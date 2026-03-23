@@ -46,6 +46,16 @@ VCP Mobile 遵循 **Double-Track 3-Tier (双轨三层架构)**，以确保移动
 
 ---
 
+## 🚀 快速上手 (Quick Start)
+
+为了实现 VCP Mobile 与桌面端 VChat 的完美同步，你需要完成以下步骤：
+
+1.  **安装手机端**: 在 [Releases](https://github.com/MRiecy/VCPMobile/releases/tag/v0.9.0) 页面下载对应架构的 APK 并安装。
+2.  **安装 VChat 插件**: 下载 Release 包中的 `VCPMobileSync.7z`，将其解压并安装至你的桌面端 VChat 插件目录。
+3.  **扫码/IP 连接**: 确保手机与电脑在同一局域网下，配置好设置即可开启流式同步。
+
+---
+
 ## 🛠️ 未完善功能与未来规划 (Pending Features & Roadmap)
 
 Project Avatar 的完全体仍在锻造中，以下是即将突破的领域：

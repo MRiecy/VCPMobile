@@ -40,3 +40,5 @@ VCPMobile.code-workspace
 # Large Assets & Scripts
 public/wallpaper/
 scripts/
+# Local Release Artifacts
+releases/
