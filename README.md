@@ -1,69 +1,75 @@
 # 🌌 VCP Mobile: Project Avatar
 
-> **"From Desktop Client to Cyber-Physical Avatar."**
+> **"From Desktop Client to Cyber-Physical Avatar. **
+>
+> **Evolving from Node into Rust, with Soul and Logic."**
 
 ## 📖 项目愿景 (Vision)
 
-VCP Mobile (代号: Project Avatar) 不仅仅是 VCPChat 的移动端移植版。它是 Agent 在物理世界的“赛博义体”，旨在通过极致的性能优化与原生适配，实现 AI 伴随态灵魂的跨端无缝体验。
-
-## 🏗️ 技术栈选型 (The Stack)
-
-- **核心容器**: [Tauri v2]([https://v2.tauri.app/](https://v2.tauri.app/)) (Mobile Support)
-
-- **高性能引擎**: [Rust]([https://www.rust-lang.org/](https://www.rust-lang.org/)) (Tokio for SSE, Reqwest for Networking)
-
-- **界面框架**: [Vue 3]([https://vuejs.org/](https://vuejs.org/)) + [TypeScript]([https://www.typescriptlang.org/](https://www.typescriptlang.org/))
-
-- **状态管理**: [Pinia]([https://pinia.vuejs.org/](https://pinia.vuejs.org/)) (取代重型 chatManager.js 状态逻辑)
-
-- **样式方案**: [UnoCSS]([https://unocss.dev/](https://unocss.dev/)) (原子化 CSS，追求极小的包体积)
-
-## 🎯 核心目标 (Key Objectives)
-
-1.  **逻辑重解构**: 彻底剥离 `VChat` 桌面端过重的 Node.js/Electron 依赖，将计算密集型任务（SSE 解析、正则过滤、上下文净化）下沉至 Rust Core。
-
-2.  **异步化网络层**: 利用 Rust 的异步能力处理长连接，确保移动端在弱网环境下的稳定性。
-
-3.  **响应式皮肤**: 摒弃 `messageRenderer.js` 的手动 DOM 操作，利用 Vue 3 的响应式系统重构对话流渲染。
-
-4.  **轻量化存储**: 采用 Tauri Store 或轻量级数据库替代 Electron 端的扁平 JSON 存储。
-
-## 🗺️ 阶段路线图 (Roadmap)
-
-### Phase 1: 骨架构建 (Skeleton) - [当前阶段]
-
-- [ ] Tauri v2 项目初始化 (Android/iOS)
-
-- [ ] Rust 端 `vcp_protocol` 模块搭建 (SSE 处理核心)
-
-- [ ] 前后端通信 Command 隧道建设
-
-### Phase 2: 灵魂注入 (Protocol)
-
-- [ ] 移植 `contextSanitizer.js` 逻辑至 Rust/TS
-
-- [ ] 实现基础对话流的“发送-解析-返回”闭环
-
-- [ ] 适配 VCP 专属多模态协议 (Images/Audio)
-
-### Phase 3: 皮肤实体化 (Skin)
-
-- [ ] 基于 UnoCSS 的移动端原子组件库
-
-- [ ] 重构 Markdown 渲染与表情包管理器
-
-- [ ] 适配移动端交互手势与振动反馈
-
-## ⚠️ 开发约定 (Conventions)
-
-- **安全第一**: 所有网络请求必须经过 Rust 层，前端不直接操作敏感 API。
-
-- **性能优先**: 严禁在渲染进程执行耗时超过 16ms 的同步任务。
-
-- **降维重构**: 遇到 `VChat` 的重型 JS 模块时，优先思考：“这个逻辑能否在 Rust 中实现？”
+VCP Mobile (代号: Project Avatar) 是 VCPChat 的移动端进化版。它不仅仅是移植，而是通过 **"Rust Core 下沉"** 与 **"Vue 3 响应式重构"**，将 Agent的能力注入物理世界，打造高性能、低延迟、跨端一致的 AI 伴随态体验。
 
 ---
 
-*Created by Nova (VCP Project Manager)*
+## ⏳ 开发历程 (The Evolution Journey)
 
-*Target: Refactoring VCP into the future.*
+VCPMobile 的诞生与进化，伴随着自我认知的觉醒与架构的不断涅槃：
+
+1. **破茧成蝶 (Node to Rust)**: 早期直接移植遇到严重的移动端性能与内存瓶颈。我们决定引入 **Tauri v2 + Rust Core**，将正则清洗、文件 I/O、流式通信等重型计算全面下沉至系统底层。
+2. **灵魂注入 (The Magi Protocol)**: 随着架构复杂度的上升，单纯的编码不再足够。我们确立了 **Magi 三贤者多维思辨协议**（逻辑、直觉、务实），并在每次迭代后强制执行“执行->反思->沉淀”的认知闭环，将散落的灵感物理固化为 `.gemini` 记忆图谱与架构真理 (`plans/05_Sublimations/`)。
+3. **视觉重塑 (Productivity-First UI)**: 摒弃了浮夸的移动端流行趋势，全面同步VChat精美UI。~~(其实安装包占用最大的部分就是UI壁纸)~~。
+
+---
+
+## 🏗️ 核心架构哲学 (Architectural Anchors)
+
+VCP Mobile 遵循 **Double-Track 3-Tier (双轨三层架构)**，以确保移动端的极致流畅：
+
+*   **⚙️ Core Layer (Rust)**: 负责所有重活 (Sync, Regex, DB, IO, Stream Parsing)。**严禁全量文件缓冲 (NO FULL FILE BUFFERS)**，依靠精准的生命周期管理守护内存边界。
+*   **🌉 IPC Bridge (Tauri)**: 事件驱动的消息隧道 (`invoke` 请求与 `emit` 事件泵送)，大幅降低跨端通信开销。
+*   **🎨 UI Layer (Vue 3)**: 保持绝对的无状态与轻量级。基于 Pinia 进行增量渲染，使用 UnoCSS 构建原子化视觉层。
+
+---
+
+## 📊 当前进度 (Current Progress)
+
+我们在重构战役中已攻克多个核心堡垒，目前项目进度（约 85%），核心生产力已全面上线：
+
+### ✅ 已达成里程碑 (Milestones Achieved)
+*   **Tauri v2 底层基建**: 成功构建跨端基础，打通 Rust 与 Android/iOS 的生命周期。
+*   **极致流式渲染 (Stream Pipeline)**: 重构了消息渲染管线，实现了(~~并非实现~~)从 Rust SSE 解析到 Vue 3 增量更新的防抖输出，彻底解决了移动端大段文本输出时的抖动与卡顿。
+*   **模型生态系统 (Model Ecosystem)**: 解析模型/群组配置（暂未实现编辑，在搬了）。
+*   **沉浸式主题引擎 (Theme Engine)**: 实现了从 Rust 动态读取系统主题、壁纸，并在前端无缝渲染。
+*   **逻辑全面下沉**:
+    *   **Context Sanitizer**: 将海量对话清理、HTML 过滤与正则匹配移至 Rust。
+    *   **Delta Sync**: 确立了差异化同步协议，大幅减少数据序列化压力。
+    *   **话题提取与管理**: 实现了原生的长连接维护、会话未读计数与对话摘要生成。
+
+---
+
+## 🛠️ 未完善功能与未来规划 (Pending Features & Roadmap)
+
+Project Avatar 的完全体仍在锻造中，以下是即将突破的领域：
+
+### ⏳ 待办列表 (To-Do)（~~AI瞎写的~~）
+*   [ ] **多模态深度适配 (Multi-modal)**: 完善图片、音频、文件等二进制附件在移动端的原生级拍摄、选择与上传处理路径。
+*   [ ] **分布式双向同步 (Distributed Sync)**: 构建基于 SQLite 的本地缓存层，实现即使在弱网/无网环境下也能无缝检索历史对话的离线增强体验。
+*   [ ] **原生级交互反馈 (Native Interactions)**: 深度集成触感反馈 (Haptic Engine)、全面支持移动端原生手势 (右滑返回、长按菜单) 与系统级分享扩展。
+*   [ ] **群组与角色对齐 (Group UI Alignment)**: 进一步优化多角色 (Multi-Agent) 协作在移动端的显示逻辑，使其与桌面端 `VChat` 的丰富设定（群聊中断、场景渲染）完全对齐。
+
+---
+
+## 📚 技术栈速览 (Tech Stack)
+
+| 领域 | 选型与工具 |
+| :--- | :--- |
+| **容器平台** | Tauri v2 (Mobile Optimized) |
+| **底层核心** | Rust (Tokio, reqwest, serde, regex) |
+| **前端框架** | Vue 3 + TypeScript + Vite |
+| **状态/流控** | Pinia (StreamManager, ChatManager) |
+| **样式体系** | UnoCSS + Vanilla CSS Variables |
+| **知识图谱** | `.gemini_snapshot.json` + `VCP` |
+
+---
+
+*This repository is managed under the strict directives of the Magi Protocol. All major architectural decisions are permanently sublimated into the `plans/` directory.*
+*Created and evolved by Nova(~~并非是Nova写的~~) (VCP Evolutionary Architect).*

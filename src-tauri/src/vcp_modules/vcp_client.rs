@@ -36,6 +36,7 @@ pub struct VcpRequestPayload {
 
 /// 流式事件结构体，用于向前端发送数据
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
     pub r#type: String,         // 事件类型: "data", "end", "error"
     pub chunk: Option<Value>,   // 数据块 (仅 type="data" 时有效)
@@ -74,58 +75,51 @@ pub async fn sendToVCP<R: Runtime>(
     state: tauri::State<'_, ActiveRequests>,
     payload: VcpRequestPayload,
 ) -> Result<Value, String> {
-    println!("[VCPClient] sendToVCP called for messageId: {}, context: {:?}", payload.message_id, payload.context);
+    let (res, _is_aborted) = perform_vcp_request(&app, state.0.clone(), payload).await?;
+    Ok(res)
+}
+
+/// 核心请求实现函数，可供 Tauri Command 或 内部 Rust 模块(如 GroupOrchestrator) 调用
+/// 返回 Result<(全量内容/响应体, 是否被中止), 错误信息>
+pub async fn perform_vcp_request<R: Runtime>(
+    app: &AppHandle<R>,
+    active_requests: Arc<DashMap<String, oneshot::Sender<()>>>,
+    payload: VcpRequestPayload,
+) -> Result<(Value, bool), String> {
+    println!("[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}", payload.message_id, payload.context);
     let app_data_path = get_app_data_path(&app).await;
-    let stream_channel = payload.stream_channel.clone().unwrap_or_else(|| "vcp-stream-event".to_string());
+    let stream_channel = payload.stream_channel.clone().unwrap_or_else(|| "vcp-stream".to_string());
     
-    // === 0. 数据验证和规范化 (Data Validation and Normalization) ===
+    // === 0. 数据验证和规范化 ===
+    // ... (rest of data normalization unchanged)
     let mut messages: Vec<Value> = payload.messages.into_iter().map(|mut msg| {
         if !msg.is_object() {
-            println!("[VCPClient] Invalid message object: {:?}", msg);
             return json!({"role": "system", "content": "[Invalid message]"});
         }
-        
         let content = msg.get("content").cloned().unwrap_or(Value::Null);
-        
         if content.is_object() {
             if let Some(text) = content.get("text") {
-                // 如果 content.text 存在，提取它
                 msg["content"] = text.clone();
             } else {
-                // 否则序列化整个对象
                 msg["content"] = json!(content.to_string());
-                println!("[VCPClient] Message content is object without text field, stringifying: {:?}", content);
             }
-        } else if content.is_array() {
-            // 保持数组形式 (多模态)
-        } else if !content.is_string() && !content.is_null() {
-            // 转换非字符串/非空值为字符串
+        } else if !content.is_array() && !content.is_string() && !content.is_null() {
             msg["content"] = json!(content.to_string());
-            println!("[VCPClient] Converting non-string content to string: {:?}", content);
         }
         msg
     }).collect();
 
-    // === 1. 读取设置与动态路由切换 (URL Switching) ===
+    // === 1. 读取设置与动态路由切换 ===
     let settings_path = app_data_path.join("settings.json");
     let mut enable_vcp_tool_injection = false;
     let mut agent_music_control = false;
     let mut enable_agent_bubble_theme = false;
 
-    if settings_path.exists() {
-        match std::fs::read_to_string(&settings_path) {
-            Ok(content) => {
-                if let Ok(settings) = serde_json::from_str::<Value>(&content) {
-                    enable_vcp_tool_injection = settings["enableVcpToolInjection"].as_bool().unwrap_or(false);
-                    agent_music_control = settings["agentMusicControl"].as_bool().unwrap_or(false);
-                    enable_agent_bubble_theme = settings["enableAgentBubbleTheme"].as_bool().unwrap_or(false);
-                } else {
-                    println!("[VCPClient] Error parsing settings.json. Proceeding with defaults.");
-                }
-            }
-            Err(e) => {
-                println!("[VCPClient] Error reading settings or switching URL: {}. Proceeding with original URL.", e);
-            }
+    if let Ok(content) = tokio::fs::read_to_string(&settings_path).await {
+        if let Ok(settings) = serde_json::from_str::<Value>(&content) {
+            enable_vcp_tool_injection = settings["enableVcpToolInjection"].as_bool().unwrap_or(false);
+            agent_music_control = settings["agentMusicControl"].as_bool().unwrap_or(false);
+            enable_agent_bubble_theme = settings["enableAgentBubbleTheme"].as_bool().unwrap_or(false);
         }
     }
 
@@ -134,15 +128,10 @@ pub async fn sendToVCP<R: Runtime>(
         if let Ok(mut url) = Url::parse(&final_url) {
             url.set_path("/v1/chatvcp/completions");
             final_url = url.to_string();
-            println!("[VCPClient] VCP tool injection is ON. URL switched to: {}", final_url);
         }
-    } else {
-        println!("[VCPClient] VCP tool injection is OFF. Using original URL: {}", final_url);
     }
 
-    // === 2. 上下文注入 (Context Injection) ===
-    
-    // 确保消息列表中存在 System 消息
+    // === 2. 上下文注入 ===
     let has_system = messages.iter().any(|m| m["role"] == "system");
     if !has_system {
         messages.insert(0, json!({"role": "system", "content": ""}));
@@ -152,51 +141,33 @@ pub async fn sendToVCP<R: Runtime>(
     let mut bottom_parts = Vec::new();
     
     // 3.1 音乐状态注入
-    // 尝试读取当前播放状态 (在移动端重构中，未来应通过 MusicManager 模块获取)
     let music_state_path = app_data_path.join("music_state.json");
-    if music_state_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&music_state_path) {
-            if let Ok(m_state) = serde_json::from_str::<Value>(&content) {
-                if let (Some(title), Some(artist)) = (m_state["title"].as_str(), m_state["artist"].as_str()) {
-                    let album = m_state["album"].as_str().unwrap_or("未知专辑");
-                    bottom_parts.push(format!("[当前播放音乐：{} - {} ({})]", title, artist, album));
-                }
-            } else {
-                println!("[VCPClient] Failed to inject music info: Invalid music_state.json format");
+    if let Ok(content) = tokio::fs::read_to_string(&music_state_path).await {
+        if let Ok(m_state) = serde_json::from_str::<Value>(&content) {
+            if let (Some(title), Some(artist)) = (m_state["title"].as_str(), m_state["artist"].as_str()) {
+                let album = m_state["album"].as_str().unwrap_or("未知专辑");
+                bottom_parts.push(format!("[当前播放音乐：{} - {} ({})]", title, artist, album));
             }
-        } else {
-            println!("[VCPClient] Failed to inject music info: Error reading music_state.json");
         }
     }
 
     // 3.2 播放列表与点歌台注入
     if agent_music_control {
         let songlist_path = app_data_path.join("songlist.json");
-        if songlist_path.exists() {
-            match std::fs::read_to_string(&songlist_path) {
-                Ok(content) => {
-                    if let Ok(songlist) = serde_json::from_str::<Value>(&content) {
-                        if let Some(songs) = songlist.as_array() {
-                            let titles: Vec<&str> = songs.iter()
-                                .filter_map(|s| s["title"].as_str())
-                                .collect();
-                            if !titles.is_empty() {
-                                top_parts.push(format!("[播放列表——\n{}\n]", titles.join("\n")));
-                            }
-                        }
-                    } else {
-                        println!("[VCPClient] Failed to inject music info: Invalid songlist.json format");
+        if let Ok(content) = tokio::fs::read_to_string(&songlist_path).await {
+            if let Ok(songlist) = serde_json::from_str::<Value>(&content) {
+                if let Some(songs) = songlist.as_array() {
+                    let titles: Vec<&str> = songs.iter().filter_map(|s| s["title"].as_str()).collect();
+                    if !titles.is_empty() {
+                        top_parts.push(format!("[播放列表——\n{}\n]", titles.join("\n")));
                     }
-                }
-                Err(e) => {
-                    println!("[VCPClient] Failed to inject music info: Error reading songlist.json: {}", e);
                 }
             }
         }
         bottom_parts.push("点歌台{{VCPMusicController}}".to_string());
     }
 
-    // 3.3 UI 规范要求注入 (Agent Bubble Theme)
+    // 3.3 UI 规范要求注入
     if enable_agent_bubble_theme {
         bottom_parts.push("输出规范要求：{{VarDivRender}}".to_string());
     }
@@ -210,14 +181,13 @@ pub async fn sendToVCP<R: Runtime>(
                 if !top_parts.is_empty() { final_parts.push(top_parts.join("\n")); }
                 if !original_content.is_empty() { final_parts.push(original_content.to_string()); }
                 if !bottom_parts.is_empty() { final_parts.push(bottom_parts.join("\n")); }
-                
                 m["content"] = json!(final_parts.join("\n\n").trim());
                 break;
             }
         }
     }
 
-    // === 4. 准备请求体 (Request Body) ===
+    // === 4. 准备请求体 ===
     let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
     let mut request_body = payload.model_config.clone();
     if let Some(obj) = request_body.as_object_mut() {
@@ -226,174 +196,155 @@ pub async fn sendToVCP<R: Runtime>(
         obj.insert("stream".to_string(), json!(is_stream));
     }
 
-    if let Ok(serialized) = serde_json::to_string(&request_body) {
-        let preview = if serialized.len() > 100 { &serialized[..100] } else { &serialized };
-        println!("[VCPClient] Request body preview: {}...", preview);
-    } else {
-        println!("[VCPClient] Failed to serialize request body");
-    }
-
-    // === 5. 配置网络请求 (HTTP Client) ===
+    // === 5. 配置网络请求 ===
     let client = Client::builder()
-        .timeout(Duration::from_secs(30)) // 30秒超时限制
+        // 移除硬超时限制，对齐桌面端，让长思考模型有充足时间生成，连接管理交给 VCP 服务器
         .build()
         .map_err(|e| e.to_string())?;
 
     // 创建并注册中止信号
     let (abort_tx, abort_rx) = oneshot::channel();
-    state.0.insert(payload.message_id.clone(), abort_tx);
-    println!("[VCPClient] Registered AbortController for messageId: {}. Active requests: {}", payload.message_id, state.0.len());
+    active_requests.insert(payload.message_id.clone(), abort_tx);
 
     let message_id = payload.message_id.clone();
     let context = payload.context.clone();
     let api_key = payload.vcp_api_key.clone();
 
-    println!("[VCPClient] Sending request to: {}", final_url);
-
     if is_stream {
-        // === 6. 流式处理模式 (SSE Parsing) ===
+        // === 6. 流式处理模式 (同步等待，以便串行调用) ===
         let app_handle = app.clone();
         let message_id_inner = message_id.clone();
         let context_inner = context.clone();
-        let state_inner = state.0.clone();
+        let active_requests_inner = active_requests.clone();
+        
+        let mut full_content = String::new();
+        let mut is_aborted = false;
+        let mut abort_rx = abort_rx; // 取得所有权进入循环
+        
+        let res_future = client.post(&final_url)
+            .header(AUTHORIZATION, format!("Bearer {}", api_key))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&request_body)
+            .send();
 
-        tokio::spawn(async move {
-            println!("[VCPClient] Starting stream processing for messageId: {}", message_id_inner);
-            let res_future = client.post(&final_url)
-                .header(AUTHORIZATION, format!("Bearer {}", api_key))
-                .header(CONTENT_TYPE, "application/json")
-                .json(&request_body)
-                .send();
+        tokio::select! {
+            _ = &mut abort_rx => {
+                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                    r#type: "error".to_string(),
+                    chunk: None,
+                    message_id: message_id_inner.clone(),
+                    context: context_inner.clone(),
+                    error: Some("请求已中止".to_string()),
+                });
+                active_requests_inner.remove(&message_id_inner);
+                return Ok((json!({ "fullContent": "", "streamingStarted": false }), true));
+            }
+            response_res = res_future => {
+                match response_res {
+                    Ok(resp) if resp.status().is_success() => {
+                        let stream = resp.bytes_stream().map_err(|e| IoError::new(std::io::ErrorKind::Other, e));
+                        let reader = StreamReader::new(stream);
+                        let mut lines = FramedRead::new(reader, LinesCodec::new());
 
-            tokio::select! {
-                // 处理任务中止信号
-                _ = abort_rx => {
-                    println!("[VCPClient] Request aborted for messageId: {}", message_id_inner);
-                    let _ = app_handle.emit(&stream_channel, StreamEvent {
-                        r#type: "error".to_string(),
-                        chunk: None,
-                        message_id: message_id_inner.clone(),
-                        context: context_inner.clone(),
-                        error: Some("请求已中止".to_string()),
-                    });
-                }
-                // 处理响应流
-                response_res = res_future => {
-                    match response_res {
-                        Ok(resp) if resp.status().is_success() => {
-                            // 使用 StreamReader 和 LinesCodec 建立行读取器，处理 SSE 格式
-                            let stream = resp.bytes_stream().map_err(|e| IoError::new(std::io::ErrorKind::Other, e));
-                            let reader = StreamReader::new(stream);
-                            let mut lines = FramedRead::new(reader, LinesCodec::new());
+                        while let Some(line_res) = lines.next().await {
+                            // 每读取一行前，检查是否收到中止信号 (Deep Polling)
+                            if abort_rx.try_recv().is_ok() {
+                                is_aborted = true;
+                                println!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
+                                // 发送结束符告知前端
+                                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                    r#type: "end".to_string(),
+                                    chunk: None,
+                                    message_id: message_id_inner.clone(),
+                                    context: context_inner.clone(),
+                                    error: None,
+                                });
+                                break;
+                            }
 
-                            while let Some(line_res) = lines.next().await {
-                                if let Ok(line) = line_res {
-                                    let line_str: String = line;
-                                    if line_str.trim().is_empty() { continue; }
-                                    
-                                    if line_str.starts_with("data: ") {
-                                        let data = line_str.trim_start_matches("data: ").trim();
-                                        
-                                        // 处理 [DONE] 信号
-                                        if data == "[DONE]" {
-                                            println!("[VCPClient] Stream [DONE] for messageId: {}", message_id_inner);
-                                            let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                                r#type: "end".to_string(),
-                                                chunk: None,
-                                                message_id: message_id_inner.clone(),
-                                                context: context_inner.clone(),
-                                                error: None,
-                                            });
-                                            break;
+                            if let Ok(line) = line_res {
+                                if line.trim().is_empty() { continue; }
+                                if line.starts_with("data: ") {
+                                    let data = line.trim_start_matches("data: ").trim();
+                                    if data == "[DONE]" {
+                                        let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                            r#type: "end".to_string(),
+                                            chunk: None,
+                                            message_id: message_id_inner.clone(),
+                                            context: context_inner.clone(),
+                                            error: None,
+                                        });
+                                        break;
+                                    }
+                                    if let Ok(chunk) = serde_json::from_str::<Value>(data) {
+                                        // 累加全量内容
+                                        if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
+                                            full_content.push_str(text);
                                         }
-                                        
-                                        // 解析 JSON Chunk 并推送到前端
-                                        match serde_json::from_str::<Value>(data) {
-                                            Ok(chunk) => {
-                                                let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                                    r#type: "data".to_string(),
-                                                    chunk: Some(chunk),
-                                                    message_id: message_id_inner.clone(),
-                                                    context: context_inner.clone(),
-                                                    error: None,
-                                                });
-                                            }
-                                            Err(e) => {
-                                                println!("[VCPClient] Failed to parse stream chunk for messageId: {}: {}, 原始数据: {}", message_id_inner, e, data);
-                                            }
-                                        }
+                                        let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                            r#type: "data".to_string(),
+                                            chunk: Some(chunk),
+                                            message_id: message_id_inner.clone(),
+                                            context: context_inner.clone(),
+                                            error: None,
+                                        });
                                     }
                                 }
                             }
-                            println!("[VCPClient] Stream ended for messageId: {}", message_id_inner);
-                            println!("[VCPClient] Stream lock released for messageId: {}", message_id_inner);
                         }
-                        Ok(resp) => {
-                            // HTTP 错误响应处理
-                            let status = resp.status();
-                            let text = resp.text().await.unwrap_or_default();
-                            println!("[VCPClient] VCP request failed. Status: {}, Response Text: {}", status, text);
-                            let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                r#type: "error".to_string(),
-                                chunk: None,
-                                message_id: message_id_inner.clone(),
-                                context: context_inner.clone(),
-                                error: Some(format!("VCP服务器错误: {} - {}", status, text)),
-                            });
-                        }
-                        Err(e) => {
-                            // 网络请求异常处理
-                            if e.is_timeout() {
-                                println!("[VCPClient] Timeout triggered for messageId: {}", message_id_inner);
-                            }
-                            println!("[VCPClient] Request error: {}", e);
-                            let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                r#type: "error".to_string(),
-                                chunk: None,
-                                message_id: message_id_inner.clone(),
-                                context: context_inner.clone(),
-                                error: Some(format!("网络请求异常: {}", e)),
-                            });
-                            println!("[VCPClient] Stream processing error for messageId: {}: {}", message_id_inner, e);
-                        }
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let text = resp.text().await.unwrap_or_default();
+                        let _ = app_handle.emit(&stream_channel, StreamEvent {
+                            r#type: "error".to_string(),
+                            chunk: None,
+                            message_id: message_id_inner.clone(),
+                            context: context_inner.clone(),
+                            error: Some(format!("VCP服务器错误: {} - {}", status, text)),
+                        });
+                        active_requests_inner.remove(&message_id_inner);
+                        return Err(format!("VCP Error: {}", status));
+                    }
+                    Err(e) => {
+                        let _ = app_handle.emit(&stream_channel, StreamEvent {
+                            r#type: "error".to_string(),
+                            chunk: None,
+                            message_id: message_id_inner.clone(),
+                            context: context_inner.clone(),
+                            error: Some(format!("网络请求异常: {}", e)),
+                        });
+                        active_requests_inner.remove(&message_id_inner);
+                        return Err(e.to_string());
                     }
                 }
             }
-            // 最终清理活跃记录
-            state_inner.remove(&message_id_inner);
-            println!("[VCPClient] Cleaned up AbortController for messageId: {}. Active requests: {}", message_id_inner, state_inner.len());
-            println!("[VCPClient] Stream processing completed for messageId: {}", message_id_inner);
-        });
-
-        Ok(json!({"streamingStarted": true}))
+        }
+        
+        active_requests_inner.remove(&message_id_inner);
+        Ok((json!({ "fullContent": full_content, "streamingStarted": true }), is_aborted))
     } else {
         // === 7. 非流式响应模式 ===
-        println!("[VCPClient] Processing non-streaming response");
         let response = client.post(&final_url)
             .header(AUTHORIZATION, format!("Bearer {}", api_key))
             .header(CONTENT_TYPE, "application/json")
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| {
-                println!("[VCPClient] Request error: {}", e);
-                format!("VCP请求失败: {}", e)
-            })?;
+            .map_err(|e| format!("VCP请求失败: {}", e))?;
 
-        state.0.remove(&message_id);
-        println!("[VCPClient] Cleaned up AbortController for messageId: {}. Active requests: {}", message_id, state.0.len());
+        active_requests.remove(&message_id);
 
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            println!("[VCPClient] VCP request failed. Status: {}, Response Text: {}", status, text);
-            return Err(format!("VCP响应错误: {} - {}", status, text));
+            return Err(format!("VCP响应错误: {}", status));
         }
 
         let vcp_response = response.json::<Value>().await.map_err(|e| format!("JSON解析失败: {}", e))?;
-        Ok(json!({"response": vcp_response, "context": context}))
+        Ok((json!({"response": vcp_response, "context": context}), false))
     }
 }
+
 
 /// 中止请求 Command: interruptRequest
 /// 通过 messageId 立即触发对应的 oneshot 信号
@@ -412,5 +363,72 @@ pub fn interruptRequest(
     } else {
         println!("[VCPClient] No active request found for messageId: {}", message_id);
         Err(format!("Request {} not found", message_id))
+    }
+}
+
+/// 测试 VCP 后端连接状态并获取模型列表 (对齐桌面端 main.js fetchAndCacheModels 逻辑)
+#[tauri::command]
+pub async fn test_vcp_connection(
+    vcp_url: String,
+    vcp_api_key: String,
+) -> Result<Value, String> {
+    println!("[VCPClient] test_vcp_connection called for URL: {}", vcp_url);
+    
+    // 对齐桌面端原汁原味的逻辑：
+    // const urlObject = new URL(vcpServerUrl);
+    // const baseUrl = `${urlObject.protocol}//${urlObject.host}`;
+    // const modelsUrl = new URL('/v1/models', baseUrl).toString();
+    
+    let url_object = match Url::parse(&vcp_url) {
+        Ok(url) => url,
+        Err(e) => return Err(format!("URL 解析失败: {}", e)),
+    };
+
+    // 对齐 JS 的 urlObject.host (包含端口号)
+    let port_str = match url_object.port() {
+        Some(p) => format!(":{}", p),
+        None => "".to_string(),
+    };
+    let host_with_port = format!("{}{}", url_object.host_str().unwrap_or(""), port_str);
+    let base_url = format!("{}://{}", url_object.scheme(), host_with_port);
+    
+    let models_url = if base_url.ends_with('/') {
+        format!("{}v1/models", base_url)
+    } else {
+        format!("{}/v1/models", base_url)
+    };
+
+    println!("[VCPClient] Testing connection to (Original Logic): {}", models_url);
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10)) // 测试连接 10s 超时即可
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let res = client.get(&models_url)
+        .header(AUTHORIZATION, format!("Bearer {}", vcp_api_key))
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {}", e))?;
+
+    let status = res.status();
+    if status.is_success() {
+        let json_res: Value = res.json().await.map_err(|e| format!("JSON解析失败: {}", e))?;
+        
+        // 尝试提取模型数量，对齐桌面端 `cachedModels = data.data || []`
+        let model_count = json_res.get("data")
+            .and_then(|data| data.as_array())
+            .map(|arr| arr.len())
+            .unwrap_or(0);
+            
+        Ok(json!({
+            "success": true,
+            "status": status.as_u16(),
+            "modelCount": model_count,
+            "models": json_res
+        }))
+    } else {
+        let text = res.text().await.unwrap_or_default();
+        Err(format!("验证失败 ({}): {}", status.as_u16(), text))
     }
 }

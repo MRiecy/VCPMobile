@@ -22,3 +22,21 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Security & Secrets
+*.keystore
+vcp-mobile.keystore
+build_android_release.ps1
+
+# AI Knowledge Base & Docs
+plans/
+plans_back.zip
+.gemini_snapshot.json
+GEMINI.md
+*.md
+!README.md
+VCPMobile.code-workspace
+
+# Large Assets & Scripts
+public/wallpaper/
+scripts/

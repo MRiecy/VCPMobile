@@ -1,0 +1,40 @@
+:root {
+  /* 基础颜色 - 增加预设防止加载闪烁 (匹配 themes黑白简约.css) */
+  --primary-bg: #1c1c1e;
+  --secondary-bg: #28282c;
+  --primary-text: #e0e0e0;
+  --border-color: #3a3a3e;
+  
+  /* 移动端安全区 - 增加物理回退值 (24px 是安卓常见的刘海高度) */
+  --vcp-safe-top: env(safe-area-inset-top, 24px);
+  --vcp-safe-bottom: env(safe-area-inset-bottom, 20px);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--primary-bg);
+  color: var(--primary-text);
+  overflow: hidden;
+  /* 禁止系统滚动回弹 */
+  overscroll-behavior: none;
+}
+
+/* 统一毛玻璃效果 */
+.glass-panel {
+  backdrop-filter: blur(25px) saturate(160%);
+  -webkit-backdrop-filter: blur(25px) saturate(160%);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* 抽屉层级修正 */
+.vcp-drawer {
+  box-shadow: 0 0 40px rgba(0,0,0,0.5);
+}
+
+/* 图标大小强控 */
+[class^="i-"] {
+  display: inline-block;
+  width: 1.2em;
+  height: 1.2em;
+}

@@ -1,2 +1,17 @@
 pub mod vcp_client;
 pub mod context_sanitizer;
+pub mod chat_manager;
+pub mod message_processor;
+pub mod topic_list_manager;
+pub mod agent_config_manager;
+pub mod group_manager;
+pub mod group_orchestrator;
+pub mod app_settings_manager;
+pub mod db_manager;
+pub mod file_watcher;
+pub mod file_manager;
+pub mod index_service;
+pub mod ipc;
+pub mod content_parser;
+pub mod avatar_color_extractor;
+pub mod model_manager;

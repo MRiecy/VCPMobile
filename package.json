@@ -1,24 +1,52 @@
 {
   "name": "vcp-mobile",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.9.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "io:write": "node scripts/nova_utils.cjs write",
+    "io:append": "node scripts/nova_utils.cjs append",
+    "memory:refresh": "node scripts/refresh_manifest.cjs",
+    "check": "vue-tsc --noEmit && cd src-tauri && cargo check"
   },
+
   "dependencies": {
-    "vue": "^3.5.13",
+    "@iconify-json/ph": "^1.2.2",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@unocss/preset-attributify": "^66.6.4",
+    "@unocss/preset-typography": "^66.6.4",
+    "@unocss/preset-uno": "^66.6.4",
+    "@unocss/reset": "^66.6.5",
+    "@unocss/transformer-directives": "^66.6.4",
+    "@unocss/transformer-variant-group": "^66.6.4",
+    "@unocss/vite": "^66.6.4",
+    "@vueuse/core": "^14.2.1",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.33",
+    "lucide-vue-next": "^0.576.0",
+    "marked-highlight": "^2.2.3",
+    "mermaid": "^11.12.3",
+    "pinia": "^3.0.4",
+    "unocss": "^66.6.4",
+    "vue": "^3.5.13",
+    "vue-router": "^5.0.3"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "latest",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-fs": "^2.4.5",
+    "@types/katex": "^0.16.8",
     "@vitejs/plugin-vue": "^5.2.1",
+    "dompurify": "^3.3.1",
+    "marked": "^17.0.4",
+    "morphdom": "^2.7.8",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
-    "vue-tsc": "^2.1.10",
-    "@tauri-apps/cli": "^2"
+    "vue-tsc": "^2.1.10"
   }
 }
