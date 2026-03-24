@@ -1,0 +1,58 @@
+name: 🌌 Nova CI Aegis (Automatic Review)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  review:
+    name: Autonomous Code Review
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🦀 Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: 🟢 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Setup Pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: 馃搳 Get Pnpm Cache Directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+      - name: 馃殌 Cache Pnpm Modules
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: 馃搱 Install Dependencies
+        run: pnpm install
+
+      - name: 🎨 Layer 1: Frontend Lint (ESLint & Prettier)
+        run: pnpm lint
+
+      - name: 🛡️ Layer 2: TypeScript Type Check
+        run: pnpm vue-tsc --noEmit
+
+      - name: ⚙️ Layer 3: Rust Core Review (Clippy & Fmt)
+        run: |
+          cd src-tauri
+          cargo fmt --check
+          cargo clippy -- -D warnings

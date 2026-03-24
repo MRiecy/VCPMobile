@@ -8,12 +8,13 @@
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "lint": "eslint . --ext .vue,.js,.ts --fix --ignore-path .gitignore",
+    "format": "prettier --write .",
     "io:write": "node scripts/nova_utils.cjs write",
     "io:append": "node scripts/nova_utils.cjs append",
     "memory:refresh": "node scripts/refresh_manifest.cjs",
     "check": "vue-tsc --noEmit && cd src-tauri && cargo check"
   },
-
   "dependencies": {
     "@iconify-json/ph": "^1.2.2",
     "@tauri-apps/api": "^2",
@@ -41,10 +42,17 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-fs": "^2.4.5",
     "@types/katex": "^0.16.8",
+    "@typescript-eslint/eslint-plugin": "^8.57.2",
+    "@typescript-eslint/parser": "^8.57.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "dompurify": "^3.3.1",
+    "eslint": "^10.1.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.5",
+    "eslint-plugin-vue": "^10.8.0",
     "marked": "^17.0.4",
     "morphdom": "^2.7.8",
+    "prettier": "^3.8.1",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
     "vue-tsc": "^2.1.10"
