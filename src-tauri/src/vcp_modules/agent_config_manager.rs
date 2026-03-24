@@ -2,14 +2,14 @@
 // 源 JS 逻辑参考: ../VCPChat/modules/utils/agentConfigManager.js
 // 职责: 管理 Agent 的 config.json 及其备份，实现原子写入、多重恢复机制、缓存管理及并发控制。
 
+use crate::vcp_modules::db_manager::DbState;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use tauri::{AppHandle, Manager, State};
-use crate::vcp_modules::db_manager::DbState;
-use dashmap::DashMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -53,8 +53,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for RegexRule {
     fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         use sqlx::Row;
         let roles_json: String = row.try_get("apply_to_roles")?;
-        let apply_to_roles: Vec<String> = serde_json::from_str(&roles_json)
-            .map_err(|e| sqlx::Error::ColumnDecode {
+        let apply_to_roles: Vec<String> =
+            serde_json::from_str(&roles_json).map_err(|e| sqlx::Error::ColumnDecode {
                 index: "apply_to_roles".to_string(),
                 source: Box::new(e),
             })?;
@@ -73,8 +73,12 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for RegexRule {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_neg_one() -> i32 { -1 }
+fn default_true() -> bool {
+    true
+}
+fn default_neg_one() -> i32 {
+    -1
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UiCollapseStates {
@@ -108,7 +112,7 @@ pub struct AgentConfig {
     /// 单次输出最大 Token 数
     #[serde(rename = "maxOutputTokens", default = "default_max_output")]
     pub max_output_tokens: i32,
-    
+
     // --- 新增对齐 JS 的字段 ---
     #[serde(rename = "top_p", default)]
     pub top_p: Option<f32>,
@@ -144,7 +148,7 @@ pub struct AgentConfig {
     pub disable_custom_colors: bool,
     #[serde(rename = "useThemeColorsInChat", default)]
     pub use_theme_colors_in_chat: bool,
-    
+
     #[serde(rename = "uiCollapseStates", default)]
     pub ui_collapse_states: Option<UiCollapseStates>,
 
@@ -165,10 +169,18 @@ pub struct AgentConfig {
     pub extra: serde_json::Value,
 }
 
-fn default_one_f32() -> f32 { 1.0 }
-fn default_temperature() -> f32 { 1.0 }
-fn default_context_limit() -> i32 { 1000000 }
-fn default_max_output() -> i32 { 64000 }
+fn default_one_f32() -> f32 {
+    1.0
+}
+fn default_temperature() -> f32 {
+    1.0
+}
+fn default_context_limit() -> i32 {
+    1000000
+}
+fn default_max_output() -> i32 {
+    64000
+}
 
 /// Agent 相关的路径管理集合
 pub struct AgentPaths {
@@ -202,7 +214,8 @@ impl AgentConfigState {
 
     /// 获取针对特定 Agent 的锁
     pub async fn acquire_lock(&self, agent_id: &str) -> Arc<Mutex<()>> {
-        self.locks.entry(agent_id.to_string())
+        self.locks
+            .entry(agent_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .value()
             .clone()
@@ -211,7 +224,10 @@ impl AgentConfigState {
 
 /// 获取指定智能体相关的所有文件路径
 fn get_agent_paths(app_handle: &AppHandle, agent_id: &str) -> Result<AgentPaths, String> {
-    let mut agent_path = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut agent_path = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     agent_path.push("agents");
     agent_path.push(agent_id);
 
@@ -264,10 +280,11 @@ pub async fn read_agent_config(
 
     // 1. 尝试从缓存读取
     if let Ok(metadata) = fs::metadata(&paths.config_path) {
-        let mtime = metadata.modified()
+        let mtime = metadata
+            .modified()
             .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
             .unwrap_or(0);
-        
+
         if let Some(cached_config) = state.caches.get(&agent_id) {
             if let Some(cached_mtime) = state.cache_timestamps.get(&agent_id) {
                 if mtime <= *cached_mtime {
@@ -310,25 +327,28 @@ pub async fn read_agent_config(
                 topics: vec![TopicInfo {
                     id: "default".to_string(),
                     name: "主要对话".to_string(),
-                    created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64,
+                    created_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64,
                     extra_fields: serde_json::Map::new(),
                 }],
                 extra: serde_json::Value::Object(serde_json::Map::new()),
             });
         }
-        
+
         // 尝试从缓存恢复（最后手段）
         if let Some(cached) = state.caches.get(&agent_id) {
             return Ok(cached.clone());
         }
-        
+
         return Err(format!("Agent config for {} not found", agent_id));
     }
 
     // 3. 读取并解析 (带重试逻辑)
     let content = retry_read_to_string(&paths.config_path).await?;
     let config_res: Result<AgentConfig, serde_json::Error> = serde_json::from_str(&content);
-    
+
     let mut config = match config_res {
         Ok(c) => c,
         Err(e) => {
@@ -336,12 +356,13 @@ pub async fn read_agent_config(
             let mut backup_recovered = None;
             if paths.backup_file.exists() {
                 if let Ok(backup_content) = fs::read_to_string(&paths.backup_file) {
-                    if let Ok(backup_config) = serde_json::from_str::<AgentConfig>(&backup_content) {
+                    if let Ok(backup_config) = serde_json::from_str::<AgentConfig>(&backup_content)
+                    {
                         backup_recovered = Some(backup_config);
                     }
                 }
             }
-            
+
             match backup_recovered {
                 Some(bc) => bc,
                 None => return Err(e.to_string()),
@@ -366,20 +387,30 @@ pub async fn read_agent_config(
     // [重大对齐] 为被恢复工具恢复的不完整话题补充默认字段
     for topic in &mut config.topics {
         if !topic.extra_fields.contains_key("locked") {
-            topic.extra_fields.insert("locked".to_string(), serde_json::Value::Bool(true));
+            topic
+                .extra_fields
+                .insert("locked".to_string(), serde_json::Value::Bool(true));
         }
         if !topic.extra_fields.contains_key("unread") {
-            topic.extra_fields.insert("unread".to_string(), serde_json::Value::Bool(false));
+            topic
+                .extra_fields
+                .insert("unread".to_string(), serde_json::Value::Bool(false));
         }
         if !topic.extra_fields.contains_key("creatorSource") {
-            topic.extra_fields.insert("creatorSource".to_string(), serde_json::Value::String("ui".to_string()));
+            topic.extra_fields.insert(
+                "creatorSource".to_string(),
+                serde_json::Value::String("ui".to_string()),
+            );
         }
     }
 
     // 动态替换桌面端的绝对路径为手机端的绝对路径
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     let config_dir_str = config_dir.to_string_lossy().replace("\\", "/");
-    
+
     if let Some(avatar_url) = &mut config.avatar_url {
         if avatar_url.contains("AppData/Agents") || avatar_url.contains("AppData\\Agents") {
             let parts: Vec<&str> = avatar_url.split(&['/', '\\'][..]).collect();
@@ -404,8 +435,13 @@ pub async fn read_agent_config(
     let mtime = fs::metadata(&paths.config_path)
         .and_then(|m| m.modified())
         .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
-    
+        .unwrap_or_else(|_| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        });
+
     state.caches.insert(agent_id.clone(), config.clone());
     state.cache_timestamps.insert(agent_id, mtime);
 
@@ -448,9 +484,12 @@ pub async fn write_agent_config(
 #[tauri::command]
 pub async fn get_agents(
     app_handle: AppHandle,
-    state: State<'_, AgentConfigState>
+    state: State<'_, AgentConfigState>,
 ) -> Result<Vec<AgentConfig>, String> {
-    let mut agents_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut agents_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     agents_dir.push("agents");
 
     if !agents_dir.exists() {
@@ -463,7 +502,9 @@ pub async fn get_agents(
         let path = entry.path();
         if path.is_dir() {
             let agent_id = entry.file_name().to_string_lossy().to_string();
-            if let Ok(config) = read_agent_config(app_handle.clone(), state.clone(), agent_id, Some(false)).await {
+            if let Ok(config) =
+                read_agent_config(app_handle.clone(), state.clone(), agent_id, Some(false)).await
+            {
                 agents.push(config);
             }
         }
@@ -484,12 +525,18 @@ pub async fn update_agent_config(
     let _lock = mutex.lock().await;
 
     // 1. 读取当前配置
-    let config = read_agent_config(app_handle.clone(), state.clone(), agent_id.clone(), Some(false)).await?;
-    
+    let config = read_agent_config(
+        app_handle.clone(),
+        state.clone(),
+        agent_id.clone(),
+        Some(false),
+    )
+    .await?;
+
     // 2. 合并更新字段
     // 使用 serde_json 的合并逻辑
     let mut config_val = serde_json::to_value(&config).map_err(|e| e.to_string())?;
-    
+
     if let Some(updates_obj) = updates.as_object() {
         if let Some(config_obj) = config_val.as_object_mut() {
             for (k, v) in updates_obj {
@@ -497,15 +544,15 @@ pub async fn update_agent_config(
             }
         }
     }
-    
+
     let new_config: AgentConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
-    
+
     // 3. 持久化 (内部调用 write_agent_config 的逻辑，由于已经持有锁，这里直接写文件)
     // 注意：write_agent_config 命令也需要获取锁，但 Rust 的 Mutex 不支持重入。
     // 所以这里我们要提取出不带锁的内部写入逻辑。
-    
+
     internal_write_agent_config(&app_handle, &state, &agent_id, &new_config).await?;
-    
+
     Ok(new_config)
 }
 
@@ -527,7 +574,8 @@ async fn internal_write_agent_config(
     // 2. 物理层保持分离: 独立保存 regex_rules.json 以兼容桌面端
     if !config.strip_regexes.is_empty() {
         let regex_path = paths.agent_path.join("regex_rules.json");
-        let regex_content = serde_json::to_string_pretty(&config.strip_regexes).map_err(|e| e.to_string())?;
+        let regex_content =
+            serde_json::to_string_pretty(&config.strip_regexes).map_err(|e| e.to_string())?;
         fs::write(regex_path, regex_content).map_err(|e| e.to_string())?;
     } else {
         let regex_path = paths.agent_path.join("regex_rules.json");
@@ -544,8 +592,9 @@ async fn internal_write_agent_config(
 
     let content = serde_json::to_string_pretty(&config_val).map_err(|e| e.to_string())?;
     fs::write(&paths.temp_file, &content).map_err(|e| e.to_string())?;
-    let _: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("Temp file validation failed: {}", e))?;
-    
+    let _: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("Temp file validation failed: {}", e))?;
+
     if paths.config_path.exists() {
         fs::copy(&paths.config_path, &paths.backup_file).map_err(|e| e.to_string())?;
     }
@@ -554,8 +603,13 @@ async fn internal_write_agent_config(
     let mtime = fs::metadata(&paths.config_path)
         .and_then(|m| m.modified())
         .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
-    
+        .unwrap_or_else(|_| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        });
+
     // 4. 更新内存缓存 (逻辑层保持合并)
     state.caches.insert(agent_id.to_string(), config.clone());
     state.cache_timestamps.insert(agent_id.to_string(), mtime);
@@ -563,14 +617,14 @@ async fn internal_write_agent_config(
     // 5. 影子数据库同步 (Shadow DB Sync)
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    
+
     // 使用事务保证物理文件与数据库索引的最终一致性
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     // 5a. 更新 agent_index
     sqlx::query(
         "INSERT INTO agent_index (agent_id, name, mtime) VALUES (?, ?, ?)
-         ON CONFLICT(agent_id) DO UPDATE SET name=excluded.name, mtime=excluded.mtime"
+         ON CONFLICT(agent_id) DO UPDATE SET name=excluded.name, mtime=excluded.mtime",
     )
     .bind(agent_id)
     .bind(&config.name)
@@ -587,12 +641,13 @@ async fn internal_write_agent_config(
         .map_err(|e| e.to_string())?;
 
     for rule in &config.strip_regexes {
-        let roles_json = serde_json::to_string(&rule.apply_to_roles).unwrap_or_else(|_| "[]".to_string());
+        let roles_json =
+            serde_json::to_string(&rule.apply_to_roles).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             "INSERT INTO agent_regex_rules (
                 rule_id, agent_id, title, find_pattern, replace_with, 
                 apply_to_roles, apply_to_frontend, apply_to_context, min_depth, max_depth
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&rule.id)
         .bind(agent_id)
@@ -642,7 +697,10 @@ pub async fn rebuild_db_index(
     app_handle: AppHandle,
     state: State<'_, AgentConfigState>,
 ) -> Result<usize, String> {
-    let mut agents_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut agents_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     agents_dir.push("agents");
 
     if !agents_dir.exists() {
@@ -656,11 +714,21 @@ pub async fn rebuild_db_index(
         if path.is_dir() {
             let agent_id = entry.file_name().to_string_lossy().to_string();
             // 读取配置 (这会触发路径替换等逻辑)
-            if let Ok(config) = read_agent_config(app_handle.clone(), state.clone(), agent_id.clone(), Some(false)).await {
+            if let Ok(config) = read_agent_config(
+                app_handle.clone(),
+                state.clone(),
+                agent_id.clone(),
+                Some(false),
+            )
+            .await
+            {
                 // 强制写入一次，触发 internal_write_agent_config 里的数据库同步逻辑
                 let mutex = state.acquire_lock(&agent_id).await;
                 let _lock = mutex.lock().await;
-                if let Ok(_) = internal_write_agent_config(&app_handle, &state, &agent_id, &config).await {
+                if internal_write_agent_config(&app_handle, &state, &agent_id, &config)
+                    .await
+                    .is_ok()
+                {
                     count += 1;
                 }
             }

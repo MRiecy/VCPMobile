@@ -13,22 +13,22 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("Config dir failed: {}", e))?;
-    
+
     // 确保父目录存在
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir).map_err(|e| format!("Create dir failed: {}", e))?;
     }
-    
+
     let mut db_path = config_dir.clone();
     db_path.push("vcp_avatar.db");
-    
+
     println!("[DBManager] Initializing SQLite at: {:?}", db_path);
 
     // 配置连接选项
     let mut connect_options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&db_path)
         .create_if_missing(true);
-    
+
     // 性能优化：禁用同步以减少磁盘 IO 压力 (适合移动端)
     connect_options = connect_options.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 

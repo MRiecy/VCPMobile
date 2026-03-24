@@ -1,9 +1,11 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::group_manager::{resolve_topic_dir, resolve_history_path};
+use crate::vcp_modules::group_manager::{resolve_history_path, resolve_topic_dir};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone, Default)]
 pub struct Topic {
@@ -38,7 +40,7 @@ pub struct Topic {
 #[tauri::command]
 pub async fn get_topics(
     db_state: tauri::State<'_, DbState>,
-    item_id: String
+    item_id: String,
 ) -> Result<Vec<Topic>, String> {
     let topics = sqlx::query_as::<_, Topic>(
         "SELECT topic_id, title, mtime, locked, unread, unread_count, last_msg_preview, msg_count FROM topic_index WHERE agent_id = ? ORDER BY mtime DESC"
@@ -56,7 +58,7 @@ pub async fn create_topic(
     app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, DbState>,
     item_id: String,
-    name: String
+    name: String,
 ) -> Result<Topic, String> {
     let id = format!("topic_{}", uuid::Uuid::new_v4());
     let now = std::time::SystemTime::now()
@@ -108,7 +110,7 @@ pub async fn delete_topic(
     app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, DbState>,
     item_id: String,
-    topic_id: String
+    topic_id: String,
 ) -> Result<(), String> {
     // 1. 从数据库删除
     sqlx::query("DELETE FROM topic_index WHERE topic_id = ?")
@@ -132,11 +134,16 @@ pub async fn update_topic_title(
     db_state: tauri::State<'_, DbState>,
     _item_id: String,
     topic_id: String,
-    title: String
+    title: String,
 ) -> Result<(), String> {
     sqlx::query("UPDATE topic_index SET title = ?, mtime = ? WHERE topic_id = ?")
         .bind(&title)
-        .bind(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+        .bind(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        )
         .bind(&topic_id)
         .execute(&db_state.pool)
         .await
@@ -145,11 +152,11 @@ pub async fn update_topic_title(
     Ok(())
 }
 
-use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, Runtime, State};
 use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
 use reqwest::Client;
+use serde_json::{json, Value};
 use std::time::Duration;
+use tauri::{AppHandle, Manager, Runtime, State};
 
 #[tauri::command]
 pub async fn summarize_topic<R: Runtime>(
@@ -172,20 +179,14 @@ pub async fn summarize_topic<R: Runtime>(
 
     let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
     let history: Vec<Value> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    
+
     if history.len() < 2 {
         return Err("Not enough messages to summarize".to_string());
     }
 
-    let filtered_history: Vec<_> = history.iter()
-        .filter(|m| m["role"] != "system")
-        .collect();
+    let filtered_history: Vec<_> = history.iter().filter(|m| m["role"] != "system").collect();
 
-    let recent_msgs: Vec<_> = filtered_history.iter()
-        .rev()
-        .take(4)
-        .rev()
-        .collect();
+    let recent_msgs: Vec<_> = filtered_history.iter().rev().take(4).rev().collect();
 
     let mut recent_content = String::new();
     for msg in recent_msgs {
@@ -210,10 +211,13 @@ pub async fn summarize_topic<R: Runtime>(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let model = settings.topic_summary_model.unwrap_or_else(|| "gemini-2.5-flash".to_string());
+    let model = settings
+        .topic_summary_model
+        .unwrap_or_else(|| "gemini-2.5-flash".to_string());
     let temp = settings.topic_summary_model_temperature.unwrap_or(0.7);
 
-    let response = client.post(&settings.vcp_server_url)
+    let response = client
+        .post(&settings.vcp_server_url)
         .header("Authorization", format!("Bearer {}", settings.vcp_api_key))
         .header("Content-Type", "application/json")
         .json(&json!({
@@ -239,7 +243,7 @@ pub async fn summarize_topic<R: Runtime>(
 
     // 4. 清洗标题 (对齐桌面端 logic)
     let clean_title = clean_summarized_title(raw_title);
-    
+
     if clean_title.is_empty() {
         return Err("AI failed to generate a valid title".to_string());
     }
@@ -250,7 +254,7 @@ pub async fn summarize_topic<R: Runtime>(
 fn clean_summarized_title(raw: &str) -> String {
     // 提取第一行
     let first_line = raw.lines().next().unwrap_or("").trim();
-    
+
     // 移除标点符号、前缀
     let mut cleaned = first_line
         .replace(|c: char| !c.is_alphanumeric() && !c.is_whitespace(), "")
@@ -278,10 +282,16 @@ async fn update_topic_in_main_config<R: Runtime>(
     app_handle: &tauri::AppHandle<R>,
     item_id: &str,
     topic_id: &str,
-    update_fn: impl Fn(&mut Value)
+    update_fn: impl Fn(&mut Value),
 ) -> Result<(), String> {
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
-    let group_config = config_dir.join("AgentGroups").join(item_id).join("config.json");
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    let group_config = config_dir
+        .join("AgentGroups")
+        .join(item_id)
+        .join("config.json");
     let agent_config = config_dir.join("agents").join(item_id).join("config.json");
 
     let target_path = if group_config.exists() {
@@ -297,7 +307,10 @@ async fn update_topic_in_main_config<R: Runtime>(
 
     let mut updated = false;
     if let Some(topics) = json.get_mut("topics").and_then(|v| v.as_array_mut()) {
-        if let Some(topic) = topics.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(topic_id)) {
+        if let Some(topic) = topics
+            .iter_mut()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(topic_id))
+        {
             update_fn(topic);
             updated = true;
         }
@@ -319,12 +332,17 @@ pub async fn toggle_topic_lock(
     db_state: tauri::State<'_, DbState>,
     item_id: String,
     topic_id: String,
-    locked: bool
+    locked: bool,
 ) -> Result<(), String> {
     // 1. 更新数据库
     sqlx::query("UPDATE topic_index SET locked = ?, mtime = ? WHERE topic_id = ?")
         .bind(locked)
-        .bind(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+        .bind(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        )
         .bind(&topic_id)
         .execute(&db_state.pool)
         .await
@@ -333,7 +351,8 @@ pub async fn toggle_topic_lock(
     // 2. 原子的更新主 config.json
     update_topic_in_main_config(&app_handle, &item_id, &topic_id, |topic| {
         topic["locked"] = serde_json::Value::Bool(locked);
-    }).await?;
+    })
+    .await?;
 
     Ok(())
 }
@@ -344,12 +363,17 @@ pub async fn set_topic_unread(
     db_state: tauri::State<'_, DbState>,
     item_id: String,
     topic_id: String,
-    unread: bool
+    unread: bool,
 ) -> Result<(), String> {
     // 1. 更新数据库
     sqlx::query("UPDATE topic_index SET unread = ?, mtime = ? WHERE topic_id = ?")
         .bind(unread)
-        .bind(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+        .bind(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        )
         .bind(&topic_id)
         .execute(&db_state.pool)
         .await
@@ -358,7 +382,8 @@ pub async fn set_topic_unread(
     // 2. 原子的更新主 config.json
     update_topic_in_main_config(&app_handle, &item_id, &topic_id, |topic| {
         topic["unread"] = serde_json::Value::Bool(unread);
-    }).await?;
+    })
+    .await?;
 
     Ok(())
 }

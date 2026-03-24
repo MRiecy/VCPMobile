@@ -5,9 +5,9 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use tauri::{AppHandle, Manager, State, Runtime};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
@@ -15,7 +15,10 @@ use tokio::time::sleep;
 pub struct AppSettings {
     #[serde(rename = "sidebarWidth", default = "default_sidebar_width")]
     pub sidebar_width: i32,
-    #[serde(rename = "notificationsSidebarWidth", default = "default_notifications_sidebar_width")]
+    #[serde(
+        rename = "notificationsSidebarWidth",
+        default = "default_notifications_sidebar_width"
+    )]
     pub notifications_sidebar_width: i32,
     #[serde(rename = "userName", default = "default_user_name")]
     pub user_name: String,
@@ -35,7 +38,10 @@ pub struct AppSettings {
     pub enable_smooth_streaming: bool,
     #[serde(rename = "minChunkBufferSize", default = "default_one_i32")]
     pub min_chunk_buffer_size: i32,
-    #[serde(rename = "smoothStreamIntervalMs", default = "default_smooth_stream_interval")]
+    #[serde(
+        rename = "smoothStreamIntervalMs",
+        default = "default_smooth_stream_interval"
+    )]
     pub smooth_stream_interval_ms: i32,
     #[serde(rename = "assistantAgent", default)]
     pub assistant_agent: String,
@@ -47,14 +53,14 @@ pub struct AppSettings {
     pub enable_distributed_server_logs: bool,
     #[serde(rename = "enableVcpToolInjection", default)]
     pub enable_vcp_tool_injection: bool,
-    
+
     #[serde(rename = "lastOpenItemId", default)]
     pub last_open_item_id: Option<String>,
     #[serde(rename = "lastOpenItemType", default)]
     pub last_open_item_type: Option<String>,
     #[serde(rename = "lastOpenTopicId", default)]
     pub last_open_topic_id: Option<String>,
-    
+
     #[serde(rename = "combinedItemOrder", default)]
     pub combined_item_order: Vec<serde_json::Value>,
     #[serde(rename = "agentOrder", default)]
@@ -88,14 +94,30 @@ pub struct AppSettings {
     pub extra: serde_json::Value,
 }
 
-fn default_sidebar_width() -> i32 { 260 }
-fn default_notifications_sidebar_width() -> i32 { 300 }
-fn default_user_name() -> String { "用户".to_string() }
-fn default_one_i32() -> i32 { 1 }
-fn default_smooth_stream_interval() -> i32 { 25 }
-fn default_true() -> bool { true }
-fn default_flowlock_delay() -> i32 { 5 }
-fn default_sync_port() -> i32 { 5974 }
+fn default_sidebar_width() -> i32 {
+    260
+}
+fn default_notifications_sidebar_width() -> i32 {
+    300
+}
+fn default_user_name() -> String {
+    "用户".to_string()
+}
+fn default_one_i32() -> i32 {
+    1
+}
+fn default_smooth_stream_interval() -> i32 {
+    25
+}
+fn default_true() -> bool {
+    true
+}
+fn default_flowlock_delay() -> i32 {
+    5
+}
+fn default_sync_port() -> i32 {
+    5974
+}
 
 impl AppSettings {
     /// 执行业务逻辑验证
@@ -124,7 +146,10 @@ impl AppSettingsState {
 }
 
 fn get_settings_path<R: Runtime>(app_handle: &AppHandle<R>) -> Result<PathBuf, String> {
-    let mut path = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut path = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     path.push("settings.json");
     Ok(path)
 }
@@ -154,13 +179,14 @@ pub async fn read_app_settings<R: Runtime>(
     state: State<'_, AppSettingsState>,
 ) -> Result<AppSettings, String> {
     let path = get_settings_path(&app_handle)?;
-    
+
     // 1. 缓存检查
     if let Ok(metadata) = fs::metadata(&path) {
-        let mtime = metadata.modified()
+        let mtime = metadata
+            .modified()
             .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
             .unwrap_or(0);
-        
+
         let cache_ts = *state.cache_timestamp.lock().await;
         if mtime <= cache_ts {
             if let Some(cached) = &*state.cache.lock().await {
@@ -212,7 +238,7 @@ pub async fn read_app_settings<R: Runtime>(
     // 3. 读取并解析 (带重试)
     let content = retry_read_to_string(&path).await?;
     let settings_res: Result<AppSettings, serde_json::Error> = serde_json::from_str(&content);
-    
+
     let mut settings = match settings_res {
         Ok(s) => s,
         Err(e) => {
@@ -221,12 +247,14 @@ pub async fn read_app_settings<R: Runtime>(
             let backup_path = path.with_extension("json.backup");
             if backup_path.exists() {
                 if let Ok(backup_content) = fs::read_to_string(&backup_path) {
-                    if let Ok(backup_settings) = serde_json::from_str::<AppSettings>(&backup_content) {
+                    if let Ok(backup_settings) =
+                        serde_json::from_str::<AppSettings>(&backup_content)
+                    {
                         backup_recovered = Some(backup_settings);
                     }
                 }
             }
-            
+
             match backup_recovered {
                 Some(bs) => bs,
                 None => return Err(e.to_string()),
@@ -236,9 +264,12 @@ pub async fn read_app_settings<R: Runtime>(
 
     // 动态注入用户真实头像路径
     // 注意：在 VCP Mobile 架构中，桌面端的 AppData/UserData 映射为手机端的 app_config_dir/data
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     let user_data_dir = config_dir.join("data");
-    
+
     // 检查常见的头像格式 (下划线格式)
     let extensions = ["png", "jpg", "jpeg", "webp"];
     settings.user_avatar_url = None;
@@ -255,8 +286,13 @@ pub async fn read_app_settings<R: Runtime>(
     let mtime = fs::metadata(&path)
         .and_then(|m| m.modified())
         .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
-    
+        .unwrap_or_else(|_| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        });
+
     *state.cache.lock().await = Some(settings.clone());
     *state.cache_timestamp.lock().await = mtime;
 
@@ -297,7 +333,8 @@ pub async fn update_app_settings<R: Runtime>(
         }
     }
 
-    let mut new_settings: AppSettings = serde_json::from_value(current_val).map_err(|e| e.to_string())?;
+    let mut new_settings: AppSettings =
+        serde_json::from_value(current_val).map_err(|e| e.to_string())?;
     new_settings.validate();
 
     internal_write_app_settings(&app_handle, &state, &new_settings).await?;
@@ -324,7 +361,8 @@ async fn internal_write_app_settings<R: Runtime>(
     fs::write(&temp_path, &content).map_err(|e| e.to_string())?;
 
     // 2. 验证
-    let _: AppSettings = serde_json::from_str(&content).map_err(|e| format!("Temp file validation failed: {}", e))?;
+    let _: AppSettings = serde_json::from_str(&content)
+        .map_err(|e| format!("Temp file validation failed: {}", e))?;
 
     // 3. 备份
     if path.exists() {
@@ -338,8 +376,13 @@ async fn internal_write_app_settings<R: Runtime>(
     let mtime = fs::metadata(&path)
         .and_then(|m| m.modified())
         .map(|t| t.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64)
-        .unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64);
-    
+        .unwrap_or_else(|_| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        });
+
     *state.cache.lock().await = Some(settings.clone());
     *state.cache_timestamp.lock().await = mtime;
 

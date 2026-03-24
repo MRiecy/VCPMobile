@@ -1,14 +1,14 @@
+use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager, Runtime, State};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use reqwest::Client;
+use std::sync::Arc;
 use std::time::Duration;
+use tauri::{AppHandle, Manager, Runtime, State};
+use tokio::sync::RwLock;
 use url::Url;
-use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelInfo {
@@ -43,7 +43,9 @@ impl ModelManagerState {
 }
 
 async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
-    app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("AppData"))
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("AppData"))
 }
 
 async fn load_favorites<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
@@ -56,13 +58,18 @@ async fn load_favorites<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
     Vec::new()
 }
 
-async fn save_favorites<R: Runtime>(app: &AppHandle<R>, favorites: &[String]) -> Result<(), String> {
+async fn save_favorites<R: Runtime>(
+    app: &AppHandle<R>,
+    favorites: &[String],
+) -> Result<(), String> {
     let path = get_app_data_path(app).await.join("model_favorites.json");
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let content = serde_json::to_string_pretty(favorites).map_err(|e| e.to_string())?;
-    tokio::fs::write(path, content).await.map_err(|e| e.to_string())
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn load_usage_stats<R: Runtime>(app: &AppHandle<R>) -> HashMap<String, u32> {
@@ -75,17 +82,24 @@ async fn load_usage_stats<R: Runtime>(app: &AppHandle<R>) -> HashMap<String, u32
     HashMap::new()
 }
 
-async fn save_usage_stats<R: Runtime>(app: &AppHandle<R>, stats: &HashMap<String, u32>) -> Result<(), String> {
+async fn save_usage_stats<R: Runtime>(
+    app: &AppHandle<R>,
+    stats: &HashMap<String, u32>,
+) -> Result<(), String> {
     let path = get_app_data_path(app).await.join("model_usage_stats.json");
     if let Some(parent) = path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let content = serde_json::to_string_pretty(stats).map_err(|e| e.to_string())?;
-    tokio::fs::write(path, content).await.map_err(|e| e.to_string())
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn get_cached_models(state: State<'_, ModelManagerState>) -> Result<Vec<ModelInfo>, String> {
+pub async fn get_cached_models(
+    state: State<'_, ModelManagerState>,
+) -> Result<Vec<ModelInfo>, String> {
     Ok(state.cached_models.read().await.clone())
 }
 
@@ -114,7 +128,7 @@ pub async fn refresh_models<R: Runtime>(
     };
     let host_with_port = format!("{}{}", url_object.host_str().unwrap_or(""), port_str);
     let base_url = format!("{}://{}", url_object.scheme(), host_with_port);
-    
+
     let models_url = if base_url.ends_with('/') {
         format!("{}v1/models", base_url)
     } else {
@@ -126,19 +140,24 @@ pub async fn refresh_models<R: Runtime>(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let res = client.get(&models_url)
+    let res = client
+        .get(&models_url)
         .header("Authorization", format!("Bearer {}", vcp_api_key))
         .send()
         .await
         .map_err(|e| format!("网络请求失败: {}", e))?;
 
     if res.status().is_success() {
-        let json_res: Value = res.json().await.map_err(|e| format!("JSON解析失败: {}", e))?;
+        let json_res: Value = res
+            .json()
+            .await
+            .map_err(|e| format!("JSON解析失败: {}", e))?;
         if let Some(data) = json_res.get("data").and_then(|d| d.as_array()) {
-            let models: Vec<ModelInfo> = data.iter().filter_map(|m| {
-                serde_json::from_value(m.clone()).ok()
-            }).collect();
-            
+            let models: Vec<ModelInfo> = data
+                .iter()
+                .filter_map(|m| serde_json::from_value(m.clone()).ok())
+                .collect();
+
             *state.cached_models.write().await = models.clone();
             Ok(models)
         } else {
@@ -152,17 +171,24 @@ pub async fn refresh_models<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn get_hot_models(state: State<'_, ModelManagerState>, limit: usize) -> Result<Vec<String>, String> {
+pub async fn get_hot_models(
+    state: State<'_, ModelManagerState>,
+    limit: usize,
+) -> Result<Vec<String>, String> {
     let stats = state.usage_stats.read().await;
     let mut entries: Vec<(&String, &u32)> = stats.iter().collect();
     entries.sort_by(|a, b| b.1.cmp(a.1));
-    Ok(entries.into_iter().take(limit).map(|(k, _)| k.clone()).collect())
+    Ok(entries
+        .into_iter()
+        .take(limit)
+        .map(|(k, _)| k.clone())
+        .collect())
 }
 
 #[tauri::command]
 pub async fn get_favorite_models<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, ModelManagerState>
+    state: State<'_, ModelManagerState>,
 ) -> Result<Vec<String>, String> {
     let mut favs = state.favorites.write().await;
     if favs.is_empty() {
@@ -175,7 +201,7 @@ pub async fn get_favorite_models<R: Runtime>(
 pub async fn toggle_favorite_model<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
-    model_id: String
+    model_id: String,
 ) -> Result<bool, String> {
     let mut favs = state.favorites.write().await;
     if favs.is_empty() {
@@ -199,7 +225,7 @@ pub async fn toggle_favorite_model<R: Runtime>(
 pub async fn record_model_usage<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
-    model_id: String
+    model_id: String,
 ) -> Result<(), String> {
     let mut stats = state.usage_stats.write().await;
     if stats.is_empty() {
@@ -215,7 +241,7 @@ pub async fn record_model_usage<R: Runtime>(
         let app_clone = app.clone();
         let stats_clone = stats.clone();
         let dirty_clone = state.is_dirty.clone();
-        
+
         // 简单的异步延迟落盘逻辑
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;

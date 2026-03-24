@@ -1,18 +1,18 @@
+use dashmap::DashMap;
+use futures_util::StreamExt;
+use futures_util::TryStreamExt;
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, Runtime, Emitter};
+use std::io::Error as IoError;
+use std::path::PathBuf;
 use std::sync::Arc;
-use dashmap::DashMap;
-use tokio::sync::oneshot;
-use futures_util::StreamExt;
-use reqwest::Client;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
-use std::io::Error as IoError;
-use futures_util::TryStreamExt;
-use std::path::PathBuf;
 use url::Url;
 
 /// =================================================================
@@ -20,17 +20,16 @@ use url::Url;
 /// =================================================================
 /// 该模块对应原项目的 modules/vcpClient.js，负责处理所有与 VCP 服务器的通信。
 /// 包含动态路由、上下文注入（音乐、UI 规范）、流式 SSE 解析以及请求中止机制。
-
 /// 请求参数结构体
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcpRequestPayload {
-    pub vcp_url: String,            // VCP服务器URL
-    pub vcp_api_key: String,        // API密钥
-    pub messages: Vec<Value>,       // 消息数组
-    pub model_config: Value,        // 模型配置 (包含 model, stream, temperature 等)
-    pub message_id: String,         // 消息ID (用于跟踪和中止)
-    pub context: Option<Value>,     // 上下文信息 (agentId, topicId等)
+    pub vcp_url: String,                // VCP服务器URL
+    pub vcp_api_key: String,            // API密钥
+    pub messages: Vec<Value>,           // 消息数组
+    pub model_config: Value,            // 模型配置 (包含 model, stream, temperature 等)
+    pub message_id: String,             // 消息ID (用于跟踪和中止)
+    pub context: Option<Value>,         // 上下文信息 (agentId, topicId等)
     pub stream_channel: Option<String>, // 流式数据频道名称 (默认为 vcp-stream-event)
 }
 
@@ -58,7 +57,9 @@ impl Default for ActiveRequests {
 
 /// 内部辅助函数：获取应用程序数据目录
 async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
-    app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("AppData"))
+    app.path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("AppData"))
 }
 
 /// 核心请求函数：sendToVCP
@@ -86,28 +87,38 @@ pub async fn perform_vcp_request<R: Runtime>(
     active_requests: Arc<DashMap<String, oneshot::Sender<()>>>,
     payload: VcpRequestPayload,
 ) -> Result<(Value, bool), String> {
-    println!("[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}", payload.message_id, payload.context);
-    let app_data_path = get_app_data_path(&app).await;
-    let stream_channel = payload.stream_channel.clone().unwrap_or_else(|| "vcp-stream".to_string());
-    
+    println!(
+        "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
+        payload.message_id, payload.context
+    );
+    let app_data_path = get_app_data_path(app).await;
+    let stream_channel = payload
+        .stream_channel
+        .clone()
+        .unwrap_or_else(|| "vcp-stream".to_string());
+
     // === 0. 数据验证和规范化 ===
     // ... (rest of data normalization unchanged)
-    let mut messages: Vec<Value> = payload.messages.into_iter().map(|mut msg| {
-        if !msg.is_object() {
-            return json!({"role": "system", "content": "[Invalid message]"});
-        }
-        let content = msg.get("content").cloned().unwrap_or(Value::Null);
-        if content.is_object() {
-            if let Some(text) = content.get("text") {
-                msg["content"] = text.clone();
-            } else {
+    let mut messages: Vec<Value> = payload
+        .messages
+        .into_iter()
+        .map(|mut msg| {
+            if !msg.is_object() {
+                return json!({"role": "system", "content": "[Invalid message]"});
+            }
+            let content = msg.get("content").cloned().unwrap_or(Value::Null);
+            if content.is_object() {
+                if let Some(text) = content.get("text") {
+                    msg["content"] = text.clone();
+                } else {
+                    msg["content"] = json!(content.to_string());
+                }
+            } else if !content.is_array() && !content.is_string() && !content.is_null() {
                 msg["content"] = json!(content.to_string());
             }
-        } else if !content.is_array() && !content.is_string() && !content.is_null() {
-            msg["content"] = json!(content.to_string());
-        }
-        msg
-    }).collect();
+            msg
+        })
+        .collect();
 
     // === 1. 读取设置与动态路由切换 ===
     let settings_path = app_data_path.join("settings.json");
@@ -117,9 +128,13 @@ pub async fn perform_vcp_request<R: Runtime>(
 
     if let Ok(content) = tokio::fs::read_to_string(&settings_path).await {
         if let Ok(settings) = serde_json::from_str::<Value>(&content) {
-            enable_vcp_tool_injection = settings["enableVcpToolInjection"].as_bool().unwrap_or(false);
+            enable_vcp_tool_injection = settings["enableVcpToolInjection"]
+                .as_bool()
+                .unwrap_or(false);
             agent_music_control = settings["agentMusicControl"].as_bool().unwrap_or(false);
-            enable_agent_bubble_theme = settings["enableAgentBubbleTheme"].as_bool().unwrap_or(false);
+            enable_agent_bubble_theme = settings["enableAgentBubbleTheme"]
+                .as_bool()
+                .unwrap_or(false);
         }
     }
 
@@ -139,14 +154,19 @@ pub async fn perform_vcp_request<R: Runtime>(
 
     let mut top_parts = Vec::new();
     let mut bottom_parts = Vec::new();
-    
+
     // 3.1 音乐状态注入
     let music_state_path = app_data_path.join("music_state.json");
     if let Ok(content) = tokio::fs::read_to_string(&music_state_path).await {
         if let Ok(m_state) = serde_json::from_str::<Value>(&content) {
-            if let (Some(title), Some(artist)) = (m_state["title"].as_str(), m_state["artist"].as_str()) {
+            if let (Some(title), Some(artist)) =
+                (m_state["title"].as_str(), m_state["artist"].as_str())
+            {
                 let album = m_state["album"].as_str().unwrap_or("未知专辑");
-                bottom_parts.push(format!("[当前播放音乐：{} - {} ({})]", title, artist, album));
+                bottom_parts.push(format!(
+                    "[当前播放音乐：{} - {} ({})]",
+                    title, artist, album
+                ));
             }
         }
     }
@@ -157,7 +177,8 @@ pub async fn perform_vcp_request<R: Runtime>(
         if let Ok(content) = tokio::fs::read_to_string(&songlist_path).await {
             if let Ok(songlist) = serde_json::from_str::<Value>(&content) {
                 if let Some(songs) = songlist.as_array() {
-                    let titles: Vec<&str> = songs.iter().filter_map(|s| s["title"].as_str()).collect();
+                    let titles: Vec<&str> =
+                        songs.iter().filter_map(|s| s["title"].as_str()).collect();
                     if !titles.is_empty() {
                         top_parts.push(format!("[播放列表——\n{}\n]", titles.join("\n")));
                     }
@@ -178,9 +199,15 @@ pub async fn perform_vcp_request<R: Runtime>(
             if m["role"] == "system" {
                 let original_content = m["content"].as_str().unwrap_or("");
                 let mut final_parts = Vec::new();
-                if !top_parts.is_empty() { final_parts.push(top_parts.join("\n")); }
-                if !original_content.is_empty() { final_parts.push(original_content.to_string()); }
-                if !bottom_parts.is_empty() { final_parts.push(bottom_parts.join("\n")); }
+                if !top_parts.is_empty() {
+                    final_parts.push(top_parts.join("\n"));
+                }
+                if !original_content.is_empty() {
+                    final_parts.push(original_content.to_string());
+                }
+                if !bottom_parts.is_empty() {
+                    final_parts.push(bottom_parts.join("\n"));
+                }
                 m["content"] = json!(final_parts.join("\n\n").trim());
                 break;
             }
@@ -216,12 +243,13 @@ pub async fn perform_vcp_request<R: Runtime>(
         let message_id_inner = message_id.clone();
         let context_inner = context.clone();
         let active_requests_inner = active_requests.clone();
-        
+
         let mut full_content = String::new();
         let mut is_aborted = false;
         let mut abort_rx = abort_rx; // 取得所有权进入循环
-        
-        let res_future = client.post(&final_url)
+
+        let res_future = client
+            .post(&final_url)
             .header(AUTHORIZATION, format!("Bearer {}", api_key))
             .header(CONTENT_TYPE, "application/json")
             .json(&request_body)
@@ -242,7 +270,7 @@ pub async fn perform_vcp_request<R: Runtime>(
             response_res = res_future => {
                 match response_res {
                     Ok(resp) if resp.status().is_success() => {
-                        let stream = resp.bytes_stream().map_err(|e| IoError::new(std::io::ErrorKind::Other, e));
+                        let stream = resp.bytes_stream().map_err(IoError::other);
                         let reader = StreamReader::new(stream);
                         let mut lines = FramedRead::new(reader, LinesCodec::new());
 
@@ -320,12 +348,16 @@ pub async fn perform_vcp_request<R: Runtime>(
                 }
             }
         }
-        
+
         active_requests_inner.remove(&message_id_inner);
-        Ok((json!({ "fullContent": full_content, "streamingStarted": true }), is_aborted))
+        Ok((
+            json!({ "fullContent": full_content, "streamingStarted": true }),
+            is_aborted,
+        ))
     } else {
         // === 7. 非流式响应模式 ===
-        let response = client.post(&final_url)
+        let response = client
+            .post(&final_url)
             .header(AUTHORIZATION, format!("Bearer {}", api_key))
             .header(CONTENT_TYPE, "application/json")
             .json(&request_body)
@@ -340,11 +372,13 @@ pub async fn perform_vcp_request<R: Runtime>(
             return Err(format!("VCP响应错误: {}", status));
         }
 
-        let vcp_response = response.json::<Value>().await.map_err(|e| format!("JSON解析失败: {}", e))?;
+        let vcp_response = response
+            .json::<Value>()
+            .await
+            .map_err(|e| format!("JSON解析失败: {}", e))?;
         Ok((json!({"response": vcp_response, "context": context}), false))
     }
 }
-
 
 /// 中止请求 Command: interruptRequest
 /// 通过 messageId 立即触发对应的 oneshot 信号
@@ -354,31 +388,45 @@ pub fn interruptRequest(
     state: tauri::State<'_, ActiveRequests>,
     message_id: String,
 ) -> Result<Value, String> {
-    println!("[VCPClient] interruptRequest called for messageId: {}. Active requests: {}", message_id, state.0.len());
+    println!(
+        "[VCPClient] interruptRequest called for messageId: {}. Active requests: {}",
+        message_id,
+        state.0.len()
+    );
     if let Some((_, sender)) = state.0.remove(&message_id) {
-        println!("[VCPClient] Found AbortController for messageId: {}, aborting...", message_id);
+        println!(
+            "[VCPClient] Found AbortController for messageId: {}, aborting...",
+            message_id
+        );
         let _ = sender.send(());
-        println!("[VCPClient] Request interrupted for messageId: {}. Remaining active requests: {}", message_id, state.0.len());
+        println!(
+            "[VCPClient] Request interrupted for messageId: {}. Remaining active requests: {}",
+            message_id,
+            state.0.len()
+        );
         Ok(json!({"success": true, "message": format!("Request {} interrupted", message_id)}))
     } else {
-        println!("[VCPClient] No active request found for messageId: {}", message_id);
+        println!(
+            "[VCPClient] No active request found for messageId: {}",
+            message_id
+        );
         Err(format!("Request {} not found", message_id))
     }
 }
 
 /// 测试 VCP 后端连接状态并获取模型列表 (对齐桌面端 main.js fetchAndCacheModels 逻辑)
 #[tauri::command]
-pub async fn test_vcp_connection(
-    vcp_url: String,
-    vcp_api_key: String,
-) -> Result<Value, String> {
-    println!("[VCPClient] test_vcp_connection called for URL: {}", vcp_url);
-    
+pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result<Value, String> {
+    println!(
+        "[VCPClient] test_vcp_connection called for URL: {}",
+        vcp_url
+    );
+
     // 对齐桌面端原汁原味的逻辑：
     // const urlObject = new URL(vcpServerUrl);
     // const baseUrl = `${urlObject.protocol}//${urlObject.host}`;
     // const modelsUrl = new URL('/v1/models', baseUrl).toString();
-    
+
     let url_object = match Url::parse(&vcp_url) {
         Ok(url) => url,
         Err(e) => return Err(format!("URL 解析失败: {}", e)),
@@ -391,21 +439,25 @@ pub async fn test_vcp_connection(
     };
     let host_with_port = format!("{}{}", url_object.host_str().unwrap_or(""), port_str);
     let base_url = format!("{}://{}", url_object.scheme(), host_with_port);
-    
+
     let models_url = if base_url.ends_with('/') {
         format!("{}v1/models", base_url)
     } else {
         format!("{}/v1/models", base_url)
     };
 
-    println!("[VCPClient] Testing connection to (Original Logic): {}", models_url);
+    println!(
+        "[VCPClient] Testing connection to (Original Logic): {}",
+        models_url
+    );
 
     let client = Client::builder()
         .timeout(Duration::from_secs(10)) // 测试连接 10s 超时即可
         .build()
         .map_err(|e| e.to_string())?;
 
-    let res = client.get(&models_url)
+    let res = client
+        .get(&models_url)
         .header(AUTHORIZATION, format!("Bearer {}", vcp_api_key))
         .send()
         .await
@@ -413,14 +465,18 @@ pub async fn test_vcp_connection(
 
     let status = res.status();
     if status.is_success() {
-        let json_res: Value = res.json().await.map_err(|e| format!("JSON解析失败: {}", e))?;
-        
+        let json_res: Value = res
+            .json()
+            .await
+            .map_err(|e| format!("JSON解析失败: {}", e))?;
+
         // 尝试提取模型数量，对齐桌面端 `cachedModels = data.data || []`
-        let model_count = json_res.get("data")
+        let model_count = json_res
+            .get("data")
             .and_then(|data| data.as_array())
             .map(|arr| arr.len())
             .unwrap_or(0);
-            
+
         Ok(json!({
             "success": true,
             "status": status.as_u16(),

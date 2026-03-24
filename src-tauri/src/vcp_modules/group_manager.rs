@@ -2,14 +2,14 @@
 // 源 JS 逻辑参考: ../VCPChat/modules/groupchat.js
 // 职责: 管理群组的 config.json，实现双轨目录结构支持，并为前端提供高性能缓存。
 
+use dashmap::DashMap;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager, Runtime};
-use dashmap::DashMap;
 use std::sync::Arc;
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::Mutex;
-use log::{info, error};
 
 use crate::vcp_modules::topic_list_manager::Topic;
 
@@ -98,7 +98,10 @@ impl GroupManagerState {
 
 /// 获取 AppData/AgentGroups 目录
 pub fn get_groups_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
-    let mut path = app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("AppData"));
+    let mut path = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("AppData"));
     path.push("AgentGroups");
     path
 }
@@ -106,7 +109,10 @@ pub fn get_groups_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
 /// 获取 UserData/{groupId} 目录
 #[allow(dead_code)]
 pub fn get_group_user_data_path<R: Runtime>(app: &AppHandle<R>, group_id: &str) -> PathBuf {
-    let mut path = app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("AppData"));
+    let mut path = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("AppData"));
     path.push("UserData");
     path.push(group_id);
     path
@@ -123,9 +129,10 @@ fn resolve_group_avatar_path<R: Runtime>(app: &AppHandle<R>, config: &mut GroupC
             path.push(&config.id);
             path.push(&avatar);
             *avatar = path.to_string_lossy().replace("\\", "/");
-        } 
+        }
         // 如果是桌面端的绝对路径，进行转换
-        else if avatar.contains("AppData/AgentGroups") || avatar.contains("AppData\\AgentGroups") {
+        else if avatar.contains("AppData/AgentGroups") || avatar.contains("AppData\\AgentGroups")
+        {
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             let config_dir_str = config_dir.to_string_lossy().replace("\\", "/");
             let parts: Vec<&str> = avatar.split(&['/', '\\'][..]).collect();
@@ -150,9 +157,9 @@ fn resolve_group_avatar_path<R: Runtime>(app: &AppHandle<R>, config: &mut GroupC
 
 /// 加载所有群组配置到缓存，并同步话题索引到数据库
 pub async fn load_all_groups<R: Runtime>(
-    app: &AppHandle<R>, 
+    app: &AppHandle<R>,
     state: &GroupManagerState,
-    db: &sqlx::Pool<sqlx::Sqlite>
+    db: &sqlx::Pool<sqlx::Sqlite>,
 ) -> Result<(), String> {
     let base_path = get_groups_base_path(app);
     if !base_path.exists() {
@@ -161,28 +168,28 @@ pub async fn load_all_groups<R: Runtime>(
     }
 
     let entries = fs::read_dir(base_path).map_err(|e| e.to_string())?;
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.is_dir() {
-                let config_path = path.join("config.json");
-                if config_path.exists() {
-                    if let Ok(content) = fs::read_to_string(&config_path) {
-                        if let Ok(mut config) = serde_json::from_str::<GroupConfig>(&content) {
-                            // 路径转换
-                            resolve_group_avatar_path(app, &mut config);
-                            
-                            // 同步话题到数据库
-                            for topic in &config.topics {
-                                let exists: bool = sqlx::query("SELECT 1 FROM topic_index WHERE topic_id = ?")
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let config_path = path.join("config.json");
+            if config_path.exists() {
+                if let Ok(content) = fs::read_to_string(&config_path) {
+                    if let Ok(mut config) = serde_json::from_str::<GroupConfig>(&content) {
+                        // 路径转换
+                        resolve_group_avatar_path(app, &mut config);
+
+                        // 同步话题到数据库
+                        for topic in &config.topics {
+                            let exists: bool =
+                                sqlx::query("SELECT 1 FROM topic_index WHERE topic_id = ?")
                                     .bind(&topic.id)
                                     .fetch_optional(db)
                                     .await
                                     .map_err(|e| e.to_string())?
                                     .is_some();
-                                
-                                if !exists {
-                                    sqlx::query(
+
+                            if !exists {
+                                sqlx::query(
                                         "INSERT INTO topic_index (topic_id, agent_id, title, mtime, locked, unread, unread_count, last_msg_preview, msg_count) 
                                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
                                     )
@@ -198,25 +205,30 @@ pub async fn load_all_groups<R: Runtime>(
                                     .execute(db)
                                     .await
                                     .map_err(|e| e.to_string())?;
-                                }
                             }
-                            
-                            state.caches.insert(config.id.clone(), config);
                         }
+
+                        state.caches.insert(config.id.clone(), config);
                     }
                 }
             }
         }
     }
-    
-    println!("[GroupManager] Loaded {} groups and synced topics to DB.", state.caches.len());
+
+    println!(
+        "[GroupManager] Loaded {} groups and synced topics to DB.",
+        state.caches.len()
+    );
     Ok(())
 }
 
 /// 获取话题目录路径 (支持双轨结构与 UserData/data 兼容)
 pub fn resolve_topic_dir<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id: &str) -> PathBuf {
-    let config_dir = app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from("AppData"));
-    
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("AppData"));
+
     // 兼容性探测：优先 UserData (桌面端标准)，次选 data (移动端同步标准)
     let mut path = config_dir.join("UserData");
     if !path.exists() {
@@ -230,7 +242,9 @@ pub fn resolve_topic_dir<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id
     path.push("topics");
 
     // 如果是群组，且话题ID不带 group_ 前缀，则增加 group_ 前缀
-    if (item_id.starts_with("____") || item_id.starts_with("___N_P_")) && !topic_id.starts_with("group_") {
+    if (item_id.starts_with("____") || item_id.starts_with("___N_P_"))
+        && !topic_id.starts_with("group_")
+    {
         path.push(format!("group_{}", topic_id));
     } else {
         path.push(topic_id);
@@ -238,25 +252,38 @@ pub fn resolve_topic_dir<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id
     path
 }
 /// 修改后的历史记录路径获取逻辑 (支持双轨结构)
-pub fn resolve_history_path<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id: &str) -> PathBuf {
+pub fn resolve_history_path<R: Runtime>(
+    app: &AppHandle<R>,
+    item_id: &str,
+    topic_id: &str,
+) -> PathBuf {
     let mut path = resolve_topic_dir(app, item_id, topic_id);
     path.push("history.json");
-    info!("[GroupManager] Resolved history path for {}/{}: {:?}", item_id, topic_id, path);
+    info!(
+        "[GroupManager] Resolved history path for {}/{}: {:?}",
+        item_id, topic_id, path
+    );
     path
 }
 
 // --- Tauri Commands ---
 
 #[tauri::command]
-pub async fn get_groups(state: tauri::State<'_, GroupManagerState>) -> Result<Vec<GroupConfig>, String> {
-    Ok(state.caches.iter().map(|entry| entry.value().clone()).collect())
+pub async fn get_groups(
+    state: tauri::State<'_, GroupManagerState>,
+) -> Result<Vec<GroupConfig>, String> {
+    Ok(state
+        .caches
+        .iter()
+        .map(|entry| entry.value().clone())
+        .collect())
 }
 
 #[tauri::command]
 pub async fn read_group_config(
     app: AppHandle,
     state: tauri::State<'_, GroupManagerState>,
-    group_id: String
+    group_id: String,
 ) -> Result<GroupConfig, String> {
     if let Some(mut config) = state.get_group(&group_id) {
         resolve_group_avatar_path(&app, &mut config);
@@ -264,23 +291,35 @@ pub async fn read_group_config(
     }
 
     // 缓存未命中，尝试磁盘读取
-    let config_path = get_groups_base_path(&app).join(&group_id).join("config.json");
+    let config_path = get_groups_base_path(&app)
+        .join(&group_id)
+        .join("config.json");
     if !config_path.exists() {
-        error!("[GroupManager] Group config NOT FOUND at: {:?}", config_path);
+        error!(
+            "[GroupManager] Group config NOT FOUND at: {:?}",
+            config_path
+        );
         return Err(format!("Group config not found: {}", group_id));
     }
 
     let content = fs::read_to_string(&config_path).map_err(|e| {
-        error!("[GroupManager] Failed to read config at {:?}: {}", config_path, e);
+        error!(
+            "[GroupManager] Failed to read config at {:?}: {}",
+            config_path, e
+        );
         e.to_string()
     })?;
 
     let mut config: GroupConfig = serde_json::from_str(&content).map_err(|e| {
-        error!("[GroupManager] Failed to parse GroupConfig for {}: {}. Content sample: {}", 
-            group_id, e, &content[..content.len().min(100)]);
+        error!(
+            "[GroupManager] Failed to parse GroupConfig for {}: {}. Content sample: {}",
+            group_id,
+            e,
+            &content[..content.len().min(100)]
+        );
         e.to_string()
     })?;
-    
+
     resolve_group_avatar_path(&app, &mut config);
     state.caches.insert(config.id.clone(), config.clone());
     Ok(config)

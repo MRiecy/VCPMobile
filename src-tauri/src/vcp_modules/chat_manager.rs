@@ -1,15 +1,15 @@
-use serde::{Deserialize, Serialize};
-use std::fs;
-use tauri::{AppHandle, Manager, State};
-use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::group_manager::resolve_history_path;
-use crate::vcp_modules::file_watcher::{signal_internal_save, WatcherState};
 use crate::vcp_modules::agent_config_manager::RegexRule;
-use std::time::{SystemTime, UNIX_EPOCH};
-use fancy_regex::Regex;
+use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::file_watcher::{signal_internal_save, WatcherState};
+use crate::vcp_modules::group_manager::resolve_history_path;
 use dashmap::DashMap;
+use fancy_regex::Regex;
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager, State};
 
 lazy_static! {
     /// 正则表达式编译缓存: find_pattern -> Compiled Regex
@@ -75,23 +75,23 @@ pub async fn apply_regex_rules(
     depth: i32,
 ) -> Result<String, String> {
     // 1. 从影子数据库加载该智能体的所有正则规则 (高性能索引)
-    let rules = sqlx::query_as::<_, RegexRule>(
-        "SELECT * FROM agent_regex_rules WHERE agent_id = ?"
-    )
-    .bind(agent_id)
-    .fetch_all(&db.pool)
-    .await
-    .map_err(|e: sqlx::Error| e.to_string())?;
+    let rules =
+        sqlx::query_as::<_, RegexRule>("SELECT * FROM agent_regex_rules WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_all(&db.pool)
+            .await
+            .map_err(|e: sqlx::Error| e.to_string())?;
 
     let mut processed_text = text.to_string();
 
     for rule in rules {
         // 2. 检查作用域对齐
-        let should_apply_to_scope = 
-            (scope == "context" && rule.apply_to_context) || 
-            (scope == "frontend" && rule.apply_to_frontend);
-        
-        if !should_apply_to_scope { continue; }
+        let should_apply_to_scope = (scope == "context" && rule.apply_to_context)
+            || (scope == "frontend" && rule.apply_to_frontend);
+
+        if !should_apply_to_scope {
+            continue;
+        }
 
         // 3. 检查角色对齐
         if !rule.apply_to_roles.contains(&role.to_string()) {
@@ -102,19 +102,24 @@ pub async fn apply_regex_rules(
         let min_depth_ok = rule.min_depth == -1 || depth >= rule.min_depth;
         let max_depth_ok = rule.max_depth == -1 || depth <= rule.max_depth;
 
-        if !min_depth_ok || !max_depth_ok { continue; }
+        if !min_depth_ok || !max_depth_ok {
+            continue;
+        }
 
         // 5. 执行替换逻辑 (带编译缓存)
         let regex = match REGEX_CACHE.get(&rule.find_pattern) {
             Some(r) => r.clone(),
             None => {
-                let r = Regex::new(&rule.find_pattern).map_err(|e| format!("Invalid regex {}: {}", rule.find_pattern, e))?;
+                let r = Regex::new(&rule.find_pattern)
+                    .map_err(|e| format!("Invalid regex {}: {}", rule.find_pattern, e))?;
                 REGEX_CACHE.insert(rule.find_pattern.clone(), r.clone());
                 r
             }
         };
 
-        processed_text = regex.replace_all(&processed_text, rule.replace_with.as_str()).to_string();
+        processed_text = regex
+            .replace_all(&processed_text, rule.replace_with.as_str())
+            .to_string();
     }
 
     Ok(processed_text)
@@ -140,7 +145,7 @@ pub async fn load_chat_history(
     item_id: String,
     topic_id: String,
     limit: Option<usize>,
-    offset: Option<usize>
+    offset: Option<usize>,
 ) -> Result<Vec<ChatMessage>, String> {
     let history_path = resolve_history_path(&app_handle, &item_id, &topic_id);
 
@@ -149,7 +154,8 @@ pub async fn load_chat_history(
     }
 
     let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
-    let full_history: Vec<ChatMessage> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let full_history: Vec<ChatMessage> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
     let total_len = full_history.len();
     let end = total_len.saturating_sub(offset.unwrap_or(0));
@@ -162,9 +168,12 @@ pub async fn load_chat_history(
         .collect();
 
     // 动态替换桌面端的绝对路径为手机端的绝对路径
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     let config_dir_str = config_dir.to_string_lossy().replace("\\", "/");
-    
+
     for msg in &mut history {
         // 替换 extra 里的 avatarUrl
         if let Some(avatar_url) = msg.extra.get_mut("avatarUrl") {
@@ -172,7 +181,7 @@ pub async fn load_chat_history(
             if let Some(url_str_raw) = avatar_url.as_str() {
                 // 1. 去除 file:// 前缀并统一斜杠
                 let url_str = url_str_raw.trim_start_matches("file://").replace("\\", "/");
-                
+
                 // 2. 处理桌面端 Agents 路径
                 if url_str.contains("AppData/Agents") {
                     let parts: Vec<&str> = url_str.split('/').collect();
@@ -182,29 +191,32 @@ pub async fn load_chat_history(
                             new_url = Some(format!("{}/agents/{}", config_dir_str, relative_path));
                         }
                     }
-                } 
+                }
                 // 3. 处理桌面端 AgentGroups 路径
                 else if url_str.contains("AppData/AgentGroups") {
                     let parts: Vec<&str> = url_str.split('/').collect();
                     if let Some(group_idx) = parts.iter().position(|&r| r == "AgentGroups") {
                         if parts.len() > group_idx + 1 {
                             let relative_path = parts[group_idx + 1..].join("/");
-                            new_url = Some(format!("{}/AgentGroups/{}", config_dir_str, relative_path));
+                            new_url =
+                                Some(format!("{}/AgentGroups/{}", config_dir_str, relative_path));
                         }
                     }
                 }
-                // 4. 兼容旧版 VChat 格式: /chat_api/avatar/agent/... 
+                // 4. 兼容旧版 VChat 格式: /chat_api/avatar/agent/...
                 else if url_str.starts_with("/chat_api/") || url_str.starts_with("/avatar/") {
                     let mut found_path = None;
                     let extensions = ["png", "jpg", "jpeg", "webp", "gif"];
-                    
+
                     if let Some(agent_name) = &msg.name {
                         let mut avatarimage_dir = config_dir.clone();
                         avatarimage_dir.push("avatarimage");
                         for ext in extensions {
-                            let possible_path = avatarimage_dir.join(format!("{}.{}", agent_name, ext));
+                            let possible_path =
+                                avatarimage_dir.join(format!("{}.{}", agent_name, ext));
                             if possible_path.exists() {
-                                found_path = Some(possible_path.to_string_lossy().replace("\\", "/"));
+                                found_path =
+                                    Some(possible_path.to_string_lossy().replace("\\", "/"));
                                 break;
                             }
                         }
@@ -217,7 +229,8 @@ pub async fn load_chat_history(
                         for ext in extensions {
                             let possible_path = agent_dir.join(format!("avatar.{}", ext));
                             if possible_path.exists() {
-                                found_path = Some(possible_path.to_string_lossy().replace("\\", "/"));
+                                found_path =
+                                    Some(possible_path.to_string_lossy().replace("\\", "/"));
                                 break;
                             }
                         }
@@ -244,7 +257,7 @@ pub async fn save_chat_history(
     watcher_state: State<'_, WatcherState>,
     item_id: String,
     topic_id: String,
-    history: Vec<ChatMessage>
+    history: Vec<ChatMessage>,
 ) -> Result<(), String> {
     // 1. 发射内部保存信号，防止 Watcher 触发回环
     signal_internal_save(watcher_state);
@@ -267,15 +280,18 @@ pub async fn save_chat_history(
         }
         preview
     });
-    
+
     // "智能计数判断"
     let mut smart_unread_count = 0;
     let non_system_msgs: Vec<_> = history.iter().filter(|m| m.role != "system").collect();
     if non_system_msgs.len() == 1 && non_system_msgs[0].role == "assistant" {
         smart_unread_count = 1;
     }
-    
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
 
     sqlx::query(
         "UPDATE topic_index SET 
@@ -283,7 +299,7 @@ pub async fn save_chat_history(
             last_msg_preview = ?, 
             mtime = ?,
             unread_count = ?
-         WHERE topic_id = ?"
+         WHERE topic_id = ?",
     )
     .bind(msg_count)
     .bind(last_msg_preview)
@@ -330,12 +346,15 @@ pub async fn get_topic_delta(
 
     // 2. 读取磁盘上的最新历史记录
     let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
-    let new_history: Vec<ChatMessage> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let new_history: Vec<ChatMessage> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
 
     // 3. 构建索引以便快速比对
-    let old_map: HashMap<String, ChatMessage> =
-        current_history.iter().map(|m| (m.id.clone(), m.clone())).collect();
-    
+    let old_map: HashMap<String, ChatMessage> = current_history
+        .iter()
+        .map(|m| (m.id.clone(), m.clone()))
+        .collect();
+
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut deleted_ids = Vec::new();
@@ -372,7 +391,7 @@ pub async fn get_topic_delta(
         .map(|m| m.id.clone())
         .filter(|id| new_ids_set.contains(id))
         .collect();
-    
+
     let new_ids_already_present: Vec<String> = new_ids_seq
         .iter()
         .filter(|id| old_map.contains_key(*id))

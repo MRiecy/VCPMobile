@@ -45,9 +45,7 @@ pub fn extract_dominant_color(path: &str) -> Result<String, String> {
 #[tauri::command]
 pub async fn extract_avatar_color(path: String) -> Result<String, String> {
     // 在后台线程执行 CPU 密集型任务，防止阻塞 Tauri 主线程
-    tauri::async_runtime::spawn_blocking(move || {
-        extract_dominant_color(&path)
-    })
-    .await
-    .map_err(|e| format!("Thread spawn error: {}", e))?
+    tauri::async_runtime::spawn_blocking(move || extract_dominant_color(&path))
+        .await
+        .map_err(|e| format!("Thread spawn error: {}", e))?
 }
