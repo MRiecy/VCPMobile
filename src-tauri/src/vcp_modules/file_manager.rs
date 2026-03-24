@@ -1,11 +1,11 @@
 use crate::vcp_modules::db_manager::DbState;
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
-use base64::{Engine as _, engine::general_purpose};
 
 /// 附件元数据结构
 /// 对齐 @/plans/Rust文件数据管理重构详细规划.md 中的 2.1 节
@@ -63,11 +63,12 @@ pub async fn store_file(
     let internal_path_str = internal_file_path.to_str().unwrap().to_string();
 
     // 3. 检查影子数据库中是否已存在该哈希，或磁盘上是否已存在文件
-    let existing: Option<(String,)> = sqlx::query_as("SELECT hash FROM attachment_index WHERE hash = ?")
-        .bind(&hash)
-        .fetch_optional(&db_state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT hash FROM attachment_index WHERE hash = ?")
+            .bind(&hash)
+            .fetch_optional(&db_state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -77,7 +78,7 @@ pub async fn store_file(
     if existing.is_none() || !internal_file_path.exists() {
         // 4. 写入物理文件
         fs::write(&internal_file_path, &file_bytes).map_err(|e| e.to_string())?;
-        
+
         // 5. 更新影子数据库索引 (attachment_index)
         sqlx::query(
             "INSERT INTO attachment_index (hash, local_path, mime_type, size, created_at)
@@ -159,29 +160,32 @@ pub async fn pick_and_store_attachment(
         "rar" => "application/x-rar-compressed",
         "7z" => "application/x-7z-compressed",
         _ => "application/octet-stream",
-    }.to_string();
+    }
+    .to_string();
 
     // 3. 获取文件大小并准备源文件流
     let file_size = fs::metadata(&path_buf)
         .map_err(|e| format!("无法获取文件信息: {}", e))?
         .len();
-        
-    let mut source_file = std::fs::File::open(&path_buf)
-        .map_err(|e| format!("无法打开源文件: {}", e))?;
+
+    let mut source_file =
+        std::fs::File::open(&path_buf).map_err(|e| format!("无法打开源文件: {}", e))?;
 
     // 4. 流式计算 SHA256 哈希值 (防 OOM)
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 8192]; // 8KB buffer 读文件
-    
+
     loop {
         use std::io::Read;
-        let bytes_read = source_file.read(&mut buffer).map_err(|e| format!("计算哈希失败: {}", e))?;
+        let bytes_read = source_file
+            .read(&mut buffer)
+            .map_err(|e| format!("计算哈希失败: {}", e))?;
         if bytes_read == 0 {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
     }
-    
+
     let hash = hex::encode(hasher.finalize());
 
     // 5. 准备内部文件名和目标路径
@@ -206,11 +210,12 @@ pub async fn pick_and_store_attachment(
     let internal_path_str = internal_file_path.to_str().unwrap().to_string();
 
     // 6. 检查影子数据库中是否已存在该哈希，或磁盘上是否已存在文件
-    let existing: Option<(String,)> = sqlx::query_as("SELECT hash FROM attachment_index WHERE hash = ?")
-        .bind(&hash)
-        .fetch_optional(&db_state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT hash FROM attachment_index WHERE hash = ?")
+            .bind(&hash)
+            .fetch_optional(&db_state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -221,21 +226,26 @@ pub async fn pick_and_store_attachment(
         // 如果文件不存在，进行拷贝。优先使用系统级 copy (底层高度优化)，回退使用流式复制
         if let Err(copy_err) = fs::copy(&path_buf, &internal_file_path) {
             eprintln!("[FileManager] 快速拷贝失败，回退为流式复制: {}", copy_err);
-            
+
             // 重置源文件指针，准备流式复制
-            use std::io::{Seek, Read, Write};
-            source_file.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-            let mut target_file = std::fs::File::create(&internal_file_path).map_err(|e| e.to_string())?;
-            
+            use std::io::{Read, Seek, Write};
+            source_file
+                .seek(std::io::SeekFrom::Start(0))
+                .map_err(|e| e.to_string())?;
+            let mut target_file =
+                std::fs::File::create(&internal_file_path).map_err(|e| e.to_string())?;
+
             loop {
                 let bytes_read = source_file.read(&mut buffer).map_err(|e| e.to_string())?;
                 if bytes_read == 0 {
                     break;
                 }
-                target_file.write_all(&buffer[..bytes_read]).map_err(|e| e.to_string())?;
+                target_file
+                    .write_all(&buffer[..bytes_read])
+                    .map_err(|e| e.to_string())?;
             }
         }
-        
+
         // 7. 更新影子数据库索引
         sqlx::query(
             "INSERT INTO attachment_index (hash, local_path, mime_type, size, created_at)

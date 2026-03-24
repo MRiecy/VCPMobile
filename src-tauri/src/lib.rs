@@ -1,27 +1,43 @@
 mod vcp_modules;
 
-use vcp_modules::vcp_client::{ActiveRequests, sendToVCP, interruptRequest, test_vcp_connection};
-use vcp_modules::context_sanitizer::ContextSanitizer;
-use vcp_modules::chat_manager::{load_chat_history, save_chat_history, process_regex_for_message, get_topic_delta};
-use vcp_modules::message_processor::process_message_content;
-use vcp_modules::topic_list_manager::{get_topics, create_topic, delete_topic, update_topic_title, toggle_topic_lock, set_topic_unread, summarize_topic};
-use vcp_modules::agent_config_manager::{get_agents, read_agent_config, write_agent_config, save_agent_config, update_agent_config, rebuild_db_index, AgentConfigState};
-use vcp_modules::group_manager::{get_groups, read_group_config, GroupManagerState, load_all_groups};
-use vcp_modules::app_settings_manager::{read_app_settings, write_app_settings, update_app_settings, AppSettingsState};
-use vcp_modules::ipc::agent_handlers::{save_agent_avatar, create_agent, delete_agent};
-use vcp_modules::ipc::group_handlers::handle_group_chat_message;
-use vcp_modules::ipc::settings_handlers::{save_avatar_color, save_user_avatar, set_theme, notify_app_state, notify_network_state};
-use vcp_modules::ipc::sync_handlers::{sync_download_file, sync_ping, sync_fetch_manifest, sync_get_local_manifest};
-use vcp_modules::file_manager::{store_file, pick_and_store_attachment, read_local_image_base64};
-use vcp_modules::db_manager::{init_db, DbState};
-use vcp_modules::file_watcher::{init_watcher, signal_internal_save, WatcherState};
-use vcp_modules::index_service::full_scan;
-use vcp_modules::avatar_color_extractor::extract_avatar_color;
-use vcp_modules::model_manager::{
-    get_cached_models, refresh_models, get_hot_models, get_favorite_models, 
-    toggle_favorite_model, record_model_usage, ModelManagerState, init_model_manager
+use tauri::{Emitter, Manager};
+use vcp_modules::agent_config_manager::{
+    get_agents, read_agent_config, rebuild_db_index, save_agent_config, update_agent_config,
+    write_agent_config, AgentConfigState,
 };
-use tauri::{Manager, Emitter};
+use vcp_modules::app_settings_manager::{
+    read_app_settings, update_app_settings, write_app_settings, AppSettingsState,
+};
+use vcp_modules::avatar_color_extractor::extract_avatar_color;
+use vcp_modules::chat_manager::{
+    get_topic_delta, load_chat_history, process_regex_for_message, save_chat_history,
+};
+use vcp_modules::context_sanitizer::ContextSanitizer;
+use vcp_modules::db_manager::{init_db, DbState};
+use vcp_modules::file_manager::{pick_and_store_attachment, read_local_image_base64, store_file};
+use vcp_modules::file_watcher::{init_watcher, signal_internal_save, WatcherState};
+use vcp_modules::group_manager::{
+    get_groups, load_all_groups, read_group_config, GroupManagerState,
+};
+use vcp_modules::index_service::full_scan;
+use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
+use vcp_modules::ipc::group_handlers::handle_group_chat_message;
+use vcp_modules::ipc::settings_handlers::{
+    notify_app_state, notify_network_state, save_avatar_color, save_user_avatar, set_theme,
+};
+use vcp_modules::ipc::sync_handlers::{
+    sync_download_file, sync_fetch_manifest, sync_get_local_manifest, sync_ping,
+};
+use vcp_modules::message_processor::process_message_content;
+use vcp_modules::model_manager::{
+    get_cached_models, get_favorite_models, get_hot_models, init_model_manager, record_model_usage,
+    refresh_models, toggle_favorite_model, ModelManagerState,
+};
+use vcp_modules::topic_list_manager::{
+    create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
+    update_topic_title,
+};
+use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -34,17 +50,17 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            
+
             // --- 关键修复：完全异步化初始化 (Async Boot) ---
             // 这样即使 DB 卡住，WebView 也能正常显示
             tauri::async_runtime::spawn(async move {
                 println!("[VCPCore] Starting asynchronous initialization...");
-                
+
                 match init_db(&handle).await {
                     Ok(pool) => {
                         println!("[VCPCore] Database initialized successfully.");
                         handle.manage(DbState { pool: pool.clone() });
-                        
+
                         // 初始化其他状态
                         handle.manage(AgentConfigState::new());
                         handle.manage(GroupManagerState::new());
@@ -61,7 +77,7 @@ pub fn run() {
                         if let Err(e) = load_all_groups(&handle, &group_state, &pool).await {
                             eprintln!("[VCPCore] Group load failed: {}", e);
                         }
-                        
+
                         // 启动文件监控 (如果失败仅打印，不影响主流程)
                         if let Err(e) = init_watcher(handle.clone()) {
                             eprintln!("[VCPCore] Watcher init failed: {}", e);
@@ -71,10 +87,10 @@ pub fn run() {
                         if let Err(e) = full_scan(&handle, &pool).await {
                             eprintln!("[VCPCore] Initial scan failed: {}", e);
                         }
-                        
+
                         // 通知前端核心已就绪
                         let _ = handle.emit("vcp-core-ready", ());
-                    },
+                    }
                     Err(e) => {
                         eprintln!("[VCPCore] FATAL: Database initialization failed: {}", e);
                         // 发送错误通知，让前端显示“数据库错误”而不是白屏
@@ -82,7 +98,7 @@ pub fn run() {
                     }
                 }
             });
-            
+
             Ok(())
         })
         .manage(ActiveRequests::default())

@@ -1,12 +1,12 @@
 // GroupOrchestrator: 群组决策引擎与上下文组装器
 // 职责: 1. 运行 NatureRandom 算法 2. 注入群组全局设定 3. 处理 SessionWatcher 动态感知
 
-use serde_json::json;
+use crate::vcp_modules::agent_config_manager::AgentConfig;
+use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::group_manager::GroupConfig;
 use rand::Rng;
 use regex::Regex;
-use crate::vcp_modules::agent_config_manager::AgentConfig;
-use crate::vcp_modules::group_manager::GroupConfig;
-use crate::vcp_modules::chat_manager::ChatMessage;
+use serde_json::json;
 
 /// NatureRandom 决策引擎
 pub fn determine_naturerandom_speakers(
@@ -17,23 +17,24 @@ pub fn determine_naturerandom_speakers(
 ) -> Vec<AgentConfig> {
     let mut speakers = Vec::new();
     let mut spoken_this_turn = std::collections::HashSet::new();
-    
+
     let user_text = user_message.content.to_lowercase();
-    
+
     // 基础上下文窗口 (对齐桌面端 CONTEXT_WINDOW = 8)
     const CONTEXT_WINDOW: usize = 8;
     let history_len = history.len();
     let start_idx = history_len.saturating_sub(CONTEXT_WINDOW + 1);
     // 排除最后一条 (当前用户消息)
     let end_idx = history_len.saturating_sub(1);
-    
+
     let recent_history = if start_idx < end_idx {
         &history[start_idx..end_idx]
     } else {
         &[]
     };
 
-    let context_text = recent_history.iter()
+    let context_text = recent_history
+        .iter()
         .map(|m| {
             // 简单去除发言头 [Nova的发言]:
             let re = Regex::new(r"^\[.*?的发言\]:\s*").unwrap();
@@ -46,59 +47,88 @@ pub fn determine_naturerandom_speakers(
 
     // 1. 优先级: @角色名
     for member in active_members {
-        if user_text.contains(&format!("@{}", member.name.to_lowercase())) {
-            if spoken_this_turn.insert(member.id.clone()) {
-                speakers.push(member.clone());
-                println!("[GroupOrchestrator] @{} triggered by direct mention.", member.name);
-            }
+        if user_text.contains(&format!("@{}", member.name.to_lowercase()))
+            && spoken_this_turn.insert(member.id.clone())
+        {
+            speakers.push(member.clone());
+            println!(
+                "[GroupOrchestrator] @{} triggered by direct mention.",
+                member.name
+            );
         }
     }
 
     // 2. 优先级: Tag 匹配
     let tag_re = Regex::new(r"[,，]").unwrap();
+    let name_prefix_re = Regex::new(r"^\[.*?的发言\]:\s*").unwrap();
     for member in active_members {
-        if spoken_this_turn.contains(&member.id) { continue; }
+        if spoken_this_turn.contains(&member.id) {
+            continue;
+        }
 
-        let tags_val = group_config.member_tags.as_ref()
+        let tags_val = group_config
+            .member_tags
+            .as_ref()
             .and_then(|t| t.get(&member.id))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-            
-        if tags_val.is_empty() { continue; }
-        let tags: Vec<&str> = tag_re.split(tags_val)
+
+        if tags_val.is_empty() {
+            continue;
+        }
+        let tags: Vec<&str> = tag_re
+            .split(tags_val)
             .map(|t| t.trim())
             .filter(|t| !t.is_empty())
             .collect();
 
         if tag_match_mode == "natural" {
             // Natural 模式: 分档逻辑
-            let tag_in_others = recent_history.iter()
+            let tag_in_others = recent_history
+                .iter()
                 .filter(|m| m.extra.get("agentId").and_then(|id| id.as_str()) != Some(&member.id))
                 .any(|m| {
-                    let clean_content = Regex::new(r"^\[.*?的发言\]:\s*").unwrap().replace(&m.content, "").to_lowercase();
-                    tags.iter().any(|t| clean_content.contains(&t.to_lowercase()))
-                }) || tags.iter().any(|t| user_text.contains(&t.to_lowercase()));
+                    let clean_content = name_prefix_re.replace(&m.content, "").to_lowercase();
+                    tags.iter()
+                        .any(|t| clean_content.contains(&t.to_lowercase()))
+                })
+                || tags.iter().any(|t| user_text.contains(&t.to_lowercase()));
 
-            if tags.iter().any(|t| user_text.contains(&format!("@{}", t.to_lowercase()))) {
-                speakers.push(member.clone());
-                spoken_this_turn.insert(member.id.clone());
-            } else if tag_in_others {
+            if tags
+                .iter()
+                .any(|t| user_text.contains(&format!("@{}", t.to_lowercase())))
+                || tag_in_others
+            {
                 speakers.push(member.clone());
                 spoken_this_turn.insert(member.id.clone());
             } else {
                 // 仅出现在自身历史消息 -> 动态概率
-                let tag_in_own = recent_history.iter()
-                    .filter(|m| m.extra.get("agentId").and_then(|id| id.as_str()) == Some(&member.id))
-                    .any(|m| tags.iter().any(|t| m.content.to_lowercase().contains(&t.to_lowercase())));
+                let tag_in_own = recent_history
+                    .iter()
+                    .filter(|m| {
+                        m.extra.get("agentId").and_then(|id| id.as_str()) == Some(&member.id)
+                    })
+                    .any(|m| {
+                        tags.iter()
+                            .any(|t| m.content.to_lowercase().contains(&t.to_lowercase()))
+                    });
 
                 if tag_in_own {
-                    let last_ai_msg = history.iter().rev()
+                    let last_ai_msg = history
+                        .iter()
+                        .rev()
                         .skip(1) // 跳过当前用户消息
                         .find(|m| m.role == "assistant");
-                    
-                    let is_last_speaker = last_ai_msg.and_then(|m| m.extra.get("agentId")).and_then(|id| id.as_str()) == Some(&member.id);
-                    let own_msg_count = recent_history.iter()
-                        .filter(|m| m.extra.get("agentId").and_then(|id| id.as_str()) == Some(&member.id))
+
+                    let is_last_speaker = last_ai_msg
+                        .and_then(|m| m.extra.get("agentId"))
+                        .and_then(|id| id.as_str())
+                        == Some(&member.id);
+                    let own_msg_count = recent_history
+                        .iter()
+                        .filter(|m| {
+                            m.extra.get("agentId").and_then(|id| id.as_str()) == Some(&member.id)
+                        })
                         .count();
 
                     let speak_chance = if is_last_speaker {
@@ -115,7 +145,9 @@ pub fn determine_naturerandom_speakers(
             }
         } else {
             // Strict 模式: 包含即触发
-            if tags.iter().any(|t| context_text.contains(&t.to_lowercase()) || user_text.contains(&t.to_lowercase())) {
+            if tags.iter().any(|t| {
+                context_text.contains(&t.to_lowercase()) || user_text.contains(&t.to_lowercase())
+            }) {
                 speakers.push(member.clone());
                 spoken_this_turn.insert(member.id.clone());
             }
@@ -134,17 +166,24 @@ pub fn determine_naturerandom_speakers(
     // 4. 优先级: 概率发言 (15%)
     let mut rng = rand::thread_rng();
     for member in active_members {
-        if spoken_this_turn.contains(&member.id) { continue; }
-        
+        if spoken_this_turn.contains(&member.id) {
+            continue;
+        }
+
         let mut speak_chance = 0.15;
         if tag_match_mode == "strict" {
-            let tags_val = group_config.member_tags.as_ref()
+            let tags_val = group_config
+                .member_tags
+                .as_ref()
                 .and_then(|t| t.get(&member.id))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if !tags_val.is_empty() {
                 let tags: Vec<&str> = tag_re.split(tags_val).map(|t| t.trim()).collect();
-                if tags.iter().any(|t| context_text.contains(&t.to_lowercase())) {
+                if tags
+                    .iter()
+                    .any(|t| context_text.contains(&t.to_lowercase()))
+                {
                     speak_chance = 0.85;
                 }
             }
@@ -158,15 +197,21 @@ pub fn determine_naturerandom_speakers(
 
     // 5. 优先级: 保底发言
     if speakers.is_empty() && !active_members.is_empty() {
-        let relevant_members: Vec<_> = active_members.iter()
+        let relevant_members: Vec<_> = active_members
+            .iter()
             .filter(|m| {
-                let tags_val = group_config.member_tags.as_ref()
+                let tags_val = group_config
+                    .member_tags
+                    .as_ref()
                     .and_then(|t| t.get(&m.id))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if tags_val.is_empty() { return false; }
+                if tags_val.is_empty() {
+                    return false;
+                }
                 let tags: Vec<&str> = tag_re.split(tags_val).map(|t| t.trim()).collect();
-                tags.iter().any(|t| context_text.contains(&t.to_lowercase()))
+                tags.iter()
+                    .any(|t| context_text.contains(&t.to_lowercase()))
             })
             .collect();
 
@@ -180,15 +225,20 @@ pub fn determine_naturerandom_speakers(
 
     // 排序优化: 用户最新发言命中的排在最前
     speakers.sort_by_cached_key(|member| {
-        let tags_val = group_config.member_tags.as_ref()
+        let tags_val = group_config
+            .member_tags
+            .as_ref()
             .and_then(|t| t.get(&member.id))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let tags: Vec<&str> = tag_re.split(tags_val).map(|t| t.trim()).collect();
-        
+
         if tags.iter().any(|t| user_text.contains(&t.to_lowercase())) {
             0 // Rank 0 (highest)
-        } else if tags.iter().any(|t| context_text.contains(&t.to_lowercase())) {
+        } else if tags
+            .iter()
+            .any(|t| context_text.contains(&t.to_lowercase()))
+        {
             1 // Rank 1
         } else {
             2 // Rank 2
@@ -204,13 +254,17 @@ pub async fn assemble_context(
     group_config: &GroupConfig,
     active_members: &[AgentConfig],
 ) -> String {
-    let agent_name = if agent_config.name.is_empty() { &agent_config.id } else { &agent_config.name };
+    let agent_name = if agent_config.name.is_empty() {
+        &agent_config.id
+    } else {
+        &agent_config.name
+    };
     let mut system_prompt = agent_config.system_prompt.clone();
-    
+
     // 注入群组全局设定
     if let Some(group_prompt) = &group_config.group_prompt {
         let mut final_group_prompt = group_prompt.clone();
-        
+
         // 处理 SessionWatcher 感知占位符
         if final_group_prompt.contains("{{VCPChatGroupSessionWatcher}}") {
             let session_info = json!({
@@ -224,9 +278,10 @@ pub async fn assemble_context(
                     })
                 }).collect::<Vec<_>>()
             });
-            final_group_prompt = final_group_prompt.replace("{{VCPChatGroupSessionWatcher}}", &session_info.to_string());
+            final_group_prompt = final_group_prompt
+                .replace("{{VCPChatGroupSessionWatcher}}", &session_info.to_string());
         }
-        
+
         system_prompt = format!("{}\n\n[群聊设定]:\n{}", system_prompt, final_group_prompt);
     }
 

@@ -1,19 +1,19 @@
+use hex;
+use log::{error, info, warn};
+use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
 use std::fs;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
-use sha2::{Sha256, Digest};
-use hex;
-use log::{info, error, warn};
 
 pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<(), String> {
     let config_dir = app_handle
         .path()
         .app_config_dir()
         .map_err(|e: tauri::Error| e.to_string())?;
-    
+
     // 兼容性扫描：同时支持 UserData (桌面端) 和 data (移动端同步)
     let search_dirs = [config_dir.join("UserData"), config_dir.join("data")];
 
@@ -41,7 +41,11 @@ pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<()
     Ok(())
 }
 
-pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<Sqlite>) -> Result<(), String> {
+pub async fn index_history_file(
+    app_config_dir: &Path,
+    path: &Path,
+    pool: &Pool<Sqlite>,
+) -> Result<(), String> {
     let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
     let mtime = metadata
         .modified()
@@ -55,7 +59,7 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
     if components.len() < 4 {
         return Ok(());
     }
-    
+
     let topic_id = match components[components.len() - 2].as_os_str().to_str() {
         Some(s) => s.to_string(),
         None => return Ok(()),
@@ -69,11 +73,17 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
     // 普通智能体: app_config_dir/agents/{agent_id}/config.json
     // 群组: app_config_dir/AgentGroups/{agent_id}/config.json
     let config_path = if agent_id.starts_with("____") || agent_id.starts_with("___N_P_") {
-        app_config_dir.join("AgentGroups").join(&agent_id).join("config.json")
+        app_config_dir
+            .join("AgentGroups")
+            .join(&agent_id)
+            .join("config.json")
     } else {
-        app_config_dir.join("agents").join(&agent_id).join("config.json")
+        app_config_dir
+            .join("agents")
+            .join(&agent_id)
+            .join("config.json")
     };
-    
+
     let mut locked = false;
     let mut unread = false;
     let mut title_from_config = None;
@@ -88,7 +98,11 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
                             locked = t.get("locked").and_then(|v| v.as_bool()).unwrap_or(false);
                             unread = t.get("unread").and_then(|v| v.as_bool()).unwrap_or(false);
                             // 优先取 name, 次选 title
-                            title_from_config = t.get("name").or(t.get("title")).and_then(|v| v.as_str()).map(|s| s.to_string());
+                            title_from_config = t
+                                .get("name")
+                                .or(t.get("title"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
                             break;
                         }
                     }
@@ -96,15 +110,19 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
             }
         }
     } else {
-        warn!("[IndexService] Config not found for {}, topic {}. Path attempted: {:?}", agent_id, topic_id, config_path);
+        warn!(
+            "[IndexService] Config not found for {}, topic {}. Path attempted: {:?}",
+            agent_id, topic_id, config_path
+        );
     }
 
     // Check if we need to re-index based on mtime, and retain the old title if any
-    let existing: Option<(i64, Option<String>)> = sqlx::query_as("SELECT mtime, title FROM topic_index WHERE topic_id = ?")
-        .bind(&topic_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let existing: Option<(i64, Option<String>)> =
+        sqlx::query_as("SELECT mtime, title FROM topic_index WHERE topic_id = ?")
+            .bind(&topic_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let mut existing_title = None;
     if let Some((old_mtime, old_title)) = existing {
@@ -120,13 +138,15 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
                         .map_err(|e| e.to_string())?;
                 }
             }
-            return Ok(()); 
+            return Ok(());
         }
         existing_title = old_title;
     }
 
     // Read file and calculate hash/count
-    let content = tokio::fs::read_to_string(path).await.map_err(|e| e.to_string())?;
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
     let file_hash = hex::encode(hasher.finalize());
@@ -139,9 +159,10 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
         msg_count = history_array.len() as i32;
 
         // "智能计数判断"
-        let non_system_msgs: Vec<_> = history_array.iter().filter(|m| {
-            m.get("role").and_then(|r| r.as_str()) != Some("system")
-        }).collect();
+        let non_system_msgs: Vec<_> = history_array
+            .iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+            .collect();
 
         if non_system_msgs.len() == 1 {
             if let Some(role) = non_system_msgs[0].get("role").and_then(|r| r.as_str()) {
@@ -151,7 +172,7 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
             }
         }
     }
-    
+
     // Determine title: Use topic config > DB existing title > topic_id
     let title = title_from_config
         .or(existing_title)
@@ -182,7 +203,10 @@ pub async fn index_history_file(app_config_dir: &Path, path: &Path, pool: &Pool<
     .await
     .map_err(|e| e.to_string())?;
 
-    info!("[IndexService] Indexed topic: {} (Agent: {}, Messages: {})", topic_id, agent_id, msg_count);
+    info!(
+        "[IndexService] Indexed topic: {} (Agent: {}, Messages: {})",
+        topic_id, agent_id, msg_count
+    );
 
     Ok(())
 }

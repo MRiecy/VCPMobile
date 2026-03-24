@@ -1,13 +1,13 @@
 // agent_handlers.rs: 处理智能体相关的强类型指令
 // 对齐原 agentHandlers.js 的业务逻辑，并注入移动端感知
 
+use crate::vcp_modules::agent_config_manager::{
+    read_agent_config, write_agent_config, AgentConfig, AgentConfigState, TopicInfo,
+};
 use serde::Deserialize;
 use std::fs;
-use tauri::{AppHandle, Manager, State};
-use crate::vcp_modules::agent_config_manager::{
-    AgentConfig, AgentConfigState, read_agent_config, write_agent_config, TopicInfo
-};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Manager, State};
 
 #[derive(Debug, Deserialize)]
 pub struct AvatarPayload {
@@ -27,7 +27,10 @@ pub async fn save_agent_avatar(
     agent_id: String,
     avatar: AvatarPayload,
 ) -> Result<String, String> {
-    let mut agent_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut agent_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     agent_dir.push("agents");
     agent_dir.push(&agent_id);
 
@@ -59,16 +62,29 @@ pub async fn save_agent_avatar(
 
     // 3. 集中式存储 (avatarimage 目录)
     // 这是为了方便前端通过统一路径访问或进行备份
-    let app_data = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_data = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
     let avatar_image_dir = app_data.join("avatarimage");
     if !avatar_image_dir.exists() {
         let _ = fs::create_dir_all(&avatar_image_dir);
     }
 
     // 获取 Agent 名称用于集中命名
-    let config = read_agent_config(app_handle.clone(), agent_state, agent_id.clone(), Some(true)).await?;
-    let centralized_name = if config.name.is_empty() { &agent_id } else { &config.name };
-    
+    let config = read_agent_config(
+        app_handle.clone(),
+        agent_state,
+        agent_id.clone(),
+        Some(true),
+    )
+    .await?;
+    let centralized_name = if config.name.is_empty() {
+        &agent_id
+    } else {
+        &config.name
+    };
+
     // 清理集中式目录里的旧名
     for e in extensions {
         let old_centralized = avatar_image_dir.join(format!("{}.{}", centralized_name, e));
@@ -79,8 +95,15 @@ pub async fn save_agent_avatar(
     let centralized_path = avatar_image_dir.join(format!("{}.{}", centralized_name, ext));
     fs::write(&centralized_path, &avatar.buffer).map_err(|e| e.to_string())?;
 
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    Ok(format!("{}?t={}", new_avatar_path.to_string_lossy(), timestamp))
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    Ok(format!(
+        "{}?t={}",
+        new_avatar_path.to_string_lossy(),
+        timestamp
+    ))
 }
 
 /// 创建 Agent
@@ -94,8 +117,14 @@ pub async fn create_agent(
     initial_config: Option<serde_json::Value>,
 ) -> Result<AgentConfig, String> {
     // ID 生成逻辑: 过滤特殊字符 + 时间戳
-    let base_id = name.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect::<String>();
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let base_id = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect::<String>();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
     let agent_id = format!("{}_{}", base_id, timestamp);
 
     let config = if let Some(init) = initial_config {
@@ -142,10 +171,13 @@ pub async fn create_agent(
     };
 
     // 初始化话题存储目录
-    let mut agent_path = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut agent_path = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     agent_path.push("agents");
     agent_path.push(&agent_id);
-    
+
     let mut topic_dir = agent_path.clone();
     topic_dir.push("topics");
     topic_dir.push("default");
@@ -166,7 +198,10 @@ pub async fn delete_agent(
     _state: State<'_, AgentConfigState>,
     agent_id: String,
 ) -> Result<bool, String> {
-    let mut agent_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut agent_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     agent_dir.push("agents");
     agent_dir.push(&agent_id);
 

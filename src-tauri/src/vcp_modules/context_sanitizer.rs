@@ -2,14 +2,14 @@
 //! 上下文 HTML 标签转 MD 净化器模块（Rust 重构版）
 //! 处理 HTML 净化、多媒体保留、VCP 特殊块提取以及元思考链清理
 
-use scraper::{Html, Node};
 use ego_tree::NodeRef;
-use lru::LruCache;
-use std::sync::Mutex;
-use std::num::NonZeroUsize;
-use std::time::{SystemTime, Duration};
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
+use lru::LruCache;
+use scraper::{Html, Node};
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 lazy_static! {
     /// 清理 VCP 元思考链的正则表达式
@@ -42,7 +42,10 @@ impl ContextSanitizer {
     /// @param capacity 缓存最大容量
     /// @param ttl_secs 过期时间（秒）
     pub fn new(capacity: usize, ttl_secs: u64) -> Self {
-        println!("[ContextSanitizer] Initializing Rust ContextSanitizer with capacity {} and TTL {}s", capacity, ttl_secs);
+        println!(
+            "[ContextSanitizer] Initializing Rust ContextSanitizer with capacity {} and TTL {}s",
+            capacity, ttl_secs
+        );
         Self {
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
             ttl: Duration::from_secs(ttl_secs),
@@ -74,10 +77,13 @@ impl ContextSanitizer {
     #[allow(dead_code)]
     pub fn set_cached(&self, key: String, value: String) {
         let mut cache = self.cache.lock().unwrap();
-        cache.put(key, CacheItem {
-            value,
-            timestamp: SystemTime::now(),
-        });
+        cache.put(
+            key,
+            CacheItem {
+                value,
+                timestamp: SystemTime::now(),
+            },
+        );
         println!("[ContextSanitizer] Sanitized content, cached result");
     }
 
@@ -103,7 +109,7 @@ impl ContextSanitizer {
 
         // 核心执行：HTML 转换为 Markdown
         let result = html_to_vcp_markdown(content, keep_thoughts);
-        
+
         // 存入缓存
         self.set_cached(cache_key, result.clone());
         result
@@ -132,14 +138,16 @@ pub fn strip_thought_chains(content: &str) -> String {
 pub fn html_to_vcp_markdown(html: &str, keep_thoughts: bool) -> String {
     let fragment = Html::parse_fragment(html);
     let mut result = String::new();
-    
+
     // 遍历 HTML 树的根节点子代
     for node in fragment.tree.root().children() {
         process_node(node, &mut result, keep_thoughts);
     }
-    
+
     // 清理多余空行，对齐 JS 逻辑
-    MULTI_NEWLINE_REGEX.replace_all(result.trim(), "\n\n").to_string()
+    MULTI_NEWLINE_REGEX
+        .replace_all(result.trim(), "\n\n")
+        .to_string()
 }
 
 /// 递归处理 HTML 节点
@@ -152,7 +160,7 @@ fn process_node(node: NodeRef<Node>, out: &mut String, keep_thoughts: bool) {
         // 处理元素节点
         Node::Element(el) => {
             let tag = el.name();
-            
+
             // 算法 A：特殊块的“零损提取”
             // 检查是否有 data-raw-content 属性，如果有则直接返回原始内容
             if let Some(raw) = el.attr("data-raw-content") {
@@ -197,9 +205,11 @@ fn process_node(node: NodeRef<Node>, out: &mut String, keep_thoughts: bool) {
                 "pre" => {
                     let mut text_content = String::new();
                     collect_text(node, &mut text_content);
-                    
+
                     // 检查是否包含 VCP 专用原始标记
-                    if text_content.contains("<<<[TOOL_REQUEST]>>>") || text_content.contains("<<<DailyNoteStart>>>") {
+                    if text_content.contains("<<<[TOOL_REQUEST]>>>")
+                        || text_content.contains("<<<DailyNoteStart>>>")
+                    {
                         out.push_str(&text_content);
                     } else {
                         // 普通 pre 标签转为 Markdown 代码块
@@ -209,10 +219,19 @@ fn process_node(node: NodeRef<Node>, out: &mut String, keep_thoughts: bool) {
                     }
                 }
                 // 算法 C：元思考链的结构化处理
-                "div" if el.has_class("vcp-thought-chain-bubble", scraper::CaseSensitivity::AsciiCaseInsensitive) => {
+                "div"
+                    if el.has_class(
+                        "vcp-thought-chain-bubble",
+                        scraper::CaseSensitivity::AsciiCaseInsensitive,
+                    ) =>
+                {
                     if keep_thoughts {
                         let title = el.attr("data-thought-title").unwrap_or("");
-                        let title_part = if !title.is_empty() { format!(r#": "{}""#, title) } else { String::new() };
+                        let title_part = if !title.is_empty() {
+                            format!(r#": "{}""#, title)
+                        } else {
+                            String::new()
+                        };
                         out.push_str(&format!("\n\n[--- VCP元思考链{} ---]\n", title_part));
                         for child in node.children() {
                             process_node(child, out, keep_thoughts);
@@ -246,7 +265,9 @@ fn process_node(node: NodeRef<Node>, out: &mut String, keep_thoughts: bool) {
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     let level = tag.chars().last().unwrap().to_digit(10).unwrap_or(1);
                     out.push('\n');
-                    for _ in 0..level { out.push('#'); }
+                    for _ in 0..level {
+                        out.push('#');
+                    }
                     out.push(' ');
                     for child in node.children() {
                         process_node(child, out, keep_thoughts);
@@ -316,7 +337,7 @@ pub fn contains_html(content: &str) -> bool {
 pub fn generate_cache_key(content: &str, keep_thoughts: bool) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
-    
+
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     keep_thoughts.hash(&mut hasher);

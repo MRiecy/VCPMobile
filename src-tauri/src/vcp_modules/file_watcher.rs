@@ -1,9 +1,13 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::index_service::index_history_file;
-use notify_debouncer_full::{new_debouncer, notify::{*, self}, Debouncer, FileIdMap};
+use notify_debouncer_full::{
+    new_debouncer,
+    notify::{self, *},
+    Debouncer, FileIdMap,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// 文件监听状态，用于处理回环过滤
 /// 对齐 @/plans/Rust文件数据管理重构详细规划.md 中的 2.2 节
@@ -46,7 +50,7 @@ pub fn init_watcher(app_handle: AppHandle) -> std::result::Result<(), String> {
         .path()
         .app_config_dir()
         .map_err(|e: tauri::Error| e.to_string())?;
-    
+
     let search_dirs = [config_dir.join("UserData"), config_dir.join("data")];
 
     // 2. 创建异步通道用于接收文件事件
@@ -54,12 +58,16 @@ pub fn init_watcher(app_handle: AppHandle) -> std::result::Result<(), String> {
 
     // 3. 初始化防抖监听器 (Debouncer)
     // 设置 500ms 的稳定窗口，确保像 Syncthing 这样的大文件写入完成后再处理
-    let mut debouncer = new_debouncer(Duration::from_millis(500), None, tx).map_err(|e: notify::Error| e.to_string())?;
+    let mut debouncer = new_debouncer(Duration::from_millis(500), None, tx)
+        .map_err(|e: notify::Error| e.to_string())?;
 
     // 递归监听 UserData 和 data 目录
     for dir in &search_dirs {
         if dir.exists() {
-            debouncer.watcher().watch(dir, RecursiveMode::Recursive).map_err(|e: notify::Error| e.to_string())?;
+            debouncer
+                .watcher()
+                .watch(dir, RecursiveMode::Recursive)
+                .map_err(|e: notify::Error| e.to_string())?;
             println!("[Watcher] Now watching: {:?}", dir);
         }
     }
@@ -67,7 +75,7 @@ pub fn init_watcher(app_handle: AppHandle) -> std::result::Result<(), String> {
     let handle_clone = app_handle.clone();
     let config_dir_clone = config_dir.clone();
     let index_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
-    
+
     // 4. 开启后台线程处理事件流
     std::thread::spawn(move || {
         while let Ok(res) = rx.recv() {
@@ -88,22 +96,28 @@ pub fn init_watcher(app_handle: AppHandle) -> std::result::Result<(), String> {
 
                     for event in events {
                         println!("[Watcher] External change: {:?}", event.paths);
-                        
+
                         // a. 通知前端 UI：文件已变动，请触发 Delta Sync
                         let _ = handle_clone.emit("vcp-file-change", &event.paths);
-                        
+
                         // b. 如果变动的是聊天记录 (history.json)，触发影子数据库重索引
                         if let Some(db_state) = handle_clone.try_state::<DbState>() {
                             for path in &event.paths {
-                                if path.file_name().and_then(|n| n.to_str()) == Some("history.json") {
+                                if path.file_name().and_then(|n| n.to_str()) == Some("history.json")
+                                {
                                     let pool = db_state.pool.clone();
                                     let path_buf = path.to_path_buf();
                                     let sem = index_semaphore.clone();
                                     let app_config_dir = config_dir_clone.clone();
                                     // 异步执行索引更新，不阻塞事件循环
                                     tauri::async_runtime::spawn(async move {
-                                        let _permit = sem.acquire().await.unwrap_or_else(|e| panic!("Semaphore closed: {}", e));
-                                        let _ = index_history_file(&app_config_dir, &path_buf, &pool).await;
+                                        let _permit = sem
+                                            .acquire()
+                                            .await
+                                            .unwrap_or_else(|e| panic!("Semaphore closed: {}", e));
+                                        let _ =
+                                            index_history_file(&app_config_dir, &path_buf, &pool)
+                                                .await;
                                     });
                                 }
                             }

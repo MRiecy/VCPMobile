@@ -1,11 +1,11 @@
-use tauri::AppHandle;
-use tauri::Manager;
-use std::path::PathBuf;
-use std::fs;
 use reqwest::Client;
-use std::time::UNIX_EPOCH;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
+use tauri::AppHandle;
+use tauri::Manager;
 
 #[derive(Serialize)]
 pub struct LocalFileInfo {
@@ -16,8 +16,14 @@ pub struct LocalFileInfo {
 
 /// 将桌面端的相对路径映射为手机端的本地绝对路径
 fn map_remote_path_to_local(app_handle: &AppHandle, remote_path: &str) -> Result<PathBuf, String> {
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
-    let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
 
     let path_str = remote_path.replace("\\", "/");
     let parts: Vec<&str> = path_str.split('/').collect();
@@ -70,7 +76,8 @@ fn map_remote_path_to_local(app_handle: &AppHandle, remote_path: &str) -> Result
 pub async fn sync_ping(url: String, token: String) -> Result<String, String> {
     println!("[VCPMobileSync] 发起 Ping 请求 -> {}", url);
     let client = Client::new();
-    let res = client.get(&url)
+    let res = client
+        .get(&url)
         .header("x-sync-token", token)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -86,7 +93,10 @@ pub async fn sync_ping(url: String, token: String) -> Result<String, String> {
         return Err(format!("HTTP Error: {}", status));
     }
 
-    let text = res.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+    let text = res
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
     println!("[VCPMobileSync] Ping 成功，返回数据: {}", text);
     Ok(text)
 }
@@ -95,7 +105,8 @@ pub async fn sync_ping(url: String, token: String) -> Result<String, String> {
 pub async fn sync_fetch_manifest(url: String, token: String) -> Result<String, String> {
     println!("[VCPMobileSync] 发起 Manifest 请求 -> {}", url);
     let client = Client::new();
-    let res = client.get(&url)
+    let res = client
+        .get(&url)
         .header("x-sync-token", token)
         .header("Accept-Encoding", "gzip")
         .timeout(std::time::Duration::from_secs(30))
@@ -112,8 +123,14 @@ pub async fn sync_fetch_manifest(url: String, token: String) -> Result<String, S
         return Err(format!("HTTP Error: {}", status));
     }
 
-    let text = res.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
-    println!("[VCPMobileSync] Manifest 获取成功，数据长度: {} bytes", text.len());
+    let text = res
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+    println!(
+        "[VCPMobileSync] Manifest 获取成功，数据长度: {} bytes",
+        text.len()
+    );
     Ok(text)
 }
 
@@ -131,11 +148,15 @@ pub async fn sync_download_file(
         fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {}", e))?;
     }
 
-    println!("[VCPMobileSync] 开始下载文件 -> {} (保存至: {:?})", url, local_path);
+    println!(
+        "[VCPMobileSync] 开始下载文件 -> {} (保存至: {:?})",
+        url, local_path
+    );
 
     // 发起下载请求
     let client = Client::new();
-    let response = client.get(&url)
+    let response = client
+        .get(&url)
         .header("x-sync-token", token)
         .send()
         .await
@@ -146,21 +167,28 @@ pub async fn sync_download_file(
 
     if !response.status().is_success() {
         let status = response.status();
-        println!("[VCPMobileSync] 下载失败 ({})，HTTP 状态码: {}", relative_path, status);
+        println!(
+            "[VCPMobileSync] 下载失败 ({})，HTTP 状态码: {}",
+            relative_path, status
+        );
         return Err(format!("Server returned error: {}", status));
     }
 
     // 读取二进制流
-    let bytes = response.bytes().await.map_err(|e| format!("Failed to read bytes: {}", e))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read bytes: {}", e))?;
 
     // 原子写入：先写入临时文件，再重命名
     let temp_path = local_path.with_extension("tmp_download");
-    
+
     // 如果下载的是全局配置文件，进行智能合并，保留移动端专属的同步配置
     if relative_path == "settings.json" && local_path.exists() {
         if let Ok(local_content) = tokio::fs::read_to_string(&local_path).await {
             if let Ok(local_json) = serde_json::from_str::<serde_json::Value>(&local_content) {
-                if let Ok(mut downloaded_json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Ok(mut downloaded_json) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                {
                     // 保留移动端特有字段
                     let keys_to_preserve = vec!["syncServerIp", "syncServerPort", "syncToken"];
                     for key in keys_to_preserve {
@@ -170,15 +198,19 @@ pub async fn sync_download_file(
                     }
                     // 重新写入合并后的内容到 temp_path
                     if let Ok(merged_bytes) = serde_json::to_vec_pretty(&downloaded_json) {
-                        fs::write(&temp_path, merged_bytes).map_err(|e| format!("Failed to write merged file: {}", e))?;
+                        fs::write(&temp_path, merged_bytes)
+                            .map_err(|e| format!("Failed to write merged file: {}", e))?;
                     } else {
-                        fs::write(&temp_path, &bytes).map_err(|e| format!("Failed to write file: {}", e))?;
+                        fs::write(&temp_path, &bytes)
+                            .map_err(|e| format!("Failed to write file: {}", e))?;
                     }
                 } else {
-                    fs::write(&temp_path, &bytes).map_err(|e| format!("Failed to write file: {}", e))?;
+                    fs::write(&temp_path, &bytes)
+                        .map_err(|e| format!("Failed to write file: {}", e))?;
                 }
             } else {
-                fs::write(&temp_path, &bytes).map_err(|e| format!("Failed to write file: {}", e))?;
+                fs::write(&temp_path, &bytes)
+                    .map_err(|e| format!("Failed to write file: {}", e))?;
             }
         } else {
             fs::write(&temp_path, &bytes).map_err(|e| format!("Failed to write file: {}", e))?;
@@ -209,11 +241,14 @@ pub async fn sync_get_local_manifest(
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis();
-                    
-                    manifest.insert(relative_path, LocalFileInfo {
-                        mtime_ms: mtime,
-                        size: metadata.len(),
-                    });
+
+                    manifest.insert(
+                        relative_path,
+                        LocalFileInfo {
+                            mtime_ms: mtime,
+                            size: metadata.len(),
+                        },
+                    );
                 }
             }
         }
