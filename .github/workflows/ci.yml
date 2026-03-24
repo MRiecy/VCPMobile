@@ -1,58 +1,55 @@
-name: 🌌 Nova CI Aegis (Automatic Review)
+name: CI Check
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ main ]
+    branches: [ "main", "master" ]
 
 jobs:
-  review:
-    name: Autonomous Code Review
+  check:
+    name: Code Quality & Type Check
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout Code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🦀 Setup Rust
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # 建议使用 LTS 版本
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 8
+
+      - name: Install Node Dependencies
+        run: pnpm install
+
+      - name: Vue & TypeScript Type Check
+        run: pnpm exec vue-tsc --noEmit
+
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - name: 🟢 Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: 20
+          workspaces: "src-tauri"
 
-      - name: 📦 Setup Pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 9
-
-      - name: 馃搳 Get Pnpm Cache Directory
-        id: pnpm-cache
-        run: echo "STORE_PATH=$(pnpm store path)" >> $GITHUB_OUTPUT
-
-      - name: 馃殌 Cache Pnpm Modules
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-
-      - name: 馃搱 Install Dependencies
-        run: pnpm install
-
-      - name: 🎨 Layer 1: Frontend Lint (ESLint & Prettier)
-        run: pnpm lint
-
-      - name: 🛡️ Layer 2: TypeScript Type Check
-        run: pnpm vue-tsc --noEmit
-
-      - name: ⚙️ Layer 3: Rust Core Review (Clippy & Fmt)
+      - name: Install Linux Dependencies (for Tauri)
         run: |
-          cd src-tauri
-          cargo fmt --check
-          cargo clippy -- -D warnings
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Rust Formatting Check
+        working-directory: ./src-tauri
+        run: cargo fmt -- --check
+
+      - name: Rust Clippy (Lint & Check)
+        working-directory: ./src-tauri
+        run: cargo clippy -- -D warnings

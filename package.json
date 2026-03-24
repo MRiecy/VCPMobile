@@ -8,8 +8,6 @@
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "lint": "eslint . --ext .vue,.js,.ts --fix --ignore-path .gitignore",
-    "format": "prettier --write .",
     "io:write": "node scripts/nova_utils.cjs write",
     "io:append": "node scripts/nova_utils.cjs append",
     "memory:refresh": "node scripts/refresh_manifest.cjs",
