@@ -257,6 +257,44 @@ const handleCreateTopic = async () => {
   }
 };
 
+const handleCreateAgent = async () => {
+  const name = window.prompt("请输入助手名称:", "新助手");
+  if (!name || name.trim() === "") return;
+  try {
+    const newAgent = await assistantStore.createAgent(name.trim());
+    if (newAgent && newAgent.id) {
+      // 自动切换到新助手并开启话题
+      activeTab.value = 'topics';
+      await topicListStore.loadTopicList(newAgent.id);
+      const topics = topicListStore.topics;
+      if (topics && topics.length > 0) {
+        await selectTopic(newAgent.id, topics[0].id, topics[0].name);
+      }
+    }
+  } catch (err) {
+    console.error("创建助手失败", err);
+  }
+};
+
+const handleCreateGroup = async () => {
+  const name = window.prompt("请输入群组名称:", "新群组");
+  if (!name || name.trim() === "") return;
+  try {
+    const newGroup = await assistantStore.createGroup(name.trim());
+    if (newGroup && newGroup.id) {
+      // 自动切换到新群组并开启话题
+      activeTab.value = 'topics';
+      await topicListStore.loadTopicList(newGroup.id);
+      const topics = topicListStore.topics;
+      if (topics && topics.length > 0) {
+        await selectTopic(newGroup.id, topics[0].id, topics[0].name);
+      }
+    }
+  } catch (err) {
+    console.error("创建群组失败", err);
+  }
+};
+
 const filteredAgents = computed(() => {
   if (!searchQuery.value) return assistantStore.agents;
   return assistantStore.agents.filter(a => a.name.toLowerCase().includes(searchQuery.value.toLowerCase()));
@@ -517,11 +555,18 @@ onMounted(async () => {
       
       <!-- 底部: 动作区与设置 -->
       <div class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 space-y-3 pb-[calc(var(--vcp-safe-bottom,16px)+8px)]">
-        <button v-if="activeTab === 'agents'" @click="$router.push('/agents')" 
-          class="w-full py-2.5 bg-blue-500/10 dark:bg-blue-500/20 hover:bg-blue-500/20 dark:hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-          创建 Agent
-        </button>
+        <div v-if="activeTab === 'agents'" class="flex gap-2">
+          <button @click="handleCreateAgent" 
+            class="flex-1 py-2.5 bg-blue-500/10 dark:bg-blue-500/20 hover:bg-blue-500/20 dark:hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            创建 Agent
+          </button>
+          <button @click="handleCreateGroup" 
+            class="flex-1 py-2.5 bg-purple-500/10 dark:bg-purple-500/20 hover:bg-purple-500/20 dark:hover:bg-purple-500/30 text-purple-600 dark:text-purple-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            创建 Group
+          </button>
+        </div>
         <button v-if="activeTab === 'topics'" @click="handleCreateTopic" class="w-full py-2.5 bg-green-500/10 dark:bg-green-500/20 hover:bg-green-500/20 dark:hover:bg-green-500/30 text-green-600 dark:text-green-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           新建话题

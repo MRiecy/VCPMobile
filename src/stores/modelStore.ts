@@ -98,7 +98,7 @@ export const useModelStore = defineStore('model', {
 
     async recordUsage(modelId: string) {
       try {
-        await invoke('record_model_usage', { model_id: modelId });
+        await invoke('record_model_usage', { modelId });
         // 更新本地热门列表（可选，或者等待下次 fetch）
         this.fetchHotModels();
       } catch (error) {

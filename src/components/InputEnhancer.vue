@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick } from 'vue';
+import { ref, watch, nextTick, computed } from 'vue';
 import { useChatManagerStore } from '../stores/chatManager';
 
 const props = defineProps<{
@@ -14,6 +14,9 @@ const emit = defineEmits<{
 const input = ref('');
 const chatStore = useChatManagerStore();
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+
+// 是否正在生成中
+const isGenerating = computed(() => !!chatStore.streamingMessageId);
 
 // 监听并接收外部注入的“编辑消息”内容
 watch(() => chatStore.editMessageContent, async (newContent) => {
@@ -38,10 +41,18 @@ const handleSend = () => {
   }
 };
 
+const handleAction = () => {
+  if (isGenerating.value) {
+    chatStore.stopGenerating();
+  } else {
+    handleSend();
+  }
+};
+
 const handleKeydown = (e: KeyboardEvent) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    handleSend();
+    handleAction();
   }
 };
 
@@ -109,14 +120,25 @@ const removeStagedAttachment = (index: number) => {
         ></textarea>
       </div>
 
-      <!-- 发送按钮 -->
+      <!-- 发送/中止按钮 -->
       <button
-        @click="handleSend"
-        class="w-9 h-9 flex items-center justify-center shrink-0 rounded-full bg-blue-500 text-white shadow-md active:scale-90 transition-all ml-1"
-        :class="{ 'opacity-30 scale-90': (!input.trim() && chatStore.stagedAttachments.length === 0) || disabled, 'hover:bg-blue-600': (input.trim() || chatStore.stagedAttachments.length > 0) && !disabled }"
-        :disabled="(!input.trim() && chatStore.stagedAttachments.length === 0) || disabled"
+        @click="handleAction"
+        class="w-9 h-9 flex items-center justify-center shrink-0 rounded-full shadow-md active:scale-90 transition-all ml-1"
+        :class="[
+          isGenerating ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-blue-500 text-white',
+          { 
+            'opacity-30 scale-90': !isGenerating && !input.trim() && chatStore.stagedAttachments.length === 0 && !disabled, 
+            'hover:bg-blue-600': !isGenerating && (input.trim() || chatStore.stagedAttachments.length > 0) && !disabled 
+          }
+        ]"
+        :disabled="!isGenerating && ((!input.trim() && chatStore.stagedAttachments.length === 0) || disabled)"
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="-ml-0.5">
+        <!-- 停止图标 -->
+        <svg v-if="isGenerating" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+          <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
+        </svg>
+        <!-- 发送图标 -->
+        <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="-ml-0.5">
           <line x1="22" y1="2" x2="11" y2="13"></line>
           <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
         </svg>

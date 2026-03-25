@@ -27,7 +27,7 @@ const handleAction = async (item: VcpNotification, action: any) => {
     };
     
     try {
-      await invoke('sendToVCP', { payload: JSON.stringify(response) });
+      await invoke('send_vcp_log_message', { payload: response });
       // 处理后关闭 Toast
       item.actions = [];
       store.activeToasts = store.activeToasts.filter(t => t.id !== item.id);
@@ -42,7 +42,7 @@ const handleAction = async (item: VcpNotification, action: any) => {
   <div class="fixed top-safe left-0 right-0 z-[200] pointer-events-none px-6 pt-4 flex flex-col items-center gap-3">
     <TransitionGroup name="toast">
       <div v-for="toast in store.activeToasts" :key="toast.id"
-           class="pointer-events-auto flex flex-col gap-3 px-4 py-3 rounded-2xl bg-black/80 dark:bg-white/10 backdrop-blur-xl border border-white/10 shadow-2xl max-w-md w-full overflow-hidden">
+           class="pointer-events-auto flex flex-col gap-3 px-4 py-3 rounded-2xl bg-black/85 backdrop-blur-[10px] border border-white/10 shadow-2xl max-w-md w-full overflow-hidden bg-[linear-gradient(110deg,transparent_0%,transparent_35%,rgba(255,255,255,0.1)_50%,transparent_65%,transparent_100%)] bg-[length:300%_100%] animate-[vcp-shimmer_15s_linear_infinite]">
         
         <div class="flex items-center gap-3">
           <div class="shrink-0 p-1.5 rounded-xl bg-white/5">
@@ -51,7 +51,11 @@ const handleAction = async (item: VcpNotification, action: any) => {
           </div>
           <div class="flex-1 min-w-0 pr-2">
             <div class="text-[11px] font-black uppercase tracking-wider opacity-90 mb-0.5 text-white">{{ toast.title }}</div>
-            <div :class="['text-[12px] text-white/80', toast.isPreformatted ? 'font-mono opacity-100' : 'truncate']">
+            <div v-if="toast.isPreformatted" 
+                 class="bg-black/20 p-1.5 rounded text-[0.85em] mt-1.5 max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono text-white/90">
+              {{ toast.message }}
+            </div>
+            <div v-else class="text-[12px] text-white/80 truncate">
               {{ toast.message }}
             </div>
           </div>
@@ -65,8 +69,11 @@ const handleAction = async (item: VcpNotification, action: any) => {
         <div v-if="toast.actions && toast.actions.length > 0" class="flex gap-2 pb-1">
           <button v-for="action in toast.actions" :key="action.label"
                   @click="handleAction(toast, action)"
-                  :class="action.color"
-                  class="flex-1 py-2 rounded-xl text-[10px] font-black text-white active:scale-95 transition-all uppercase tracking-wider">
+                  :class="[
+                    action.label === 'Approve' || action.color?.includes('green') ? 'bg-green-600' :
+                    action.label === 'Deny' || action.color?.includes('red') ? 'bg-red-600' : action.color,
+                    'flex-1 py-1.5 shadow-sm hover:shadow-md hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 font-medium text-[11px] rounded-lg text-white'
+                  ]">
             {{ action.label }}
           </button>
         </div>
@@ -81,4 +88,9 @@ const handleAction = async (item: VcpNotification, action: any) => {
 .toast-enter-from { opacity: 0; transform: translateY(-40px) scale(0.8); }
 .toast-leave-to { opacity: 0; transform: translateY(-20px) scale(0.9); }
 .toast-move { transition: transform 0.4s ease; }
+
+@keyframes vcp-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -200% 0; }
+}
 </style>

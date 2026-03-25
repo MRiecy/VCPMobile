@@ -94,8 +94,53 @@ pub async fn create_topic(
 
     // 2. 创建目录
     let topic_dir = resolve_topic_dir(&app_handle, &item_id, &id);
-
     fs::create_dir_all(&topic_dir).map_err(|e| e.to_string())?;
+
+    // 初始化 history.json (内容为 [])
+    let history_path = topic_dir.join("history.json");
+    fs::write(history_path, "[]").map_err(|e| e.to_string())?;
+
+    // 3. 更新父级配置 (config.json) 中的 topics 数组 (Unshift 逻辑)
+    // 逻辑对齐: chatHandlers.js -> create-new-topic-for-agent
+    if item_id.starts_with("____") || item_id.starts_with("___N_P_") {
+        // 处理群组
+        let group_state = app_handle.state::<crate::vcp_modules::group_manager::GroupManagerState>();
+        let mut config = crate::vcp_modules::group_manager::read_group_config(
+            app_handle.clone(),
+            group_state.clone(),
+            item_id.clone(),
+        ).await?;
+        config.topics.insert(0, topic.clone());
+        
+        // 写回磁盘
+        let config_path = crate::vcp_modules::group_manager::get_groups_base_path(&app_handle)
+            .join(&item_id)
+            .join("config.json");
+        let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+        fs::write(config_path, content).map_err(|e| e.to_string())?;
+        // 更新缓存
+        group_state.caches.insert(item_id, config);
+    } else {
+        // 处理 Agent
+        let agent_state = app_handle.state::<crate::vcp_modules::agent_config_manager::AgentConfigState>();
+        let mut config = crate::vcp_modules::agent_config_manager::read_agent_config(
+            app_handle.clone(),
+            agent_state.clone(),
+            item_id.clone(),
+            Some(false),
+        ).await?;
+        
+        // TopicInfo 在 agent_config_manager 中定义，结构略有不同但兼容
+        use crate::vcp_modules::agent_config_manager::TopicInfo;
+        let info = TopicInfo {
+            id: topic.id.clone(),
+            name: topic.name.clone(),
+            created_at: topic.created_at,
+            extra_fields: serde_json::Map::new(),
+        };
+        config.topics.insert(0, info);
+        crate::vcp_modules::agent_config_manager::write_agent_config(app_handle.clone(), agent_state, item_id, config).await?;
+    }
 
     let mut config_path = topic_dir.clone();
     config_path.push("config.json");
