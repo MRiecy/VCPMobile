@@ -183,6 +183,11 @@ pub async fn create_agent(
     topic_dir.push("default");
     fs::create_dir_all(&topic_dir).map_err(|e| e.to_string())?;
 
+    // 初始化默认话题的 history.json (内容为 [])
+    let mut history_path = topic_dir.clone();
+    history_path.push("history.json");
+    fs::write(history_path, "[]").map_err(|e| e.to_string())?;
+
     // 写入配置 (原子操作)
     write_agent_config(app_handle, state, agent_id, config.clone()).await?;
 

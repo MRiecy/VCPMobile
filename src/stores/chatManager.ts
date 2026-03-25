@@ -372,15 +372,15 @@ export const useChatManagerStore = defineStore('chatManager', () => {
         // 本地伪造一个 end 事件，防止假死
         streamManager.finalizeStream(streamingMessageId.value);
 
-        // 确保清理状态及无用空消息
+        // 确保清理状态
         const msgIndex = currentChatHistory.value.findIndex(m => m.id === streamingMessageId.value);
         if (msgIndex !== -1) {
           const msg = currentChatHistory.value[msgIndex];
           msg.isThinking = false;
-          // 若是被中断在思考态且没有返回内容，直接清理消息
-          if (!msg.content.trim()) {
-            currentChatHistory.value.splice(msgIndex, 1);
-          }
+          // [优化] 不再主动清理空消息，保留该占位符以对齐桌面端逻辑，防止消息流失感
+          // if (!msg.content.trim()) {
+          //   currentChatHistory.value.splice(msgIndex, 1);
+          // }
         }
 
         streamingMessageId.value = null;
@@ -532,15 +532,26 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       await invoke('sendToVCP', { payload });
     } catch (e) {
       console.error('[ChatManager] Failed to send message:', e);
-      // 发生错误时移除思考态消息
-      currentChatHistory.value = currentChatHistory.value.filter(m => m.id !== thinkingId);
       
-      currentChatHistory.value.push({
-        id: `error_${Date.now()}`,
-        role: 'system',
-        content: `VCP错误: ${e instanceof Error ? e.message : String(e)}`,
-        timestamp: Date.now()
-      });
+      const errorText = `\n\n> VCP错误: ${e instanceof Error ? e.message : String(e)}`;
+      
+      const msgIndex = currentChatHistory.value.findIndex(m => m.id === thinkingId);
+      if (msgIndex !== -1) {
+        const msg = currentChatHistory.value[msgIndex];
+        msg.isThinking = false;
+        msg.content += errorText;
+        if (msg.displayedContent !== undefined) {
+          msg.displayedContent += errorText;
+        }
+      } else {
+        // Fallback if message was somehow lost
+        currentChatHistory.value.push({
+          id: `error_${Date.now()}`,
+          role: 'system',
+          content: errorText.trim(),
+          timestamp: Date.now()
+        });
+      }
       
       streamingMessageId.value = null;
       await saveHistory();
@@ -604,38 +615,57 @@ export const useChatManagerStore = defineStore('chatManager', () => {
               });
             }
             } else if (type === 'end') {
-            console.log(`[ChatManager] Stream ended for ${actualMessageId}. Draining queue...`);
-            msg.isThinking = false;
-            // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
-            streamManager.finalizeStream(actualMessageId, () => {
-              const latestMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
-              if (latestMsg) {
-                // 确保最终内容一致
-                latestMsg.displayedContent = latestMsg.content;
-              }
-              streamingMessageId.value = null;
+              console.log(`[ChatManager] Stream ended for ${actualMessageId}. Draining queue...`);
+              msg.isThinking = false;
+              // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
+              streamManager.finalizeStream(actualMessageId, () => {
+                const latestMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
+                if (latestMsg) {
+                  // 确保最终内容一致
+                  latestMsg.displayedContent = latestMsg.content;
+                }
+                streamingMessageId.value = null;
 
-              // 重新获取一次最新引用进行正则处理
-              const finalMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
-              if (finalMsg && currentSelectedItem.value?.id) {
-                processRegex(finalMsg, currentSelectedItem.value.id);
-              }
-              saveHistory();
-              // 话题自动总结逻辑 (桌面端对齐)
-              summarizeTopic();
-            });
-            }
- else if (type === 'error') {
-            console.error(`[ChatManager] Stream error for ${actualMessageId}:`, event.payload.error);
+                // 重新获取一次最新引用进行正则处理
+                const finalMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
+                if (finalMsg && currentSelectedItem.value?.id) {
+                  processRegex(finalMsg, currentSelectedItem.value.id);
+                }
+                saveHistory();
+                // 话题自动总结逻辑 (桌面端对齐)
+                summarizeTopic();
+              });
+            } else if (type === 'error') {
+            const errorMsg = event.payload.error || '未知错误';
+            console.log(`[ChatManager] Stream error for ${actualMessageId}:`, errorMsg);
             msg.isThinking = false;
             streamManager.finalizeStream(actualMessageId);
             streamingMessageId.value = null;
-            currentChatHistory.value.push({
-              id: `error_${Date.now()}`,
-              role: 'system',
-              content: `VCP流式错误: ${event.payload.error || '未知错误'}`,
-              timestamp: Date.now()
-            });
+
+            // 如果是用户主动中止，就不再追加系统错误消息
+            if (errorMsg === '请求已中止') {
+              saveHistory();
+              return;
+            }
+
+            const errorText = `\n\n> VCP流式错误: ${errorMsg}`;
+
+            if (msg.content.trim()) {
+              // 存在非空消息，换行拼接在原消息之后，避免抹除先前的“看不见”的交互内容
+              msg.content += errorText;
+              if (msg.displayedContent !== undefined) {
+                msg.displayedContent += errorText;
+              }
+            } else {
+              // 空消息，移除占位气泡，直接显示为系统错误消息
+              currentChatHistory.value = currentChatHistory.value.filter(m => m.id !== actualMessageId);
+              currentChatHistory.value.push({
+                id: `error_${Date.now()}`,
+                role: 'system',
+                content: errorText.trim(),
+                timestamp: Date.now()
+              });
+            }
             saveHistory();
           }
         }

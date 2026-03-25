@@ -34,7 +34,9 @@ const getTypeColor = (type: string) => {
 };
 
 const copyContent = (item: VcpNotification) => {
-  const text = `${item.title}\n${item.message}`;
+  const text = item.rawPayload 
+    ? JSON.stringify(item.rawPayload, null, 2) 
+    : `${item.title}\n${item.message}`;
   navigator.clipboard.writeText(text);
   copiedId.value = item.id;
   setTimeout(() => copiedId.value = null, 2000);
@@ -51,8 +53,8 @@ const handleAction = async (item: VcpNotification, action: any) => {
     };
     
     try {
-      // 通过 vcp_client 接口回传
-      await invoke('sendToVCP', { payload: JSON.stringify(response) });
+      // 通过 vcp_log_service 接口回传
+      await invoke('send_vcp_log_message', { payload: response });
       
       // 处理后 UI 反馈：清空按钮并从 Toast 移除
       item.actions = [];
@@ -84,10 +86,20 @@ const handleAction = async (item: VcpNotification, action: any) => {
       </div>
     </div>
 
+    <!-- VCP Connection Status Bar -->
+    <div :class="{
+      'bg-[#2e7d32] text-white': store.vcpStatus.status === 'connected' || store.vcpStatus.status === 'open',
+      'bg-[#c62828] text-white': store.vcpStatus.status === 'disconnected' || store.vcpStatus.status === 'closed',
+      'bg-[#b71c1c] text-white': store.vcpStatus.status === 'error',
+      'bg-[#f9a825] text-black': store.vcpStatus.status === 'connecting'
+    }" class="w-full text-center py-2 text-[11px] font-bold uppercase tracking-wider transition-colors duration-300">
+      {{ store.vcpStatus.source || 'VCPLog' }}: {{ store.vcpStatus.message || '状态未知' }}
+    </div>
+
     <div class="flex-1 overflow-y-auto custom-scrollbar">
       <TransitionGroup name="list" tag="div" class="p-4 space-y-4">
         <div v-for="item in store.historyList" :key="item.id" 
-             class="group relative p-4 rounded-2xl bg-white/5 border border-white/5 hover:bg-white/10 transition-all">
+             class="group relative p-4 rounded-2xl border border-white/5 hover:bg-white/10 transition-all bg-[linear-gradient(110deg,rgba(255,255,255,0.05)_0%,rgba(255,255,255,0.05)_40%,rgba(255,255,255,0.1)_50%,rgba(255,255,255,0.05)_60%,rgba(255,255,255,0.05)_100%)] bg-[length:250%_100%] animate-[vcp-shimmer_15s_linear_infinite]">
           
           <div class="flex gap-3">
             <component :is="getIcon(item.type)" :size="16" :class="getTypeColor(item.type)" class="mt-0.5 shrink-0" />
@@ -98,17 +110,23 @@ const handleAction = async (item: VcpNotification, action: any) => {
               </div>
               
               <!-- 消息体：支持 Preformatted 模式 -->
-              <div :class="[
-                'text-[12px] leading-relaxed break-words text-primary-text',
-                item.isPreformatted ? 'font-mono bg-black/10 p-2 rounded-lg mt-2 opacity-80' : 'opacity-60'
-              ]" style="white-space: pre-wrap;">{{ item.message }}</div>
+              <div v-if="item.isPreformatted" 
+                   class="bg-black/20 p-1.5 rounded text-[0.85em] mt-1.5 max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-90 text-primary-text">
+                {{ item.message }}
+              </div>
+              <div v-else class="text-[12px] leading-relaxed break-words text-primary-text opacity-60">
+                {{ item.message }}
+              </div>
 
               <!-- 动作按钮区 -->
               <div v-if="item.actions && item.actions.length > 0" class="mt-4 flex gap-2">
                 <button v-for="action in item.actions" :key="action.label"
                         @click="handleAction(item, action)"
-                        :class="action.color"
-                        class="px-4 py-2 rounded-xl text-[10px] font-black text-white active:scale-95 transition-all uppercase tracking-wider">
+                        :class="[
+                          action.label === 'Approve' || action.color?.includes('green') ? 'bg-green-600' :
+                          action.label === 'Deny' || action.color?.includes('red') ? 'bg-red-600' : action.color,
+                          'px-3 py-1.5 shadow-sm hover:shadow-md hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 font-medium text-[11px] rounded-lg text-white'
+                        ]">
                   {{ action.label }}
                 </button>
               </div>
@@ -135,4 +153,9 @@ const handleAction = async (item: VcpNotification, action: any) => {
 .list-enter-active, .list-leave-active { transition: all 0.4s cubic-bezier(0.3, 0, 0.2, 1); }
 .list-enter-from { opacity: 0; transform: translateX(30px); }
 .list-leave-to { opacity: 0; transform: scale(0.9); }
+
+@keyframes vcp-shimmer {
+  0% { background-position: 250% 0; }
+  100% { background-position: -250% 0; }
+}
 </style>

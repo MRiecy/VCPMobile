@@ -119,6 +119,34 @@ export const useAssistantStore = defineStore('assistant', () => {
     }
   };
 
+  const createAgent = async (name: string) => {
+    loading.value = true;
+    try {
+      const newAgent = await invoke<AgentConfig>('create_agent', { name });
+      await fetchAgents();
+      return newAgent;
+    } catch (e: any) {
+      error.value = e.toString();
+      throw e;
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  const createGroup = async (name: string) => {
+    loading.value = true;
+    try {
+      const newGroup = await invoke<GroupConfig>('create_group', { name });
+      await fetchGroups();
+      return newGroup;
+    } catch (e: any) {
+      error.value = e.toString();
+      throw e;
+    } finally {
+      loading.value = false;
+    }
+  };
+
   const saveAgent = async (agent: AgentConfig) => {
     try {
       await invoke('save_agent_config', { agent });
@@ -137,6 +165,8 @@ export const useAssistantStore = defineStore('assistant', () => {
     unreadCounts,
     fetchAgents,
     fetchGroups,
+    createAgent,
+    createGroup,
     saveAgent,
     fetchUnreadCounts
   };

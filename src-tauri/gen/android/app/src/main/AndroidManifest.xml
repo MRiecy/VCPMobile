@@ -10,7 +10,7 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.vcp_mobile"
         android:enableOnBackInvokedCallback="true"
-        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        android:usesCleartextTraffic="true">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"

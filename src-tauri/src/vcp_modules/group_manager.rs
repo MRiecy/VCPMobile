@@ -68,7 +68,7 @@ pub struct GroupConfig {
     pub tag_match_mode: Option<String>,
     /// 捕获所有未定义的字段
     #[serde(flatten)]
-    pub extra: serde_json::Value,
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// GroupManager 的全局状态
@@ -324,3 +324,71 @@ pub async fn read_group_config(
     state.caches.insert(config.id.clone(), config.clone());
     Ok(config)
 }
+
+#[tauri::command]
+pub async fn create_group(
+    app_handle: AppHandle,
+    state: tauri::State<'_, GroupManagerState>,
+    name: String,
+) -> Result<GroupConfig, String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    
+    // ID 生成逻辑对齐桌面端: 名称过滤 + 时间戳
+    let base_id = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect::<String>();
+    let group_id = format!("_____{}_{}", base_id, timestamp); // 手机端强制 ____ 前缀标识群组
+
+    let base_path = get_groups_base_path(&app_handle).join(&group_id);
+    fs::create_dir_all(&base_path).map_err(|e| e.to_string())?;
+
+    let default_topic_id = format!("group_topic_{}", timestamp);
+    let default_topic = Topic {
+        id: default_topic_id.clone(),
+        name: "主要群聊".to_string(),
+        created_at: (timestamp / 1000) as i64,
+        locked: false,
+        unread: false,
+        unread_count: 0,
+        last_msg_preview: None,
+        msg_count: 0,
+    };
+
+    let config = GroupConfig {
+        id: group_id.clone(),
+        name: name.clone(),
+        avatar: None,
+        avatar_calculated_color: None,
+        members: vec![],
+        mode: "sequential".to_string(),
+        member_tags: Some(serde_json::json!({})),
+        group_prompt: Some("".to_string()),
+        invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
+        use_unified_model: false,
+        unified_model: None,
+        created_at: (timestamp / 1000) as i64,
+        topics: vec![default_topic.clone()],
+        tag_match_mode: Some("strict".to_string()),
+        extra: serde_json::Map::new(),
+    };
+
+    // 写入 config.json
+    let config_path = base_path.join("config.json");
+    let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(config_path, content).map_err(|e| e.to_string())?;
+
+    // 初始化话题目录及 history.json
+    let topic_dir = resolve_topic_dir(&app_handle, &group_id, &default_topic_id);
+    fs::create_dir_all(&topic_dir).map_err(|e| e.to_string())?;
+    fs::write(topic_dir.join("history.json"), "[]").map_err(|e| e.to_string())?;
+
+    // 更新缓存
+    state.caches.insert(group_id, config.clone());
+
+    Ok(config)
+}
+

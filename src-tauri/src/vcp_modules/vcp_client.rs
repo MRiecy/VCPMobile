@@ -274,48 +274,74 @@ pub async fn perform_vcp_request<R: Runtime>(
                         let reader = StreamReader::new(stream);
                         let mut lines = FramedRead::new(reader, LinesCodec::new());
 
-                        while let Some(line_res) = lines.next().await {
-                            // 每读取一行前，检查是否收到中止信号 (Deep Polling)
-                            if abort_rx.try_recv().is_ok() {
-                                is_aborted = true;
-                                println!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
-                                // 发送结束符告知前端
-                                let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                    r#type: "end".to_string(),
-                                    chunk: None,
-                                    message_id: message_id_inner.clone(),
-                                    context: context_inner.clone(),
-                                    error: None,
-                                });
-                                break;
-                            }
-
-                            if let Ok(line) = line_res {
-                                if line.trim().is_empty() { continue; }
-                                if line.starts_with("data: ") {
-                                    let data = line.trim_start_matches("data: ").trim();
-                                    if data == "[DONE]" {
-                                        let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                            r#type: "end".to_string(),
-                                            chunk: None,
-                                            message_id: message_id_inner.clone(),
-                                            context: context_inner.clone(),
-                                            error: None,
-                                        });
-                                        break;
-                                    }
-                                    if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                        // 累加全量内容
-                                        if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
-                                            full_content.push_str(text);
+                        loop {
+                            tokio::select! {
+                                // 核心修复：即使在等待数据的间隙，也能捕获中断信号
+                                _ = &mut abort_rx => {
+                                    is_aborted = true;
+                                    println!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
+                                    let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                        r#type: "end".to_string(),
+                                        chunk: None,
+                                        message_id: message_id_inner.clone(),
+                                        context: context_inner.clone(),
+                                        error: None,
+                                    });
+                                    break;
+                                }
+                                line_res = lines.next() => {
+                                    match line_res {
+                                        Some(Ok(line)) => {
+                                            if line.trim().is_empty() { continue; }
+                                            if line.starts_with("data: ") {
+                                                let data = line.trim_start_matches("data: ").trim();
+                                                if data == "[DONE]" {
+                                                    let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                        r#type: "end".to_string(),
+                                                        chunk: None,
+                                                        message_id: message_id_inner.clone(),
+                                                        context: context_inner.clone(),
+                                                        error: None,
+                                                    });
+                                                    break;
+                                                }
+                                                if let Ok(chunk) = serde_json::from_str::<Value>(data) {
+                                                    // 累加全量内容
+                                                    if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
+                                                        full_content.push_str(text);
+                                                    }
+                                                    let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                        r#type: "data".to_string(),
+                                                        chunk: Some(chunk),
+                                                        message_id: message_id_inner.clone(),
+                                                        context: context_inner.clone(),
+                                                        error: None,
+                                                    });
+                                                }
+                                            }
                                         }
-                                        let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                            r#type: "data".to_string(),
-                                            chunk: Some(chunk),
-                                            message_id: message_id_inner.clone(),
-                                            context: context_inner.clone(),
-                                            error: None,
-                                        });
+                                        Some(Err(e)) => {
+                                            println!("[VCPClient] Stream read error: {:?}", e);
+                                            let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                r#type: "error".to_string(),
+                                                chunk: None,
+                                                message_id: message_id_inner.clone(),
+                                                context: context_inner.clone(),
+                                                error: Some(format!("流读取错误: {}", e)),
+                                            });
+                                            break;
+                                        }
+                                        None => {
+                                            println!("[VCPClient] Stream ended unexpectedly (None)");
+                                            let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                r#type: "error".to_string(),
+                                                chunk: None,
+                                                message_id: message_id_inner.clone(),
+                                                context: context_inner.clone(),
+                                                error: Some("网络连接意外断开".to_string()),
+                                            });
+                                            break;
+                                        }
                                     }
                                 }
                             }
