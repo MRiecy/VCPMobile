@@ -604,27 +604,26 @@ export const useChatManagerStore = defineStore('chatManager', () => {
               });
             }
             } else if (type === 'end') {
-            console.log(`[ChatManager] Stream ended for ${actualMessageId}`);
+            console.log(`[ChatManager] Stream ended for ${actualMessageId}. Draining queue...`);
             msg.isThinking = false;
-            // 流式结束时，强制刷新 streamManager 缓冲区并结束动画
-            streamManager.finalizeStream(actualMessageId, (text) => {
+            // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
+            streamManager.finalizeStream(actualMessageId, () => {
               const latestMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
               if (latestMsg) {
-                latestMsg.displayedContent = text;
                 // 确保最终内容一致
                 latestMsg.displayedContent = latestMsg.content;
               }
-            });
-            streamingMessageId.value = null;
+              streamingMessageId.value = null;
 
-            // 重新获取一次最新引用进行正则处理
-            const finalMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
-            if (finalMsg && currentSelectedItem.value?.id) {
-              processRegex(finalMsg, currentSelectedItem.value.id);
-            }
-            saveHistory();
-            // 话题自动总结逻辑 (桌面端对齐)
-            summarizeTopic();
+              // 重新获取一次最新引用进行正则处理
+              const finalMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
+              if (finalMsg && currentSelectedItem.value?.id) {
+                processRegex(finalMsg, currentSelectedItem.value.id);
+              }
+              saveHistory();
+              // 话题自动总结逻辑 (桌面端对齐)
+              summarizeTopic();
+            });
             }
  else if (type === 'error') {
             console.error(`[ChatManager] Stream error for ${actualMessageId}:`, event.payload.error);

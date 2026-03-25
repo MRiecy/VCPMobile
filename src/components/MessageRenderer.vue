@@ -110,6 +110,12 @@ const contentBlocks = ref<ContentBlock[]>([]);
 // 流式传输专用原始文本
 const streamContent = ref<string>('');
 
+// 过渡状态：用于在流式结束、等待 Rust AST 解析完成前，保持流式视图不消失，防止闪烁
+const isTransitioning = ref(false);
+
+// 决定当前 UI 显示哪个视图：只要在流式中，或者正在过渡中，就显示流式纯文本视图
+const showStreamView = computed(() => isStreaming.value || isTransitioning.value);
+
 // 节流状态
 let isProcessing = false;
 let pendingText: string | null = null;
@@ -136,7 +142,13 @@ const updateContentBlocks = async (text: string) => {
     streamContent.value = blocks[0]?.content || '';
   } else {
     // 静态完成状态：走严格的 AST 拆分 (Rust)
-    contentBlocks.value = await processMessageContent(text || '', options);
+    isTransitioning.value = true;
+    try {
+      contentBlocks.value = await processMessageContent(text || '', options);
+    } finally {
+      // 确保无论解析成功失败，都能解除过渡状态
+      isTransitioning.value = false;
+    }
   }
 };
 
@@ -146,38 +158,33 @@ watch(
     () => props.message.processedContent || props.message.displayedContent || props.message.content,
     () => isStreaming.value
   ],
-  async ([newText]) => {
+  async ([newText, streaming]) => {
     if (isProcessing) {
       // 如果正在处理，则将最新文本存入 pending
       pendingText = newText as string || '';
       return;
     }
 
-    isProcessing = true;
-    await updateContentBlocks(newText as string || '');
-    
-    // 强制延迟 100ms，合并渲染批次
-    await new Promise(resolve => setTimeout(resolve, 100));
-    isProcessing = false;
+    try {
+      isProcessing = true;
+      await updateContentBlocks(newText as string || '');
+      
+      // [优化] 流式状态时放宽到 33ms (约 30fps) 以减轻渲染主线程负担
+      // 如果是非流式（例如切换话题、历史加载），保持 50ms 响应性
+      const throttleTime = streaming ? 33 : 50;
+      await new Promise(resolve => setTimeout(resolve, throttleTime));
+    } catch (e) {
+      console.error('[MessageRenderer] Watcher error:', e);
+    } finally {
+      // [关键修复] 必须在 finally 中释放锁，防止发生错误后永久死锁
+      isProcessing = false;
 
-    // 如果在处理期间有新文本或状态到达，再次触发处理
-    if (pendingText !== null) {
-      const textToProcess = pendingText;
-      pendingText = null;
-      
-      // 递归处理剩余的文本
-      const processPending = async () => {
-        isProcessing = true;
-        await updateContentBlocks(textToProcess);
-        await new Promise(resolve => setTimeout(resolve, 100));
-        isProcessing = false;
-        
-        if (pendingText !== null) {
-          processPending();
-        }
-      };
-      
-      processPending();
+      // 消费积压的文本
+      if (pendingText !== null) {
+        const textToProcess = pendingText;
+        pendingText = null;
+        updateContentBlocks(textToProcess);
+      }
     }
   },
   { immediate: true }
@@ -393,7 +400,7 @@ const handleSaveEdit = async (newContent: string) => {
         </div>
 
         <!-- Hybrid Rendering Pipeline -->
-        <template v-if="!isStreaming">
+        <template v-if="!showStreamView">
           <!-- Static Complete State: Strict AST Layout -->
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-for="(block, index) in contentBlocks" :key="index">

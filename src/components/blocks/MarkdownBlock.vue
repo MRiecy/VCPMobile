@@ -72,7 +72,42 @@ const renderer = {
   }
 };
 
+// VCP Math Extension for Marked
+const mathExtension = {
+  extensions: [
+    {
+      name: 'inlineMath',
+      level: 'inline',
+      start(src: string) { return src.indexOf('$'); },
+      tokenizer(src: string) {
+        const match = src.match(/^\$((?:[^\$\n]|\\\$)+?)\$/);
+        if (match) {
+          return { type: 'inlineMath', raw: match[0], text: match[1].trim() };
+        }
+      },
+      renderer(token: any) {
+        return `<span class="math-inline">${token.text}</span>`;
+      }
+    },
+    {
+      name: 'blockMath',
+      level: 'block',
+      start(src: string) { return src.indexOf('$$'); },
+      tokenizer(src: string) {
+        const match = src.match(/^\$\$([\s\S]+?)\$\$/);
+        if (match) {
+          return { type: 'blockMath', raw: match[0], text: match[1].trim() };
+        }
+      },
+      renderer(token: any) {
+        return `<div class="language-math">${token.text}</div>`;
+      }
+    }
+  ]
+};
+
 marked.use({ renderer });
+marked.use(mathExtension);
 
 // Sanitize HTML with DOMPurify
 const renderedHtml = computed(() => {
@@ -172,11 +207,16 @@ const renderHeavyContent = async () => {
         import('katex/dist/katex.min.css')
       ]);
       const katex = katexModule.default;
+      (window as any).katex = katex; // 挂载到全局以便调试和兼容性
 
       texElements.forEach(el => {
         if (el.querySelector('.katex')) return; // Already rendered
+        const isBlock = el.classList.contains('language-math');
         try {
-          katex.render(el.textContent || '', el as HTMLElement, { throwOnError: false });
+          katex.render(el.textContent || '', el as HTMLElement, { 
+            throwOnError: false,
+            displayMode: isBlock
+          });
         } catch (e) {
           console.error('KaTeX error:', e);
         }
@@ -416,5 +456,39 @@ watch(() => [props.content, props.isStreaming], () => {
   padding-left: 1.2em !important;
   margin-top: 0.5em !important;
   margin-bottom: 0.5em !important;
+}
+
+/* 修复：超长公式截断问题（为 KaTeX 公式容器分配独立的横向滚动上下文） */
+.vcp-markdown-block .language-math,
+.vcp-markdown-block .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.vcp-markdown-block .katex-display {
+  padding-bottom: 0.5em; /* 防止垂直截断遮挡下标或滚动条 */
+}
+
+.vcp-markdown-block .math-inline {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* 匹配整体美学的细长公式滚动条 */
+.vcp-markdown-block .language-math::-webkit-scrollbar,
+.vcp-markdown-block .katex-display::-webkit-scrollbar,
+.vcp-markdown-block .math-inline::-webkit-scrollbar {
+  height: 4px;
+}
+.vcp-markdown-block .language-math::-webkit-scrollbar-thumb,
+.vcp-markdown-block .katex-display::-webkit-scrollbar-thumb,
+.vcp-markdown-block .math-inline::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.3);
+  border-radius: 4px;
 }
 </style>

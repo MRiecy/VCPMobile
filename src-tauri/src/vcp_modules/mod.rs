@@ -15,3 +15,4 @@ pub mod message_processor;
 pub mod model_manager;
 pub mod topic_list_manager;
 pub mod vcp_client;
+pub mod vcp_log_service;

@@ -77,9 +77,21 @@ const handleVcpButtonClick = (e: any) => {
   }
 };
 
+// --- OOM Defense: Viewport Handler Reference ---
+const handleViewportResize = () => {
+  if (chatStore.currentChatHistory.length > 0) {
+    scrollToBottom(true);
+  }
+};
+
 onMounted(async () => {
   // 监听来自内联 HTML 按钮的点击事件
   window.addEventListener('vcp-button-click', handleVcpButtonClick);
+
+  // 监听视口变化（键盘弹起）- 保持引用以便销毁
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', handleViewportResize);
+  }
 
   // 初始加载时滚动到底部
   setTimeout(() => {
@@ -111,6 +123,10 @@ onUnmounted(() => {
   if (unlistenReady) unlistenReady();
   if (unlistenError) unlistenError();
   window.removeEventListener('vcp-button-click', handleVcpButtonClick);
+  
+  if (window.visualViewport) {
+    window.visualViewport.removeEventListener('resize', handleViewportResize);
+  }
 });
 </script>
 

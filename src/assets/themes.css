@@ -10,9 +10,14 @@
   --vcp-safe-bottom: env(safe-area-inset-bottom, 20px);
 }
 
-body {
+html, body, #app {
+  height: 100%;
+  width: 100%;
   margin: 0;
   padding: 0;
+}
+
+body {
   background-color: var(--primary-bg);
   color: var(--primary-text);
   overflow: hidden;
