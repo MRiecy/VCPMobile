@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useThemeStore } from './stores/theme';
 import { useTopicStore } from './stores/topicListManager';
 import { useChatManagerStore } from './stores/chatManager';
@@ -11,6 +13,10 @@ import SettingsView from './views/SettingsView.vue';
 import SyncView from './views/SyncView.vue';
 import BottomSheet from './components/BottomSheet.vue';
 import VcpPrompt from './components/VcpPrompt.vue';
+import NotificationDrawer from './components/NotificationDrawer.vue';
+import ToastManager from './components/ToastManager.vue';
+import { useNotificationStore } from './stores/notification';
+import { useNotificationProcessor } from './composables/useNotificationProcessor';
 import { useContextMenu } from './composables/useContextMenu';
 import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Users } from 'lucide-vue-next';
 
@@ -19,6 +25,8 @@ const topicListStore = useTopicStore();
 const chatStore = useChatManagerStore();
 const assistantStore = useAssistantStore();
 const settingsStore = useSettingsStore();
+const notificationStore = useNotificationStore();
+const { processPayload } = useNotificationProcessor();
 const router = useRouter();
 
 const { registerModal, unregisterModal, showExitToast, initRootHistory } = useModalHistory();
@@ -48,8 +56,11 @@ watch(isLeftDrawerOpen, (val) => {
 });
 
 watch(isRightDrawerOpen, (val) => {
-  if (val && window.innerWidth < 768) {
-    registerModal('RightDrawer', () => { isRightDrawerOpen.value = false; });
+  if (val) {
+    notificationStore.markAllRead();
+    if (window.innerWidth < 768) {
+      registerModal('RightDrawer', () => { isRightDrawerOpen.value = false; });
+    }
   } else if (!val) {
     unregisterModal('RightDrawer');
   }
@@ -300,6 +311,25 @@ onMounted(async () => {
   await assistantStore.fetchAgents();
   await assistantStore.fetchGroups();
 
+  // 启动 VCP Log IPC 监听 (使用 1:1 移植的解析大脑)
+  listen('vcp-system-event', (event: any) => {
+    const payload = event.payload;
+    const processed = processPayload(payload);
+    
+    if (processed && !processed.silent) {
+      notificationStore.addNotification(processed);
+    }
+  });
+
+  // 监听配置并初始化后端大动脉
+  watch(() => [settingsStore.settings?.vcpLogUrl, settingsStore.settings?.vcpLogKey], ([url, key]) => {
+    if (url && key) {
+      invoke('init_vcp_log_connection', { url: String(url), key: String(key) }).catch(e => {
+        console.error('[VCPLog] Failed to init connection:', e);
+      });
+    }
+  }, { immediate: true });
+
   // Operation Dummy Root: Wait for router and inject dummy layer
   await router.isReady();
   initRootHistory();
@@ -307,7 +337,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="vcp-app-root h-screen w-full overflow-hidden flex flex-col select-none relative">
+  <div class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
     
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">
@@ -526,26 +556,10 @@ onMounted(async () => {
     </main>
 
     <!-- 5. 右侧抽屉 -->
-    <aside class="vcp-drawer vcp-drawer-right pt-safe flex flex-col z-[100]" 
-           :class="{ 'is-open': isRightDrawerOpen }">
-      <div class="p-6 border-b border-white/10 flex justify-between items-center">
-        <h3 class="font-bold opacity-80 text-xs uppercase tracking-widest">Notification</h3>
-        <button @click="isRightDrawerOpen = false" class="p-2 opacity-40 hover:opacity-100 transition-opacity md:hidden">
-           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-             <line x1="18" y1="6" x2="6" y2="18"></line>
-             <line x1="6" y1="6" x2="18" y2="18"></line>
-           </svg>
-        </button>
-      </div>
-      <div class="flex-1 overflow-y-auto p-8 flex flex-col items-center justify-center opacity-20 text-center">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="mb-4">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-          <line x1="8" y1="21" x2="16" y2="21"></line>
-          <line x1="12" y1="17" x2="12" y2="21"></line>
-        </svg>
-        <div class="text-[10px] uppercase tracking-[0.2em] font-light">Watching system logs...</div>
-      </div>
-    </aside>
+    <NotificationDrawer :is-open="isRightDrawerOpen" @close="isRightDrawerOpen = false" />
+
+    <!-- 6. 全局 Toast 气泡容器 -->
+    <ToastManager />
 
     <!-- 6. 全屏设置叠加层 (z-index 最高) -->
     <Transition name="slide-up">

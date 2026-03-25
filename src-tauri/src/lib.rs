@@ -38,6 +38,7 @@ use vcp_modules::topic_list_manager::{
     update_topic_title,
 };
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
+use vcp_modules::vcp_log_service::init_vcp_log_connection;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -157,7 +158,8 @@ pub fn run() {
             get_favorite_models,
             toggle_favorite_model,
             record_model_usage,
-            summarize_topic
+            summarize_topic,
+            init_vcp_log_connection
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

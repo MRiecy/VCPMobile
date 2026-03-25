@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { ref, watch, nextTick } from 'vue';
 import { X, Check } from 'lucide-vue-next';
 import { useModalHistory } from '../composables/useModalHistory';
 
@@ -19,7 +19,6 @@ const modalId = 'FullScreenEditor';
 
 const editorContent = ref('');
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
-const keyboardHeightOffset = ref(0); // Optional: for advanced visual viewport handling
 
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
@@ -49,33 +48,13 @@ const handleCancel = () => {
   emit('cancel');
   emit('update:isOpen', false);
 };
-
-const handleVisualViewportResize = () => {
-  if (window.visualViewport) {
-    keyboardHeightOffset.value = window.innerHeight - window.visualViewport.height;
-  }
-};
-
-onMounted(() => {
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', handleVisualViewportResize);
-  }
-});
-
-onUnmounted(() => {
-  if (window.visualViewport) {
-    window.visualViewport.removeEventListener('resize', handleVisualViewportResize);
-  }
-});
-
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="slide-up">
       <div v-if="isOpen" 
-           class="fixed inset-0 z-[2000] flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden"
-           :style="{ paddingBottom: keyboardHeightOffset + 'px' }">
+           class="fixed inset-0 z-[2000] flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden">
         
         <!-- 顶部导航栏 -->
         <div class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10">
@@ -95,7 +74,7 @@ onUnmounted(() => {
           <textarea
             ref="textareaRef"
             v-model="editorContent"
-            class="flex-1 w-full bg-transparent resize-none outline-none text-[15px] leading-relaxed text-gray-800 dark:text-gray-200 placeholder-gray-400 font-sans"
+            class="flex-1 w-full bg-transparent resize-none outline-none text-[15px] leading-relaxed text-gray-800 dark:text-gray-200 placeholder-gray-400 font-sans pb-[env(safe-area-inset-bottom)]"
             placeholder="输入消息内容..."
             spellcheck="false"
           ></textarea>
