@@ -37,7 +37,14 @@ fn map_remote_path_to_local(app_handle: &AppHandle, remote_path: &str) -> Result
     match parts[0].to_lowercase().as_str() {
         "agents" => {
             local_path.push(config_dir);
-            local_path.push("agents");
+            local_path.push("Agents"); // 统一使用大写 A 对齐全局逻辑
+            for part in &parts[1..] {
+                local_path.push(part);
+            }
+        }
+        "agentgroups" => {
+            local_path.push(config_dir);
+            local_path.push("AgentGroups"); // 明确支持群组目录同步
             for part in &parts[1..] {
                 local_path.push(part);
             }

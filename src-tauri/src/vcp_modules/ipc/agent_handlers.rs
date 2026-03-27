@@ -31,7 +31,7 @@ pub async fn save_agent_avatar(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    agent_dir.push("agents");
+    agent_dir.push("Agents");
     agent_dir.push(&agent_id);
 
     if !agent_dir.exists() {
@@ -124,8 +124,10 @@ pub async fn create_agent(
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_millis();
+        .as_millis() as i64;
     let agent_id = format!("{}_{}", base_id, timestamp);
+
+    let default_topic_id = format!("topic_{}", timestamp);
 
     let config = if let Some(init) = initial_config {
         let mut c: AgentConfig = serde_json::from_value(init).map_err(|e| e.to_string())?;
@@ -161,27 +163,28 @@ pub async fn create_agent(
             avatar_url: None,
             avatar_calculated_color: None,
             topics: vec![TopicInfo {
-                id: "default".to_string(),
-                name: "主要对话".to_string(),
-                created_at: timestamp as i64,
-                extra_fields: serde_json::Map::new(),
+            id: default_topic_id.clone(),
+            name: "主要对话".to_string(),
+            created_at: timestamp,
+            extra_fields: serde_json::Map::new(),
             }],
-            extra: serde_json::Value::Object(serde_json::Map::new()),
-        }
-    };
-
-    // 初始化话题存储目录
-    let mut agent_path = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    agent_path.push("agents");
-    agent_path.push(&agent_id);
-
-    let mut topic_dir = agent_path.clone();
-    topic_dir.push("topics");
-    topic_dir.push("default");
+            extra: serde_json::Map::new(),
+            }
+            };
+    // 初始化默认话题目录：Agent/Group 统一落在 UserData/data 聚合层，而非 Agents 配置目录
+    let topic_dir = crate::vcp_modules::group_manager::resolve_topic_dir(
+        &app_handle,
+        &agent_id,
+        &default_topic_id,
+    );
     fs::create_dir_all(&topic_dir).map_err(|e| e.to_string())?;
+
+    log::info!(
+        "[AgentHandlers] Creating agent '{}' with config at Agents/{}/config.json and topic history at {:?}",
+        agent_id,
+        agent_id,
+        topic_dir
+    );
 
     // 初始化默认话题的 history.json (内容为 [])
     let mut history_path = topic_dir.clone();
@@ -207,7 +210,7 @@ pub async fn delete_agent(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    agent_dir.push("agents");
+    agent_dir.push("Agents");
     agent_dir.push(&agent_id);
 
     if agent_dir.exists() {

@@ -1,23 +1,25 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useThemeStore } from './stores/theme';
-import { useTopicStore } from './stores/topicListManager';
+import { useTopicStore, type Topic } from './stores/topicListManager';
 import { useChatManagerStore } from './stores/chatManager';
 import { useAssistantStore } from './stores/assistant';
 import { useSettingsStore } from './stores/settings';
-import { useModalHistory } from './composables/useModalHistory';
+import { useAppLifecycleStore } from './stores/appLifecycle';
+import { useModalHistory, showExitToast } from './composables/useModalHistory';
 import SettingsView from './views/SettingsView.vue';
 import SyncView from './views/SyncView.vue';
-import BottomSheet from './components/BottomSheet.vue';
+import BottomSheet, { type ActionItem } from './components/BottomSheet.vue';
 import VcpPrompt from './components/VcpPrompt.vue';
 import NotificationDrawer from './components/NotificationDrawer.vue';
 import ToastManager from './components/ToastManager.vue';
 import { useNotificationStore } from './stores/notification';
 import { useNotificationProcessor } from './composables/useNotificationProcessor';
 import { useContextMenu } from './composables/useContextMenu';
+import { useEmoticonFixer } from './composables/useEmoticonFixer';
 import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Users } from 'lucide-vue-next';
 
 const themeStore = useThemeStore();
@@ -25,11 +27,41 @@ const topicListStore = useTopicStore();
 const chatStore = useChatManagerStore();
 const assistantStore = useAssistantStore();
 const settingsStore = useSettingsStore();
+const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
 const { processPayload } = useNotificationProcessor();
+const { initGlobalFixer } = useEmoticonFixer();
 const router = useRouter();
 
-const { registerModal, unregisterModal, showExitToast, initRootHistory } = useModalHistory();
+const { registerModal, unregisterModal, initRootHistory } = useModalHistory();
+
+const reloadApp = () => {
+  window.location.reload();
+};
+
+const bootstrapApp = async () => {
+  try {
+    await lifecycleStore.bootstrap();
+  } catch (error) {
+    console.error('[App] Bootstrap failed:', error);
+  }
+};
+
+const lifecycleLoadingTitle = computed(() => {
+  switch (lifecycleStore.state) {
+    case 'BOOTING':
+      return '应用启动中';
+    case 'CONNECTING':
+      return '连接核心服务';
+    case 'PRELOADING':
+      return '预加载核心数据';
+    case 'ERROR':
+      return '启动失败';
+    case 'READY':
+    default:
+      return '应用已就绪';
+  }
+});
 
 const isLeftDrawerOpen = ref(false);
 const isRightDrawerOpen = ref(false);
@@ -37,11 +69,9 @@ const isSettingsOpen = ref(false);
 const isSyncOpen = ref(false);
 
 // --- History Handling for Overlays ---
-watch(isSettingsOpen, (val) => {
-  if (val) registerModal('SettingsView', () => { isSettingsOpen.value = false; });
-  else unregisterModal('SettingsView');
-});
-
+// 仅对真正的叠加层（抽屉/面板）注册历史返回处理。
+// 全局设置已切换为路由页，不能再复用 modal history，否则在从抽屉态切到路由态时会触发 history.back()，
+// 直接把刚进入的 /settings 路由弹回去，表现为“闪一下就关闭”。
 watch(isSyncOpen, (val) => {
   if (val) registerModal('SyncView', () => { isSyncOpen.value = false; });
   else unregisterModal('SyncView');
@@ -136,6 +166,24 @@ const openPrompt = (title: string, initialValue: string, placeholder: string, on
   isPromptOpen.value = true;
 };
 
+const settingsActions = computed<ActionItem[]>(() => [
+  {
+    label: '关闭',
+    handler: () => {
+      isSettingsOpen.value = false;
+    }
+  }
+]);
+
+const syncActions = computed<ActionItem[]>(() => [
+  {
+    label: '关闭',
+    handler: () => {
+      isSyncOpen.value = false;
+    }
+  }
+]);
+
 const toggleLeftDrawer = () => {
   isLeftDrawerOpen.value = !isLeftDrawerOpen.value;
   if (isLeftDrawerOpen.value) isRightDrawerOpen.value = false;
@@ -146,19 +194,27 @@ const toggleRightDrawer = () => {
   if (isRightDrawerOpen.value) isLeftDrawerOpen.value = false;
 };
 
-const openSettings = () => {
-  isSettingsOpen.value = true;
-  isLeftDrawerOpen.value = false;
+const openSettings = async () => {
+  console.info('[App] Opening global settings route');
+  await router.push('/settings');
+  console.info('[App] Current route after global settings push:', router.currentRoute.value.fullPath);
+};
+
+const openSync = () => {
+  console.info('[App] Opening sync panel from settings');
+  isSettingsOpen.value = false;
+  isSyncOpen.value = true;
 };
 
 const selectAgent = async (agentId: string) => {
-  const agent = assistantStore.agents.find(a => a.id === agentId);
+  const agent = assistantStore.agents.find((a: any) => a.id === agentId);
   if (agent) {
     chatStore.currentSelectedItem = { id: agent.id, name: agent.name, type: 'agent' };
   }
   await topicListStore.loadTopicList(agentId);
   activeTab.value = 'topics';
 };
+
 
 const selectGroup = async (groupId: string) => {
   const group = assistantStore.groups.find(g => g.id === groupId);
@@ -169,7 +225,7 @@ const selectGroup = async (groupId: string) => {
   activeTab.value = 'topics';
 };
 
-const showTopicContextMenu = (topic: any) => {
+const showTopicContextMenu = (topic: Topic) => {
   const itemId = chatStore.currentSelectedItem?.id || 'default_agent';
   
   openMenu([
@@ -221,7 +277,7 @@ const selectTopic = async (itemId: string, topicId: string, topicName: string) =
   
   // 更新当前选中项的名称 (保持 type)
   if (!chatStore.currentSelectedItem || chatStore.currentSelectedItem.id !== itemId) {
-     const agent = assistantStore.agents.find(a => a.id === itemId);
+     const agent = assistantStore.agents.find((a: any) => a.id === itemId);
      if (agent) {
        chatStore.currentSelectedItem = { id: agent.id, name: agent.name, type: 'agent' };
      } else {
@@ -252,70 +308,37 @@ const handleCreateTopic = async () => {
     if (newTopic && newTopic.id) {
       await selectTopic(itemId, newTopic.id, newTopic.name);
     }
-  } catch (err) {
-    console.error("创建话题失败", err);
+  } catch (e) {
+    console.error('创建话题失败', e);
+    alert('创建话题失败');
   }
 };
 
-const handleCreateAgent = async () => {
-  const name = window.prompt("请输入助手名称:", "新助手");
-  if (!name || name.trim() === "") return;
-  try {
-    const newAgent = await assistantStore.createAgent(name.trim());
-    if (newAgent && newAgent.id) {
-      // 自动切换到新助手并开启话题
-      activeTab.value = 'topics';
-      await topicListStore.loadTopicList(newAgent.id);
-      const topics = topicListStore.topics;
-      if (topics && topics.length > 0) {
-        await selectTopic(newAgent.id, topics[0].id, topics[0].name);
-      }
-    }
-  } catch (err) {
-    console.error("创建助手失败", err);
-  }
-};
-
-const handleCreateGroup = async () => {
-  const name = window.prompt("请输入群组名称:", "新群组");
-  if (!name || name.trim() === "") return;
-  try {
-    const newGroup = await assistantStore.createGroup(name.trim());
-    if (newGroup && newGroup.id) {
-      // 自动切换到新群组并开启话题
-      activeTab.value = 'topics';
-      await topicListStore.loadTopicList(newGroup.id);
-      const topics = topicListStore.topics;
-      if (topics && topics.length > 0) {
-        await selectTopic(newGroup.id, topics[0].id, topics[0].name);
-      }
-    }
-  } catch (err) {
-    console.error("创建群组失败", err);
-  }
-};
-
-const filteredAgents = computed(() => {
-  if (!searchQuery.value) return assistantStore.agents;
-  return assistantStore.agents.filter(a => a.name.toLowerCase().includes(searchQuery.value.toLowerCase()));
+const filteredCombinedItems = computed(() => {
+  const query = searchQuery.value.toLowerCase().trim();
+  if (!query) return assistantStore.combinedItems;
+  return assistantStore.combinedItems.filter(item => item.name.toLowerCase().includes(query));
 });
 
-const filteredGroups = computed(() => {
-  if (!searchQuery.value) return assistantStore.groups;
-  return assistantStore.groups.filter(g => g.name.toLowerCase().includes(searchQuery.value.toLowerCase()));
+type TopicViewModel = Topic & { pinned?: boolean; updatedAt?: number };
+
+const currentTopics = computed<TopicViewModel[]>(() => {
+  return topicListStore.filteredTopics as TopicViewModel[];
 });
 
-const filteredTopics = computed(() => {
-  if (!searchQuery.value) return topicListStore.topics;
-  return topicListStore.topics.filter(t => t.name.toLowerCase().includes(searchQuery.value.toLowerCase()));
+const handleContextMenuBackdropClick = () => {
+  showExitToast.value = true;
+};
+
+const isFullScreenRoute = computed(() => {
+  const path = router.currentRoute.value.path;
+  return path !== '/chat' && path !== '/';
 });
 
 const backgroundStyle = computed(() => {
-  if (!themeStore.currentTheme) return {};
-  
   const themeInfo = themeStore.availableThemes.find(t => t.fileName === themeStore.currentTheme);
   if (!themeInfo) return {};
-  
+
   const isLight = !themeStore.isDarkResolved;
   let rawValue = isLight 
     ? themeInfo.variables.light?.['--chat-wallpaper-light']
@@ -342,15 +365,18 @@ const backgroundStyle = computed(() => {
   return { backgroundImage: `url("/wallpaper/${filename}")` };
 });
 
+// 用于取消监听的清理函数
+let unlistenLog: (() => void) | null = null;
+let stopVcpLogWatch: (() => void) | null = null;
+
 onMounted(async () => {
-  // 异步加载主题与数据
-  await themeStore.initTheme();
-  settingsStore.fetchSettings().catch(() => {});
-  await assistantStore.fetchAgents();
-  await assistantStore.fetchGroups();
+  // 初始化全局表情包修复器
+  initGlobalFixer();
+
+  bootstrapApp();
 
   // 启动 VCP Log IPC 监听 (使用 1:1 移植的解析大脑)
-  listen('vcp-system-event', (event: any) => {
+  unlistenLog = await listen('vcp-system-event', (event: any) => {
     const payload = event.payload;
     const processed = processPayload(payload);
     
@@ -359,8 +385,8 @@ onMounted(async () => {
     }
   });
 
-  // 监听配置并初始化后端大动脉
-  watch(() => [settingsStore.settings?.vcpLogUrl, settingsStore.settings?.vcpLogKey], ([url, key]) => {
+  // 保留 UI 直接依赖的日志链路初始化，但与启动编排解耦
+  stopVcpLogWatch = watch(() => [settingsStore.settings?.vcpLogUrl, settingsStore.settings?.vcpLogKey], ([url, key]) => {
     if (url && key) {
       invoke('init_vcp_log_connection', { url: String(url), key: String(key) }).catch(e => {
         console.error('[VCPLog] Failed to init connection:', e);
@@ -372,11 +398,57 @@ onMounted(async () => {
   await router.isReady();
   initRootHistory();
 });
+
+onUnmounted(() => {
+  if (unlistenLog) unlistenLog();
+  if (stopVcpLogWatch) stopVcpLogWatch();
+});
 </script>
 
 <template>
   <div class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
     
+    <!-- 0. 全局初始化加载层 -->
+    <Transition name="fade">
+      <div
+        v-if="lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR'"
+        class="fixed inset-0 z-[1000] bg-white/96 dark:bg-gray-950/96 backdrop-blur-md flex flex-col items-center justify-center gap-6 px-8 text-center"
+      >
+        <div class="w-18 h-18 relative">
+          <div class="absolute inset-0 rounded-full border-4 border-blue-500/15"></div>
+          <div class="absolute inset-0 rounded-full border-4 border-transparent border-t-blue-500 border-r-cyan-400 animate-spin"></div>
+        </div>
+        <div class="flex flex-col items-center gap-2 max-w-xs">
+          <p class="text-[11px] font-black tracking-[0.45em] text-blue-500/80 pl-[0.45em]">VCP MOBILE</p>
+          <h2 class="text-2xl font-black tracking-tight text-primary-text">{{ lifecycleLoadingTitle }}</h2>
+          <p class="text-sm opacity-70 leading-6">{{ lifecycleStore.statusText }}</p>
+          <p class="text-[10px] opacity-45 font-mono uppercase tracking-[0.3em]">{{ lifecycleStore.state }}</p>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 0.5 全局错误看板 -->
+    <Transition name="fade">
+      <div
+        v-if="lifecycleStore.state === 'ERROR'"
+        class="fixed inset-0 z-[1001] bg-white/98 dark:bg-gray-950/98 backdrop-blur-md flex flex-col items-center justify-center p-8 text-center"
+      >
+        <div class="w-full max-w-md rounded-3xl border border-red-500/20 bg-white/80 dark:bg-white/5 shadow-2xl shadow-red-500/10 px-6 py-8 flex flex-col items-center">
+          <div class="w-16 h-16 bg-red-500/10 text-red-500 rounded-2xl flex items-center justify-center mb-6">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          </div>
+          <p class="text-[11px] font-black tracking-[0.35em] text-red-500/80 pl-[0.35em] mb-2">LIFECYCLE ERROR</p>
+          <h2 class="text-2xl font-black mb-3">核心启动失败</h2>
+          <p class="text-sm opacity-70 leading-6 mb-2">生命周期入口未能完成初始化，应用已进入保护态。</p>
+          <p class="text-xs opacity-60 mb-8 max-w-xs break-all">{{ lifecycleStore.errorMsg || '未知错误' }}</p>
+          <button @click="reloadApp()" 
+                  class="px-8 py-3 bg-blue-500 text-white rounded-xl font-bold shadow-lg shadow-blue-500/20 active:scale-95 transition-all">
+            重试启动
+          </button>
+        </div>
+      </div>
+    </Transition>
+
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">
       <div :key="backgroundStyle.backgroundImage" class="vcp-background-layer" :style="backgroundStyle"></div>
@@ -401,12 +473,12 @@ onMounted(async () => {
         <h2 class="text-xl font-black opacity-90 mb-4 tracking-tighter text-blue-500 dark:text-blue-400 px-2">VCP MOBILE</h2>
         
         <div class="flex p-1 bg-black/5 dark:bg-black/20 rounded-xl mb-4 border border-black/5 dark:border-white/5">
-          <button @click="activeTab = 'agents'" 
+          <button @click="activeTab = 'agents'"
                   class="flex-1 py-1.5 text-sm font-bold rounded-lg transition-all"
                   :class="activeTab === 'agents' ? 'bg-white shadow-sm text-gray-800 dark:bg-white/10 dark:text-white dark:shadow-sm' : 'text-gray-500 hover:text-gray-700 dark:text-white/40 dark:hover:text-white/60'">
             助手
           </button>
-          <button @click="activeTab = 'topics'" 
+          <button @click="activeTab = 'topics'"
                   class="flex-1 py-1.5 text-sm font-bold rounded-lg transition-all"
                   :class="activeTab === 'topics' ? 'bg-white shadow-sm text-gray-800 dark:bg-white/10 dark:text-white dark:shadow-sm' : 'text-gray-500 hover:text-gray-700 dark:text-white/40 dark:hover:text-white/60'">
             话题
@@ -415,14 +487,14 @@ onMounted(async () => {
 
         <div class="relative">
           <svg class="absolute left-3 top-1/2 -translate-y-1/2 opacity-40 w-4 h-4 text-primary-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-          <input v-model="searchQuery" 
-                 type="text" 
-                 :placeholder="activeTab === 'agents' ? '搜索助手...' : '搜索话题...'" 
+          <input v-model="searchQuery"
+                 type="text"
+                 :placeholder="activeTab === 'agents' ? '搜索助手...' : '搜索话题...'"
                  class="w-full bg-black/5 dark:bg-black/20 text-primary-text text-sm rounded-xl py-2 pl-9 pr-4 outline-none border border-black/5 dark:border-white/5 focus:border-black/20 dark:focus:border-white/20 transition-colors" />
         </div>
       </div>
 
-      <!-- 列表内容区 -->
+      <!-- 内容区 -->
       <div class="flex-1 overflow-y-auto px-4 py-4 space-y-2">
         
         <!-- Agents Tab Content -->
@@ -433,14 +505,13 @@ onMounted(async () => {
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
           </div>
-          <div v-else-if="filteredAgents.length === 0 && filteredGroups.length === 0" class="text-center p-8 opacity-30 text-sm">
+          <div v-else-if="filteredCombinedItems.length === 0" class="text-center p-8 opacity-30 text-sm">
             未找到助手或群组
           </div>
           <div v-else class="space-y-4">
-            <!-- 群组列表 (Phase 4) -->
-            <div v-if="filteredGroups.length > 0" class="space-y-2">
+            <div v-if="assistantStore.groups.length > 0" class="space-y-2">
               <h3 class="px-2 text-[10px] font-black uppercase tracking-widest opacity-30">Agent Groups</h3>
-              <div v-for="group in filteredGroups" :key="group.id" class="relative rounded-xl overflow-hidden w-full">
+              <div v-for="group in assistantStore.groups.filter(group => !searchQuery.trim() || group.name.toLowerCase().includes(searchQuery.toLowerCase().trim()))" :key="group.id" class="relative rounded-xl overflow-hidden w-full">
                 <div @click="selectGroup(group.id)"
                      class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] transition-all"
                      :class="chatStore.currentSelectedItem?.id === group.id ? 'border-purple-500/50 bg-purple-500/10 dark:bg-purple-500/20' : 'border-black/5 dark:border-white/5'">
@@ -457,11 +528,9 @@ onMounted(async () => {
               </div>
             </div>
 
-            <!-- 助手列表 -->
-            <div v-if="filteredAgents.length > 0" class="space-y-2">
+            <div v-if="assistantStore.agents.length > 0" class="space-y-2">
               <h3 class="px-2 text-[10px] font-black uppercase tracking-widest opacity-30">Individual Agents</h3>
-              <div v-for="agent in filteredAgents" :key="agent.id" class="relative rounded-xl overflow-hidden w-full">
-                <!-- 底部操作区 -->
+              <div v-for="agent in assistantStore.agents.filter(agent => !searchQuery.trim() || agent.name.toLowerCase().includes(searchQuery.toLowerCase().trim()))" :key="agent.id" class="relative rounded-xl overflow-hidden w-full">
                 <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start z-0"
                      @click.stop="goToSettings(agent.id)">
                   <div class="w-[80px] h-full flex items-center justify-center text-blue-600/70 dark:text-blue-400/70 hover:text-blue-600 dark:hover:text-blue-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5">
@@ -472,7 +541,6 @@ onMounted(async () => {
                   </div>
                 </div>
 
-                <!-- 顶层原卡片 (绑定滑动手势) -->
                 <div @click="selectAgent(agent.id)"
                      @touchstart="onTouchStart($event, agent.id)"
                      @touchmove="onTouchMove($event, agent.id)"
@@ -484,7 +552,6 @@ onMounted(async () => {
                      ]"
                      :style="{ transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)` }">
                      
-                  <!-- 未读小红点 -->
                   <div v-if="assistantStore.unreadCounts[agent.id] === -1 || assistantStore.unreadCounts[agent.id] > 0" class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse" style="background: #ff6b6b;"></div>
 
                   <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10 overflow-hidden pointer-events-none">
@@ -501,9 +568,8 @@ onMounted(async () => {
           </div>
         </template>
 
-        <!-- Topics Tab Content -->
         <template v-if="activeTab === 'topics'">
-          <div v-if="!topicListStore.topics || topicListStore.topics.length === 0" 
+          <div v-if="!topicListStore.topics || topicListStore.topics.length === 0"
                class="p-8 opacity-30 text-center flex flex-col items-center gap-2">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -511,17 +577,16 @@ onMounted(async () => {
             <span class="text-xs">暂无话题，请先选择助手</span>
           </div>
           
-          <div v-else v-for="topic in filteredTopics" :key="topic.id"
+          <div v-else v-for="topic in currentTopics" :key="topic.id"
                @click="selectTopic(chatStore.currentSelectedItem?.id || 'default_agent', topic.id, topic.name)"
                v-longpress="() => showTopicContextMenu(topic)"
                class="relative p-3 glass-panel rounded-xl flex items-center gap-3 active:scale-95 transition-all border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
                :class="chatStore.currentTopicId === topic.id ? 'border-green-500/50 bg-green-500/10 dark:bg-green-500/20' : 'border-black/5 dark:border-white/5'">
             
-            <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
-            <div v-if="topic.unreadCount === -1 || topic.unread" 
+            <div v-if="topic.unreadCount === -1 || topic.unread"
                  class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse"
                  style="background: #ff6b6b;"></div>
-            <div v-else-if="topic.unreadCount && topic.unreadCount > 0" 
+            <div v-else-if="topic.unreadCount && topic.unreadCount > 0"
                  class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full border-2 border-white dark:border-gray-900 text-[9px] font-bold text-white flex items-center justify-center z-10 shadow-sm"
                  style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);">
               {{ topic.unreadCount > 99 ? '99+' : topic.unreadCount }}
@@ -535,7 +600,7 @@ onMounted(async () => {
             <div class="flex flex-col overflow-hidden flex-1">
               <div class="flex justify-between items-center w-full">
                 <span class="font-bold text-sm truncate text-primary-text">{{ topic.name }}</span>
-                <span v-if="topic.messageCount !== undefined" 
+                <span v-if="topic.messageCount !== undefined"
                       class="text-[11px] font-bold shrink-0 ml-2 px-[8px] py-[3px] rounded-[10px]"
                       style="background-color: var(--accent-bg); color: var(--highlight-text); font-family: 'Arial Rounded MT Bold', 'Helvetica Rounded', Arial, sans-serif;">
                   {{ topic.messageCount }}
@@ -544,7 +609,6 @@ onMounted(async () => {
               <span class="text-[9px] opacity-40 truncate font-mono tracking-tighter">{{ topic.id }}</span>
             </div>
             
-            <!-- 解锁状态标签 (桌面端还原) -->
             <div v-if="!topic.locked" class="absolute bottom-1 right-2 flex items-center gap-[2px] bg-black/5 dark:bg-white/10 px-1 py-[1px] rounded text-[9px] text-yellow-600 dark:text-yellow-400 border border-yellow-600/20 dark:border-yellow-400/20">
               <LockOpen :size="8" />
               <span class="scale-90 font-bold uppercase tracking-tighter leading-none pt-[1px]">Unlock</span>
@@ -553,20 +617,12 @@ onMounted(async () => {
         </template>
       </div>
       
-      <!-- 底部: 动作区与设置 -->
       <div class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 space-y-3 pb-[calc(var(--vcp-safe-bottom,16px)+8px)]">
-        <div v-if="activeTab === 'agents'" class="flex gap-2">
-          <button @click="handleCreateAgent" 
-            class="flex-1 py-2.5 bg-blue-500/10 dark:bg-blue-500/20 hover:bg-blue-500/20 dark:hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            创建 Agent
-          </button>
-          <button @click="handleCreateGroup" 
-            class="flex-1 py-2.5 bg-purple-500/10 dark:bg-purple-500/20 hover:bg-purple-500/20 dark:hover:bg-purple-500/30 text-purple-600 dark:text-purple-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            创建 Group
-          </button>
-        </div>
+        <button v-if="activeTab === 'agents'" @click="$router.push('/agents')"
+          class="w-full py-2.5 bg-blue-500/10 dark:bg-blue-500/20 hover:bg-blue-500/20 dark:hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          创建 Agent
+        </button>
         <button v-if="activeTab === 'topics'" @click="handleCreateTopic" class="w-full py-2.5 bg-green-500/10 dark:bg-green-500/20 hover:bg-green-500/20 dark:hover:bg-green-500/30 text-green-600 dark:text-green-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           新建话题
@@ -588,70 +644,95 @@ onMounted(async () => {
       </div>
     </aside>
 
-    <!-- 4. 主视图层 (对话容器) -->
-    <main class="vcp-main-stage flex-1 relative flex flex-col overflow-hidden w-full h-full z-10">
-      <router-view v-slot="{ Component }">
-        <keep-alive include="ChatView">
-          <component v-if="Component" 
-                     :is="Component" 
-                     @toggle-left="toggleLeftDrawer" 
-                     @toggle-right="toggleRightDrawer" />
-        </keep-alive>
+    <!-- 4. 主舞台 -->
+    <main class="vcp-main-stage flex-1 relative flex flex-col overflow-hidden w-full h-full"
+          :class="isFullScreenRoute ? 'z-[105]' : 'z-10'">
+      <router-view v-slot="{ Component, route }">
+        <template v-if="Component && route.name === 'chat'">
+          <keep-alive>
+            <component :is="Component" 
+                       @toggle-left="toggleLeftDrawer" 
+                       @toggle-right="toggleRightDrawer" />
+          </keep-alive>
+        </template>
+        <component v-else-if="Component"
+                   :is="Component"
+                   @toggle-left="toggleLeftDrawer"
+                   @toggle-right="toggleRightDrawer"
+                   @open-sync="openSync" />
       </router-view>
     </main>
 
-    <!-- 5. 右侧抽屉 -->
+    <!-- 5. 右侧通知抽屉 -->
     <NotificationDrawer :is-open="isRightDrawerOpen" @close="isRightDrawerOpen = false" />
 
-    <!-- 6. 全局 Toast 气泡容器 -->
-    <ToastManager />
+    <!-- 6. 底部弹层 -->
+    <BottomSheet :model-value="isSettingsOpen" :actions="settingsActions" title="设置" @update:modelValue="isSettingsOpen = $event">
+      <SettingsView @close="isSettingsOpen = false" @open-sync="openSync" />
+    </BottomSheet>
 
-    <!-- 6. 全屏设置叠加层 (z-index 最高) -->
-    <Transition name="slide-up">
-      <div v-if="isSettingsOpen" class="fixed inset-0 z-[200]">
-        <SettingsView @close="isSettingsOpen = false" @open-sync="isSettingsOpen = false; isSyncOpen = true" />
-      </div>
-    </Transition>
+    <BottomSheet :model-value="isSyncOpen" :actions="syncActions" title="同步" @update:modelValue="isSyncOpen = $event">
+      <SyncView />
+    </BottomSheet>
 
-    <!-- 7. 全屏同步面板叠加层 -->
-    <Transition name="slide-up">
-      <div v-if="isSyncOpen" class="fixed inset-0 z-[200]">
-        <SyncView @close="isSyncOpen = false" />
-      </div>
-    </Transition>
-
-    <!-- 8. 全局右键 / 长按菜单 ActionSheet -->
-    <BottomSheet
-      v-model="isContextMenuOpen"
-      :title="contextMenuTitle"
-      :actions="contextMenuActions"
-    />
-
-    <!-- 9. VCP 风格输入弹窗 -->
+    <!-- 7. 全局 Prompt -->
     <VcpPrompt
-      v-model:isOpen="isPromptOpen"
+      :is-open="isPromptOpen"
       :title="promptTitle"
-      :initialValue="promptInitialValue"
+      :initial-value="promptInitialValue"
       :placeholder="promptPlaceholder"
-      @confirm="promptCallback"
+      @confirm="promptCallback($event); isPromptOpen = false"
+      @cancel="isPromptOpen = false"
+      @update:isOpen="isPromptOpen = $event"
     />
 
-    <!-- 10. 双击退出提示 (Operation Aegis) -->
-    <Transition name="toast-fade">
-      <div v-if="showExitToast" 
-           class="vcp-toast fixed bottom-10 left-1/2 -translate-x-1/2 px-6 py-3 rounded-full bg-gray-900/90 dark:bg-white/90 text-white dark:text-gray-900 text-sm font-bold shadow-2xl z-[9999] backdrop-blur-md flex items-center gap-2 border border-white/10 dark:border-black/10">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-          <polyline points="16 17 21 12 16 7"></polyline>
-          <line x1="21" y1="12" x2="9" y2="12"></line>
-        </svg>
-        <span>再按一次退出应用</span>
+    <!-- 8. 全局 Context Menu -->
+    <Transition name="fade">
+      <div v-if="isContextMenuOpen" class="fixed inset-0 z-[200] bg-black/20 backdrop-blur-[1px]" @click="handleContextMenuBackdropClick">
+        <div class="absolute left-1/2 bottom-6 -translate-x-1/2 w-[calc(100%-24px)] max-w-sm rounded-3xl border border-black/5 dark:border-white/10 bg-white/92 dark:bg-[#111827]/92 backdrop-blur-xl shadow-2xl overflow-hidden"
+             @click.stop>
+          <div class="px-5 pt-5 pb-3 border-b border-black/5 dark:border-white/10">
+            <h3 class="text-sm font-black tracking-wide">{{ contextMenuTitle }}</h3>
+          </div>
+          <div class="p-2">
+            <button v-for="action in contextMenuActions" :key="action.label"
+                    @click="action.handler()"
+                    class="w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-left transition-all"
+                    :class="action.danger ? 'text-red-500 hover:bg-red-500/10' : 'hover:bg-black/5 dark:hover:bg-white/5'">
+              <component :is="action.icon" class="w-4 h-4 shrink-0" />
+              <span class="text-sm font-semibold">{{ action.label }}</span>
+            </button>
+          </div>
+        </div>
       </div>
     </Transition>
+
+    <!-- 9. Toast -->
+    <ToastManager />
   </div>
 </template>
 
 <style scoped>
+/* Overlay Fade */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* Background Fade */
+.bg-fade-enter-active,
+.bg-fade-leave-active {
+  transition: opacity 0.6s ease;
+}
+.bg-fade-enter-from,
+.bg-fade-leave-to {
+  opacity: 0;
+}
+
 /* Toast Animation */
 .toast-fade-enter-active, .toast-fade-leave-active { 
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); 
@@ -695,7 +776,7 @@ onMounted(async () => {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 82vw; 
+  width: 82vw;
   max-width: 340px;
   background-color: color-mix(in srgb, var(--secondary-bg) 85%, transparent);
   backdrop-filter: blur(20px) saturate(180%);
@@ -752,4 +833,8 @@ onMounted(async () => {
 
 .page-fade-enter-active, .page-fade-leave-active { transition: opacity 0.2s ease; }
 .page-fade-enter-from, .page-fade-leave-to { opacity: 0; }
+
+.vcp-main-stage {
+  min-width: 0;
+}
 </style>

@@ -96,6 +96,16 @@ impl GroupManagerState {
 
 // --- 路径辅助逻辑 ---
 
+/// 获取 AppData/Agents 目录 (注意: A 大写以对齐桌面端)
+pub fn get_agents_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
+    let mut path = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("AppData"));
+    path.push("Agents");
+    path
+}
+
 /// 获取 AppData/AgentGroups 目录
 pub fn get_groups_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     let mut path = app
@@ -106,16 +116,9 @@ pub fn get_groups_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     path
 }
 
-/// 获取 UserData/{groupId} 目录
-#[allow(dead_code)]
-pub fn get_group_user_data_path<R: Runtime>(app: &AppHandle<R>, group_id: &str) -> PathBuf {
-    let mut path = app
-        .path()
-        .app_config_dir()
-        .unwrap_or_else(|_| PathBuf::from("AppData"));
-    path.push("UserData");
-    path.push(group_id);
-    path
+/// 物理探测: 判定 ID 是否属于群组
+pub fn is_group_item<R: Runtime>(app: &AppHandle<R>, item_id: &str) -> bool {
+    get_groups_base_path(app).join(item_id).exists()
 }
 
 // --- 业务逻辑 ---
@@ -241,10 +244,8 @@ pub fn resolve_topic_dir<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id
     path.push(item_id);
     path.push("topics");
 
-    // 如果是群组，且话题ID不带 group_ 前缀，则增加 group_ 前缀
-    if (item_id.starts_with("____") || item_id.starts_with("___N_P_"))
-        && !topic_id.starts_with("group_")
-    {
+    // [重大修复] 不再依赖前缀判断，改用物理位置探测
+    if is_group_item(app, item_id) && !topic_id.starts_with("group_") {
         path.push(format!("group_{}", topic_id));
     } else {
         path.push(topic_id);
@@ -334,14 +335,14 @@ pub async fn create_group(
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis();
-    
+        .as_millis() as i64;
+
     // ID 生成逻辑对齐桌面端: 名称过滤 + 时间戳
     let base_id = name
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
         .collect::<String>();
-    let group_id = format!("_____{}_{}", base_id, timestamp); // 手机端强制 ____ 前缀标识群组
+    let group_id = format!("____{}_{}", base_id, timestamp); // 手机端强制 ____ 前缀标识群组
 
     let base_path = get_groups_base_path(&app_handle).join(&group_id);
     fs::create_dir_all(&base_path).map_err(|e| e.to_string())?;
@@ -350,7 +351,7 @@ pub async fn create_group(
     let default_topic = Topic {
         id: default_topic_id.clone(),
         name: "主要群聊".to_string(),
-        created_at: (timestamp / 1000) as i64,
+        created_at: timestamp,
         locked: false,
         unread: false,
         unread_count: 0,
@@ -370,7 +371,7 @@ pub async fn create_group(
         invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
         use_unified_model: false,
         unified_model: None,
-        created_at: (timestamp / 1000) as i64,
+        created_at: timestamp,
         topics: vec![default_topic.clone()],
         tag_match_mode: Some("strict".to_string()),
         extra: serde_json::Map::new(),
@@ -391,4 +392,3 @@ pub async fn create_group(
 
     Ok(config)
 }
-

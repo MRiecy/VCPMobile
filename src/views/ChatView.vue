@@ -3,14 +3,15 @@ import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue';
 import { useChatManagerStore } from '../stores/chatManager';
 import { useAssistantStore } from '../stores/assistant';
 import { useThemeStore } from '../stores/theme';
+import { useAppLifecycleStore } from '../stores/appLifecycle';
 import MessageRenderer from '../components/MessageRenderer.vue';
 import InputEnhancer from '../components/InputEnhancer.vue';
-import { listen } from '@tauri-apps/api/event';
 import { ArrowDown } from 'lucide-vue-next';
 
 const chatStore = useChatManagerStore();
 const assistantStore = useAssistantStore();
 const themeStore = useThemeStore();
+const lifecycleStore = useAppLifecycleStore();
 
 const emit = defineEmits(['toggle-left', 'toggle-right']);
 
@@ -29,10 +30,6 @@ const currentNameInitial = computed(() => {
   if (!chatStore.currentSelectedItem) return '';
   return chatStore.currentSelectedItem.name.charAt(0).toUpperCase();
 });
-
-// 使用 chatStore 中的 coreStatus 来保持状态，避免每次组件挂载时重置为 loading
-let unlistenReady: (() => void) | null = null;
-let unlistenError: (() => void) | null = null;
 
 // 自动滚动到底部
 const messageListRef = ref<HTMLElement | null>(null);
@@ -97,31 +94,9 @@ onMounted(async () => {
   setTimeout(() => {
     scrollToBottom();
   }, 100);
-
-  // 如果已经是 active，说明之前已经收到过 ready，不需要再变回 loading
-  if (chatStore.coreStatus === 'loading') {
-    // 监听 Rust Core 状态
-    unlistenReady = await listen('vcp-core-ready', () => {
-      chatStore.coreStatus = 'active';
-    });
-
-    unlistenError = await listen('vcp-core-error', (event: any) => {
-      chatStore.coreStatus = 'error';
-      chatStore.coreErrorMsg = event.payload;
-    });
-
-    // 超时保底，防止错过事件
-    setTimeout(() => {
-      if (chatStore.coreStatus === 'loading') {
-        chatStore.coreStatus = 'active';
-      }
-    }, 3000);
-  }
 });
 
 onUnmounted(() => {
-  if (unlistenReady) unlistenReady();
-  if (unlistenError) unlistenError();
   window.removeEventListener('vcp-button-click', handleVcpButtonClick);
   
   if (window.visualViewport) {
@@ -156,15 +131,15 @@ onUnmounted(() => {
           <span class="font-bold text-sm text-primary-text">
             {{ chatStore.currentSelectedItem?.name || 'VCP Mobile' }}
           </span>
-          <div class="flex items-center gap-1" :title="chatStore.coreErrorMsg">
+          <div class="flex items-center gap-1" :title="lifecycleStore.errorMsg || undefined">
             <span class="w-1.5 h-1.5 rounded-full" 
                   :class="{
-                    'bg-green-500 vcp-core-pulse core-glow-green': chatStore.coreStatus === 'active',
-                    'bg-red-500 vcp-core-pulse core-glow-red': chatStore.coreStatus === 'error',
-                    'bg-yellow-500': chatStore.coreStatus === 'loading'
+                    'bg-green-500 vcp-core-pulse core-glow-green': lifecycleStore.state === 'READY',
+                    'bg-red-500 vcp-core-pulse core-glow-red': lifecycleStore.state === 'ERROR',
+                    'bg-yellow-500': lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR'
                   }"></span>
             <span class="text-[9px] opacity-40 uppercase font-mono tracking-tighter">
-              {{ chatStore.coreStatus === 'active' ? 'Core Active' : (chatStore.coreStatus === 'error' ? 'Core Error' : 'Booting...') }}
+              {{ lifecycleStore.state === 'READY' ? 'Core Active' : (lifecycleStore.state === 'ERROR' ? 'Core Error' : 'Booting...') }}
             </span>
           </div>
         </div>

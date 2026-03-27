@@ -19,6 +19,7 @@ export interface Attachment {
   name: string;
   size: number;
   hash?: string;
+  extractedText?: string;
 }
 
 /**
@@ -58,8 +59,6 @@ export const useChatManagerStore = defineStore('chatManager', () => {
   const currentSelectedItem = ref<any>(null);
   const currentTopicId = ref<string | null>(null);
   const loading = ref(false);
-  const coreStatus = ref<'active' | 'error' | 'loading'>('loading');
-  const coreErrorMsg = ref('');
   const streamingMessageId = ref<string | null>(null);
   const isGroupGenerating = ref(false);
   
@@ -91,13 +90,13 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     
     // 只有“未命名”话题且消息数达到阈值才总结 (桌面端策略)
     const topic = topicStore.topics.find(t => t.id === topicId);
-    const isUnnamed = !topic || topic.name.includes('新话题') || topic.name.includes('topic_') || topic.name === '主要群聊';
+    const isUnnamed = !topic || topic.name.includes('新话题') || topic.name.includes('topic_') || topic.name.includes('group_topic_') || topic.name === '主要群聊';
     const messageCount = currentChatHistory.value.filter(m => m.role !== 'system').length;
 
     if (isUnnamed && messageCount >= 4) {
       console.log(`[ChatManager] Triggering AI summary for topic: ${topicId}`);
       try {
-        const agentName = assistantStore.agents.find(a => a.id === itemId)?.name || 'AI';
+        const agentName = assistantStore.agents.find((a: any) => a.id === itemId)?.name || 'AI';
         const newTitle = await invoke<string>('summarize_topic', {
           itemId,
           topicId,
@@ -415,14 +414,16 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     if (!currentSelectedItem.value || !currentTopicId.value || (!content.trim() && stagedAttachments.value.length === 0)) return;
 
     const agentId = currentSelectedItem.value.id;
+    const currentStaged = [...stagedAttachments.value];
     
     // 构造用户消息
+    const now = Date.now();
     const userMsg: ChatMessage = {
-      id: `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: `msg_${now}_user_${Math.random().toString(36).substring(2, 7)}`,
       role: 'user',
       content,
-      timestamp: Date.now(),
-      attachments: stagedAttachments.value.length > 0 ? [...stagedAttachments.value] : undefined,
+      timestamp: now,
+      attachments: currentStaged.length > 0 ? currentStaged : undefined,
     };
     
     currentChatHistory.value.push(userMsg);
@@ -431,12 +432,12 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     stagedAttachments.value = [];
 
     // 构造 AI 思考占位消息
-    const thinkingId = `assistant_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 7)}`;
     const thinkingMsg: ChatMessage = {
       id: thinkingId,
       role: 'assistant',
       content: '',
-      timestamp: Date.now(),
+      timestamp: now,
       isThinking: true,
     };
     
@@ -447,13 +448,13 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       // 立即保存一次历史记录 (包含用户消息和思考态)
       await saveHistory();
 
-      // 确保设置已加载
-      if (!settingsStore.settings) {
-        await settingsStore.fetchSettings();
+      const settings = settingsStore.settings;
+      if (!settings) {
+        throw new Error('应用尚未完成初始化，缺少设置数据，无法发送消息');
       }
       
-      const vcpUrl = settingsStore.settings?.vcpServerUrl || '';
-      const vcpApiKey = settingsStore.settings?.vcpApiKey || '';
+      const vcpUrl = settings.vcpServerUrl || '';
+      const vcpApiKey = settings.vcpApiKey || '';
 
       // --- 群组消息路由 ---
       if (currentSelectedItem.value?.type === 'group') {
@@ -482,7 +483,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       }
 
       // --- 普通单 Agent 消息逻辑 ---
-      let agentConfig = assistantStore.agents.find(a => a.id === agentId);
+      let agentConfig = assistantStore.agents.find((a: any) => a.id === agentId);
       if (!agentConfig) {
         agentConfig = await invoke('read_agent_config', { agentId, allowDefault: true });
       }
@@ -494,12 +495,52 @@ export const useChatManagerStore = defineStore('chatManager', () => {
         messagesForVcp.push({ role: 'system', content: systemPrompt });
       }
 
-      const historyForVcp = currentChatHistory.value
+      // 核心：处理历史记录并转换多模态 Payload
+      const historyForVcp = await Promise.all(currentChatHistory.value
         .filter(m => !m.isThinking)
-        .map(m => ({
-          role: m.role,
-          content: m.content,
-          name: m.name
+        .map(async m => {
+          // 如果没有附件且是纯文本，保持简单格式
+          if (!m.attachments || m.attachments.length === 0) {
+            return { role: m.role, content: m.content, name: m.name };
+          }
+
+          const contentParts: any[] = [];
+          let combinedText = m.content;
+
+          for (const att of m.attachments) {
+            // 1. 文本提取注入 (对齐桌面端)
+            if (att.extractedText) {
+              combinedText += `\n\n[附加文件: ${att.name}]\n${att.extractedText}\n[/附加文件结束: ${att.name}]`;
+            }
+
+            // 2. 多模态识别 (图片/音频/视频)
+            const isImage = att.type.startsWith('image/');
+            const isAudio = att.type.startsWith('audio/');
+            const isVideo = att.type.startsWith('video/');
+
+            if (isImage || isAudio || isVideo) {
+              // 关键重构：不再在前端读 Base64，而是传引用，由 Rust 后端在发送前动态读取
+              // 这样做极大减少了 IPC 通讯的内存压力，同时也绕过了 50MB 的限制 (Rust 端目前支持更大)
+              contentParts.push({
+                type: 'local_file',
+                path: att.src,
+                mime: att.type
+              });
+            } else if (!att.extractedText) {
+              // 既非文本提取也非多模态（如普通压缩包），仅注入路径占位
+              combinedText += `\n\n[附加文件: ${att.name}] (不支持直接读取内容)`;
+            }
+          }
+
+          if (combinedText.trim()) {
+            contentParts.unshift({ type: 'text', text: combinedText });
+          }
+
+          return {
+            role: m.role,
+            content: contentParts.length > 0 ? contentParts : m.content,
+            name: m.name
+          };
         }));
         
       messagesForVcp.push(...historyForVcp);
@@ -521,14 +562,12 @@ export const useChatManagerStore = defineStore('chatManager', () => {
         context: { agentId, topicId: currentTopicId.value }
       };
 
-      console.log('[ChatManager] Sending single payload to VCP:', payload);
+      console.log('[ChatManager] Sending payload to VCP:', payload);
       
-      // 记录模型使用频率
       if (payload.modelConfig.model) {
         modelStore.recordUsage(payload.modelConfig.model);
       }
 
-      // 直接发起请求，移除 30s 前端硬超时
       await invoke('sendToVCP', { payload });
     } catch (e) {
       console.error('[ChatManager] Failed to send message:', e);
@@ -546,7 +585,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       } else {
         // Fallback if message was somehow lost
         currentChatHistory.value.push({
-          id: `error_${Date.now()}`,
+          id: `msg_${Date.now()}_system_error`,
           role: 'system',
           content: errorText.trim(),
           timestamp: Date.now()
@@ -660,7 +699,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
               // 空消息，移除占位气泡，直接显示为系统错误消息
               currentChatHistory.value = currentChatHistory.value.filter(m => m.id !== actualMessageId);
               currentChatHistory.value.push({
-                id: `error_${Date.now()}`,
+                id: `msg_${Date.now()}_system_error`,
                 role: 'system',
                 content: errorText.trim(),
                 timestamp: Date.now()
@@ -707,8 +746,6 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     currentSelectedItem,
     currentTopicId,
     loading,
-    coreStatus,
-    coreErrorMsg,
     streamingMessageId,
     stagedAttachments,
     editMessageContent,

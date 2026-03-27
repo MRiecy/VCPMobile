@@ -60,11 +60,16 @@ pub async fn create_topic(
     item_id: String,
     name: String,
 ) -> Result<Topic, String> {
-    let id = format!("topic_{}", uuid::Uuid::new_v4());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64;
+        .as_millis() as i64;
+    
+    let id = if crate::vcp_modules::group_manager::is_group_item(&app_handle, &item_id) {
+        format!("group_topic_{}", now)
+    } else {
+        format!("topic_{}", now)
+    };
 
     let topic = Topic {
         id: id.clone(),
@@ -102,16 +107,18 @@ pub async fn create_topic(
 
     // 3. 更新父级配置 (config.json) 中的 topics 数组 (Unshift 逻辑)
     // 逻辑对齐: chatHandlers.js -> create-new-topic-for-agent
-    if item_id.starts_with("____") || item_id.starts_with("___N_P_") {
+    if crate::vcp_modules::group_manager::is_group_item(&app_handle, &item_id) {
         // 处理群组
-        let group_state = app_handle.state::<crate::vcp_modules::group_manager::GroupManagerState>();
+        let group_state =
+            app_handle.state::<crate::vcp_modules::group_manager::GroupManagerState>();
         let mut config = crate::vcp_modules::group_manager::read_group_config(
             app_handle.clone(),
             group_state.clone(),
             item_id.clone(),
-        ).await?;
+        )
+        .await?;
         config.topics.insert(0, topic.clone());
-        
+
         // 写回磁盘
         let config_path = crate::vcp_modules::group_manager::get_groups_base_path(&app_handle)
             .join(&item_id)
@@ -122,14 +129,16 @@ pub async fn create_topic(
         group_state.caches.insert(item_id, config);
     } else {
         // 处理 Agent
-        let agent_state = app_handle.state::<crate::vcp_modules::agent_config_manager::AgentConfigState>();
+        let agent_state =
+            app_handle.state::<crate::vcp_modules::agent_config_manager::AgentConfigState>();
         let mut config = crate::vcp_modules::agent_config_manager::read_agent_config(
             app_handle.clone(),
             agent_state.clone(),
             item_id.clone(),
             Some(false),
-        ).await?;
-        
+        )
+        .await?;
+
         // TopicInfo 在 agent_config_manager 中定义，结构略有不同但兼容
         use crate::vcp_modules::agent_config_manager::TopicInfo;
         let info = TopicInfo {
@@ -139,7 +148,13 @@ pub async fn create_topic(
             extra_fields: serde_json::Map::new(),
         };
         config.topics.insert(0, info);
-        crate::vcp_modules::agent_config_manager::write_agent_config(app_handle.clone(), agent_state, item_id, config).await?;
+        crate::vcp_modules::agent_config_manager::write_agent_config(
+            app_handle.clone(),
+            agent_state,
+            item_id,
+            config,
+        )
+        .await?;
     }
 
     let mut config_path = topic_dir.clone();
@@ -187,7 +202,7 @@ pub async fn update_topic_title(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i64,
+                .as_millis() as i64,
         )
         .bind(&topic_id)
         .execute(&db_state.pool)
@@ -329,44 +344,30 @@ async fn update_topic_in_main_config<R: Runtime>(
     topic_id: &str,
     update_fn: impl Fn(&mut Value),
 ) -> Result<(), String> {
-    let config_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let group_config = config_dir
-        .join("AgentGroups")
-        .join(item_id)
-        .join("config.json");
-    let agent_config = config_dir.join("agents").join(item_id).join("config.json");
+    let target_path = resolve_topic_dir(app_handle, item_id, topic_id).join("config.json");
 
-    let target_path = if group_config.exists() {
-        group_config
-    } else if agent_config.exists() {
-        agent_config
-    } else {
-        return Err(format!("Config not found for item: {}", item_id));
-    };
+    if !target_path.exists() {
+        return Err(format!(
+            "Topic config not found for item '{}' topic '{}' at {:?}",
+            item_id, topic_id, target_path
+        ));
+    }
 
     let content = fs::read_to_string(&target_path).map_err(|e| e.to_string())?;
     let mut json: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    update_fn(&mut json);
 
-    let mut updated = false;
-    if let Some(topics) = json.get_mut("topics").and_then(|v| v.as_array_mut()) {
-        if let Some(topic) = topics
-            .iter_mut()
-            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(topic_id))
-        {
-            update_fn(topic);
-            updated = true;
-        }
-    }
+    let new_content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    let temp_path = target_path.with_extension("tmp");
+    fs::write(&temp_path, new_content).map_err(|e| e.to_string())?;
+    fs::rename(&temp_path, &target_path).map_err(|e| e.to_string())?;
 
-    if updated {
-        let new_content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-        let temp_path = target_path.with_extension("tmp");
-        fs::write(&temp_path, new_content).map_err(|e| e.to_string())?;
-        fs::rename(&temp_path, &target_path).map_err(|e| e.to_string())?;
-    }
+    log::debug!(
+        "[TopicListManager] Updated topic metadata for item '{}' topic '{}' at {:?}; item config path remains separate",
+        item_id,
+        topic_id,
+        target_path
+    );
 
     Ok(())
 }
@@ -386,7 +387,7 @@ pub async fn toggle_topic_lock(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i64,
+                .as_millis() as i64,
         )
         .bind(&topic_id)
         .execute(&db_state.pool)
@@ -417,7 +418,7 @@ pub async fn set_topic_unread(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i64,
+                .as_millis() as i64,
         )
         .bind(&topic_id)
         .execute(&db_state.pool)

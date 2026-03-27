@@ -112,13 +112,13 @@ marked.use(mathExtension);
 // Sanitize HTML with DOMPurify
 const renderedHtml = computed(() => {
   const rawHtml = marked.parse(props.content) as string;
-  // 增强版安全过滤：允许 VCP 核心交互标签和属性
+  // 保持安全过滤，但由于纠错已在 Rust 完成，不再需要放行 onerror
   return DOMPurify.sanitize(rawHtml, {
-    ADD_TAGS: ['iframe', 'canvas', 'script', 'style', 'button'],
+    ADD_TAGS: ['iframe', 'canvas', 'script', 'style', 'button', 'img'],
     ADD_ATTR: [
       'allow', 'allowfullscreen', 'frameborder', 'scrolling',
       'data-send', 'data-vcp-interactive', 'data-vcp-scoped',
-      'class' // 允许保留流式特殊气泡的 CSS 类
+      'class', 'width', 'height'
     ],
     FORCE_BODY: true
   });
@@ -382,6 +382,25 @@ watch(() => [props.content, props.isStreaming], () => {
 .vcp-markdown-block img {
   max-width: 100%;
   height: auto;
+}
+
+/* 表情包专属尺寸约束：使用 Rust 注入的 .vcp-emoticon 类名 */
+.vcp-markdown-block .vcp-emoticon {
+  max-width: 110px;
+  max-height: 110px;
+  display: inline-block;
+  vertical-align: middle;
+  margin: 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  /* 平滑显示效果 */
+  transition: all 0.3s ease;
+}
+
+.vcp-markdown-block .vcp-emoticon:hover {
+  transform: scale(1.05);
+  border-color: rgba(52, 152, 219, 0.3);
 }
 
 .vcp-markdown-block code {

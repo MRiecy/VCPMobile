@@ -5,9 +5,9 @@ import AgentSettingsView from '../views/AgentSettingsView.vue';
 
 const routes = [
   { path: '/', redirect: '/chat' },
-  { path: '/agents/:id', component: AgentSettingsView, props: true },
-  { path: '/chat', component: ChatView },
-  { path: '/settings', component: SettingsView },
+  { path: '/agents/:id', name: 'agent-settings', component: AgentSettingsView, props: true },
+  { path: '/chat', name: 'chat', component: ChatView },
+  { path: '/settings', name: 'settings', component: SettingsView },
 ];
 
 export const router = createRouter({

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 
 export interface AgentConfig {
@@ -47,7 +47,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   // 记录每个 item (agent 或 group) 的未读数量
   const unreadCounts = ref<Record<string, number>>({});
 
-  const fetchUnreadCounts = async (fetchedItems: (AgentConfig | GroupConfig)[]) => {
+  const refreshUnreadCountsForItems = async (fetchedItems: (AgentConfig | GroupConfig)[]) => {
     try {
       for (const item of fetchedItems) {
         try {
@@ -73,9 +73,14 @@ export const useAssistantStore = defineStore('assistant', () => {
         }
       }
     } catch(err) {
-       console.error('[AssistantStore] fetchUnreadCounts error', err);
+       console.error('[AssistantStore] refreshUnreadCountsForItems error', err);
     }
   };
+
+  const combinedItems = computed(() => [
+    ...agents.value.map(agent => ({ ...agent, type: 'agent' as const })),
+    ...groups.value.map(group => ({ ...group, type: 'group' as const }))
+  ]);
 
   const fetchAgents = async () => {
     loading.value = true;
@@ -92,7 +97,7 @@ export const useAssistantStore = defineStore('assistant', () => {
         }
       });
       agents.value = fetchedAgents;
-      fetchUnreadCounts(fetchedAgents);
+      refreshUnreadCountsForItems(fetchedAgents);
     } catch (e: any) {
       error.value = e.toString();
     } finally {
@@ -101,6 +106,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   };
 
   const fetchGroups = async () => {
+    loading.value = true;
     try {
       const fetchedGroups = await invoke<GroupConfig[]>('get_groups');
       fetchedGroups.forEach((group) => {
@@ -113,9 +119,12 @@ export const useAssistantStore = defineStore('assistant', () => {
         }
       });
       groups.value = fetchedGroups;
-      fetchUnreadCounts(fetchedGroups);
+      refreshUnreadCountsForItems(fetchedGroups);
     } catch (e: any) {
       console.error('Failed to fetch groups:', e);
+      error.value = e.toString();
+    } finally {
+      loading.value = false;
     }
   };
 
@@ -123,7 +132,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     loading.value = true;
     try {
       const newAgent = await invoke<AgentConfig>('create_agent', { name });
-      await fetchAgents();
+      // 不再自动全局 fetch，由生命周期或调用方决定是否增量更新
       return newAgent;
     } catch (e: any) {
       error.value = e.toString();
@@ -137,7 +146,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     loading.value = true;
     try {
       const newGroup = await invoke<GroupConfig>('create_group', { name });
-      await fetchGroups();
+      // 不再自动全局 fetch
       return newGroup;
     } catch (e: any) {
       error.value = e.toString();
@@ -160,6 +169,7 @@ export const useAssistantStore = defineStore('assistant', () => {
   return {
     agents,
     groups,
+    combinedItems,
     loading,
     error,
     unreadCounts,
@@ -168,7 +178,7 @@ export const useAssistantStore = defineStore('assistant', () => {
     createAgent,
     createGroup,
     saveAgent,
-    fetchUnreadCounts
+    refreshUnreadCountsForItems
   };
 });
 

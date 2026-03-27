@@ -15,12 +15,20 @@ use vcp_modules::chat_manager::{
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::db_manager::{init_db, DbState};
-use vcp_modules::file_manager::{pick_and_store_attachment, read_local_image_base64, store_file};
+use vcp_modules::emoticon_manager::{
+    fix_emoticon_url, get_emoticon_library, internal_generate_library, regenerate_emoticon_library,
+    EmoticonManagerState,
+};
+use vcp_modules::file_manager::{
+    cleanup_orphaned_attachments, get_attachment_real_path, open_file, pick_and_store_attachment,
+    read_local_file_base64, store_file,
+};
 use vcp_modules::file_watcher::{init_watcher, signal_internal_save, WatcherState};
 use vcp_modules::group_manager::{
     create_group, get_groups, load_all_groups, read_group_config, GroupManagerState,
 };
 use vcp_modules::index_service::full_scan;
+use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
 use vcp_modules::ipc::group_handlers::handle_group_chat_message;
 use vcp_modules::ipc::settings_handlers::{
@@ -51,53 +59,14 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            // 初始化生命周期状态
+            app.manage(LifecycleState::new());
+
             let handle = app.handle().clone();
-
-            // --- 关键修复：完全异步化初始化 (Async Boot) ---
-            // 这样即使 DB 卡住，WebView 也能正常显示
+            // 异步启动核心服务
             tauri::async_runtime::spawn(async move {
-                println!("[VCPCore] Starting asynchronous initialization...");
-
-                match init_db(&handle).await {
-                    Ok(pool) => {
-                        println!("[VCPCore] Database initialized successfully.");
-                        handle.manage(DbState { pool: pool.clone() });
-
-                        // 初始化其他状态
-                        handle.manage(AgentConfigState::new());
-                        handle.manage(GroupManagerState::new());
-                        handle.manage(AppSettingsState::new());
-                        handle.manage(WatcherState::default());
-
-                        // 初始化模型管理器
-                        let model_manager_state = ModelManagerState::new();
-                        init_model_manager(&handle, &model_manager_state).await;
-                        handle.manage(model_manager_state);
-
-                        // 加载群组配置
-                        let group_state = handle.state::<GroupManagerState>();
-                        if let Err(e) = load_all_groups(&handle, &group_state, &pool).await {
-                            eprintln!("[VCPCore] Group load failed: {}", e);
-                        }
-
-                        // 启动文件监控 (如果失败仅打印，不影响主流程)
-                        if let Err(e) = init_watcher(handle.clone()) {
-                            eprintln!("[VCPCore] Watcher init failed: {}", e);
-                        }
-
-                        // 运行初始全量扫描
-                        if let Err(e) = full_scan(&handle, &pool).await {
-                            eprintln!("[VCPCore] Initial scan failed: {}", e);
-                        }
-
-                        // 通知前端核心已就绪
-                        let _ = handle.emit("vcp-core-ready", ());
-                    }
-                    Err(e) => {
-                        eprintln!("[VCPCore] FATAL: Database initialization failed: {}", e);
-                        // 发送错误通知，让前端显示“数据库错误”而不是白屏
-                        let _ = handle.emit("vcp-core-error", format!("数据库初始化失败: {}", e));
-                    }
+                if let Err(e) = bootstrap(&handle).await {
+                    eprintln!("[VCPCore] Bootstrap failed: {}", e);
                 }
             });
 
@@ -105,28 +74,30 @@ pub fn run() {
         })
         .manage(ActiveRequests::default())
         .manage(ContextSanitizer::default())
-        .plugin(tauri_plugin_log::Builder::new()
-            .targets([
-                Target::new(TargetKind::Stdout),
-                Target::new(TargetKind::LogDir { file_name: None }),
-                Target::new(TargetKind::Webview),
-            ])
-            .level(log::LevelFilter::Info)
-            .filter(|metadata| {
-                let target = metadata.target();
-                // 屏蔽高频 UI 交互、系统窗口以及 Android 系统底层冗余日志
-                !target.contains("pointer") && 
-                !target.contains("touch") && 
-                !target.contains("gesture") && 
-                !target.contains("wry::event_loop") &&
-                !target.contains("tao::window") &&
-                !target.contains("wry::webview") &&
-                !target.contains("DynamicFramerate") &&
-                !target.contains("PowerHalMgrImpl") &&
-                !target.contains("AnimationSpeedAware") &&
-                !target.contains("InputEventInfo")
-            })
-            .build())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir { file_name: None }),
+                    Target::new(TargetKind::Webview),
+                ])
+                .level(log::LevelFilter::Info)
+                .filter(|metadata| {
+                    let target = metadata.target();
+                    // 屏蔽高频 UI 交互、系统窗口以及 Android 系统底层冗余日志
+                    !target.contains("pointer")
+                        && !target.contains("touch")
+                        && !target.contains("gesture")
+                        && !target.contains("wry::event_loop")
+                        && !target.contains("tao::window")
+                        && !target.contains("wry::webview")
+                        && !target.contains("DynamicFramerate")
+                        && !target.contains("PowerHalMgrImpl")
+                        && !target.contains("AnimationSpeedAware")
+                        && !target.contains("InputEventInfo")
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -169,7 +140,10 @@ pub fn run() {
             signal_internal_save,
             store_file,
             pick_and_store_attachment,
-            read_local_image_base64,
+            read_local_file_base64,
+            get_attachment_real_path,
+            open_file,
+            cleanup_orphaned_attachments,
             get_topic_delta,
             sync_download_file,
             sync_ping,
@@ -184,7 +158,12 @@ pub fn run() {
             record_model_usage,
             summarize_topic,
             init_vcp_log_connection,
-            send_vcp_log_message
+            send_vcp_log_message,
+            get_emoticon_library,
+            regenerate_emoticon_library,
+            fix_emoticon_url,
+            get_core_status,
+            get_last_error
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

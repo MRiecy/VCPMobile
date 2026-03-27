@@ -26,6 +26,14 @@ pub struct Attachment {
     pub name: String,
     #[serde(default)]
     pub size: u64,
+    #[serde(default)]
+    pub hash: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "extractedText")]
+    pub extracted_text: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "thumbnailPath")]
+    pub thumbnail_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -175,7 +183,33 @@ pub async fn load_chat_history(
     let config_dir_str = config_dir.to_string_lossy().replace("\\", "/");
 
     for msg in &mut history {
-        // 替换 extra 里的 avatarUrl
+        // 1. 修复附件路径 (Path Rebasing)
+        if let Some(attachments) = &mut msg.attachments {
+            for att in attachments {
+                if let Some(hash) = &att.hash {
+                    if let Some(real_path) = crate::vcp_modules::file_manager::resolve_attachment_path(&app_handle, hash, &att.name) {
+                        let new_src = format!("file://{}", real_path.replace("\\", "/"));
+                        if att.src != new_src {
+                            println!("[VCPCore] Rebasing attachment: {} -> {}", att.src, new_src);
+                            att.src = new_src;
+                        }
+                        
+                        // 同时校准缩略图路径
+                        let thumb_path = std::path::PathBuf::from(&real_path);
+                        if let Some(parent) = thumb_path.parent() {
+                            let mut t = parent.to_path_buf();
+                            t.push("thumbnails");
+                            t.push(format!("{}_thumb.webp", hash));
+                            if t.exists() {
+                                att.thumbnail_path = Some(format!("file://{}", t.to_string_lossy().replace("\\", "/")));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. 替换 extra 里的 avatarUrl (原有逻辑)
         if let Some(avatar_url) = msg.extra.get_mut("avatarUrl") {
             let mut new_url = None;
             if let Some(url_str_raw) = avatar_url.as_str() {
