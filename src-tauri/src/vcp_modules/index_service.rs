@@ -3,10 +3,72 @@ use log::{error, info, warn};
 use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
+
+#[derive(Clone, Copy, Debug)]
+enum IndexedItemKind {
+    Agent,
+    Group,
+}
+
+impl IndexedItemKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Group => "group",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IndexedHistoryTarget {
+    item_id: String,
+    topic_id: String,
+    history_path: PathBuf,
+    topic_config_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct ItemIdentity {
+    kind: IndexedItemKind,
+    config_path: PathBuf,
+    config_exists: bool,
+}
+
+#[derive(Debug)]
+struct TopicMetadata {
+    title: Option<String>,
+    locked: Option<bool>,
+    unread: Option<bool>,
+}
+
+impl TopicMetadata {
+    fn is_empty(&self) -> bool {
+        self.title.is_none() && self.locked.is_none() && self.unread.is_none()
+    }
+
+    fn merge_from(&mut self, other: TopicMetadata) {
+        if self.title.is_none() {
+            self.title = other.title;
+        }
+        if self.locked.is_none() {
+            self.locked = other.locked;
+        }
+        if self.unread.is_none() {
+            self.unread = other.unread;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MetadataResolution {
+    metadata: TopicMetadata,
+    source: &'static str,
+    missing_layers: Vec<&'static str>,
+}
 
 pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<(), String> {
     let config_dir = app_handle
@@ -41,6 +103,187 @@ pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<()
     Ok(())
 }
 
+fn parse_history_target(path: &Path) -> Option<IndexedHistoryTarget> {
+    let components: Vec<_> = path.components().collect();
+    if components.len() < 4 {
+        return None;
+    }
+
+    let topic_id = components.get(components.len() - 2)?.as_os_str().to_str()?.to_string();
+    let item_id = components.get(components.len() - 4)?.as_os_str().to_str()?.to_string();
+
+    Some(IndexedHistoryTarget {
+        item_id,
+        topic_id,
+        history_path: path.to_path_buf(),
+        topic_config_path: path.with_file_name("config.json"),
+    })
+}
+
+fn resolve_item_identity(app_config_dir: &Path, item_id: &str) -> ItemIdentity {
+    let group_config_path = app_config_dir
+        .join("AgentGroups")
+        .join(item_id)
+        .join("config.json");
+    let agent_config_path = app_config_dir.join("Agents").join(item_id).join("config.json");
+
+    if group_config_path.exists() {
+        ItemIdentity {
+            kind: IndexedItemKind::Group,
+            config_path: group_config_path,
+            config_exists: true,
+        }
+    } else if agent_config_path.exists() {
+        ItemIdentity {
+            kind: IndexedItemKind::Agent,
+            config_path: agent_config_path,
+            config_exists: true,
+        }
+    } else {
+        ItemIdentity {
+            kind: IndexedItemKind::Agent,
+            config_path: agent_config_path,
+            config_exists: false,
+        }
+    }
+}
+
+async fn load_topic_dir_metadata(topic_config_path: &Path) -> Result<Option<TopicMetadata>, String> {
+    if !topic_config_path.exists() {
+        return Ok(None);
+    }
+
+    let topic_content = tokio::fs::read_to_string(topic_config_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let topic_json = serde_json::from_str::<serde_json::Value>(&topic_content)
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(TopicMetadata {
+        title: topic_json
+            .get("name")
+            .or(topic_json.get("title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        locked: topic_json.get("locked").and_then(|v| v.as_bool()),
+        unread: topic_json.get("unread").and_then(|v| v.as_bool()),
+    }))
+}
+
+fn extract_topic_entry_metadata(item_json: &serde_json::Value, topic_id: &str) -> Option<TopicMetadata> {
+    item_json
+        .get("topics")
+        .and_then(|v| v.as_array())
+        .and_then(|topics| {
+            topics.iter().find(|topic| {
+                topic.get("id").and_then(|v| v.as_str()) == Some(topic_id)
+            })
+        })
+        .map(|topic_entry| TopicMetadata {
+            title: topic_entry
+                .get("name")
+                .or(topic_entry.get("title"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            locked: topic_entry
+                .get("locked")
+                .or_else(|| {
+                    topic_entry
+                        .get("extra")
+                        .and_then(|v| v.get("locked"))
+                })
+                .or_else(|| {
+                    topic_entry
+                        .get("extra_fields")
+                        .and_then(|v| v.get("locked"))
+                })
+                .and_then(|v| v.as_bool()),
+            unread: topic_entry
+                .get("unread")
+                .or_else(|| {
+                    topic_entry
+                        .get("extra")
+                        .and_then(|v| v.get("unread"))
+                })
+                .or_else(|| {
+                    topic_entry
+                        .get("extra_fields")
+                        .and_then(|v| v.get("unread"))
+                })
+                .and_then(|v| v.as_bool()),
+        })
+}
+
+async fn load_item_config_metadata(
+    identity: &ItemIdentity,
+    topic_id: &str,
+) -> Result<Option<TopicMetadata>, String> {
+    if !identity.config_exists {
+        return Ok(None);
+    }
+
+    let item_content = tokio::fs::read_to_string(&identity.config_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let item_json = serde_json::from_str::<serde_json::Value>(&item_content)
+        .map_err(|e| e.to_string())?;
+
+    Ok(extract_topic_entry_metadata(&item_json, topic_id))
+}
+
+async fn resolve_topic_metadata(
+    identity: &ItemIdentity,
+    target: &IndexedHistoryTarget,
+) -> Result<MetadataResolution, String> {
+    let mut metadata = TopicMetadata {
+        title: None,
+        locked: None,
+        unread: None,
+    };
+    let mut source = "history directory fallback";
+    let mut missing_layers = Vec::new();
+
+    match load_topic_dir_metadata(&target.topic_config_path).await? {
+        Some(topic_dir_metadata) => {
+            metadata.merge_from(topic_dir_metadata);
+            source = "topic directory config";
+        }
+        None => missing_layers.push("topic directory config"),
+    }
+
+    match load_item_config_metadata(identity, &target.topic_id).await? {
+        Some(item_metadata) => {
+            let had_primary = !metadata.is_empty();
+            metadata.merge_from(item_metadata);
+            if !had_primary && !metadata.is_empty() {
+                source = match identity.kind {
+                    IndexedItemKind::Agent => "agent config topics[]",
+                    IndexedItemKind::Group => "group config topics[]",
+                };
+            }
+        }
+        None => {
+            if identity.config_exists {
+                missing_layers.push(match identity.kind {
+                    IndexedItemKind::Agent => "agent config topics[]",
+                    IndexedItemKind::Group => "group config topics[]",
+                });
+            } else {
+                missing_layers.push(match identity.kind {
+                    IndexedItemKind::Agent => "agent config missing",
+                    IndexedItemKind::Group => "group config missing",
+                });
+            }
+        }
+    }
+
+    Ok(MetadataResolution {
+        metadata,
+        source,
+        missing_layers,
+    })
+}
+
 pub async fn index_history_file(
     app_config_dir: &Path,
     path: &Path,
@@ -54,72 +297,37 @@ pub async fn index_history_file(
         .unwrap_or_default()
         .as_millis() as i64;
 
-    // Extract agent_id and topic_id from path: .../{data|UserData}/{agent_id}/topics/{topic_id}/history.json
-    let components: Vec<_> = path.components().collect();
-    if components.len() < 4 {
+    let Some(target) = parse_history_target(path) else {
         return Ok(());
-    }
-
-    let topic_id = match components[components.len() - 2].as_os_str().to_str() {
-        Some(s) => s.to_string(),
-        None => return Ok(()),
-    };
-    let agent_id = match components[components.len() - 4].as_os_str().to_str() {
-        Some(s) => s.to_string(),
-        None => return Ok(()),
     };
 
-    // 智能探测 Config 路径：普通智能体 vs 群组
-    // 普通智能体: app_config_dir/agents/{agent_id}/config.json
-    // 群组: app_config_dir/AgentGroups/{agent_id}/config.json
-    let config_path = if agent_id.starts_with("____") || agent_id.starts_with("___N_P_") {
-        app_config_dir
-            .join("AgentGroups")
-            .join(&agent_id)
-            .join("config.json")
-    } else {
-        app_config_dir
-            .join("agents")
-            .join(&agent_id)
-            .join("config.json")
-    };
+    let identity = resolve_item_identity(app_config_dir, &target.item_id);
+    let topic_id_source = "history directory name";
+    let metadata_resolution = resolve_topic_metadata(&identity, &target).await?;
 
-    let mut locked = false;
-    let mut unread = false;
-    let mut title_from_config = None;
-
-    if config_path.exists() {
-        if let Ok(config_content) = tokio::fs::read_to_string(&config_path).await {
-            if let Ok(config_json) = serde_json::from_str::<serde_json::Value>(&config_content) {
-                // Find the correct topic metadata in the "topics" array
-                if let Some(topics) = config_json.get("topics").and_then(|t| t.as_array()) {
-                    for t in topics {
-                        if t.get("id").and_then(|id| id.as_str()) == Some(&topic_id) {
-                            locked = t.get("locked").and_then(|v| v.as_bool()).unwrap_or(false);
-                            unread = t.get("unread").and_then(|v| v.as_bool()).unwrap_or(false);
-                            // 优先取 name, 次选 title
-                            title_from_config = t
-                                .get("name")
-                                .or(t.get("title"))
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
+    if !identity.config_exists {
         warn!(
-            "[IndexService] Config not found for {}, topic {}. Path attempted: {:?}",
-            agent_id, topic_id, config_path
+            "[IndexService] item_kind={} item_id={} item_config=missing path={:?}; indexing with history-only fallback",
+            identity.kind.as_str(),
+            target.item_id,
+            identity.config_path
         );
     }
+
+    info!(
+        "[IndexService] item_kind={} item_id={} topic_id={} topic_source={} metadata_source={} missing_layers={:?}",
+        identity.kind.as_str(),
+        target.item_id,
+        target.topic_id,
+        topic_id_source,
+        metadata_resolution.source,
+        metadata_resolution.missing_layers
+    );
 
     // Check if we need to re-index based on mtime, and retain the old title if any
     let existing: Option<(i64, Option<String>)> =
         sqlx::query_as("SELECT mtime, title FROM topic_index WHERE topic_id = ?")
-            .bind(&topic_id)
+            .bind(&target.topic_id)
             .fetch_optional(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -127,12 +335,11 @@ pub async fn index_history_file(
     let mut existing_title = None;
     if let Some((old_mtime, old_title)) = existing {
         if old_mtime >= mtime {
-            // 如果已存在且 mtime 没变，但我们从 config 拿到了更好的标题，则尝试更新标题
-            if let Some(new_title) = title_from_config {
+            if let Some(new_title) = metadata_resolution.metadata.title.clone() {
                 if old_title.as_ref() != Some(&new_title) {
                     sqlx::query("UPDATE topic_index SET title = ? WHERE topic_id = ?")
                         .bind(new_title)
-                        .bind(&topic_id)
+                        .bind(&target.topic_id)
                         .execute(pool)
                         .await
                         .map_err(|e| e.to_string())?;
@@ -143,8 +350,7 @@ pub async fn index_history_file(
         existing_title = old_title;
     }
 
-    // Read file and calculate hash/count
-    let content = tokio::fs::read_to_string(path)
+    let content = tokio::fs::read_to_string(&target.history_path)
         .await
         .map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -158,7 +364,6 @@ pub async fn index_history_file(
     if let Some(history_array) = history.as_array() {
         msg_count = history_array.len() as i32;
 
-        // "智能计数判断"
         let non_system_msgs: Vec<_> = history_array
             .iter()
             .filter(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
@@ -173,10 +378,14 @@ pub async fn index_history_file(
         }
     }
 
-    // Determine title: Use topic config > DB existing title > topic_id
-    let title = title_from_config
+    let title = metadata_resolution
+        .metadata
+        .title
+        .clone()
         .or(existing_title)
-        .unwrap_or_else(|| topic_id.clone());
+        .unwrap_or_else(|| target.topic_id.clone());
+    let locked = metadata_resolution.metadata.locked.unwrap_or(false);
+    let unread = metadata_resolution.metadata.unread.unwrap_or(false);
 
     sqlx::query(
         "INSERT INTO topic_index (topic_id, agent_id, title, mtime, file_hash, msg_count, locked, unread, unread_count)
@@ -190,8 +399,8 @@ pub async fn index_history_file(
             unread = excluded.unread,
             unread_count = excluded.unread_count",
     )
-    .bind(&topic_id)
-    .bind(&agent_id)
+    .bind(&target.topic_id)
+    .bind(&target.item_id)
     .bind(&title)
     .bind(mtime)
     .bind(&file_hash)
@@ -204,8 +413,12 @@ pub async fn index_history_file(
     .map_err(|e| e.to_string())?;
 
     info!(
-        "[IndexService] Indexed topic: {} (Agent: {}, Messages: {})",
-        topic_id, agent_id, msg_count
+        "[IndexService] indexed item_kind={} item_id={} topic_id={} messages={} title={:?}",
+        identity.kind.as_str(),
+        target.item_id,
+        target.topic_id,
+        msg_count,
+        title
     );
 
     Ok(())

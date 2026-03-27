@@ -6576,6 +6576,7 @@ dependencies = [
  "md5",
  "notify",
  "notify-debouncer-full",
+ "percent-encoding",
  "rand 0.8.5",
  "regex",
  "reqwest 0.12.28",

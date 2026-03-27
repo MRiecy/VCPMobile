@@ -6,7 +6,7 @@ import type { ContentBlock } from '../../composables/useContentProcessor';
 
 const props = defineProps<{
   type: 'tool-use' | 'tool-result';
-  content: string;
+  content?: string;
   block: ContentBlock;
 }>();
 

@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { router } from '../router';
 
 /**
  * VCP Mobile Unified Modal History Stack 2.0 (Operation Aegis)
@@ -47,7 +48,16 @@ const handlePopState = (event: PopStateEvent) => {
     return;
   }
 
-  // 2. Handle Modal Stack (LIFO)
+  // 2. Handle normal route navigation first.
+  // 对于 /settings、/agents/:id 这类真实路由页，返回手势应该交给 vue-router，
+  // 不能误判成“要退出应用”或“要关闭底层侧边栏”。
+  // 只有在主界面（/ 或 /chat）时，我们才拦截返回手势用于操作 Overlay。
+  const currentPath = router.currentRoute.value.path;
+  if (currentPath !== '/chat' && currentPath !== '/') {
+    return;
+  }
+
+  // 3. Handle Modal Stack (LIFO)
   if (modalStack.value.length > 0) {
     const topModal = modalStack.value[modalStack.value.length - 1];
     
@@ -61,7 +71,7 @@ const handlePopState = (event: PopStateEvent) => {
     return;
   }
 
-  // 3. Handle Root Exit (Operation Dummy Root - Catch & Bounce)
+  // 4. Handle Root Exit (Operation Dummy Root - Catch & Bounce)
   // If we hit a state that doesn't have vcpMain, it means we've popped our dummy state
   if (!event.state || !event.state.vcpMain) {
     const currentTime = Date.now();

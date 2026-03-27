@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { useRouter } from 'vue-router';
 import ThemePicker from '../components/ThemePicker.vue';
 import ModelSelector from '../components/ModelSelector.vue';
 import { syncService } from '../services/syncService';
 import { useSettingsStore, type AppSettings } from '../stores/settings';
 
 const settingsStore = useSettingsStore();
+const router = useRouter();
 
 const settings = ref<AppSettings>({
   userName: 'User',
@@ -39,10 +41,22 @@ const settings = ref<AppSettings>({
 const loading = ref(true);
 const pingStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 const vcpPingStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
+const emoticonStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
+const cleanupStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 
 const showSummaryModelSelector = ref(false);
 const onSummaryModelSelect = (modelId: string) => {
   settings.value.topicSummaryModel = modelId;
+};
+
+const emit = defineEmits(['close', 'open-sync']);
+
+const closeSettings = () => {
+  if (window.history.length > 1) {
+    router.back();
+    return;
+  }
+  router.replace('/chat');
 };
 
 const loadSettings = async () => {
@@ -53,7 +67,7 @@ const loadSettings = async () => {
       settings.value = JSON.parse(JSON.stringify(settingsStore.settings));
     }
   } catch (e) {
-    console.error('Failed to load settings:', e);
+    console.error('[SettingsView] Failed to load settings:', e);
   } finally {
     loading.value = false;
   }
@@ -68,6 +82,28 @@ const saveSettings = async () => {
     console.log('Settings saved!');
   } catch (e) {
     console.error('Failed to save settings:', e);
+  }
+};
+
+const rebuildEmoticonLibrary = async () => {
+  emoticonStatus.value = { type: 'loading', message: '正在扫描表情包...' };
+  try {
+    const count = await invoke<number>('regenerate_emoticon_library');
+    emoticonStatus.value = { type: 'success', message: `成功重载 ${count} 个表情包` };
+    setTimeout(() => { emoticonStatus.value = { type: null, message: '' }; }, 3000);
+  } catch (e: any) {
+    emoticonStatus.value = { type: 'error', message: `重载失败: ${e}` };
+  }
+};
+
+const cleanupAttachments = async () => {
+  cleanupStatus.value = { type: 'loading', message: '正在深度扫描孤儿附件...' };
+  try {
+    const result = await invoke<string>('cleanup_orphaned_attachments');
+    cleanupStatus.value = { type: 'success', message: result };
+    setTimeout(() => { cleanupStatus.value = { type: null, message: '' }; }, 5000);
+  } catch (e: any) {
+    cleanupStatus.value = { type: 'error', message: `清理失败: ${e}` };
   }
 };
 
@@ -116,7 +152,13 @@ const testVcpConnection = async () => {
   }
 };
 
-onMounted(loadSettings);
+onMounted(() => {
+  loadSettings();
+});
+
+onUnmounted(() => {
+  console.info('[SettingsView][Debug] component unmounted');
+});
 </script>
 
 <template>
@@ -125,7 +167,7 @@ onMounted(loadSettings);
     <!-- Header (仅在全屏模式下显示) -->
     <header class="p-4 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+20px)] pb-6 shrink-0">
       <h2 class="text-xl font-bold">全局设置</h2>
-      <button @click="$emit('close')" class="p-2.5 bg-white/10 rounded-full active:scale-90 transition-all flex items-center justify-center">
+      <button @click="closeSettings" class="p-2.5 bg-white/10 rounded-full active:scale-90 transition-all flex items-center justify-center">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>
     </header>
@@ -182,10 +224,21 @@ onMounted(loadSettings);
               <button @click="testSyncConnection" :disabled="pingStatus.type === 'loading'" class="px-4 py-2 bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 active:scale-95 transition-all rounded-xl text-xs font-bold tracking-wider disabled:opacity-50">
                 测试连接
               </button>
-              <button @click="$emit('open-sync')" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-xl text-xs font-bold tracking-wider shadow-lg shadow-blue-900/20">
+              <button @click="emit('open-sync')" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-xl text-xs font-bold tracking-wider shadow-lg shadow-blue-900/20">
                 进入同步面板
               </button>
             </div>
+          </div>
+
+          <div class="border-t border-black/5 dark:border-white/5 pt-4 mt-2 flex items-center justify-between">
+            <div class="flex flex-col">
+              <span class="text-xs font-bold opacity-60">本地表情包修复库</span>
+              <span class="text-[9px] opacity-30 uppercase font-mono">{{ emoticonStatus.message || 'IDLE' }}</span>
+            </div>
+            <button @click="rebuildEmoticonLibrary" :disabled="emoticonStatus.type === 'loading'" class="px-3 py-1.5 bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 active:scale-95 transition-all rounded-lg text-[10px] font-bold tracking-tight disabled:opacity-50 flex items-center gap-2">
+              <div v-if="emoticonStatus.type === 'loading'" class="w-2 h-2 rounded-full bg-blue-500 animate-ping"></div>
+              RESCAN_LIBRARY
+            </button>
           </div>
         </div>
       </section>
@@ -288,7 +341,33 @@ onMounted(loadSettings);
         </div>
       </section>
 
-      <!-- 5. 视觉主题 -->
+      <!-- 5. 数据维护 -->
+      <section class="space-y-4">
+        <div class="flex items-center gap-2 px-1">
+          <div class="w-1 h-4 bg-red-500 rounded-full"></div>
+          <h3 class="text-xs font-black uppercase tracking-[0.2em] opacity-50 dark:opacity-40">数据维护 (Maintenance)</h3>
+        </div>
+        <div class="card-modern space-y-4">
+          <div class="flex items-center justify-between">
+            <div class="flex flex-col">
+              <span class="text-sm font-bold">附件库垃圾回收 (GC)</span>
+              <span class="text-[10px] opacity-40">深度扫描并删除未被引用的孤立附件与缩略图</span>
+            </div>
+            <button @click="cleanupAttachments" :disabled="cleanupStatus.type === 'loading'" class="px-4 py-2 bg-red-500/10 text-red-500 hover:bg-red-500/20 active:scale-95 transition-all rounded-xl text-[11px] font-bold tracking-tight disabled:opacity-50">
+              立即清理
+            </button>
+          </div>
+          <div v-if="cleanupStatus.type" class="text-[10px] p-3 rounded-xl bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 font-mono" :class="{
+            'text-blue-500': cleanupStatus.type === 'loading',
+            'text-green-500': cleanupStatus.type === 'success',
+            'text-red-500': cleanupStatus.type === 'error'
+          }">
+            {{ cleanupStatus.message }}
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. 视觉主题 -->
       <section class="space-y-4">
         <div class="flex items-center gap-2 px-1">
           <div class="w-1 h-4 bg-orange-500 rounded-full"></div>
@@ -309,17 +388,17 @@ onMounted(loadSettings);
       <div class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest">
         VCP MOBILE · PROJECT AVATAR<br/>INTERNAL RELEASE 2026.03.13
       </div>
-      </div>
+    </div>
 
-      <!-- 话题总结模型选择器 -->
-      <ModelSelector 
+    <!-- 话题总结模型选择器 -->
+    <ModelSelector 
       v-model="showSummaryModelSelector" 
       :current-model="settings.topicSummaryModel"
       title="选择总结专用模型"
       @select="onSummaryModelSelect"
-      />
-      </div>
-      </template>
+    />
+  </div>
+</template>
 
 
 <style scoped>

@@ -8,7 +8,7 @@ import { useContentProcessor, type ContentBlock } from '../composables/useConten
 import { useAvatarTheme } from '../composables/useAvatarTheme';
 import { useContextMenu } from '../composables/useContextMenu';
 import { useChatManagerStore } from '../stores/chatManager';
-import { FileText, ExternalLink, Copy, Edit2, RotateCcw, Trash2, StopCircle } from 'lucide-vue-next';
+import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from 'lucide-vue-next';
 
 // Import block components
 import MarkdownBlock from './blocks/MarkdownBlock.vue';
@@ -16,6 +16,7 @@ import ToolBlock from './blocks/ToolBlock.vue';
 import DiaryBlock from './blocks/DiaryBlock.vue';
 import ThoughtBlock from './blocks/ThoughtBlock.vue';
 import HtmlPreviewBlock from './blocks/HtmlPreviewBlock.vue';
+import AttachmentPreview from './AttachmentPreview.vue';
 import FullScreenEditor from './FullScreenEditor.vue';
 
 const props = defineProps<{
@@ -222,17 +223,6 @@ const nameStyle = computed(() => {
   return { color: color || 'var(--highlight-text)' };
 });
 
-// 处理附件路径
-const getAttachmentSrc = (src: string) => {
-  if (src.startsWith('file://')) {
-    return convertFileSrc(src.replace('file://', ''));
-  }
-  return src;
-};
-
-// 检查是否是图片
-const isImage = (type: string) => type.startsWith('image/');
-
 // 长按菜单触发逻辑
 const showMessageContextMenu = () => {
   const chatStore = useChatManagerStore();
@@ -405,8 +395,10 @@ const handleSaveEdit = async (newContent: string) => {
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-for="(block, index) in contentBlocks" :key="index">
               <MarkdownBlock v-if="block.type === 'markdown'" :content="block.content" :is-streaming="false" />
-              <ToolBlock v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
+              <ToolBlock v-else-if="block.type === 'tool-use'"
                 :type="block.type" :content="block.content" :block="block" />
+              <ToolBlock v-else-if="block.type === 'tool-result'"
+                :type="block.type" :block="block" />
               <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
               <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
               <HtmlPreviewBlock
@@ -427,30 +419,12 @@ const handleSaveEdit = async (newContent: string) => {
           </div>
         </template>
 
-        <!-- Attachments -->
-        <div v-if="message.attachments && message.attachments.length > 0" class="mt-4 space-y-3 pt-3 border-t border-black/5 dark:border-white/5">
-          <div v-for="(att, index) in message.attachments" :key="index" class="overflow-hidden rounded-xl">
-            <!-- Image Attachment -->
-            <div v-if="isImage(att.type)" class="relative group">
-              <img
-                :src="att.resolvedSrc || getAttachmentSrc(att.src)"
-                class="max-w-full rounded-lg border border-black/5 dark:border-white/10 shadow-sm active:scale-[0.98] transition-all"
-                loading="lazy"
-              />
-            </div>
-            <!-- File Attachment -->
-            <div v-else class="flex items-center gap-3 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 hover:bg-black/10 transition-colors">
-              <div class="p-2 bg-white/50 dark:bg-gray-700/50 rounded-lg shrink-0">
-                <FileText :size="20" class="text-gray-500 dark:text-gray-400" />
-              </div>
-              <div class="flex-1 min-w-0 overflow-hidden">
-                <div class="text-xs font-bold truncate">{{ att.name }}</div>
-                <div class="text-[10px] opacity-50 uppercase mt-0.5">{{ (att.size / 1024).toFixed(1) }} KB</div>
-              </div>
-              <ExternalLink :size="16" class="text-gray-400 shrink-0" />
-            </div>
-          </div>
-        </div>
+        <!-- Attachments (Simplified with specialized component) -->
+        <AttachmentPreview 
+          v-if="message.attachments && message.attachments.length > 0" 
+          :attachments="message.attachments" 
+          class="pt-3 border-t border-black/5 dark:border-white/5"
+        />
 
         <!-- Floating Action Indicators (Optional) -->
         <div

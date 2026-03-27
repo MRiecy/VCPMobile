@@ -31,13 +31,15 @@ pub struct TopicInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegexRule {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub title: String,
-    #[serde(rename = "findPattern")]
+    #[serde(rename = "findPattern", default)]
     pub find_pattern: String,
-    #[serde(rename = "replaceWith")]
+    #[serde(rename = "replaceWith", default)]
     pub replace_with: String,
-    #[serde(rename = "applyToRoles")]
+    #[serde(rename = "applyToRoles", default)]
     pub apply_to_roles: Vec<String>,
     #[serde(rename = "applyToFrontend", default = "default_true")]
     pub apply_to_frontend: bool,
@@ -96,12 +98,13 @@ pub struct AgentConfig {
     #[serde(default)]
     pub id: String,
     /// 智能体名称
+    #[serde(default = "default_agent_name")]
     pub name: String,
     /// 系统提示词 (System Prompt)
     #[serde(rename = "systemPrompt", default)]
     pub system_prompt: String,
     /// 使用的模型 (如: "gemini-2.0-flash")
-    #[serde(default)]
+    #[serde(default = "default_model")]
     pub model: String,
     /// 模型采样温度 (0.0-2.0)
     #[serde(default = "default_temperature")]
@@ -166,7 +169,14 @@ pub struct AgentConfig {
 
     /// 捕获所有未定义的字段，确保 config.json 的完整性（真实之源）
     #[serde(flatten)]
-    pub extra: serde_json::Value,
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+fn default_agent_name() -> String {
+    "Unnamed Agent".to_string()
+}
+fn default_model() -> String {
+    "gemini-2.0-flash".to_string()
 }
 
 fn default_one_f32() -> f32 {
@@ -228,13 +238,19 @@ fn get_agent_paths(app_handle: &AppHandle, agent_id: &str) -> Result<AgentPaths,
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    agent_path.push("agents");
+    agent_path.push("Agents");
     agent_path.push(agent_id);
 
     let config_path = agent_path.join("config.json");
     let lock_file = agent_path.join("config.json.lock");
     let backup_file = agent_path.join("config.json.backup");
     let temp_file = agent_path.join("config.json.tmp");
+
+    log::debug!(
+        "[AgentConfigManager] Resolved agent '{}' config path to {:?}; topic history must still be aggregated from UserData/data",
+        agent_id,
+        config_path
+    );
 
     Ok(AgentPaths {
         agent_path,
@@ -324,16 +340,8 @@ pub async fn read_agent_config(
                 strip_regexes: vec![],
                 avatar_url: None,
                 avatar_calculated_color: None,
-                topics: vec![TopicInfo {
-                    id: "default".to_string(),
-                    name: "主要对话".to_string(),
-                    created_at: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as i64,
-                    extra_fields: serde_json::Map::new(),
-                }],
-                extra: serde_json::Value::Object(serde_json::Map::new()),
+                topics: vec![],
+                extra: serde_json::Map::new(),
             });
         }
 
@@ -416,7 +424,7 @@ pub async fn read_agent_config(
             let parts: Vec<&str> = avatar_url.split(&['/', '\\'][..]).collect();
             if let Some(agent_idx) = parts.iter().position(|&r| r == "Agents") {
                 let relative_path = parts[agent_idx + 1..].join("/");
-                *avatar_url = format!("{}/agents/{}", config_dir_str, relative_path);
+                *avatar_url = format!("{}/Agents/{}", config_dir_str, relative_path);
             }
         }
     } else {
@@ -490,7 +498,7 @@ pub async fn get_agents(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    agents_dir.push("agents");
+    agents_dir.push("Agents");
 
     if !agents_dir.exists() {
         return Ok(vec![]);
@@ -500,12 +508,30 @@ pub async fn get_agents(
     for entry in fs::read_dir(agents_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.is_dir() {
-            let agent_id = entry.file_name().to_string_lossy().to_string();
-            if let Ok(config) =
-                read_agent_config(app_handle.clone(), state.clone(), agent_id, Some(false)).await
-            {
-                agents.push(config);
+        if !path.is_dir() {
+            continue;
+        }
+
+        let agent_id = entry.file_name().to_string_lossy().to_string();
+        let config_path = path.join("config.json");
+        if !config_path.exists() {
+            log::warn!(
+                "[AgentConfigManager] Skipping agent directory '{}' because config.json is missing at {:?}",
+                agent_id,
+                config_path
+            );
+            continue;
+        }
+
+        match read_agent_config(app_handle.clone(), state.clone(), agent_id.clone(), Some(false)).await {
+            Ok(config) => agents.push(config),
+            Err(err) => {
+                log::error!(
+                    "[AgentConfigManager] Failed to read agent '{}' from {:?}: {}",
+                    agent_id,
+                    config_path,
+                    err
+                );
             }
         }
     }
@@ -701,7 +727,7 @@ pub async fn rebuild_db_index(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    agents_dir.push("agents");
+    agents_dir.push("Agents");
 
     if !agents_dir.exists() {
         return Ok(0);

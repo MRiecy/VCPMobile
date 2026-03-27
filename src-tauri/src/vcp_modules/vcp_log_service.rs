@@ -19,7 +19,9 @@ lazy_static::lazy_static! {
 pub async fn send_vcp_log_message(payload: Value) -> Result<(), String> {
     let sender_lock = LOG_SENDER.lock().await;
     if let Some(sender) = sender_lock.as_ref() {
-        sender.send(payload).map_err(|e| format!("Failed to send message to VCPLog: {}", e))?;
+        sender
+            .send(payload)
+            .map_err(|e| format!("Failed to send message to VCPLog: {}", e))?;
         Ok(())
     } else {
         Err("VCPLog connection is not active".to_string())
@@ -71,7 +73,7 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
 
     // 创建 mpsc 通道用于回传消息
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
-    
+
     // 将发送端存储在全局静态变量中供 send_vcp_log_message 使用
     {
         let mut sender_lock = LOG_SENDER.lock().await;
@@ -80,24 +82,33 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
 
     loop {
         println!("[VCPLog] Attempting to connect...");
-        
-        let _ = app_handle.emit("vcp-system-event", serde_json::json!({
-            "type": "connection_status",
-            "status": "connecting",
-            "message": "Connecting...",
-            "source": "VCPLog"
-        }));
+
+        let _ = app_handle.emit(
+            "vcp-system-event",
+            serde_json::json!({
+                "type": "connection_status",
+                "status": "connecting",
+                "message": "Connecting...",
+                "source": "VCPLog"
+            }),
+        );
 
         let mut request = match ws_url.as_str().into_client_request() {
             Ok(req) => req,
             Err(e) => {
-                eprintln!("[VCPLog] Failed to build request: {}. Retrying in 5 seconds...", e);
-                let _ = app_handle.emit("vcp-system-event", serde_json::json!({
-                    "type": "connection_status",
-                    "status": "error",
-                    "message": format!("Request error: {}", e),
-                    "source": "VCPLog"
-                }));
+                eprintln!(
+                    "[VCPLog] Failed to build request: {}. Retrying in 5 seconds...",
+                    e
+                );
+                let _ = app_handle.emit(
+                    "vcp-system-event",
+                    serde_json::json!({
+                        "type": "connection_status",
+                        "status": "error",
+                        "message": format!("Request error: {}", e),
+                        "source": "VCPLog"
+                    }),
+                );
                 sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -138,15 +149,18 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
             Ok(connection_result) => match connection_result {
                 Ok((ws_stream, _)) => {
                     println!("[VCPLog] Connected successfully.");
-                    
+
                     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-                    let _ = app_handle.emit("vcp-system-event", serde_json::json!({
-                        "type": "connection_status",
-                        "status": "connected",
-                        "message": "Connected to VCPLog",
-                        "source": "VCPLog"
-                    }));
+                    let _ = app_handle.emit(
+                        "vcp-system-event",
+                        serde_json::json!({
+                            "type": "connection_status",
+                            "status": "connected",
+                            "message": "Connected to VCPLog",
+                            "source": "VCPLog"
+                        }),
+                    );
 
                     loop {
                         tokio::select! {
@@ -194,33 +208,44 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                             }
                         }
                     }
-                    
+
                     println!("[VCPLog] Disconnected.");
-                    let _ = app_handle.emit("vcp-system-event", serde_json::json!({
-                        "type": "connection_status",
-                        "status": "disconnected",
-                        "message": "Disconnected from VCPLog",
-                        "source": "VCPLog"
-                    }));
+                    let _ = app_handle.emit(
+                        "vcp-system-event",
+                        serde_json::json!({
+                            "type": "connection_status",
+                            "status": "disconnected",
+                            "message": "Disconnected from VCPLog",
+                            "source": "VCPLog"
+                        }),
+                    );
                 }
                 Err(e) => {
                     eprintln!("[VCPLog] Detailed Connection Error: {:?}. Status: {}", e, e);
-                    let _ = app_handle.emit("vcp-system-event", serde_json::json!({
-                        "type": "connection_status",
-                        "status": "error",
-                        "message": format!("Connection failed: {}", e),
-                        "source": "VCPLog"
-                    }));
+                    let _ = app_handle.emit(
+                        "vcp-system-event",
+                        serde_json::json!({
+                            "type": "connection_status",
+                            "status": "error",
+                            "message": format!("Connection failed: {}", e),
+                            "source": "VCPLog"
+                        }),
+                    );
                 }
             },
             Err(_) => {
-                eprintln!("[VCPLog] Connection timed out after 10 seconds. Retrying in 5 seconds...");
-                let _ = app_handle.emit("vcp-system-event", serde_json::json!({
-                    "type": "connection_status",
-                    "status": "error",
-                    "message": "Connection timed out",
-                    "source": "VCPLog"
-                }));
+                eprintln!(
+                    "[VCPLog] Connection timed out after 10 seconds. Retrying in 5 seconds..."
+                );
+                let _ = app_handle.emit(
+                    "vcp-system-event",
+                    serde_json::json!({
+                        "type": "connection_status",
+                        "status": "error",
+                        "message": "Connection timed out",
+                        "source": "VCPLog"
+                    }),
+                );
             }
         }
 

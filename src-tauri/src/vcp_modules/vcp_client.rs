@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use dashmap::DashMap;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -98,27 +99,67 @@ pub async fn perform_vcp_request<R: Runtime>(
         .unwrap_or_else(|| "vcp-stream".to_string());
 
     // === 0. 数据验证和规范化 ===
-    // ... (rest of data normalization unchanged)
-    let mut messages: Vec<Value> = payload
-        .messages
-        .into_iter()
-        .map(|mut msg| {
-            if !msg.is_object() {
-                return json!({"role": "system", "content": "[Invalid message]"});
-            }
-            let content = msg.get("content").cloned().unwrap_or(Value::Null);
-            if content.is_object() {
-                if let Some(text) = content.get("text") {
-                    msg["content"] = text.clone();
+    let mut messages: Vec<Value> = Vec::new();
+    for msg_val in payload.messages {
+        if !msg_val.is_object() {
+            messages.push(json!({"role": "system", "content": "[Invalid message]"}));
+            continue;
+        }
+
+        let mut msg = msg_val.clone();
+        let content = msg.get("content").cloned().unwrap_or(Value::Null);
+
+        // 处理多模态或复杂内容数组
+        if let Some(content_array) = content.as_array() {
+            let mut new_parts = Vec::new();
+            for part in content_array {
+                if let Some(obj) = part.as_object() {
+                    // 识别自定义的 local_file 类型并进行路径还原与编码
+                    if obj.get("type").and_then(|t| t.as_str()) == Some("local_file") {
+                        if let Some(path_str) = obj.get("path").and_then(|p| p.as_str()) {
+                            let clean_path = path_str.replace("file://", "");
+                            let path_buf = std::path::PathBuf::from(&clean_path);
+
+                            if path_buf.exists() {
+                                // 提取扩展名决定 mime_type
+                                let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                let (mime, part_type) = match ext.as_str() {
+                                    "png" | "jpg" | "jpeg" | "webp" | "gif" => ("image", "image_url"),
+                                    "mp3" | "wav" | "ogg" => ("audio", "audio_url"),
+                                    "mp4" | "mkv" | "webm" => ("video", "video_url"),
+                                    _ => ("application", "file_url"), // 非多模态文件回退
+                                };
+
+                                if let Ok(bytes) = std::fs::read(&path_buf) {
+                                    let b64 = general_purpose::STANDARD.encode(&bytes);
+                                    let data_url = format!("data:{}/{};base64,{}", mime, ext, b64);
+                                    
+                                    new_parts.push(json!({
+                                        "type": part_type,
+                                        part_type: { "url": data_url }
+                                    }));
+                                }
+                            }
+                        }
+                    } else {
+                        new_parts.push(part.clone());
+                    }
                 } else {
-                    msg["content"] = json!(content.to_string());
+                    new_parts.push(part.clone());
                 }
-            } else if !content.is_array() && !content.is_string() && !content.is_null() {
+            }
+            msg["content"] = json!(new_parts);
+        } else if content.is_object() {
+            if let Some(text) = content.get("text") {
+                msg["content"] = text.clone();
+            } else {
                 msg["content"] = json!(content.to_string());
             }
-            msg
-        })
-        .collect();
+        } else if !content.is_string() && !content.is_null() {
+            msg["content"] = json!(content.to_string());
+        }
+        messages.push(msg);
+    }
 
     // === 1. 读取设置与动态路由切换 ===
     let settings_path = app_data_path.join("settings.json");
