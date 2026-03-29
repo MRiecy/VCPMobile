@@ -1,9 +1,9 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import App from "./App.vue";
-import { router } from "./router";
-import { vIntersectionObserver } from "./directives/intersectionObserver";
-import { vLongpress } from "./directives/longpress";
+import { router } from "./core/router";
+import { vIntersectionObserver } from "./core/directives/intersectionObserver";
+import { vLongpress } from "./core/directives/longpress";
 
 import 'virtual:uno.css'
 import "@unocss/reset/tailwind.css"

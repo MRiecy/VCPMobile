@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import type { SyncTreeNode } from '../core/utils/syncService';
+import type { SyncTreeNode } from '../../core/utils/syncService';
 
 defineOptions({ name: 'SyncFileTree' });
 

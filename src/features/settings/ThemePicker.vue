@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { useThemeStore, type ThemeInfo } from '../core/stores/theme';
+import { useThemeStore, type ThemeInfo } from '../../core/stores/theme';
 
 // 为 layout 提供默认值，防止由于未传参导致的初始化失败
 const props = withDefaults(defineProps<{
