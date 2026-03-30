@@ -11,7 +11,8 @@ use vcp_modules::app_settings_manager::{
 };
 use vcp_modules::avatar_color_extractor::extract_avatar_color;
 use vcp_modules::chat_manager::{
-    get_topic_delta, load_chat_history, process_regex_for_message, save_chat_history,
+    get_topic_delta, get_topic_fingerprint, load_chat_history, process_regex_for_message,
+    save_chat_history,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::db_manager::{init_db, DbState};
@@ -145,6 +146,7 @@ pub fn run() {
             open_file,
             cleanup_orphaned_attachments,
             get_topic_delta,
+            get_topic_fingerprint,
             sync_download_file,
             sync_ping,
             sync_fetch_manifest,
