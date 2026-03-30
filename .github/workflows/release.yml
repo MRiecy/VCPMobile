@@ -1,9 +1,9 @@
 name: Android Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types:
+      - published
 
 permissions:
   contents: write
@@ -31,7 +31,7 @@ jobs:
         id: meta
         shell: bash
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_NAME="${{ github.event.release.tag_name }}"
 
           if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
             echo "Invalid release tag: $TAG_NAME" >&2
