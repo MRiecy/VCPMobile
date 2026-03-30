@@ -4,6 +4,7 @@
 use crate::vcp_modules::agent_config_manager::{read_agent_config, AgentConfigState};
 use crate::vcp_modules::chat_manager::{save_chat_history, ChatMessage};
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::emoticon_manager::EmoticonManagerState;
 use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::group_manager::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_orchestrator::{assemble_context, determine_naturerandom_speakers};
@@ -11,7 +12,7 @@ use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpReq
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +182,14 @@ pub async fn handle_group_chat_message(
                             .as_millis() as u64,
                         is_thinking: Some(false),
                         attachments: None,
-                        extra: json!({ "agentId": agent_id }),
+                        extra: json!({
+                            "agentId": agent_id,
+                            "avatarUrl": speaker
+                                .extra
+                                .get("avatar")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        }),
                     };
 
                     current_history.push(ai_msg);

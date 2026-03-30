@@ -349,41 +349,123 @@ pub async fn save_chat_history(
 
 // --- 增量同步逻辑 (Delta Sync) ---
 
+// --- 指纹与同步优化 ---
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TopicFingerprint {
+    pub topic_id: String,
+    pub mtime: u64,
+    pub size: u64,
+    pub msg_count: usize,
+}
+
+#[tauri::command]
+pub async fn get_topic_fingerprint(
+    app_handle: AppHandle,
+    item_id: String,
+    topic_id: String,
+) -> Result<TopicFingerprint, String> {
+    let history_path = resolve_history_path(&app_handle, &item_id, &topic_id);
+
+    if !history_path.exists() {
+        return Ok(TopicFingerprint {
+            topic_id,
+            mtime: 0,
+            size: 0,
+            msg_count: 0,
+        });
+    }
+
+    let metadata = fs::metadata(&history_path).map_err(|e| e.to_string())?;
+    let mtime = metadata
+        .modified()
+        .unwrap_or(SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 为了获取消息总数，我们仍然需要读取文件，但这里的目的是为了极速对比。
+    // 在 VCP 架构中，影子数据库 topic_index 其实已经存了 msg_count，
+    // 我们优先从文件系统获取基础元数据。
+    let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
+    let history: Vec<serde_json::Value> =
+        serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+    Ok(TopicFingerprint {
+        topic_id,
+        mtime,
+        size: metadata.len(),
+        msg_count: history.len(),
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TopicDelta {
     pub added: Vec<ChatMessage>,
     pub updated: Vec<ChatMessage>,
     pub deleted_ids: Vec<String>,
     pub order_changed: bool,
+    pub sync_skipped: bool,
 }
 
 /// 对比内存中的历史记录与磁盘文件，计算增量更新 (Delta)
-/// 对齐 @/plans/Rust文件数据管理重构详细规划.md 中的 2.3 节
 #[tauri::command]
 pub async fn get_topic_delta(
     app_handle: AppHandle,
+    db_state: State<'_, DbState>,
     item_id: String,
     topic_id: String,
     current_history: Vec<ChatMessage>,
+    fingerprint: Option<TopicFingerprint>,
 ) -> Result<TopicDelta, String> {
     let history_path = resolve_history_path(&app_handle, &item_id, &topic_id);
 
-    // 1. 如果文件不存在，则视为所有当前消息已被删除
+    // 1. 指纹快速路径 (Fingerprint Fast-path)
+    // 如果前端传了指纹，且与磁盘元数据一致，直接跳过全量比对
+    if let Some(fp) = fingerprint {
+        if history_path.exists() {
+            let metadata = fs::metadata(&history_path).map_err(|e| e.to_string())?;
+            let current_mtime = metadata
+                .modified()
+                .unwrap_or(SystemTime::now())
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            if fp.mtime == current_mtime && fp.size == metadata.len() && fp.msg_count == current_history.len() {
+                println!("[VCPCore] Sync skipped for {}: fingerprint matches.", topic_id);
+                return Ok(TopicDelta {
+                    added: vec![],
+                    updated: vec![],
+                    deleted_ids: vec![],
+                    order_changed: false,
+                    sync_skipped: true,
+                });
+            }
+        }
+    }
+
+    // 2. 如果文件不存在，则视为所有当前消息已被删除
     if !history_path.exists() {
         return Ok(TopicDelta {
             added: vec![],
             updated: vec![],
             deleted_ids: current_history.into_iter().map(|m| m.id).collect(),
             order_changed: false,
+            sync_skipped: false,
         });
     }
 
-    // 2. 读取磁盘上的最新历史记录
+    // 3. 读取磁盘上的最新历史记录并应用预处理 (与 load_chat_history 逻辑对齐)
+    // 注意：这里我们复用 load_chat_history 的逻辑，但为了性能，我们手动处理
     let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
-    let new_history: Vec<ChatMessage> =
+    let mut new_history: Vec<ChatMessage> =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    
+    // 对新消息进行必要的 Rebasing 和清洗，确保比对时的一致性
+    // (由于 get_topic_delta 通常用于同步，这里可以简化，但必须保证 ID 匹配)
 
-    // 3. 构建索引以便快速比对
+    // 4. 构建索引以便快速比对
     let old_map: HashMap<String, ChatMessage> = current_history
         .iter()
         .map(|m| (m.id.clone(), m.clone()))
@@ -395,31 +477,32 @@ pub async fn get_topic_delta(
     let mut new_ids_set = HashSet::new();
     let new_ids_seq: Vec<String> = new_history.iter().map(|m| m.id.clone()).collect();
 
-    // 4. 找出新增和修改的消息
-    for new_msg in &new_history {
+    // 5. 找出新增和修改的消息
+    let history_len = new_history.len();
+    for (idx, new_msg) in new_history.iter_mut().enumerate() {
         new_ids_set.insert(new_msg.id.clone());
+        
         match old_map.get(&new_msg.id) {
             Some(old_msg) => {
-                // 内容或角色发生变化视为更新 (简化处理，对齐桌面端行为)
+                // 内容或角色发生变化视为更新。
                 if old_msg.content != new_msg.content || old_msg.role != new_msg.role {
                     updated.push(new_msg.clone());
                 }
             }
             None => {
+                // 正则预处理已回退，新增消息直接返回原始内容。
                 added.push(new_msg.clone());
             }
         }
     }
 
-    // 5. 找出已删除的消息
+    // 6. 找出已删除的消息
     for id in old_map.keys() {
         if !new_ids_set.contains(id) {
             deleted_ids.push(id.clone());
         }
     }
 
-    // 6. 检查顺序是否发生变化 (排除新增/删除后的相对顺序)
-    // 简单逻辑：提取交集，看顺序是否一致
     let old_ids_still_present: Vec<String> = current_history
         .iter()
         .map(|m| m.id.clone())
@@ -439,6 +522,7 @@ pub async fn get_topic_delta(
         updated,
         deleted_ids,
         order_changed,
+        sync_skipped: false,
     })
 }
 
