@@ -1,11 +1,11 @@
 import java.util.Properties
-
+ 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("rust")
 }
-
+ 
 val tauriProperties = Properties().apply {
     val propFile = file("tauri.properties")
     if (propFile.exists()) {
@@ -13,9 +13,30 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
+val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
+val releaseKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
+val hasReleaseSigning = !releaseKeystorePath.isNullOrBlank()
+    && !releaseKeyAlias.isNullOrBlank()
+    && !releaseKeystorePassword.isNullOrBlank()
+    && !releaseKeyPassword.isNullOrBlank()
+ 
 android {
     compileSdk = 36
     namespace = "com.vcp.avatar"
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.vcp.avatar"
@@ -37,7 +58,11 @@ android {
             }
         }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }

@@ -1,0 +1,126 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android-release:
+    name: Build and Publish Android Release
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_VERSION: '20'
+      PNPM_VERSION: '8'
+      JAVA_VERSION: '17'
+      NDK_VERSION: '27.0.12077973'
+      ANDROID_KEYSTORE_PATH: src-tauri/release.keystore
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          VERSION="${TAG_NAME#v}"
+          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src-tauri -> src-tauri/target
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: sdkmanager "ndk;${NDK_VERSION}"
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Restore Android keystore
+        shell: bash
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "${ANDROID_KEYSTORE_PATH}"
+          test -s "${ANDROID_KEYSTORE_PATH}"
+
+      - name: Build Android APKs
+        shell: bash
+        env:
+          NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          pnpm tauri android build --apk --split-per-abi
+
+      - name: Rename APK artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          shopt -s globstar nullglob
+          found=0
+          for apk in src-tauri/gen/android/app/build/outputs/**/*.apk; do
+            base_name="$(basename "$apk")"
+            abi=""
+            for candidate in arm64-v8a armeabi-v7a x86 x86_64 universal; do
+              if [[ "$base_name" == *"$candidate"* ]]; then
+                abi="$candidate"
+                break
+              fi
+            done
+            if [[ -z "$abi" ]]; then
+              abi="unknown"
+            fi
+            cp "$apk" "release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_${abi}.apk"
+            found=1
+          done
+          if [[ "$found" -ne 1 ]]; then
+            echo "No APK artifacts were found." >&2
+            exit 1
+          fi
+          echo "artifact_dir=release-artifacts" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            ${{ steps.artifacts.outputs.artifact_dir }}/*.apk
