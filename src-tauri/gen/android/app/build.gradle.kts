@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
  
 plugins {
@@ -17,7 +18,15 @@ val releaseKeystorePath = System.getenv("ANDROID_KEYSTORE_PATH")
 val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val releaseKeystorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
-val hasReleaseSigning = !releaseKeystorePath.isNullOrBlank()
+val resolvedReleaseKeystoreFile = releaseKeystorePath?.let {
+    val candidate = File(it)
+    if (candidate.isAbsolute) {
+        candidate
+    } else {
+        rootProject.projectDir.resolve(it).normalize()
+    }
+}
+val hasReleaseSigning = resolvedReleaseKeystoreFile?.exists() == true
     && !releaseKeyAlias.isNullOrBlank()
     && !releaseKeystorePassword.isNullOrBlank()
     && !releaseKeyPassword.isNullOrBlank()
@@ -29,7 +38,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = file(releaseKeystorePath!!)
+                storeFile = resolvedReleaseKeystoreFile
                 storePassword = releaseKeystorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
