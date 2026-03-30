@@ -1,16 +1,11 @@
 <script setup lang="ts">
 import { useOverlayStore } from '../core/stores/overlay';
-import { showExitToast } from '../core/composables/useModalHistory';
 import VcpPrompt from './ui/VcpPrompt.vue';
 import ToastManager from './ui/ToastManager.vue';
-import SettingsView from '../features/settings/SettingsView.vue';
-import SyncView from '../features/settings/SyncView.vue';
+import ContextMenuSheet from './ui/ContextMenuSheet.vue';
+import FullScreenEditor from './ui/FullScreenEditor.vue';
 
 const overlayStore = useOverlayStore();
-
-const handleContextMenuBackdropClick = () => {
-  showExitToast.value = true;
-};
 
 const handlePromptConfirm = (val: string) => {
   if (overlayStore.promptConfig?.onConfirm) {
@@ -18,11 +13,18 @@ const handlePromptConfirm = (val: string) => {
   }
   overlayStore.closePrompt();
 };
+
+const handleEditorSave = (newContent: string) => {
+  if (overlayStore.editorConfig?.onSave) {
+    overlayStore.editorConfig.onSave(newContent);
+  }
+  overlayStore.closeEditor();
+};
 </script>
 
 <template>
-  <div class="fixed inset-0 pointer-events-none z-[120]">
-    <!-- 全局 Prompt -->
+  <div class="fixed inset-0 pointer-events-none">
+    <!-- 1. 全局基础 UI (Prompt/Toast) -->
     <VcpPrompt
       v-if="overlayStore.promptConfig"
       class="pointer-events-auto"
@@ -36,42 +38,33 @@ const handlePromptConfirm = (val: string) => {
     />
 
     <!-- 全局 Context Menu -->
-    <Transition name="fade">
-      <div v-if="overlayStore.contextMenuConfig" class="fixed inset-0 z-[200] bg-black/20 backdrop-blur-[1px] pointer-events-auto" @click="handleContextMenuBackdropClick">
-        <div class="absolute left-1/2 bottom-6 -translate-x-1/2 w-[calc(100%-24px)] max-w-sm rounded-3xl border border-black/5 dark:border-white/10 bg-white/92 dark:bg-[#111827]/92 backdrop-blur-xl shadow-2xl overflow-hidden"
-             @click.stop>
-          <div class="px-5 pt-5 pb-3 border-b border-black/5 dark:border-white/10">
-            <h3 class="text-sm font-black tracking-wide">{{ overlayStore.contextMenuConfig.title }}</h3>
-          </div>
-          <div class="p-2">
-            <button v-for="action in overlayStore.contextMenuConfig.actions" :key="action.label"
-                    @click="action.handler(); overlayStore.closeContextMenu()"
-                    class="w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-left transition-all"
-                    :class="action.danger ? 'text-red-500 hover:bg-red-500/10' : 'hover:bg-black/5 dark:hover:bg-white/5'">
-              <component :is="action.icon" class="w-4 h-4 shrink-0" />
-              <span class="text-sm font-semibold">{{ action.label }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </Transition>
+    <ContextMenuSheet
+      v-if="overlayStore.contextMenuConfig"
+      :is-open="!!overlayStore.contextMenuConfig"
+      :title="overlayStore.contextMenuConfig.title"
+      :actions="overlayStore.contextMenuConfig.actions"
+      @close="overlayStore.closeContextMenu()"
+      @action-click="overlayStore.closeContextMenu()"
+    />
 
-    <!-- Toast -->
+    <!-- 全局 FullScreenEditor -->
+    <FullScreenEditor
+      v-if="overlayStore.editorConfig"
+      class="pointer-events-auto"
+      :is-open="!!overlayStore.editorConfig"
+      :initial-value="overlayStore.editorConfig.initialValue"
+      @save="handleEditorSave"
+      @cancel="overlayStore.closeEditor()"
+      @update:isOpen="!$event && overlayStore.closeEditor()"
+    />
+
     <ToastManager class="pointer-events-auto" />
 
-    <!-- Settings & Sync -->
-    <SettingsView :is-open="overlayStore.isSettingsOpen" @close="overlayStore.closeSettings()" @open-sync="overlayStore.openSync()" />
-    <SyncView :is-open="overlayStore.isSyncOpen" @close="overlayStore.closeSync()" />
+    <!-- 2. 业务 Feature 投射目标 -->
+    <!-- 各 Feature 组件通过 <Teleport to="#vcp-feature-overlays"> 投射到此处 -->
+    <div id="vcp-feature-overlays" class="absolute inset-0 pointer-events-none"></div>
   </div>
 </template>
 
 <style scoped>
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.25s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
 </style>

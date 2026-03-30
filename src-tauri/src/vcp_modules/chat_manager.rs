@@ -187,13 +187,19 @@ pub async fn load_chat_history(
         if let Some(attachments) = &mut msg.attachments {
             for att in attachments {
                 if let Some(hash) = &att.hash {
-                    if let Some(real_path) = crate::vcp_modules::file_manager::resolve_attachment_path(&app_handle, hash, &att.name) {
+                    if let Some(real_path) =
+                        crate::vcp_modules::file_manager::resolve_attachment_path(
+                            &app_handle,
+                            hash,
+                            &att.name,
+                        )
+                    {
                         let new_src = format!("file://{}", real_path.replace("\\", "/"));
                         if att.src != new_src {
                             println!("[VCPCore] Rebasing attachment: {} -> {}", att.src, new_src);
                             att.src = new_src;
                         }
-                        
+
                         // 同时校准缩略图路径
                         let thumb_path = std::path::PathBuf::from(&real_path);
                         if let Some(parent) = thumb_path.parent() {
@@ -201,7 +207,10 @@ pub async fn load_chat_history(
                             t.push("thumbnails");
                             t.push(format!("{}_thumb.webp", hash));
                             if t.exists() {
-                                att.thumbnail_path = Some(format!("file://{}", t.to_string_lossy().replace("\\", "/")));
+                                att.thumbnail_path = Some(format!(
+                                    "file://{}",
+                                    t.to_string_lossy().replace("\\", "/")
+                                ));
                             }
                         }
                     }
@@ -432,8 +441,14 @@ pub async fn get_topic_delta(
                 .unwrap()
                 .as_secs();
 
-            if fp.mtime == current_mtime && fp.size == metadata.len() && fp.msg_count == current_history.len() {
-                println!("[VCPCore] Sync skipped for {}: fingerprint matches.", topic_id);
+            if fp.mtime == current_mtime
+                && fp.size == metadata.len()
+                && fp.msg_count == current_history.len()
+            {
+                println!(
+                    "[VCPCore] Sync skipped for {}: fingerprint matches.",
+                    topic_id
+                );
                 return Ok(TopicDelta {
                     added: vec![],
                     updated: vec![],
@@ -461,7 +476,7 @@ pub async fn get_topic_delta(
     let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
     let mut new_history: Vec<ChatMessage> =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    
+
     // 对新消息进行必要的 Rebasing 和清洗，确保比对时的一致性
     // (由于 get_topic_delta 通常用于同步，这里可以简化，但必须保证 ID 匹配)
 
@@ -481,7 +496,7 @@ pub async fn get_topic_delta(
     let history_len = new_history.len();
     for (idx, new_msg) in new_history.iter_mut().enumerate() {
         new_ids_set.insert(new_msg.id.clone());
-        
+
         match old_map.get(&new_msg.id) {
             Some(old_msg) => {
                 // 内容或角色发生变化视为更新。

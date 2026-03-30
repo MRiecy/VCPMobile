@@ -6596,6 +6596,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "url",
+ "urlencoding",
  "uuid",
  "walkdir",
 ]

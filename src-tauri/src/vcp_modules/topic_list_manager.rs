@@ -64,7 +64,7 @@ pub async fn create_topic(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    
+
     let id = if crate::vcp_modules::group_manager::is_group_item(&app_handle, &item_id) {
         format!("group_topic_{}", now)
     } else {
@@ -191,11 +191,13 @@ pub async fn delete_topic(
 
 #[tauri::command]
 pub async fn update_topic_title(
+    app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, DbState>,
-    _item_id: String,
+    item_id: String,
     topic_id: String,
     title: String,
 ) -> Result<(), String> {
+    // 1. 更新数据库
     sqlx::query("UPDATE topic_index SET title = ?, mtime = ? WHERE topic_id = ?")
         .bind(&title)
         .bind(
@@ -208,6 +210,18 @@ pub async fn update_topic_title(
         .execute(&db_state.pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 2. 更新 config.json
+    update_topic_in_main_config(&app_handle, &item_id, &topic_id, |topic| {
+        // 兼容 TopicInfo (name) 和 Topic (title/name)
+        if let Some(name) = topic.get_mut("name") {
+            *name = serde_json::Value::String(title.clone());
+        }
+        if let Some(t) = topic.get_mut("title") {
+            *t = serde_json::Value::String(title.clone());
+        }
+    })
+    .await?;
 
     Ok(())
 }
@@ -338,36 +352,76 @@ fn clean_summarized_title(raw: &str) -> String {
     }
 }
 
-async fn update_topic_in_main_config<R: Runtime>(
-    app_handle: &tauri::AppHandle<R>,
+async fn update_topic_in_main_config(
+    app_handle: &tauri::AppHandle,
     item_id: &str,
     topic_id: &str,
-    update_fn: impl Fn(&mut Value),
+    update_fn: impl Fn(&mut serde_json::Value),
 ) -> Result<(), String> {
-    let target_path = resolve_topic_dir(app_handle, item_id, topic_id).join("config.json");
+    if crate::vcp_modules::group_manager::is_group_item(app_handle, item_id) {
+        // 处理群组
+        let group_state =
+            app_handle.state::<crate::vcp_modules::group_manager::GroupManagerState>();
+        let mut config = crate::vcp_modules::group_manager::read_group_config(
+            app_handle.clone(),
+            group_state.clone(),
+            item_id.to_string(),
+        )
+        .await?;
 
-    if !target_path.exists() {
-        return Err(format!(
-            "Topic config not found for item '{}' topic '{}' at {:?}",
-            item_id, topic_id, target_path
-        ));
+        if let Some(topic) = config.topics.iter_mut().find(|t| t.id == topic_id) {
+            let mut topic_json = serde_json::to_value(&topic).map_err(|e| e.to_string())?;
+            update_fn(&mut topic_json);
+            *topic = serde_json::from_value(topic_json).map_err(|e| e.to_string())?;
+
+            // 写回磁盘
+            let config_path = crate::vcp_modules::group_manager::get_groups_base_path(app_handle)
+                .join(item_id)
+                .join("config.json");
+            let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+            fs::write(config_path, content).map_err(|e| e.to_string())?;
+            // 更新缓存
+            group_state.caches.insert(item_id.to_string(), config);
+        }
+    } else {
+        // 处理 Agent
+        let agent_state =
+            app_handle.state::<crate::vcp_modules::agent_config_manager::AgentConfigState>();
+        let mut config = crate::vcp_modules::agent_config_manager::read_agent_config(
+            app_handle.clone(),
+            agent_state.clone(),
+            item_id.to_string(),
+            Some(false),
+        )
+        .await?;
+
+        if let Some(topic) = config.topics.iter_mut().find(|t| t.id == topic_id) {
+            let mut topic_json = serde_json::to_value(&topic).map_err(|e| e.to_string())?;
+            update_fn(&mut topic_json);
+            *topic = serde_json::from_value(topic_json).map_err(|e| e.to_string())?;
+
+            crate::vcp_modules::agent_config_manager::write_agent_config(
+                app_handle.clone(),
+                agent_state,
+                item_id.to_string(),
+                config,
+            )
+            .await?;
+        }
     }
 
-    let content = fs::read_to_string(&target_path).map_err(|e| e.to_string())?;
-    let mut json: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    update_fn(&mut json);
-
-    let new_content = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-    let temp_path = target_path.with_extension("tmp");
-    fs::write(&temp_path, new_content).map_err(|e| e.to_string())?;
-    fs::rename(&temp_path, &target_path).map_err(|e| e.to_string())?;
-
-    log::debug!(
-        "[TopicListManager] Updated topic metadata for item '{}' topic '{}' at {:?}; item config path remains separate",
-        item_id,
-        topic_id,
-        target_path
-    );
+    // 同时尝试更新话题目录下的 config.json (如果存在)，保持兼容性
+    let topic_dir_config = resolve_topic_dir(app_handle, item_id, topic_id).join("config.json");
+    if topic_dir_config.exists() {
+        if let Ok(content) = fs::read_to_string(&topic_dir_config) {
+            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&content) {
+                update_fn(&mut json);
+                if let Ok(new_content) = serde_json::to_string_pretty(&json) {
+                    let _ = fs::write(&topic_dir_config, new_content);
+                }
+            }
+        }
+    }
 
     Ok(())
 }

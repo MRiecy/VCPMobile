@@ -29,7 +29,6 @@ use vcp_modules::group_manager::{
     create_group, get_groups, load_all_groups, read_group_config, GroupManagerState,
 };
 use vcp_modules::index_service::full_scan;
-use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
 use vcp_modules::ipc::group_handlers::handle_group_chat_message;
 use vcp_modules::ipc::settings_handlers::{
@@ -38,6 +37,7 @@ use vcp_modules::ipc::settings_handlers::{
 use vcp_modules::ipc::sync_handlers::{
     sync_download_file, sync_fetch_manifest, sync_get_local_manifest, sync_ping,
 };
+use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, init_model_manager, record_model_usage,

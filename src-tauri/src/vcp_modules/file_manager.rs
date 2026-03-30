@@ -27,13 +27,13 @@ pub struct AttachmentData {
 fn generate_thumbnail(original_path: &std::path::Path, hash: &str) -> Option<String> {
     let mut thumb_path = original_path.parent()?.to_path_buf();
     thumb_path.push("thumbnails");
-    
+
     if !thumb_path.exists() {
         let _ = fs::create_dir_all(&thumb_path);
     }
-    
+
     let thumb_file_path = thumb_path.join(format!("{}_thumb.webp", hash));
-    
+
     // 如果缩略图已存在，直接返回
     if thumb_file_path.exists() {
         return Some(format!("file://{}", thumb_file_path.to_string_lossy()));
@@ -51,7 +51,10 @@ fn generate_thumbnail(original_path: &std::path::Path, hash: &str) -> Option<Str
 
 /// 内部辅助函数：校验路径安全性，防止路径遍历攻击
 fn ensure_safe_path(app_handle: &AppHandle, path: &std::path::Path) -> Result<(), String> {
-    let config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     // 允许访问 App 配置目录及其子目录
     if path.starts_with(&config_dir) {
         Ok(())
@@ -135,7 +138,10 @@ pub async fn store_file(
 ) -> Result<AttachmentData, String> {
     // 0. OOM 防御：限制 store_file 只能处理 20MB 以下的文件
     if file_bytes.len() > 20 * 1024 * 1024 {
-        return Err("文件过大，请使用文件选取器 (pick_and_store_attachment) 以流式上传 (Limit: 20MB)".to_string());
+        return Err(
+            "文件过大，请使用文件选取器 (pick_and_store_attachment) 以流式上传 (Limit: 20MB)"
+                .to_string(),
+        );
     }
 
     // 1. 计算 SHA256 哈希值以确保唯一性
@@ -204,7 +210,7 @@ pub async fn store_file(
 
     // 提取文本内容 (如果适用)
     let extracted_text = try_extract_text(&internal_file_path, &mime_type);
-    
+
     // 生成缩略图 (如果适用)
     let thumbnail_path = if mime_type.starts_with("image/") {
         generate_thumbnail(&internal_file_path, &hash)
@@ -444,7 +450,7 @@ pub async fn get_attachment_real_path(
 pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String> {
     let clean_path = path.replace("file://", "");
     let path_buf = std::path::PathBuf::from(&clean_path);
-    
+
     // 安全校验：禁止打开系统敏感路径
     if let Err(e) = ensure_safe_path(&app_handle, &path_buf) {
         return Err(e);
@@ -452,7 +458,10 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
 
     // 使用 tauri-plugin-opener 的原生能力
     use tauri_plugin_opener::OpenerExt;
-    app_handle.opener().open_path(clean_path, Option::<String>::None).map_err(|e| e.to_string())
+    app_handle
+        .opener()
+        .open_path(clean_path, Option::<String>::None)
+        .map_err(|e| e.to_string())
 }
 
 /// 读取本地文件并转换为 Base64 字符串 (用于多模态 Payload)
@@ -533,9 +542,9 @@ pub async fn cleanup_orphaned_attachments(
     // 2. 深度扫描 topics 目录下的所有 history.json 提取正在使用的 hash
     let mut topics_dir = config_root.clone();
     topics_dir.push("UserData"); // 适配桌面端 UserData 目录
-    
+
     let mut used_hashes = std::collections::HashSet::new();
-    
+
     // 使用简单的递归目录遍历
     fn scan_dir(dir: &std::path::Path, used: &mut std::collections::HashSet<String>) {
         if let Ok(entries) = fs::read_dir(dir) {
@@ -555,7 +564,7 @@ pub async fn cleanup_orphaned_attachments(
             }
         }
     }
-    
+
     scan_dir(&topics_dir, &mut used_hashes);
 
     // 3. 找出未引用的哈希并删除
@@ -570,18 +579,20 @@ pub async fn cleanup_orphaned_attachments(
                     freed_size += meta.len();
                 }
                 let _ = fs::remove_file(path);
-                
+
                 // 同时删除可能的缩略图
                 if let Some(parent) = path.parent() {
-                    let thumb_path = parent.join("thumbnails").join(format!("{}_thumb.webp", hash));
+                    let thumb_path = parent
+                        .join("thumbnails")
+                        .join(format!("{}_thumb.webp", hash));
                     if thumb_path.exists() {
                         let _ = fs::remove_file(thumb_path);
                     }
                 }
-                
+
                 deleted_count += 1;
             }
-            
+
             // 从索引库中移除
             let _ = sqlx::query("DELETE FROM attachment_index WHERE hash = ?")
                 .bind(&hash)
@@ -590,6 +601,9 @@ pub async fn cleanup_orphaned_attachments(
         }
     }
 
-    Ok(format!("清理完成：删除了 {} 个孤儿附件，释放了 {:.2} MB 空间", 
-        deleted_count, (freed_size as f64) / 1024.0 / 1024.0))
+    Ok(format!(
+        "清理完成：删除了 {} 个孤儿附件，释放了 {:.2} MB 空间",
+        deleted_count,
+        (freed_size as f64) / 1024.0 / 1024.0
+    ))
 }

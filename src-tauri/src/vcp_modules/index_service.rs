@@ -1,12 +1,25 @@
 use hex;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
+
+#[derive(Clone, Serialize)]
+struct TopicIndexUpdatePayload {
+    topic_id: String,
+    agent_id: String,
+    title: String,
+    msg_count: i32,
+    unread_count: i32,
+    created_at: i64,
+    locked: bool,
+    unread: bool,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum IndexedItemKind {
@@ -28,7 +41,6 @@ struct IndexedHistoryTarget {
     item_id: String,
     topic_id: String,
     history_path: PathBuf,
-    topic_config_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -43,11 +55,15 @@ struct TopicMetadata {
     title: Option<String>,
     locked: Option<bool>,
     unread: Option<bool>,
+    created_at: Option<i64>,
 }
 
 impl TopicMetadata {
     fn is_empty(&self) -> bool {
-        self.title.is_none() && self.locked.is_none() && self.unread.is_none()
+        self.title.is_none()
+            && self.locked.is_none()
+            && self.unread.is_none()
+            && self.created_at.is_none()
     }
 
     fn merge_from(&mut self, other: TopicMetadata) {
@@ -60,6 +76,9 @@ impl TopicMetadata {
         if self.unread.is_none() {
             self.unread = other.unread;
         }
+        if self.created_at.is_none() {
+            self.created_at = other.created_at;
+        }
     }
 }
 
@@ -67,7 +86,6 @@ impl TopicMetadata {
 struct MetadataResolution {
     metadata: TopicMetadata,
     source: &'static str,
-    missing_layers: Vec<&'static str>,
 }
 
 pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<(), String> {
@@ -84,7 +102,7 @@ pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<()
             continue;
         }
 
-        info!("[IndexService] Scanning directory: {:?}", data_dir);
+        info!("[IndexService] Starting background scan: {:?}", data_dir);
 
         for entry in WalkDir::new(&data_dir)
             .max_depth(4)
@@ -93,13 +111,14 @@ pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<()
         {
             let path = entry.path();
             if path.file_name().and_then(|n| n.to_str()) == Some("history.json") {
-                if let Err(e) = index_history_file(&config_dir, path, pool).await {
+                if let Err(e) = index_history_file(app_handle, &config_dir, path, pool).await {
                     error!("[IndexService] Failed to index {:?}: {}", path, e);
                 }
             }
         }
     }
 
+    info!("[IndexService] Background scan completed.");
     Ok(())
 }
 
@@ -109,14 +128,21 @@ fn parse_history_target(path: &Path) -> Option<IndexedHistoryTarget> {
         return None;
     }
 
-    let topic_id = components.get(components.len() - 2)?.as_os_str().to_str()?.to_string();
-    let item_id = components.get(components.len() - 4)?.as_os_str().to_str()?.to_string();
+    let topic_id = components
+        .get(components.len() - 2)?
+        .as_os_str()
+        .to_str()?
+        .to_string();
+    let item_id = components
+        .get(components.len() - 4)?
+        .as_os_str()
+        .to_str()?
+        .to_string();
 
     Some(IndexedHistoryTarget {
         item_id,
         topic_id,
         history_path: path.to_path_buf(),
-        topic_config_path: path.with_file_name("config.json"),
     })
 }
 
@@ -125,7 +151,10 @@ fn resolve_item_identity(app_config_dir: &Path, item_id: &str) -> ItemIdentity {
         .join("AgentGroups")
         .join(item_id)
         .join("config.json");
-    let agent_config_path = app_config_dir.join("Agents").join(item_id).join("config.json");
+    let agent_config_path = app_config_dir
+        .join("Agents")
+        .join(item_id)
+        .join("config.json");
 
     if group_config_path.exists() {
         ItemIdentity {
@@ -148,36 +177,17 @@ fn resolve_item_identity(app_config_dir: &Path, item_id: &str) -> ItemIdentity {
     }
 }
 
-async fn load_topic_dir_metadata(topic_config_path: &Path) -> Result<Option<TopicMetadata>, String> {
-    if !topic_config_path.exists() {
-        return Ok(None);
-    }
-
-    let topic_content = tokio::fs::read_to_string(topic_config_path)
-        .await
-        .map_err(|e| e.to_string())?;
-    let topic_json = serde_json::from_str::<serde_json::Value>(&topic_content)
-        .map_err(|e| e.to_string())?;
-
-    Ok(Some(TopicMetadata {
-        title: topic_json
-            .get("name")
-            .or(topic_json.get("title"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        locked: topic_json.get("locked").and_then(|v| v.as_bool()),
-        unread: topic_json.get("unread").and_then(|v| v.as_bool()),
-    }))
-}
-
-fn extract_topic_entry_metadata(item_json: &serde_json::Value, topic_id: &str) -> Option<TopicMetadata> {
+fn extract_topic_entry_metadata(
+    item_json: &serde_json::Value,
+    topic_id: &str,
+) -> Option<TopicMetadata> {
     item_json
         .get("topics")
         .and_then(|v| v.as_array())
         .and_then(|topics| {
-            topics.iter().find(|topic| {
-                topic.get("id").and_then(|v| v.as_str()) == Some(topic_id)
-            })
+            topics
+                .iter()
+                .find(|topic| topic.get("id").and_then(|v| v.as_str()) == Some(topic_id))
         })
         .map(|topic_entry| TopicMetadata {
             title: topic_entry
@@ -187,11 +197,7 @@ fn extract_topic_entry_metadata(item_json: &serde_json::Value, topic_id: &str) -
                 .map(|s| s.to_string()),
             locked: topic_entry
                 .get("locked")
-                .or_else(|| {
-                    topic_entry
-                        .get("extra")
-                        .and_then(|v| v.get("locked"))
-                })
+                .or_else(|| topic_entry.get("extra").and_then(|v| v.get("locked")))
                 .or_else(|| {
                     topic_entry
                         .get("extra_fields")
@@ -200,17 +206,17 @@ fn extract_topic_entry_metadata(item_json: &serde_json::Value, topic_id: &str) -
                 .and_then(|v| v.as_bool()),
             unread: topic_entry
                 .get("unread")
-                .or_else(|| {
-                    topic_entry
-                        .get("extra")
-                        .and_then(|v| v.get("unread"))
-                })
+                .or_else(|| topic_entry.get("extra").and_then(|v| v.get("unread")))
                 .or_else(|| {
                     topic_entry
                         .get("extra_fields")
                         .and_then(|v| v.get("unread"))
                 })
                 .and_then(|v| v.as_bool()),
+            created_at: topic_entry
+                .get("createdAt")
+                .or_else(|| topic_entry.get("created_at"))
+                .and_then(|v| v.as_i64()),
         })
 }
 
@@ -225,8 +231,8 @@ async fn load_item_config_metadata(
     let item_content = tokio::fs::read_to_string(&identity.config_path)
         .await
         .map_err(|e| e.to_string())?;
-    let item_json = serde_json::from_str::<serde_json::Value>(&item_content)
-        .map_err(|e| e.to_string())?;
+    let item_json =
+        serde_json::from_str::<serde_json::Value>(&item_content).map_err(|e| e.to_string())?;
 
     Ok(extract_topic_entry_metadata(&item_json, topic_id))
 }
@@ -239,52 +245,26 @@ async fn resolve_topic_metadata(
         title: None,
         locked: None,
         unread: None,
+        created_at: None,
     };
     let mut source = "history directory fallback";
-    let mut missing_layers = Vec::new();
-
-    match load_topic_dir_metadata(&target.topic_config_path).await? {
-        Some(topic_dir_metadata) => {
-            metadata.merge_from(topic_dir_metadata);
-            source = "topic directory config";
-        }
-        None => missing_layers.push("topic directory config"),
-    }
 
     match load_item_config_metadata(identity, &target.topic_id).await? {
         Some(item_metadata) => {
-            let had_primary = !metadata.is_empty();
             metadata.merge_from(item_metadata);
-            if !had_primary && !metadata.is_empty() {
-                source = match identity.kind {
-                    IndexedItemKind::Agent => "agent config topics[]",
-                    IndexedItemKind::Group => "group config topics[]",
-                };
-            }
+            source = match identity.kind {
+                IndexedItemKind::Agent => "agent config topics[]",
+                IndexedItemKind::Group => "group config topics[]",
+            };
         }
-        None => {
-            if identity.config_exists {
-                missing_layers.push(match identity.kind {
-                    IndexedItemKind::Agent => "agent config topics[]",
-                    IndexedItemKind::Group => "group config topics[]",
-                });
-            } else {
-                missing_layers.push(match identity.kind {
-                    IndexedItemKind::Agent => "agent config missing",
-                    IndexedItemKind::Group => "group config missing",
-                });
-            }
-        }
+        None => {}
     }
 
-    Ok(MetadataResolution {
-        metadata,
-        source,
-        missing_layers,
-    })
+    Ok(MetadataResolution { metadata, source })
 }
 
 pub async fn index_history_file(
+    app_handle: &AppHandle,
     app_config_dir: &Path,
     path: &Path,
     pool: &Pool<Sqlite>,
@@ -314,14 +294,13 @@ pub async fn index_history_file(
         );
     }
 
-    info!(
-        "[IndexService] item_kind={} item_id={} topic_id={} topic_source={} metadata_source={} missing_layers={:?}",
+    debug!(
+        "[IndexService] item_kind={} item_id={} topic_id={} topic_source={} metadata_source={}",
         identity.kind.as_str(),
         target.item_id,
         target.topic_id,
         topic_id_source,
-        metadata_resolution.source,
-        metadata_resolution.missing_layers
+        metadata_resolution.source
     );
 
     // Check if we need to re-index based on mtime, and retain the old title if any
@@ -384,8 +363,17 @@ pub async fn index_history_file(
         .clone()
         .or(existing_title)
         .unwrap_or_else(|| target.topic_id.clone());
-    let locked = metadata_resolution.metadata.locked.unwrap_or(false);
+
+    // 兼容性处理：Agent 默认 locked=true, unread=false; Group 默认 false
+    let locked = metadata_resolution
+        .metadata
+        .locked
+        .unwrap_or_else(|| match identity.kind {
+            IndexedItemKind::Agent => true,
+            IndexedItemKind::Group => false,
+        });
     let unread = metadata_resolution.metadata.unread.unwrap_or(false);
+    let created_at = metadata_resolution.metadata.created_at.unwrap_or(0);
 
     sqlx::query(
         "INSERT INTO topic_index (topic_id, agent_id, title, mtime, file_hash, msg_count, locked, unread, unread_count)
@@ -411,6 +399,21 @@ pub async fn index_history_file(
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 发送增量更新事件到前端
+    let _ = app_handle.emit(
+        "topic-index-updated",
+        TopicIndexUpdatePayload {
+            topic_id: target.topic_id.clone(),
+            agent_id: target.item_id.clone(),
+            title: title.clone(),
+            msg_count,
+            unread_count: smart_unread_count,
+            created_at,
+            locked,
+            unread,
+        },
+    );
 
     info!(
         "[IndexService] indexed item_kind={} item_id={} topic_id={} messages={} title={:?}",

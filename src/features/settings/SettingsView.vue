@@ -108,65 +108,67 @@ watch(() => props.isOpen, (val: boolean) => {
 </script>
 
 <template>
-  <Transition name="fade">
-    <div v-if="props.isOpen" class="settings-view fixed inset-0 flex flex-col bg-secondary-bg text-primary-text pointer-events-auto">
-      <!-- Header -->
-        <header class="p-4 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+20px)] pb-6 shrink-0">
-          <h2 class="text-xl font-bold">全局设置</h2>
-          <button @click="closeSettings" class="p-2.5 bg-white/10 rounded-full active:scale-90 transition-all flex items-center justify-center">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-          </button>
-        </header>
+  <Teleport to="#vcp-feature-overlays" :disabled="!props.isOpen">
+    <Transition name="fade">
+      <div v-if="props.isOpen" class="settings-view fixed inset-0 flex flex-col bg-secondary-bg text-primary-text pointer-events-auto">
+        <!-- Header -->
+          <header class="p-4 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+20px)] pb-6 shrink-0">
+            <h2 class="text-xl font-bold">全局设置</h2>
+            <button @click="closeSettings" class="p-2.5 bg-white/10 rounded-full active:scale-90 transition-all flex items-center justify-center">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
+          </header>
 
-        <!-- Scrollable Form Area -->
-        <div v-if="loading" class="flex-1 flex items-center justify-center opacity-60 text-sm font-bold tracking-widest uppercase">
-          正在加载设置...
-        </div>
-        <div v-else class="flex-1 overflow-y-auto p-5 space-y-8 pb-safe">
-          <UserProfileSection :settings="settings" />
+          <!-- Scrollable Form Area -->
+          <div v-if="loading" class="flex-1 flex items-center justify-center opacity-60 text-sm font-bold tracking-widest uppercase">
+            正在加载设置...
+          </div>
+          <div v-else class="flex-1 overflow-y-auto p-5 space-y-8 pb-safe">
+            <UserProfileSection :settings="settings" />
 
-          <SyncSettingsSection :settings="settings" @save-request="saveSettings" @open-sync="openSyncView" />
+            <SyncSettingsSection :settings="settings" @save-request="saveSettings" @open-sync="openSyncView" />
 
-          <VcpCoreSettingsSection :settings="settings" @save-request="saveSettings" />
+            <VcpCoreSettingsSection :settings="settings" @save-request="saveSettings" />
 
-          <AiLogicSettingsSection :settings="settings" />
+            <AiLogicSettingsSection :settings="settings" />
 
-          <TopicSummarySection :settings="settings" @open-model-selector="showSummaryModelSelector = true" />
+            <TopicSummarySection :settings="settings" @open-model-selector="showSummaryModelSelector = true" />
 
-          <MaintenanceSection />
+            <MaintenanceSection />
 
           <section class="space-y-4">
-            <div class="flex items-center gap-2 px-1">
-              <div class="w-1 h-4 bg-orange-500 rounded-full"></div>
-              <h3 class="text-xs font-black uppercase tracking-[0.2em] opacity-50 dark:opacity-40">视觉长廊</h3>
+              <div class="flex items-center gap-2 px-1">
+                <div class="w-1 h-4 bg-orange-500 rounded-full"></div>
+                <h3 class="text-xs font-black uppercase tracking-[0.2em] opacity-50 dark:opacity-40">视觉长廊</h3>
+              </div>
+              <ThemePicker />
+            </section>
+
+            <div class="h-4"></div>
+
+            <!-- 保存按钮 -->
+            <button @click="saveSettings"
+                    class="w-full py-4.5 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-[1.25rem] font-black uppercase tracking-widest text-xs shadow-xl shadow-blue-900/20">
+                    保存并应用变更
+            </button>
+
+            <!-- 版本信息 -->
+            <div class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest">
+              VCP MOBILE · PROJECT AVATAR<br/>INTERNAL RELEASE 2026.03.13
             </div>
-            <ThemePicker />
-          </section>
-
-          <div class="h-4"></div>
-
-          <!-- 保存按钮 -->
-          <button @click="saveSettings"
-                  class="w-full py-4.5 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-[1.25rem] font-black uppercase tracking-widest text-xs shadow-xl shadow-blue-900/20">
-                  保存并应用变更
-          </button>
-
-          <!-- 版本信息 -->
-          <div class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest">
-            VCP MOBILE · PROJECT AVATAR<br/>INTERNAL RELEASE 2026.03.13
           </div>
-        </div>
 
-        <!-- 话题总结模型选择器 -->
-        <ModelSelector
-          :model-value="showSummaryModelSelector"
-          @update:model-value="showSummaryModelSelector = $event"
-          :current-model="settings.topicSummaryModel"
-          title="选择总结专用模型"
-          @select="onSummaryModelSelect"
-        />
-    </div>
-  </Transition>
+          <!-- 话题总结模型选择器 -->
+          <ModelSelector
+            :model-value="showSummaryModelSelector"
+            @update:model-value="showSummaryModelSelector = $event"
+            :current-model="settings.topicSummaryModel"
+            title="选择总结专用模型"
+            @select="onSummaryModelSelect"
+          />
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>

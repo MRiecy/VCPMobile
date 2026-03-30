@@ -25,8 +25,12 @@ const currentTopics = computed<TopicViewModel[]>(() => {
   return topicListStore.filteredTopics as TopicViewModel[];
 });
 
-const showTopicContextMenu = (topic: Topic) => {
-  const itemId = chatStore.currentSelectedItem?.id || 'default_agent';
+const showTopicContextMenu = (topicId: string) => {
+  // 每次打开菜单时，从 store 中获取最新的 topic 状态，避免闭包捕获旧状态
+  const topic = topicListStore.topics.find(t => t.id === topicId);
+  if (!topic) return;
+
+  const itemId = topic.agentId || topicListStore.currentAgentId || chatStore.currentSelectedItem?.id || 'default_agent';
   
   overlayStore.openContextMenu([
     {
@@ -114,24 +118,42 @@ const selectTopic = async (itemId: string, topicId: string, topicName: string) =
   </div>
   
   <div v-else v-for="topic in currentTopics" :key="topic.id"
-       @click="selectTopic(chatStore.currentSelectedItem?.id || 'default_agent', topic.id, topic.name)"
-       v-longpress="() => showTopicContextMenu(topic)"
+       @click="selectTopic(topic.agentId || chatStore.currentSelectedItem?.id || 'default_agent', topic.id, topic.name)"
+       v-longpress="() => showTopicContextMenu(topic.id)"
        class="relative p-3 glass-panel rounded-xl flex items-center gap-3 active:scale-95 transition-all border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
        :class="chatStore.currentTopicId === topic.id ? 'border-green-500/50 bg-green-500/10 dark:bg-green-500/20' : 'border-black/5 dark:border-white/5'">
     
+    <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
     <div v-if="topic.unreadCount === -1 || topic.unread"
-         class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse"
+         class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse shrink-0"
          style="background: #ff6b6b;"></div>
+    <div v-else-if="topic.unreadCount && topic.unreadCount > 0" 
+         class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full border-2 border-white dark:border-gray-900 text-[9px] font-bold text-white flex items-center justify-center z-10 shadow-sm"
+         style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);">
+      {{ topic.unreadCount > 99 ? '99+' : topic.unreadCount }}
+    </div>
 
-    <div class="w-10 h-10 rounded-xl bg-black/5 dark:bg-white/5 flex items-center justify-center shrink-0 border border-black/5 dark:border-white/5">
-      <svg v-if="topic.locked" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="opacity-40"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-      <span v-else class="text-[10px] font-bold opacity-30">{{ topic.messageCount || 0 }}</span>
+    <div class="relative w-10 h-10 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+      </svg>
     </div>
     <div class="flex flex-col overflow-hidden flex-1">
-      <span class="font-bold text-sm truncate text-primary-text">{{ topic.name }}</span>
-      <span class="text-[9px] opacity-40 uppercase tracking-tighter">
-        {{ new Date(topic.createdAt).toLocaleDateString() }}
-      </span>
+      <div class="flex justify-between items-center w-full">
+        <span class="font-bold text-sm truncate text-primary-text">{{ topic.name }}</span>
+        <span v-if="topic.messageCount !== undefined" 
+              class="text-[11px] font-bold shrink-0 ml-2 px-[8px] py-[3px] rounded-[10px]"
+              style="background-color: var(--accent-bg); color: var(--highlight-text); font-family: 'Arial Rounded MT Bold', 'Helvetica Rounded', Arial, sans-serif;">
+          {{ topic.messageCount }}
+        </span>
+      </div>
+      <span class="text-[9px] opacity-40 truncate font-mono tracking-tighter">{{ topic.id }}</span>
+    </div>
+
+    <!-- 解锁状态标签 (桌面端还原) -->
+    <div v-if="!topic.locked" class="absolute bottom-1 right-2 flex items-center gap-[2px] bg-black/5 dark:bg-white/10 px-1 py-[1px] rounded text-[9px] text-yellow-600 dark:text-yellow-400 border border-yellow-600/20 dark:border-yellow-400/20">
+      <LockOpen :size="8" />
+      <span class="scale-90 font-bold uppercase tracking-tighter leading-none pt-[1px]">Unlock</span>
     </div>
   </div>
 </template>

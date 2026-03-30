@@ -97,14 +97,20 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         error!("[Lifecycle] Watcher init failed: {}", e);
     }
 
-    // 5. 全量扫描 (建立最终一致性)
-    info!("[Lifecycle] Running initial full scan...");
-    if let Err(e) = full_scan(&handle, &pool).await {
-        error!("[Lifecycle] Initial scan failed: {}", e);
-    }
+    // 5. 全量扫描 (建立最终一致性) - 异步执行，不阻塞启动
+    info!("[Lifecycle] Spawning background full scan...");
+    let scan_handle = {
+        let h = handle.clone();
+        let p = pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = full_scan(&h, &p).await {
+                error!("[Lifecycle] Background scan failed: {}", e);
+            }
+        })
+    };
 
     // 等待并行任务完成 (非阻塞)
-    let _ = tokio::join!(emoticon_task, model_task);
+    let _ = tokio::join!(emoticon_task, model_task, scan_handle);
 
     // 6. 标记为就绪
     *lifecycle.status.write().await = CoreStatus::Ready;

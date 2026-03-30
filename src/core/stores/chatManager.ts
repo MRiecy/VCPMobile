@@ -15,7 +15,7 @@ import { useTopicStore } from './topicListManager';
 export interface Attachment {
   type: string;
   src: string;
-  resolvedSrc?: string; // 用于 WebView 渲染的 asset:// 路径
+  resolvedSrc?: string; // 已在 Rust 端预转换的 asset:// 路径
   name: string;
   size: number;
   hash?: string;
@@ -31,23 +31,34 @@ export interface ChatMessage {
   name?: string;
   content: string;
   displayedContent?: string; // 用于平滑流式显示的文本内容
-  processedContent?: string; // 缓存正则清洗后的内容
+  processedContent?: string; // Rust 正则清洗后的成品内容
   timestamp: number;
-  isThinking?: boolean; // 修正为驼峰命名，对齐桌面端 history.json
-  avatarUrl?: string;   // 桌面端扁平化传递的头像路径
-  avatarColor?: string; // 桌面端扁平化传递的头像颜色
-  resolvedAvatarUrl?: string; // 用于 WebView 渲染的 asset:// 路径
+  isThinking?: boolean;
+  avatarUrl?: string;
+  avatarColor?: string; // 兼容旧版历史记录中的气泡颜色
+  resolvedAvatarUrl?: string; // 已在 Rust 端预转换的 asset:// 路径
   attachments?: Attachment[];
   extra?: Record<string, any>;
 }
 
 /**
- * TopicDelta 接口定义，用于增量同步
+ * TopicDelta 接口定义
  */
 export interface TopicDelta {
   added: ChatMessage[];
   updated: ChatMessage[];
   deleted_ids: string[];
+  sync_skipped?: boolean;
+}
+
+/**
+ * TopicFingerprint 接口定义
+ */
+export interface TopicFingerprint {
+  topic_id: string;
+  mtime: number;
+  size: number;
+  msg_count: number;
 }
 
 /**
@@ -61,10 +72,13 @@ export const useChatManagerStore = defineStore('chatManager', () => {
   const loading = ref(false);
   const streamingMessageId = ref<string | null>(null);
   const isGroupGenerating = ref(false);
-  
+
+  // 用于高性能同步的指纹缓存
+  const lastTopicFingerprint = ref<TopicFingerprint | null>(null);
+
   // 暂存的附件列表，准备随下一条消息发送
   const stagedAttachments = ref<Attachment[]>([]);
-  
+
   const streamManager = useStreamManagerStore();
   const settingsStore = useSettingsStore();
   const assistantStore = useAssistantStore();
@@ -73,7 +87,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
 
   // 用于拦截重新生成时的输入框补全
   const editMessageContent = ref('');
-  
+
   // 用于取消监听的清理函数
   let unlistenStreamPromise: Promise<UnlistenFn> | null = null;
   let unlistenFileChangePromise: Promise<UnlistenFn> | null = null;
@@ -84,10 +98,10 @@ export const useChatManagerStore = defineStore('chatManager', () => {
    */
   const summarizeTopic = async () => {
     if (!currentTopicId.value || !currentSelectedItem.value?.id) return;
-    
+
     const topicId = currentTopicId.value;
     const itemId = currentSelectedItem.value.id;
-    
+
     // 只有“未命名”话题且消息数达到阈值才总结 (桌面端策略)
     const topic = topicStore.topics.find(t => t.id === topicId);
     const isUnnamed = !topic || topic.name.includes('新话题') || topic.name.includes('topic_') || topic.name.includes('group_topic_') || topic.name === '主要群聊';
@@ -102,7 +116,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
           topicId,
           agentName
         });
-        
+
         if (newTitle) {
           console.log(`[ChatManager] AI Summarized Title: ${newTitle}`);
           await topicStore.updateTopicTitle(itemId, topicId, newTitle);
@@ -118,18 +132,20 @@ export const useChatManagerStore = defineStore('chatManager', () => {
    */
   const resolveMessageAssets = (msg: ChatMessage) => {
     // 处理头像
-    if (msg.avatarUrl && !msg.avatarUrl.startsWith('http') && !msg.avatarUrl.startsWith('data:')) {
+    if (msg.avatarUrl && !msg.avatarUrl.startsWith('http') &&
+      !msg.avatarUrl.startsWith('data:')) {
       try {
         msg.resolvedAvatarUrl = convertFileSrc(msg.avatarUrl);
       } catch (err) {
         console.warn(`[ChatManager] Failed to convert avatar path for message ${msg.id}:`, err);
       }
     }
-    
+
     // 处理附件 (仅处理图片类型)
     if (msg.attachments && msg.attachments.length > 0) {
       msg.attachments.forEach((att) => {
-        if (att.type.startsWith('image/') && att.src && !att.src.startsWith('http') && !att.src.startsWith('data:')) {
+        if (att.type.startsWith('image/') && att.src && !att.src.startsWith('http') &&
+          !att.src.startsWith('data:')) {
           try {
             att.resolvedSrc = convertFileSrc(att.src);
           } catch (err) {
@@ -147,8 +163,10 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     try {
       // 调用 Rust 端原生的文件选择和存储逻辑
       const attachmentData = await invoke<any>('pick_and_store_attachment');
+
       if (attachmentData) {
         console.log('[ChatManager] Attachment picked and stored:', attachmentData);
+
         // 将后端返回的元数据转为前端格式并推入暂存区
         stagedAttachments.value.push({
           type: attachmentData.mime_type,
@@ -160,7 +178,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       }
     } catch (e) {
       console.error('[ChatManager] Failed to pick or store attachment:', e);
-      // TODO: 可以在这里添加 Toast 提示用户
+      // TODO: 添加 Toast 提示用户
     }
   };
 
@@ -192,10 +210,10 @@ export const useChatManagerStore = defineStore('chatManager', () => {
   };
 
   /**
-   * 加载聊天历史 (支持分页加载)
+   * 加载聊天历史 (已优化：数据在 Rust 端完成预处理)
    */
   const loadHistory = async (itemId: string, topicId: string, limit: number = 50, offset: number = 0) => {
-    console.log(`[ChatManager] Loading history for ${itemId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`);
+    console.log(`[ChatManager] Loading history for ${itemId}, topic: ${topicId}`);
     loading.value = true;
     try {
       const history = await invoke<ChatMessage[]>('load_chat_history', {
@@ -204,17 +222,15 @@ export const useChatManagerStore = defineStore('chatManager', () => {
         limit,
         offset
       });
-      
+
       if (offset === 0) {
         currentChatHistory.value = history;
       } else {
-        // 如果是加载更早的历史记录，我们将其前置拼接到当前历史记录的最前面
         currentChatHistory.value = [...history, ...currentChatHistory.value];
       }
-      
+
       currentTopicId.value = topicId;
-      
-      // 默认选中项初始化 (如果尚未设置)
+
       if (!currentSelectedItem.value || currentSelectedItem.value.id !== itemId) {
         currentSelectedItem.value = { id: itemId };
       }
@@ -224,8 +240,14 @@ export const useChatManagerStore = defineStore('chatManager', () => {
         resolveMessageAssets(msg);
         await processRegex(msg, itemId);
       }));
-      
-      console.log(`[ChatManager] History loaded: ${history.length} messages`);
+
+      // 获取并更新初始指纹，用于后续同步
+      lastTopicFingerprint.value = await invoke<TopicFingerprint>('get_topic_fingerprint', {
+        itemId,
+        topicId
+      });
+
+      console.log(`[ChatManager] History loaded: ${history.length} messages (Pre-processed by Rust)`);
     } catch (e) {
       console.error('[ChatManager] Failed to load history:', e);
     } finally {
@@ -235,24 +257,25 @@ export const useChatManagerStore = defineStore('chatManager', () => {
 
   /**
    * 保存聊天历史
-   * 在保存前会发出 signal_internal_save 信号，防止文件监听器触发自循环同步
    */
   const saveHistory = async () => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
-    
+
     const itemId = currentSelectedItem.value.id;
     const topicId = currentTopicId.value;
 
     try {
-      console.log(`[ChatManager] Internal save triggered for ${itemId}/${topicId}`);
-      // 1. 发出内部保存信号 (Rust 端会记录时间戳)
       await invoke('signal_internal_save');
-      
-      // 2. 执行保存操作
       await invoke('save_chat_history', {
         itemId,
         topicId,
         history: currentChatHistory.value,
+      });
+
+      // 保存后立即刷新指纹，防止刚刚保存的动作触发外部同步
+      lastTopicFingerprint.value = await invoke<TopicFingerprint>('get_topic_fingerprint', {
+        itemId,
+        topicId
       });
     } catch (e) {
       console.error('[ChatManager] Failed to save history:', e);
@@ -260,8 +283,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
   };
 
   /**
-   * 增量同步聊天历史 (Delta Sync)
-   * 对应桌面端的 syncHistoryFromFile 逻辑
+   * 增量同步聊天历史 (已优化：指纹预检 + Rust 预处理)
    */
   const syncHistoryWithDelta = async () => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
@@ -270,69 +292,83 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     const topicId = currentTopicId.value;
 
     try {
-      console.log(`[ChatManager] Syncing delta for topic: ${topicId}`);
-      
-      // 获取 Rust 端计算出的差异块
+      // 1. 获取最新指纹并与本地缓存比对
+      const newFingerprint = await invoke<TopicFingerprint>('get_topic_fingerprint', {
+        itemId,
+        topicId
+      });
+
+      if (lastTopicFingerprint.value &&
+        newFingerprint.mtime === lastTopicFingerprint.value.mtime &&
+        newFingerprint.size === lastTopicFingerprint.value.size &&
+        newFingerprint.msg_count === currentChatHistory.value.length) {
+        return;
+      }
+
+      console.log(`[ChatManager] Fingerprint mismatch, calculating delta for topic: ${topicId}`);
+
+      // 2. 获取 Rust 端计算出的差异块
       const delta = await invoke<TopicDelta>('get_topic_delta', {
         itemId,
         topicId,
         currentHistory: currentChatHistory.value,
+        fingerprint: lastTopicFingerprint.value
       });
 
-      if (delta.added.length === 0 && delta.updated.length === 0 && delta.deleted_ids.length === 0) {
-        console.log('[ChatManager] No changes detected, sync skipped.');
+      if (delta.sync_skipped) {
+        lastTopicFingerprint.value = newFingerprint;
         return;
       }
 
-      // 1. 处理删除的消息
+      if (delta.added.length === 0 && delta.updated.length === 0 && delta.deleted_ids.length === 0) {
+        lastTopicFingerprint.value = newFingerprint;
+        return;
+      }
+
+      // 3. 处理删除的消息
       if (delta.deleted_ids.length > 0) {
         currentChatHistory.value = currentChatHistory.value.filter(
           m => !delta.deleted_ids.includes(m.id)
         );
       }
 
-      // 2. 处理更新的消息
+      // 4. 处理更新的消息
       for (const updatedMsg of delta.updated) {
-        // 如果是当前正在流式输出的消息，我们要谨慎合并，防止覆盖前端正在平滑显示的内容
         if (updatedMsg.id === streamingMessageId.value) {
-           const index = currentChatHistory.value.findIndex(m => m.id === updatedMsg.id);
-           if (index > -1) {
-             // 仅同步头像、附件等元数据，保留 content 和 displayedContent 由流式管线控制
-             const { content, displayedContent, ...meta } = updatedMsg;
-             currentChatHistory.value[index] = {
-               ...currentChatHistory.value[index],
-               ...meta
-             };
-           }
-           continue;
+          const index = currentChatHistory.value.findIndex(m => m.id === updatedMsg.id);
+          if (index > -1) {
+            const { content, displayedContent, ...meta } = updatedMsg;
+            currentChatHistory.value[index] = {
+              ...currentChatHistory.value[index],
+              ...meta
+            };
+          }
+          continue;
         }
 
         const index = currentChatHistory.value.findIndex(m => m.id === updatedMsg.id);
         if (index > -1) {
           currentChatHistory.value[index] = {
             ...currentChatHistory.value[index],
-            ...updatedMsg,
-            processedContent: undefined, // 内容变更，重置缓存触发重算
+            ...updatedMsg
           };
-          resolveMessageAssets(currentChatHistory.value[index]);
-          await processRegex(currentChatHistory.value[index], itemId);
         }
       }
 
-      // 3. 处理新增的消息
+      // 5. 处理新增的消息
       for (const addedMsg of delta.added) {
-        // 简单去重保护
         if (!currentChatHistory.value.some(m => m.id === addedMsg.id)) {
-          resolveMessageAssets(addedMsg);
           currentChatHistory.value.push(addedMsg);
-          await processRegex(addedMsg, itemId);
         }
       }
 
-      // 4. 重新排序以确保时间轴一致
+      // 6. 重新排序以确保时间轴一致
       currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
 
-      console.log(`[ChatManager] Delta sync complete. Changes: +${delta.added.length} / ~${delta.updated.length} / -${delta.deleted_ids.length}`);
+      // 更新指纹缓存
+      lastTopicFingerprint.value = newFingerprint;
+
+      console.log(`[ChatManager] Delta sync complete (Optimized). Changes: +${delta.added.length} / ~${delta.updated.length} / -${delta.deleted_ids.length}`);
     } catch (e) {
       console.error('[ChatManager] Delta sync failed:', e);
     }
@@ -344,18 +380,18 @@ export const useChatManagerStore = defineStore('chatManager', () => {
    */
   const deleteMessage = async (messageId: string, deleteAfter: boolean = false) => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
-    
+
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
 
     if (deleteAfter) {
-       // 删除自身以及后面所有的
-       currentChatHistory.value.splice(targetIndex);
+      // 删除自身以及后面所有的
+      currentChatHistory.value.splice(targetIndex);
     } else {
-       // 仅删除自身
-       currentChatHistory.value.splice(targetIndex, 1);
+      // 仅删除自身
+      currentChatHistory.value.splice(targetIndex, 1);
     }
-    
+
     // 触发保存与文件同步
     await saveHistory();
   };
@@ -415,7 +451,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
 
     const agentId = currentSelectedItem.value.id;
     const currentStaged = [...stagedAttachments.value];
-    
+
     // 构造用户消息
     const now = Date.now();
     const userMsg: ChatMessage = {
@@ -425,9 +461,9 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       timestamp: now,
       attachments: currentStaged.length > 0 ? currentStaged : undefined,
     };
-    
+
     currentChatHistory.value.push(userMsg);
-    
+
     // 清空暂存区
     stagedAttachments.value = [];
 
@@ -440,7 +476,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       timestamp: now,
       isThinking: true,
     };
-    
+
     currentChatHistory.value.push(thinkingMsg);
     streamingMessageId.value = thinkingId;
 
@@ -452,7 +488,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       if (!settings) {
         throw new Error('应用尚未完成初始化，缺少设置数据，无法发送消息');
       }
-      
+
       const vcpUrl = settings.vcpServerUrl || '';
       const vcpApiKey = settings.vcpApiKey || '';
 
@@ -460,11 +496,11 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       if (currentSelectedItem.value?.type === 'group') {
         const groupId = currentSelectedItem.value.id;
         isGroupGenerating.value = true;
-        
+
         // 注意：群组模式下，多个 Agent 会轮流发言。
         // 我们不能简单地在这里清空 streamingMessageId，否则后续的流式事件会被拦截。
         // 但我们也需要允许第一个发言的 Agent 建立它自己的思考占位。
-        
+
         const groupPayload = {
           groupId,
           topicId: currentTopicId.value,
@@ -472,11 +508,11 @@ export const useChatManagerStore = defineStore('chatManager', () => {
           vcpUrl,
           vcpApiKey
         };
-        
+
         console.log('[ChatManager] Sending group payload:', groupPayload);
         // 直接调用 Rust 端群组调度器，不再设置前端硬超时
         await invoke('handle_group_chat_message', { payload: groupPayload });
-        
+
         // 注意：这里不再立即移除 thinkingId，由后续的 vcp-stream type='end' 或 type='error' 来清理
         // 或者由下一次 loadHistory/syncHistory 全量覆盖
         return;
@@ -542,7 +578,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
             name: m.name
           };
         }));
-        
+
       messagesForVcp.push(...historyForVcp);
 
       const payload = {
@@ -563,7 +599,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       };
 
       console.log('[ChatManager] Sending payload to VCP:', payload);
-      
+
       if (payload.modelConfig.model) {
         modelStore.recordUsage(payload.modelConfig.model);
       }
@@ -571,9 +607,9 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       await invoke('sendToVCP', { payload });
     } catch (e) {
       console.error('[ChatManager] Failed to send message:', e);
-      
+
       const errorText = `\n\n> VCP错误: ${e instanceof Error ? e.message : String(e)}`;
-      
+
       const msgIndex = currentChatHistory.value.findIndex(m => m.id === thinkingId);
       if (msgIndex !== -1) {
         const msg = currentChatHistory.value[msgIndex];
@@ -591,12 +627,12 @@ export const useChatManagerStore = defineStore('chatManager', () => {
           timestamp: Date.now()
         });
       }
-      
+
       streamingMessageId.value = null;
       await saveHistory();
     }
   };
-  
+
   /**
    * 重新生成消息
    * @param targetMessageId 用户想要重新生成的 AI 回复的 ID
@@ -605,13 +641,13 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     // 1. 查找此 AI 消息前的一条 用户消息
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === targetMessageId);
     if (targetIndex === -1) return;
-    
+
     // 我们采取“时间回退”策略，将聊天截断到这条 AI 消息之前，然后触发上一次的 prompt 再次请求
     // 注意：桌面端通常需要回溯找到最近的一条 user 消息来作为输入，但在我们的架构下，
     // 我们直接切片历史记录并发起空的 content 请求即可，因为 VCP 会自动拾取最新的完整 messages 数组
-    
+
     await deleteMessage(targetMessageId, true);
-    
+
     // 再次触发发送，留空内容即可，VCP 后端会用最后一句话作为基准续写
     await sendMessage('');
   };
@@ -624,7 +660,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       // 适配 Rust 端默认序列化使用下划线命名法 (message_id)
       const { message_id, messageId: legacyMessageId, chunk, type } = event.payload;
       const actualMessageId = message_id || legacyMessageId;
-      
+
       if (actualMessageId === streamingMessageId.value) {
         const msg = currentChatHistory.value.find(m => m.id === actualMessageId);
         if (msg) {
@@ -653,28 +689,28 @@ export const useChatManagerStore = defineStore('chatManager', () => {
                 }
               });
             }
-            } else if (type === 'end') {
-              console.log(`[ChatManager] Stream ended for ${actualMessageId}. Draining queue...`);
-              msg.isThinking = false;
-              // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
-              streamManager.finalizeStream(actualMessageId, () => {
-                const latestMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
-                if (latestMsg) {
-                  // 确保最终内容一致
-                  latestMsg.displayedContent = latestMsg.content;
-                }
-                streamingMessageId.value = null;
+          } else if (type === 'end') {
+            console.log(`[ChatManager] Stream ended for ${actualMessageId}. Draining queue...`);
+            msg.isThinking = false;
+            // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
+            streamManager.finalizeStream(actualMessageId, () => {
+              const latestMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
+              if (latestMsg) {
+                // 确保最终内容一致
+                latestMsg.displayedContent = latestMsg.content;
+              }
+              streamingMessageId.value = null;
 
-                // 重新获取一次最新引用进行正则处理
-                const finalMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
-                if (finalMsg && currentSelectedItem.value?.id) {
-                  processRegex(finalMsg, currentSelectedItem.value.id);
-                }
-                saveHistory();
-                // 话题自动总结逻辑 (桌面端对齐)
-                summarizeTopic();
-              });
-            } else if (type === 'error') {
+              // 重新获取一次最新引用进行正则处理
+              const finalMsg = currentChatHistory.value.find(m => m.id === actualMessageId);
+              if (finalMsg && currentSelectedItem.value?.id) {
+                processRegex(finalMsg, currentSelectedItem.value.id);
+              }
+              saveHistory();
+              // 话题自动总结逻辑 (桌面端对齐)
+              summarizeTopic();
+            });
+          } else if (type === 'error') {
             const errorMsg = event.payload.error || '未知错误';
             console.log(`[ChatManager] Stream error for ${actualMessageId}:`, errorMsg);
             msg.isThinking = false;
@@ -715,7 +751,7 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     unlistenFileChangePromise = listen('vcp-file-change', async (event: any) => {
       const paths = event.payload as string[];
       console.log('[ChatManager] File change detected by Rust Watcher:', paths);
-      
+
       if (!currentTopicId.value || !currentSelectedItem.value?.id) return;
 
       // 检查变更的文件路径是否包含当前正在查看的 topicId

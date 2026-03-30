@@ -17,6 +17,7 @@ import BootScreen from './components/layout/BootScreen.vue';
 import AgentSidebar from './components/layout/AgentSidebar.vue';
 import RightSidebar from './components/layout/RightSidebar.vue';
 import GlobalOverlayManager from './components/GlobalOverlayManager.vue';
+import FeatureOverlays from './components/FeatureOverlays.vue';
 
 const themeStore = useThemeStore();
 const settingsStore = useSettingsStore();
@@ -140,6 +141,9 @@ onUnmounted(() => {
 
     <!-- 5. 全局覆盖层管理器 -->
     <GlobalOverlayManager />
+
+    <!-- 6. 业务 Feature 视图挂载点 -->
+    <FeatureOverlays />
   </div>
 </template>
 

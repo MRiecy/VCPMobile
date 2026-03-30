@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useChatManagerStore } from './chatManager';
 
 /**
@@ -8,6 +9,7 @@ import { useChatManagerStore } from './chatManager';
  */
 export interface Topic {
   id: string;
+  agentId?: string; // 所属 Agent ID
   name: string;
   createdAt: number; // 修正为驼峰命名，对齐 Rust 端的 #[serde(rename = "createdAt")]
   locked?: boolean;
@@ -27,6 +29,42 @@ export const useTopicStore = defineStore('topic', () => {
   const loading = ref(false);
   const searchTerm = ref('');
   const currentAgentId = ref<string | null>(null);
+
+  // --- 事件监听 (Event Listeners) ---
+  
+  /**
+   * 监听来自 Rust 的增量索引更新事件
+   */
+  listen('topic-index-updated', (event: any) => {
+    const payload = event.payload;
+    console.log(`[TopicStore] Received incremental update for topic: ${payload.topic_id}`);
+    
+    // 只有当更新的话题属于当前选中的 Agent 时才处理
+    if (currentAgentId.value === payload.agent_id) {
+      const index = topics.value.findIndex(t => t.id === payload.topic_id);
+      const updatedTopic: Topic = {
+        id: payload.topic_id,
+        agentId: payload.agent_id,
+        name: payload.title,
+        createdAt: payload.created_at || Date.now(),
+        unreadCount: payload.unread_count,
+        messageCount: payload.msg_count,
+        locked: payload.locked,
+        unread: payload.unread
+      };
+
+      if (index !== -1) {
+        // 增量更新现有话题
+        topics.value[index] = {
+          ...topics.value[index],
+          ...updatedTopic
+        };
+      } else {
+        // 发现新话题，插入到列表顶部
+        topics.value.unshift(updatedTopic);
+      }
+    }
+  });
 
   // --- 计算属性 (Getters) ---
   
@@ -78,6 +116,7 @@ export const useTopicStore = defineStore('topic', () => {
       // 映射 Rust 字段到前端状态 (Rust 已对齐 camelCase)
       topics.value = result.map(t => ({
         ...t,
+        agentId: agentId,
         name: t.title || t.name || t.id,
         unreadCount: t.unreadCount || 0,
         messageCount: t.messageCount || 0
@@ -129,8 +168,9 @@ export const useTopicStore = defineStore('topic', () => {
       
       // 如果删除的是当前选中的话题，通知 chatManager
       if (chatManager.currentTopicId === topicId) {
-        chatManager.currentTopicId = null;
-        chatManager.currentChatHistory = [];
+        // 修复响应式误用：在 setup store 中，跨 store 访问 ref 需要通过 .value
+        (chatManager as any).currentTopicId = null;
+        (chatManager as any).currentChatHistory = [];
       }
     } catch (e) {
       console.error('[TopicStore] Failed to delete topic:', e);
@@ -147,9 +187,9 @@ export const useTopicStore = defineStore('topic', () => {
       // 注意：确保 Rust 端已实现 update_topic_title 命令
       await invoke('update_topic_title', { itemId: agentId, topicId, title: newTitle });
       
-      const topic = topics.value.find(t => t.id === topicId);
-      if (topic) {
-        topic.name = newTitle;
+      const index = topics.value.findIndex(t => t.id === topicId);
+      if (index !== -1) {
+        topics.value[index] = { ...topics.value[index], name: newTitle };
       }
     } catch (e) {
       console.error('[TopicStore] Failed to update topic title:', e);
@@ -162,15 +202,15 @@ export const useTopicStore = defineStore('topic', () => {
    */
   const toggleTopicLock = async (agentId: string, topicId: string) => {
     try {
-      const topic = topics.value.find(t => t.id === topicId);
-      if (!topic) return;
+      const index = topics.value.findIndex(t => t.id === topicId);
+      if (index === -1) return;
 
-      const targetLockState = !topic.locked;
+      const targetLockState = !topics.value[index].locked;
       console.log(`[TopicStore] Toggling lock for ${topicId} to ${targetLockState}`);
       
       // 调用 Rust 命令切换锁定
       await invoke('toggle_topic_lock', { itemId: agentId, topicId, locked: targetLockState });
-      topic.locked = targetLockState;
+      topics.value[index] = { ...topics.value[index], locked: targetLockState };
     } catch (e) {
       console.error('[TopicStore] Failed to toggle topic lock:', e);
       throw e;
@@ -186,9 +226,9 @@ export const useTopicStore = defineStore('topic', () => {
       // 调用 Rust 命令更新状态
       await invoke('set_topic_unread', { itemId: agentId, topicId, unread });
       
-      const topic = topics.value.find(t => t.id === topicId);
-      if (topic) {
-        topic.unread = unread;
+      const index = topics.value.findIndex(t => t.id === topicId);
+      if (index !== -1) {
+        topics.value[index] = { ...topics.value[index], unread: unread };
       }
     } catch (e) {
       console.error('[TopicStore] Failed to set topic unread:', e);
@@ -205,6 +245,7 @@ export const useTopicStore = defineStore('topic', () => {
     createTopic,
     deleteTopic,
     updateTopicTitle,
+    currentAgentId,
     toggleTopicLock,
     setTopicUnread,
   };

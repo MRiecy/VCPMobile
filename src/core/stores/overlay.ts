@@ -1,32 +1,23 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
-import type { ActionItem } from '../../components/ui/BottomSheet.vue';
-
-export interface PromptConfig {
-  title: string;
-  initialValue: string;
-  placeholder: string;
-  onConfirm: (val: string) => void;
-}
-
-export interface ContextMenuConfig {
-  title: string;
-  actions: ActionItem[];
-}
+import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
 
 export const useOverlayStore = defineStore('overlay', () => {
   const { registerModal, unregisterModal } = useModalHistory();
 
   const promptConfig = ref<PromptConfig | null>(null);
   const contextMenuConfig = ref<ContextMenuConfig | null>(null);
+  const editorConfig = ref<EditorConfig | null>(null);
   
   const isSettingsOpen = ref(false);
   const isSyncOpen = ref(false);
 
   const openSettings = () => {
     isSettingsOpen.value = true;
-    registerModal('SettingsView', () => { isSettingsOpen.value = false; });
+    registerModal('SettingsView', () => { 
+      isSettingsOpen.value = false; 
+    });
   };
 
   const closeSettings = () => {
@@ -60,7 +51,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     }
   };
 
-  const openContextMenu = (actions: ActionItem[], title?: string) => {
+  const openContextMenu = (actions: OverlayActionItem[], title?: string) => {
     contextMenuConfig.value = {
       title: title || '',
       actions
@@ -75,9 +66,22 @@ export const useOverlayStore = defineStore('overlay', () => {
     }
   };
 
+  const openEditor = (config: EditorConfig) => {
+    editorConfig.value = config;
+    registerModal('FullScreenEditor', () => { editorConfig.value = null; });
+  };
+
+  const closeEditor = () => {
+    if (editorConfig.value) {
+      unregisterModal('FullScreenEditor');
+      editorConfig.value = null;
+    }
+  };
+
   return {
     promptConfig,
     contextMenuConfig,
+    editorConfig,
     isSettingsOpen,
     isSyncOpen,
     openSettings,
@@ -87,6 +91,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     openPrompt,
     closePrompt,
     openContextMenu,
-    closeContextMenu
+    closeContextMenu,
+    openEditor,
+    closeEditor
   };
 });

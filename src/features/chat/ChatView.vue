@@ -178,12 +178,12 @@ onUnmounted(() => {
 
     <!-- 2. 消息展示区 (确保 flex-1 撑开) -->
     <div ref="messageListRef"
-         @scroll="handleScroll"
-         class="flex-1 overflow-y-auto py-4 space-y-2 relative">
+     @scroll="handleScroll"
+     class="flex-1 overflow-y-auto py-4 space-y-2 relative">
       
       <!-- 零数据引导状态 -->
       <div v-if="chatStore.currentChatHistory.length === 0" 
-           class="h-full flex flex-col items-center justify-center text-center px-10 py-20">
+           class="absolute inset-0 flex flex-col items-center justify-center text-center px-10">
         <div class="w-24 h-24 rounded-[2.5rem] bg-gradient-to-br from-primary/20 to-blue-500/20 flex-center mb-8 border border-white/10 shadow-2xl rotate-3">
            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="text-primary opacity-60">
              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
@@ -201,9 +201,9 @@ onUnmounted(() => {
       </div>
       
       <MessageRenderer v-for="msg in chatStore.currentChatHistory"
-                        :key="msg.id"
-                        :message="msg"
-                        :agent-id="chatStore.currentSelectedItem?.id" />      
+                 :key="msg.id"
+                 :message="msg"
+                 :agent-id="chatStore.currentSelectedItem?.id" />
       <div class="h-20"></div> <!-- 底部填充，防止输入框挡住最后一条 -->
     </div>
 
@@ -276,6 +276,10 @@ onUnmounted(() => {
 
 .core-glow-green {
   box-shadow: 0 0 6px 1px rgba(34, 197, 94, 0.6);
+}
+
+.core-glow-red {
+  box-shadow: 0 0 6px 1px rgba(239, 68, 68, 0.6);
 }
 
 .core-glow-red {

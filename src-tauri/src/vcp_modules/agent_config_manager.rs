@@ -498,9 +498,14 @@ pub async fn get_agents(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
+
     agents_dir.push("Agents");
 
     if !agents_dir.exists() {
+        log::warn!(
+            "[AgentConfigManager] Agents directory NOT FOUND at {:?}",
+            agents_dir
+        );
         return Ok(vec![]);
     }
 
@@ -523,7 +528,14 @@ pub async fn get_agents(
             continue;
         }
 
-        match read_agent_config(app_handle.clone(), state.clone(), agent_id.clone(), Some(false)).await {
+        match read_agent_config(
+            app_handle.clone(),
+            state.clone(),
+            agent_id.clone(),
+            Some(false),
+        )
+        .await
+        {
             Ok(config) => agents.push(config),
             Err(err) => {
                 log::error!(

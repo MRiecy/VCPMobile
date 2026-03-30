@@ -163,14 +163,14 @@ pub async fn create_agent(
             avatar_url: None,
             avatar_calculated_color: None,
             topics: vec![TopicInfo {
-            id: default_topic_id.clone(),
-            name: "主要对话".to_string(),
-            created_at: timestamp,
-            extra_fields: serde_json::Map::new(),
+                id: default_topic_id.clone(),
+                name: "主要对话".to_string(),
+                created_at: timestamp,
+                extra_fields: serde_json::Map::new(),
             }],
             extra: serde_json::Map::new(),
-            }
-            };
+        }
+    };
     // 初始化默认话题目录：Agent/Group 统一落在 UserData/data 聚合层，而非 Agents 配置目录
     let topic_dir = crate::vcp_modules::group_manager::resolve_topic_dir(
         &app_handle,

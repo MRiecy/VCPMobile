@@ -122,9 +122,15 @@ pub async fn perform_vcp_request<R: Runtime>(
 
                             if path_buf.exists() {
                                 // 提取扩展名决定 mime_type
-                                let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                                let ext = path_buf
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("")
+                                    .to_lowercase();
                                 let (mime, part_type) = match ext.as_str() {
-                                    "png" | "jpg" | "jpeg" | "webp" | "gif" => ("image", "image_url"),
+                                    "png" | "jpg" | "jpeg" | "webp" | "gif" => {
+                                        ("image", "image_url")
+                                    }
                                     "mp3" | "wav" | "ogg" => ("audio", "audio_url"),
                                     "mp4" | "mkv" | "webm" => ("video", "video_url"),
                                     _ => ("application", "file_url"), // 非多模态文件回退
@@ -133,7 +139,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 if let Ok(bytes) = std::fs::read(&path_buf) {
                                     let b64 = general_purpose::STANDARD.encode(&bytes);
                                     let data_url = format!("data:{}/{};base64,{}", mime, ext, b64);
-                                    
+
                                     new_parts.push(json!({
                                         "type": part_type,
                                         part_type: { "url": data_url }

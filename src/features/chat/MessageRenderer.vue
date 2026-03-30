@@ -6,8 +6,9 @@ import { useAssistantStore } from '../../core/stores/assistant';
 import { useSettingsStore } from '../../core/stores/settings';
 import { useContentProcessor, type ContentBlock } from '../../core/composables/useContentProcessor';
 import { useAvatarTheme } from '../../core/composables/useAvatarTheme';
-import { useContextMenu } from '../../core/composables/useContextMenu';
+import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useNotificationStore } from '../../core/stores/notification';
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from 'lucide-vue-next';
 
 // Import block components
@@ -17,7 +18,6 @@ import DiaryBlock from './blocks/DiaryBlock.vue';
 import ThoughtBlock from './blocks/ThoughtBlock.vue';
 import HtmlPreviewBlock from './blocks/HtmlPreviewBlock.vue';
 import AttachmentPreview from '../../components/ui/AttachmentPreview.vue';
-import FullScreenEditor from '../../components/ui/FullScreenEditor.vue';
 
 const props = defineProps<{
   message: ChatMessage;
@@ -29,7 +29,8 @@ const assistantStore = useAssistantStore();
 const settingsStore = useSettingsStore();
 const { processMessageContent, removeScopedCss } = useContentProcessor();
 const { extractAndSaveColor } = useAvatarTheme();
-const { openMenu } = useContextMenu();
+const overlayStore = useOverlayStore();
+const notificationStore = useNotificationStore();
 
 const chatStore = useChatManagerStore();
 
@@ -37,10 +38,6 @@ const isUser = computed(() => props.message.role === 'user');
 const isStreaming = computed(() => 
   (!!props.message.isThinking || chatStore.streamingMessageId === props.message.id) && !isUser.value
 );
-
-// 全屏编辑器状态
-const isEditorOpen = ref(false);
-const editorInitialValue = ref('');
 
 // 获取当前消息实际对应的 Agent ID (对于群聊，从 extra 中读取)
 const actualAgentId = computed(() => {
@@ -260,6 +257,12 @@ const showMessageContextMenu = () => {
             document.execCommand('copy');
             document.body.removeChild(textarea);
           }
+          notificationStore.addNotification({
+            type: 'success',
+            title: '复制成功',
+            message: '内容已复制到剪贴板',
+            duration: 2000
+          });
         } catch (e) {
           console.error('[MessageContextMenu] Copy failed:', e);
         }
@@ -273,8 +276,10 @@ const showMessageContextMenu = () => {
       label: '编辑消息',
       icon: Edit2,
       handler: () => {
-        editorInitialValue.value = props.message.content || '';
-        isEditorOpen.value = true;
+        overlayStore.openEditor({
+          initialValue: props.message.content || streamContent.value || '',
+          onSave: (newContent) => handleSaveEdit(newContent)
+        });
       }
     });
   }
@@ -314,7 +319,7 @@ const showMessageContextMenu = () => {
     }
   });
 
-  openMenu(actions, isUser.value ? 'User Message' : 'Assistant Message');
+  overlayStore.openContextMenu(actions, isUser.value ? 'User Message' : 'Assistant Message');
 };
 
 const handleSaveEdit = async (newContent: string) => {
@@ -445,13 +450,6 @@ const handleSaveEdit = async (newContent: string) => {
         {{ new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}
       </div>
     </div>
-
-    <!-- 全屏编辑器弹窗 -->
-    <FullScreenEditor
-      v-model:isOpen="isEditorOpen"
-      :initial-value="editorInitialValue"
-      @save="handleSaveEdit"
-    />
   </div>
 </template>
 

@@ -150,7 +150,7 @@ const filteredCombinedItems = computed(() => {
              ]"
              :style="{ transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)` }">
              
-          <div v-if="assistantStore.unreadCounts[agent.id] === -1 || assistantStore.unreadCounts[agent.id] > 0" class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse" style="background: #ff6b6b;"></div>
+          <div v-if="assistantStore.unreadCounts[agent.id] === -1 || assistantStore.unreadCounts[agent.id] > 0" class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse shrink-0" style="background: #ff6b6b;"></div>
 
           <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10 overflow-hidden pointer-events-none">
             <img v-if="agent.resolvedAvatarUrl" :src="agent.resolvedAvatarUrl" class="w-full h-full object-cover" />

@@ -110,14 +110,19 @@ pub fn init_watcher(app_handle: AppHandle) -> std::result::Result<(), String> {
                                     let sem = index_semaphore.clone();
                                     let app_config_dir = config_dir_clone.clone();
                                     // 异步执行索引更新，不阻塞事件循环
+                                    let handle_for_task = handle_clone.clone();
                                     tauri::async_runtime::spawn(async move {
                                         let _permit = sem
                                             .acquire()
                                             .await
                                             .unwrap_or_else(|e| panic!("Semaphore closed: {}", e));
-                                        let _ =
-                                            index_history_file(&app_config_dir, &path_buf, &pool)
-                                                .await;
+                                        let _ = index_history_file(
+                                            &handle_for_task,
+                                            &app_config_dir,
+                                            &path_buf,
+                                            &pool,
+                                        )
+                                        .await;
                                     });
                                 }
                             }

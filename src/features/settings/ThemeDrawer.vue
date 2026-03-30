@@ -17,7 +17,7 @@ defineExpose({ open, close });
 </script>
 
 <template>
-  <Teleport to="#vcp-overlays">
+  <Teleport to="#vcp-feature-overlays">
     <!-- Backdrop -->
     <Transition name="fade">
       <div v-if="isOpen" @click="close" class="fixed inset-0 bg-black/50 backdrop-blur-sm pointer-events-auto"></div>

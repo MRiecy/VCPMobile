@@ -1,7 +1,9 @@
 <script setup lang="ts">
+defineOptions({
+  inheritAttrs: false
+});
 import { ref, watch, nextTick } from 'vue';
 import { X, Check } from 'lucide-vue-next';
-import { useModalHistory } from '../../core/composables/useModalHistory';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -14,28 +16,16 @@ const emit = defineEmits<{
   (e: 'cancel'): void;
 }>();
 
-const { registerModal, unregisterModal } = useModalHistory();
-const modalId = 'FullScreenEditor';
-
-const editorContent = ref('');
+const editorContent = ref(props.initialValue || '');
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
-    // Register for back button handling
-    registerModal(modalId, () => {
-      emit('cancel');
-      emit('update:isOpen', false);
-    });
-
     editorContent.value = props.initialValue || '';
     nextTick(() => {
       textareaRef.value?.focus();
       textareaRef.value?.setSelectionRange(editorContent.value.length, editorContent.value.length);
     });
-  } else {
-    // Unregister and clean up history stack
-    unregisterModal(modalId);
   }
 });
 
@@ -53,7 +43,8 @@ const handleCancel = () => {
 <template>
   <Teleport to="body">
     <Transition name="slide-up">
-      <div v-if="isOpen" 
+      <div v-if="isOpen"
+           v-bind="$attrs"
            class="fixed inset-0 z-[2000] flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden">
         
         <!-- 顶部导航栏 -->
