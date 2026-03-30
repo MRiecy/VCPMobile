@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      NODE_VERSION: '20'
-      PNPM_VERSION: '8'
+      NODE_VERSION: '22'
+      PNPM_VERSION: '10'
       JAVA_VERSION: '17'
-      NDK_VERSION: '27.0.12077973'
+      NDK_VERSION: '29.0.13846066'
       ANDROID_KEYSTORE_PATH: src-tauri/release.keystore
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
