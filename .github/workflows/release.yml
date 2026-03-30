@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag, e.g. v0.9.6'
+        required: true
 
 permissions:
   contents: write
@@ -32,7 +36,17 @@ jobs:
         id: meta
         shell: bash
         run: |
-          TAG_NAME="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            TAG_NAME="${{ github.event.inputs.release_tag }}"
+          else
+            TAG_NAME="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $TAG_NAME" >&2
+            exit 1
+          fi
+
           VERSION="${TAG_NAME#v}"
           echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -89,32 +103,35 @@ jobs:
         run: |
           pnpm tauri android build --apk --split-per-abi
 
-      - name: Rename APK artifacts
+      - name: Collect and rename APK artifacts
         id: artifacts
         shell: bash
         run: |
           mkdir -p release-artifacts
-          shopt -s globstar nullglob
           found=0
-          for apk in src-tauri/gen/android/app/build/outputs/**/*.apk; do
-            base_name="$(basename "$apk")"
-            abi=""
-            for candidate in arm64-v8a armeabi-v7a x86 x86_64 universal; do
-              if [[ "$base_name" == *"$candidate"* ]]; then
-                abi="$candidate"
-                break
-              fi
-            done
-            if [[ -z "$abi" ]]; then
-              abi="unknown"
+
+          declare -A apk_map=(
+            [arm64]="arm64-v8a"
+            [arm]="armeabi-v7a"
+            [x86]="x86"
+            [x86_64]="x86_64"
+          )
+
+          for dir_name in "${!apk_map[@]}"; do
+            source_apk="src-tauri/gen/android/app/build/outputs/apk/${dir_name}/release/app-${dir_name}-release.apk"
+            target_abi="${apk_map[$dir_name]}"
+
+            if [[ -f "$source_apk" ]]; then
+              cp "$source_apk" "release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_${target_abi}.apk"
+              found=$((found + 1))
             fi
-            cp "$apk" "release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_${abi}.apk"
-            found=1
           done
-          if [[ "$found" -ne 1 ]]; then
-            echo "No APK artifacts were found." >&2
+
+          if [[ "$found" -eq 0 ]]; then
+            echo "No APK artifacts were found in split-per-abi output directories." >&2
             exit 1
           fi
+
           echo "artifact_dir=release-artifacts" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
