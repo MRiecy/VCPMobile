@@ -48,8 +48,20 @@ jobs:
           fi
 
           VERSION="${TAG_NAME#v}"
+          MAJOR_VERSION="${VERSION%%.*}"
+          RELEASE_TITLE="VCP Mobile v${VERSION}"
+          PRERELEASE="false"
+          if (( MAJOR_VERSION < 1 )); then
+            RELEASE_TITLE="${RELEASE_TITLE} Preview"
+            PRERELEASE="true"
+          fi
+          BODY_PATH="releases/release-notes-v${VERSION}.md"
+
           echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "body_path=${BODY_PATH}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -138,6 +150,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          generate_release_notes: true
+          name: ${{ steps.meta.outputs.release_title }}
+          body_path: ${{ steps.meta.outputs.body_path }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           files: |
             ${{ steps.artifacts.outputs.artifact_dir }}/*.apk
