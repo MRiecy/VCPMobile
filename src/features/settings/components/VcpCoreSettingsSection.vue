@@ -2,6 +2,11 @@
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings } from '../../../core/stores/settings';
+import SettingsSection from '../../../components/settings/SettingsSection.vue';
+import SettingsCard from '../../../components/settings/SettingsCard.vue';
+import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
+import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
+import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
 
 const props = defineProps<{
   settings: AppSettings;
@@ -40,47 +45,51 @@ const testVcpConnection = async () => {
 </script>
 
 <template>
-  <section class="space-y-4">
-    <div class="flex items-center gap-2 px-1">
-      <div class="w-1 h-4 bg-blue-500 rounded-full"></div>
-      <h3 class="text-xs font-black uppercase tracking-[0.2em] opacity-50 dark:opacity-40">核心连接</h3>
-    </div>
-    <div class="card-modern space-y-5">
-      <div>
-        <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">VCP 服务器 URL (HTTP/HTTPS)</label>
-        <input v-model="settings.vcpServerUrl" placeholder="https://vcp-endpoint.com" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-blue-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all" />
-      </div>
-      <div>
-        <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">VCP API Key</label>
-        <input v-model="settings.vcpApiKey" type="password" placeholder="••••••••" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-blue-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all" />
-      </div>
+  <SettingsSection title="核心连接" accent-color="bg-blue-500">
+    <SettingsCard class="space-y-5">
+      <SettingsTextField 
+        v-model="settings.vcpServerUrl" 
+        label="VCP 服务器 URL (HTTP/HTTPS)" 
+        placeholder="https://vcp-endpoint.com" 
+      />
+      <SettingsTextField 
+        v-model="settings.vcpApiKey" 
+        type="password" 
+        label="VCP API Key" 
+        placeholder="••••••••" 
+      />
 
-      <div class="border-t border-black/5 dark:border-white/5 pt-4 mt-2"></div>
+      <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
-      <div>
-        <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">VCP WebSocket 服务器 URL</label>
-        <input v-model="settings.vcpLogUrl" placeholder="ws://localhost:8024" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-blue-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all font-mono text-sm" />
-      </div>
-      <div>
-        <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">VCP WebSocket 鉴权 Key</label>
-        <input v-model="settings.vcpLogKey" type="password" placeholder="输入 WebSocket Key" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-blue-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all font-mono text-sm" />
-      </div>
+      <SettingsTextField 
+        v-model="settings.vcpLogUrl" 
+        label="VCP WebSocket 服务器 URL" 
+        placeholder="ws://localhost:8024" 
+        mono
+      />
+      <SettingsTextField 
+        v-model="settings.vcpLogKey" 
+        type="password" 
+        label="VCP WebSocket 鉴权 Key" 
+        placeholder="输入 WebSocket Key" 
+        mono
+      />
 
-      <div class="pt-2 flex items-center justify-between">
-        <div class="text-[10px] font-medium leading-tight max-w-[65%]" :class="{
-          'text-blue-500 dark:text-blue-400': vcpPingStatus.type === 'success',
-          'text-red-500 dark:text-red-400': vcpPingStatus.type === 'error',
-          'text-purple-500 dark:text-purple-400 animate-pulse': vcpPingStatus.type === 'loading',
-          'opacity-0': !vcpPingStatus.type
-        }">
-          {{ vcpPingStatus.message }}
-        </div>
-        <div class="flex gap-2">
-          <button @click="testVcpConnection" :disabled="vcpPingStatus.type === 'loading'" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-xl text-xs font-bold tracking-wider shadow-lg shadow-blue-900/20 disabled:opacity-50">
-            验证连接
-          </button>
-        </div>
+      <div class="pt-2 flex items-center justify-between gap-4">
+        <SettingsInlineStatus 
+          v-if="vcpPingStatus.type"
+          :type="vcpPingStatus.type" 
+          :message="vcpPingStatus.message" 
+          class="flex-1"
+        />
+        <SettingsActionButton 
+          variant="primary" 
+          :loading="vcpPingStatus.type === 'loading'"
+          @click="testVcpConnection"
+        >
+          验证连接
+        </SettingsActionButton>
       </div>
-    </div>
-  </section>
+    </SettingsCard>
+  </SettingsSection>
 </template>

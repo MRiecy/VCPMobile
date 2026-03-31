@@ -12,6 +12,12 @@ import MaintenanceSection from './components/MaintenanceSection.vue';
 import ThemePicker from './ThemePicker.vue';
 import ModelSelector from '../chat/ModelSelector.vue';
 
+// 原子组件
+import SettingsSection from '../../components/settings/SettingsSection.vue';
+import SettingsCard from '../../components/settings/SettingsCard.vue';
+import SettingsActionButton from '../../components/settings/SettingsActionButton.vue';
+import SettingsDisclosure from '../../components/settings/SettingsDisclosure.vue';
+
 const props = withDefaults(defineProps<{
   isOpen?: boolean;
 }>(), {
@@ -123,38 +129,57 @@ watch(() => props.isOpen, (val: boolean) => {
           <div v-if="loading" class="flex-1 flex items-center justify-center opacity-60 text-sm font-bold tracking-widest uppercase">
             正在加载设置...
           </div>
-          <div v-else class="flex-1 overflow-y-auto p-5 space-y-8 pb-safe">
+          <div v-else class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe">
+            <!-- 用户档案 (Hero) -->
             <UserProfileSection :settings="settings" />
 
-            <SyncSettingsSection :settings="settings" @save-request="saveSettings" @open-sync="openSyncView" />
+            <!-- 核心连接 (折叠) -->
+            <SettingsDisclosure title="核心连接" description="配置 VCP 服务器与 WebSocket 鉴权" :default-open="true">
+              <VcpCoreSettingsSection :settings="settings" @save-request="saveSettings" />
+            </SettingsDisclosure>
 
-            <VcpCoreSettingsSection :settings="settings" @save-request="saveSettings" />
+            <!-- 数据同步 (折叠) -->
+            <SettingsDisclosure title="数据同步" description="桌面端数据同步与表情包库维护">
+              <SyncSettingsSection :settings="settings" @save-request="saveSettings" @open-sync="openSyncView" />
+            </SettingsDisclosure>
 
-            <AiLogicSettingsSection :settings="settings" />
+            <!-- AI 引擎逻辑 (折叠) -->
+            <SettingsDisclosure title="AI 引擎逻辑" description="流式输出、工具注入与 UI 规范">
+              <AiLogicSettingsSection :settings="settings" />
+            </SettingsDisclosure>
 
-            <TopicSummarySection :settings="settings" @open-model-selector="showSummaryModelSelector = true" />
+            <!-- 话题总结 (折叠) -->
+            <SettingsDisclosure title="话题总结" description="配置总结专用模型与参数">
+              <TopicSummarySection :settings="settings" @open-model-selector="showSummaryModelSelector = true" />
+            </SettingsDisclosure>
 
+            <!-- 视觉长廊 -->
+            <SettingsSection title="视觉长廊" accent-color="bg-orange-500">
+              <SettingsCard no-padding>
+                <div class="p-4">
+                  <ThemePicker />
+                </div>
+              </SettingsCard>
+            </SettingsSection>
+
+            <!-- 数据维护 -->
             <MaintenanceSection />
-
-          <section class="space-y-4">
-              <div class="flex items-center gap-2 px-1">
-                <div class="w-1 h-4 bg-orange-500 rounded-full"></div>
-                <h3 class="text-xs font-black uppercase tracking-[0.2em] opacity-50 dark:opacity-40">视觉长廊</h3>
-              </div>
-              <ThemePicker />
-            </section>
 
             <div class="h-4"></div>
 
             <!-- 保存按钮 -->
-            <button @click="saveSettings"
-                    class="w-full py-4.5 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-[1.25rem] font-black uppercase tracking-widest text-xs shadow-xl shadow-blue-900/20">
-                    保存并应用变更
-            </button>
+            <SettingsActionButton 
+              variant="primary" 
+              size="lg" 
+              full-width 
+              @click="saveSettings"
+            >
+              保存并应用变更
+            </SettingsActionButton>
 
             <!-- 版本信息 -->
             <div class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest">
-              VCP MOBILE · PROJECT AVATAR<br/>INTERNAL RELEASE 2026.03.13
+              VCP MOBILE · PROJECT AVATAR<br/>INTERNAL RELEASE 2026.03.31
             </div>
           </div>
 
@@ -173,18 +198,24 @@ watch(() => props.isOpen, (val: boolean) => {
 
 <style scoped>
 .settings-view {
-  background-color: color-mix(in srgb, var(--primary-bg) 85%, transparent);
-  backdrop-filter: blur(30px) saturate(180%);
-}
-
-/* 确保子组件中的 card-modern 样式生效 */
-:deep(.card-modern) {
-  @apply bg-white/5 border border-white/10 rounded-[2rem] p-6 backdrop-blur-xl shadow-2xl;
+  background-color: color-mix(in srgb, var(--primary-bg) 92%, transparent);
+  backdrop-filter: blur(40px) saturate(180%);
 }
 
 :deep(input[type="number"]::-webkit-inner-spin-button),
 :deep(input[type="number"]::-webkit-outer-spin-button) {
   -webkit-appearance: none;
   margin: 0;
+}
+
+/* 覆盖分区组件内部的 Section 标题，因为 SettingsView 已经用了 Disclosure 包裹 */
+:deep(.settings-disclosure .space-y-3 > .flex.items-center) {
+  display: none;
+}
+:deep(.settings-disclosure .settings-card) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
 }
 </style>

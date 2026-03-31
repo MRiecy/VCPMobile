@@ -218,9 +218,9 @@ onUnmounted(() => {
 
     <!-- 3. 输入增强区 (固定底部) -->
     <footer class="px-4 py-1.5 bg-black/10 backdrop-blur-md border-t border-white/5 shrink-0">
-      <InputEnhancer 
-        :disabled="!chatStore.currentTopicId || !!chatStore.streamingMessageId || chatStore.isGroupGenerating"
-        @send="chatStore.sendMessage" 
+      <InputEnhancer
+        :disabled="!chatStore.currentTopicId || chatStore.activeStreamingIds.size > 0"
+        @send="chatStore.sendMessage"
       />
       <div class="h-[var(--vcp-safe-bottom, 20px)]"></div>
     </footer>

@@ -12,6 +12,12 @@ const app = createApp(App);
 const pinia = createPinia();
 
 app.use(pinia);
+
+import('./core/stores/chatManager').then(({ useChatManagerStore }) => {
+  const chatManagerStore = useChatManagerStore(pinia);
+  chatManagerStore.ensureEventListenersRegistered();
+});
+
 app.use(router);
 app.directive('intersection-observer', vIntersectionObserver);
 app.directive('longpress', vLongpress);

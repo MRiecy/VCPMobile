@@ -1,0 +1,368 @@
+# 第一阶段实施说明
+
+## 1. 文档定位
+
+本文是对既有蓝图 [`plans/01_Architecture/backend_refactor_blueprint.md`](plans/01_Architecture/backend_refactor_blueprint.md) 的第一阶段落地细化，范围仅覆盖消息历史真实源、[`topic_index`](src-tauri/src/vcp_modules/index_service.rs:308) 投影、watcher 外部变更重建三条链路的最小可行重构。
+
+本文只做分析与实施方案设计，不包含任何 Rust 源码修改。目标是为后续在 Code 模式下实施提供边界、顺序、约束与验收依据。
+
+## 2. 第一阶段聚焦范围
+
+### 2.1 第一阶段目标
+
+第一阶段的最小可行重构 MVR 只解决一个核心问题：把当前分散在 [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs:152)、[`index_service`](src-tauri/src/vcp_modules/index_service.rs:266)、[`file_watcher`](src-tauri/src/vcp_modules/file_watcher.rs:47)、[`group_manager`](src-tauri/src/vcp_modules/group_manager.rs:229) 中的消息历史与索引一致性语义，收束为一组清晰边界。
+
+本阶段应达成的目标：
+
+1. 明确 `history.json` 仍是唯一真实源，索引仅是投影，延续蓝图中的不变量定义，见 [`backend_refactor_blueprint.md`](plans/01_Architecture/backend_refactor_blueprint.md:13)。
+2. 将“历史写入”和“topic_index 投影更新”从 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:298) 与 [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:367) 的混合实现中解耦。
+3. 将 watcher 外部变更处理限定为外围补偿器，只触发统一投影入口，不再携带独立的字段推导语义，参考 [`init_watcher()`](src-tauri/src/vcp_modules/file_watcher.rs:47)。
+4. 为群聊链路中的用户消息整段写入与 AI 断点追加写入建立同一套语义中心，参考 [`handle_group_chat_message()`](src-tauri/src/vcp_modules/ipc/group_handlers.rs:27)。
+5. 保持 [`load_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:152)、[`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:298)、[`get_topic_delta()`](src-tauri/src/vcp_modules/chat_manager.rs:514)、[`get_topic_fingerprint()`](src-tauri/src/vcp_modules/chat_manager.rs:464) 的外部调用行为不变。
+
+### 2.2 第一阶段非目标
+
+本阶段明确不做以下事项：
+
+1. 不改变 [`history.json`](src-tauri/src/vcp_modules/group_manager.rs:256) 的文件格式、目录结构、命名规则或跨端兼容策略。
+2. 不重写 [`ipc/group_handlers.rs`](src-tauri/src/vcp_modules/ipc/group_handlers.rs:27) 为全新的应用服务，只允许后续实现时把其内部持久化调用改为委托新边界。
+3. 不处理 [`topic_list_manager`](src-tauri/src/vcp_modules/topic_list_manager.rs) 的话题生命周期重构。
+4. 不处理 [`agent_config_manager`](src-tauri/src/vcp_modules/agent_config_manager.rs) 的 regex 投影、配置缓存或索引重建问题。
+5. 不改变 [`run()`](src-tauri/src/lib.rs:58) 的 IPC 暴露面与命令名称。
+6. 不在第一阶段引入数据库事务性真源、事件总线或跨模块全面依赖反转。
+7. 不把 [`group_manager`](src-tauri/src/vcp_modules/group_manager.rs:75) 扩展为 Group 子域整体重构对象，仅把它视为路径解析与启动同步的依赖背景。
+
+## 3. 当前代码中的交互事实
+
+### 3.1 消息历史写入链路
+
+当前存在两条内部写链：
+
+1. 全量写链：[`handle_group_chat_message()`](src-tauri/src/vcp_modules/ipc/group_handlers.rs:27) 在写入用户消息后调用 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:298)。
+2. 追加写链：同一处理器在每个 Agent 回复后调用 [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:367) 做断点存盘。
+
+这两条链路都会：
+
+- 解析 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256)
+- 直接写 `history.json`
+- 重新计算 `msg_count`
+- 重新推导 `unread_count`
+- 更新 [`topic_index`](src-tauri/src/vcp_modules/index_service.rs:308) 中对应 topic 的投影字段
+
+问题在于，两者虽意图一致，但实现散落且重复，导致“历史写入”和“索引投影”没有单一语义中心。
+
+### 3.2 watcher 外部重建链路
+
+[`init_watcher()`](src-tauri/src/vcp_modules/file_watcher.rs:47) 监听 [`UserData`](src-tauri/src/vcp_modules/file_watcher.rs:54) 与 `data` 双轨目录。外部变更命中 `history.json` 时，直接异步调用 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:266) 进行重索引。
+
+该链路的重要特征：
+
+1. 它不关心业务用例，只基于文件事件运作。
+2. 它通过 [`signal_internal_save()`](src-tauri/src/vcp_modules/file_watcher.rs:36) 与 2 秒窗口做内部写过滤。
+3. 它既承担“外部修改补偿”，也在事实上持有一套独立的 topic 投影字段推导逻辑。
+
+问题在于 watcher 理应只是触发器，但当前真正的投影规则却主要存放在 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:266) 内，和内部写入路径形成“双核心”。
+
+### 3.3 group_manager 的实际参与方式
+
+[`group_manager`](src-tauri/src/vcp_modules/group_manager.rs:1) 当前在第一阶段相关链路中并不直接写消息，但承担三个关键背景职责：
+
+1. 通过 [`resolve_topic_dir()`](src-tauri/src/vcp_modules/group_manager.rs:229) 与 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256) 定义真实源路径拓扑。
+2. 通过 [`is_group_item()`](src-tauri/src/vcp_modules/group_manager.rs:120) 与 `group_` 前缀修正规则，影响 Group topic 的物理目录寻址。
+3. 通过 [`load_all_groups()`](src-tauri/src/vcp_modules/group_manager.rs:162) 在启动阶段向 [`topic_index`](src-tauri/src/vcp_modules/group_manager.rs:187) 写入初始 topic 元数据。
+
+这说明第一阶段不能脱离 [`group_manager`](src-tauri/src/vcp_modules/group_manager.rs:229) 讨论消息与索引链路，因为 topic 路径和 Group 元数据默认值都受它影响；但也不应在本阶段深入拆 Group 缓存与配置仓储。
+
+### 3.4 当前语义冲突点
+
+当前至少存在四类语义分散：
+
+1. 历史事实写入语义分散在 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:298) 与 [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:367)。
+2. 投影计算语义分散在 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:318)、[`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:411)、[`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:340)、[`load_all_groups()`](src-tauri/src/vcp_modules/group_manager.rs:185)。
+3. 路径语义分散在 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256) 与 [`parse_history_target()`](src-tauri/src/vcp_modules/index_service.rs:125)。
+4. 时间语义不统一，内部写路径用当前系统时间更新 `mtime`，而 watcher 重建路径用文件元数据时间，见 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:335) 与 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:272)。
+
+## 4. 第一阶段建议拆出的模块边界与职责
+
+第一阶段不要求物理文件结构一次性成型，但建议在逻辑边界上先收束为以下单元。
+
+### 4.1 `history_repository_fs`
+
+职责：
+
+1. 负责基于 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256) 读取与写入 `history.json`。
+2. 提供全量保存、带去重保护的单条追加、存在性检查、元数据读取。
+3. 只关心真实源文件，不直接做 SQLite 更新。
+
+从现状迁入的逻辑来源：
+
+- [`load_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:152) 的文件读取主体
+- [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:309) 到 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:316) 的物理写入片段
+- [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:375) 到 [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:409) 的加锁与追加写入片段
+
+明确不承担：
+
+- `topic_index` 计算
+- watcher 去抖
+- UI 事件发射
+- 元数据默认值判定
+
+### 4.2 `message_projection_service`
+
+职责：
+
+1. 从一份已确定的消息历史事实，计算 topic 投影字段。
+2. 统一 `msg_count`、`last_msg_preview`、`smart_unread_count` 的计算。
+3. 统一内部写入后的投影更新入口。
+4. 可在后续提供“从历史事实重建投影”的公共接口，供 watcher 与 full scan 复用。
+
+从现状迁入的逻辑来源：
+
+- [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:318) 到 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:355)
+- [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:411) 到 [`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:446)
+- [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:339) 到 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:401) 中与消息内容直接相关的字段计算部分
+
+明确不承担：
+
+- 文件监听
+- 历史文件路径推断
+- topic title 和 locked 等配置元数据装载策略本身
+
+### 4.3 `topic_projection_metadata_resolver`
+
+职责：
+
+1. 负责解析 topic 投影中的非消息事实字段来源。
+2. 从 Group 或 Agent `config.json` 的 `topics[]` 中读取 `title`、`locked`、`unread`、`created_at`。
+3. 当配置缺失时提供明确的回退顺序与默认值规则。
+
+从现状迁入的逻辑来源：
+
+- [`resolve_item_identity()`](src-tauri/src/vcp_modules/index_service.rs:149)
+- [`extract_topic_entry_metadata()`](src-tauri/src/vcp_modules/index_service.rs:180)
+- [`load_item_config_metadata()`](src-tauri/src/vcp_modules/index_service.rs:223)
+- [`resolve_topic_metadata()`](src-tauri/src/vcp_modules/index_service.rs:240)
+- [`load_all_groups()`](src-tauri/src/vcp_modules/group_manager.rs:185) 中对 Group topic 的初始元数据写入约束
+
+### 4.4 `history_projection_rebuild_service`
+
+职责：
+
+1. 接收一个 `history.json` 路径或 topic 标识，驱动一次标准化投影重建。
+2. 内部统一调用路径解析、历史读取、元数据解析、投影写库、事件发射。
+3. 作为 watcher 和 full scan 的唯一投影入口。
+
+从现状迁入的逻辑来源：
+
+- [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:266) 的整体编排角色
+- [`full_scan()`](src-tauri/src/vcp_modules/index_service.rs:91) 与 [`init_watcher()`](src-tauri/src/vcp_modules/file_watcher.rs:47) 对该服务的触发关系
+
+### 4.5 `history_path_resolver`
+
+职责：
+
+1. 把 topic 标识到物理文件路径的规则，与物理路径到 topic 标识的逆向解析规则放到同一边界内。
+2. 统一 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256) 与 [`parse_history_target()`](src-tauri/src/vcp_modules/index_service.rs:125) 的拓扑假设。
+3. 明确 UserData 与 data 双轨目录、Group topic 前缀修正与 item identity 探测规则。
+
+本阶段原因：
+
+若不统一正反向路径语义，则内部写入与 watcher 重建仍可能在 topic 识别上各自维护一套约定。
+
+## 5. 第一阶段三条链路的统一语义定义
+
+第一阶段必须将“消息历史写入、topic_index 投影更新、watcher 外部变更重建”统一为同一事实模型。
+
+### 5.1 统一原则
+
+统一原则如下：
+
+1. 真实源优先：一切投影都以磁盘上的 `history.json` 为事实输入。
+2. 投影派生：[`topic_index`](src-tauri/src/vcp_modules/index_service.rs:308) 仅保存从事实和 topic 配置推导出的派生字段。
+3. 写入与重建同义：内部写成功后的投影更新，与 watcher 检测到外部改动后的重建，应产生等价的 `msg_count`、`last_msg_preview`、`unread_count` 结果。
+4. watcher 为旁路补偿器：watcher 不定义业务语义，只触发标准化重建。
+5. 配置元数据旁路合并：`title`、`locked`、`unread`、`created_at` 等字段来自配置元数据解析器，而非消息仓储。
+
+### 5.2 三条链路统一后的抽象流程
+
+```mermaid
+flowchart TD
+    A[内部写入请求] --> B[history_repository_fs 写入 history.json]
+    B --> C[读取已落盘历史事实]
+    C --> D[message_projection_service 计算消息投影]
+    D --> E[topic_projection_metadata_resolver 合并配置元数据]
+    E --> F[写入 topic_index]
+
+    G[watcher 外部 history 变更] --> H[history_projection_rebuild_service]
+    H --> C
+```
+
+### 5.3 链路一 消息历史写入
+
+统一定义：
+
+1. 成功标准首先是 `history.json` 已按既有格式成功落盘。
+2. 历史写入接口必须返回“事实写入成功但投影更新失败”与“事实写入失败”这两类可区分状态，至少在内部日志与错误分层上可区分。
+3. 追加写入只是全量历史写入的特化形式，不能拥有独立的投影计算规则。
+
+这意味着第一阶段实现时，[`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:367) 不应继续保留一套手写投影 SQL，而应只负责调用统一的事实写入与投影刷新编排。
+
+### 5.4 链路二 topic_index 投影更新
+
+统一定义：
+
+1. `msg_count` 以历史数组长度为准。
+2. `last_msg_preview` 以最后一条消息的 `content` 截取前 100 字符为准，延续现状，见 [`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:320)。
+3. `smart_unread_count` 以当前唯一的既有规则为准：仅当非 system 消息恰好一条且角色为 assistant 时置为 1，其他情况为 0，保持与 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:346) 一致。
+4. `mtime` 语义在第一阶段建议收敛为“投影刷新发生时间”或“文件事实修改时间”二选一，且必须统一。基于兼容与 watcher 现状，第一阶段建议统一为文件事实时间优先：内部写入完成后重新读取文件元数据时间，再写回投影。这样与 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:272) 的 watcher 路径对齐。
+5. `title`、`locked`、`unread`、`created_at` 不由消息写入链路直接决定，只能由 topic 元数据解析器决定。
+
+### 5.5 链路三 watcher 外部变更重建
+
+统一定义：
+
+1. watcher 只负责发现 `history.json` 外部变化并提交重建任务，见 [`init_watcher()`](src-tauri/src/vcp_modules/file_watcher.rs:103)。
+2. 重建任务与内部写后投影刷新共用同一套投影构建逻辑。
+3. watcher 的内部写过滤仍保留，但仅作为性能与回环保护，不作为正确性的唯一保障。
+4. 即使 watcher 漏过某次事件，[`full_scan()`](src-tauri/src/vcp_modules/index_service.rs:91) 仍能使用同一重建入口做补偿。
+
+## 6. 从旧代码迁移到新边界的建议步骤
+
+### 步骤 1 收敛规则而不改变 IPC 面
+
+1. 保留 [`load_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:152)、[`save_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:298)、[`append_single_message()`](src-tauri/src/vcp_modules/chat_manager.rs:367) 的函数签名。
+2. 在内部把真实源读写逻辑抽到 `history_repository_fs`。
+3. 在内部把投影计算抽到 `message_projection_service`。
+4. 此时不变更 [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) 中的命令注册关系。
+
+目标：先消除 [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs:298) 内部重复实现，而不是先改外部依赖。
+
+### 步骤 2 收敛重建入口
+
+1. 将 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:266) 改造为面向 `history_projection_rebuild_service` 的薄适配层。
+2. 把路径逆向解析、元数据解析、消息投影计算统一委托给新边界。
+3. 保持 [`full_scan()`](src-tauri/src/vcp_modules/index_service.rs:91) 和 [`init_watcher()`](src-tauri/src/vcp_modules/file_watcher.rs:47) 仍调用原入口名或等价包装层，避免对启动链路造成额外扰动。
+
+目标：让 watcher 与 full scan 不再持有独立的投影语义。
+
+### 步骤 3 对齐路径语义
+
+1. 把 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256) 所代表的正向解析规则，与 [`parse_history_target()`](src-tauri/src/vcp_modules/index_service.rs:125) 的逆向解析规则整理为同一模块说明。
+2. 先统一规则文档与内部调用，不强制第一阶段就移动所有函数物理位置。
+3. 对 Group topic 的 `group_` 前缀补偿必须在正向与逆向上保持可逆。
+
+目标：消除“内部写入成功但 watcher 重建定位到不同 topic_id”这类隐患。
+
+### 步骤 4 明确 Group 启动同步的边界
+
+1. [`load_all_groups()`](src-tauri/src/vcp_modules/group_manager.rs:162) 在第一阶段可以继续保留启动时向 [`topic_index`](src-tauri/src/vcp_modules/group_manager.rs:187) 写入缺失 topic 的行为。
+2. 但需在实施时明确它只负责“配置元数据预热”而不是消息投影真相维护。
+3. 一旦 topic 已存在，后续消息投影字段应由统一投影服务负责覆盖。
+
+目标：避免 Group 启动预热继续成为另一套长期投影写入口。
+
+### 步骤 5 保留旧入口 逐步内聚实现
+
+1. [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs) 在第一阶段仍可作为对外 façade 存在。
+2. [`index_service`](src-tauri/src/vcp_modules/index_service.rs) 在第一阶段仍可作为 watcher 和 full scan 的 façade 存在。
+3. [`file_watcher`](src-tauri/src/vcp_modules/file_watcher.rs) 继续只处理监听、过滤、派发。
+4. [`group_manager`](src-tauri/src/vcp_modules/group_manager.rs) 继续保留缓存与路径职责，不扩展重构面。
+
+目标：边界先收，入口不动，降低第一阶段替换风险。
+
+## 7. 保持外部行为不变的约束
+
+第一阶段实施时必须满足以下不变约束。
+
+### 7.1 IPC 与前端契约不变
+
+1. [`run()`](src-tauri/src/lib.rs:103) 中已暴露命令名不变。
+2. 返回数据结构与错误字符串风格不做主动清理式重构。
+3. [`handle_group_chat_message()`](src-tauri/src/vcp_modules/ipc/group_handlers.rs:27) 的串行回复、断点存盘与结束事件行为保持现状。
+
+### 7.2 文件布局与历史格式不变
+
+1. `history.json` 仍位于 [`resolve_history_path()`](src-tauri/src/vcp_modules/group_manager.rs:256) 指定的位置。
+2. Group topic 的目录前缀兼容规则不变。
+3. `ChatMessage` 与附件字段不改名、不删字段，保持 [`ChatMessage`](src-tauri/src/vcp_modules/chat_manager.rs:41) 兼容。
+
+### 7.3 同步与补偿行为不变
+
+1. [`signal_internal_save()`](src-tauri/src/vcp_modules/file_watcher.rs:36) 与 watcher 内部写过滤仍保留。
+2. [`full_scan()`](src-tauri/src/vcp_modules/index_service.rs:91) 仍保留后台补偿角色。
+3. [`topic-index-updated`](src-tauri/src/vcp_modules/index_service.rs:405) 与 [`vcp-file-change`](src-tauri/src/vcp_modules/file_watcher.rs:101) 事件仍继续发射。
+
+### 7.4 展示兼容行为不变
+
+[`load_chat_history()`](src-tauri/src/vcp_modules/chat_manager.rs:179) 中的附件 rebasing 与 avatar 路径兼容处理不属于本阶段主问题，但外部效果不得退化。第一阶段允许继续保留在 [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs:152) 或后续抽为独立兼容组件，但不能影响前端读取历史时的表现。
+
+## 8. 具体验收标准
+
+### 8.1 功能验收
+
+满足以下条件才算第一阶段完成：
+
+1. 内部全量写入与追加写入不再各自维护独立的 topic 投影 SQL 规则。
+2. watcher 命中 `history.json` 后的重建，和内部写入后立即投影，在同一 topic 上得到一致的 `msg_count`、`last_msg_preview`、`unread_count`。
+3. Group 聊天场景下，用户消息先落盘、多个 Agent 回复分段落盘后，最终 `history.json` 顺序与 [`topic_index`](src-tauri/src/vcp_modules/index_service.rs:308) 投影一致。
+4. 外部工具直接修改 `history.json` 后，watcher 或 full scan 能把投影重新收敛到正确状态。
+
+### 8.2 兼容性验收
+
+1. 前端不需要修改任何 IPC 调用。
+2. 历史记录读取结果与第一阶段前相比不出现字段缺失、附件路径失效、头像路径回退异常。
+3. 桌面端 `UserData` 与移动同步 `data` 双轨目录仍可被正确解析与扫描。
+4. Group topic 与普通 topic 在路径解析上不出现回归。
+
+### 8.3 风险控制验收
+
+1. 历史事实写入失败时，不得写出伪成功投影。
+2. 投影更新失败时，不得破坏已写入的 `history.json`。
+3. watcher 去抖窗口即使误判，也不能导致永久性索引错误，因为 [`full_scan()`](src-tauri/src/vcp_modules/index_service.rs:91) 可补偿。
+4. 任何新增边界都不得让 [`load_all_groups()`](src-tauri/src/vcp_modules/group_manager.rs:162) 的启动同步逻辑失去现有可运行性。
+
+### 8.4 回滚性验收
+
+1. 第一阶段重构后，仍可把新抽取边界重新内联回 [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs) 与 [`index_service`](src-tauri/src/vcp_modules/index_service.rs) 而不需要迁移数据结构。
+2. 不新增必须迁移的存储表或文件格式。
+3. 回滚时不需要清理 topic 数据，也不需要重建历史文件。
+
+## 9. 建议实施先后顺序
+
+建议顺序如下：
+
+1. 先定义统一语义与边界文档，以 [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs:298) 和 [`index_service`](src-tauri/src/vcp_modules/index_service.rs:266) 的字段规则为收敛对象。
+2. 再抽 `history_repository_fs` 与 `message_projection_service`，优先消除内部全量写与追加写重复。
+3. 再抽 `topic_projection_metadata_resolver`，把非消息字段来源固定下来。
+4. 再让 [`index_history_file()`](src-tauri/src/vcp_modules/index_service.rs:266) 委托 `history_projection_rebuild_service`。
+5. 最后整理 [`group_manager`](src-tauri/src/vcp_modules/group_manager.rs:229) 与 [`index_service`](src-tauri/src/vcp_modules/index_service.rs:125) 的路径正反向一致性说明。
+
+不建议的顺序：
+
+1. 不建议先改 IPC handler。
+2. 不建议先拆 [`group_manager`](src-tauri/src/vcp_modules/group_manager.rs:75) 缓存体系。
+3. 不建议先处理 topic 生命周期或 AI 总结逻辑。
+
+## 10. 第一阶段建议改动范围摘要
+
+第一阶段建议改动范围应严格限定为：
+
+1. [`chat_manager`](src-tauri/src/vcp_modules/chat_manager.rs) 中与历史写入和投影更新直接相关的内部实现。
+2. [`index_service`](src-tauri/src/vcp_modules/index_service.rs) 中与基于 `history.json` 的投影重建直接相关的内部实现。
+3. [`file_watcher`](src-tauri/src/vcp_modules/file_watcher.rs) 中对统一重建入口的调用方式。
+4. [`group_manager`](src-tauri/src/vcp_modules/group_manager.rs) 中与路径解析和 Group 启动投影预热边界说明直接相关的最小调整。
+
+不建议在第一阶段进入的区域：
+
+- [`topic_list_manager`](src-tauri/src/vcp_modules/topic_list_manager.rs)
+- [`agent_config_manager`](src-tauri/src/vcp_modules/agent_config_manager.rs)
+- 前端 Store 与 IPC 协议
+- 群聊决策算法与 VCP 调用流程
+
+## 11. 最关键验收结论
+
+第一阶段是否成功，最关键只看三件事：
+
+1. 内部全量写入、内部追加写入、watcher 外部重建三条链路是否共享同一套投影语义。
+2. `history.json` 作为真实源是否在任何失败场景下保持优先且不被索引反向污染。
+3. 不改前端协议、不改历史格式的前提下，Group 聊天断点存盘与外部同步补偿是否仍然成立。

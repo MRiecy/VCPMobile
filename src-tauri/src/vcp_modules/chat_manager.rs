@@ -8,6 +8,7 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
@@ -356,6 +357,97 @@ pub async fn save_chat_history(
     Ok(())
 }
 
+/// 线程安全地向历史记录追加单条消息 (用于并行群聊断点存盘)
+lazy_static! {
+    /// 历史记录写入锁，防止并行追加时的竞态
+    static ref HISTORY_WRITE_LOCKS: DashMap<String, Arc<tokio::sync::Mutex<()>>> = DashMap::new();
+}
+
+/// 线程安全地向历史记录追加单条消息 (用于并行群聊断点存盘)
+pub async fn append_single_message(
+    app_handle: AppHandle,
+    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    watcher_state: Option<&WatcherState>,
+    item_id: String,
+    topic_id: String,
+    message: ChatMessage,
+) -> Result<(), String> {
+    let lock_key = format!("{}_{}", item_id, topic_id);
+    let lock = HISTORY_WRITE_LOCKS
+        .entry(lock_key.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+
+    let _guard = lock.lock().await;
+
+    // 1. 加载当前全量历史
+    let mut history =
+        load_chat_history(app_handle.clone(), item_id.clone(), topic_id.clone(), None, None).await?;
+
+    // 检查是否已存在 (防止重复追加)
+    if history.iter().any(|m| m.id == message.id) {
+        return Ok(());
+    }
+
+    history.push(message);
+
+    if let Some(state) = watcher_state {
+        state.last_internal_save_time.store(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    let history_path = resolve_history_path(&app_handle, &item_id, &topic_id);
+    let history_dir = history_path.parent().unwrap();
+    fs::create_dir_all(history_dir).map_err(|e| e.to_string())?;
+
+    let content = serde_json::to_string_pretty(&history).map_err(|e| e.to_string())?;
+    fs::write(&history_path, content).map_err(|e| e.to_string())?;
+
+    let msg_count = history.len() as i32;
+    let last_msg_preview = history.last().map(|m| {
+        let mut preview = m.content.chars().take(100).collect::<String>();
+        if m.content.chars().count() > 100 {
+            preview.push_str("...");
+        }
+        preview
+    });
+
+    let mut smart_unread_count = 0;
+    let non_system_msgs: Vec<_> = history.iter().filter(|m| m.role != "system").collect();
+    if non_system_msgs.len() == 1 && non_system_msgs[0].role == "assistant" {
+        smart_unread_count = 1;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    sqlx::query(
+        "UPDATE topic_index SET 
+            msg_count = ?, 
+            last_msg_preview = ?, 
+            mtime = ?,
+            unread_count = ?
+         WHERE topic_id = ?",
+    )
+    .bind(msg_count)
+    .bind(last_msg_preview)
+    .bind(now)
+    .bind(smart_unread_count)
+    .bind(&topic_id)
+    .execute(db_pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 // --- 增量同步逻辑 (Delta Sync) ---
 
 // --- 指纹与同步优化 ---
@@ -493,8 +585,8 @@ pub async fn get_topic_delta(
     let new_ids_seq: Vec<String> = new_history.iter().map(|m| m.id.clone()).collect();
 
     // 5. 找出新增和修改的消息
-    let history_len = new_history.len();
-    for (idx, new_msg) in new_history.iter_mut().enumerate() {
+    let _history_len = new_history.len();
+    for (_idx, new_msg) in new_history.iter_mut().enumerate() {
         new_ids_set.insert(new_msg.id.clone());
 
         match old_map.get(&new_msg.id) {

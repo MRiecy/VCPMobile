@@ -3,6 +3,12 @@ import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { syncService } from '../../../core/utils/syncService';
 import type { AppSettings } from '../../../core/stores/settings';
+import SettingsSection from '../../../components/settings/SettingsSection.vue';
+import SettingsCard from '../../../components/settings/SettingsCard.vue';
+import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
+import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
+import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
+import SettingsRow from '../../../components/settings/SettingsRow.vue';
 
 const props = defineProps<{
   settings: AppSettings;
@@ -49,56 +55,78 @@ const rebuildEmoticonLibrary = async () => {
 </script>
 
 <template>
-  <section class="space-y-4">
-    <div class="flex items-center gap-2 px-1">
-      <div class="w-1 h-4 bg-green-500 rounded-full"></div>
-      <h3 class="text-xs font-black uppercase tracking-[0.2em] opacity-50 dark:opacity-40">桌面端数据同步</h3>
-    </div>
-    <div class="card-modern space-y-5">
+  <SettingsSection title="桌面端数据同步" accent-color="bg-green-500">
+    <SettingsCard class="space-y-5">
       <div class="flex gap-4">
         <div class="flex-[2]">
-          <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">同步服务器 IP</label>
-          <input v-model="settings.syncServerIp" placeholder="192.168.x.x" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-green-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all font-mono text-sm" />
+          <SettingsTextField 
+            v-model="settings.syncServerIp" 
+            label="同步服务器 IP" 
+            placeholder="192.168.x.x" 
+            mono
+          />
         </div>
         <div class="flex-1">
-          <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">端口</label>
-          <input v-model.number="settings.syncServerPort" type="number" placeholder="5974" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-green-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all font-mono text-sm text-center" />
+          <SettingsTextField 
+            v-model.number="settings.syncServerPort" 
+            type="number" 
+            label="端口" 
+            placeholder="5974" 
+            mono
+            center
+          />
         </div>
       </div>
-      <div>
-        <label class="text-[11px] uppercase font-bold opacity-50 dark:opacity-40 mb-2 block">Mobile Sync Token</label>
-        <input v-model="settings.syncToken" type="text" placeholder="输入桌面端 config.env 中的 Token" class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border border-black/5 dark:border-white/5 focus:border-green-500/50 focus:bg-black/10 dark:focus:bg-white/10 transition-all font-mono text-sm" />
-      </div>
+      <SettingsTextField 
+        v-model="settings.syncToken" 
+        label="Mobile Sync Token" 
+        placeholder="输入桌面端 config.env 中的 Token" 
+        mono
+      />
 
-      <div class="pt-2 flex items-center justify-between">
-        <div class="text-xs font-medium" :class="{
-          'text-green-500 dark:text-green-400': pingStatus.type === 'success',
-          'text-red-500 dark:text-red-400': pingStatus.type === 'error',
-          'text-blue-500 dark:text-blue-400 animate-pulse': pingStatus.type === 'loading',
-          'opacity-0': !pingStatus.type
-        }">
-          {{ pingStatus.message }}
-        </div>
-        <div class="flex gap-2">
-          <button @click="testSyncConnection" :disabled="pingStatus.type === 'loading'" class="px-4 py-2 bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 active:scale-95 transition-all rounded-xl text-xs font-bold tracking-wider disabled:opacity-50">
+      <div class="pt-2 flex items-center justify-between gap-4">
+        <SettingsInlineStatus 
+          v-if="pingStatus.type"
+          :type="pingStatus.type" 
+          :message="pingStatus.message" 
+          class="flex-1"
+        />
+        <div class="flex gap-2 shrink-0">
+          <SettingsActionButton 
+            variant="secondary" 
+            size="sm"
+            :loading="pingStatus.type === 'loading'"
+            @click="testSyncConnection"
+          >
             测试连接
-          </button>
-          <button @click="openSyncCenter" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white active:scale-95 transition-all rounded-xl text-xs font-bold tracking-wider shadow-lg shadow-blue-900/20">
+          </SettingsActionButton>
+          <SettingsActionButton 
+            variant="primary" 
+            size="sm"
+            @click="openSyncCenter"
+          >
             进入同步面板
-          </button>
+          </SettingsActionButton>
         </div>
       </div>
 
-      <div class="border-t border-black/5 dark:border-white/5 pt-4 mt-2 flex items-center justify-between">
-        <div class="flex flex-col">
-          <span class="text-xs font-bold opacity-60">本地表情包修复库</span>
-          <span class="text-[9px] opacity-30 uppercase font-mono">{{ emoticonStatus.message || 'IDLE' }}</span>
-        </div>
-        <button @click="rebuildEmoticonLibrary" :disabled="emoticonStatus.type === 'loading'" class="px-3 py-1.5 bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 active:scale-95 transition-all rounded-lg text-[10px] font-bold tracking-tight disabled:opacity-50 flex items-center gap-2">
-          <div v-if="emoticonStatus.type === 'loading'" class="w-2 h-2 rounded-full bg-blue-500 animate-ping"></div>
-          RESCAN_LIBRARY
-        </button>
+      <div class="border-t border-black/5 dark:border-white/5 pt-2">
+        <SettingsRow 
+          title="本地表情包修复库" 
+          :description="emoticonStatus.message || 'IDLE'"
+        >
+          <template #action>
+            <SettingsActionButton 
+              variant="secondary" 
+              size="sm"
+              :loading="emoticonStatus.type === 'loading'"
+              @click="rebuildEmoticonLibrary"
+            >
+              RESCAN
+            </SettingsActionButton>
+          </template>
+        </SettingsRow>
       </div>
-    </div>
-  </section>
+    </SettingsCard>
+  </SettingsSection>
 </template>

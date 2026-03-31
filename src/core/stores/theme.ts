@@ -56,6 +56,8 @@ const inlineThemes = import.meta.glob('../../assets/themes/*.css', { query: '?in
 export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>((localStorage.getItem('vcp-theme-mode') as ThemeMode) || 'system');
   const isDarkResolved = ref(true);
+  const lastModeSwitchAt = ref(0);
+  const MODE_SWITCH_DEBOUNCE_MS = 500;
   
   let initialTheme = localStorage.getItem('vcp-theme-name');
   if (initialTheme && LEGACY_THEME_MAP[initialTheme]) {
@@ -164,8 +166,22 @@ export const useThemeStore = defineStore('theme', () => {
     }
   });
 
+  const setMode = (newMode: ThemeMode) => {
+    const now = Date.now();
+    if (now - lastModeSwitchAt.value < MODE_SWITCH_DEBOUNCE_MS) {
+      return;
+    }
+
+    if (mode.value === newMode) {
+      return;
+    }
+
+    lastModeSwitchAt.value = now;
+    mode.value = newMode;
+  };
+
   const toggleTheme = () => {
-    mode.value = mode.value === 'light' ? 'dark' : 'light';
+    setMode(mode.value === 'light' ? 'dark' : 'light');
   };
   // Listen for theme updates from backend
   listen('onThemeUpdated', (event) => {
@@ -184,6 +200,6 @@ export const useThemeStore = defineStore('theme', () => {
     applyThemeFile,
     initTheme,
     toggleTheme,
-    setMode: (m: ThemeMode) => (mode.value = m),
+    setMode,
   };
 });

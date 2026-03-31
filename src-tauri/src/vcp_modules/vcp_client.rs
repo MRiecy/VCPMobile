@@ -304,8 +304,9 @@ pub async fn perform_vcp_request<R: Runtime>(
 
         tokio::select! {
             _ = &mut abort_rx => {
+                println!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
                 let _ = app_handle.emit(&stream_channel, StreamEvent {
-                    r#type: "error".to_string(),
+                    r#type: "end".to_string(),
                     chunk: None,
                     message_id: message_id_inner.clone(),
                     context: context_inner.clone(),
@@ -332,8 +333,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         chunk: None,
                                         message_id: message_id_inner.clone(),
                                         context: context_inner.clone(),
-                                        error: None,
+                                        error: Some("请求已中止".to_string()),
                                     });
+                                    // 显式清理，防止 race
+                                    active_requests_inner.remove(&message_id_inner);
                                     break;
                                 }
                                 line_res = lines.next() => {

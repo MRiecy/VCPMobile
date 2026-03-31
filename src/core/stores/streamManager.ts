@@ -84,11 +84,22 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
   const finalizeStream = (messageId: string, onComplete?: () => void) => {
     const buffer = streamBuffers.get(messageId);
     if (buffer) {
+      // 如果已经标记为结束，不要重复设置回调，但可以更新它
+      if (buffer.isFinishing) {
+        const oldCallback = buffer.onCompleteCallback;
+        buffer.onCompleteCallback = () => {
+          if (oldCallback) oldCallback();
+          if (onComplete) onComplete();
+        };
+        return;
+      }
+      
       // 标记为结束，loop 会在清空队列后触发回调并自动退出
       buffer.isFinishing = true;
       buffer.onCompleteCallback = onComplete;
     } else {
       // 如果 buffer 已经不存在（比如未经过 stream 过程就结束了），直接触发回调
+      activeStreams.value.delete(messageId);
       if (onComplete) onComplete();
     }
   };

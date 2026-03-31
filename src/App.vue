@@ -174,7 +174,7 @@ html, body, #app {
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  transition: background-image 1s ease-in-out;
+  transition: background-image 0.8s ease-in-out;
   transform: translateZ(0);
   will-change: opacity, transform;
   backface-visibility: hidden;
@@ -189,7 +189,7 @@ html, body, #app {
 }
 
 .bg-fade-enter-active, .bg-fade-leave-active {
-  transition: opacity 1s ease-in-out;
+  transition: opacity 0.8s ease-in-out;
 }
 .bg-fade-enter-from, .bg-fade-leave-to {
   opacity: 0;
