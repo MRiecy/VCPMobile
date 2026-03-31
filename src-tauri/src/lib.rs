@@ -1,13 +1,13 @@
 mod vcp_modules;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::agent_config_manager::{
     get_agents, read_agent_config, rebuild_db_index, save_agent_config, update_agent_config,
-    write_agent_config, AgentConfigState,
+    write_agent_config,
 };
 use vcp_modules::app_settings_manager::{
-    read_app_settings, update_app_settings, write_app_settings, AppSettingsState,
+    read_app_settings, update_app_settings, write_app_settings,
 };
 use vcp_modules::avatar_color_extractor::extract_avatar_color;
 use vcp_modules::chat_manager::{
@@ -15,20 +15,18 @@ use vcp_modules::chat_manager::{
     save_chat_history,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
-use vcp_modules::db_manager::{init_db, DbState};
+use vcp_modules::db_manager::DbState;
 use vcp_modules::emoticon_manager::{
-    fix_emoticon_url, get_emoticon_library, internal_generate_library, regenerate_emoticon_library,
-    EmoticonManagerState,
+    fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
     cleanup_orphaned_attachments, get_attachment_real_path, open_file, pick_and_store_attachment,
     read_local_file_base64, store_file,
 };
-use vcp_modules::file_watcher::{init_watcher, signal_internal_save, WatcherState};
+use vcp_modules::file_watcher::{signal_internal_save, WatcherState};
 use vcp_modules::group_manager::{
-    create_group, get_groups, load_all_groups, read_group_config, GroupManagerState,
+    create_group, get_groups, read_group_config, GroupManagerState,
 };
-use vcp_modules::index_service::full_scan;
 use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
 use vcp_modules::ipc::group_handlers::handle_group_chat_message;
 use vcp_modules::ipc::settings_handlers::{
@@ -40,8 +38,8 @@ use vcp_modules::ipc::sync_handlers::{
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
 use vcp_modules::model_manager::{
-    get_cached_models, get_favorite_models, get_hot_models, init_model_manager, record_model_usage,
-    refresh_models, toggle_favorite_model, ModelManagerState,
+    get_cached_models, get_favorite_models, get_hot_models, record_model_usage,
+    refresh_models, toggle_favorite_model,
 };
 use vcp_modules::topic_list_manager::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,

@@ -35,9 +35,19 @@ const notificationStore = useNotificationStore();
 const chatStore = useChatManagerStore();
 
 const isUser = computed(() => props.message.role === 'user');
-const isStreaming = computed(() => 
-  (!!props.message.isThinking || chatStore.streamingMessageId === props.message.id) && !isUser.value
-);
+const isStreaming = computed(() => {
+  if (isUser.value) return false;
+  if (props.message.isThinking) return true;
+  
+  // 检查当前消息是否在所属会话的活动流中
+  const itemId = props.message.extra?.agentId || props.message.extra?.groupId || props.agentId;
+  const topicId = chatStore.currentTopicId;
+  if (!itemId || !topicId) return false;
+  
+  const key = `${itemId}:${topicId}`;
+  const streams = chatStore.sessionActiveStreams?.get(key);
+  return streams ? streams.has(props.message.id) : false;
+});
 
 // 获取当前消息实际对应的 Agent ID (对于群聊，从 extra 中读取)
 const actualAgentId = computed(() => {
@@ -233,7 +243,7 @@ const showMessageContextMenu = () => {
       icon: StopCircle,
       danger: true,
       handler: () => {
-        chatStore.stopGenerating();
+        chatStore.stopMessage(props.message.id);
       }
     });
   }

@@ -62,7 +62,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -92,37 +92,22 @@ jobs:
         env:
           NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          pnpm tauri android build --apk --split-per-abi
+          pnpm tauri android build --apk --target aarch64-linux-android
 
-      - name: Collect and rename APK artifacts
+      - name: Collect and rename APK artifact
         id: artifacts
         shell: bash
         run: |
           mkdir -p release-artifacts
-          found=0
+          source_apk="src-tauri/gen/android/app/build/outputs/apk/arm64/release/app-arm64-release.apk"
+          target_apk="release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_arm64-v8a.apk"
 
-          declare -A apk_map=(
-            [arm64]="arm64-v8a"
-            [arm]="armeabi-v7a"
-            [x86]="x86"
-            [x86_64]="x86_64"
-          )
-
-          for dir_name in "${!apk_map[@]}"; do
-            source_apk="src-tauri/gen/android/app/build/outputs/apk/${dir_name}/release/app-${dir_name}-release.apk"
-            target_abi="${apk_map[$dir_name]}"
-
-            if [[ -f "$source_apk" ]]; then
-              cp "$source_apk" "release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_${target_abi}.apk"
-              found=$((found + 1))
-            fi
-          done
-
-          if [[ "$found" -eq 0 ]]; then
-            echo "No APK artifacts were found in split-per-abi output directories." >&2
+          if [[ ! -f "$source_apk" ]]; then
+            echo "Expected APK not found: $source_apk" >&2
             exit 1
           fi
 
+          cp "$source_apk" "$target_apk"
           echo "artifact_dir=release-artifacts" >> "$GITHUB_OUTPUT"
 
       - name: Update GitHub Release assets
