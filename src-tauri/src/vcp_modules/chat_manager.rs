@@ -2,6 +2,7 @@ use crate::vcp_modules::agent_config_manager::RegexRule;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_watcher::{signal_internal_save, WatcherState};
 use crate::vcp_modules::group_manager::resolve_history_path;
+use crate::vcp_modules::topic_projection_service::refresh_topic_projection_from_history;
 use dashmap::DashMap;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
@@ -303,58 +304,24 @@ pub async fn save_chat_history(
     topic_id: String,
     history: Vec<ChatMessage>,
 ) -> Result<(), String> {
-    // 1. 发射内部保存信号，防止 Watcher 触发回环
     signal_internal_save(watcher_state);
 
     let history_path = resolve_history_path(&app_handle, &item_id, &topic_id);
     let history_dir = history_path.parent().unwrap();
-
     fs::create_dir_all(history_dir).map_err(|e| e.to_string())?;
 
-    // 2. 原子写入物理文件
     let content = serde_json::to_string_pretty(&history).map_err(|e| e.to_string())?;
     fs::write(&history_path, content).map_err(|e| e.to_string())?;
 
-    // 3. 同步更新影子数据库索引 (Shadow DB Sync)
-    let msg_count = history.len() as i32;
-    let last_msg_preview = history.last().map(|m| {
-        let mut preview = m.content.chars().take(100).collect::<String>();
-        if m.content.chars().count() > 100 {
-            preview.push_str("...");
-        }
-        preview
-    });
-
-    // "智能计数判断"
-    let mut smart_unread_count = 0;
-    let non_system_msgs: Vec<_> = history.iter().filter(|m| m.role != "system").collect();
-    if non_system_msgs.len() == 1 && non_system_msgs[0].role == "assistant" {
-        smart_unread_count = 1;
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-
-    sqlx::query(
-        "UPDATE topic_index SET 
-            msg_count = ?, 
-            last_msg_preview = ?, 
-            mtime = ?,
-            unread_count = ?
-         WHERE topic_id = ?",
+    refresh_topic_projection_from_history(
+        &app_handle,
+        &db_state.pool,
+        &item_id,
+        &topic_id,
+        &history_path,
+        &history,
     )
-    .bind(msg_count)
-    .bind(last_msg_preview)
-    .bind(now)
-    .bind(smart_unread_count)
-    .bind(&topic_id)
-    .execute(&db_state.pool)
     .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
 }
 
 /// 线程安全地向历史记录追加单条消息 (用于并行群聊断点存盘)
@@ -408,44 +375,15 @@ pub async fn append_single_message(
     let content = serde_json::to_string_pretty(&history).map_err(|e| e.to_string())?;
     fs::write(&history_path, content).map_err(|e| e.to_string())?;
 
-    let msg_count = history.len() as i32;
-    let last_msg_preview = history.last().map(|m| {
-        let mut preview = m.content.chars().take(100).collect::<String>();
-        if m.content.chars().count() > 100 {
-            preview.push_str("...");
-        }
-        preview
-    });
-
-    let mut smart_unread_count = 0;
-    let non_system_msgs: Vec<_> = history.iter().filter(|m| m.role != "system").collect();
-    if non_system_msgs.len() == 1 && non_system_msgs[0].role == "assistant" {
-        smart_unread_count = 1;
-    }
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
-
-    sqlx::query(
-        "UPDATE topic_index SET 
-            msg_count = ?, 
-            last_msg_preview = ?, 
-            mtime = ?,
-            unread_count = ?
-         WHERE topic_id = ?",
+    refresh_topic_projection_from_history(
+        &app_handle,
+        db_pool,
+        &item_id,
+        &topic_id,
+        &history_path,
+        &history,
     )
-    .bind(msg_count)
-    .bind(last_msg_preview)
-    .bind(now)
-    .bind(smart_unread_count)
-    .bind(&topic_id)
-    .execute(db_pool)
     .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
 }
 
 // --- 增量同步逻辑 (Delta Sync) ---
