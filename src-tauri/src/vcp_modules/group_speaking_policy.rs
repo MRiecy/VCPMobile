@@ -1,12 +1,8 @@
-// GroupOrchestrator: 群组决策引擎与上下文组装器
-// 职责: 1. 运行 NatureRandom 算法 2. 注入群组全局设定 3. 处理 SessionWatcher 动态感知
-
 use crate::vcp_modules::agent_config_manager::AgentConfig;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::group_manager::GroupConfig;
 use rand::Rng;
 use regex::Regex;
-use serde_json::json;
 
 /// NatureRandom 决策引擎
 pub fn determine_naturerandom_speakers(
@@ -52,7 +48,7 @@ pub fn determine_naturerandom_speakers(
         {
             speakers.push(member.clone());
             println!(
-                "[GroupOrchestrator] @{} triggered by direct mention.",
+                "[GroupSpeakingPolicy] @{} triggered by direct mention.",
                 member.name
             );
         }
@@ -246,50 +242,4 @@ pub fn determine_naturerandom_speakers(
     });
 
     speakers
-}
-
-/// 上下文组装器: 合并 Agent 设定与群组设定
-pub async fn assemble_context(
-    agent_config: &AgentConfig,
-    group_config: &GroupConfig,
-    active_members: &[AgentConfig],
-) -> String {
-    let agent_name = if agent_config.name.is_empty() {
-        &agent_config.id
-    } else {
-        &agent_config.name
-    };
-    let mut system_prompt = agent_config.system_prompt.clone();
-
-    // 注入群组全局设定
-    if let Some(group_prompt) = &group_config.group_prompt {
-        let mut final_group_prompt = group_prompt.clone();
-
-        // 处理 SessionWatcher 感知占位符
-        if final_group_prompt.contains("{{VCPChatGroupSessionWatcher}}") {
-            let session_info = json!({
-                "groupId": group_config.id,
-                "groupName": group_config.name,
-                "activeMembers": active_members.iter().map(|m| {
-                    json!({
-                        "id": m.id,
-                        "name": m.name,
-                        "model": m.model
-                    })
-                }).collect::<Vec<_>>()
-            });
-            final_group_prompt = final_group_prompt
-                .replace("{{VCPChatGroupSessionWatcher}}", &session_info.to_string());
-        }
-
-        system_prompt = format!("{}\n\n[群聊设定]:\n{}", system_prompt, final_group_prompt);
-    }
-
-    // 注入邀请发言逻辑
-    if let Some(invite_prompt) = &group_config.invite_prompt {
-        let processed_invite = invite_prompt.replace("{{VCPChatAgentName}}", agent_name);
-        system_prompt = format!("{}\n\n[指令]:\n{}", system_prompt, processed_invite);
-    }
-
-    system_prompt
 }

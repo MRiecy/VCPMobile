@@ -56,11 +56,11 @@ fn edit_distance(s1: &str, s2: &str) -> usize {
 
     let mut dp = vec![vec![0; m + 1]; n + 1];
 
-    for i in 0..=n {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
     }
-    for j in 0..=m {
-        dp[0][j] = j;
+    for (j, item) in dp[0].iter_mut().enumerate() {
+        *item = j;
     }
 
     for i in 1..=n {

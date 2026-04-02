@@ -78,12 +78,18 @@ const mathExtension = {
     {
       name: 'inlineMath',
       level: 'inline',
-      start(src: string) { return src.indexOf('$'); },
+      start(src: string) {
+        const match = src.match(/\$|\\\(/);
+        return match ? match.index : -1;
+      },
       tokenizer(src: string) {
-        const match = src.match(/^\$((?:[^\$\n]|\\\$)+?)\$/);
-        if (match) {
-          return { type: 'inlineMath', raw: match[0], text: match[1].trim() };
-        }
+        // 匹配 $...$ (非换行，支持 \$ 转义)
+        const dollarMatch = src.match(/^\$((?:[^\$\n]|\\\$)+?)\$/);
+        if (dollarMatch) return { type: 'inlineMath', raw: dollarMatch[0], text: dollarMatch[1].trim() };
+        
+        // 匹配 \(...\)
+        const parenMatch = src.match(/^\\\(([\s\S]+?)\\\)/);
+        if (parenMatch) return { type: 'inlineMath', raw: parenMatch[0], text: parenMatch[1].trim() };
       },
       renderer(token: any) {
         return `<span class="math-inline">${token.text}</span>`;
@@ -92,12 +98,22 @@ const mathExtension = {
     {
       name: 'blockMath',
       level: 'block',
-      start(src: string) { return src.indexOf('$$'); },
+      start(src: string) {
+        const match = src.match(/\$\$|\\\[|\\begin/);
+        return match ? match.index : -1;
+      },
       tokenizer(src: string) {
-        const match = src.match(/^\$\$([\s\S]+?)\$\$/);
-        if (match) {
-          return { type: 'blockMath', raw: match[0], text: match[1].trim() };
-        }
+        // 匹配 $$...$$ (允许前置空格)
+        const dollarMatch = src.match(/^ *\$\$([\s\S]+?)\$\$/);
+        if (dollarMatch) return { type: 'blockMath', raw: dollarMatch[0], text: dollarMatch[1].trim() };
+        
+        // 匹配 \[...\]
+        const bracketMatch = src.match(/^ *\\\[([\s\S]+?)\\\]/);
+        if (bracketMatch) return { type: 'blockMath', raw: bracketMatch[0], text: bracketMatch[1].trim() };
+        
+        // 匹配 \begin{...}...\end{...}
+        const envMatch = src.match(/^ *\\begin\{([a-z]*\*?)\}([\s\S]+?)\\end\{\1\}/);
+        if (envMatch) return { type: 'blockMath', raw: envMatch[0], text: envMatch[0].trim() };
       },
       renderer(token: any) {
         return `<div class="language-math">${token.text}</div>`;

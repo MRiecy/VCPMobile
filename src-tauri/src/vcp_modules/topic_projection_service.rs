@@ -368,7 +368,10 @@ fn resolve_item_identity(app_config_dir: &Path, item_id: &str) -> ItemIdentity {
         .join("AgentGroups")
         .join(item_id)
         .join("config.json");
-    let agent_config_path = app_config_dir.join("Agents").join(item_id).join("config.json");
+    let agent_config_path = app_config_dir
+        .join("Agents")
+        .join(item_id)
+        .join("config.json");
 
     if group_config_path.exists() {
         ItemIdentity {

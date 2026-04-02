@@ -15,7 +15,7 @@ use vcp_modules::chat_manager::{
     save_chat_history,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
-use vcp_modules::db_manager::DbState;
+// use vcp_modules::db_manager::DbState;
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
@@ -23,12 +23,10 @@ use vcp_modules::file_manager::{
     cleanup_orphaned_attachments, get_attachment_real_path, open_file, pick_and_store_attachment,
     read_local_file_base64, store_file,
 };
-use vcp_modules::file_watcher::{signal_internal_save, WatcherState};
-use vcp_modules::group_manager::{
-    create_group, get_groups, read_group_config, GroupManagerState,
-};
+use vcp_modules::file_watcher::signal_internal_save;
+use vcp_modules::group_manager::{create_group, get_groups, read_group_config};
 use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
-use vcp_modules::ipc::group_handlers::handle_group_chat_message;
+use vcp_modules::ipc::group_chat_handler::handle_group_chat_message;
 use vcp_modules::ipc::settings_handlers::{
     notify_app_state, notify_network_state, save_avatar_color, save_user_avatar, set_theme,
 };
@@ -38,8 +36,8 @@ use vcp_modules::ipc::sync_handlers::{
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
 use vcp_modules::model_manager::{
-    get_cached_models, get_favorite_models, get_hot_models, record_model_usage,
-    refresh_models, toggle_favorite_model,
+    get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
+    toggle_favorite_model,
 };
 use vcp_modules::topic_list_manager::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,

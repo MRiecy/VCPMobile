@@ -1,21 +1,20 @@
-// group_handlers.rs: 处理群组相关的 IPC 指令
-// 职责: 1. 协调多 Agent 串行回复 2. 实现断点存盘 3. 触发前端实时同步
+// group_chat_application_service.rs: 编排群聊工作流
+// 职责: 1. 读取配置 2. 保存消息 3. 决策发言者 4. 组装上下文 5. 执行 AI 调用 6. 发射事件
 
 use crate::vcp_modules::agent_config_manager::{read_agent_config, AgentConfigState};
-use crate::vcp_modules::chat_manager::{save_chat_history, ChatMessage};
+use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_watcher::WatcherState;
+use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_manager::{read_group_config, GroupManagerState};
-use crate::vcp_modules::group_orchestrator::{assemble_context, determine_naturerandom_speakers};
+use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
+use crate::vcp_modules::message_application_service;
 use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpRequestPayload};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupChatPayload {
+pub struct GroupChatParams {
     pub group_id: String,
     pub topic_id: String,
     pub user_message: ChatMessage,
@@ -23,28 +22,29 @@ pub struct GroupChatPayload {
     pub vcp_api_key: String,
 }
 
-#[tauri::command]
-pub async fn handle_group_chat_message(
+pub async fn process_group_chat_message(
     app_handle: AppHandle,
     group_state: State<'_, GroupManagerState>,
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     watcher_state: State<'_, WatcherState>,
     active_requests: State<'_, ActiveRequests>,
-    payload: GroupChatPayload,
+    params: GroupChatParams,
 ) -> Result<Value, String> {
+    let group_id = params.group_id;
+    let topic_id = params.topic_id;
+    let user_message = params.user_message;
+    let vcp_url = params.vcp_url;
+    let vcp_api_key = params.vcp_api_key;
+
     println!(
-        "[GroupHandlers] handle_group_chat_message invoked for group: {}",
-        payload.group_id
+        "[GroupChatAppService] process_group_chat_message invoked for group: {}",
+        group_id
     );
 
     // 1. 加载群组配置
-    let group_config = read_group_config(
-        app_handle.clone(),
-        group_state.clone(),
-        payload.group_id.clone(),
-    )
-    .await?;
+    let group_config =
+        read_group_config(app_handle.clone(), group_state.clone(), group_id.clone()).await?;
 
     // 2. 加载成员配置
     let mut active_member_configs = Vec::new();
@@ -62,25 +62,25 @@ pub async fn handle_group_chat_message(
     }
 
     // 3. 加载并更新历史记录 (存入用户消息)
-    let history_command = crate::vcp_modules::chat_manager::load_chat_history(
-        app_handle.clone(),
-        payload.group_id.clone(),
-        payload.topic_id.clone(),
+    let history_command = message_application_service::load_chat_history_internal(
+        &app_handle,
+        &group_id,
+        &topic_id,
         None,
         None,
     )
     .await?;
 
     let mut current_history = history_command;
-    current_history.push(payload.user_message.clone());
+    current_history.push(user_message.clone());
 
     // 立即保存一次用户消息
-    save_chat_history(
-        app_handle.clone(),
-        db_state.clone(),
-        watcher_state.clone(),
-        payload.group_id.clone(),
-        payload.topic_id.clone(),
+    message_application_service::save_chat_history_internal(
+        &app_handle,
+        &db_state,
+        &watcher_state,
+        &group_id,
+        &topic_id,
         current_history.clone(),
     )
     .await?;
@@ -93,11 +93,11 @@ pub async fn handle_group_chat_message(
             &active_member_configs,
             &current_history,
             &group_config,
-            &payload.user_message,
+            &user_message,
         )
     } else {
         println!(
-            "[GroupHandlers] Mode {} not implemented, ignoring.",
+            "[GroupChatAppService] Mode {} not implemented, ignoring.",
             group_config.mode
         );
         return Ok(json!({"status": "no_ai_response"}));
@@ -115,16 +115,16 @@ pub async fn handle_group_chat_message(
         let db_pool = db_state.pool.clone();
         let watcher_state_ref = &*watcher_state;
         let active_requests_map = active_requests.0.clone();
-        let group_id = payload.group_id.clone();
-        let topic_id = payload.topic_id.clone();
-        let vcp_url = payload.vcp_url.clone();
-        let vcp_api_key = payload.vcp_api_key.clone();
-        
+        let group_id = group_id.clone();
+        let topic_id = topic_id.clone();
+        let vcp_url = vcp_url.clone();
+        let vcp_api_key = vcp_api_key.clone();
+
         // 每次循环重新加载历史，以包含前一个 Agent 的回复
-        let current_history_for_context = crate::vcp_modules::chat_manager::load_chat_history(
-            app_handle.clone(),
-            group_id.clone(),
-            topic_id.clone(),
+        let current_history_for_context = message_application_service::load_chat_history_internal(
+            &app_handle,
+            &group_id,
+            &topic_id,
             None,
             None,
         )
@@ -146,7 +146,8 @@ pub async fn handle_group_chat_message(
 
         // 组装上下文
         let system_prompt =
-            assemble_context(&speaker, &group_config_inner, &active_member_configs_inner).await;
+            assemble_group_context(&speaker, &group_config_inner, &active_member_configs_inner)
+                .await;
 
         // 构造请求载荷
         let mut model_config = speaker.extra.get("modelConfig").cloned().unwrap_or(json!({
@@ -185,7 +186,8 @@ pub async fn handle_group_chat_message(
         };
 
         // 执行请求 (串行等待)
-        let res_result = perform_vcp_request(&app_handle, active_requests_map, request_payload).await;
+        let res_result =
+            perform_vcp_request(&app_handle, active_requests_map, request_payload).await;
 
         if let Ok((res, _is_aborted)) = res_result {
             if let Some(full_content) = res["fullContent"].as_str() {
@@ -211,7 +213,7 @@ pub async fn handle_group_chat_message(
                 };
 
                 // 立即进行一次断点存盘 (针对单个 Agent)
-                let _ = crate::vcp_modules::chat_manager::append_single_message(
+                let _ = message_application_service::append_single_message(
                     app_handle.clone(),
                     &db_pool,
                     Some(watcher_state_ref),
@@ -225,7 +227,7 @@ pub async fn handle_group_chat_message(
             }
         } else if let Err(e) = res_result {
             eprintln!(
-                "[GroupHandlers] Error during agent {} response: {}",
+                "[GroupChatAppService] Error during agent {} response: {}",
                 agent_id, e
             );
         }
@@ -246,8 +248,8 @@ pub async fn handle_group_chat_message(
     let _ = app_handle.emit(
         "vcp-group-turn-finished",
         json!({
-            "groupId": payload.group_id,
-            "topic_id": payload.topic_id,
+            "groupId": group_id,
+            "topic_id": topic_id,
             "agentIds": agent_ids
         }),
     );

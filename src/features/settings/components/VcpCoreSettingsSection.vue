@@ -2,8 +2,6 @@
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings } from '../../../core/stores/settings';
-import SettingsSection from '../../../components/settings/SettingsSection.vue';
-import SettingsCard from '../../../components/settings/SettingsCard.vue';
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
 import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
 import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
@@ -45,51 +43,49 @@ const testVcpConnection = async () => {
 </script>
 
 <template>
-  <SettingsSection title="核心连接" accent-color="bg-blue-500">
-    <SettingsCard class="space-y-5">
-      <SettingsTextField 
-        v-model="settings.vcpServerUrl" 
-        label="VCP 服务器 URL (HTTP/HTTPS)" 
-        placeholder="https://vcp-endpoint.com" 
-      />
-      <SettingsTextField 
-        v-model="settings.vcpApiKey" 
-        type="password" 
-        label="VCP API Key" 
-        placeholder="••••••••" 
-      />
+  <div class="space-y-5 px-1">
+    <SettingsTextField 
+      v-model="settings.vcpServerUrl" 
+      label="VCP 服务器 URL (HTTP/HTTPS)" 
+      placeholder="https://vcp-endpoint.com" 
+    />
+    <SettingsTextField 
+      v-model="settings.vcpApiKey" 
+      type="password" 
+      label="VCP API Key" 
+      placeholder="••••••••" 
+    />
 
-      <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
+    <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
-      <SettingsTextField 
-        v-model="settings.vcpLogUrl" 
-        label="VCP WebSocket 服务器 URL" 
-        placeholder="ws://localhost:8024" 
-        mono
-      />
-      <SettingsTextField 
-        v-model="settings.vcpLogKey" 
-        type="password" 
-        label="VCP WebSocket 鉴权 Key" 
-        placeholder="输入 WebSocket Key" 
-        mono
-      />
+    <SettingsTextField 
+      v-model="settings.vcpLogUrl" 
+      label="VCP WebSocket 服务器 URL" 
+      placeholder="ws://localhost:8024" 
+      mono
+    />
+    <SettingsTextField 
+      v-model="settings.vcpLogKey" 
+      type="password" 
+      label="VCP WebSocket 鉴权 Key" 
+      placeholder="输入 WebSocket Key" 
+      mono
+    />
 
-      <div class="pt-2 flex items-center justify-between gap-4">
-        <SettingsInlineStatus 
-          v-if="vcpPingStatus.type"
-          :type="vcpPingStatus.type" 
-          :message="vcpPingStatus.message" 
-          class="flex-1"
-        />
-        <SettingsActionButton 
-          variant="primary" 
-          :loading="vcpPingStatus.type === 'loading'"
-          @click="testVcpConnection"
-        >
-          验证连接
-        </SettingsActionButton>
-      </div>
-    </SettingsCard>
-  </SettingsSection>
+    <div class="pt-2 flex items-center justify-between gap-4">
+      <SettingsInlineStatus 
+        v-if="vcpPingStatus.type"
+        :type="vcpPingStatus.type" 
+        :message="vcpPingStatus.message" 
+        class="flex-1"
+      />
+      <SettingsActionButton 
+        variant="primary" 
+        :loading="vcpPingStatus.type === 'loading'"
+        @click="testVcpConnection"
+      >
+        验证连接
+      </SettingsActionButton>
+    </div>
+  </div>
 </template>

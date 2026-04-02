@@ -452,9 +452,7 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
     let path_buf = std::path::PathBuf::from(&clean_path);
 
     // 安全校验：禁止打开系统敏感路径
-    if let Err(e) = ensure_safe_path(&app_handle, &path_buf) {
-        return Err(e);
-    }
+    ensure_safe_path(&app_handle, &path_buf)?;
 
     // 使用 tauri-plugin-opener 的原生能力
     use tauri_plugin_opener::OpenerExt;
@@ -475,9 +473,7 @@ pub async fn read_local_file_base64(app_handle: AppHandle, path: String) -> Resu
     }
 
     // 安全校验
-    if let Err(e) = ensure_safe_path(&app_handle, &path_buf) {
-        return Err(e);
-    }
+    ensure_safe_path(&app_handle, &path_buf)?;
 
     // OOM 防御：禁止读取超过 50MB 的文件到内存进行 Base64 转换
     let metadata = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
@@ -544,18 +540,22 @@ pub async fn cleanup_orphaned_attachments(
     topics_dir.push("UserData"); // 适配桌面端 UserData 目录
 
     let mut used_hashes = std::collections::HashSet::new();
+    let re = regex::Regex::new(r#""hash"\s*:\s*"([a-f0-9]{64})""#).unwrap();
 
     // 使用简单的递归目录遍历
-    fn scan_dir(dir: &std::path::Path, used: &mut std::collections::HashSet<String>) {
+    fn scan_dir(
+        dir: &std::path::Path,
+        used: &mut std::collections::HashSet<String>,
+        re: &regex::Regex,
+    ) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    scan_dir(&path, used);
-                } else if path.file_name().map_or(false, |n| n == "history.json") {
+                    scan_dir(&path, used, re);
+                } else if path.file_name().is_some_and(|n| n == "history.json") {
                     if let Ok(content) = fs::read_to_string(&path) {
                         // 使用正则提取所有 "hash": "..." 字段，避免昂贵的 JSON 反序列化
-                        let re = regex::Regex::new(r#""hash"\s*:\s*"([a-f0-9]{64})""#).unwrap();
                         for cap in re.captures_iter(&content) {
                             used.insert(cap[1].to_string());
                         }
@@ -565,7 +565,7 @@ pub async fn cleanup_orphaned_attachments(
         }
     }
 
-    scan_dir(&topics_dir, &mut used_hashes);
+    scan_dir(&topics_dir, &mut used_hashes, &re);
 
     // 3. 找出未引用的哈希并删除
     let mut deleted_count = 0;

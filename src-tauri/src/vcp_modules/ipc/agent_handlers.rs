@@ -172,7 +172,7 @@ pub async fn create_agent(
         }
     };
     // 初始化默认话题目录：Agent/Group 统一落在 UserData/data 聚合层，而非 Agents 配置目录
-    let topic_dir = crate::vcp_modules::group_manager::resolve_topic_dir(
+    let topic_dir = crate::vcp_modules::path_topology_service::resolve_topic_dir(
         &app_handle,
         &agent_id,
         &default_topic_id,

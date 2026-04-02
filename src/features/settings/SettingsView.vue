@@ -134,22 +134,22 @@ watch(() => props.isOpen, (val: boolean) => {
             <UserProfileSection :settings="settings" />
 
             <!-- 核心连接 (折叠) -->
-            <SettingsDisclosure title="核心连接" description="配置 VCP 服务器与 WebSocket 鉴权" :default-open="true">
+            <SettingsDisclosure title="核心连接" description="配置 VCP 服务器与 WebSocket 鉴权" :default-open="true" accent-color="bg-blue-500">
               <VcpCoreSettingsSection :settings="settings" @save-request="saveSettings" />
             </SettingsDisclosure>
 
             <!-- 数据同步 (折叠) -->
-            <SettingsDisclosure title="数据同步" description="桌面端数据同步与表情包库维护">
+            <SettingsDisclosure title="数据同步" description="桌面端数据同步与表情包库维护" accent-color="bg-green-500">
               <SyncSettingsSection :settings="settings" @save-request="saveSettings" @open-sync="openSyncView" />
             </SettingsDisclosure>
 
             <!-- AI 引擎逻辑 (折叠) -->
-            <SettingsDisclosure title="AI 引擎逻辑" description="流式输出、工具注入与 UI 规范">
+            <SettingsDisclosure title="AI 引擎逻辑" description="流式输出、工具注入与 UI 规范" accent-color="bg-purple-500">
               <AiLogicSettingsSection :settings="settings" />
             </SettingsDisclosure>
 
             <!-- 话题总结 (折叠) -->
-            <SettingsDisclosure title="话题总结" description="配置总结专用模型与参数">
+            <SettingsDisclosure title="话题总结" description="配置总结专用模型与参数" accent-color="bg-yellow-500">
               <TopicSummarySection :settings="settings" @open-model-selector="showSummaryModelSelector = true" />
             </SettingsDisclosure>
 
@@ -163,7 +163,11 @@ watch(() => props.isOpen, (val: boolean) => {
             </SettingsSection>
 
             <!-- 数据维护 -->
-            <MaintenanceSection />
+            <SettingsSection title="数据维护 (Maintenance)" accent-color="bg-red-500">
+              <SettingsCard>
+                <MaintenanceSection />
+              </SettingsCard>
+            </SettingsSection>
 
             <div class="h-4"></div>
 
@@ -206,16 +210,5 @@ watch(() => props.isOpen, (val: boolean) => {
 :deep(input[type="number"]::-webkit-outer-spin-button) {
   -webkit-appearance: none;
   margin: 0;
-}
-
-/* 覆盖分区组件内部的 Section 标题，因为 SettingsView 已经用了 Disclosure 包裹 */
-:deep(.settings-disclosure .space-y-3 > .flex.items-center) {
-  display: none;
-}
-:deep(.settings-disclosure .settings-card) {
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  padding: 0 !important;
 }
 </style>

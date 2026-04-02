@@ -9,7 +9,8 @@ use crate::vcp_modules::app_settings_manager::AppSettingsState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
 use crate::vcp_modules::file_watcher::{init_watcher, WatcherState};
-use crate::vcp_modules::group_manager::{load_all_groups, GroupManagerState};
+use crate::vcp_modules::group_bootstrap_loader::load_all_groups;
+use crate::vcp_modules::group_cache_coordinator::GroupManagerState;
 use crate::vcp_modules::index_service::full_scan;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 
@@ -18,7 +19,7 @@ use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 pub enum CoreStatus {
     Initializing,
     Ready,
-    Syncing,
+    // Syncing,
     Error,
 }
 
