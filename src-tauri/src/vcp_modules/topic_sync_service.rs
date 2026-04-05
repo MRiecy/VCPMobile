@@ -1,18 +1,16 @@
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::history_repository_fs;
-use crate::vcp_modules::path_topology_service::resolve_history_path;
+use crate::vcp_modules::message_application_service;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TopicFingerprint {
     pub topic_id: String,
-    pub mtime: u64,
-    pub size: u64,
-    pub msg_count: usize,
+    pub revision: i64,
+    pub updated_at: i64,
+    pub msg_count: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -24,96 +22,69 @@ pub struct TopicDelta {
     pub sync_skipped: bool,
 }
 
-pub fn get_topic_fingerprint_internal(
+pub async fn get_topic_fingerprint_internal(
     app_handle: &AppHandle,
-    item_id: &str,
+    _item_id: &str,
     topic_id: &str,
 ) -> Result<TopicFingerprint, String> {
-    let history_path = resolve_history_path(app_handle, item_id, topic_id);
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
 
-    if !history_path.exists() {
-        return Ok(TopicFingerprint {
+    let row_res = sqlx::query(
+        "SELECT revision, updated_at, msg_count 
+         FROM topic_state 
+         WHERE topic_id = ?"
+    )
+    .bind(topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Some(row) = row_res {
+        use sqlx::Row;
+        Ok(TopicFingerprint {
             topic_id: topic_id.to_string(),
-            mtime: 0,
-            size: 0,
+            revision: row.get("revision"),
+            updated_at: row.get("updated_at"),
+            msg_count: row.get("msg_count"),
+        })
+    } else {
+        Ok(TopicFingerprint {
+            topic_id: topic_id.to_string(),
+            revision: 0,
+            updated_at: 0,
             msg_count: 0,
-        });
+        })
     }
-
-    let metadata = fs::metadata(&history_path).map_err(|e| e.to_string())?;
-    let mtime = metadata
-        .modified()
-        .unwrap_or(SystemTime::now())
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // 为了获取消息总数，我们仍然需要读取文件，但这里的目的是为了极速对比。
-    // 在 VCP 架构中，影子数据库 topic_index 其实已经存了 msg_count，
-    // 我们优先从文件系统获取基础元数据。
-    let history = history_repository_fs::read_history(&history_path)?;
-
-    Ok(TopicFingerprint {
-        topic_id: topic_id.to_string(),
-        mtime,
-        size: metadata.len(),
-        msg_count: history.len(),
-    })
 }
 
-pub fn get_topic_delta_internal(
+pub async fn get_topic_delta_internal(
     app_handle: &AppHandle,
     item_id: &str,
     topic_id: &str,
     current_history: Vec<ChatMessage>,
     fingerprint: Option<TopicFingerprint>,
 ) -> Result<TopicDelta, String> {
-    let history_path = resolve_history_path(app_handle, item_id, topic_id);
-
     // 1. 指纹快速路径 (Fingerprint Fast-path)
-    // 如果前端传了指纹，且与磁盘元数据一致，直接跳过全量比对
     if let Some(fp) = fingerprint {
-        if history_path.exists() {
-            let metadata = fs::metadata(&history_path).map_err(|e| e.to_string())?;
-            let current_mtime = metadata
-                .modified()
-                .unwrap_or(SystemTime::now())
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            if fp.mtime == current_mtime
-                && fp.size == metadata.len()
-                && fp.msg_count == current_history.len()
-            {
-                println!(
-                    "[VCPCore] Sync skipped for {}: fingerprint matches.",
-                    topic_id
-                );
-                return Ok(TopicDelta {
-                    added: vec![],
-                    updated: vec![],
-                    deleted_ids: vec![],
-                    order_changed: false,
-                    sync_skipped: true,
-                });
-            }
+        let current_fp = get_topic_fingerprint_internal(app_handle, item_id, topic_id).await?;
+        if current_fp.revision == fp.revision && current_fp.msg_count == current_history.len() as i32 {
+            println!(
+                "[VCPCore] Sync skipped for {}: revision matches.",
+                topic_id
+            );
+            return Ok(TopicDelta {
+                added: vec![],
+                updated: vec![],
+                deleted_ids: vec![],
+                order_changed: false,
+                sync_skipped: true,
+            });
         }
     }
 
-    // 2. 如果文件不存在，则视为所有当前消息已被删除
-    if !history_path.exists() {
-        return Ok(TopicDelta {
-            added: vec![],
-            updated: vec![],
-            deleted_ids: current_history.into_iter().map(|m| m.id).collect(),
-            order_changed: false,
-            sync_skipped: false,
-        });
-    }
-
-    // 3. 读取磁盘上的最新历史记录并应用预处理 (与 load_chat_history 逻辑对齐)
-    let mut new_history = history_repository_fs::read_history(&history_path)?;
+    // 3. 读取数据库/JSONL 中的全量历史记录并应用比对
+    let mut new_history = message_application_service::load_chat_history_internal(app_handle, item_id, topic_id, None, None).await?;
 
     // 4. 构建索引以便快速比对
     let old_map: HashMap<String, ChatMessage> = current_history
@@ -133,13 +104,11 @@ pub fn get_topic_delta_internal(
 
         match old_map.get(&new_msg.id) {
             Some(old_msg) => {
-                // 内容或角色发生变化视为更新。
                 if old_msg.content != new_msg.content || old_msg.role != new_msg.role {
                     updated.push(new_msg.clone());
                 }
             }
             None => {
-                // 新增消息直接返回原始内容。
                 added.push(new_msg.clone());
             }
         }

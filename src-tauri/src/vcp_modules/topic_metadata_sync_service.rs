@@ -53,13 +53,6 @@ pub async fn sync_new_topic(
         write_agent_config(app_handle.clone(), agent_state, item_id.to_string(), config).await?;
     }
 
-    // 2. 写入话题目录下的 config.json
-    let topic_dir = resolve_topic_dir(app_handle, item_id, &topic.id);
-    let mut config_path = topic_dir.clone();
-    config_path.push("config.json");
-    let content = serde_json::to_string_pretty(&topic).map_err(|e| e.to_string())?;
-    fs::write(config_path, content).map_err(|e| e.to_string())?;
-
     Ok(())
 }
 

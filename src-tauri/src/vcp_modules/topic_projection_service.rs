@@ -1,13 +1,11 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
-use hex;
 use log::{debug, info, warn};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 #[derive(Clone, Serialize)]
 pub struct TopicIndexUpdatePayload {
@@ -24,7 +22,6 @@ pub struct TopicIndexUpdatePayload {
 #[derive(Clone, Debug)]
 pub struct TopicMessageProjection {
     pub msg_count: i32,
-    pub last_msg_preview: Option<String>,
     pub unread_count: i32,
 }
 
@@ -41,7 +38,6 @@ pub struct TopicProjectionRecord {
     pub topic_id: String,
     pub item_id: String,
     pub mtime: i64,
-    pub file_hash: Option<String>,
     pub message: TopicMessageProjection,
     pub metadata: TopicMetadataProjection,
 }
@@ -108,7 +104,6 @@ struct MetadataResolution {
 
 pub fn compute_topic_message_projection(history: &[ChatMessage]) -> TopicMessageProjection {
     let msg_count = history.len() as i32;
-    let last_msg_preview = history.last().map(|m| preview_message_content(&m.content));
 
     let non_system_msgs: Vec<_> = history.iter().filter(|m| m.role != "system").collect();
     let unread_count = if non_system_msgs.len() == 1 && non_system_msgs[0].role == "assistant" {
@@ -119,7 +114,6 @@ pub fn compute_topic_message_projection(history: &[ChatMessage]) -> TopicMessage
 
     TopicMessageProjection {
         msg_count,
-        last_msg_preview,
         unread_count,
     }
 }
@@ -130,20 +124,18 @@ pub fn history_mtime_millis(path: &Path) -> Result<i64, String> {
     Ok(system_time_to_millis(modified))
 }
 
-pub async fn apply_topic_projection(
-    app_handle: &AppHandle,
+pub async fn apply_topic_projection<R: Runtime>(
+    app_handle: &AppHandle<R>,
     pool: &Pool<Sqlite>,
     record: &TopicProjectionRecord,
 ) -> Result<(), String> {
     sqlx::query(
-        "INSERT INTO topic_index (topic_id, agent_id, title, mtime, file_hash, last_msg_preview, msg_count, locked, unread, unread_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO topic_state (topic_id, item_id, title, created_at, updated_at, revision, msg_count, locked, unread, unread_count)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
          ON CONFLICT(topic_id) DO UPDATE SET
-            agent_id = excluded.agent_id,
+            item_id = excluded.item_id,
             title = excluded.title,
-            mtime = excluded.mtime,
-            file_hash = excluded.file_hash,
-            last_msg_preview = excluded.last_msg_preview,
+            updated_at = excluded.updated_at,
             msg_count = excluded.msg_count,
             locked = excluded.locked,
             unread = excluded.unread,
@@ -152,9 +144,8 @@ pub async fn apply_topic_projection(
     .bind(&record.topic_id)
     .bind(&record.item_id)
     .bind(&record.metadata.title)
+    .bind(record.metadata.created_at)
     .bind(record.mtime)
-    .bind(&record.file_hash)
-    .bind(&record.message.last_msg_preview)
     .bind(record.message.msg_count)
     .bind(record.metadata.locked)
     .bind(record.metadata.unread)
@@ -180,12 +171,11 @@ pub async fn apply_topic_projection(
     Ok(())
 }
 
-pub async fn refresh_topic_projection_from_history(
-    app_handle: &AppHandle,
+pub async fn refresh_topic_projection_from_history<R: Runtime>(
+    app_handle: &AppHandle<R>,
     pool: &Pool<Sqlite>,
     item_id: &str,
     topic_id: &str,
-    history_path: &Path,
     history: &[ChatMessage],
 ) -> Result<(), String> {
     let app_config_dir = app_handle
@@ -213,7 +203,7 @@ pub async fn refresh_topic_projection_from_history(
     );
 
     let existing_title: Option<String> =
-        sqlx::query_scalar("SELECT title FROM topic_index WHERE topic_id = ?")
+        sqlx::query_scalar("SELECT title FROM topic_state WHERE topic_id = ?")
             .bind(topic_id)
             .fetch_optional(pool)
             .await
@@ -232,8 +222,9 @@ pub async fn refresh_topic_projection_from_history(
     let unread = metadata_resolution.metadata.unread.unwrap_or(false);
     let created_at = metadata_resolution.metadata.created_at.unwrap_or(0);
     let message = compute_topic_message_projection(history);
-    let mtime = history_mtime_millis(history_path)?;
-    let file_hash = compute_file_hash(history_path)?;
+    
+    // Use current time as mtime since we don't rely on history.json anymore
+    let mtime = system_time_to_millis(SystemTime::now());
 
     apply_topic_projection(
         app_handle,
@@ -242,7 +233,6 @@ pub async fn refresh_topic_projection_from_history(
             topic_id: topic_id.to_string(),
             item_id: item_id.to_string(),
             mtime,
-            file_hash: Some(file_hash),
             message,
             metadata: TopicMetadataProjection {
                 title: title.clone(),
@@ -305,8 +295,8 @@ pub fn parse_history_target(app_config_dir: &Path, path: &Path) -> Option<Indexe
     })
 }
 
-pub async fn rebuild_topic_projection_from_history_path(
-    app_handle: &AppHandle,
+pub async fn rebuild_topic_projection_from_history_path<R: Runtime>(
+    app_handle: &AppHandle<R>,
     app_config_dir: &Path,
     path: &Path,
     pool: &Pool<Sqlite>,
@@ -325,31 +315,15 @@ pub async fn rebuild_topic_projection_from_history_path(
         pool,
         &target.item_id,
         &target.topic_id,
-        &target.history_path,
         &history,
     )
     .await
-}
-
-fn preview_message_content(content: &str) -> String {
-    let mut preview = content.chars().take(100).collect::<String>();
-    if content.chars().count() > 100 {
-        preview.push_str("...");
-    }
-    preview
 }
 
 fn system_time_to_millis(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
-}
-
-fn compute_file_hash(path: &Path) -> Result<String, String> {
-    let content = fs::read(path).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    hasher.update(&content);
-    Ok(hex::encode(hasher.finalize()))
 }
 
 fn default_locked(kind: IndexedItemKind) -> bool {

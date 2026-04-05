@@ -68,7 +68,6 @@ pub async fn create_group(
         locked: false,
         unread: false,
         unread_count: 0,
-        last_msg_preview: None,
         msg_count: 0,
     };
 

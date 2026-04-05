@@ -1,10 +1,12 @@
 use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
-use crate::vcp_modules::path_topology_service::resolve_history_path;
+use crate::vcp_modules::path_topology_service::resolve_jsonl_path;
+use crate::vcp_modules::message_log_store::MessageLogStore;
+use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::db_manager::DbState;
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::fs;
 use std::time::Duration;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 
 /// 话题总结的默认 Prompt
 const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一个简洁的话题标题。要求：1. 标题长度控制在10个汉字以内。2. 标题本身不能包含任何标点符号、数字编号 or 任何非标题文字。3. 直接给出标题文字，不要添加任何解释或前缀。";
@@ -33,33 +35,58 @@ pub async fn summarize_topic<R: Runtime>(
         return Err("VCP settings are missing".to_string());
     }
 
-    // 1. 获取历史记录 (最近4条)
-    let history_path = resolve_history_path(&app_handle, &item_id, &topic_id);
-    if !history_path.exists() {
-        return Err("History not found".to_string());
-    }
+    // 1. 获取最近消息 (最近4条) - 使用 Leviathan 架构 (JSONL/DB)
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
 
-    let content = fs::read_to_string(&history_path).map_err(|e| e.to_string())?;
-    let history: Vec<Value> = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let pointers_res: Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
+            "SELECT raw_byte_offset, raw_byte_length 
+            FROM message_index 
+            WHERE topic_id = ? AND is_deleted = 0 AND role != 'system'
+            ORDER BY created_at DESC 
+            LIMIT 4"
+        )
+        .bind(&topic_id)
+        .fetch_all(pool)
+        .await;
 
-    if history.len() < 2 {
+    let history_rows = pointers_res.map_err(|e| e.to_string())?;
+    if history_rows.len() < 2 {
         return Err("Not enough messages to summarize".to_string());
     }
 
-    let filtered_history: Vec<_> = history.iter().filter(|m| m["role"] != "system").collect();
+    let jsonl_path = resolve_jsonl_path(&app_handle, &item_id, &topic_id);
+    if !jsonl_path.exists() {
+        return Err("JSONL history not found".to_string());
+    }
 
-    let recent_msgs: Vec<_> = filtered_history.iter().rev().take(4).rev().collect();
-
+    let log_store = MessageLogStore::new(jsonl_path);
     let mut recent_content = String::new();
-    for msg in recent_msgs {
-        let role_name = if msg["role"] == "user" {
+    
+    // Reverse because we queried DESC
+    let mut messages = Vec::new();
+    for row in history_rows {
+        use sqlx::Row;
+        let r_offset: i64 = row.get("raw_byte_offset");
+        let r_length: i64 = row.get("raw_byte_length");
+
+        if let Ok(json_line) = log_store.read_jsonl_at(r_offset as u64, r_length as u64) {
+            if let Ok(msg) = serde_json::from_str::<ChatMessage>(&json_line) {
+                messages.push(msg);
+            }
+        }
+    }
+    messages.reverse(); // Now chronological
+
+    for msg in messages {
+        let role_name = if msg.role == "user" {
             settings.user_name.as_str()
         } else {
             agent_name.as_str()
         };
-        let content_str = msg["content"].as_str().unwrap_or("");
-        recent_content.push_str(&format!("{}: {}\n", role_name, content_str));
+        recent_content.push_str(&format!("{}: {}\n", role_name, msg.content));
     }
+
 
     // 2. 构造 Prompt (对齐桌面端)
     let summary_prompt = format!(
@@ -78,7 +105,7 @@ pub async fn summarize_topic<R: Runtime>(
         .unwrap_or_else(|| DEFAULT_SUMMARY_MODEL.to_string());
     let temp = settings
         .topic_summary_model_temperature
-        .unwrap_or(DEFAULT_SUMMARY_TEMPERATURE);
+        .unwrap_or(DEFAULT_SUMMARY_TEMPERATURE as f32);
 
     let response = client
         .post(&settings.vcp_server_url)

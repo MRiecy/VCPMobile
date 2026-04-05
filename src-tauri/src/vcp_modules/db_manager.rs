@@ -45,31 +45,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
 }
 
 async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
-    // 1. 话题索引表
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS topic_index (
-            topic_id TEXT PRIMARY KEY,
-            agent_id TEXT NOT NULL,
-            title TEXT,
-            mtime BIGINT NOT NULL,
-            file_hash TEXT,
-            last_msg_preview TEXT,
-            msg_count INTEGER DEFAULT 0,
-            locked BOOLEAN DEFAULT 0,
-            unread BOOLEAN DEFAULT 0,
-            unread_count INTEGER DEFAULT 0
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // Migration: Add unread_count if it doesn't exist
-    let _ = sqlx::query("ALTER TABLE topic_index ADD COLUMN unread_count INTEGER DEFAULT 0")
-        .execute(pool)
-        .await;
-
-    // 2. 附件索引表
+    // 1. 附件索引表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS attachment_index (
             hash TEXT PRIMARY KEY,
@@ -83,7 +59,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 3. Agent 索引表
+    // 2. Agent 索引表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS agent_index (
             agent_id TEXT PRIMARY KEY,
@@ -95,7 +71,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 4. 正则规则表
+    // 3. 正则规则表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS agent_regex_rules (
             rule_id TEXT NOT NULL,
@@ -110,6 +86,75 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             max_depth INTEGER,
             PRIMARY KEY (agent_id, rule_id)
         )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 4. Project Leviathan: topic_state
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS topic_state (
+            topic_id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            title TEXT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0,
+            msg_count INTEGER NOT NULL DEFAULT 0,
+            locked BOOLEAN NOT NULL DEFAULT 0,
+            unread BOOLEAN NOT NULL DEFAULT 0,
+            unread_count INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 5. Project Leviathan: message_index
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS message_index (
+            msg_id TEXT PRIMARY KEY,
+            topic_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at BIGINT NOT NULL,
+            raw_byte_offset INTEGER NOT NULL,
+            raw_byte_length INTEGER NOT NULL,
+            render_byte_offset INTEGER,
+            render_byte_length INTEGER,
+            has_attachments INTEGER NOT NULL DEFAULT 0,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            extra_json TEXT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_message_topic_time
+         ON message_index(topic_id, created_at)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 7. Project Leviathan: message_attachment_ref
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS message_attachment_ref (
+            msg_id TEXT NOT NULL,
+            attachment_hash TEXT NOT NULL,
+            attachment_order INTEGER NOT NULL,
+            PRIMARY KEY (msg_id, attachment_order)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_attachment_ref_hash
+         ON message_attachment_ref(attachment_hash)",
     )
     .execute(pool)
     .await

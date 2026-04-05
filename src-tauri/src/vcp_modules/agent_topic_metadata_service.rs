@@ -5,7 +5,7 @@ use sqlx::{Pool, Sqlite};
 pub struct AgentTopicMetadataService;
 
 impl AgentTopicMetadataService {
-    /// 将话题列表同步到 `topic_index` 数据库表
+    /// 将话题列表同步到 `topic_state` 数据库表
     /// 注意：这里只做插入或更新基本信息，不覆盖 msg_count 等动态数据
     pub async fn sync_topics_to_db(
         pool: &Pool<Sqlite>,
@@ -16,15 +16,16 @@ impl AgentTopicMetadataService {
 
         for topic in topics {
             sqlx::query(
-                "INSERT INTO topic_index (topic_id, agent_id, title, mtime, locked, unread, unread_count)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                "INSERT INTO topic_state (topic_id, item_id, title, created_at, updated_at, locked, unread, unread_count, revision, msg_count)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
                  ON CONFLICT(topic_id) DO UPDATE SET
                     title=excluded.title,
-                    mtime=excluded.mtime"
+                    updated_at=excluded.updated_at"
             )
             .bind(&topic.id)
             .bind(agent_id)
             .bind(&topic.name)
+            .bind(topic.created_at)
             .bind(topic.created_at)
             .bind(false)
             .bind(false)

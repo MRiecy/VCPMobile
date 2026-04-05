@@ -506,7 +506,7 @@ pub async fn read_local_file_base64(app_handle: AppHandle, path: String) -> Resu
 }
 
 /// 清理孤儿附件 (无任何历史记录引用的文件)
-/// 算法：扫描所有 history.json，收集所有 hash，对比索引并删除未引用的物理文件
+/// Project Leviathan Phase 4: 依赖 message_attachment_ref 而不是扫描文件
 #[tauri::command]
 pub async fn cleanup_orphaned_attachments(
     app_handle: AppHandle,
@@ -516,7 +516,6 @@ pub async fn cleanup_orphaned_attachments(
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    let config_root = attachments_dir.clone();
     attachments_dir.push("data");
     attachments_dir.push("attachments");
 
@@ -535,37 +534,15 @@ pub async fn cleanup_orphaned_attachments(
         return Ok("索引库为空，无需清理".to_string());
     }
 
-    // 2. 深度扫描 topics 目录下的所有 history.json 提取正在使用的 hash
-    let mut topics_dir = config_root.clone();
-    topics_dir.push("UserData"); // 适配桌面端 UserData 目录
-
-    let mut used_hashes = std::collections::HashSet::new();
-    let re = regex::Regex::new(r#""hash"\s*:\s*"([a-f0-9]{64})""#).unwrap();
-
-    // 使用简单的递归目录遍历
-    fn scan_dir(
-        dir: &std::path::Path,
-        used: &mut std::collections::HashSet<String>,
-        re: &regex::Regex,
-    ) {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    scan_dir(&path, used, re);
-                } else if path.file_name().is_some_and(|n| n == "history.json") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        // 使用正则提取所有 "hash": "..." 字段，避免昂贵的 JSON 反序列化
-                        for cap in re.captures_iter(&content) {
-                            used.insert(cap[1].to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    scan_dir(&topics_dir, &mut used_hashes, &re);
+    // 2. 查新表 message_attachment_ref 确定哪些 hash 正在被引用
+    let used_hashes: std::collections::HashSet<String> =
+        sqlx::query_as::<_, (String,)>("SELECT DISTINCT attachment_hash FROM message_attachment_ref")
+            .fetch_all(&db_state.pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(h,)| h)
+            .collect();
 
     // 3. 找出未引用的哈希并删除
     let mut deleted_count = 0;

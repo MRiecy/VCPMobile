@@ -434,19 +434,31 @@ export const useChatManagerStore = defineStore('chatManager', () => {
   const deleteMessage = async (messageId: string, deleteAfter: boolean = false) => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
 
+    const itemId = currentSelectedItem.value.id;
+    const topicId = currentTopicId.value;
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
 
+    const targetMsg = currentChatHistory.value[targetIndex];
+
     if (deleteAfter) {
-      // 删除自身以及后面所有的
+      // 物理截断：删除自身以及后面所有的
+      await invoke('truncate_history_after_timestamp', {
+        itemId,
+        topicId,
+        timestamp: targetMsg.timestamp - 1 // 包含自身
+      });
       currentChatHistory.value.splice(targetIndex);
     } else {
-      // 仅删除自身
+      // 逻辑删除：仅删除自身
+      await invoke('delete_messages', {
+        msgIds: [messageId]
+      });
       currentChatHistory.value.splice(targetIndex, 1);
     }
 
-    // 触发保存与文件同步
-    await saveHistory();
+    // 触发同步到桌面端
+    syncService.pushTopicToDesktop(itemId, topicId, currentChatHistory.value);
   };
 
   /**
@@ -464,8 +476,9 @@ export const useChatManagerStore = defineStore('chatManager', () => {
 
       // 确保清理状态
       const msgIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
+      let msg: ChatMessage | null = null;
       if (msgIndex !== -1) {
-        const msg = currentChatHistory.value[msgIndex];
+        msg = currentChatHistory.value[msgIndex];
         msg.isThinking = false;
       }
 
@@ -476,7 +489,17 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       if (streamingMessageId.value === messageId) {
         streamingMessageId.value = null;
       }
-      await saveHistory();
+      
+      // 增量保存当前中止后的内容
+      if (msg && currentSelectedItem.value?.id && currentTopicId.value) {
+        await invoke('append_single_message', {
+          itemId: currentSelectedItem.value.id,
+          topicId: currentTopicId.value,
+          message: msg
+        });
+        // 触发同步到桌面端
+        syncService.pushTopicToDesktop(currentSelectedItem.value.id, currentTopicId.value, currentChatHistory.value);
+      }
     } catch (e) {
       console.error(`[ChatManager] Failed to interrupt stream for ${messageId}:`, e);
     }
@@ -507,7 +530,15 @@ export const useChatManagerStore = defineStore('chatManager', () => {
     }
     msg.processedContent = undefined;
 
-    await saveHistory();
+    if (currentSelectedItem.value?.id && currentTopicId.value) {
+      await invoke('patch_single_message', {
+        itemId: currentSelectedItem.value.id,
+        topicId: currentTopicId.value,
+        message: msg
+      });
+      // 触发同步到桌面端
+      syncService.pushTopicToDesktop(currentSelectedItem.value.id, currentTopicId.value, currentChatHistory.value);
+    }
   };
 
   /**
@@ -552,7 +583,21 @@ export const useChatManagerStore = defineStore('chatManager', () => {
 
     try {
       // 立即保存一次历史记录 (包含用户消息和思考态)
-      await saveHistory();
+      if (currentSelectedItem.value?.id && currentTopicId.value) {
+        await invoke('append_single_message', {
+          itemId: currentSelectedItem.value.id,
+          topicId: currentTopicId.value,
+          message: userMsg
+        });
+        await invoke('append_single_message', {
+          itemId: currentSelectedItem.value.id,
+          topicId: currentTopicId.value,
+          message: thinkingMsg
+        });
+        
+        // 触发同步到桌面端
+        syncService.pushTopicToDesktop(currentSelectedItem.value.id, currentTopicId.value, currentChatHistory.value);
+      }
 
       const settings = settingsStore.settings;
       if (!settings) {
@@ -697,7 +742,17 @@ export const useChatManagerStore = defineStore('chatManager', () => {
       }
 
       streamingMessageId.value = null;
-      await saveHistory();
+      if (currentSelectedItem.value?.id && currentTopicId.value) {
+        // 查找当前的思考占位消息
+        const msg = currentChatHistory.value.find(m => m.id === thinkingId);
+        if (msg) {
+          await invoke('patch_single_message', {
+            itemId: currentSelectedItem.value.id,
+            topicId: currentTopicId.value,
+            message: msg
+          });
+        }
+      }
     }
   };
 
@@ -842,7 +897,17 @@ export const useChatManagerStore = defineStore('chatManager', () => {
             if (currentSelectedItem.value?.id) {
               processRegex(latestMsg, currentSelectedItem.value.id);
             }
-            saveHistory();
+            
+            // 使用 patch (墓碑更新) 代替 append
+            // 因为在发送瞬间我们已经 append 过一个思考态占位符了，现在是更新它的内容
+            if (currentSelectedItem.value?.id && currentTopicId.value) {
+              invoke('patch_single_message', {
+                itemId: currentSelectedItem.value.id,
+                topicId: currentTopicId.value,
+                message: latestMsg
+              });
+            }
+
             // 话题自动总结逻辑
             summarizeTopic();
           } else {

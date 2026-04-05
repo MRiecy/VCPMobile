@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { useRouter } from 'vue-router';
-import { useTopicStore } from '../../core/stores/topicListManager';
-import { useChatManagerStore } from '../../core/stores/chatManager';
-import { useAssistantStore } from '../../core/stores/assistant';
-import { useLayoutStore } from '../../core/stores/layout';
+import { computed, ref } from "vue";
+import { useRouter } from "vue-router";
+import { useTopicStore } from "../../core/stores/topicListManager";
+import { useChatManagerStore } from "../../core/stores/chatManager";
+import { useAssistantStore } from "../../core/stores/assistant";
+import { useLayoutStore } from "../../core/stores/layout";
 
 const topicStore = useTopicStore();
 const chatStore = useChatManagerStore();
@@ -12,28 +12,49 @@ const assistantStore = useAssistantStore();
 const layoutStore = useLayoutStore();
 const router = useRouter();
 
-const currentItemId = computed(() => chatStore.currentSelectedItem?.id || assistantStore.agents[0]?.id || null);
-const canCreateTopic = computed(() => Boolean(currentItemId.value));
+const isCreating = ref(false);
 
-const selectTopic = async (itemId: string, topicId: string, topicName: string) => {
-  if (router.currentRoute.value.path !== '/chat') {
-    await router.push('/chat');
+const currentItemId = computed(
+  () =>
+    chatStore.currentSelectedItem?.id || assistantStore.agents[0]?.id || null,
+);
+const canCreateTopic = computed(
+  () => Boolean(currentItemId.value) && !isCreating.value,
+);
+
+const selectTopic = async (
+  itemId: string,
+  topicId: string,
+  topicName: string,
+) => {
+  if (router.currentRoute.value.path !== "/chat") {
+    await router.push("/chat");
   }
 
   const agent = assistantStore.agents.find((a: any) => a.id === itemId);
   if (agent) {
-    chatStore.currentSelectedItem = { id: agent.id, name: agent.name, type: 'agent' };
+    chatStore.currentSelectedItem = {
+      id: agent.id,
+      name: agent.name,
+      type: "agent",
+    };
   } else {
-    const group = assistantStore.groups.find(groupItem => groupItem.id === itemId);
+    const group = assistantStore.groups.find(
+      (groupItem) => groupItem.id === itemId,
+    );
     if (group) {
-      chatStore.currentSelectedItem = { id: group.id, name: group.name, type: 'group' };
+      chatStore.currentSelectedItem = {
+        id: group.id,
+        name: group.name,
+        type: "group",
+      };
     }
   }
 
   await chatStore.loadHistory(itemId, topicId);
   chatStore.currentTopicId = topicId;
 
-  const createdTopic = topicStore.topics.find(topic => topic.id === topicId);
+  const createdTopic = topicStore.topics.find((topic) => topic.id === topicId);
   if (createdTopic) {
     createdTopic.name = topicName;
   }
@@ -42,27 +63,42 @@ const selectTopic = async (itemId: string, topicId: string, topicName: string) =
 };
 
 const handleCreateTopic = async () => {
-  console.info('[TopicCreator] create-topic clicked', chatStore.currentSelectedItem);
+  if (isCreating.value) return;
+
+  console.info(
+    "[TopicCreator] create-topic clicked",
+    chatStore.currentSelectedItem,
+  );
 
   if (!currentItemId.value) {
-    window.alert('请先选择一个助手或群组');
+    window.alert("请先选择一个助手或群组");
     return;
   }
 
+  isCreating.value = true;
+
   const newTopicName = `新话题 ${new Date().toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   })}`;
 
   try {
-    const newTopic = await topicStore.createTopic(currentItemId.value, newTopicName);
+    const newTopic = await topicStore.createTopic(
+      currentItemId.value,
+      newTopicName,
+    );
     if (newTopic?.id) {
       await selectTopic(currentItemId.value, newTopic.id, newTopic.name);
     }
   } catch (error) {
-    console.error('[TopicCreator] create-topic failed', error);
-    window.alert('创建话题失败');
+    console.error("[TopicCreator] create-topic failed", error);
+    // 错误通知已在 store 层处理
+  } finally {
+    // 1秒防抖/锁定，防止快速连击
+    setTimeout(() => {
+      isCreating.value = false;
+    }, 1000);
   }
 };
 </script>
@@ -73,7 +109,14 @@ const handleCreateTopic = async () => {
     :disabled="!canCreateTopic"
     @click="handleCreateTopic"
   >
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+    >
       <line x1="12" y1="5" x2="12" y2="19"></line>
       <line x1="5" y1="12" x2="19" y2="12"></line>
     </svg>

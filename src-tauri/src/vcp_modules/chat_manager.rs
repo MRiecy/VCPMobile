@@ -119,6 +119,70 @@ pub async fn save_chat_history(
     .await
 }
 
+#[tauri::command]
+pub async fn append_single_message(
+    app_handle: AppHandle,
+    db_state: State<'_, DbState>,
+    item_id: String,
+    topic_id: String,
+    message: ChatMessage,
+) -> Result<(), String> {
+    message_application_service::append_single_message(
+        app_handle,
+        &db_state.pool,
+        None,
+        item_id,
+        topic_id,
+        message,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn patch_single_message(
+    app_handle: AppHandle,
+    db_state: State<'_, DbState>,
+    item_id: String,
+    topic_id: String,
+    message: ChatMessage,
+) -> Result<(), String> {
+    message_application_service::patch_single_message(
+        app_handle,
+        &db_state.pool,
+        item_id,
+        topic_id,
+        message,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_messages(
+    db_state: State<'_, DbState>,
+    topic_id: String,
+    msg_ids: Vec<String>,
+) -> Result<(), String> {
+    message_application_service::delete_messages(&db_state.pool, &topic_id, msg_ids).await
+}
+
+#[tauri::command]
+pub async fn truncate_history_after_timestamp(
+    app_handle: AppHandle,
+    db_state: State<'_, DbState>,
+    item_id: String,
+    topic_id: String,
+    timestamp: i64,
+) -> Result<(), String> {
+    message_application_service::truncate_history_after_timestamp(
+        app_handle,
+        &db_state.pool,
+        &item_id,
+        &topic_id,
+        timestamp,
+    )
+    .await
+}
+
 // --- 增量同步逻辑 (Delta Sync) ---
 
 // --- 指纹与同步优化 ---
@@ -129,7 +193,7 @@ pub async fn get_topic_fingerprint(
     item_id: String,
     topic_id: String,
 ) -> Result<TopicFingerprint, String> {
-    get_topic_fingerprint_internal(&app_handle, &item_id, &topic_id)
+    get_topic_fingerprint_internal(&app_handle, &item_id, &topic_id).await
 }
 
 /// 对比内存中的历史记录与磁盘文件，计算增量更新 (Delta)
@@ -148,5 +212,5 @@ pub async fn get_topic_delta(
         &topic_id,
         current_history,
         fingerprint,
-    )
+    ).await
 }

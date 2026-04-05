@@ -11,8 +11,9 @@ use vcp_modules::app_settings_manager::{
 };
 use vcp_modules::avatar_color_extractor::extract_avatar_color;
 use vcp_modules::chat_manager::{
-    get_topic_delta, get_topic_fingerprint, load_chat_history, process_regex_for_message,
-    save_chat_history,
+    append_single_message, delete_messages, get_topic_delta, get_topic_fingerprint,
+    load_chat_history, patch_single_message, process_regex_for_message, save_chat_history,
+    truncate_history_after_timestamp,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
 // use vcp_modules::db_manager::DbState;
@@ -35,6 +36,7 @@ use vcp_modules::ipc::sync_handlers::{
 };
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
+use vcp_modules::message_stream_protocol::handle_vcp_request;
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     toggle_favorite_model,
@@ -45,6 +47,15 @@ use vcp_modules::topic_list_manager::{
 };
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
+use vcp_modules::sync_daemon::{self, SyncDaemonState};
+
+#[tauri::command]
+pub async fn start_sync_daemon(
+    app_handle: tauri::AppHandle,
+    ws_url: String,
+) -> Result<(), String> {
+    sync_daemon::start_daemon(app_handle, ws_url).await
+}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -55,11 +66,18 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .register_uri_scheme_protocol("vcp", move |ctx, request| {
+             // 暂时占位，或者重构 `register_vcp_protocol` 以返回一个可以调用的函数/闭包
+             handle_vcp_request(ctx, request)
+        })
         .setup(|app| {
             // 初始化生命周期状态
             app.manage(LifecycleState::new());
+            app.manage(SyncDaemonState::new());
 
             let handle = app.handle().clone();
+
+
             // 异步启动核心服务
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(&handle).await {
@@ -105,6 +123,10 @@ pub fn run() {
             test_vcp_connection,
             load_chat_history,
             save_chat_history,
+            append_single_message,
+            patch_single_message,
+            delete_messages,
+            truncate_history_after_timestamp,
             process_regex_for_message,
             process_message_content,
             get_topics,
@@ -161,7 +183,8 @@ pub fn run() {
             regenerate_emoticon_library,
             fix_emoticon_url,
             get_core_status,
-            get_last_error
+            get_last_error,
+            start_sync_daemon
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

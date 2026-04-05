@@ -1,4 +1,3 @@
-use log::info;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -57,17 +56,24 @@ pub fn resolve_topic_dir<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id
     path
 }
 
-/// 修改后的历史记录路径获取逻辑 (支持双轨结构)
-pub fn resolve_history_path<R: Runtime>(
+/// 获取 history.jsonl 路径
+pub fn resolve_jsonl_path<R: Runtime>(
     app: &AppHandle<R>,
     item_id: &str,
     topic_id: &str,
 ) -> PathBuf {
     let mut path = resolve_topic_dir(app, item_id, topic_id);
-    path.push("history.json");
-    info!(
-        "[PathTopology] Resolved history path for {}/{}: {:?}",
-        item_id, topic_id, path
-    );
+    path.push("history.jsonl");
+    path
+}
+
+/// 获取 history.astbin 路径
+pub fn resolve_astbin_path<R: Runtime>(
+    app: &AppHandle<R>,
+    item_id: &str,
+    topic_id: &str,
+) -> PathBuf {
+    let mut path = resolve_topic_dir(app, item_id, topic_id);
+    path.push("history.astbin");
     path
 }

@@ -56,6 +56,7 @@ export class SyncService {
 
   /**
    * 测试与桌面端同步服务器的连接
+   * 
    */
   async pingServer(customIp?: string, customPort?: number, customToken?: string): Promise<{ status: string; deviceName: string; message: string }> {
     const url = `${this.getBaseUrl(customIp, customPort)}/ping`;
@@ -155,6 +156,57 @@ export class SyncService {
 
     // 4. 完成
     onProgress(total, total, '同步完成');
+
+    // 5. 自动启动同步守护进程 (实时订阅)
+    await this.startSyncDaemon().catch(e => console.error('[SyncService] Failed to start daemon:', e));
+  }
+
+  /**
+   * 启动实时同步守护进程 (WebSocket)
+   */
+  async startSyncDaemon(): Promise<void> {
+    const settingsStore = useSettingsStore();
+    const ip = settingsStore.settings?.syncServerIp || '127.0.0.1';
+    // 注意：WS 端口是主端口 + 1
+    const port = (settingsStore.settings?.syncServerPort || 5974) + 1;
+    const token = encodeURIComponent(settingsStore.settings?.syncToken || '');
+    
+    const wsUrl = `ws://${ip}:${port}/?token=${token}`;
+    console.log('[SyncService] Starting sync daemon:', wsUrl);
+    
+    return await invoke('start_sync_daemon', { wsUrl });
+  }
+
+  /**
+   * 将本地话题全量推送到桌面端 (上行同步)
+   */
+  async pushTopicToDesktop(agentId: string, topicId: string, history: any[]): Promise<void> {
+    const url = `${this.getBaseUrl()}/upload-topic`;
+    const settingsStore = useSettingsStore();
+    const token = settingsStore.settings?.syncToken || '';
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sync-token': token,
+        },
+        body: JSON.stringify({
+          agentId,
+          topicId,
+          history,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`);
+      }
+      
+      console.log(`[SyncService] Topic ${topicId} pushed to desktop successfully.`);
+    } catch (e) {
+      console.error(`[SyncService] Failed to push topic ${topicId} to desktop:`, e);
+    }
   }
 }
 

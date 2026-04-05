@@ -25,7 +25,7 @@ pub async fn load_all_groups<R: Runtime>(
             if let Ok(config) = read_group_config_fs(app, &group_id) {
                 // 同步话题到数据库
                 for topic in &config.topics {
-                    let exists: bool = sqlx::query("SELECT 1 FROM topic_index WHERE topic_id = ?")
+                    let exists: bool = sqlx::query("SELECT 1 FROM topic_state WHERE topic_id = ?")
                         .bind(&topic.id)
                         .fetch_optional(db)
                         .await
@@ -34,17 +34,17 @@ pub async fn load_all_groups<R: Runtime>(
 
                     if !exists {
                         sqlx::query(
-                            "INSERT INTO topic_index (topic_id, agent_id, title, mtime, locked, unread, unread_count, last_msg_preview, msg_count)
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                            "INSERT INTO topic_state (topic_id, item_id, title, created_at, updated_at, locked, unread, unread_count, msg_count, revision)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)"
                         )
                         .bind(&topic.id)
                         .bind(&config.id)
                         .bind(&topic.name)
                         .bind(topic.created_at)
+                        .bind(topic.created_at)
                         .bind(topic.locked)
                         .bind(topic.unread)
                         .bind(topic.unread_count)
-                        .bind(&topic.last_msg_preview)
                         .bind(topic.msg_count)
                         .execute(db)
                         .await
