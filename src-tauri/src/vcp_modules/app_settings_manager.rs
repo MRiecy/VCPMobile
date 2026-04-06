@@ -1,13 +1,26 @@
 // AppSettingsManager: 处理应用全局配置的核心模块
 // 职责: 管理全局配置，实现基于 SQLite 的原子写入、数据验证与并发控制。
 
+use crate::vcp_modules::agent_service::{update_agent_config, AgentConfigState};
 use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
+
+#[derive(Debug, Deserialize)]
+pub struct AvatarColorPayload {
+    pub r#type: String, // "user" or "agent"
+    pub id: Option<String>,
+    pub color: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserAvatarPayload {
+    pub buffer: Vec<u8>,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
@@ -288,4 +301,100 @@ async fn internal_write_app_settings<R: Runtime>(
     *state.cache.lock().await = Some(settings.clone());
     Ok(true)
 }
+
+/// 保存头像颜色关联
+#[tauri::command]
+pub async fn save_avatar_color(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentConfigState>,
+    settings_state: State<'_, AppSettingsState>,
+    payload: AvatarColorPayload,
+) -> Result<bool, String> {
+    if payload.r#type == "user" {
+        let updates = serde_json::json!({
+            "userAvatarCalculatedColor": payload.color
+        });
+        update_app_settings(app_handle, settings_state, updates).await?;
+        Ok(true)
+    } else if payload.r#type == "agent" {
+        if let Some(agent_id) = payload.id {
+            let updates = serde_json::json!({
+                "avatarCalculatedColor": payload.color
+            });
+            update_agent_config(app_handle, agent_state, agent_id, updates).await?;
+            Ok(true)
+        } else {
+            Err("Missing agent ID for color update".to_string())
+        }
+    } else {
+        Err("Invalid type for avatar color".to_string())
+    }
+}
+
+/// 保存全局用户头像
+#[tauri::command]
+pub async fn save_user_avatar(
+    app_handle: AppHandle,
+    payload: UserAvatarPayload,
+) -> Result<String, String> {
+    let config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    let avatar_path = config_dir.join("user_avatar.png");
+
+    fs::write(&avatar_path, &payload.buffer).map_err(|e| e.to_string())?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    Ok(format!("{}?t={}", avatar_path.to_string_lossy(), timestamp))
+}
+
+/// 设置主题
+#[tauri::command]
+pub async fn set_theme(
+    app_handle: AppHandle,
+    state: State<'_, AppSettingsState>,
+    theme: String, // "light" or "dark"
+) -> Result<bool, String> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let updates = serde_json::json!({
+        "currentThemeMode": theme,
+        "themeLastUpdated": timestamp
+    });
+
+    update_app_settings(app_handle, state, updates).await?;
+
+    Ok(true)
+}
+
+/// 应用生命周期状态变更 (Active / Background)
+#[tauri::command]
+pub async fn notify_app_state(
+    _app_handle: AppHandle,
+    state: String, // "active", "background", "inactive"
+) -> Result<(), String> {
+    log::info!("[AppSettingsManager] Mobile lifecycle state change: {}", state);
+    Ok(())
+}
+
+/// 网络连接状态变更
+#[tauri::command]
+pub async fn notify_network_state(
+    _app_handle: AppHandle,
+    online: bool,
+    r#type: String, // "wifi", "cellular", "none"
+) -> Result<(), String> {
+    log::info!(
+        "[AppSettingsManager] Network connection changed: online={}, type={}",
+        online, r#type
+    );
+    Ok(())
+}
+
 

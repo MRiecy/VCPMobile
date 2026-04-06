@@ -23,7 +23,6 @@ pub mod content_parser;
 pub mod topic_service;
 pub mod agent_types;
 pub mod group_types;
-pub mod ipc;
 pub mod regex_service;
 pub mod index_service;
 pub mod topic_summary_service;
@@ -31,5 +30,4 @@ pub mod topic_sync_service;
 pub mod group_chat_application_service;
 pub mod group_context_assembler;
 pub mod group_speaking_policy;
-pub mod sync_daemon;
 

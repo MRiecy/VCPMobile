@@ -9,9 +9,20 @@ use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpRequestPayload};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, State};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupChatPayload {
+    pub group_id: String,
+    pub topic_id: String,
+    pub user_message: ChatMessage,
+    pub vcp_url: String,
+    pub vcp_api_key: String,
+}
 
 pub struct GroupChatParams {
     pub group_id: String,
@@ -251,3 +262,35 @@ pub async fn process_group_chat_message(
 
     Ok(json!({"status": "completed"}))
 }
+
+#[tauri::command]
+pub async fn handle_group_chat_message(
+    app_handle: AppHandle,
+    group_state: State<'_, GroupManagerState>,
+    agent_state: State<'_, AgentConfigState>,
+    db_state: State<'_, DbState>,
+    active_requests: State<'_, ActiveRequests>,
+    payload: GroupChatPayload,
+) -> Result<Value, String> {
+    log::info!(
+        "[GroupChatAppService] handle_group_chat_message invoked for group: {}",
+        payload.group_id
+    );
+
+    process_group_chat_message(
+        app_handle,
+        group_state,
+        agent_state,
+        db_state,
+        active_requests,
+        GroupChatParams {
+            group_id: payload.group_id,
+            topic_id: payload.topic_id,
+            user_message: payload.user_message,
+            vcp_url: payload.vcp_url,
+            vcp_api_key: payload.vcp_api_key,
+        },
+    )
+    .await
+}
+
