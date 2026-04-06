@@ -1,7 +1,4 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::path_topology_service::resolve_astbin_path;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use tauri::{Manager, Runtime};
 use tauri::http::{Response, header, Request};
 use url::Url;
@@ -34,7 +31,7 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
     }
 
     let topic_id = topic_id.unwrap();
-    let item_id = item_id.unwrap();
+    let _item_id = item_id.unwrap();
 
     // Check if core is ready
     let lifecycle = handle.state::<LifecycleState>();
@@ -48,19 +45,17 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
 
     let db_state = handle.state::<DbState>();
     let pool = db_state.pool.clone();
-    let handle_clone = handle.clone();
+    let _handle_clone = handle.clone();
 
     // Since we need to return synchronously but DB is async, 
     // block_on is used here. In real scenarios consider asynchronous protocol.
     let response = tauri::async_runtime::block_on(async move {
-        // Query message indices
-        // We want the most recent 'limit' messages starting from 'offset' back in time.
-        // Then we return them in chronological (ASC) order.
-        let pointers_res: Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
-                "SELECT render_byte_offset, render_byte_length 
-                FROM message_index 
-                WHERE topic_id = ? AND is_deleted = 0 
-                ORDER BY created_at DESC 
+        // Query message indices and render content directly from DB
+        let rows_res: Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
+                "SELECT render_content 
+                FROM messages 
+                WHERE topic_id = ? AND deleted_at IS NULL 
+                ORDER BY timestamp DESC 
                 LIMIT ? OFFSET ?"
             )
             .bind(&topic_id)
@@ -69,45 +64,23 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
             .fetch_all(&pool)
             .await;
 
-        match pointers_res {
+        match rows_res {
             Ok(mut rows) => {
-                // Reverse to get ASC order
+                // Reverse to get ASC order (chronological)
                 rows.reverse();
-
-                let astbin_path = resolve_astbin_path(&handle_clone, &item_id, &topic_id);
-                if !astbin_path.exists() {
-                    return Response::builder()
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(b"[]".to_vec().into())
-                        .unwrap();
-                }
-
-                let mut file = match File::open(&astbin_path) {
-                    Ok(f) => f,
-                    Err(_) => {
-                        return Response::builder().status(500).body(Vec::new().into()).unwrap();
-                    }
-                };
 
                 let mut result_json = Vec::new();
                 result_json.push(b'[');
 
+                use sqlx::Row;
                 for (i, row) in rows.iter().enumerate() {
-                    use sqlx::Row;
-                    let r_offset: Option<i32> = row.try_get("render_byte_offset").ok();
-                    let r_length: Option<i32> = row.try_get("render_byte_length").ok();
+                    let render_content: Option<Vec<u8>> = row.get("render_content");
 
-                    if let (Some(offset), Some(length)) = (r_offset, r_length) {
+                    if let Some(content) = render_content {
                         if i > 0 {
                             result_json.push(b',');
                         }
-                        
-                        let mut buffer = vec![0u8; length as usize];
-                        if file.seek(SeekFrom::Start(offset as u64)).is_ok() && file.read_exact(&mut buffer).is_ok() {
-                            result_json.extend_from_slice(&buffer);
-                        } else {
-                            result_json.extend_from_slice(b"[]");
-                        }
+                        result_json.extend_from_slice(&content);
                     }
                 }
                 result_json.push(b']');

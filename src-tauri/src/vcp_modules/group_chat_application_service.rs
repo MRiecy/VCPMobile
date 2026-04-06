@@ -1,14 +1,14 @@
 // group_chat_application_service.rs: 编排群聊工作流
 // 职责: 1. 读取配置 2. 保存消息 3. 决策发言者 4. 组装上下文 5. 执行 AI 调用 6. 发射事件
 
-use crate::vcp_modules::agent_config_manager::{read_agent_config, AgentConfigState};
+use crate::vcp_modules::agent_service::{read_agent_config, AgentConfigState};
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
-use crate::vcp_modules::group_manager::{read_group_config, GroupManagerState};
+use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
-use crate::vcp_modules::message_application_service;
+use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpRequestPayload};
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,7 +62,7 @@ pub async fn process_group_chat_message(
     }
 
     // 3. 加载并更新历史记录 (存入用户消息)
-    let history_command = message_application_service::load_chat_history_internal(
+    let history_command = message_service::load_chat_history_internal(
         &app_handle,
         &group_id,
         &topic_id,
@@ -75,7 +75,7 @@ pub async fn process_group_chat_message(
     current_history.push(user_message.clone());
 
     // 立即保存一次用户消息
-    message_application_service::save_chat_history_internal(
+    message_service::save_chat_history_internal(
         &app_handle,
         &db_state,
         &watcher_state,
@@ -121,7 +121,7 @@ pub async fn process_group_chat_message(
         let vcp_api_key = vcp_api_key.clone();
 
         // 每次循环重新加载历史，以包含前一个 Agent 的回复
-        let current_history_for_context = message_application_service::load_chat_history_internal(
+        let current_history_for_context = message_service::load_chat_history_internal(
             &app_handle,
             &group_id,
             &topic_id,
@@ -213,7 +213,7 @@ pub async fn process_group_chat_message(
                 };
 
                 // 立即进行一次断点存盘 (针对单个 Agent)
-                let _ = message_application_service::append_single_message(
+                let _ = message_service::append_single_message(
                     app_handle.clone(),
                     &db_pool,
                     Some(watcher_state_ref),

@@ -1,5 +1,5 @@
-use crate::vcp_modules::agent_config_manager::AgentConfig;
-use crate::vcp_modules::group_manager::GroupConfig;
+use crate::vcp_modules::agent_types::AgentConfig;
+use crate::vcp_modules::group_types::GroupConfig;
 use serde_json::json;
 
 /// 上下文组装器: 合并 Agent 设定与群组设定

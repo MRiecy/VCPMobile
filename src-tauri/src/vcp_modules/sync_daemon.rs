@@ -1,14 +1,12 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::message_application_service;
-use futures_util::{StreamExt, SinkExt};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use crate::vcp_modules::message_service;
+use futures_util::StreamExt;
+use serde::Deserialize;
+use tokio::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
-use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use url::Url;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -112,7 +110,8 @@ pub async fn start_daemon(
             retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
         }
 
-        let mut running = app_clone.state::<SyncDaemonState>().is_running.lock().await;
+        let binding = app_clone.state::<SyncDaemonState>();
+        let mut running = binding.is_running.lock().await;
         *running = false;
     });
 
@@ -127,7 +126,7 @@ async fn handle_sync_message(app_handle: &AppHandle, msg: SyncMessage) {
             
             let db_state = app_handle.state::<DbState>();
             
-            let res = message_application_service::apply_sync_delta(
+            let res = message_service::apply_sync_delta(
                 app_handle,
                 &db_state.pool,
                 &agent_id,

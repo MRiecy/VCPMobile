@@ -1,12 +1,12 @@
 // group_chat_handler.rs: 处理群组相关的 IPC 指令
 // 职责: 1. 解析前端 Payload 2. 调用 Application Service 3. 返回结果给前端
 
-use crate::vcp_modules::agent_config_manager::AgentConfigState;
+use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::group_chat_application_service;
-use crate::vcp_modules::group_manager::GroupManagerState;
+use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::vcp_client::ActiveRequests;
 use serde::Deserialize;
 use serde_json::Value;

@@ -1,7 +1,7 @@
 // settings_handlers.rs: 处理设置、主题相关的强类型指令
 // 对齐原 settingsHandlers.js 逻辑，并增强移动端感知
 
-use crate::vcp_modules::agent_config_manager::{update_agent_config, AgentConfigState};
+use crate::vcp_modules::agent_service::{update_agent_config, AgentConfigState};
 use crate::vcp_modules::app_settings_manager::{update_app_settings, AppSettingsState};
 use serde::Deserialize;
 use std::fs;

@@ -1,10 +1,8 @@
 mod vcp_modules;
 
 use tauri::Manager;
-use tauri_plugin_log::{Target, TargetKind};
-use vcp_modules::agent_config_manager::{
-    get_agents, read_agent_config, rebuild_db_index, save_agent_config, update_agent_config,
-    write_agent_config,
+use vcp_modules::agent_service::{
+    get_agents, read_agent_config, save_agent_config, update_agent_config,
 };
 use vcp_modules::app_settings_manager::{
     read_app_settings, update_app_settings, write_app_settings,
@@ -25,14 +23,14 @@ use vcp_modules::file_manager::{
     read_local_file_base64, store_file,
 };
 use vcp_modules::file_watcher::signal_internal_save;
-use vcp_modules::group_manager::{create_group, get_groups, read_group_config};
+use vcp_modules::group_service::{create_group, get_groups, read_group_config, save_group_config, update_group_config};
 use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
 use vcp_modules::ipc::group_chat_handler::handle_group_chat_message;
 use vcp_modules::ipc::settings_handlers::{
     notify_app_state, notify_network_state, save_avatar_color, save_user_avatar, set_theme,
 };
 use vcp_modules::ipc::sync_handlers::{
-    sync_download_file, sync_fetch_manifest, sync_get_local_manifest, sync_ping,
+    start_sync_daemon, sync_download_file, sync_fetch_manifest, sync_get_local_manifest, sync_ping,
 };
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
@@ -47,15 +45,8 @@ use vcp_modules::topic_list_manager::{
 };
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
-use vcp_modules::sync_daemon::{self, SyncDaemonState};
+use tauri_plugin_log::{Target, TargetKind};
 
-#[tauri::command]
-pub async fn start_sync_daemon(
-    app_handle: tauri::AppHandle,
-    ws_url: String,
-) -> Result<(), String> {
-    sync_daemon::start_daemon(app_handle, ws_url).await
-}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -73,7 +64,7 @@ pub fn run() {
         .setup(|app| {
             // 初始化生命周期状态
             app.manage(LifecycleState::new());
-            app.manage(SyncDaemonState::new());
+            app.manage(vcp_modules::sync_daemon::SyncDaemonState::new());
 
             let handle = app.handle().clone();
 
@@ -139,10 +130,8 @@ pub fn run() {
             set_topic_unread,
             get_agents,
             read_agent_config,
-            write_agent_config,
             save_agent_config,
             update_agent_config,
-            rebuild_db_index,
             read_app_settings,
             write_app_settings,
             update_app_settings,
@@ -152,6 +141,8 @@ pub fn run() {
             handle_group_chat_message,
             create_agent,
             create_group,
+            save_group_config,
+            update_group_config,
             delete_agent,
             set_theme,
             notify_app_state,
