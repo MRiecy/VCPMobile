@@ -2,17 +2,16 @@
 // 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
 
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::storage_paths::is_group_item;
 use crate::vcp_modules::topic_list_manager::Topic;
 use tauri::AppHandle;
 
-pub async fn get_topics(db_state: &DbState, item_id: &str) -> Result<Vec<Topic>, String> {
+pub async fn get_topics(db_state: &DbState, owner_id: &str) -> Result<Vec<Topic>, String> {
     let pool = &db_state.pool;
     let rows = sqlx::query(
         "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count 
          FROM topics WHERE owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC"
     )
-    .bind(item_id)
+    .bind(owner_id)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -34,9 +33,10 @@ pub async fn get_topics(db_state: &DbState, item_id: &str) -> Result<Vec<Topic>,
 }
 
 pub async fn create_topic(
-    app_handle: &AppHandle,
+    _app_handle: &AppHandle,
     db_state: &DbState,
-    item_id: &str,
+    owner_id: &str,
+    owner_type: &str,
     name: &str,
 ) -> Result<Topic, String> {
     let now = std::time::SystemTime::now()
@@ -44,7 +44,7 @@ pub async fn create_topic(
         .unwrap()
         .as_millis() as i64;
 
-    let id = if is_group_item(app_handle, item_id) {
+    let id = if owner_type == "group" {
         format!("group_topic_{}", now)
     } else {
         format!("topic_{}", now)
@@ -60,14 +60,12 @@ pub async fn create_topic(
         msg_count: 0,
     };
 
-    let owner_type = if item_id.starts_with("____") { "group" } else { "agent" };
-
     sqlx::query(
         "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, revision, msg_count, locked, unread, unread_count)
          VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)"
     )
     .bind(&id)
-    .bind(item_id)
+    .bind(owner_id)
     .bind(owner_type)
     .bind(name)
     .bind(now)
@@ -82,7 +80,8 @@ pub async fn create_topic(
 pub async fn delete_topic(
     _app_handle: &AppHandle,
     db_state: &DbState,
-    _item_id: &str,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: &str,
 ) -> Result<(), String> {
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
@@ -113,7 +112,8 @@ pub async fn delete_topic(
 pub async fn update_topic_title(
     _app_handle: &AppHandle,
     db_state: &DbState,
-    _item_id: &str,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: &str,
     title: &str,
 ) -> Result<(), String> {
@@ -136,7 +136,8 @@ pub async fn update_topic_title(
 pub async fn toggle_topic_lock(
     _app_handle: &AppHandle,
     db_state: &DbState,
-    _item_id: &str,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: &str,
     locked: bool,
 ) -> Result<(), String> {
@@ -159,7 +160,8 @@ pub async fn toggle_topic_lock(
 pub async fn set_topic_unread(
     _app_handle: &AppHandle,
     db_state: &DbState,
-    _item_id: &str,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: &str,
     unread: bool,
 ) -> Result<(), String> {

@@ -31,6 +31,7 @@ const selectTopic = async (
     await router.push("/chat");
   }
 
+  let ownerType = "agent";
   const agent = assistantStore.agents.find((a: any) => a.id === itemId);
   if (agent) {
     chatStore.currentSelectedItem = {
@@ -38,6 +39,7 @@ const selectTopic = async (
       name: agent.name,
       type: "agent",
     };
+    ownerType = "agent";
   } else {
     const group = assistantStore.groups.find(
       (groupItem) => groupItem.id === itemId,
@@ -48,10 +50,11 @@ const selectTopic = async (
         name: group.name,
         type: "group",
       };
+      ownerType = "group";
     }
   }
 
-  await chatStore.loadHistory(itemId, topicId);
+  await chatStore.loadHistory(itemId, ownerType, topicId);
   chatStore.currentTopicId = topicId;
 
   const createdTopic = topicStore.topics.find((topic) => topic.id === topicId);
@@ -84,8 +87,13 @@ const handleCreateTopic = async () => {
   })}`;
 
   try {
+    const ownerType = assistantStore.agents.some((a) => a.id === currentItemId.value)
+      ? "agent"
+      : "group";
+
     const newTopic = await topicStore.createTopic(
       currentItemId.value,
+      ownerType,
       newTopicName,
     );
     if (newTopic?.id) {

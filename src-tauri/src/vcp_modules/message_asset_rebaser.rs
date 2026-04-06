@@ -6,7 +6,8 @@ use tauri::{AppHandle, Manager};
 /// 处理跨端路径适配、缩略图路径校准以及头像路径的兼容性转换。
 pub fn rebase_message_assets(
     app_handle: &AppHandle,
-    item_id: &str,
+    owner_id: &str,
+    owner_type: &str,
     messages: &mut [ChatMessage],
 ) -> Result<(), String> {
     let config_dir = app_handle
@@ -97,11 +98,15 @@ pub fn rebase_message_assets(
                     }
 
                     if found_path.is_none() {
-                        let mut agent_dir = config_dir.clone();
-                        agent_dir.push("agents");
-                        agent_dir.push(item_id);
+                        let mut owner_dir = config_dir.clone();
+                        if owner_type == "group" {
+                            owner_dir.push("AgentGroups");
+                        } else {
+                            owner_dir.push("agents");
+                        }
+                        owner_dir.push(owner_id);
                         for ext in extensions {
-                            let possible_path = agent_dir.join(format!("avatar.{}", ext));
+                            let possible_path = owner_dir.join(format!("avatar.{}", ext));
                             if possible_path.exists() {
                                 found_path =
                                     Some(possible_path.to_string_lossy().replace("\\", "/"));

@@ -51,7 +51,11 @@ export const useAssistantStore = defineStore('assistant', () => {
     try {
       for (const item of fetchedItems) {
         try {
-          const topics = await invoke<any[]>('get_topics', { itemId: item.id });
+          const ownerType = (item as any).members ? "group" : "agent";
+          const topics = await invoke<any[]>('get_topics', { 
+            ownerId: item.id,
+            ownerType
+          });
           let hasUnread = false;
           let totalCount = 0;
           

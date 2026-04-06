@@ -99,11 +99,11 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
   // 辅助方法：管理会话流状态
   const addSessionStream = (
-    itemId: string,
+    ownerId: string,
     topicId: string,
     messageId: string,
   ) => {
-    const key = `${itemId}:${topicId}`;
+    const key = `${ownerId}:${topicId}`;
     if (!sessionActiveStreams.value.has(key)) {
       sessionActiveStreams.value.set(key, new Set());
     }
@@ -111,11 +111,11 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   const removeSessionStream = (
-    itemId: string,
+    ownerId: string,
     topicId: string,
     messageId: string,
   ) => {
-    const key = `${itemId}:${topicId}`;
+    const key = `${ownerId}:${topicId}`;
     const streams = sessionActiveStreams.value.get(key);
     if (streams) {
       streams.delete(messageId);
@@ -125,9 +125,9 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     }
   };
 
-  // 非当前视图流的轻量级内容缓存 (messageId -> { content: string, topicId: string, itemId: string })
+  // 非当前视图流的轻量级内容缓存 (messageId -> { content: string, topicId: string, ownerId: string })
   const backgroundStreamingBuffers = ref<
-    Map<string, { content: string; topicId: string; itemId: string }>
+    Map<string, { content: string; topicId: string; ownerId: string }>
   >(new Map());
 
   // 用于高性能同步的指纹缓存
@@ -154,7 +154,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     if (!currentTopicId.value || !currentSelectedItem.value?.id) return;
 
     const topicId = currentTopicId.value;
-    const itemId = currentSelectedItem.value.id;
+    const ownerId = currentSelectedItem.value.id;
+    const ownerType = currentSelectedItem.value.type;
 
     // 只有“未命名”话题且消息数达到阈值才总结 (桌面端策略)
     const topic = topicStore.topics.find((t) => t.id === topicId);
@@ -172,16 +173,17 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       console.log(`[ChatManager] Triggering AI summary for topic: ${topicId}`);
       try {
         const agentName =
-          assistantStore.agents.find((a: any) => a.id === itemId)?.name || "AI";
+          assistantStore.agents.find((a: any) => a.id === ownerId)?.name || "AI";
         const newTitle = await invoke<string>("summarize_topic", {
-          itemId,
+          ownerId,
+          ownerType,
           topicId,
           agentName,
         });
 
         if (newTitle) {
           console.log(`[ChatManager] AI Summarized Title: ${newTitle}`);
-          await topicStore.updateTopicTitle(itemId, topicId, newTitle);
+          await topicStore.updateTopicTitle(ownerId, ownerType, topicId, newTitle);
         }
       } catch (e) {
         console.error("[ChatManager] AI Summary failed:", e);
@@ -292,18 +294,20 @@ export const useChatManagerStore = defineStore("chatManager", () => {
    * 加载聊天历史 (已优化：数据在 Rust 端完成预处理)
    */
   const loadHistory = async (
-    itemId: string,
+    ownerId: string,
+    ownerType: string,
     topicId: string,
     limit: number = 50,
     offset: number = 0,
   ) => {
     console.log(
-      `[ChatManager] Loading history for ${itemId}, topic: ${topicId}`,
+      `[ChatManager] Loading history for ${ownerId}, topic: ${topicId}`,
     );
     loading.value = true;
     try {
       const history = await invoke<ChatMessage[]>("load_chat_history", {
-        itemId,
+        ownerId,
+        ownerType,
         topicId,
         limit,
         offset,
@@ -337,16 +341,16 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
       if (
         !currentSelectedItem.value ||
-        currentSelectedItem.value.id !== itemId
+        currentSelectedItem.value.id !== ownerId
       ) {
-        currentSelectedItem.value = { id: itemId };
+        currentSelectedItem.value = { id: ownerId, type: ownerType };
       }
 
       // 异步预处理正则并解析本地资源路径
       await Promise.all(
         history.map(async (msg) => {
           resolveMessageAssets(msg);
-          await processRegex(msg, itemId);
+          await processRegex(msg, ownerId);
         }),
       );
 
@@ -354,7 +358,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       lastTopicFingerprint.value = await invoke<TopicFingerprint>(
         "get_topic_fingerprint",
         {
-          itemId,
+          ownerId,
+          ownerType,
           topicId,
         },
       );
@@ -375,13 +380,14 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   const saveHistory = async () => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
 
-    const itemId = currentSelectedItem.value.id;
+    const ownerId = currentSelectedItem.value.id;
+    const ownerType = currentSelectedItem.value.type;
     const topicId = currentTopicId.value;
 
     try {
-      await invoke("signal_internal_save");
       await invoke("save_chat_history", {
-        itemId,
+        ownerId,
+        ownerType,
         topicId,
         history: currentChatHistory.value,
       });
@@ -390,7 +396,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       lastTopicFingerprint.value = await invoke<TopicFingerprint>(
         "get_topic_fingerprint",
         {
-          itemId,
+          ownerId,
+          ownerType,
           topicId,
         },
       );
@@ -405,7 +412,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   const syncHistoryWithDelta = async () => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
 
-    const itemId = currentSelectedItem.value.id;
+    const ownerId = currentSelectedItem.value.id;
+    const ownerType = currentSelectedItem.value.type;
     const topicId = currentTopicId.value;
 
     try {
@@ -413,7 +421,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       const newFingerprint = await invoke<TopicFingerprint>(
         "get_topic_fingerprint",
         {
-          itemId,
+          ownerId,
+          ownerType,
           topicId,
         },
       );
@@ -433,7 +442,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
       // 2. 获取 Rust 端计算出的差异块
       const delta = await invoke<TopicDelta>("get_topic_delta", {
-        itemId,
+        ownerId,
+        ownerType,
         topicId,
         currentHistory: currentChatHistory.value,
         fingerprint: lastTopicFingerprint.value,
@@ -518,7 +528,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   ) => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
 
-    const itemId = currentSelectedItem.value.id;
+    const ownerId = currentSelectedItem.value.id;
+    const ownerType = currentSelectedItem.value.type;
     const topicId = currentTopicId.value;
     const targetIndex = currentChatHistory.value.findIndex(
       (m) => m.id === messageId,
@@ -530,7 +541,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     if (deleteAfter) {
       // 物理截断：删除自身以及后面所有的
       await invoke("truncate_history_after_timestamp", {
-        itemId,
+        ownerId,
+        ownerType,
         topicId,
         timestamp: targetMsg.timestamp - 1, // 包含自身
       });
@@ -538,13 +550,16 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     } else {
       // 逻辑删除：仅删除自身
       await invoke("delete_messages", {
+        ownerId,
+        ownerType,
+        topicId,
         msgIds: [messageId],
       });
       currentChatHistory.value.splice(targetIndex, 1);
     }
 
     // 触发同步到桌面端
-    syncService.pushTopicToDesktop(itemId, topicId, currentChatHistory.value);
+    syncService.pushTopicToDesktop(ownerId, topicId, currentChatHistory.value);
   };
 
   /**
@@ -572,29 +587,28 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         msg.isThinking = false;
       }
 
-      if (currentSelectedItem.value?.id && currentTopicId.value) {
-        removeSessionStream(
-          currentSelectedItem.value.id,
-          currentTopicId.value,
-          messageId,
-        );
+      const ownerId = currentSelectedItem.value?.id;
+      const topicId = currentTopicId.value;
+
+      if (ownerId && topicId) {
+        removeSessionStream(ownerId, topicId, messageId);
       }
 
       if (streamingMessageId.value === messageId) {
         streamingMessageId.value = null;
       }
-
       // 增量保存当前中止后的内容
-      if (msg && currentSelectedItem.value?.id && currentTopicId.value) {
+      if (msg && ownerId && topicId) {
         await invoke("append_single_message", {
-          itemId: currentSelectedItem.value.id,
-          topicId: currentTopicId.value,
+          ownerId,
+          ownerType: currentSelectedItem.value!.type,
+          topicId,
           message: msg,
         });
         // 触发同步到桌面端
         syncService.pushTopicToDesktop(
-          currentSelectedItem.value.id,
-          currentTopicId.value,
+          ownerId,
+          topicId,
           currentChatHistory.value,
         );
       }
@@ -633,10 +647,10 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       msg.displayedContent = "";
     }
     msg.processedContent = undefined;
-
     if (currentSelectedItem.value?.id && currentTopicId.value) {
       await invoke("patch_single_message", {
-        itemId: currentSelectedItem.value.id,
+        ownerId: currentSelectedItem.value.id,
+        ownerType: currentSelectedItem.value.type,
         topicId: currentTopicId.value,
         message: msg,
       });
@@ -702,12 +716,14 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       // 立即保存一次历史记录 (包含用户消息和思考态)
       if (currentSelectedItem.value?.id && currentTopicId.value) {
         await invoke("append_single_message", {
-          itemId: currentSelectedItem.value.id,
+          ownerId: currentSelectedItem.value.id,
+          ownerType: currentSelectedItem.value.type,
           topicId: currentTopicId.value,
           message: userMsg,
         });
         await invoke("append_single_message", {
-          itemId: currentSelectedItem.value.id,
+          ownerId: currentSelectedItem.value.id,
+          ownerType: currentSelectedItem.value.type,
           topicId: currentTopicId.value,
           message: thinkingMsg,
         });
@@ -884,7 +900,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         const msg = currentChatHistory.value.find((m) => m.id === thinkingId);
         if (msg) {
           await invoke("patch_single_message", {
-            itemId: currentSelectedItem.value.id,
+            ownerId: currentSelectedItem.value.id,
+            ownerType: currentSelectedItem.value.type,
             topicId: currentTopicId.value,
             message: msg,
           });
@@ -1005,7 +1022,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
             if (topicId && itemId) {
               const buffer = backgroundStreamingBuffers.value.get(
                 actualMessageId,
-              ) || { content: "", topicId, itemId };
+              ) || { content: "", topicId, ownerId: itemId };
               buffer.content += textChunk;
               backgroundStreamingBuffers.value.set(actualMessageId, buffer);
             }
@@ -1025,7 +1042,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         }
 
         // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
-        streamManager.finalizeStream(actualMessageId, () => {
+        streamManager.finalizeStream(actualMessageId, async () => {
           const latestMsg = currentChatHistory.value.find(
             (m) => m.id === actualMessageId,
           );
@@ -1056,21 +1073,22 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           if (latestMsg) {
             // 重新获取一次最新引用进行正则处理
             if (currentSelectedItem.value?.id) {
-              processRegex(latestMsg, currentSelectedItem.value.id);
+              await processRegex(latestMsg, currentSelectedItem.value.id);
             }
 
             // 使用 patch (墓碑更新) 代替 append
             // 因为在发送瞬间我们已经 append 过一个思考态占位符了，现在是更新它的内容
             if (currentSelectedItem.value?.id && currentTopicId.value) {
-              invoke("patch_single_message", {
-                itemId: currentSelectedItem.value.id,
+              await invoke("patch_single_message", {
+                ownerId: currentSelectedItem.value.id,
+                ownerType: currentSelectedItem.value.type,
                 topicId: currentTopicId.value,
                 message: latestMsg,
               });
             }
 
             // 话题自动总结逻辑
-            summarizeTopic();
+            await summarizeTopic();
           } else {
             // 如果不在当前视图，从后台缓存中提取并尝试保存一次
             const buffer =
@@ -1112,7 +1130,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       }
     });
 
-    listen("vcp-group-turn-finished", (event: any) => {
+    listen("vcp-group-turn-finished", async (event: any) => {
       const { groupId, topic_id, topicId: legacyTopicId } = event.payload;
       const actualTopicId = topic_id || legacyTopicId;
 
@@ -1122,7 +1140,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       ) {
         console.log(`[ChatManager] Group turn finished for ${groupId}`);
         // 强制同步一次，确保所有并行 Agent 的最终结果都已落盘并同步到前端
-        syncHistoryWithDelta();
+        await syncHistoryWithDelta();
       }
     });
   };

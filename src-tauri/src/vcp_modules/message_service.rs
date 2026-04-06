@@ -9,7 +9,8 @@ use tauri::{AppHandle, Manager};
 /// 加载聊天历史记录的内部逻辑
 pub async fn load_chat_history_internal(
     app_handle: &AppHandle,
-    item_id: &str,
+    owner_id: &str,
+    owner_type: &str,
     topic_id: &str,
     limit: Option<usize>,
     offset: Option<usize>,
@@ -97,35 +98,36 @@ pub async fn load_chat_history_internal(
 
     // Reverse to chronological order as frontend expects
     history.reverse();
+// 动态替换桌面端的绝对路径为手机端的绝对路径 (Path Rebasing)
+message_asset_rebaser::rebase_message_assets(app_handle, owner_id, owner_type, &mut history)?;
 
-    // 动态替换桌面端的绝对路径为手机端的绝对路径 (Path Rebasing)
-    message_asset_rebaser::rebase_message_assets(app_handle, item_id, &mut history)?;
-
-    Ok(history)
+Ok(history)
 }
 
 /// 保存聊天历史记录的内部逻辑
 pub async fn save_chat_history_internal(
-    app_handle: &AppHandle,
-    db_state: &DbState,
-    item_id: &str,
-    topic_id: &str,
-    history: &[ChatMessage],
-    ) -> Result<(), String> {
-    rebuild_topic_core_from_history(
-        app_handle,
-        &db_state.pool,
-        item_id,
-        topic_id,
-        &history,
-    ).await
+app_handle: &AppHandle,
+db_state: &DbState,
+owner_id: &str,
+_owner_type: &str,
+topic_id: &str,
+history: &[ChatMessage],
+) -> Result<(), String> {
+rebuild_topic_core_from_history(
+    app_handle,
+    &db_state.pool,
+    owner_id,
+    topic_id,
+    history,
+)
+.await
 }
 
 /// 权威重建 Topic 的新内核状态 (DB Only)
 pub async fn rebuild_topic_core_from_history(
     app_handle: &AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    item_id: &str,
+    owner_id: &str,
     topic_id: &str,
     history: &[ChatMessage],
 ) -> Result<(), String> {
@@ -150,18 +152,27 @@ pub async fn rebuild_topic_core_from_history(
         ).await?;
         last_timestamp = msg.timestamp as i64;
     }
+
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    let owner_type = if item_id.starts_with("____") { "group" } else { "agent" };
+    // 从数据库获取 owner_type 确保准确性
+    let owner_type = match sqlx::query_as::<_, (String,)>("SELECT owner_type FROM topics WHERE topic_id = ?")
+        .bind(topic_id)
+        .fetch_optional(db_pool)
+        .await {
+            Ok(Some((ot,))) => ot,
+            _ => "agent".to_string(), // Fallback
+        };
 
     MessageRepository::rebuild_topic_data_state(
         db_pool,
         topic_id,
-        owner_type,
-        item_id,
+        &owner_type,
+        owner_id,
         history.len() as i32,
         last_timestamp,
-    ).await?;
+    )
+    .await?;
 
     Ok(())
 }
@@ -170,7 +181,8 @@ pub async fn rebuild_topic_core_from_history(
 pub async fn truncate_history_after_timestamp(
     _app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _item_id: &str,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: &str,
     timestamp: i64,
 ) -> Result<(), String> {
@@ -214,7 +226,8 @@ pub async fn truncate_history_after_timestamp(
 pub async fn append_single_message(
     app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _item_id: String,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: String,
     message: ChatMessage,
 ) -> Result<(), String> {
@@ -262,7 +275,8 @@ pub async fn append_single_message(
 pub async fn patch_single_message(
     app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _item_id: String,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: String,
     message: ChatMessage,
 ) -> Result<(), String> {

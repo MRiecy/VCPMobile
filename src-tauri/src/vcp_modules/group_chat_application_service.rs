@@ -74,6 +74,7 @@ pub async fn process_group_chat_message(
     let history_command = message_service::load_chat_history_internal(
         &app_handle,
         &group_id,
+        "group",
         &topic_id,
         None,
         None,
@@ -88,6 +89,7 @@ pub async fn process_group_chat_message(
         &app_handle,
         &db_state,
         &group_id,
+        "group",
         &topic_id,
         &current_history,
     )
@@ -131,6 +133,7 @@ pub async fn process_group_chat_message(
         let current_history_for_context = message_service::load_chat_history_internal(
             &app_handle,
             &group_id,
+            "group",
             &topic_id,
             None,
             None,
@@ -223,7 +226,8 @@ pub async fn process_group_chat_message(
                 let _ = message_service::append_single_message(
                     app_handle.clone(),
                     &db_pool,
-                    group_id.clone(),
+                    &group_id,
+                    "group",
                     topic_id.clone(),
                     ai_msg.clone(),
                 )

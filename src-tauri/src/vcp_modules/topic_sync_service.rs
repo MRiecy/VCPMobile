@@ -24,7 +24,6 @@ pub struct TopicDelta {
 
 pub async fn get_topic_fingerprint_internal(
     app_handle: &AppHandle,
-    _item_id: &str,
     topic_id: &str,
 ) -> Result<TopicFingerprint, String> {
     let db_state = app_handle.state::<DbState>();
@@ -60,14 +59,13 @@ pub async fn get_topic_fingerprint_internal(
 
 pub async fn get_topic_delta_internal(
     app_handle: &AppHandle,
-    item_id: &str,
     topic_id: &str,
     current_history: Vec<ChatMessage>,
     fingerprint: Option<TopicFingerprint>,
 ) -> Result<TopicDelta, String> {
     // 1. 指纹快速路径 (Fingerprint Fast-path)
     if let Some(fp) = fingerprint {
-        let current_fp = get_topic_fingerprint_internal(app_handle, item_id, topic_id).await?;
+        let current_fp = get_topic_fingerprint_internal(app_handle, topic_id).await?;
         if current_fp.revision == fp.revision && current_fp.msg_count == current_history.len() as i32 {
             println!(
                 "[VCPCore] Sync skipped for {}: revision matches.",
@@ -83,8 +81,21 @@ pub async fn get_topic_delta_internal(
         }
     }
 
+    // 从数据库获取 owner 详情用于加载历史 (Asset Rebasing 需要)
+    let db_state = app_handle.state::<DbState>();
+    let owner_row = sqlx::query_as::<_, (String, String)>("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?")
+        .bind(topic_id)
+        .fetch_optional(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let (owner_id, owner_type) = match owner_row {
+        Some(row) => row,
+        None => return Err("Topic not found".to_string()),
+    };
+
     // 3. 读取数据库 中的全量历史记录并应用比对
-    let mut new_history = message_service::load_chat_history_internal(app_handle, item_id, topic_id, None, None).await?;
+    let mut new_history = message_service::load_chat_history_internal(app_handle, &owner_id, &owner_type, topic_id, None, None).await?;
 
     // 4. 构建索引以便快速比对
     let old_map: HashMap<String, ChatMessage> = current_history

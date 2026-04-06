@@ -31,6 +31,7 @@ const showTopicContextMenu = (topicId: string) => {
   if (!topic) return;
 
   const itemId = topic.agentId || topicListStore.currentAgentId || chatStore.currentSelectedItem?.id || 'default_agent';
+  const ownerType = assistantStore.agents.some(a => a.id === itemId) ? 'agent' : 'group';
   
   overlayStore.openContextMenu([
     {
@@ -43,7 +44,7 @@ const showTopicContextMenu = (topicId: string) => {
           placeholder: '请输入新的话题标题...',
           onConfirm: (newTitle: string) => {
             if (newTitle && newTitle.trim()) {
-              topicListStore.updateTopicTitle(itemId, topic.id, newTitle.trim());
+              topicListStore.updateTopicTitle(itemId, ownerType, topic.id, newTitle.trim());
             }
           }
         });
@@ -53,14 +54,14 @@ const showTopicContextMenu = (topicId: string) => {
       label: topic.locked ? '解锁话题' : '锁定话题',
       icon: topic.locked ? LockOpen : Lock,
       handler: () => {
-        topicListStore.toggleTopicLock(itemId, topic.id);
+        topicListStore.toggleTopicLock(itemId, ownerType, topic.id);
       }
     },
     {
       label: topic.unread ? '标为已读' : '标为未读',
       icon: CheckCircle,
       handler: () => {
-        topicListStore.setTopicUnread(itemId, topic.id, !topic.unread);
+        topicListStore.setTopicUnread(itemId, ownerType, topic.id, !topic.unread);
       }
     },
     {
@@ -70,7 +71,7 @@ const showTopicContextMenu = (topicId: string) => {
       handler: () => {
         if (window.confirm(`确定要删除话题 "${topic.name}" 吗？此操作不可逆转。`)) {
           if (window.confirm(`【最终确认】真的要永久删除 "${topic.name}" 吗？`)) {
-            topicListStore.deleteTopic(itemId, topic.id);
+            topicListStore.deleteTopic(itemId, ownerType, topic.id);
           }
         }
       }
@@ -82,7 +83,9 @@ const selectTopic = async (itemId: string, topicId: string, topicName: string) =
   if (router.currentRoute.value.path !== '/chat') {
     await router.push('/chat');
   }
-  await chatStore.loadHistory(itemId, topicId);
+
+  const ownerType = assistantStore.agents.some(a => a.id === itemId) ? 'agent' : 'group';
+  await chatStore.loadHistory(itemId, ownerType, topicId);
   
   // 更新当前选中项的名称 (保持 type)
   if (!chatStore.currentSelectedItem || chatStore.currentSelectedItem.id !== itemId) {

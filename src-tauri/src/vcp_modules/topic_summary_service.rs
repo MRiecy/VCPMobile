@@ -25,7 +25,8 @@ const AI_MAX_TOKENS: u32 = 4000;
 pub async fn summarize_topic(
     app_handle: AppHandle,
     settings_state: State<'_, AppSettingsState>,
-    item_id: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     agent_name: String,
 ) -> Result<String, String> {
@@ -38,7 +39,8 @@ pub async fn summarize_topic(
     let _db_state = app_handle.state::<DbState>();
     let messages = message_service::load_chat_history_internal(
         &app_handle,
-        &item_id,
+        &owner_id,
+        &owner_type,
         &topic_id,
         Some(4),
         None,

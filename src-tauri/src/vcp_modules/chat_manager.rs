@@ -83,14 +83,16 @@ pub async fn process_regex_for_message(
 #[tauri::command]
 pub async fn load_chat_history(
     app_handle: AppHandle,
-    item_id: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<ChatMessage>, String> {
     message_service::load_chat_history_internal(
         &app_handle,
-        &item_id,
+        &owner_id,
+        &owner_type,
         &topic_id,
         limit,
         offset,
@@ -102,14 +104,16 @@ pub async fn load_chat_history(
 pub async fn save_chat_history(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
-    item_id: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     history: Vec<ChatMessage>,
 ) -> Result<(), String> {
     message_service::save_chat_history_internal(
         &app_handle,
         &db_state,
-        &item_id,
+        &owner_id,
+        &owner_type,
         &topic_id,
         &history,
     )
@@ -120,14 +124,16 @@ pub async fn save_chat_history(
 pub async fn append_single_message(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
-    item_id: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     message: ChatMessage,
 ) -> Result<(), String> {
     message_service::append_single_message(
         app_handle,
         &db_state.pool,
-        item_id,
+        &owner_id,
+        &owner_type,
         topic_id,
         message,
     )
@@ -138,14 +144,16 @@ pub async fn append_single_message(
 pub async fn patch_single_message(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
-    item_id: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     message: ChatMessage,
 ) -> Result<(), String> {
     message_service::patch_single_message(
         app_handle,
         &db_state.pool,
-        item_id,
+        &owner_id,
+        &owner_type,
         topic_id,
         message,
     )
@@ -165,14 +173,16 @@ pub async fn delete_messages(
 pub async fn truncate_history_after_timestamp(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
-    item_id: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     timestamp: i64,
 ) -> Result<(), String> {
     message_service::truncate_history_after_timestamp(
         app_handle,
         &db_state.pool,
-        &item_id,
+        &owner_id,
+        &owner_type,
         &topic_id,
         timestamp,
     )
@@ -186,10 +196,11 @@ pub async fn truncate_history_after_timestamp(
 #[tauri::command]
 pub async fn get_topic_fingerprint(
     app_handle: AppHandle,
-    item_id: String,
+    _owner_id: String,
+    _owner_type: String,
     topic_id: String,
 ) -> Result<TopicFingerprint, String> {
-    get_topic_fingerprint_internal(&app_handle, &item_id, &topic_id).await
+    get_topic_fingerprint_internal(&app_handle, &topic_id).await
 }
 
 /// 对比内存中的历史记录与磁盘文件，计算增量更新 (Delta)
@@ -197,14 +208,14 @@ pub async fn get_topic_fingerprint(
 pub async fn get_topic_delta(
     app_handle: AppHandle,
     _db_state: State<'_, DbState>,
-    item_id: String,
+    _owner_id: String,
+    _owner_type: String,
     topic_id: String,
     current_history: Vec<ChatMessage>,
     fingerprint: Option<TopicFingerprint>,
 ) -> Result<TopicDelta, String> {
     get_topic_delta_internal(
         &app_handle,
-        &item_id,
         &topic_id,
         current_history,
         fingerprint,

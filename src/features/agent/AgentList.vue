@@ -76,7 +76,7 @@ const selectAgent = async (agentId: string) => {
   if (agent) {
     chatStore.currentSelectedItem = { id: agent.id, name: agent.name, type: 'agent' };
   }
-  await topicListStore.loadTopicList(agentId);
+  await topicListStore.loadTopicList(agentId, 'agent');
   emit('select-agent');
 };
 
@@ -85,7 +85,7 @@ const selectGroup = async (groupId: string) => {
   if (group) {
     chatStore.currentSelectedItem = { id: group.id, name: group.name, type: 'group' };
   }
-  await topicListStore.loadTopicList(groupId);
+  await topicListStore.loadTopicList(groupId, 'group');
   emit('select-agent');
 };
 

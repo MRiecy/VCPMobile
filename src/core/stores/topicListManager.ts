@@ -104,25 +104,25 @@ export const useTopicStore = defineStore("topic", () => {
 
   /**
    * 加载话题列表
-   * @param agentId Agent ID
+   * @param ownerId Agent ID or Group ID
+   * @param ownerType "agent" or "group"
    */
-  const loadTopicList = async (agentId: string) => {
-    if (!agentId) return;
+  const loadTopicList = async (ownerId: string, ownerType: string) => {
+    if (!ownerId) return;
 
-    currentAgentId.value = agentId;
-    console.log(`[TopicStore] Loading topics for agent: ${agentId}`);
+    currentAgentId.value = ownerId;
+    console.log(`[TopicStore] Loading topics for ${ownerType}: ${ownerId}`);
     loading.value = true;
 
     try {
       // 1. 从 Rust 获取基础话题列表
       // 命令对应 Rust 中的 get_topics
-      // 这里的 Topic 结构体已经由 Rust 后端在扫描 history.json 时算好了 unread_count 和 msg_count
-      const result = await invoke<any[]>("get_topics", { itemId: agentId });
+      const result = await invoke<any[]>("get_topics", { ownerId, ownerType });
 
       // 映射 Rust 字段到前端状态 (Rust 已对齐 camelCase)
       topics.value = result.map((t) => ({
         ...t,
-        agentId: agentId,
+        agentId: ownerId,
         name: t.title || t.name || t.id,
         unreadCount: t.unreadCount || 0,
         messageCount: t.messageCount || 0,
@@ -141,13 +141,14 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 创建新话题
    */
-  const createTopic = async (agentId: string, name: string) => {
+  const createTopic = async (ownerId: string, ownerType: string, name: string) => {
     try {
       console.log(
-        `[TopicStore] Creating new topic "${name}" for agent ${agentId}`,
+        `[TopicStore] Creating new topic "${name}" for ${ownerType} ${ownerId}`,
       );
       const newTopic = await invoke<Topic>("create_topic", {
-        itemId: agentId,
+        ownerId,
+        ownerType,
         name,
       });
 
@@ -181,11 +182,11 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 删除话题
    */
-  const deleteTopic = async (agentId: string, topicId: string) => {
+  const deleteTopic = async (ownerId: string, ownerType: string, topicId: string) => {
     try {
       console.log(`[TopicStore] Deleting topic ${topicId}`);
       // 注意：确保 Rust 端已实现 delete_topic 命令
-      await invoke("delete_topic", { itemId: agentId, topicId });
+      await invoke("delete_topic", { ownerId, ownerType, topicId });
 
       topics.value = topics.value.filter((t) => t.id !== topicId);
 
@@ -205,7 +206,8 @@ export const useTopicStore = defineStore("topic", () => {
    * 更新话题标题
    */
   const updateTopicTitle = async (
-    agentId: string,
+    ownerId: string,
+    ownerType: string,
     topicId: string,
     newTitle: string,
   ) => {
@@ -215,7 +217,8 @@ export const useTopicStore = defineStore("topic", () => {
       );
       // 注意：确保 Rust 端已实现 update_topic_title 命令
       await invoke("update_topic_title", {
-        itemId: agentId,
+        ownerId,
+        ownerType,
         topicId,
         title: newTitle,
       });
@@ -233,7 +236,7 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 切换话题锁定状态
    */
-  const toggleTopicLock = async (agentId: string, topicId: string) => {
+  const toggleTopicLock = async (ownerId: string, ownerType: string, topicId: string) => {
     try {
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index === -1) return;
@@ -245,7 +248,8 @@ export const useTopicStore = defineStore("topic", () => {
 
       // 调用 Rust 命令切换锁定
       await invoke("toggle_topic_lock", {
-        itemId: agentId,
+        ownerId,
+        ownerType,
         topicId,
         locked: targetLockState,
       });
@@ -260,7 +264,8 @@ export const useTopicStore = defineStore("topic", () => {
    * 设置未读状态 (手动标记)
    */
   const setTopicUnread = async (
-    agentId: string,
+    ownerId: string,
+    ownerType: string,
     topicId: string,
     unread: boolean,
   ) => {
@@ -269,7 +274,7 @@ export const useTopicStore = defineStore("topic", () => {
         `[TopicStore] Setting unread state for ${topicId} to ${unread}`,
       );
       // 调用 Rust 命令更新状态
-      await invoke("set_topic_unread", { itemId: agentId, topicId, unread });
+      await invoke("set_topic_unread", { ownerId, ownerType, topicId, unread });
 
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {

@@ -22,16 +22,18 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
     // Query params
     let query_pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     let topic_id = query_pairs.get("topic_id").cloned();
-    let item_id = query_pairs.get("item_id").cloned();
+    let owner_id = query_pairs.get("owner_id").cloned();
+    let owner_type = query_pairs.get("owner_type").cloned();
     let limit: usize = query_pairs.get("limit").and_then(|s| s.parse().ok()).unwrap_or(20);
     let offset: usize = query_pairs.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    if topic_id.is_none() || item_id.is_none() {
+    if topic_id.is_none() || owner_id.is_none() || owner_type.is_none() {
         return Response::builder().status(400).body(Vec::new().into()).unwrap();
     }
 
     let topic_id = topic_id.unwrap();
-    let _item_id = item_id.unwrap();
+    let _owner_id = owner_id.unwrap();
+    let _owner_type = owner_type.unwrap();
 
     // Check if core is ready
     let lifecycle = handle.state::<LifecycleState>();
