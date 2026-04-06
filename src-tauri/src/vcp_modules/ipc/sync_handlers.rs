@@ -263,3 +263,11 @@ pub async fn sync_get_local_manifest(
 
     Ok(manifest)
 }
+
+#[tauri::command]
+pub async fn start_sync_daemon(
+    app_handle: tauri::AppHandle,
+    ws_url: String,
+) -> Result<(), String> {
+    crate::vcp_modules::sync_daemon::start_daemon(app_handle, ws_url).await
+}

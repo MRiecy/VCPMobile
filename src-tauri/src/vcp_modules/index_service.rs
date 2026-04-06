@@ -1,4 +1,3 @@
-use crate::vcp_modules::topic_projection_service::rebuild_topic_projection_from_history_path;
 use log::{error, info};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -40,10 +39,11 @@ pub async fn full_scan(app_handle: &AppHandle, pool: &Pool<Sqlite>) -> Result<()
 }
 
 pub async fn index_history_file(
-    app_handle: &AppHandle,
-    app_config_dir: &Path,
+    _app_handle: &AppHandle,
+    _app_config_dir: &Path,
     path: &Path,
-    pool: &Pool<Sqlite>,
+    _pool: &Pool<Sqlite>,
 ) -> Result<(), String> {
-    rebuild_topic_projection_from_history_path(app_handle, app_config_dir, path, pool).await
+    info!("[IndexService] History file found at {:?}, but history-to-DB sync is now handled by SyncDaemon or manual migration.", path);
+    Ok(())
 }

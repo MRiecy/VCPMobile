@@ -45,33 +45,157 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
 }
 
 async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
-    // 1. 附件索引表
+    // 1. agents 表 (替代 agent_index 和 config.json)
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS attachment_index (
-            hash TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS agents (
+            agent_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            system_prompt TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL,
+            temperature REAL NOT NULL DEFAULT 1,
+            context_token_limit INTEGER NOT NULL DEFAULT 0,
+            max_output_tokens INTEGER NOT NULL DEFAULT 0,
+            extra_json TEXT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            deleted_at BIGINT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 2. groups 表 (替代 config.json)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS groups (
+            group_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            avatar TEXT,
+            avatar_calculated_color TEXT,
+            mode TEXT NOT NULL DEFAULT 'sequential',
+            group_prompt TEXT,
+            invite_prompt TEXT,
+            use_unified_model INTEGER NOT NULL DEFAULT 0,
+            unified_model TEXT,
+            tag_match_mode TEXT,
+            extra_json TEXT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            deleted_at BIGINT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 3. group_members 表
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS group_members (
+            group_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            member_tag TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            deleted_at BIGINT,
+            PRIMARY KEY (group_id, agent_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 4. topics 表 (替代 topic_state)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS topics (
+            topic_id TEXT PRIMARY KEY,
+            owner_type TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            locked INTEGER NOT NULL DEFAULT 0,
+            unread INTEGER NOT NULL DEFAULT 0,
+            unread_count INTEGER NOT NULL DEFAULT 0,
+            msg_count INTEGER NOT NULL DEFAULT 0,
+            creator_source TEXT,
+            revision INTEGER NOT NULL DEFAULT 0,
+            extra_json TEXT,
+            deleted_at BIGINT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 5. messages 表 (替代 message_index 和 jsonl/astbin)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS messages (
+            msg_id TEXT PRIMARY KEY,
+            topic_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            name TEXT,
+            agent_id TEXT,
+            content TEXT NOT NULL,
+            timestamp BIGINT NOT NULL,
+            is_thinking INTEGER,
+            is_group_message INTEGER NOT NULL DEFAULT 0,
+            group_id TEXT,
+            avatar_url TEXT,
+            avatar_color TEXT,
+            render_format TEXT,
+            render_content BLOB,
+            render_version INTEGER NOT NULL DEFAULT 1,
+            extra_json TEXT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            deleted_at BIGINT
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 6. attachments 表 (替代 attachment_index)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS attachments (
+            attachment_hash TEXT PRIMARY KEY,
+            attachment_id TEXT NOT NULL,
+            name TEXT,
+            internal_file_name TEXT,
             local_path TEXT NOT NULL,
+            src TEXT,
             mime_type TEXT,
             size BIGINT NOT NULL,
-            created_at BIGINT NOT NULL
+            extracted_text TEXT,
+            thumbnail_path TEXT,
+            image_frames TEXT,
+            extra_json TEXT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            deleted_at BIGINT
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    // 2. Agent 索引表
+    // 7. message_attachments 表 (更名自 message_attachment_ref)
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS agent_index (
-            agent_id TEXT PRIMARY KEY,
-            name TEXT,
-            mtime BIGINT NOT NULL
+        "CREATE TABLE IF NOT EXISTS message_attachments (
+            msg_id TEXT NOT NULL,
+            attachment_hash TEXT NOT NULL,
+            attachment_order INTEGER NOT NULL,
+            extra_json TEXT,
+            created_at BIGINT NOT NULL,
+            PRIMARY KEY (msg_id, attachment_order)
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    // 3. 正则规则表
+    // 8. agent_regex_rules 表 (正式业务化)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS agent_regex_rules (
             rule_id TEXT NOT NULL,
@@ -80,10 +204,15 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             find_pattern TEXT NOT NULL,
             replace_with TEXT,
             apply_to_roles TEXT,
-            apply_to_frontend BOOLEAN,
-            apply_to_context BOOLEAN,
+            apply_to_frontend INTEGER NOT NULL DEFAULT 1,
+            apply_to_context INTEGER NOT NULL DEFAULT 1,
             min_depth INTEGER,
             max_depth INTEGER,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            extra_json TEXT,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL,
+            deleted_at BIGINT,
             PRIMARY KEY (agent_id, rule_id)
         )",
     )
@@ -91,74 +220,62 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 4. Project Leviathan: topic_state
+    // 索引
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS topic_state (
-            topic_id TEXT PRIMARY KEY,
-            item_id TEXT NOT NULL,
-            title TEXT,
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL,
-            revision INTEGER NOT NULL DEFAULT 0,
-            msg_count INTEGER NOT NULL DEFAULT 0,
-            locked BOOLEAN NOT NULL DEFAULT 0,
-            unread BOOLEAN NOT NULL DEFAULT 0,
-            unread_count INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // 5. Project Leviathan: message_index
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_index (
-            msg_id TEXT PRIMARY KEY,
-            topic_id TEXT NOT NULL,
-            item_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            created_at BIGINT NOT NULL,
-            raw_byte_offset INTEGER NOT NULL,
-            raw_byte_length INTEGER NOT NULL,
-            render_byte_offset INTEGER,
-            render_byte_length INTEGER,
-            has_attachments INTEGER NOT NULL DEFAULT 0,
-            is_deleted INTEGER NOT NULL DEFAULT 0,
-            extra_json TEXT
-        )",
+        "CREATE INDEX IF NOT EXISTS idx_topics_owner
+         ON topics(owner_type, owner_id, updated_at DESC)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_message_topic_time
-         ON message_index(topic_id, created_at)",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // 7. Project Leviathan: message_attachment_ref
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_attachment_ref (
-            msg_id TEXT NOT NULL,
-            attachment_hash TEXT NOT NULL,
-            attachment_order INTEGER NOT NULL,
-            PRIMARY KEY (msg_id, attachment_order)
-        )",
+        "CREATE INDEX IF NOT EXISTS idx_messages_topic_time
+         ON messages(topic_id, timestamp DESC)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_attachment_ref_hash
-         ON message_attachment_ref(attachment_hash)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_updated_at
+         ON messages(updated_at)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_group_members_agent
+         ON group_members(agent_id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_message_attachments_hash
+         ON message_attachments(attachment_hash)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 删除旧表 (如果存在)
+    let drop_tables = vec![
+        "DROP TABLE IF EXISTS agent_index",
+        "DROP TABLE IF EXISTS topic_state",
+        "DROP TABLE IF EXISTS message_index",
+        "DROP TABLE IF EXISTS attachment_index",
+        "DROP TABLE IF EXISTS message_attachment_ref",
+    ];
+
+    for drop_query in drop_tables {
+        sqlx::query(drop_query)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }

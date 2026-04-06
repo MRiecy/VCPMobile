@@ -1,6 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_watcher::WatcherState;
-use crate::vcp_modules::message_application_service;
+use crate::vcp_modules::message_service;
 use crate::vcp_modules::topic_sync_service::{
     get_topic_delta_internal, get_topic_fingerprint_internal, TopicDelta, TopicFingerprint,
 };
@@ -89,7 +89,7 @@ pub async fn load_chat_history(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<ChatMessage>, String> {
-    message_application_service::load_chat_history_internal(
+    message_service::load_chat_history_internal(
         &app_handle,
         &item_id,
         &topic_id,
@@ -108,7 +108,7 @@ pub async fn save_chat_history(
     topic_id: String,
     history: Vec<ChatMessage>,
 ) -> Result<(), String> {
-    message_application_service::save_chat_history_internal(
+    message_service::save_chat_history_internal(
         &app_handle,
         &db_state,
         &watcher_state,
@@ -127,7 +127,7 @@ pub async fn append_single_message(
     topic_id: String,
     message: ChatMessage,
 ) -> Result<(), String> {
-    message_application_service::append_single_message(
+    message_service::append_single_message(
         app_handle,
         &db_state.pool,
         None,
@@ -146,7 +146,7 @@ pub async fn patch_single_message(
     topic_id: String,
     message: ChatMessage,
 ) -> Result<(), String> {
-    message_application_service::patch_single_message(
+    message_service::patch_single_message(
         app_handle,
         &db_state.pool,
         item_id,
@@ -162,7 +162,7 @@ pub async fn delete_messages(
     topic_id: String,
     msg_ids: Vec<String>,
 ) -> Result<(), String> {
-    message_application_service::delete_messages(&db_state.pool, &topic_id, msg_ids).await
+    message_service::delete_messages(&db_state.pool, &topic_id, msg_ids).await
 }
 
 #[tauri::command]
@@ -173,7 +173,7 @@ pub async fn truncate_history_after_timestamp(
     topic_id: String,
     timestamp: i64,
 ) -> Result<(), String> {
-    message_application_service::truncate_history_after_timestamp(
+    message_service::truncate_history_after_timestamp(
         app_handle,
         &db_state.pool,
         &item_id,

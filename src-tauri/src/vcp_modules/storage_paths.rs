@@ -21,9 +21,9 @@ pub fn get_groups_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     path
 }
 
-/// 物理探测: 判定 ID 是否属于群组
-pub fn is_group_item<R: Runtime>(app: &AppHandle<R>, item_id: &str) -> bool {
-    get_groups_base_path(app).join(item_id).exists()
+/// 物理探测: 判定 ID 是否属于群组 (不推荐使用，应通过数据库 owner_type 判断)
+pub fn is_group_item<R: Runtime>(_app: &AppHandle<R>, item_id: &str) -> bool {
+    item_id.starts_with("____")
 }
 
 /// 获取话题目录路径 (支持双轨结构与 UserData/data 兼容)
@@ -56,24 +56,20 @@ pub fn resolve_topic_dir<R: Runtime>(app: &AppHandle<R>, item_id: &str, topic_id
     path
 }
 
-/// 获取 history.jsonl 路径
+/// 获取 history.jsonl 路径 (Deprecated)
 pub fn resolve_jsonl_path<R: Runtime>(
-    app: &AppHandle<R>,
-    item_id: &str,
-    topic_id: &str,
+    _app: &AppHandle<R>,
+    _item_id: &str,
+    _topic_id: &str,
 ) -> PathBuf {
-    let mut path = resolve_topic_dir(app, item_id, topic_id);
-    path.push("history.jsonl");
-    path
+    PathBuf::new()
 }
 
-/// 获取 history.astbin 路径
+/// 获取 history.astbin 路径 (Deprecated)
 pub fn resolve_astbin_path<R: Runtime>(
-    app: &AppHandle<R>,
-    item_id: &str,
-    topic_id: &str,
+    _app: &AppHandle<R>,
+    _item_id: &str,
+    _topic_id: &str,
 ) -> PathBuf {
-    let mut path = resolve_topic_dir(app, item_id, topic_id);
-    path.push("history.astbin");
-    path
+    PathBuf::new()
 }

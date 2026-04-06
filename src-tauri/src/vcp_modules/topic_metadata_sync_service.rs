@@ -1,11 +1,12 @@
-use crate::vcp_modules::agent_config_manager::{
-    read_agent_config, write_agent_config, AgentConfigState, TopicInfo,
+use crate::vcp_modules::agent_service::{
+    read_agent_config, save_agent_config as write_agent_config, AgentConfigState,
 };
-use crate::vcp_modules::group_manager::{read_group_config, GroupManagerState};
-use crate::vcp_modules::path_topology_service::{
+use crate::vcp_modules::agent_types::TopicInfo;
+use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
+use crate::vcp_modules::storage_paths::{
     get_groups_base_path, is_group_item, resolve_topic_dir,
 };
-pub use crate::vcp_modules::topic_repository_projection::Topic;
+use crate::vcp_modules::topic_list_manager::Topic;
 use serde_json::{Map, Value};
 use std::fs;
 use tauri::{AppHandle, Manager};
@@ -50,7 +51,7 @@ pub async fn sync_new_topic(
             extra_fields: Map::new(),
         };
         config.topics.insert(0, info);
-        write_agent_config(app_handle.clone(), agent_state, item_id.to_string(), config).await?;
+        write_agent_config(app_handle.clone(), agent_state, config).await?;
     }
 
     Ok(())
@@ -99,7 +100,7 @@ pub async fn update_topic_metadata(
             update_fn(&mut topic_json);
             *topic = serde_json::from_value(topic_json).map_err(|e| e.to_string())?;
 
-            write_agent_config(app_handle.clone(), agent_state, item_id.to_string(), config)
+            write_agent_config(app_handle.clone(), agent_state, config)
                 .await?;
         }
     }

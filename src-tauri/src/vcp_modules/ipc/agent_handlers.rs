@@ -1,9 +1,10 @@
 // agent_handlers.rs: 处理智能体相关的强类型指令
 // 对齐原 agentHandlers.js 的业务逻辑，并注入移动端感知
 
-use crate::vcp_modules::agent_config_manager::{
-    read_agent_config, write_agent_config, AgentConfig, AgentConfigState, TopicInfo,
+use crate::vcp_modules::agent_service::{
+    read_agent_config, AgentConfigState,
 };
+use crate::vcp_modules::agent_types::{AgentConfig, TopicInfo};
 use serde::Deserialize;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -172,7 +173,7 @@ pub async fn create_agent(
         }
     };
     // 初始化默认话题目录：Agent/Group 统一落在 UserData/data 聚合层，而非 Agents 配置目录
-    let topic_dir = crate::vcp_modules::path_topology_service::resolve_topic_dir(
+    let topic_dir = crate::vcp_modules::storage_paths::resolve_topic_dir(
         &app_handle,
         &agent_id,
         &default_topic_id,
@@ -192,7 +193,7 @@ pub async fn create_agent(
     fs::write(history_path, "[]").map_err(|e| e.to_string())?;
 
     // 写入配置 (原子操作)
-    write_agent_config(app_handle, state, agent_id, config.clone()).await?;
+    crate::vcp_modules::agent_service::save_agent_config(app_handle, state, config.clone()).await?;
 
     Ok(config)
 }

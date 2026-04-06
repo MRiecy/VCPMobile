@@ -1,6 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::message_application_service;
+use crate::vcp_modules::message_service;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Manager};
@@ -32,7 +32,7 @@ pub async fn get_topic_fingerprint_internal(
 
     let row_res = sqlx::query(
         "SELECT revision, updated_at, msg_count 
-         FROM topic_state 
+         FROM topics 
          WHERE topic_id = ?"
     )
     .bind(topic_id)
@@ -83,8 +83,8 @@ pub async fn get_topic_delta_internal(
         }
     }
 
-    // 3. 读取数据库/JSONL 中的全量历史记录并应用比对
-    let mut new_history = message_application_service::load_chat_history_internal(app_handle, item_id, topic_id, None, None).await?;
+    // 3. 读取数据库 中的全量历史记录并应用比对
+    let mut new_history = message_service::load_chat_history_internal(app_handle, item_id, topic_id, None, None).await?;
 
     // 4. 构建索引以便快速比对
     let old_map: HashMap<String, ChatMessage> = current_history

@@ -1,6 +1,6 @@
-use crate::vcp_modules::agent_config_manager::AgentConfig;
+use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::group_manager::GroupConfig;
+use crate::vcp_modules::group_types::GroupConfig;
 use rand::Rng;
 use regex::Regex;
 

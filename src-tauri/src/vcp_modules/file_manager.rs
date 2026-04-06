@@ -175,9 +175,9 @@ pub async fn store_file(
     let internal_file_path = attachments_dir.join(&internal_file_name);
     let internal_path_str = internal_file_path.to_str().unwrap().to_string();
 
-    // 3. 检查影子数据库中是否已存在该哈希，或磁盘上是否已存在文件
+    // 3. 检查数据库中是否已存在该哈希，或磁盘上是否已存在文件
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT hash FROM attachment_index WHERE hash = ?")
+        sqlx::query_as("SELECT hash FROM attachments WHERE hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
@@ -192,16 +192,18 @@ pub async fn store_file(
         // 4. 写入物理文件
         fs::write(&internal_file_path, &file_bytes).map_err(|e| e.to_string())?;
 
-        // 5. 更新影子数据库索引 (attachment_index)
+        // 5. 更新数据库 (attachments)
         sqlx::query(
-            "INSERT INTO attachment_index (hash, local_path, mime_type, size, created_at)
-             VALUES (?, ?, ?, ?, ?)
+            "INSERT INTO attachments (hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(hash) DO UPDATE SET local_path = excluded.local_path",
         )
         .bind(&hash)
+        .bind(format!("attachment_{}", hash))
         .bind(&internal_path_str)
         .bind(&mime_type)
         .bind(file_bytes.len() as i64)
+        .bind(now as i64)
         .bind(now as i64)
         .execute(&db_state.pool)
         .await
@@ -334,9 +336,9 @@ pub async fn pick_and_store_attachment(
     let internal_file_path = attachments_dir.join(&internal_file_name);
     let internal_path_str = internal_file_path.to_str().unwrap().to_string();
 
-    // 6. 检查影子数据库中是否已存在该哈希，或磁盘上是否已存在文件
+    // 6. 检查数据库中是否已存在该哈希，或磁盘上是否已存在文件
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT hash FROM attachment_index WHERE hash = ?")
+        sqlx::query_as("SELECT hash FROM attachments WHERE hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
@@ -371,16 +373,18 @@ pub async fn pick_and_store_attachment(
             }
         }
 
-        // 7. 更新影子数据库索引
+        // 7. 更新数据库 (attachments)
         sqlx::query(
-            "INSERT INTO attachment_index (hash, local_path, mime_type, size, created_at)
-             VALUES (?, ?, ?, ?, ?)
+            "INSERT INTO attachments (hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(hash) DO UPDATE SET local_path = excluded.local_path",
         )
         .bind(&hash)
+        .bind(format!("attachment_{}", hash))
         .bind(&internal_path_str)
         .bind(&mime_type)
         .bind(file_size as i64)
+        .bind(now as i64)
         .bind(now as i64)
         .execute(&db_state.pool)
         .await
@@ -506,7 +510,7 @@ pub async fn read_local_file_base64(app_handle: AppHandle, path: String) -> Resu
 }
 
 /// 清理孤儿附件 (无任何历史记录引用的文件)
-/// Project Leviathan Phase 4: 依赖 message_attachment_ref 而不是扫描文件
+/// Project Leviathan Phase 4: 依赖 message_attachments 而不是扫描文件
 #[tauri::command]
 pub async fn cleanup_orphaned_attachments(
     app_handle: AppHandle,
@@ -523,9 +527,9 @@ pub async fn cleanup_orphaned_attachments(
         return Ok("没有附件需要清理".to_string());
     }
 
-    // 1. 获取影子数据库中记录的所有哈希
+    // 1. 获取数据库中记录的所有哈希
     let all_indexed_hashes: Vec<(String, String)> =
-        sqlx::query_as("SELECT hash, local_path FROM attachment_index")
+        sqlx::query_as("SELECT hash, local_path FROM attachments")
             .fetch_all(&db_state.pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -534,9 +538,9 @@ pub async fn cleanup_orphaned_attachments(
         return Ok("索引库为空，无需清理".to_string());
     }
 
-    // 2. 查新表 message_attachment_ref 确定哪些 hash 正在被引用
+    // 2. 查 message_attachments 确定哪些 hash 正在被引用
     let used_hashes: std::collections::HashSet<String> =
-        sqlx::query_as::<_, (String,)>("SELECT DISTINCT attachment_hash FROM message_attachment_ref")
+        sqlx::query_as::<_, (String,)>("SELECT DISTINCT attachment_hash FROM message_attachments")
             .fetch_all(&db_state.pool)
             .await
             .map_err(|e| e.to_string())?
@@ -570,8 +574,8 @@ pub async fn cleanup_orphaned_attachments(
                 deleted_count += 1;
             }
 
-            // 从索引库中移除
-            let _ = sqlx::query("DELETE FROM attachment_index WHERE hash = ?")
+            // 从数据库中移除
+            let _ = sqlx::query("DELETE FROM attachments WHERE hash = ?")
                 .bind(&hash)
                 .execute(&db_state.pool)
                 .await;

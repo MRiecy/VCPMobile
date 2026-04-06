@@ -1,4 +1,4 @@
-use crate::vcp_modules::agent_config_manager::RegexRule;
+use crate::vcp_modules::agent_types::RegexRule;
 use crate::vcp_modules::db_manager::DbState;
 use dashmap::DashMap;
 use fancy_regex::Regex;

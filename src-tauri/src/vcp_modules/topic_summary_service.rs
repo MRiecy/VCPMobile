@@ -1,12 +1,11 @@
 use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
-use crate::vcp_modules::path_topology_service::resolve_jsonl_path;
-use crate::vcp_modules::message_log_store::MessageLogStore;
-use crate::vcp_modules::chat_manager::ChatMessage;
+
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::message_service;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tauri::{AppHandle, Manager, Runtime, State};
+use tauri::{AppHandle, Manager, State};
 
 /// 话题总结的默认 Prompt
 const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一个简洁的话题标题。要求：1. 标题长度控制在10个汉字以内。2. 标题本身不能包含任何标点符号、数字编号 or 任何非标题文字。3. 直接给出标题文字，不要添加任何解释或前缀。";
@@ -23,8 +22,8 @@ const AI_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// AI 请求最大 Token 数
 const AI_MAX_TOKENS: u32 = 4000;
 
-pub async fn summarize_topic<R: Runtime>(
-    app_handle: AppHandle<R>,
+pub async fn summarize_topic(
+    app_handle: AppHandle,
     settings_state: State<'_, AppSettingsState>,
     item_id: String,
     topic_id: String,
@@ -35,49 +34,21 @@ pub async fn summarize_topic<R: Runtime>(
         return Err("VCP settings are missing".to_string());
     }
 
-    // 1. 获取最近消息 (最近4条) - 使用 Leviathan 架构 (JSONL/DB)
-    let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
+    // 1. 获取最近消息 (最近4条) - 使用 Leviathan 架构 (DB Only)
+    let _db_state = app_handle.state::<DbState>();
+    let messages = message_service::load_chat_history_internal(
+        &app_handle,
+        &item_id,
+        &topic_id,
+        Some(4),
+        None,
+    ).await?;
 
-    let pointers_res: Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
-            "SELECT raw_byte_offset, raw_byte_length 
-            FROM message_index 
-            WHERE topic_id = ? AND is_deleted = 0 AND role != 'system'
-            ORDER BY created_at DESC 
-            LIMIT 4"
-        )
-        .bind(&topic_id)
-        .fetch_all(pool)
-        .await;
-
-    let history_rows = pointers_res.map_err(|e| e.to_string())?;
-    if history_rows.len() < 2 {
+    if messages.len() < 2 {
         return Err("Not enough messages to summarize".to_string());
     }
 
-    let jsonl_path = resolve_jsonl_path(&app_handle, &item_id, &topic_id);
-    if !jsonl_path.exists() {
-        return Err("JSONL history not found".to_string());
-    }
-
-    let log_store = MessageLogStore::new(jsonl_path);
     let mut recent_content = String::new();
-    
-    // Reverse because we queried DESC
-    let mut messages = Vec::new();
-    for row in history_rows {
-        use sqlx::Row;
-        let r_offset: i64 = row.get("raw_byte_offset");
-        let r_length: i64 = row.get("raw_byte_length");
-
-        if let Ok(json_line) = log_store.read_jsonl_at(r_offset as u64, r_length as u64) {
-            if let Ok(msg) = serde_json::from_str::<ChatMessage>(&json_line) {
-                messages.push(msg);
-            }
-        }
-    }
-    messages.reverse(); // Now chronological
-
     for msg in messages {
         let role_name = if msg.role == "user" {
             settings.user_name.as_str()
