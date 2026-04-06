@@ -1,11 +1,10 @@
 use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
+use crate::vcp_modules::db_manager::DbState;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::RwLock;
 use url::Url;
@@ -18,82 +17,16 @@ pub struct ModelInfo {
     pub owned_by: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-#[allow(dead_code)]
-pub struct ModelUsageStats {
-    pub usage: HashMap<String, u32>,
-}
-
 pub struct ModelManagerState {
     pub cached_models: Arc<RwLock<Vec<ModelInfo>>>,
-    pub favorites: Arc<RwLock<Vec<String>>>,
-    pub usage_stats: Arc<RwLock<HashMap<String, u32>>>,
-    pub is_dirty: Arc<RwLock<bool>>,
 }
 
 impl ModelManagerState {
     pub fn new() -> Self {
         Self {
             cached_models: Arc::new(RwLock::new(Vec::new())),
-            favorites: Arc::new(RwLock::new(Vec::new())),
-            usage_stats: Arc::new(RwLock::new(HashMap::new())),
-            is_dirty: Arc::new(RwLock::new(false)),
         }
     }
-}
-
-async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("AppData"))
-}
-
-async fn load_favorites<R: Runtime>(app: &AppHandle<R>) -> Vec<String> {
-    let path = get_app_data_path(app).await.join("model_favorites.json");
-    if let Ok(content) = tokio::fs::read_to_string(&path).await {
-        if let Ok(favs) = serde_json::from_str::<Vec<String>>(&content) {
-            return favs;
-        }
-    }
-    Vec::new()
-}
-
-async fn save_favorites<R: Runtime>(
-    app: &AppHandle<R>,
-    favorites: &[String],
-) -> Result<(), String> {
-    let path = get_app_data_path(app).await.join("model_favorites.json");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let content = serde_json::to_string_pretty(favorites).map_err(|e| e.to_string())?;
-    tokio::fs::write(path, content)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-async fn load_usage_stats<R: Runtime>(app: &AppHandle<R>) -> HashMap<String, u32> {
-    let path = get_app_data_path(app).await.join("model_usage_stats.json");
-    if let Ok(content) = tokio::fs::read_to_string(&path).await {
-        if let Ok(stats) = serde_json::from_str::<HashMap<String, u32>>(&content) {
-            return stats;
-        }
-    }
-    HashMap::new()
-}
-
-async fn save_usage_stats<R: Runtime>(
-    app: &AppHandle<R>,
-    stats: &HashMap<String, u32>,
-) -> Result<(), String> {
-    let path = get_app_data_path(app).await.join("model_usage_stats.json");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let content = serde_json::to_string_pretty(stats).map_err(|e| e.to_string())?;
-    tokio::fs::write(path, content)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -171,98 +104,124 @@ pub async fn refresh_models<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn get_hot_models(
-    state: State<'_, ModelManagerState>,
+pub async fn get_hot_models<R: Runtime>(
+    app: AppHandle<R>,
+    _state: State<'_, ModelManagerState>,
     limit: usize,
 ) -> Result<Vec<String>, String> {
-    let stats = state.usage_stats.read().await;
-    let mut entries: Vec<(&String, &u32)> = stats.iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(a.1));
-    Ok(entries
-        .into_iter()
-        .take(limit)
-        .map(|(k, _)| k.clone())
-        .collect())
+    let db_state = app.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let rows = sqlx::query("SELECT model_id FROM model_usage_stats ORDER BY usage_count DESC LIMIT ?")
+        .bind(limit as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut models = Vec::new();
+    for row in rows {
+        use sqlx::Row;
+        models.push(row.get("model_id"));
+    }
+
+    Ok(models)
 }
 
 #[tauri::command]
 pub async fn get_favorite_models<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, ModelManagerState>,
+    _state: State<'_, ModelManagerState>,
 ) -> Result<Vec<String>, String> {
-    let mut favs = state.favorites.write().await;
-    if favs.is_empty() {
-        *favs = load_favorites(&app).await;
+    let db_state = app.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let rows = sqlx::query("SELECT model_id FROM model_favorites ORDER BY created_at DESC")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut models = Vec::new();
+    for row in rows {
+        use sqlx::Row;
+        models.push(row.get("model_id"));
     }
-    Ok(favs.clone())
+
+    Ok(models)
 }
 
 #[tauri::command]
 pub async fn toggle_favorite_model<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, ModelManagerState>,
+    _state: State<'_, ModelManagerState>,
     model_id: String,
 ) -> Result<bool, String> {
-    let mut favs = state.favorites.write().await;
-    if favs.is_empty() {
-        *favs = load_favorites(&app).await;
-    }
+    let db_state = app.state::<DbState>();
+    let pool = &db_state.pool;
 
-    let favorited;
-    if let Some(pos) = favs.iter().position(|id| id == &model_id) {
-        favs.remove(pos);
-        favorited = false;
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    let row = sqlx::query("SELECT model_id FROM model_favorites WHERE model_id = ?")
+        .bind(&model_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let favorited = if row.is_some() {
+        sqlx::query("DELETE FROM model_favorites WHERE model_id = ?")
+            .bind(&model_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        false
     } else {
-        favs.push(model_id);
-        favorited = true;
-    }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        
+        sqlx::query("INSERT INTO model_favorites (model_id, created_at) VALUES (?, ?)")
+            .bind(&model_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        true
+    };
 
-    save_favorites(&app, &favs).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
     Ok(favorited)
 }
 
 #[tauri::command]
 pub async fn record_model_usage<R: Runtime>(
     app: AppHandle<R>,
-    state: State<'_, ModelManagerState>,
+    _state: State<'_, ModelManagerState>,
     model_id: String,
 ) -> Result<(), String> {
-    let mut stats = state.usage_stats.write().await;
-    if stats.is_empty() {
-        *stats = load_usage_stats(&app).await;
-    }
+    let db_state = app.state::<DbState>();
+    let pool = &db_state.pool;
 
-    let count = stats.entry(model_id).or_insert(0);
-    *count += 1;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
 
-    let mut dirty = state.is_dirty.write().await;
-    if !*dirty {
-        *dirty = true;
-        let app_clone = app.clone();
-        let stats_clone = stats.clone();
-        let dirty_clone = state.is_dirty.clone();
-
-        // 简单的异步延迟落盘逻辑
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let mut d = dirty_clone.write().await;
-            if *d {
-                if let Err(e) = save_usage_stats(&app_clone, &stats_clone).await {
-                    eprintln!("[ModelManager] Failed to save usage stats: {}", e);
-                }
-                *d = false;
-            }
-        });
-    }
+    sqlx::query(
+        "INSERT INTO model_usage_stats (model_id, usage_count, updated_at) 
+         VALUES (?, 1, ?) 
+         ON CONFLICT(model_id) DO UPDATE SET usage_count = usage_count + 1, updated_at = excluded.updated_at"
+    )
+    .bind(&model_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
 // 初始化加载
-pub async fn init_model_manager<R: Runtime>(app: &AppHandle<R>, state: &ModelManagerState) {
-    let favs = load_favorites(app).await;
-    *state.favorites.write().await = favs;
-
-    let stats = load_usage_stats(app).await;
-    *state.usage_stats.write().await = stats;
+pub async fn init_model_manager<R: Runtime>(_app: &AppHandle<R>, _state: &ModelManagerState) {
+    // 数据库架构下无需在启动时将全量收藏与使用数据加载至内存
 }

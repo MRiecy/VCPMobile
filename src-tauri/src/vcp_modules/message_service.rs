@@ -7,11 +7,6 @@ use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::emoticon_manager::EmoticonManagerState;
 use tauri::{AppHandle, Manager};
 
-/// 内部辅助函数：标记一次内部保存操作
-fn signal_internal_save_raw(_state: &WatcherState) {
-    // No-op
-}
-
 /// 加载聊天历史记录的内部逻辑
 pub async fn load_chat_history_internal(
     app_handle: &AppHandle,

@@ -220,6 +220,41 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // 9. app_settings 表 (替代 settings.json)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 10. model_favorites 表 (替代 model_favorites.json)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS model_favorites (
+            model_id TEXT PRIMARY KEY,
+            created_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 11. model_usage_stats 表 (替代 model_usage_stats.json)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS model_usage_stats (
+            model_id TEXT PRIMARY KEY,
+            usage_count INTEGER NOT NULL DEFAULT 0,
+            updated_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // 索引
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_topics_owner
