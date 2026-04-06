@@ -29,7 +29,6 @@ pub mod regex_service;
 pub mod index_service;
 pub mod topic_summary_service;
 pub mod topic_sync_service;
-pub mod topic_metadata_sync_service;
 pub mod group_chat_application_service;
 pub mod group_context_assembler;
 pub mod group_speaking_policy;

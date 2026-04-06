@@ -172,25 +172,11 @@ pub async fn create_agent(
             extra: serde_json::Map::new(),
         }
     };
-    // 初始化默认话题目录：Agent/Group 统一落在 UserData/data 聚合层，而非 Agents 配置目录
-    let topic_dir = crate::vcp_modules::storage_paths::resolve_topic_dir(
-        &app_handle,
-        &agent_id,
-        &default_topic_id,
-    );
-    fs::create_dir_all(&topic_dir).map_err(|e| e.to_string())?;
 
     log::info!(
-        "[AgentHandlers] Creating agent '{}' with config at Agents/{}/config.json and topic history at {:?}",
-        agent_id,
-        agent_id,
-        topic_dir
+        "[AgentHandlers] Creating agent '{}' within DB architecture.",
+        agent_id
     );
-
-    // 初始化默认话题的 history.json (内容为 [])
-    let mut history_path = topic_dir.clone();
-    history_path.push("history.json");
-    fs::write(history_path, "[]").map_err(|e| e.to_string())?;
 
     // 写入配置 (原子操作)
     crate::vcp_modules::agent_service::save_agent_config(app_handle, state, config.clone()).await?;

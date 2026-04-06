@@ -1,8 +1,9 @@
+// TopicService: 处理会话话题生命周期的模块
+// 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
+
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::storage_paths::{is_group_item, resolve_topic_dir, resolve_jsonl_path, resolve_astbin_path};
-use crate::vcp_modules::topic_metadata_sync_service;
+use crate::vcp_modules::storage_paths::is_group_item;
 use crate::vcp_modules::topic_list_manager::Topic;
-use std::fs;
 use tauri::AppHandle;
 
 pub async fn get_topics(db_state: &DbState, item_id: &str) -> Result<Vec<Topic>, String> {
@@ -32,38 +33,6 @@ pub async fn get_topics(db_state: &DbState, item_id: &str) -> Result<Vec<Topic>,
     Ok(topics)
 }
 
-/// Project Leviathan: Initialize core storage and topics table
-pub async fn init_topic_storage(
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    item_id: &str,
-    topic_id: &str,
-    title: &str,
-    timestamp: i64,
-) -> Result<(), String> {
-    // 1. Ensure directory exists is handled by caller (usually create_topic) or resolve paths
-    // But we need to ensure the files themselves exist
-    
-    // Initialize topics in DB
-    sqlx::query(
-        "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, revision, msg_count, locked, unread, unread_count)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)
-         ON CONFLICT(topic_id) DO UPDATE SET
-            title = excluded.title,
-            updated_at = excluded.updated_at"
-    )
-    .bind(topic_id)
-    .bind(item_id)
-    .bind(if item_id.starts_with("____") { "group" } else { "agent" })
-    .bind(title)
-    .bind(timestamp)
-    .bind(timestamp)
-    .execute(db_pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    Ok(())
-}
-
 pub async fn create_topic(
     app_handle: &AppHandle,
     db_state: &DbState,
@@ -91,76 +60,63 @@ pub async fn create_topic(
         msg_count: 0,
     };
 
-    // 1. 创建目录
-    let topic_dir = resolve_topic_dir(app_handle, item_id, &id);
-    fs::create_dir_all(&topic_dir).map_err(|e| e.to_string())?;
+    let owner_type = if item_id.starts_with("____") { "group" } else { "agent" };
 
-    // Project Leviathan: Initialize core files
-    let jsonl_path = resolve_jsonl_path(app_handle, item_id, &id);
-    let astbin_path = resolve_astbin_path(app_handle, item_id, &id);
-    fs::File::create(&jsonl_path).map_err(|e| format!("Failed to create jsonl: {}", e))?;
-    fs::File::create(&astbin_path).map_err(|e| format!("Failed to create astbin: {}", e))?;
-
-    // Initialize topic data state
-    if let Err(e) = init_topic_storage(&db_state.pool, item_id, &id, name, now).await {
-        // Cleanup: If DB init fails, remove the created directory
-        let _ = fs::remove_dir_all(&topic_dir);
-        return Err(format!("[CreateTopic] DB initialization failed: {}", e));
-    }
-
-    // 2. 同步元数据到主配置
-    if let Err(e) = topic_metadata_sync_service::sync_new_topic(app_handle, item_id, &topic).await {
-        // Cleanup: If sync fails, use delete_topic to rollback DB and Files
-        let _ = delete_topic(app_handle, db_state, item_id, &id).await;
-        return Err(format!("[CreateTopic] Metadata sync failed: {}", e));
-    }
+    sqlx::query(
+        "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, revision, msg_count, locked, unread, unread_count)
+         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)"
+    )
+    .bind(&id)
+    .bind(item_id)
+    .bind(owner_type)
+    .bind(name)
+    .bind(now)
+    .bind(now)
+    .execute(&db_state.pool)
+    .await
+    .map_err(|e| format!("[CreateTopic] DB initialization failed: {}", e))?;
 
     Ok(topic)
 }
 
 pub async fn delete_topic(
-    app_handle: &AppHandle,
+    _app_handle: &AppHandle,
     db_state: &DbState,
-    item_id: &str,
+    _item_id: &str,
     topic_id: &str,
 ) -> Result<(), String> {
-    // Project Leviathan: 从 topics, messages, message_attachments 删除
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+
     sqlx::query("DELETE FROM message_attachments WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ?)")
         .bind(topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     sqlx::query("DELETE FROM messages WHERE topic_id = ?")
         .bind(topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     sqlx::query("DELETE FROM topics WHERE topic_id = ?")
         .bind(topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 1. 删除磁盘文件
-    let topic_dir = resolve_topic_dir(app_handle, item_id, topic_id);
-
-    if topic_dir.exists() {
-        fs::remove_dir_all(topic_dir).map_err(|e| e.to_string())?;
-    }
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
 pub async fn update_topic_title(
-    app_handle: &AppHandle,
+    _app_handle: &AppHandle,
     db_state: &DbState,
-    item_id: &str,
+    _item_id: &str,
     topic_id: &str,
     title: &str,
 ) -> Result<(), String> {
-    // 1. 更新数据库
     sqlx::query("UPDATE topics SET title = ?, updated_at = ? WHERE topic_id = ?")
         .bind(title)
         .bind(
@@ -174,29 +130,16 @@ pub async fn update_topic_title(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2. 更新元数据
-    topic_metadata_sync_service::update_topic_metadata(app_handle, item_id, topic_id, |topic| {
-        // 兼容 TopicInfo (name) 和 Topic (title/name)
-        if let Some(name) = topic.get_mut("name") {
-            *name = serde_json::Value::String(title.to_string());
-        }
-        if let Some(t) = topic.get_mut("title") {
-            *t = serde_json::Value::String(title.to_string());
-        }
-    })
-    .await?;
-
     Ok(())
 }
 
 pub async fn toggle_topic_lock(
-    app_handle: &AppHandle,
+    _app_handle: &AppHandle,
     db_state: &DbState,
-    item_id: &str,
+    _item_id: &str,
     topic_id: &str,
     locked: bool,
 ) -> Result<(), String> {
-    // 1. 更新数据库
     sqlx::query("UPDATE topics SET locked = ?, updated_at = ? WHERE topic_id = ?")
         .bind(locked)
         .bind(
@@ -210,23 +153,16 @@ pub async fn toggle_topic_lock(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2. 更新元数据
-    topic_metadata_sync_service::update_topic_metadata(app_handle, item_id, topic_id, |topic| {
-        topic["locked"] = serde_json::Value::Bool(locked);
-    })
-    .await?;
-
     Ok(())
 }
 
 pub async fn set_topic_unread(
-    app_handle: &AppHandle,
+    _app_handle: &AppHandle,
     db_state: &DbState,
-    item_id: &str,
+    _item_id: &str,
     topic_id: &str,
     unread: bool,
 ) -> Result<(), String> {
-    // 1. 更新数据库
     sqlx::query("UPDATE topics SET unread = ?, updated_at = ? WHERE topic_id = ?")
         .bind(unread)
         .bind(
@@ -239,12 +175,6 @@ pub async fn set_topic_unread(
         .execute(&db_state.pool)
         .await
         .map_err(|e| e.to_string())?;
-
-    // 2. 更新元数据
-    topic_metadata_sync_service::update_topic_metadata(app_handle, item_id, topic_id, |topic| {
-        topic["unread"] = serde_json::Value::Bool(unread);
-    })
-    .await?;
 
     Ok(())
 }
