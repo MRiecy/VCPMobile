@@ -8,7 +8,6 @@ use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::app_settings_manager::AppSettingsState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
-use crate::vcp_modules::file_watcher::{init_watcher, WatcherState};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::index_service::full_scan;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
@@ -61,9 +60,8 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     handle.manage(AgentConfigState::new());
     handle.manage(GroupManagerState::new());
     handle.manage(AppSettingsState::new());
-    handle.manage(EmoticonManagerState::new());
-    handle.manage(WatcherState::default());
     handle.manage(ModelManagerState::new());
+    handle.manage(GroupManagerState::new());
 
     // 3. 服务级并行初始化 (这些服务彼此依赖较少)
     let emoticon_task = {
@@ -89,10 +87,6 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     // 4. 群组与索引初始化 (存在 DB 写入，顺序执行)
     // TODO: Implement group cache warming if needed, currently skipping obsolete group_bootstrap_loader
-
-    if let Err(e) = init_watcher(handle.clone()) {
-        error!("[Lifecycle] Watcher init failed: {}", e);
-    }
 
     // 5. 全量扫描 (建立最终一致性) - 异步执行，不阻塞启动
     info!("[Lifecycle] Spawning background full scan...");

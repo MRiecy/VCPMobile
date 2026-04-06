@@ -4,7 +4,6 @@
 use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::group_chat_application_service;
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::vcp_client::ActiveRequests;
@@ -28,7 +27,6 @@ pub async fn handle_group_chat_message(
     group_state: State<'_, GroupManagerState>,
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
-    watcher_state: State<'_, WatcherState>,
     active_requests: State<'_, ActiveRequests>,
     payload: GroupChatPayload,
 ) -> Result<Value, String> {
@@ -42,7 +40,6 @@ pub async fn handle_group_chat_message(
         group_state,
         agent_state,
         db_state,
-        watcher_state,
         active_requests,
         group_chat_application_service::GroupChatParams {
             group_id: payload.group_id,

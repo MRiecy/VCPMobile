@@ -22,7 +22,6 @@ use vcp_modules::file_manager::{
     cleanup_orphaned_attachments, get_attachment_real_path, open_file, pick_and_store_attachment,
     read_local_file_base64, store_file,
 };
-use vcp_modules::file_watcher::signal_internal_save;
 use vcp_modules::group_service::{create_group, get_groups, read_group_config, save_group_config, update_group_config};
 use vcp_modules::ipc::agent_handlers::{create_agent, delete_agent, save_agent_avatar};
 use vcp_modules::ipc::group_chat_handler::handle_group_chat_message;
@@ -147,7 +146,6 @@ pub fn run() {
             set_theme,
             notify_app_state,
             notify_network_state,
-            signal_internal_save,
             store_file,
             pick_and_store_attachment,
             read_local_file_base64,

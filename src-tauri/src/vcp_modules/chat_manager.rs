@@ -1,5 +1,4 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::topic_sync_service::{
     get_topic_delta_internal, get_topic_fingerprint_internal, TopicDelta, TopicFingerprint,
@@ -103,7 +102,6 @@ pub async fn load_chat_history(
 pub async fn save_chat_history(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
-    watcher_state: State<'_, WatcherState>,
     item_id: String,
     topic_id: String,
     history: Vec<ChatMessage>,
@@ -111,10 +109,9 @@ pub async fn save_chat_history(
     message_service::save_chat_history_internal(
         &app_handle,
         &db_state,
-        &watcher_state,
         &item_id,
         &topic_id,
-        history,
+        &history,
     )
     .await
 }
@@ -130,7 +127,6 @@ pub async fn append_single_message(
     message_service::append_single_message(
         app_handle,
         &db_state.pool,
-        None,
         item_id,
         topic_id,
         message,

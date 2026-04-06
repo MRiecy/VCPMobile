@@ -1,6 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::message_asset_rebaser;
 use crate::vcp_modules::message_render_compiler::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
@@ -109,11 +108,10 @@ pub async fn load_chat_history_internal(
 pub async fn save_chat_history_internal(
     app_handle: &AppHandle,
     db_state: &DbState,
-    _watcher_state: &WatcherState,
     item_id: &str,
     topic_id: &str,
-    history: Vec<ChatMessage>,
-) -> Result<(), String> {
+    history: &[ChatMessage],
+    ) -> Result<(), String> {
     rebuild_topic_core_from_history(
         app_handle,
         &db_state.pool,
@@ -286,7 +284,6 @@ pub async fn apply_sync_delta(
 pub async fn append_single_message(
     app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _watcher_state: Option<&WatcherState>,
     _item_id: String,
     topic_id: String,
     message: ChatMessage,

@@ -4,7 +4,6 @@ pub mod message_stream_protocol;
 pub mod message_service;
 pub mod storage_paths;
 pub mod db_manager;
-pub mod file_watcher;
 pub mod message_asset_rebaser;
 pub mod emoticon_manager;
 pub mod chat_manager;

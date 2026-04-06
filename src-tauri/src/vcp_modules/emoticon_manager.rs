@@ -32,8 +32,8 @@ pub struct EmoticonManagerState {
     pub library: Arc<Mutex<Vec<EmoticonItem>>>,
 }
 
-impl EmoticonManagerState {
-    pub fn new() -> Self {
+impl Default for EmoticonManagerState {
+    fn default() -> Self {
         Self {
             library: Arc::new(Mutex::new(Vec::new())),
         }

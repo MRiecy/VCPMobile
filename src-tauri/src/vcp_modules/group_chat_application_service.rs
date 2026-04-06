@@ -4,7 +4,6 @@
 use crate::vcp_modules::agent_service::{read_agent_config, AgentConfigState};
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::file_watcher::WatcherState;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
@@ -27,7 +26,6 @@ pub async fn process_group_chat_message(
     group_state: State<'_, GroupManagerState>,
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
-    watcher_state: State<'_, WatcherState>,
     active_requests: State<'_, ActiveRequests>,
     params: GroupChatParams,
 ) -> Result<Value, String> {
@@ -78,10 +76,9 @@ pub async fn process_group_chat_message(
     message_service::save_chat_history_internal(
         &app_handle,
         &db_state,
-        &watcher_state,
         &group_id,
         &topic_id,
-        current_history.clone(),
+        &current_history,
     )
     .await?;
 
@@ -113,7 +110,6 @@ pub async fn process_group_chat_message(
     for speaker in speakers {
         let app_handle = app_handle.clone();
         let db_pool = db_state.pool.clone();
-        let watcher_state_ref = &*watcher_state;
         let active_requests_map = active_requests.0.clone();
         let group_id = group_id.clone();
         let topic_id = topic_id.clone();
@@ -216,7 +212,6 @@ pub async fn process_group_chat_message(
                 let _ = message_service::append_single_message(
                     app_handle.clone(),
                     &db_pool,
-                    Some(watcher_state_ref),
                     group_id.clone(),
                     topic_id.clone(),
                     ai_msg.clone(),
