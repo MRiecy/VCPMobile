@@ -94,11 +94,12 @@ pub async fn read_agent_config(
 
     if let Some(row) = agent_row {
         use sqlx::Row;
-        let mut extra: serde_json::Map<String, serde_json::Value> = if let Some(ej) = row.get::<Option<String>, _>("extra_json") {
-            serde_json::from_str(&ej).unwrap_or_default()
-        } else {
-            serde_json::Map::new()
-        };
+        let mut extra: serde_json::Map<String, serde_json::Value> =
+            if let Some(ej) = row.get::<Option<String>, _>("extra_json") {
+                serde_json::from_str(&ej).unwrap_or_default()
+            } else {
+                serde_json::Map::new()
+            };
 
         let rule_rows = sqlx::query(
             "SELECT rule_id, title, find_pattern, replace_with, apply_to_roles, apply_to_frontend, apply_to_context, min_depth, max_depth 
@@ -138,13 +139,20 @@ pub async fn read_agent_config(
         let mut topics = Vec::new();
         for tr in topic_rows {
             let extra_json: Option<String> = tr.get("extra_json");
-            let mut extra_fields: serde_json::Map<String, serde_json::Value> = if let Some(ej) = extra_json {
-                serde_json::from_str(&ej).unwrap_or_default()
-            } else {
-                serde_json::Map::new()
-            };
-            extra_fields.insert("locked".to_string(), serde_json::Value::Bool(tr.get::<i32, _>("locked") != 0));
-            extra_fields.insert("unread".to_string(), serde_json::Value::Bool(tr.get::<i32, _>("unread") != 0));
+            let mut extra_fields: serde_json::Map<String, serde_json::Value> =
+                if let Some(ej) = extra_json {
+                    serde_json::from_str(&ej).unwrap_or_default()
+                } else {
+                    serde_json::Map::new()
+                };
+            extra_fields.insert(
+                "locked".to_string(),
+                serde_json::Value::Bool(tr.get::<i32, _>("locked") != 0),
+            );
+            extra_fields.insert(
+                "unread".to_string(),
+                serde_json::Value::Bool(tr.get::<i32, _>("unread") != 0),
+            );
 
             topics.push(TopicInfo {
                 id: tr.get("topic_id"),
@@ -162,25 +170,68 @@ pub async fn read_agent_config(
             temperature: row.get("temperature"),
             context_token_limit: row.get("context_token_limit"),
             max_output_tokens: row.get("max_output_tokens"),
-            top_p: extra.remove("top_p").and_then(|v| v.as_f64()).map(|f| f as f32),
-            top_k: extra.remove("top_k").and_then(|v| v.as_i64()).map(|i| i as i32),
-            stream_output: extra.remove("streamOutput").and_then(|v| v.as_bool()).unwrap_or(true),
-            tts_voice_primary: extra.remove("ttsVoicePrimary").and_then(|v| v.as_str().map(|s| s.to_string())),
-            tts_regex_primary: extra.remove("ttsRegexPrimary").and_then(|v| v.as_str().map(|s| s.to_string())),
-            tts_voice_secondary: extra.remove("ttsVoiceSecondary").and_then(|v| v.as_str().map(|s| s.to_string())),
-            tts_regex_secondary: extra.remove("ttsRegexSecondary").and_then(|v| v.as_str().map(|s| s.to_string())),
-            tts_speed: extra.remove("ttsSpeed").and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(1.0),
-            avatar_border_color: extra.remove("avatarBorderColor").and_then(|v| v.as_str().map(|s| s.to_string())),
-            name_text_color: extra.remove("nameTextColor").and_then(|v| v.as_str().map(|s| s.to_string())),
-            custom_css: extra.remove("customCss").and_then(|v| v.as_str().map(|s| s.to_string())),
-            card_css: extra.remove("cardCss").and_then(|v| v.as_str().map(|s| s.to_string())),
-            chat_css: extra.remove("chatCss").and_then(|v| v.as_str().map(|s| s.to_string())),
-            disable_custom_colors: extra.remove("disableCustomColors").and_then(|v| v.as_bool()).unwrap_or(true),
-            use_theme_colors_in_chat: extra.remove("useThemeColorsInChat").and_then(|v| v.as_bool()).unwrap_or(true),
-            ui_collapse_states: extra.remove("uiCollapseStates").and_then(|v| serde_json::from_value(v).ok()),
+            top_p: extra
+                .remove("top_p")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32),
+            top_k: extra
+                .remove("top_k")
+                .and_then(|v| v.as_i64())
+                .map(|i| i as i32),
+            stream_output: extra
+                .remove("streamOutput")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            tts_voice_primary: extra
+                .remove("ttsVoicePrimary")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            tts_regex_primary: extra
+                .remove("ttsRegexPrimary")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            tts_voice_secondary: extra
+                .remove("ttsVoiceSecondary")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            tts_regex_secondary: extra
+                .remove("ttsRegexSecondary")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            tts_speed: extra
+                .remove("ttsSpeed")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32)
+                .unwrap_or(1.0),
+            avatar_border_color: extra
+                .remove("avatarBorderColor")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            name_text_color: extra
+                .remove("nameTextColor")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            custom_css: extra
+                .remove("customCss")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            card_css: extra
+                .remove("cardCss")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            chat_css: extra
+                .remove("chatCss")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            disable_custom_colors: extra
+                .remove("disableCustomColors")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            use_theme_colors_in_chat: extra
+                .remove("useThemeColorsInChat")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            ui_collapse_states: extra
+                .remove("uiCollapseStates")
+                .and_then(|v| serde_json::from_value(v).ok()),
             strip_regexes,
-            avatar_url: extra.remove("avatarUrl").and_then(|v| v.as_str().map(|s| s.to_string())),
-            avatar_calculated_color: extra.remove("avatarCalculatedColor").and_then(|v| v.as_str().map(|s| s.to_string())),
+            avatar_url: extra
+                .remove("avatarUrl")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
+            avatar_calculated_color: extra
+                .remove("avatarCalculatedColor")
+                .and_then(|v| v.as_str().map(|s| s.to_string())),
             topics,
             extra,
         };
@@ -231,7 +282,9 @@ pub async fn get_agents(
     for row in rows {
         use sqlx::Row;
         let agent_id: String = row.get("agent_id");
-        if let Ok(config) = read_agent_config(app_handle.clone(), state.clone(), agent_id, None).await {
+        if let Ok(config) =
+            read_agent_config(app_handle.clone(), state.clone(), agent_id, None).await
+        {
             agents.push(config);
         }
     }
@@ -249,7 +302,13 @@ pub async fn update_agent_config(
     let mutex = state.acquire_lock(&agent_id).await;
     let _lock = mutex.lock().await;
 
-    let config = read_agent_config(app_handle.clone(), state.clone(), agent_id.clone(), Some(true)).await?;
+    let config = read_agent_config(
+        app_handle.clone(),
+        state.clone(),
+        agent_id.clone(),
+        Some(true),
+    )
+    .await?;
 
     let mut config_val = serde_json::to_value(&config).map_err(|e| e.to_string())?;
 
@@ -284,14 +343,25 @@ async fn internal_write_agent_config(
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let extra_json = serde_json::to_value(&config.extra).ok().map(|v| v.to_string());
-    
+    let extra_json = serde_json::to_value(&config.extra)
+        .ok()
+        .map(|v| v.to_string());
+
     sqlx::query(
-        "INSERT OR REPLACE INTO agents (
+        "INSERT INTO agents (
             agent_id, name, system_prompt, model, temperature,
             context_token_limit, max_output_tokens, extra_json,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM agents WHERE agent_id = ?), ?), ?)"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+            name = excluded.name,
+            system_prompt = excluded.system_prompt,
+            model = excluded.model,
+            temperature = excluded.temperature,
+            context_token_limit = excluded.context_token_limit,
+            max_output_tokens = excluded.max_output_tokens,
+            extra_json = excluded.extra_json,
+            updated_at = excluded.updated_at",
     )
     .bind(agent_id)
     .bind(&config.name)
@@ -301,7 +371,6 @@ async fn internal_write_agent_config(
     .bind(config.context_token_limit)
     .bind(config.max_output_tokens)
     .bind(extra_json)
-    .bind(agent_id)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -315,13 +384,14 @@ async fn internal_write_agent_config(
         .map_err(|e| e.to_string())?;
 
     for rule in &config.strip_regexes {
-        let roles_json = serde_json::to_string(&rule.apply_to_roles).unwrap_or_else(|_| "[]".to_string());
+        let roles_json =
+            serde_json::to_string(&rule.apply_to_roles).unwrap_or_else(|_| "[]".to_string());
         sqlx::query(
             "INSERT INTO agent_regex_rules (
                 rule_id, agent_id, title, find_pattern, replace_with,
                 apply_to_roles, apply_to_frontend, apply_to_context,
                 min_depth, max_depth, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&rule.id)
         .bind(agent_id)
@@ -343,18 +413,36 @@ async fn internal_write_agent_config(
     for topic in &config.topics {
         let topic_extra = serde_json::to_string(&topic.extra_fields).ok();
         sqlx::query(
-            "INSERT OR REPLACE INTO topics (
+            "INSERT INTO topics (
                 topic_id, owner_type, owner_id, title,
                 created_at, updated_at, locked, unread, extra_json
-            ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(topic_id) DO UPDATE SET
+                title = excluded.title,
+                locked = excluded.locked,
+                unread = excluded.unread,
+                extra_json = excluded.extra_json,
+                updated_at = excluded.updated_at",
         )
         .bind(&topic.id)
         .bind(agent_id)
         .bind(&topic.name)
         .bind(topic.created_at)
         .bind(now)
-        .bind(topic.extra_fields.get("locked").and_then(|v| v.as_bool()).unwrap_or(false))
-        .bind(topic.extra_fields.get("unread").and_then(|v| v.as_bool()).unwrap_or(false))
+        .bind(
+            topic
+                .extra_fields
+                .get("locked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        )
+        .bind(
+            topic
+                .extra_fields
+                .get("unread")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        )
         .bind(topic_extra)
         .execute(&mut *tx)
         .await
@@ -574,4 +662,3 @@ pub async fn delete_agent(
 
     Ok(true)
 }
-

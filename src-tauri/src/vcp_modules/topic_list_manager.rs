@@ -23,9 +23,9 @@ pub struct Topic {
 pub async fn get_topics(
     db_state: tauri::State<'_, DbState>,
     owner_id: String,
-    _owner_type: String,
+    owner_type: String,
 ) -> Result<Vec<Topic>, String> {
-    topic_service::get_topics(&db_state, &owner_id).await
+    topic_service::get_topics(&db_state, &owner_id, &owner_type).await
 }
 
 #[tauri::command]
@@ -119,6 +119,13 @@ pub async fn set_topic_unread(
     topic_id: String,
     unread: bool,
 ) -> Result<(), String> {
-    topic_service::set_topic_unread(&app_handle, &db_state, &owner_id, &owner_type, &topic_id, unread)
+    topic_service::set_topic_unread(
+        &app_handle,
+        &db_state,
+        &owner_id,
+        &owner_type,
+        &topic_id,
+        unread,
+    )
     .await
 }

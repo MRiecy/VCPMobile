@@ -112,11 +112,12 @@ pub async fn get_hot_models<R: Runtime>(
     let db_state = app.state::<DbState>();
     let pool = &db_state.pool;
 
-    let rows = sqlx::query("SELECT model_id FROM model_usage_stats ORDER BY usage_count DESC LIMIT ?")
-        .bind(limit as i64)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let rows =
+        sqlx::query("SELECT model_id FROM model_usage_stats ORDER BY usage_count DESC LIMIT ?")
+            .bind(limit as i64)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let mut models = Vec::new();
     for row in rows {
@@ -178,7 +179,7 @@ pub async fn toggle_favorite_model<R: Runtime>(
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        
+
         sqlx::query("INSERT INTO model_favorites (model_id, created_at) VALUES (?, ?)")
             .bind(&model_id)
             .bind(now)

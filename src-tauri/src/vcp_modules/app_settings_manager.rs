@@ -283,7 +283,7 @@ async fn internal_write_app_settings<R: Runtime>(
     let pool = &db_state.pool;
 
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -379,7 +379,10 @@ pub async fn notify_app_state(
     _app_handle: AppHandle,
     state: String, // "active", "background", "inactive"
 ) -> Result<(), String> {
-    log::info!("[AppSettingsManager] Mobile lifecycle state change: {}", state);
+    log::info!(
+        "[AppSettingsManager] Mobile lifecycle state change: {}",
+        state
+    );
     Ok(())
 }
 
@@ -392,9 +395,8 @@ pub async fn notify_network_state(
 ) -> Result<(), String> {
     log::info!(
         "[AppSettingsManager] Network connection changed: online={}, type={}",
-        online, r#type
+        online,
+        r#type
     );
     Ok(())
 }
-
-

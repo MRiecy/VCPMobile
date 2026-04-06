@@ -5,13 +5,20 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::topic_list_manager::Topic;
 use tauri::AppHandle;
 
-pub async fn get_topics(db_state: &DbState, owner_id: &str) -> Result<Vec<Topic>, String> {
+pub async fn get_topics(
+    db_state: &DbState,
+    owner_id: &str,
+    owner_type: &str,
+) -> Result<Vec<Topic>, String> {
     let pool = &db_state.pool;
     let rows = sqlx::query(
         "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count 
-         FROM topics WHERE owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC"
+         FROM topics 
+         WHERE owner_id = ? AND owner_type = ? AND deleted_at IS NULL 
+         ORDER BY updated_at DESC",
     )
     .bind(owner_id)
+    .bind(owner_type)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;

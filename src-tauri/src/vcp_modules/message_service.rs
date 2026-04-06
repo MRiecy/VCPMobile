@@ -1,9 +1,9 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::emoticon_manager::EmoticonManagerState;
 use crate::vcp_modules::message_asset_rebaser;
 use crate::vcp_modules::message_render_compiler::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
-use crate::vcp_modules::emoticon_manager::EmoticonManagerState;
 use tauri::{AppHandle, Manager};
 
 /// 加载聊天历史记录的内部逻辑
@@ -18,23 +18,23 @@ pub async fn load_chat_history_internal(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let limit_val = limit.unwrap_or(20) as i32;
-    let offset_val = offset.unwrap_or(0) as i32;
+    let limit_val = limit.map(|v| v as i32).unwrap_or(20);
+    let offset_val = offset.map(|v| v as i32).unwrap_or(0);
 
     // Direct read from SQLite messages table
     let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
-            "SELECT msg_id, role, name, content, timestamp, is_thinking, extra_json 
+        "SELECT msg_id, role, name, content, timestamp, is_thinking, extra_json 
             FROM messages 
             WHERE topic_id = ? AND deleted_at IS NULL 
-            ORDER BY timestamp DESC 
-            LIMIT ? OFFSET ?"
-        )
-        .bind(topic_id)
-        .bind(limit_val)
-        .bind(offset_val)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+            ORDER BY timestamp DESC, msg_id DESC
+            LIMIT ? OFFSET ?",
+    )
+    .bind(topic_id)
+    .bind(limit_val)
+    .bind(offset_val)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut history = Vec::with_capacity(rows.len());
     for row in rows {
@@ -55,9 +55,9 @@ pub async fn load_chat_history_internal(
 
         // Query attachments for this message
         let att_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
-            "SELECT a.hash, a.name, a.mime_type, a.size, a.extracted_text, a.thumbnail_path, a.src
+            "SELECT a.attachment_hash, a.name, a.mime_type, a.size, a.extracted_text, a.thumbnail_path, a.src
              FROM attachments a
-             JOIN message_attachments ma ON a.hash = ma.attachment_hash
+             JOIN message_attachments ma ON a.attachment_hash = ma.attachment_hash
              WHERE ma.msg_id = ?
              ORDER BY ma.attachment_order ASC"
         )
@@ -76,7 +76,7 @@ pub async fn load_chat_history_internal(
                     src: ar.get::<Option<String>, _>("src").unwrap_or_default(),
                     name: ar.get::<Option<String>, _>("name").unwrap_or_default(),
                     size: ar.get::<i64, _>("size") as u64,
-                    hash: Some(ar.get("hash")),
+                    hash: Some(ar.get("attachment_hash")),
                     extracted_text: ar.get("extracted_text"),
                     thumbnail_path: ar.get("thumbnail_path"),
                 });
@@ -98,82 +98,52 @@ pub async fn load_chat_history_internal(
 
     // Reverse to chronological order as frontend expects
     history.reverse();
-// 动态替换桌面端的绝对路径为手机端的绝对路径 (Path Rebasing)
-message_asset_rebaser::rebase_message_assets(app_handle, owner_id, owner_type, &mut history)?;
+    // 动态替换桌面端的绝对路径为手机端的绝对路径 (Path Rebasing)
+    message_asset_rebaser::rebase_message_assets(app_handle, owner_id, owner_type, &mut history)?;
 
-Ok(history)
+    Ok(history)
 }
 
-/// 保存聊天历史记录的内部逻辑
+/// 保存聊天历史记录的内部逻辑 (全量模式 - 仅限迁移或同步，由于历史原因保留但建议减少使用)
 pub async fn save_chat_history_internal(
-app_handle: &AppHandle,
-db_state: &DbState,
-owner_id: &str,
-_owner_type: &str,
-topic_id: &str,
-history: &[ChatMessage],
-) -> Result<(), String> {
-rebuild_topic_core_from_history(
-    app_handle,
-    &db_state.pool,
-    owner_id,
-    topic_id,
-    history,
-)
-.await
-}
-
-/// 权威重建 Topic 的新内核状态 (DB Only)
-pub async fn rebuild_topic_core_from_history(
-    app_handle: &AppHandle,
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    owner_id: &str,
+    _app_handle: &AppHandle,
+    db_state: &DbState,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: &str,
     history: &[ChatMessage],
 ) -> Result<(), String> {
-    MessageRepository::clear_topic_data(db_pool, topic_id).await?;
+    // 弃用全量删除再重建的逻辑。改为高效增量更新 (Upsert 模式)
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
 
-    let emoticon_state = app_handle.state::<EmoticonManagerState>();
+    let emoticon_state = _app_handle.state::<EmoticonManagerState>();
     let library = emoticon_state.library.lock().await;
 
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     let mut last_timestamp = 0;
-
     for msg in history {
         let blocks = MessageRenderCompiler::compile(&msg.content, &library);
         let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
-        MessageRepository::upsert_message(
-            &mut tx,
-            msg,
-            topic_id,
-            "astbin", // Default render format
-            &render_bytes,
-        ).await?;
+        MessageRepository::upsert_message(&mut tx, msg, topic_id, "astbin", &render_bytes).await?;
         last_timestamp = msg.timestamp as i64;
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
-
-    // 从数据库获取 owner_type 确保准确性
-    let owner_type = match sqlx::query_as::<_, (String,)>("SELECT owner_type FROM topics WHERE topic_id = ?")
-        .bind(topic_id)
-        .fetch_optional(db_pool)
-        .await {
-            Ok(Some((ot,))) => ot,
-            _ => "agent".to_string(), // Fallback
-        };
-
-    MessageRepository::rebuild_topic_data_state(
-        db_pool,
-        topic_id,
-        &owner_type,
-        owner_id,
-        history.len() as i32,
-        last_timestamp,
+    let msg_count = history.len() as i32;
+    sqlx::query(
+        "UPDATE topics SET 
+            updated_at = ?, 
+            revision = revision + 1,
+            msg_count = ?
+         WHERE topic_id = ?",
     )
-    .await?;
+    .bind(last_timestamp)
+    .bind(msg_count)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -202,14 +172,16 @@ pub async fn truncate_history_after_timestamp(
         .await
         .map_err(|e| e.to_string())?;
 
-    let msg_count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(topic_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let msg_count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ?"
+        "UPDATE topics SET msg_count = ?, updated_at = ?, revision = revision + 1 WHERE topic_id = ?"
     )
     .bind(msg_count)
     .bind(timestamp)
@@ -238,26 +210,23 @@ pub async fn append_single_message(
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
 
-    MessageRepository::upsert_message(
-        &mut tx,
-        &message,
-        &topic_id,
-        "astbin",
-        &render_bytes,
-    ).await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes)
+        .await?;
 
-    let msg_count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(&topic_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let msg_count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&topic_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     sqlx::query(
         "UPDATE topics SET 
             updated_at = ?, 
             revision = revision + 1,
             msg_count = ?
-         WHERE topic_id = ?"
+         WHERE topic_id = ?",
     )
     .bind(message.timestamp as i64)
     .bind(msg_count)
@@ -286,13 +255,26 @@ pub async fn patch_single_message(
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(
-        &mut tx,
-        &message,
-        &topic_id,
-        "astbin",
-        &render_bytes,
-    ).await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes)
+        .await?;
+
+    // Patch 也要更新 topic 的 revision 和 updated_at，因为内容变了
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    sqlx::query(
+        "UPDATE topics SET 
+            updated_at = ?, 
+            revision = revision + 1
+         WHERE topic_id = ?",
+    )
+    .bind(now)
+    .bind(&topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(())
@@ -314,21 +296,26 @@ pub async fn delete_messages(
         "UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
     let mut q = sqlx::query(&delete_query).bind(now).bind(topic_id);
     for id in &msg_ids {
         q = q.bind(id);
     }
     q.execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
-    let msg_count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(topic_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let msg_count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ?"
+        "UPDATE topics SET msg_count = ?, updated_at = ?, revision = revision + 1 WHERE topic_id = ?"
     )
     .bind(msg_count)
     .bind(now)
@@ -340,4 +327,3 @@ pub async fn delete_messages(
 
     Ok(())
 }
-

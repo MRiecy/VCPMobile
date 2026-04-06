@@ -3,8 +3,8 @@
 
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupConfig;
-use crate::vcp_modules::topic_list_manager::Topic;
 use crate::vcp_modules::storage_paths::get_groups_base_path;
+use crate::vcp_modules::topic_list_manager::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
@@ -43,7 +43,8 @@ fn resolve_group_avatar_path(app: &AppHandle, config: &mut GroupConfig) {
             path.push(&config.id);
             path.push(&avatar);
             *avatar = path.to_string_lossy().replace("\\", "/");
-        } else if avatar.contains("AppData/AgentGroups") || avatar.contains("AppData\\AgentGroups") {
+        } else if avatar.contains("AppData/AgentGroups") || avatar.contains("AppData\\AgentGroups")
+        {
             let config_dir = app.path().app_config_dir().unwrap_or_default();
             let config_dir_str = config_dir.to_string_lossy().replace("\\", "/");
             let parts: Vec<&str> = avatar.split(&['/', '\\'][..]).collect();
@@ -91,11 +92,12 @@ pub async fn read_group_config(
 
     if let Some(row) = group_row {
         use sqlx::Row;
-        let extra: serde_json::Map<String, serde_json::Value> = if let Some(ej) = row.get::<Option<String>, _>("extra_json") {
-            serde_json::from_str(&ej).unwrap_or_default()
-        } else {
-            serde_json::Map::new()
-        };
+        let extra: serde_json::Map<String, serde_json::Value> =
+            if let Some(ej) = row.get::<Option<String>, _>("extra_json") {
+                serde_json::from_str(&ej).unwrap_or_default()
+            } else {
+                serde_json::Map::new()
+            };
 
         let member_rows = sqlx::query(
             "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? AND deleted_at IS NULL ORDER BY sort_order ASC"
@@ -333,14 +335,28 @@ async fn internal_write_group_config(
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let extra_json = serde_json::to_value(&config.extra).ok().map(|v| v.to_string());
+    let extra_json = serde_json::to_value(&config.extra)
+        .ok()
+        .map(|v| v.to_string());
 
     sqlx::query(
-        "INSERT OR REPLACE INTO groups (
+        "INSERT INTO groups (
             group_id, name, avatar, avatar_calculated_color, mode, 
             group_prompt, invite_prompt, use_unified_model, unified_model, 
             tag_match_mode, extra_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM groups WHERE group_id = ?), ?), ?)"
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(group_id) DO UPDATE SET
+            name = excluded.name,
+            avatar = excluded.avatar,
+            avatar_calculated_color = excluded.avatar_calculated_color,
+            mode = excluded.mode,
+            group_prompt = excluded.group_prompt,
+            invite_prompt = excluded.invite_prompt,
+            use_unified_model = excluded.use_unified_model,
+            unified_model = excluded.unified_model,
+            tag_match_mode = excluded.tag_match_mode,
+            extra_json = excluded.extra_json,
+            updated_at = excluded.updated_at",
     )
     .bind(group_id)
     .bind(&config.name)
@@ -353,7 +369,6 @@ async fn internal_write_group_config(
     .bind(&config.unified_model)
     .bind(&config.tag_match_mode)
     .bind(extra_json)
-    .bind(group_id)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -369,11 +384,13 @@ async fn internal_write_group_config(
     let member_tags = config.member_tags.as_ref().and_then(|v| v.as_object());
 
     for (idx, agent_id) in config.members.iter().enumerate() {
-        let tag = member_tags.and_then(|m| m.get(agent_id)).and_then(|v| v.as_str());
+        let tag = member_tags
+            .and_then(|m| m.get(agent_id))
+            .and_then(|v| v.as_str());
         sqlx::query(
             "INSERT INTO group_members (
                 group_id, agent_id, member_tag, sort_order, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(group_id)
         .bind(agent_id)
@@ -388,10 +405,15 @@ async fn internal_write_group_config(
 
     for topic in &config.topics {
         sqlx::query(
-            "INSERT OR REPLACE INTO topics (
+            "INSERT INTO topics (
                 topic_id, owner_type, owner_id, title,
                 created_at, updated_at, locked, unread
-            ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?)"
+            ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(topic_id) DO UPDATE SET
+                title = excluded.title,
+                locked = excluded.locked,
+                unread = excluded.unread,
+                updated_at = excluded.updated_at",
         )
         .bind(&topic.id)
         .bind(group_id)

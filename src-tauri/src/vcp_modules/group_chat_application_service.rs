@@ -70,28 +70,25 @@ pub async fn process_group_chat_message(
         }
     }
 
-    // 3. 加载并更新历史记录 (存入用户消息)
-    let history_command = message_service::load_chat_history_internal(
-        &app_handle,
+    // 3. 异步追加用户消息 (不再需要全量 load 再全量 save)
+    message_service::append_single_message(
+        app_handle.clone(),
+        &db_state.pool,
         &group_id,
         "group",
-        &topic_id,
-        None,
-        None,
+        topic_id.clone(),
+        user_message.clone(),
     )
     .await?;
 
-    let mut current_history = history_command;
-    current_history.push(user_message.clone());
-
-    // 立即保存一次用户消息
-    message_service::save_chat_history_internal(
+    // 为了给 AI 决策提供上下文，我们只读取最新的 20 条（或按需分配）
+    let current_history = message_service::load_chat_history_internal(
         &app_handle,
-        &db_state,
         &group_id,
         "group",
         &topic_id,
-        &current_history,
+        Some(20), // 限制上下文长度
+        None,
     )
     .await?;
 
@@ -297,4 +294,3 @@ pub async fn handle_group_chat_message(
     )
     .await
 }
-

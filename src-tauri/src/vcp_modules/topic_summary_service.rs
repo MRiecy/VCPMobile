@@ -44,7 +44,8 @@ pub async fn summarize_topic(
         &topic_id,
         Some(4),
         None,
-    ).await?;
+    )
+    .await?;
 
     if messages.len() < 2 {
         return Err("Not enough messages to summarize".to_string());
@@ -59,7 +60,6 @@ pub async fn summarize_topic(
         };
         recent_content.push_str(&format!("{}: {}\n", role_name, msg.content));
     }
-
 
     // 2. 构造 Prompt (对齐桌面端)
     let summary_prompt = format!(
