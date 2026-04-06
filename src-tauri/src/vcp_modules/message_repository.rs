@@ -1,5 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
-use sqlx::{Pool, Sqlite};
+// use sqlx::Sqlite; (Removed unused import)
 
 /// Internal message repository for DB operations
 pub struct MessageRepository;
@@ -13,20 +13,34 @@ impl MessageRepository {
         render_content: &[u8],
     ) -> Result<(), String> {
         let extra_json = serde_json::to_string(&message.extra).ok();
-        
+
         let agent_id = message.extra.get("agentId").and_then(|v| v.as_str());
         let group_id = message.extra.get("groupId").and_then(|v| v.as_str());
-        let is_group_message = message.extra.get("isGroupMessage").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_group_message = message
+            .extra
+            .get("isGroupMessage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let avatar_url = message.extra.get("avatarUrl").and_then(|v| v.as_str());
         let avatar_color = message.extra.get("avatarColor").and_then(|v| v.as_str());
 
         sqlx::query(
-            "INSERT OR REPLACE INTO messages (
+            "INSERT INTO messages (
                 msg_id, topic_id, role, name, agent_id, content, timestamp,
                 is_thinking, is_group_message, group_id, avatar_url, avatar_color,
                 render_format, render_content, render_version, extra_json,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+             ON CONFLICT(msg_id) DO UPDATE SET
+                content = excluded.content,
+                role = excluded.role,
+                name = excluded.name,
+                is_thinking = excluded.is_thinking,
+                render_format = excluded.render_format,
+                render_content = excluded.render_content,
+                extra_json = excluded.extra_json,
+                updated_at = excluded.updated_at,
+                deleted_at = NULL",
         )
         .bind(&message.id)
         .bind(topic_id)
@@ -77,56 +91,7 @@ impl MessageRepository {
         Ok(())
     }
 
-    pub async fn clear_topic_data(
-        pool: &Pool<Sqlite>,
-        topic_id: &str,
-    ) -> Result<(), String> {
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-
-        // Delete message attachments first
-        sqlx::query("DELETE FROM message_attachments WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ?)")
-            .bind(topic_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        sqlx::query("DELETE FROM messages WHERE topic_id = ?")
-            .bind(topic_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        tx.commit().await.map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    pub async fn rebuild_topic_data_state(
-        pool: &Pool<Sqlite>,
-        topic_id: &str,
-        owner_type: &str,
-        owner_id: &str,
-        msg_count: i32,
-        last_timestamp: i64,
-    ) -> Result<(), String> {
-        // Fully reset topic state for this topic in the new topics table
-        sqlx::query(
-            "INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at, revision, msg_count)
-             VALUES (?, ?, ?, 'New Topic', ?, ?, 1, ?)
-             ON CONFLICT(topic_id) DO UPDATE SET
-                updated_at = excluded.updated_at,
-                revision = revision + 1,
-                msg_count = excluded.msg_count"
-        )
-        .bind(topic_id)
-        .bind(owner_type)
-        .bind(owner_id)
-        .bind(last_timestamp)
-        .bind(last_timestamp)
-        .bind(msg_count)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
+    // 已移除 clear_topic_data 和 rebuild_topic_data_state，
+    // 因为全量删除再重建的逻辑在数据库架构下是不安全且非必要的。
+    // 请直接使用 upsert_message 处理单条消息或批量循环处理。
 }

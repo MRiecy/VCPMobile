@@ -1,22 +1,31 @@
 use crate::vcp_modules::db_manager::DbState;
-use tauri::{Manager, Runtime};
-use tauri::http::{Response, header, Request};
-use url::Url;
-use crate::vcp_modules::lifecycle_manager::LifecycleState;
 use crate::vcp_modules::lifecycle_manager::CoreStatus;
+use crate::vcp_modules::lifecycle_manager::LifecycleState;
+use tauri::http::{header, Request, Response};
+use tauri::{Manager, Runtime};
+use url::Url;
 
-pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, request: Request<Vec<u8>>) -> Response<std::borrow::Cow<'static, [u8]>> {
+pub fn handle_vcp_request<R: Runtime>(
+    ctx: tauri::UriSchemeContext<'_, R>,
+    request: Request<Vec<u8>>,
+) -> Response<std::borrow::Cow<'static, [u8]>> {
     let handle = ctx.app_handle().clone();
     let uri_str = request.uri().to_string();
     let url_res = Url::parse(&uri_str);
     if url_res.is_err() {
-        return Response::builder().status(400).body(Vec::new().into()).unwrap();
+        return Response::builder()
+            .status(400)
+            .body(Vec::new().into())
+            .unwrap();
     }
     let url = url_res.unwrap();
-    
+
     // Path check: /api/messages
     if url.path() != "/api/messages" {
-        return Response::builder().status(404).body(Vec::new().into()).unwrap();
+        return Response::builder()
+            .status(404)
+            .body(Vec::new().into())
+            .unwrap();
     }
 
     // Query params
@@ -24,11 +33,20 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
     let topic_id = query_pairs.get("topic_id").cloned();
     let owner_id = query_pairs.get("owner_id").cloned();
     let owner_type = query_pairs.get("owner_type").cloned();
-    let limit: usize = query_pairs.get("limit").and_then(|s| s.parse().ok()).unwrap_or(20);
-    let offset: usize = query_pairs.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let limit: usize = query_pairs
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20);
+    let offset: usize = query_pairs
+        .get("offset")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     if topic_id.is_none() || owner_id.is_none() || owner_type.is_none() {
-        return Response::builder().status(400).body(Vec::new().into()).unwrap();
+        return Response::builder()
+            .status(400)
+            .body(Vec::new().into())
+            .unwrap();
     }
 
     let topic_id = topic_id.unwrap();
@@ -42,29 +60,32 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
     });
 
     if !is_ready {
-        return Response::builder().status(503).body(Vec::new().into()).unwrap();
+        return Response::builder()
+            .status(503)
+            .body(Vec::new().into())
+            .unwrap();
     }
 
     let db_state = handle.state::<DbState>();
     let pool = db_state.pool.clone();
     let _handle_clone = handle.clone();
 
-    // Since we need to return synchronously but DB is async, 
+    // Since we need to return synchronously but DB is async,
     // block_on is used here. In real scenarios consider asynchronous protocol.
     let response = tauri::async_runtime::block_on(async move {
         // Query message indices and render content directly from DB
         let rows_res: Result<Vec<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
-                "SELECT render_content 
+            "SELECT render_content 
                 FROM messages 
                 WHERE topic_id = ? AND deleted_at IS NULL 
                 ORDER BY timestamp DESC 
-                LIMIT ? OFFSET ?"
-            )
-            .bind(&topic_id)
-            .bind(limit as i32)
-            .bind(offset as i32)
-            .fetch_all(&pool)
-            .await;
+                LIMIT ? OFFSET ?",
+        )
+        .bind(&topic_id)
+        .bind(limit as i32)
+        .bind(offset as i32)
+        .fetch_all(&pool)
+        .await;
 
         match rows_res {
             Ok(mut rows) => {
@@ -95,7 +116,10 @@ pub fn handle_vcp_request<R: Runtime>(ctx: tauri::UriSchemeContext<'_, R>, reque
             }
             Err(e) => {
                 eprintln!("[VCPProtocol] DB error: {}", e);
-                Response::builder().status(500).body(Vec::new().into()).unwrap()
+                Response::builder()
+                    .status(500)
+                    .body(Vec::new().into())
+                    .unwrap()
             }
         }
     });

@@ -214,10 +214,5 @@ pub async fn get_topic_delta(
     current_history: Vec<ChatMessage>,
     fingerprint: Option<TopicFingerprint>,
 ) -> Result<TopicDelta, String> {
-    get_topic_delta_internal(
-        &app_handle,
-        &topic_id,
-        current_history,
-        fingerprint,
-    ).await
+    get_topic_delta_internal(&app_handle, &topic_id, current_history, fingerprint).await
 }

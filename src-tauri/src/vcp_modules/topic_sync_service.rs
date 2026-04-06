@@ -1,5 +1,5 @@
-use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -32,7 +32,7 @@ pub async fn get_topic_fingerprint_internal(
     let row_res = sqlx::query(
         "SELECT revision, updated_at, msg_count 
          FROM topics 
-         WHERE topic_id = ?"
+         WHERE topic_id = ?",
     )
     .bind(topic_id)
     .fetch_optional(pool)
@@ -66,11 +66,10 @@ pub async fn get_topic_delta_internal(
     // 1. 指纹快速路径 (Fingerprint Fast-path)
     if let Some(fp) = fingerprint {
         let current_fp = get_topic_fingerprint_internal(app_handle, topic_id).await?;
-        if current_fp.revision == fp.revision && current_fp.msg_count == current_history.len() as i32 {
-            println!(
-                "[VCPCore] Sync skipped for {}: revision matches.",
-                topic_id
-            );
+        if current_fp.revision == fp.revision
+            && current_fp.msg_count == current_history.len() as i32
+        {
+            println!("[VCPCore] Sync skipped for {}: revision matches.", topic_id);
             return Ok(TopicDelta {
                 added: vec![],
                 updated: vec![],
@@ -83,11 +82,13 @@ pub async fn get_topic_delta_internal(
 
     // 从数据库获取 owner 详情用于加载历史 (Asset Rebasing 需要)
     let db_state = app_handle.state::<DbState>();
-    let owner_row = sqlx::query_as::<_, (String, String)>("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?")
-        .bind(topic_id)
-        .fetch_optional(&db_state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let owner_row = sqlx::query_as::<_, (String, String)>(
+        "SELECT owner_id, owner_type FROM topics WHERE topic_id = ?",
+    )
+    .bind(topic_id)
+    .fetch_optional(&db_state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let (owner_id, owner_type) = match owner_row {
         Some(row) => row,
@@ -95,7 +96,15 @@ pub async fn get_topic_delta_internal(
     };
 
     // 3. 读取数据库 中的全量历史记录并应用比对
-    let mut new_history = message_service::load_chat_history_internal(app_handle, &owner_id, &owner_type, topic_id, None, None).await?;
+    let mut new_history = message_service::load_chat_history_internal(
+        app_handle,
+        &owner_id,
+        &owner_type,
+        topic_id,
+        None,
+        None,
+    )
+    .await?;
 
     // 4. 构建索引以便快速比对
     let old_map: HashMap<String, ChatMessage> = current_history

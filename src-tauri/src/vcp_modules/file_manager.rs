@@ -177,7 +177,7 @@ pub async fn store_file(
 
     // 3. 检查数据库中是否已存在该哈希，或磁盘上是否已存在文件
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT hash FROM attachments WHERE hash = ?")
+        sqlx::query_as("SELECT attachment_hash FROM attachments WHERE attachment_hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
@@ -194,9 +194,9 @@ pub async fn store_file(
 
         // 5. 更新数据库 (attachments)
         sqlx::query(
-            "INSERT INTO attachments (hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
+            "INSERT INTO attachments (attachment_hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(hash) DO UPDATE SET local_path = excluded.local_path",
+             ON CONFLICT(attachment_hash) DO UPDATE SET local_path = excluded.local_path",
         )
         .bind(&hash)
         .bind(format!("attachment_{}", hash))
@@ -338,7 +338,7 @@ pub async fn pick_and_store_attachment(
 
     // 6. 检查数据库中是否已存在该哈希，或磁盘上是否已存在文件
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT hash FROM attachments WHERE hash = ?")
+        sqlx::query_as("SELECT attachment_hash FROM attachments WHERE attachment_hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
@@ -375,9 +375,9 @@ pub async fn pick_and_store_attachment(
 
         // 7. 更新数据库 (attachments)
         sqlx::query(
-            "INSERT INTO attachments (hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
+            "INSERT INTO attachments (attachment_hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(hash) DO UPDATE SET local_path = excluded.local_path",
+             ON CONFLICT(attachment_hash) DO UPDATE SET local_path = excluded.local_path",
         )
         .bind(&hash)
         .bind(format!("attachment_{}", hash))

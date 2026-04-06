@@ -2,8 +2,8 @@ mod vcp_modules;
 
 use tauri::Manager;
 use vcp_modules::agent_service::{
-    create_agent, delete_agent, get_agents, read_agent_config, save_agent_avatar, save_agent_config,
-    update_agent_config,
+    create_agent, delete_agent, get_agents, read_agent_config, save_agent_avatar,
+    save_agent_config, update_agent_config,
 };
 use vcp_modules::app_settings_manager::{
     notify_app_state, notify_network_state, read_app_settings, save_avatar_color, save_user_avatar,
@@ -17,6 +17,7 @@ use vcp_modules::chat_manager::{
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
 // use vcp_modules::db_manager::DbState;
+use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
@@ -41,8 +42,6 @@ use vcp_modules::topic_list_manager::{
 };
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
-use tauri_plugin_log::{Target, TargetKind};
-
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -54,15 +53,14 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .register_uri_scheme_protocol("vcp", move |ctx, request| {
-             // 暂时占位，或者重构 `register_vcp_protocol` 以返回一个可以调用的函数/闭包
-             handle_vcp_request(ctx, request)
+            // 暂时占位，或者重构 `register_vcp_protocol` 以返回一个可以调用的函数/闭包
+            handle_vcp_request(ctx, request)
         })
         .setup(|app| {
             // 初始化生命周期状态
             app.manage(LifecycleState::new());
 
             let handle = app.handle().clone();
-
 
             // 异步启动核心服务
             tauri::async_runtime::spawn(async move {
