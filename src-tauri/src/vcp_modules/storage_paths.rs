@@ -1,16 +1,6 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, Runtime};
 
-/// 获取 AppData/Agents 目录 (注意: A 大写以对齐桌面端)
-pub fn get_agents_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
-    let mut path = app
-        .path()
-        .app_config_dir()
-        .unwrap_or_else(|_| PathBuf::from("AppData"));
-    path.push("Agents");
-    path
-}
-
 /// 获取 AppData/AgentGroups 目录
 pub fn get_groups_base_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     let mut path = app
