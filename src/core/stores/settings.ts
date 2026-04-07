@@ -25,9 +25,6 @@ export interface AppSettings {
   lastOpenTopicId?: string;
   combinedItemOrder: any[];
   agentOrder: string[];
-  userAvatarUrl?: string;
-  resolvedUserAvatarUrl?: string;
-  userAvatarCalculatedColor?: string;
   currentThemeMode?: string;
   themeLastUpdated?: number;
   flowlockContinueDelay: number;
@@ -49,16 +46,6 @@ export const useSettingsStore = defineStore('settings', () => {
     error.value = null;
     try {
       const fetchedSettings = await invoke<AppSettings>('read_app_settings');
-      
-      // 转换用户头像路径
-      if (fetchedSettings.userAvatarUrl && !fetchedSettings.userAvatarUrl.startsWith('http') && !fetchedSettings.userAvatarUrl.startsWith('data:')) {
-        try {
-          fetchedSettings.resolvedUserAvatarUrl = convertFileSrc(fetchedSettings.userAvatarUrl);
-        } catch (err) {
-          console.warn('[SettingsStore] Failed to convert user avatar path:', err);
-        }
-      }
-      
       settings.value = fetchedSettings;
     } catch (e: any) {
       error.value = e.toString();

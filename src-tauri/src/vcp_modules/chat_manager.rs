@@ -51,18 +51,6 @@ pub struct ChatMessage {
     pub extra: serde_json::Value,
 }
 
-// --- 正则处理核心逻辑 (从 chatManager.js 权力下沉) ---
-
-/// 对话深度计算逻辑 (对齐 JS 逻辑)
-/// 在 VCP 中，从最新消息往回算
-#[allow(dead_code)]
-pub fn calculate_depth(history_len: usize, current_index: usize) -> i32 {
-    if current_index >= history_len {
-        return -1;
-    }
-    (history_len - 1 - current_index) as i32
-}
-
 #[tauri::command]
 pub async fn process_regex_for_message(
     db_state: State<'_, DbState>,
@@ -96,26 +84,6 @@ pub async fn load_chat_history(
         &topic_id,
         limit,
         offset,
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn save_chat_history(
-    app_handle: AppHandle,
-    db_state: State<'_, DbState>,
-    owner_id: String,
-    owner_type: String,
-    topic_id: String,
-    history: Vec<ChatMessage>,
-) -> Result<(), String> {
-    message_service::save_chat_history_internal(
-        &app_handle,
-        &db_state,
-        &owner_id,
-        &owner_type,
-        &topic_id,
-        &history,
     )
     .await
 }

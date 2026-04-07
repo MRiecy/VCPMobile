@@ -1,4 +1,4 @@
-use crate::vcp_modules::topic_list_manager::Topic;
+use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
 
 /// 群组完整配置结构 (对齐桌面端 config.json)
@@ -10,10 +10,7 @@ pub struct GroupConfig {
     /// 群组名称
     #[serde(default)]
     pub name: String,
-    /// 头像路径 (相对或绝对)
-    #[serde(default)]
-    pub avatar: Option<String>,
-    /// 自动提取的头像主色调
+    /// 自动提取的头像主色调 (从 avatars 表动态获取)
     #[serde(default)]
     pub avatar_calculated_color: Option<String>,
     /// 成员 Agent ID 列表

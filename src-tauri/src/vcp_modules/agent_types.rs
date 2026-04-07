@@ -1,20 +1,5 @@
+use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct TopicInfo {
-    /// 话题唯一标识符
-    #[serde(default)]
-    pub id: String,
-    /// 话题名称 (如: "主要对话")
-    #[serde(alias = "title", default)]
-    pub name: String,
-    /// 话题创建时间戳 (ms)
-    #[serde(rename = "createdAt", default)]
-    pub created_at: i64,
-    /// 捕获并保留所有额外的动态字段 (如 locked, unread, creatorSource, _creator 等)
-    #[serde(flatten)]
-    pub extra_fields: serde_json::Map<String, serde_json::Value>,
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RegexRule {
@@ -124,6 +109,8 @@ pub struct AgentConfig {
     // 样式设置
     #[serde(rename = "avatarBorderColor", default)]
     pub avatar_border_color: Option<String>,
+    #[serde(rename = "avatarCalculatedColor", default)]
+    pub avatar_calculated_color: Option<String>,
     #[serde(rename = "nameTextColor", default)]
     pub name_text_color: Option<String>,
     #[serde(rename = "customCss", default)]
@@ -143,16 +130,11 @@ pub struct AgentConfig {
     #[serde(rename = "stripRegexes", default)]
     pub strip_regexes: Vec<RegexRule>,
 
-    #[serde(rename = "avatarUrl", default)]
-    pub avatar_url: Option<String>,
-    #[serde(rename = "avatarCalculatedColor", default)]
-    pub avatar_calculated_color: Option<String>,
-
     /// 话题列表
     #[serde(default)]
-    pub topics: Vec<TopicInfo>,
+    pub topics: Vec<Topic>,
 
-    /// 捕获所有未定义的字段
+    /// 捕获所有未定义的字段 (包括 avatarUrl 等 UI 样式字段)
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }

@@ -19,9 +19,9 @@ const currentAvatar = computed(() => {
   if (!chatStore.currentSelectedItem) return null;
   const { id, type } = chatStore.currentSelectedItem;
   if (type === 'agent') {
-    return assistantStore.agents.find(a => a.id === id)?.resolvedAvatarUrl;
+    return `vcp-avatar://agent/${id}`;
   } else if (type === 'group') {
-    return assistantStore.groups.find(g => g.id === id)?.resolvedAvatarUrl;
+    return `vcp-avatar://group/${id}`;
   }
   return null;
 });

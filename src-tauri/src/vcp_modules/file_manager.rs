@@ -64,6 +64,7 @@ fn ensure_safe_path(app_handle: &AppHandle, path: &std::path::Path) -> Result<()
 }
 
 /// 内部辅助函数：获取当前平台下的真实路径 (用于历史记录自动纠错)
+#[allow(dead_code)]
 pub fn resolve_attachment_path(
     app_handle: &AppHandle,
     hash: &str,

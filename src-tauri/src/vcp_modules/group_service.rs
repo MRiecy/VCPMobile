@@ -3,8 +3,7 @@
 
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupConfig;
-use crate::vcp_modules::storage_paths::get_groups_base_path;
-use crate::vcp_modules::topic_list_manager::Topic;
+use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
@@ -35,37 +34,6 @@ impl GroupManagerState {
     }
 }
 
-/// 路径转换辅助: 针对群组头像
-fn resolve_group_avatar_path(app: &AppHandle, config: &mut GroupConfig) {
-    if let Some(avatar) = &mut config.avatar {
-        if !avatar.contains('/') && !avatar.contains('\\') {
-            let mut path = get_groups_base_path(app);
-            path.push(&config.id);
-            path.push(&avatar);
-            *avatar = path.to_string_lossy().replace("\\", "/");
-        } else if avatar.contains("AppData/AgentGroups") || avatar.contains("AppData\\AgentGroups")
-        {
-            let config_dir = app.path().app_config_dir().unwrap_or_default();
-            let config_dir_str = config_dir.to_string_lossy().replace("\\", "/");
-            let parts: Vec<&str> = avatar.split(&['/', '\\'][..]).collect();
-            if let Some(idx) = parts.iter().position(|&r| r == "AgentGroups") {
-                let relative_path = parts[idx + 1..].join("/");
-                *avatar = format!("{}/AgentGroups/{}", config_dir_str, relative_path);
-            }
-        }
-    } else {
-        let base_path = get_groups_base_path(app).join(&config.id);
-        let extensions = ["png", "jpg", "jpeg", "webp", "gif"];
-        for ext in extensions {
-            let avatar_path = base_path.join(format!("avatar.{}", ext));
-            if avatar_path.exists() {
-                config.avatar = Some(avatar_path.to_string_lossy().replace("\\", "/"));
-                break;
-            }
-        }
-    }
-}
-
 #[tauri::command]
 pub async fn read_group_config(
     app_handle: AppHandle,
@@ -73,17 +41,17 @@ pub async fn read_group_config(
     group_id: String,
 ) -> Result<GroupConfig, String> {
     if let Some(cached) = state.caches.get(&group_id) {
-        let mut config = cached.value().clone();
-        resolve_group_avatar_path(&app_handle, &mut config);
-        return Ok(config);
+        return Ok(cached.value().clone());
     }
 
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let group_row = sqlx::query(
-        "SELECT name, avatar, avatar_calculated_color, mode, group_prompt, invite_prompt, use_unified_model, unified_model, tag_match_mode, extra_json 
-         FROM groups WHERE group_id = ? AND deleted_at IS NULL"
+    let group_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
+        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.extra_json, av.dominant_color 
+         FROM groups g
+         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
+         WHERE g.group_id = ? AND g.deleted_at IS NULL"
     )
     .bind(&group_id)
     .fetch_optional(pool)
@@ -92,6 +60,7 @@ pub async fn read_group_config(
 
     if let Some(row) = group_row {
         use sqlx::Row;
+        let avatar_calculated_color: Option<String> = row.get("dominant_color");
         let extra: serde_json::Map<String, serde_json::Value> =
             if let Some(ej) = row.get::<Option<String>, _>("extra_json") {
                 serde_json::from_str(&ej).unwrap_or_default()
@@ -99,7 +68,7 @@ pub async fn read_group_config(
                 serde_json::Map::new()
             };
 
-        let member_rows = sqlx::query(
+        let member_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
             "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? AND deleted_at IS NULL ORDER BY sort_order ASC"
         )
         .bind(&group_id)
@@ -118,8 +87,8 @@ pub async fn read_group_config(
             }
         }
 
-        let topic_rows = sqlx::query(
-            "SELECT topic_id, title, created_at, locked, unread, extra_json 
+        let topic_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
+            "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count, extra_json 
              FROM topics WHERE owner_type = 'group' AND owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC"
         )
         .bind(&group_id)
@@ -129,22 +98,27 @@ pub async fn read_group_config(
 
         let mut topics = Vec::new();
         for tr in topic_rows {
+            let extra_json: Option<String> = tr.get("extra_json");
             topics.push(Topic {
                 id: tr.get("topic_id"),
                 name: tr.get("title"),
                 created_at: tr.get("created_at"),
                 locked: tr.get::<i32, _>("locked") != 0,
                 unread: tr.get::<i32, _>("unread") != 0,
-                unread_count: 0,
-                msg_count: 0,
+                unread_count: tr.get("unread_count"),
+                msg_count: tr.get("msg_count"),
+                extra_fields: if let Some(ej) = extra_json {
+                    serde_json::from_str(&ej).unwrap_or_default()
+                } else {
+                    serde_json::Map::new()
+                },
             });
         }
 
-        let mut config = GroupConfig {
+        let config = GroupConfig {
             id: group_id.clone(),
             name: row.get("name"),
-            avatar: row.get("avatar"),
-            avatar_calculated_color: row.get("avatar_calculated_color"),
+            avatar_calculated_color,
             members,
             mode: row.get("mode"),
             member_tags: Some(serde_json::Value::Object(member_tags)),
@@ -158,7 +132,6 @@ pub async fn read_group_config(
             extra,
         };
 
-        resolve_group_avatar_path(&app_handle, &mut config);
         state.caches.insert(group_id.clone(), config.clone());
         return Ok(config);
     }
@@ -192,7 +165,7 @@ pub async fn get_groups(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let rows = sqlx::query("SELECT group_id FROM groups WHERE deleted_at IS NULL")
+    let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query("SELECT group_id FROM groups WHERE deleted_at IS NULL")
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -260,7 +233,7 @@ pub async fn create_group(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx: sqlx::Transaction<'_, sqlx::Sqlite> = pool.begin().await.map_err(|e| e.to_string())?;
 
     sqlx::query(
         "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model) VALUES (?, ?, ?, ?, 'sequential', 0)"
@@ -295,12 +268,12 @@ pub async fn create_group(
         unread: false,
         unread_count: 0,
         msg_count: 0,
+        extra_fields: serde_json::Map::new(),
     };
 
     let config = GroupConfig {
         id: group_id.clone(),
         name: name.clone(),
-        avatar: None,
         avatar_calculated_color: None,
         members: vec![],
         mode: "sequential".to_string(),
@@ -341,14 +314,12 @@ async fn internal_write_group_config(
 
     sqlx::query(
         "INSERT INTO groups (
-            group_id, name, avatar, avatar_calculated_color, mode, 
+            group_id, name, mode, 
             group_prompt, invite_prompt, use_unified_model, unified_model, 
             tag_match_mode, extra_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(group_id) DO UPDATE SET
             name = excluded.name,
-            avatar = excluded.avatar,
-            avatar_calculated_color = excluded.avatar_calculated_color,
             mode = excluded.mode,
             group_prompt = excluded.group_prompt,
             invite_prompt = excluded.invite_prompt,
@@ -360,8 +331,6 @@ async fn internal_write_group_config(
     )
     .bind(group_id)
     .bind(&config.name)
-    .bind(&config.avatar)
-    .bind(&config.avatar_calculated_color)
     .bind(&config.mode)
     .bind(&config.group_prompt)
     .bind(&config.invite_prompt)

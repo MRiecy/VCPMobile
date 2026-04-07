@@ -45,7 +45,24 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
 }
 
 async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
-    // 1. agents 表 (替代 agent_index 和 config.json)
+    // 1. avatars 全局多态头像表 (真理之源)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS avatars (
+            owner_type TEXT NOT NULL,     -- 'agent', 'group', 'user', 'system'
+            owner_id TEXT NOT NULL,       -- 对应实体的 UUID 或 'default_user'
+            avatar_hash TEXT NOT NULL,    -- SHA-256 摘要，用于 WS 快速 Diff
+            mime_type TEXT NOT NULL,      -- e.g., 'image/webp', 'image/png'
+            image_data BLOB NOT NULL,     -- 物理二进制数据
+            dominant_color TEXT,          -- 预计算的主色调 (rgb/hex)
+            updated_at BIGINT NOT NULL,   -- 逻辑时钟/时间戳
+            PRIMARY KEY (owner_type, owner_id)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 2. agents 表 (智能体配置)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS agents (
             agent_id TEXT PRIMARY KEY,
@@ -64,14 +81,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-
-    // 2. groups 表 (替代 config.json)
+    // 3. groups 表 (群组配置 - 已移除冗余头像字段)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS groups (
             group_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
-            avatar TEXT,
-            avatar_calculated_color TEXT,
             mode TEXT NOT NULL DEFAULT 'sequential',
             group_prompt TEXT,
             invite_prompt TEXT,
@@ -88,7 +102,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 3. group_members 表
+    // 4. group_members 表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS group_members (
             group_id TEXT NOT NULL,
@@ -105,7 +119,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 4. topics 表 (替代 topic_state)
+    // 5. topics 表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS topics (
             topic_id TEXT PRIMARY KEY,
@@ -128,7 +142,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 5. messages 表 (替代 message_index 和 jsonl/astbin)
+    // 6. messages 表 (消息历史 - 已移除冗余 avatar_url 和 avatar_color)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS messages (
             msg_id TEXT PRIMARY KEY,
@@ -141,8 +155,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             is_thinking INTEGER,
             is_group_message INTEGER NOT NULL DEFAULT 0,
             group_id TEXT,
-            avatar_url TEXT,
-            avatar_color TEXT,
             render_format TEXT,
             render_content BLOB,
             render_version INTEGER NOT NULL DEFAULT 1,

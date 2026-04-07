@@ -7,9 +7,6 @@ export interface AgentConfig {
   name: string;
   model: string;
   systemPrompt: string;
-  avatarUrl?: string;
-  avatarCalculatedColor?: string;
-  resolvedAvatarUrl?: string;
   temperature: number;
   contextTokenLimit?: number;
   maxOutputTokens?: number;
@@ -18,24 +15,25 @@ export interface AgentConfig {
   disableCustomColors?: boolean;
   useThemeColorsInChat?: boolean;
   avatarBorderColor?: string;
+  avatarCalculatedColor?: string; // Read-only from server (derived from avatars table)
   nameTextColor?: string;
   customCss?: string;
   cardCss?: string;
   chatCss?: string;
   stripRegexes?: any[];
+  extra?: Record<string, any>;
 }
 
 export interface GroupConfig {
   id: string;
   name: string;
-  avatar?: string;
-  avatarCalculatedColor?: string;
-  resolvedAvatarUrl?: string;
+  avatarCalculatedColor?: string; // Read-only from server
   members: string[];
   mode: string;
   groupPrompt?: string;
   invitePrompt?: string;
   tagMatchMode?: string;
+  extra?: Record<string, any>;
 }
 
 export const useAssistantStore = defineStore('assistant', () => {
@@ -91,15 +89,6 @@ export const useAssistantStore = defineStore('assistant', () => {
     error.value = null;
     try {
       const fetchedAgents = await invoke<AgentConfig[]>('get_agents');
-      fetchedAgents.forEach((agent) => {
-        if (agent.avatarUrl && !agent.avatarUrl.startsWith('http') && !agent.avatarUrl.startsWith('data:')) {
-          try {
-            agent.resolvedAvatarUrl = convertFileSrc(agent.avatarUrl);
-          } catch (err) {
-            console.warn(`[AssistantStore] Failed to convert avatar path for ${agent.id}:`, err);
-          }
-        }
-      });
       agents.value = fetchedAgents;
       refreshUnreadCountsForItems(fetchedAgents);
     } catch (e: any) {
@@ -113,15 +102,6 @@ export const useAssistantStore = defineStore('assistant', () => {
     loading.value = true;
     try {
       const fetchedGroups = await invoke<GroupConfig[]>('get_groups');
-      fetchedGroups.forEach((group) => {
-        if (group.avatar && !group.avatar.startsWith('http') && !group.avatar.startsWith('data:')) {
-           try {
-             group.resolvedAvatarUrl = convertFileSrc(group.avatar);
-           } catch (err) {
-             console.warn(`[AssistantStore] Failed to convert group avatar path for ${group.id}:`, err);
-           }
-        }
-      });
       groups.value = fetchedGroups;
       refreshUnreadCountsForItems(fetchedGroups);
     } catch (e: any) {
