@@ -3,6 +3,7 @@ use std::path::Path;
 
 /// 提取图片的主色调（平均色）
 /// 采用缩小图片到 50x50 后计算平均值的快速算法，避免移动端 OOM
+#[allow(dead_code)]
 pub fn extract_dominant_color(path: &str) -> Result<String, String> {
     // 尝试打开图片
     let img = image::open(Path::new(path))
@@ -43,6 +44,7 @@ pub fn extract_dominant_color(path: &str) -> Result<String, String> {
 /// Tauri IPC Command: 供前端调用提取头像颜色
 /// 注意：前端传入的 path 必须是手机上的绝对物理路径，而不是 asset:// 协议路径
 #[tauri::command]
+#[allow(dead_code)]
 pub async fn extract_avatar_color(path: String) -> Result<String, String> {
     // 在后台线程执行 CPU 密集型任务，防止阻塞 Tauri 主线程
     tauri::async_runtime::spawn_blocking(move || extract_dominant_color(&path))

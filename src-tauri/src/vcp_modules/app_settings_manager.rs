@@ -1,26 +1,12 @@
 // AppSettingsManager: 处理应用全局配置的核心模块
 // 职责: 管理全局配置，实现基于 SQLite 的原子写入、数据验证与并发控制。
 
-use crate::vcp_modules::agent_service::{update_agent_config, AgentConfigState};
 use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
-
-#[derive(Debug, Deserialize)]
-pub struct AvatarColorPayload {
-    pub r#type: String, // "user" or "agent"
-    pub id: Option<String>,
-    pub color: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UserAvatarPayload {
-    pub buffer: Vec<u8>,
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppSettings {
@@ -77,10 +63,6 @@ pub struct AppSettings {
     #[serde(rename = "agentOrder", default)]
     pub agent_order: Vec<String>,
 
-    #[serde(rename = "userAvatarUrl")]
-    pub user_avatar_url: Option<String>,
-    #[serde(rename = "userAvatarCalculatedColor")]
-    pub user_avatar_calculated_color: Option<String>,
     #[serde(rename = "currentThemeMode")]
     pub current_theme_mode: Option<String>,
     #[serde(rename = "themeLastUpdated")]
@@ -176,8 +158,6 @@ pub fn create_default_settings() -> AppSettings {
         last_open_topic_id: None,
         combined_item_order: vec![],
         agent_order: vec![],
-        user_avatar_url: None,
-        user_avatar_calculated_color: None,
         current_theme_mode: None,
         theme_last_updated: None,
         flowlock_continue_delay: 5,
@@ -207,29 +187,13 @@ pub async fn read_app_settings<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut settings = if let Some(row) = row_res {
+    let settings = if let Some(row) = row_res {
         use sqlx::Row;
         let content: String = row.get("value");
         serde_json::from_str(&content).unwrap_or_else(|_| create_default_settings())
     } else {
         create_default_settings()
     };
-
-    let config_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let user_data_dir = config_dir.join("data");
-
-    let extensions = ["png", "jpg", "jpeg", "webp"];
-    settings.user_avatar_url = None;
-    for ext in extensions {
-        let avatar_path = user_data_dir.join(format!("user_avatar.{}", ext));
-        if avatar_path.exists() {
-            settings.user_avatar_url = Some(avatar_path.to_string_lossy().replace("\\", "/"));
-            break;
-        }
-    }
 
     *state.cache.lock().await = Some(settings.clone());
     Ok(settings)
@@ -300,56 +264,6 @@ async fn internal_write_app_settings<R: Runtime>(
 
     *state.cache.lock().await = Some(settings.clone());
     Ok(true)
-}
-
-/// 保存头像颜色关联
-#[tauri::command]
-pub async fn save_avatar_color(
-    app_handle: AppHandle,
-    agent_state: State<'_, AgentConfigState>,
-    settings_state: State<'_, AppSettingsState>,
-    payload: AvatarColorPayload,
-) -> Result<bool, String> {
-    if payload.r#type == "user" {
-        let updates = serde_json::json!({
-            "userAvatarCalculatedColor": payload.color
-        });
-        update_app_settings(app_handle, settings_state, updates).await?;
-        Ok(true)
-    } else if payload.r#type == "agent" {
-        if let Some(agent_id) = payload.id {
-            let updates = serde_json::json!({
-                "avatarCalculatedColor": payload.color
-            });
-            update_agent_config(app_handle, agent_state, agent_id, updates).await?;
-            Ok(true)
-        } else {
-            Err("Missing agent ID for color update".to_string())
-        }
-    } else {
-        Err("Invalid type for avatar color".to_string())
-    }
-}
-
-/// 保存全局用户头像
-#[tauri::command]
-pub async fn save_user_avatar(
-    app_handle: AppHandle,
-    payload: UserAvatarPayload,
-) -> Result<String, String> {
-    let config_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let avatar_path = config_dir.join("user_avatar.png");
-
-    fs::write(&avatar_path, &payload.buffer).map_err(|e| e.to_string())?;
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    Ok(format!("{}?t={}", avatar_path.to_string_lossy(), timestamp))
 }
 
 /// 设置主题

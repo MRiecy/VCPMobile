@@ -89,22 +89,19 @@ const agentConfig = computed(() => {
 
 // 获取头像 URL
 const resolvedAvatarUrl = computed(() => {
-  if (isUser.value) return settingsStore.settings?.resolvedUserAvatarUrl;
+  if (isUser.value) return "vcp-avatar://user/default";
 
-  // 1. 优先使用匹配到的 Agent 配置中的头像
-  if (agentConfig.value?.resolvedAvatarUrl)
-    return agentConfig.value.resolvedAvatarUrl;
+  // 优先使用匹配到的 Agent ID
+  if (actualAgentId.value) {
+    return `vcp-avatar://agent/${actualAgentId.value}`;
+  }
 
-  // 2. 其次使用消息自带的已转换头像
-  if (props.message.resolvedAvatarUrl) return props.message.resolvedAvatarUrl;
-
-  // 3. 最后尝试转换原始路径
-  if (props.message.avatarUrl) {
-    try {
-      return convertFileSrc(props.message.avatarUrl.replace("file://", ""));
-    } catch (e) {
-      console.warn("[MessageRenderer] Failed to convert avatarUrl:", e);
-    }
+  // 如果没有 ID 只有名称，尝试按名称匹配 (兼容旧数据)
+  if (props.message.name) {
+    const agent = assistantStore.agents.find(
+      (a) => a.name === props.message.name,
+    );
+    if (agent) return `vcp-avatar://agent/${agent.id}`;
   }
 
   return null;
@@ -115,14 +112,14 @@ onMounted(() => {
   if (
     !isUser.value &&
     actualAgentId.value &&
-    agentConfig.value?.resolvedAvatarUrl &&
-    !agentConfig.value.avatarCalculatedColor
+    resolvedAvatarUrl.value &&
+    !agentConfig.value?.avatarCalculatedColor
   ) {
     extractAndSaveColor(
       actualAgentId.value,
-      agentConfig.value.resolvedAvatarUrl,
+      resolvedAvatarUrl.value,
     ).then((color) => {
-      if (agentConfig.value) {
+      if (agentConfig.value && color) {
         agentConfig.value.avatarCalculatedColor = color;
       }
     });

@@ -30,6 +30,7 @@ impl ModelManagerState {
 }
 
 #[tauri::command]
+#[allow(dead_code)]
 pub async fn get_cached_models(
     state: State<'_, ModelManagerState>,
 ) -> Result<Vec<ModelInfo>, String> {

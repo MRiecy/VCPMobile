@@ -35,7 +35,7 @@ export function useAvatarTheme() {
     }
   };
 
-  const extractAndSaveColor = async (agentId: string, avatarUrl: string) => {
+  const extractAndSaveColor = async (ownerId: string, avatarUrl: string) => {
     if (colorCache.has(avatarUrl)) return colorCache.get(avatarUrl);
 
     return new Promise<string>((resolve) => {
@@ -46,9 +46,14 @@ export function useAvatarTheme() {
         const color = getDominantColor(img);
         colorCache.set(avatarUrl, color);
         
+        // 解析 URL 获取 owner_type
+        let ownerType = 'agent';
+        if (avatarUrl.includes('group/')) ownerType = 'group';
+        else if (avatarUrl.includes('user/')) ownerType = 'user';
+
         // Save to Rust
         try {
-          await invoke('save_avatar_color', { agentId, color });
+          await invoke('save_avatar_color', { ownerType, ownerId, color });
         } catch (e) {
           console.error('Failed to save avatar color to Rust:', e);
         }

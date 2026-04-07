@@ -1,4 +1,4 @@
-use log::{error, info};
+use log::info;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -9,7 +9,6 @@ use crate::vcp_modules::app_settings_manager::AppSettingsState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
 use crate::vcp_modules::group_service::GroupManagerState;
-use crate::vcp_modules::index_service::full_scan;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
@@ -43,7 +42,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     info!("[Lifecycle] Starting bootstrap sequence...");
 
     // 1. 数据库初始化 (所有服务的基础)
-    let pool = match init_db(&handle).await {
+    let _pool = match init_db(&handle).await {
         Ok(p) => {
             handle.manage(DbState { pool: p.clone() });
             p
@@ -85,23 +84,10 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         })
     };
 
-    // 4. 群组与索引初始化 (存在 DB 写入，顺序执行)
-    // TODO: Implement group cache warming if needed, currently skipping obsolete group_bootstrap_loader
-
-    // 5. 全量扫描 (建立最终一致性) - 异步执行，不阻塞启动
-    info!("[Lifecycle] Spawning background full scan...");
-    let scan_handle = {
-        let h = handle.clone();
-        let p = pool.clone();
-        tokio::spawn(async move {
-            if let Err(e) = full_scan(&h, &p).await {
-                error!("[Lifecycle] Background scan failed: {}", e);
-            }
-        })
-    };
-
-    // 等待并行任务完成 (非阻塞)
-    let _ = tokio::join!(emoticon_task, model_task, scan_handle);
+    // 4. 群组初始化 (如有需要可在此添加)
+    
+    // 5. 等待并行任务完成
+    let _ = tokio::join!(emoticon_task, model_task);
 
     // 6. 标记为就绪
     *lifecycle.status.write().await = CoreStatus::Ready;

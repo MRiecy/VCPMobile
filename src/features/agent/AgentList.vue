@@ -115,8 +115,7 @@ const filteredCombinedItems = computed(() => {
              :class="chatStore.currentSelectedItem?.id === group.id ? 'border-purple-500/50 bg-purple-500/10 dark:bg-purple-500/20' : 'border-black/5 dark:border-white/5'">
           
           <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10 overflow-hidden">
-            <img v-if="group.resolvedAvatarUrl" :src="group.resolvedAvatarUrl" class="w-full h-full object-cover" />
-            <Users v-else class="w-5 h-5 text-purple-500/60" />
+            <img :src="`vcp-avatar://group/${group.id}`" class="w-full h-full object-cover" />
           </div>
           <div class="flex flex-col overflow-hidden flex-1">
             <span class="font-bold text-sm truncate text-primary-text">{{ group.name }}</span>
@@ -153,8 +152,7 @@ const filteredCombinedItems = computed(() => {
           <div v-if="assistantStore.unreadCounts[agent.id] === -1 || assistantStore.unreadCounts[agent.id] > 0" class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse shrink-0" style="background: #ff6b6b;"></div>
 
           <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10 overflow-hidden pointer-events-none">
-            <img v-if="agent.resolvedAvatarUrl" :src="agent.resolvedAvatarUrl" class="w-full h-full object-cover" />
-            <span v-else class="font-bold text-lg text-primary-text opacity-50">{{ agent.name[0] }}</span>
+            <img :src="`vcp-avatar://agent/${agent.id}`" class="w-full h-full object-cover" />
           </div>
           <div class="flex flex-col overflow-hidden flex-1 pointer-events-none">
             <span class="font-bold text-sm truncate text-primary-text">{{ agent.name }}</span>

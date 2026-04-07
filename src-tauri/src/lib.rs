@@ -2,17 +2,16 @@ mod vcp_modules;
 
 use tauri::Manager;
 use vcp_modules::agent_service::{
-    create_agent, delete_agent, get_agents, read_agent_config, save_agent_avatar,
-    save_agent_config, update_agent_config,
+    create_agent, delete_agent, get_agents, read_agent_config,
+    save_agent_config, update_agent_config, save_avatar_color,
 };
 use vcp_modules::app_settings_manager::{
-    notify_app_state, notify_network_state, read_app_settings, save_avatar_color, save_user_avatar,
+    notify_app_state, notify_network_state, read_app_settings,
     set_theme, update_app_settings, write_app_settings,
 };
-use vcp_modules::avatar_color_extractor::extract_avatar_color;
 use vcp_modules::chat_manager::{
     append_single_message, delete_messages, get_topic_delta, get_topic_fingerprint,
-    load_chat_history, patch_single_message, process_regex_for_message, save_chat_history,
+    load_chat_history, patch_single_message, process_regex_for_message,
     truncate_history_after_timestamp,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
@@ -33,10 +32,10 @@ use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error,
 use vcp_modules::message_processor::process_message_content;
 use vcp_modules::message_stream_protocol::handle_vcp_request;
 use vcp_modules::model_manager::{
-    get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
+    get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     toggle_favorite_model,
 };
-use vcp_modules::topic_list_manager::{
+use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
     update_topic_title,
 };
@@ -106,7 +105,6 @@ pub fn run() {
             interruptRequest,
             test_vcp_connection,
             load_chat_history,
-            save_chat_history,
             append_single_message,
             patch_single_message,
             delete_messages,
@@ -125,12 +123,10 @@ pub fn run() {
             read_agent_config,
             save_agent_config,
             update_agent_config,
+            save_avatar_color,
             read_app_settings,
             write_app_settings,
             update_app_settings,
-            save_avatar_color,
-            save_user_avatar,
-            save_agent_avatar,
             handle_group_chat_message,
             create_agent,
             create_group,
@@ -148,8 +144,6 @@ pub fn run() {
             cleanup_orphaned_attachments,
             get_topic_delta,
             get_topic_fingerprint,
-            extract_avatar_color,
-            get_cached_models,
             refresh_models,
             get_hot_models,
             get_favorite_models,
@@ -162,8 +156,62 @@ pub fn run() {
             regenerate_emoticon_library,
             fix_emoticon_url,
             get_core_status,
-            get_last_error
-        ])
+            get_last_error,
+            ])
+            .register_asynchronous_uri_scheme_protocol("vcp-avatar", |context, request, responder| {
+            let app_handle = context.app_handle().clone();
+            let uri = request.uri().to_string();
+            // uri format: vcp-avatar://agent/{id} or vcp-avatar://user/default
+
+            tauri::async_runtime::spawn(async move {
+                let db_state = app_handle.state::<vcp_modules::db_manager::DbState>();
+                let pool = &db_state.pool;
+
+                let path = uri.strip_prefix("vcp-avatar://").unwrap_or("");
+                let parts: Vec<&str> = path.split('/').collect();
+
+                if parts.len() >= 2 {
+                    let owner_type = parts[0];
+                    let owner_id = parts[1];
+
+                    let row_res: Result<Option<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query("SELECT mime_type, image_data, dominant_color FROM avatars WHERE owner_type = ? AND owner_id = ?")
+                        .bind(owner_type)
+                        .bind(owner_id)
+                        .fetch_optional(pool)
+                        .await;
+
+                    match row_res {
+                        Ok(Some(row)) => {
+                            use sqlx::Row;
+                            let mime: String = row.get("mime_type");
+                            let data: Vec<u8> = row.get("image_data");
+                            let color: Option<String> = row.get("dominant_color");
+                            
+                            let mut builder = tauri::http::Response::builder()
+                                .header("Content-Type", mime)
+                                .header("Access-Control-Allow-Origin", "*")
+                                .header("Cache-Control", "max-age=3600");
+                                
+                            if let Some(c) = color {
+                                builder = builder.header("X-Avatar-Color", c);
+                            }
+                            
+                            let response = builder.body(data).unwrap();
+                            responder.respond(response);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Fallback: 404
+                let response = tauri::http::Response::builder()
+                    .status(404)
+                    .body(Vec::new())
+                    .unwrap();
+                responder.respond(response);
+            });
+            })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
