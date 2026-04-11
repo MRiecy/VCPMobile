@@ -37,7 +37,8 @@ const close = () => emit('close');
 
 <template>
   <Transition name="viewer-fade">
-    <div v-if="isOpen && file" class="vcp-attachment-viewer fixed inset-0 z-[1000] flex flex-col bg-black/90 backdrop-blur-2xl">
+    <div v-if="isOpen && file"
+      class="vcp-attachment-viewer fixed inset-0 z-[1000] flex flex-col bg-black/90 backdrop-blur-2xl">
       <!-- Toolbar -->
       <div class="flex items-center justify-between px-4 py-4 border-b border-white/10 shrink-0">
         <div class="flex flex-col overflow-hidden mr-4">
@@ -45,7 +46,8 @@ const close = () => emit('close');
           <span class="text-[10px] text-white/40 uppercase tracking-widest">{{ file.type }}</span>
         </div>
         <div class="flex items-center gap-2">
-          <button @click="$emit('open-external', file.src)" class="p-2 hover:bg-white/10 rounded-full text-white/70 transition-colors">
+          <button @click="$emit('open-external', file.src)"
+            class="p-2 hover:bg-white/10 rounded-full text-white/70 transition-colors">
             <ExternalLink :size="20" />
           </button>
           <button @click="close" class="p-2 hover:bg-white/10 rounded-full text-white transition-colors">
@@ -56,7 +58,7 @@ const close = () => emit('close');
 
       <!-- Main Content -->
       <div class="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col items-center justify-center">
-        
+
         <!-- Text/Code/MD Viewer -->
         <div v-if="isText" class="w-full max-w-4xl bg-white/5 rounded-2xl p-6 border border-white/10 shadow-2xl">
           <MarkdownBlock :content="file.extractedText!" :is-streaming="false" />
@@ -64,11 +66,8 @@ const close = () => emit('close');
 
         <!-- Image Viewer -->
         <div v-else-if="isImage" class="relative group max-w-full max-h-full flex items-center justify-center">
-          <img 
-            :src="renderSrc" 
-            class="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl animate-zoom-in"
-            @click.stop
-          />
+          <img :src="renderSrc" class="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl animate-zoom-in"
+            @click.stop />
         </div>
 
         <!-- Unsupported Format -->
@@ -88,10 +87,13 @@ const close = () => emit('close');
 </template>
 
 <style scoped>
-.viewer-fade-enter-active, .viewer-fade-leave-active {
+.viewer-fade-enter-active,
+.viewer-fade-leave-active {
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.viewer-fade-enter-from, .viewer-fade-leave-to {
+
+.viewer-fade-enter-from,
+.viewer-fade-leave-to {
   opacity: 0;
   transform: scale(1.05);
 }
@@ -101,13 +103,21 @@ const close = () => emit('close');
 }
 
 @keyframes zoomIn {
-  from { opacity: 0; transform: scale(0.9); }
-  to { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .custom-scrollbar::-webkit-scrollbar {
   width: 4px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.1);
   border-radius: 4px;

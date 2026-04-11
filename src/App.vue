@@ -142,25 +142,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div
-    ref="appRootRef"
-    class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative"
-  >
+  <div ref="appRootRef" class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
     <!-- 0. 全局初始化加载层 & 错误看板 -->
     <BootScreen />
 
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">
-      <div
-        :key="backgroundStyle.backgroundImage"
-        class="vcp-background-layer"
-        :style="backgroundStyle"
-      ></div>
+      <div :key="backgroundStyle.backgroundImage" class="vcp-background-layer" :style="backgroundStyle"></div>
     </Transition>
-    <div
-      class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
-      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"
-    ></div>
+    <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
+      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
 
     <!-- 2. 主内容区先渲染，抽屉与遮罩在后声明，靠 DOM 顺位自然覆盖 -->
     <main class="flex-1 min-w-0 relative overflow-hidden">
@@ -171,23 +162,17 @@ onUnmounted(() => {
 
     <!-- 3. 抽屉遮罩层位于主内容之后、抽屉之前，点击空白即可关闭 -->
     <Transition name="fade">
-      <div
-        v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden"
-        @click.self="
+      <div v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
+        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden" @click.self="
           layoutStore.setLeftDrawer(false);
-          layoutStore.setRightDrawer(false);
-        "
-      ></div>
+        layoutStore.setRightDrawer(false);
+        "></div>
     </Transition>
 
     <!-- 4. 左右抽屉在遮罩之后声明，不写 z-index 也能稳定压过主内容 -->
     <AgentSidebar />
-    <RightSidebar
-      class="pointer-events-auto shrink-0"
-      :is-open="layoutStore.rightDrawerOpen"
-      @close="layoutStore.setRightDrawer(false)"
-    />
+    <RightSidebar class="pointer-events-auto shrink-0" :is-open="layoutStore.rightDrawerOpen"
+      @close="layoutStore.setRightDrawer(false)" />
 
     <!-- 5. 全局覆盖层管理器 -->
     <GlobalOverlayManager />
@@ -237,6 +222,7 @@ body,
 .fade-leave-active {
   transition: opacity 0.3s ease;
 }
+
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
@@ -246,6 +232,7 @@ body,
 .bg-fade-leave-active {
   transition: opacity 0.8s ease-in-out;
 }
+
 .bg-fade-enter-from,
 .bg-fade-leave-to {
   opacity: 0;

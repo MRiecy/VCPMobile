@@ -33,7 +33,7 @@ const EXIT_THRESHOLD = 2000; // 2 seconds
  */
 export const initRootHistory = () => {
   if (typeof window === 'undefined') return;
-  
+
   // If we are at the very beginning (length 1 or 2), push our dummy state
   // We don't use replaceState here because we WANT to be at depth > 1
   if (window.history.length <= 2) {
@@ -60,7 +60,7 @@ const handlePopState = (event: PopStateEvent) => {
   // 3. Handle Modal Stack (LIFO)
   if (modalStack.value.length > 0) {
     const topModal = modalStack.value[modalStack.value.length - 1];
-    
+
     isProcessingPopState = true;
     try {
       topModal.close();
@@ -75,7 +75,7 @@ const handlePopState = (event: PopStateEvent) => {
   // If we hit a state that doesn't have vcpMain, it means we've popped our dummy state
   if (!event.state || !event.state.vcpMain) {
     const currentTime = Date.now();
-    
+
     if (currentTime - lastBackPressTime < EXIT_THRESHOLD) {
       // Second tap within threshold -> Exit App
       getCurrentWebviewWindow().close();
@@ -84,7 +84,7 @@ const handlePopState = (event: PopStateEvent) => {
       lastBackPressTime = currentTime;
       showExitToast.value = true;
       setTimeout(() => { showExitToast.value = false; }, EXIT_THRESHOLD);
-      
+
       // THE BOUNCE: Immediately re-inject the dummy state to keep the user in the "fake" 2nd layer
       window.history.pushState({ vcpRoot: true, vcpMain: true }, '');
     }
@@ -94,7 +94,7 @@ const handlePopState = (event: PopStateEvent) => {
 // Initialize the popstate listener only once
 if (typeof window !== 'undefined') {
   window.addEventListener('popstate', handlePopState);
-  
+
   // Initial check: if we are at root, push the dummy state
   // Note: App.vue will call this again after router is ready to be 100% sure
   initRootHistory();
@@ -133,7 +133,7 @@ export function useModalHistory() {
         window.history.back();
       }
     }
-    
+
     modalStack.value.splice(index, 1);
   };
 

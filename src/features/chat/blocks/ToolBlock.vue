@@ -18,18 +18,13 @@ const toggleExpand = () => {
 </script>
 
 <template>
-  <div
-    class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden"
-    :class="[
-      type === 'tool-use' ? 'is-tool-use' : 'is-tool-result',
-      isExpanded ? 'shadow-md' : 'shadow-sm'
-    ]"
-  >
+  <div class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
+    type === 'tool-use' ? 'is-tool-use' : 'is-tool-result',
+    isExpanded ? 'shadow-md' : 'shadow-sm'
+  ]">
     <!-- Header -->
-    <div
-      class="tool-header-content flex items-center justify-between p-3 cursor-pointer select-none"
-      @click="toggleExpand"
-    >
+    <div class="tool-header-content flex items-center justify-between p-3 cursor-pointer select-none"
+      @click="toggleExpand">
       <div class="flex items-center gap-2">
         <div class="tool-icon-container p-1.5 rounded-lg">
           <Settings v-if="type === 'tool-use'" :size="14" />
@@ -45,7 +40,7 @@ const toggleExpand = () => {
           </span>
         </div>
       </div>
-      
+
       <div class="flex items-center gap-2">
         <span v-if="block.status" class="tool-status text-[10px] px-1.5 py-0.5 rounded font-bold">
           {{ block.status }}
@@ -55,7 +50,8 @@ const toggleExpand = () => {
     </div>
 
     <!-- Content -->
-    <div v-show="isExpanded" class="tool-header-content border-t border-black/10 dark:border-white/10 p-3 animate-slide-down tool-content-scrollable custom-scrollbar">
+    <div v-show="isExpanded"
+      class="tool-header-content border-t border-black/10 dark:border-white/10 p-3 animate-slide-down tool-content-scrollable custom-scrollbar">
       <template v-if="type === 'tool-use'">
         <pre class="text-[11px] font-mono whitespace-pre-wrap break-words">{{ content }}</pre>
       </template>
@@ -80,134 +76,175 @@ const toggleExpand = () => {
 <style scoped>
 /* --- Animations --- */
 @keyframes vcp-bubble-background-flow-kf {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
 }
 
 @keyframes vcp-bubble-border-flow-kf {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 200% 50%; }
-    100% { background-position: 0% 50%; }
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 200% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
 }
 
 @keyframes vcp-icon-rotate {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+  0% {
+    transform: rotate(0deg);
+  }
+
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 .animate-slide-down {
   animation: slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
 @keyframes slideDown {
-  from { opacity: 0; transform: translateY(-10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* --- Tool Use Bubble --- */
 .vcp-tool-block.is-tool-use {
-    background: linear-gradient(145deg, #3a7bd5 0%, #00d2ff 100%) !important;
-    background-size: 200% 200% !important;
-    animation: vcp-bubble-background-flow-kf 20s ease-in-out infinite;
-    color: #ffffff !important;
-    border: none !important;
-    position: relative;
+  background: linear-gradient(145deg, #3a7bd5 0%, #00d2ff 100%) !important;
+  background-size: 200% 200% !important;
+  animation: vcp-bubble-background-flow-kf 20s ease-in-out infinite;
+  color: #ffffff !important;
+  border: none !important;
+  position: relative;
 }
 
 .vcp-tool-block.is-tool-use::after {
-    content: "";
-    position: absolute;
-    box-sizing: border-box;
-    top: 0; left: 0; width: 100%; height: 100%;
-    border-radius: inherit;
-    padding: 2px;
-    background: linear-gradient(60deg, #76c4f7, #00d2ff, #3a7bd5, #ffffff, #3a7bd5, #00d2ff, #76c4f7);
-    background-size: 300% 300%;
-    animation: vcp-bubble-border-flow-kf 7s linear infinite;
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    z-index: 0;
-    pointer-events: none;
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  padding: 2px;
+  background: linear-gradient(60deg, #76c4f7, #00d2ff, #3a7bd5, #ffffff, #3a7bd5, #00d2ff, #76c4f7);
+  background-size: 300% 300%;
+  animation: vcp-bubble-border-flow-kf 7s linear infinite;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  z-index: 0;
+  pointer-events: none;
 }
 
 .vcp-tool-block.is-tool-use .tool-header-content {
-    position: relative;
-    z-index: 1;
+  position: relative;
+  z-index: 1;
 }
 
 .vcp-tool-block.is-tool-use .tool-icon-container {
-    background: transparent !important;
-    color: rgba(255, 255, 255, 0.9) !important;
-    animation: vcp-icon-rotate 4s linear infinite;
+  background: transparent !important;
+  color: rgba(255, 255, 255, 0.9) !important;
+  animation: vcp-icon-rotate 4s linear infinite;
 }
 
 .vcp-tool-block.is-tool-use .tool-label {
-    color: #f1c40f !important;
+  color: #f1c40f !important;
 }
 
 .vcp-tool-block.is-tool-use .tool-name {
-    color: #ffffff !important;
+  color: #ffffff !important;
 }
 
 .vcp-tool-block.is-tool-use pre {
-    background-color: rgba(0, 0, 0, 0.2);
-    color: #f0f0f0;
-    border-radius: 6px;
-    padding: 10px;
+  background-color: rgba(0, 0, 0, 0.2);
+  color: #f0f0f0;
+  border-radius: 6px;
+  padding: 10px;
 }
 
 /* --- Tool Result Bubble (Light/Dark Theme Fixed) --- */
 
 /* 修复：将亮色模式设为默认基础样式 */
 .vcp-tool-block.is-tool-result {
-    background: linear-gradient(145deg, #f4f6f8, #e8eaf0);
-    border: 1px solid rgba(0, 0, 0, 0.1);
-    color: #333;
+  background: linear-gradient(145deg, #f4f6f8, #e8eaf0);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  color: #333;
 }
+
 .vcp-tool-block.is-tool-result .tool-label {
-    color: #2e7d32 !important; /* 深一点的绿色适应亮色背景 */
+  color: #2e7d32 !important;
+  /* 深一点的绿色适应亮色背景 */
 }
+
 .vcp-tool-block.is-tool-result .tool-name {
-    color: #0277bd;
-    background-color: rgba(2, 119, 189, 0.1);
-    padding: 2px 6px;
-    border-radius: 4px;
+  color: #0277bd;
+  background-color: rgba(2, 119, 189, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
 }
+
 .vcp-tool-block.is-tool-result .tool-status {
-    color: #1b5e20;
-    background-color: rgba(76, 175, 80, 0.15);
+  color: #1b5e20;
+  background-color: rgba(76, 175, 80, 0.15);
 }
+
 .vcp-tool-block.is-tool-result .detail-key {
-    color: #546e7a;
+  color: #546e7a;
 }
 
 /* 修复：适配 Vue/Tailwind 标准的暗黑模式选择器 */
 html.dark .vcp-tool-block.is-tool-result {
-    background: linear-gradient(145deg, #1c1c1e, #2c2c2e);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    color: #f2f2f7;
+  background: linear-gradient(145deg, #1c1c1e, #2c2c2e);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #f2f2f7;
 }
+
 html.dark .vcp-tool-block.is-tool-result .tool-label {
-    color: #4caf50 !important;
+  color: #4caf50 !important;
 }
+
 html.dark .vcp-tool-block.is-tool-result .tool-name {
-    color: #64d2ff;
-    background-color: rgba(100, 210, 255, 0.15);
+  color: #64d2ff;
+  background-color: rgba(100, 210, 255, 0.15);
 }
+
 html.dark .vcp-tool-block.is-tool-result .tool-status {
-    color: #c8e6c9;
-    background-color: rgba(76, 175, 80, 0.2);
+  color: #c8e6c9;
+  background-color: rgba(76, 175, 80, 0.2);
 }
+
 html.dark .vcp-tool-block.is-tool-result .detail-key {
-    color: #8e8e93;
+  color: #8e8e93;
 }
 
 /* 修复：工具内子级 Markdown 的压缩排版，去除无意义的段落边距，恢复正常换行 */
 :deep(.compact-markdown p) {
-    margin-top: 0 !important;
-    margin-bottom: 4px !important;
+  margin-top: 0 !important;
+  margin-bottom: 4px !important;
 }
 
 .tool-content-scrollable {

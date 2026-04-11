@@ -63,23 +63,23 @@ export function useVcpMagic() {
 
     const OriginalWebGLRenderer = (window as any).THREE.WebGLRenderer;
 
-    (window as any).THREE.WebGLRenderer = function(...args: any[]) {
+    (window as any).THREE.WebGLRenderer = function (...args: any[]) {
       const renderer = new OriginalWebGLRenderer(...args);
       const originalRender = renderer.render;
       let associatedScene: any = null;
       let associatedCamera: any = null;
 
-      renderer.render = function(scene: any, camera: any) {
+      renderer.render = function (scene: any, camera: any) {
         if (this._disposed) return;
-        
+
         if (scene && !associatedScene) associatedScene = scene;
         if (camera && !associatedCamera) associatedCamera = camera;
-        
+
         if (!document.body.contains(this.domElement)) {
           if (!this._disposed) this.dispose();
           return;
         }
-        
+
         try {
           return originalRender.call(this, scene, camera);
         } catch (error) {
@@ -90,7 +90,7 @@ export function useVcpMagic() {
       };
 
       const originalDispose = renderer.dispose;
-      renderer.dispose = function() {
+      renderer.dispose = function () {
         if (this._disposed) return;
         this._disposed = true;
         if (originalDispose) {
@@ -126,7 +126,7 @@ export function useVcpMagic() {
     const rules = [];
     let depth = 0;
     let currentRule = '';
-    
+
     for (let i = 0; i < css.length; i++) {
       const char = css[i];
       currentRule += char;
@@ -139,7 +139,7 @@ export function useVcpMagic() {
         }
       }
     }
-    
+
     return rules.map(rule => {
       const match = rule.match(/^([^{]+)\{(.+)\}$/s);
       if (!match) return rule;
@@ -150,7 +150,7 @@ export function useVcpMagic() {
         if (sel.match(/^::?[\w-]+$/)) return `.${scopeId}${sel}`;
         return `.${scopeId} ${sel}`;
       }).join(', ');
-      
+
       return `${scopedSelectors} { ${body} }`;
     }).join('\n');
   };
@@ -247,7 +247,7 @@ export function useVcpMagic() {
       const originalOpen = document.open;
       const originalClose = document.close;
 
-      const blockedApiHandler = function(...args: any[]) {
+      const blockedApiHandler = function (...args: any[]) {
         console.warn('[VCPMagic] Blocked document.write/open/close:', args);
       };
 
@@ -263,7 +263,7 @@ export function useVcpMagic() {
             containerElement.id = containerId;
 
             let scriptContent = script.textContent || '';
-            
+
             // Auto-inject a variable `container` to help AI scripts find their root
             // 同时支持桌面端常用的 #vcp-root 查找逻辑
             const wrappedScript = `
@@ -282,7 +282,7 @@ export function useVcpMagic() {
     console.error('[VCPMagic] Error in AI script:', e);
   }
 })();`;
-            
+
             const newScript = document.createElement('script');
             newScript.textContent = wrappedScript;
             document.head.appendChild(newScript).parentNode?.removeChild(newScript);
@@ -464,7 +464,7 @@ export function useVcpMagic() {
           }
           try {
             instance.renderer.dispose();
-          } catch (e) {}
+          } catch (e) { }
         }
       });
       trackedThreeInstances.delete(containerElement);

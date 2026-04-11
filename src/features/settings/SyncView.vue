@@ -154,13 +154,18 @@ watch(() => props.isOpen, (val) => {
 <template>
   <Teleport to="#vcp-feature-overlays" :disabled="!props.isOpen">
     <Transition name="fade">
-      <div v-if="props.isOpen" class="sync-view fixed inset-0 flex flex-col bg-secondary-bg/95 text-primary-text pointer-events-auto">
+      <div v-if="props.isOpen"
+        class="sync-view fixed inset-0 flex flex-col bg-secondary-bg/95 text-primary-text pointer-events-auto">
         <!-- Header -->
-        <header class="p-4 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+20px)] pb-6 shrink-0 bg-secondary-bg/80 backdrop-blur-md">
-            <div class="flex items-center gap-3">
-              <button @click="closeSync" class="p-2 bg-white/5 rounded-full active:scale-90 transition-all">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
-              </button>
+        <header
+          class="p-4 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+20px)] pb-6 shrink-0 bg-secondary-bg/80 backdrop-blur-md">
+          <div class="flex items-center gap-3">
+            <button @click="closeSync" class="p-2 bg-white/5 rounded-full active:scale-90 transition-all">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="m15 18-6-6 6-6" />
+              </svg>
+            </button>
             <h2 class="text-xl font-bold">数据同步中心</h2>
           </div>
         </header>
@@ -168,26 +173,34 @@ watch(() => props.isOpen, (val) => {
         <!-- Content -->
         <div class="flex-1 overflow-y-auto p-5 space-y-6 pb-[120px]">
           <div v-if="loading" class="flex-center h-40 flex-col gap-4 opacity-50">
-              <div class="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+            <div class="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             <span class="text-sm font-bold tracking-widest uppercase">正在分析桌面端数据...</span>
           </div>
 
           <div v-else-if="error" class="card-modern border-red-500/30 bg-red-500/10 text-red-200">
             <h3 class="font-bold mb-2">连接失败</h3>
             <p class="text-sm opacity-80 break-words">{{ error }}</p>
-            <button @click="loadManifest" class="mt-4 px-4 py-2 bg-red-500/20 rounded-xl text-xs font-bold active:scale-95 transition-all">重试</button>
+            <button @click="loadManifest"
+              class="mt-4 px-4 py-2 bg-red-500/20 rounded-xl text-xs font-bold active:scale-95 transition-all">重试</button>
           </div>
 
           <template v-else-if="fileTree">
             <!-- 总体统计 -->
-            <div class="card-modern flex justify-between items-center bg-gradient-to-br from-blue-900/40 to-purple-900/40 border-blue-500/30">
+            <div
+              class="card-modern flex justify-between items-center bg-gradient-to-br from-blue-900/40 to-purple-900/40 border-blue-500/30">
               <div class="flex flex-col min-w-0">
                 <div class="text-[10px] uppercase font-black tracking-widest opacity-50 mb-1 truncate">桌面端总数据量</div>
                 <div class="text-2xl font-bold truncate">{{ formatBytes(fileTree.sizeBytes) }}</div>
-                <div class="text-xs opacity-60 mt-1 truncate">已选 {{ selectedStats.count }} 项，共 {{ formatBytes(selectedStats.size) }}</div>
+                <div class="text-xs opacity-60 mt-1 truncate">已选 {{ selectedStats.count }} 项，共 {{
+                  formatBytes(selectedStats.size) }}</div>
               </div>
               <div class="w-12 h-12 rounded-full bg-blue-500/20 flex-center text-blue-400 shrink-0 ml-4">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" x2="12" y1="15" y2="3" />
+                </svg>
               </div>
             </div>
 
@@ -203,20 +216,18 @@ watch(() => props.isOpen, (val) => {
                 <div class="flex items-center justify-between pb-2">
                   <div class="flex flex-col min-w-0 flex-1 mr-3">
                     <span class="text-sm font-bold truncate">全局配置 (settings.json)</span>
-                    <span class="text-[10px] opacity-50 truncate">{{ formatBytes(manifestMap['settings.json']?.size || 0) }}</span>
+                    <span class="text-[10px] opacity-50 truncate">{{ formatBytes(manifestMap['settings.json']?.size ||
+                      0) }}</span>
                   </div>
-                  <input type="checkbox" :checked="selectedPaths.has('settings.json')" @change="handleToggleFiles(['settings.json'], !selectedPaths.has('settings.json'))" class="w-5 h-5 accent-blue-500 shrink-0" />
+                  <input type="checkbox" :checked="selectedPaths.has('settings.json')"
+                    @change="handleToggleFiles(['settings.json'], !selectedPaths.has('settings.json'))"
+                    class="w-5 h-5 accent-blue-500 shrink-0" />
                 </div>
 
                 <!-- 文件树组件 -->
                 <div class="pt-4">
-                  <SyncFileTree
-                    :node="fileTree"
-                    :depth="0"
-                    :selectedPaths="selectedPaths"
-                    :getFileStatus="getFileStatus"
-                    @toggleFiles="handleToggleFiles"
-                  />
+                  <SyncFileTree :node="fileTree" :depth="0" :selectedPaths="selectedPaths"
+                    :getFileStatus="getFileStatus" @toggleFiles="handleToggleFiles" />
                 </div>
               </div>
             </div>
@@ -224,18 +235,23 @@ watch(() => props.isOpen, (val) => {
         </div>
 
         <!-- 底部同步控制栏 -->
-        <div v-if="fileTree" class="absolute bottom-0 left-0 right-0 p-5 border-t border-white/10 bg-secondary-bg/95 backdrop-blur-xl pb-[calc(env(safe-area-inset-bottom,20px)+20px)]">
+        <div v-if="fileTree"
+          class="absolute bottom-0 left-0 right-0 p-5 border-t border-white/10 bg-secondary-bg/95 backdrop-blur-xl pb-[calc(env(safe-area-inset-bottom,20px)+20px)]">
           <div v-if="isSyncing" class="space-y-3">
             <div class="flex justify-between text-xs font-bold">
               <span>正在同步...</span>
               <span>{{ syncProgress.current }} / {{ syncProgress.total }}</span>
             </div>
             <div class="w-full h-2 bg-white/10 rounded-full overflow-hidden">
-              <div class="h-full bg-blue-500 transition-all duration-300 ease-out" :style="{ width: `${syncProgress.total ? (syncProgress.current / syncProgress.total) * 100 : 0}%` }"></div>
+              <div class="h-full bg-blue-500 transition-all duration-300 ease-out"
+                :style="{ width: `${syncProgress.total ? (syncProgress.current / syncProgress.total) * 100 : 0}%` }">
+              </div>
             </div>
-            <div class="text-[10px] opacity-50 truncate" :title="syncProgress.file">{{ truncatePath(syncProgress.file) }}</div>
+            <div class="text-[10px] opacity-50 truncate" :title="syncProgress.file">{{ truncatePath(syncProgress.file)
+              }}</div>
           </div>
-          <button v-else @click="startSync" :disabled="selectedPaths.size === 0" class="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-white/10 disabled:text-white/30 text-white active:scale-95 transition-all rounded-[1.25rem] font-black uppercase tracking-widest text-xs shadow-xl shadow-blue-900/20">
+          <button v-else @click="startSync" :disabled="selectedPaths.size === 0"
+            class="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-white/10 disabled:text-white/30 text-white active:scale-95 transition-all rounded-[1.25rem] font-black uppercase tracking-widest text-xs shadow-xl shadow-blue-900/20">
             开始同步 (已选 {{ selectedStats.count }} 项)
           </button>
 
@@ -252,9 +268,11 @@ watch(() => props.isOpen, (val) => {
   background-color: color-mix(in srgb, var(--primary-bg) 85%, transparent);
   backdrop-filter: blur(30px) saturate(180%);
 }
+
 .card-modern {
   @apply bg-white/5 border border-white/10 rounded-[2rem] p-5 backdrop-blur-xl shadow-2xl;
 }
+
 /* 隐藏复选框默认的不可点击感，并在内部树中保证良好对齐 */
 :deep(.sync-tree-node) {
   @apply text-sm;

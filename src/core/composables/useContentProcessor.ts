@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface ContentBlock {
   type:
-    | "markdown"
-    | "tool-use"
-    | "tool-result"
-    | "diary"
-    | "thought"
-    | "button-click"
-    | "html-preview";
+  | "markdown"
+  | "tool-use"
+  | "tool-result"
+  | "diary"
+  | "thought"
+  | "button-click"
+  | "html-preview";
   content: string;
   tool_name?: string;
   is_complete?: boolean;

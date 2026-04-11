@@ -128,7 +128,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             title TEXT NOT NULL,
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
-            locked INTEGER NOT NULL DEFAULT 0,
+            locked INTEGER NOT NULL DEFAULT 1,
             unread INTEGER NOT NULL DEFAULT 0,
             unread_count INTEGER NOT NULL DEFAULT 0,
             msg_count INTEGER NOT NULL DEFAULT 0,
@@ -152,10 +152,10 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             is_thinking INTEGER,
             is_group_message INTEGER NOT NULL DEFAULT 0,
             group_id TEXT,
+            finish_reason TEXT,
             render_format TEXT,
             render_content BLOB,
             render_version INTEGER NOT NULL DEFAULT 1,
-            extra_json TEXT,
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
@@ -188,11 +188,10 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
         "CREATE TABLE IF NOT EXISTS message_attachments (
             msg_id TEXT NOT NULL,
             hash TEXT NOT NULL,               -- 指向 attachments.hash
-            attachment_order INTEGER NOT NULL, -- 排序 (替代 sort_order 以保持兼容)
+            attachment_order INTEGER NOT NULL, -- 排序
             display_name TEXT NOT NULL,       -- 原始文件名
             src TEXT,                         -- 来源 URL
             status TEXT,                      -- 状态 (如 'removed')
-            extra_json TEXT,                  -- 预留扩展
             created_at BIGINT NOT NULL,
             PRIMARY KEY (msg_id, attachment_order)
         )",
@@ -213,7 +212,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 9. model_favorites 表 (替代 model_favorites.json)
+    // 9. model_favorites 表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS model_favorites (
             model_id TEXT PRIMARY KEY,
@@ -224,7 +223,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 10. model_usage_stats 表 (替代 model_usage_stats.json)
+    // 10. model_usage_stats 表
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS model_usage_stats (
             model_id TEXT PRIMARY KEY,
@@ -239,7 +238,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     // 索引
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_topics_owner
-         ON topics(owner_type, owner_id, updated_at DESC)",
+         ON topics(owner_id, owner_type, created_at DESC)",
     )
     .execute(pool)
     .await
@@ -271,27 +270,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_message_attachments_hash
-         ON message_attachments(attachment_hash)",
+         ON message_attachments(hash)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-
-    // 删除旧表 (如果存在)
-    let drop_tables = vec![
-        "DROP TABLE IF EXISTS agent_index",
-        "DROP TABLE IF EXISTS topic_state",
-        "DROP TABLE IF EXISTS message_index",
-        "DROP TABLE IF EXISTS attachment_index",
-        "DROP TABLE IF EXISTS message_attachment_ref",
-    ];
-
-    for drop_query in drop_tables {
-        sqlx::query(drop_query)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
 
     Ok(())
 }

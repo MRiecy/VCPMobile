@@ -1,6 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_types::{EntityState, SyncDataType, SyncManifest};
-use crate::vcp_modules::sync_dto::{AgentSyncDTO, GroupSyncDTO};
+use crate::vcp_modules::sync_dto::{AgentSyncDTO, GroupSyncDTO, TopicSyncDTO};
 use crate::vcp_modules::agent_service::{self, AgentConfigState};
 use crate::vcp_modules::group_service::{self, GroupManagerState};
 use futures_util::{SinkExt, StreamExt};
@@ -176,34 +176,7 @@ pub fn init_sync_manager(app_handle: AppHandle) -> mpsc::UnboundedSender<SyncCom
 }
 
 fn stable_stringify(value: &Value) -> String {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let mut res = String::new();
-            res.push('{');
-            for (i, k) in keys.iter().enumerate() {
-                if i > 0 { res.push(','); }
-                res.push_str(&format!("\"{}\":{}", k, stable_stringify(map.get(*k).unwrap())));
-            }
-            res.push('}');
-            res
-        },
-        Value::Array(arr) => {
-            let mut res = String::new();
-            res.push('[');
-            for (i, v) in arr.iter().enumerate() {
-                if i > 0 { res.push(','); }
-                res.push_str(&stable_stringify(v));
-            }
-            res.push(']');
-            res
-        },
-        Value::String(s) => serde_json::to_string(s).unwrap_or_default(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
-    }
+    crate::vcp_modules::sync_types::stable_stringify(value)
 }
 
 fn compute_message_fingerprint(content: &str, attachment_hashes: Vec<String>) -> String {
@@ -236,6 +209,21 @@ async fn generate_initial_manifests(app: &AppHandle) -> Result<Vec<SyncManifest>
     }
     manifests.push(SyncManifest { data_type: SyncDataType::Group, items: group_items });
 
+    let mut avatar_items = Vec::new();
+    let rows = sqlx::query("SELECT owner_id, owner_type, hash, updated_at FROM avatars")
+        .fetch_all(pool).await.map_err(|e| e.to_string())?;
+    for r in rows {
+        use sqlx::Row;
+        let owner_id: String = r.get("owner_id");
+        let owner_type: String = r.get("owner_type");
+        avatar_items.push(EntityState { 
+            id: format!("{}:{}", owner_type, owner_id), 
+            hash: r.get("hash"), 
+            ts: r.get("updated_at") 
+        });
+    }
+    manifests.push(SyncManifest { data_type: SyncDataType::Avatar, items: avatar_items });
+
     let mut topic_items = Vec::new();
     let rows = sqlx::query("SELECT topic_id, title, created_at, locked, unread, updated_at, owner_id, owner_type FROM topics WHERE deleted_at IS NULL").fetch_all(pool).await.map_err(|e| e.to_string())?;
     for r in rows {
@@ -248,18 +236,18 @@ async fn generate_initial_manifests(app: &AppHandle) -> Result<Vec<SyncManifest>
         let locked: bool = r.get::<i64, _>("locked") != 0;
         let unread: bool = r.get::<i64, _>("unread") != 0;
 
-        let dto = json!({
-            "id": id,
-            "name": name,
-            "createdAt": created_at,
-            "locked": if owner_type == "group" { true } else { locked },
-            "unread": if owner_type == "group" { false } else { unread },
-            "ownerId": owner_id,
-            "ownerType": owner_type
-        });
+        let dto = TopicSyncDTO {
+            id: id.clone(),
+            name,
+            created_at,
+            locked: if owner_type == "group" { true } else { locked },
+            unread: if owner_type == "group" { false } else { unread },
+            owner_id,
+            owner_type,
+        };
         
         let mut hasher = sha2::Sha256::new();
-        sha2::Digest::update(&mut hasher, stable_stringify(&dto).as_bytes());
+        sha2::Digest::update(&mut hasher, stable_stringify(&serde_json::to_value(&dto).unwrap_or(Value::Null)).as_bytes());
         topic_items.push(EntityState { id, hash: format!("{:x}", sha2::Digest::finalize(hasher)), ts: r.get("updated_at") });
     }
     manifests.push(SyncManifest { data_type: SyncDataType::History, items: topic_items });
@@ -286,13 +274,40 @@ async fn perform_pull<R: Runtime>(app: &AppHandle<R>, client: &reqwest::Client, 
     } else if entity_type == "group" {
         let dto: GroupSyncDTO = res.json().await.map_err(|e| e.to_string())?;
         group_service::apply_sync_update(app, &app.state::<GroupManagerState>(), id, dto).await?;
+    } else if entity_type == "avatar" {
+        let parts: Vec<&str> = id.split(':').collect();
+        if parts.len() == 2 {
+            let owner_type = parts[0];
+            let owner_id = parts[1];
+            let settings = crate::vcp_modules::settings_manager::read_settings(app.clone(), app.state()).await?;
+            let url = format!("{}/api/mobile-sync/download-avatar?id={}", base_url, owner_id);
+            let resp = client.get(&url).header("x-sync-token", &settings.sync_token).send().await.map_err(|e| e.to_string())?;
+            if resp.status().is_success() {
+                let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+                let app_data = app.path().app_data_dir().unwrap();
+                let avatar_dir = app_data.join("avatars");
+                if !avatar_dir.exists() { std::fs::create_dir_all(&avatar_dir).ok(); }
+                let ext = "png"; // 简单起见统一 png
+                let local_path = avatar_dir.join(format!("{}_{}.{}", owner_type, owner_id, ext));
+                std::fs::write(&local_path, &bytes).ok();
+                
+                // 更新 DB
+                let mut hasher = sha2::Sha256::new();
+                sha2::Digest::update(&mut hasher, &bytes);
+                let hash = format!("{:x}", sha2::Digest::finalize(hasher));
+                let now = chrono::Utc::now().timestamp_millis();
+                let db_state = app.state::<DbState>();
+                sqlx::query("INSERT INTO avatars (owner_id, owner_type, file_path, hash, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(owner_id, owner_type) DO UPDATE SET file_path=excluded.file_path, hash=excluded.hash, updated_at=excluded.updated_at")
+                    .bind(owner_id).bind(owner_type).bind(local_path.to_string_lossy().to_string()).bind(hash).bind(now).execute(&db_state.pool).await.ok();
+            }
+        }
     } else if entity_type == "topic" || entity_type == "history" {
-        let dto: Value = res.json().await.map_err(|e| e.to_string())?;
+        let dto: TopicSyncDTO = res.json().await.map_err(|e| e.to_string())?;
         let db_state = app.state::<DbState>();
         let now = chrono::Utc::now().timestamp_millis();
         sqlx::query("INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(topic_id) DO UPDATE SET title = excluded.title, locked = excluded.locked, unread = excluded.unread, updated_at = excluded.updated_at")
-            .bind(id).bind(dto["name"].as_str().unwrap_or_default()).bind(dto["ownerId"].as_str().unwrap_or_default()).bind(dto["ownerType"].as_str().unwrap_or("agent")).bind(dto["createdAt"].as_i64().unwrap_or(now))
-            .bind(if dto["locked"].as_bool().unwrap_or(false) { 1 } else { 0 }).bind(if dto["unread"].as_bool().unwrap_or(false) { 1 } else { 0 }).bind(now)
+            .bind(id).bind(&dto.name).bind(&dto.owner_id).bind(&dto.owner_type).bind(dto.created_at)
+            .bind(if dto.locked { 1 } else { 0 }).bind(if dto.unread { 1 } else { 0 }).bind(now)
             .execute(&db_state.pool).await.map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -304,9 +319,20 @@ async fn perform_push(app: &AppHandle, client: &reqwest::Client, base_url: &str,
     let settings = crate::vcp_modules::settings_manager::read_settings(app.clone(), app.state()).await?;
 
     let payload = if entity_type == "topic" || entity_type == "history" {
-        let row = sqlx::query("SELECT title, created_at, locked, unread, owner_id, owner_type FROM topics WHERE topic_id = ?").bind(id).fetch_one(pool).await.map_err(|e| e.to_string())?;
+        let row = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id, owner_type FROM topics WHERE topic_id = ?")
+            .bind(id).fetch_one(pool).await.map_err(|e| e.to_string())?;
         use sqlx::Row;
-        let dto = json!({ "id": id, "name": row.get::<String, _>("title"), "createdAt": row.get::<i64, _>("created_at"), "locked": row.get::<i64, _>("locked") != 0, "unread": row.get::<i64, _>("unread") != 0, "ownerId": row.get::<String, _>("owner_id"), "ownerType": row.get::<String, _>("owner_type") });
+        
+        let owner_type: String = row.get("owner_type");
+        let dto = TopicSyncDTO {
+            id: row.get("topic_id"),
+            name: row.get("title"),
+            created_at: row.get("created_at"),
+            locked: if owner_type == "group" { true } else { row.get::<i64, _>("locked") != 0 },
+            unread: if owner_type == "group" { false } else { row.get::<i64, _>("unread") != 0 },
+            owner_id: row.get("owner_id"),
+            owner_type,
+        };
         json!({ "id": id, "type": "topic", "data": dto })
     } else if entity_type == "agent" {
         let state = app.state::<AgentConfigState>();
@@ -316,6 +342,21 @@ async fn perform_push(app: &AppHandle, client: &reqwest::Client, base_url: &str,
         let state = app.state::<GroupManagerState>();
         let config = group_service::read_group_config(app.clone(), state.clone(), id.to_string()).await?;
         json!({ "id": id, "type": "group", "data": GroupSyncDTO::from(&config) })
+    } else if entity_type == "avatar" {
+        let parts: Vec<&str> = id.split(':').collect();
+        if parts.len() == 2 {
+            let owner_type = parts[0];
+            let owner_id = parts[1];
+            let row = sqlx::query("SELECT file_path FROM avatars WHERE owner_id = ? AND owner_type = ?")
+                .bind(owner_id).bind(owner_type).fetch_one(pool).await.map_err(|e| e.to_string())?;
+            use sqlx::Row;
+            let file_path: String = row.get("file_path");
+            if let Ok(_bytes) = std::fs::read(&file_path) {
+                // 这里我们其实不通过 upload-entity 推送二进制，而是利用 upload-avatar (如果未来有的话)
+                // 或者直接通过现有的逻辑触发。简单起见，推送 metadata，让对方主动来 download
+                json!({ "id": id, "type": "avatar", "data": {} }) 
+            } else { return Ok(()); }
+        } else { return Ok(()); }
     } else { return Ok(()); };
 
     client.post(&format!("{}/api/mobile-sync/upload-entity", base_url)).header("x-sync-token", &settings.sync_token).json(&payload).send().await.map_err(|e| e.to_string())?;
@@ -347,14 +388,19 @@ async fn perform_history_push(app: &AppHandle, client: &reqwest::Client, base_ur
             }
         }
     }
-    client.post(&format!("{}/api/mobile-sync/upload-messages", base_url)).header("x-sync-token", &settings.sync_token).json(&json!({ "topicId": topic_id, "messages": history })).send().await.map_err(|e| e.to_string())?;
+
+    let dto_history: Vec<crate::vcp_modules::sync_dto::MessageSyncDTO> = history.iter().map(crate::vcp_modules::sync_dto::MessageSyncDTO::from).collect();
+    client.post(&format!("{}/api/mobile-sync/upload-messages", base_url))
+        .header("x-sync-token", &settings.sync_token)
+        .json(&json!({ "topicId": topic_id, "messages": dto_history }))
+        .send().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
 async fn perform_history_delta_sync(app: &AppHandle, client: &reqwest::Client, base_url: &str, topic_id: &str, remote_msgs: &Vec<Value>) -> Result<(), String> {
     let db_state = app.state::<DbState>();
     let pool = &db_state.pool;
-    let rows = sqlx::query("SELECT m.msg_id, m.content, m.updated_at, a.hash as att_hash FROM messages m LEFT JOIN message_attachments ma ON m.msg_id = ma.msg_id LEFT JOIN attachments a ON ma.attachment_hash = a.hash WHERE m.topic_id = ? AND m.deleted_at IS NULL").bind(topic_id).fetch_all(pool).await.map_err(|e| e.to_string())?;
+    let rows = sqlx::query("SELECT m.msg_id, m.content, m.updated_at, a.hash as att_hash FROM messages m LEFT JOIN message_attachments ma ON m.msg_id = ma.msg_id LEFT JOIN attachments a ON ma.hash = a.hash WHERE m.topic_id = ? AND m.deleted_at IS NULL").bind(topic_id).fetch_all(pool).await.map_err(|e| e.to_string())?;
     let mut local_map = std::collections::HashMap::new();
     for r in rows {
         use sqlx::Row;
@@ -365,8 +411,11 @@ async fn perform_history_delta_sync(app: &AppHandle, client: &reqwest::Client, b
 
     let mut to_pull_ids = Vec::new();
     let mut to_push = false;
+    let mut remote_ids = std::collections::HashSet::new();
+
     for rm in remote_msgs {
         let rid = rm["msg_id"].as_str().unwrap_or_default().to_string();
+        remote_ids.insert(rid.clone());
         let rhash = rm["content_hash"].as_str().unwrap_or_default();
         let rts = rm["updated_at"].as_i64().unwrap_or(0);
         if let Some((lcontent, lts, latts)) = local_map.get(&rid) {
@@ -376,6 +425,15 @@ async fn perform_history_delta_sync(app: &AppHandle, client: &reqwest::Client, b
             }
         } else { to_pull_ids.push(rid); }
     }
+
+    // Check if mobile has messages that desktop doesn't have
+    for lid in local_map.keys() {
+        if !remote_ids.contains(lid) {
+            to_push = true;
+            break;
+        }
+    }
+
     if to_push { let _ = perform_history_push(app, client, base_url, topic_id).await; }
     if !to_pull_ids.is_empty() {
         let agent_id_row = sqlx::query("SELECT owner_id FROM topics WHERE topic_id = ?").bind(topic_id).fetch_one(pool).await.map_err(|e| e.to_string())?;

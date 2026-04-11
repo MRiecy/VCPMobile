@@ -18,7 +18,7 @@ const vcpPingStatus = ref<{ type: 'success' | 'error' | 'loading' | null; messag
 
 const testVcpConnection = async () => {
   emit('save-request');
-  
+
   if (!props.settings.vcpServerUrl) {
     vcpPingStatus.value = { type: 'error', message: '请先输入 VCP 服务器 URL' };
     return;
@@ -26,11 +26,11 @@ const testVcpConnection = async () => {
 
   vcpPingStatus.value = { type: 'loading', message: '正在验证模型列表...' };
   try {
-    const res = await invoke<{success: boolean, status: number, modelCount: number, models: any}>('test_vcp_connection', {
+    const res = await invoke<{ success: boolean, status: number, modelCount: number, models: any }>('test_vcp_connection', {
       vcpUrl: props.settings.vcpServerUrl,
       vcpApiKey: props.settings.vcpApiKey
     });
-    
+
     if (res.success) {
       vcpPingStatus.value = { type: 'success', message: `连接成功！拉取到 ${res.modelCount} 个可用模型` };
     } else {
@@ -44,46 +44,21 @@ const testVcpConnection = async () => {
 
 <template>
   <div class="space-y-5 px-1">
-    <SettingsTextField 
-      v-model="settings.vcpServerUrl" 
-      label="VCP 服务器 URL (HTTP/HTTPS)" 
-      placeholder="https://vcp-endpoint.com" 
-    />
-    <SettingsTextField 
-      v-model="settings.vcpApiKey" 
-      type="password" 
-      label="VCP API Key" 
-      placeholder="••••••••" 
-    />
+    <SettingsTextField v-model="settings.vcpServerUrl" label="VCP 服务器 URL (HTTP/HTTPS)"
+      placeholder="https://vcp-endpoint.com" />
+    <SettingsTextField v-model="settings.vcpApiKey" type="password" label="VCP API Key" placeholder="••••••••" />
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
-    <SettingsTextField 
-      v-model="settings.vcpLogUrl" 
-      label="VCP WebSocket 服务器 URL" 
-      placeholder="ws://localhost:8024" 
-      mono
-    />
-    <SettingsTextField 
-      v-model="settings.vcpLogKey" 
-      type="password" 
-      label="VCP WebSocket 鉴权 Key" 
-      placeholder="输入 WebSocket Key" 
-      mono
-    />
+    <SettingsTextField v-model="settings.vcpLogUrl" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:8024"
+      mono />
+    <SettingsTextField v-model="settings.vcpLogKey" type="password" label="VCP WebSocket 鉴权 Key"
+      placeholder="输入 WebSocket Key" mono />
 
     <div class="pt-2 flex items-center justify-between gap-4">
-      <SettingsInlineStatus 
-        v-if="vcpPingStatus.type"
-        :type="vcpPingStatus.type" 
-        :message="vcpPingStatus.message" 
-        class="flex-1"
-      />
-      <SettingsActionButton 
-        variant="primary" 
-        :loading="vcpPingStatus.type === 'loading'"
-        @click="testVcpConnection"
-      >
+      <SettingsInlineStatus v-if="vcpPingStatus.type" :type="vcpPingStatus.type" :message="vcpPingStatus.message"
+        class="flex-1" />
+      <SettingsActionButton variant="primary" :loading="vcpPingStatus.type === 'loading'" @click="testVcpConnection">
         验证连接
       </SettingsActionButton>
     </div>

@@ -49,7 +49,7 @@ export const useModelStore = defineStore('model', {
         if (this.models.length === 0) {
           this.models = await invoke<ModelInfo[]>('get_cached_models');
         }
-        
+
         // 只有在明确要求或没缓存时才刷新
         if (force || this.models.length === 0) {
           this.models = await invoke<ModelInfo[]>('refresh_models');

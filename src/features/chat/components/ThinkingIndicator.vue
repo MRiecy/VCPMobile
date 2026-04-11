@@ -28,11 +28,13 @@
 }
 
 @keyframes vcp-dot-pulse {
+
   0%,
   100% {
     transform: scale(0.8);
     opacity: 0.2;
   }
+
   50% {
     transform: scale(1.2);
     opacity: 1;

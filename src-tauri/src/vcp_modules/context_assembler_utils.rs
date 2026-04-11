@@ -16,37 +16,36 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
 
             if let Some(attachments) = &msg.attachments {
                 for att in attachments {
-                    let file_data = att.file_manager_data.as_ref();
-                    
                     // 1. 处理提取的文本内容 (文档类)
-                    if let Some(data) = file_data {
-                        if let Some(text) = &data.extracted_text {
-                            if !text.is_empty() {
-                                combined_text.push_str(&format!(
-                                    "\n\n[附加文件: {}]\n{}\n[/附加文件结束: {}]",
-                                    att.name, text, att.name
-                                ));
-                            }
+                    if let Some(text) = &att.extracted_text {
+                        if !text.is_empty() {
+                            combined_text.push_str(&format!(
+                                "\n\n[附加文件: {}]\n{}\n[/附加文件结束: {}]",
+                                att.name, text, att.name
+                            ));
                         }
                     }
 
                     // 2. 处理多模态文件 (图片/音频/视频)
                     let mime = &att.r#type;
-                    let is_multimodal = mime.starts_with("image/") 
-                                     || mime.starts_with("audio/") 
-                                     || mime.starts_with("video/");
+                    let is_multimodal = mime.starts_with("image/")
+                        || mime.starts_with("audio/")
+                        || mime.starts_with("video/");
 
                     if is_multimodal {
                         // 优先使用物理路径 internal_path
-                        let path = file_data.map(|d| d.internal_path.clone())
-                                           .unwrap_or_else(|| att.src.clone());
-                        
+                        let path = if !att.internal_path.is_empty() {
+                            att.internal_path.clone()
+                        } else {
+                            att.src.clone()
+                        };
+
                         content_parts.push(json!({
                             "type": "local_file",
                             "path": path,
                             "mime": mime
                         }));
-                    } else if file_data.and_then(|d| d.extracted_text.as_ref()).is_none() {
+                    } else if att.extracted_text.is_none() {
                         // 既没有提取文本也不是多模态，仅做标记
                         combined_text.push_str(&format!(
                             "\n\n[附加文件: {}] (不支持直接读取内容)",
@@ -58,10 +57,13 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
 
             // 如果有文本内容，将其作为第一个 part 插入
             if !combined_text.trim().is_empty() {
-                content_parts.insert(0, json!({
-                    "type": "text",
-                    "text": combined_text
-                }));
+                content_parts.insert(
+                    0,
+                    json!({
+                        "type": "text",
+                        "text": combined_text
+                    }),
+                );
             }
 
             // 构造最终的消息对象

@@ -13,33 +13,33 @@ export const useLayoutStore = defineStore('layout', () => {
 
   const setLeftDrawer = (open: boolean) => {
     if (open === leftDrawerOpen.value) return;
-  
+
     if (!open) {
       leftDrawerOpen.value = false;
       unregisterModal('LeftDrawer');
       return;
     }
-  
+
     setRightDrawer(false);
     leftDrawerOpen.value = true;
-  
+
     if (window.innerWidth < 768) {
       registerModal('LeftDrawer', () => { leftDrawerOpen.value = false; });
     }
   };
-  
+
   const setRightDrawer = (open: boolean) => {
     if (open === rightDrawerOpen.value) return;
-  
+
     if (!open) {
       rightDrawerOpen.value = false;
       unregisterModal('RightDrawer');
       return;
     }
-  
+
     setLeftDrawer(false);
     rightDrawerOpen.value = true;
-  
+
     if (window.innerWidth < 768) {
       registerModal('RightDrawer', () => { rightDrawerOpen.value = false; });
     }

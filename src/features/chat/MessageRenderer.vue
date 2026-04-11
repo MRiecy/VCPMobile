@@ -47,9 +47,7 @@ const isStreaming = computed(() => {
 
   // 检查当前消息是否在所属会话的活动流中
   const itemId =
-    props.message.extra?.agentId ||
-    props.message.extra?.groupId ||
-    props.agentId;
+    props.message.agentId || props.message.groupId || props.agentId;
   const topicId = chatStore.currentTopicId;
   if (!itemId || !topicId) return false;
 
@@ -58,9 +56,9 @@ const isStreaming = computed(() => {
   return streams ? streams.has(props.message.id) : false;
 });
 
-// 获取当前消息实际对应的 Agent ID (对于群聊，从 extra 中读取)
+// 获取当前消息实际对应的 Agent ID (对于群聊，从显式字段读取)
 const actualAgentId = computed(() => {
-  return props.message.extra?.agentId || props.agentId;
+  return props.message.agentId || props.agentId;
 });
 
 // 获取当前 Agent 的配置
@@ -229,8 +227,7 @@ const bubbleStyle = computed(() => {
       borderBottomRightRadius: "4px",
     };
 
-  const color =
-    agentConfig.value?.avatarCalculatedColor || props.message.avatarColor;
+  const color = agentConfig.value?.avatarCalculatedColor;
   const baseStyle: any = {
     backgroundColor: "var(--assistant-bubble-bg, rgba(44, 62, 74, 0.8))",
     color: "var(--agent-text, #e8e8e8)",
@@ -250,8 +247,7 @@ const bubbleStyle = computed(() => {
 // 计算名称颜色
 const nameStyle = computed(() => {
   if (isUser.value) return { color: "var(--secondary-text)" };
-  const color =
-    agentConfig.value?.avatarCalculatedColor || props.message.avatarColor;
+  const color = agentConfig.value?.avatarCalculatedColor;
   return { color: color || "var(--highlight-text)" };
 });
 
@@ -274,11 +270,7 @@ const avatarFallbackColor = computed(() => {
     return "rgb(226,54,56)";
   }
 
-  return (
-    agentConfig.value?.avatarCalculatedColor ||
-    props.message.avatarColor ||
-    "#374151"
-  );
+  return agentConfig.value?.avatarCalculatedColor || "#374151";
 });
 
 // 长按菜单触发逻辑
@@ -397,99 +389,50 @@ const handleSaveEdit = async (newContent: string) => {
 </script>
 
 <template>
-  <div
-    v-longpress="showMessageContextMenu"
-    class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0"
-    :data-message-id="message.id"
-    :data-role="message.role"
-  >
-    <MessageHeader
-      :is-user="isUser"
-      :display-name="displayName"
-      :name-style="nameStyle"
-      :avatar-url="resolvedAvatarUrl"
-      :avatar-fallback-text="avatarFallbackText"
-      :avatar-fallback-color="avatarFallbackColor"
-    />
+  <div v-longpress="showMessageContextMenu"
+    class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
+    :data-role="message.role">
+    <MessageHeader :is-user="isUser" :display-name="displayName" :name-style="nameStyle" :avatar-url="resolvedAvatarUrl"
+      :avatar-fallback-text="avatarFallbackText" :avatar-fallback-color="avatarFallbackColor" />
 
-    <ChatBubble
-      :is-user="isUser"
-      :is-streaming="isStreaming"
-      :bubble-style="bubbleStyle"
-    >
+    <ChatBubble :is-user="isUser" :is-streaming="isStreaming" :bubble-style="bubbleStyle">
       <ThinkingIndicator v-if="message.isThinking && streamContent === ''" />
 
       <template v-if="!showStreamView">
-        <div
-          class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden"
-        >
+        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
           <template v-for="(block, index) in contentBlocks" :key="index">
-            <MarkdownBlock
-              v-if="block.type === 'markdown'"
-              :content="block.content"
-              :is-streaming="false"
-            />
-            <ToolBlock
-              v-else-if="block.type === 'tool-use'"
-              :type="block.type"
-              :content="block.content"
-              :block="block"
-            />
-            <ToolBlock
-              v-else-if="block.type === 'tool-result'"
-              :type="block.type"
-              :block="block"
-            />
-            <DiaryBlock
-              v-else-if="block.type === 'diary'"
-              :content="block.content"
-              :block="block"
-            />
-            <ThoughtBlock
-              v-else-if="block.type === 'thought'"
-              :content="block.content"
-              :block="block"
-            />
-            <HtmlPreviewBlock
-              v-else-if="block.type === 'html-preview'"
-              :content="block.content"
-              :message-id="message.id"
-            />
-            <div
-              v-else-if="block.type === 'button-click'"
-              class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1"
-            >
+            <MarkdownBlock v-if="block.type === 'markdown'" :content="block.content" :is-streaming="false" />
+            <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
+              :block="block" />
+            <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />
+            <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
+            <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
+            <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
+              :message-id="message.id" />
+            <div v-else-if="block.type === 'button-click'"
+              class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
               {{ block.content }}
             </div>
           </template>
         </div>
       </template>
       <template v-else>
-        <div
-          class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden"
-        >
+        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
           <MarkdownBlock :content="streamContent" :is-streaming="true" />
         </div>
       </template>
 
-      <AttachmentPreview
-        v-if="message.attachments && message.attachments.length > 0"
-        :attachments="message.attachments"
-        class="pt-3 border-t border-black/5 dark:border-white/5"
-      />
+      <AttachmentPreview v-if="message.attachments && message.attachments.length > 0" :attachments="message.attachments"
+        class="pt-3 border-t border-black/5 dark:border-white/5" />
 
       <StreamingTag v-if="message.isThinking && streamContent !== ''" />
 
       <template #footer>
-        <div
-          class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
-          :class="isUser ? 'text-right' : 'text-left'"
-          :style="
-            isUser
+        <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
+          :class="isUser ? 'text-right' : 'text-left'" :style="isUser
               ? { color: 'var(--secondary-text)' }
               : { color: 'var(--secondary-text)' }
-          "
-        >
+            ">
           {{
             new Date(message.timestamp).toLocaleTimeString([], {
               hour: "2-digit",
@@ -513,6 +456,7 @@ const handleSaveEdit = async (newContent: string) => {
     opacity: 0;
     transform: translateY(10px) scale(0.98);
   }
+
   to {
     opacity: 1;
     transform: translateY(0) scale(1);

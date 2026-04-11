@@ -1,27 +1,10 @@
-use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::message_service;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct FileManagerData {
-    #[serde(rename = "internalPath")]
-    pub internal_path: String,
-    pub r#type: String,
-    #[serde(rename = "extractedText")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extracted_text: Option<String>,
-    #[serde(rename = "imageFrames")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image_frames: Option<Vec<String>>,
-    #[serde(rename = "thumbnailPath")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thumbnail_path: Option<String>,
-}
+use crate::vcp_modules::message_service;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Attachment {
     pub r#type: String,
+    #[serde(default)]
     pub src: String,
     pub name: String,
     pub size: u64,
@@ -29,9 +12,18 @@ pub struct Attachment {
     pub hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    #[serde(rename = "_fileManagerData")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file_manager_data: Option<FileManagerData>,
+
+    // 平铺数据库中的核心附件字段
+    #[serde(rename = "internalPath", default)]
+    pub internal_path: String,
+    #[serde(rename = "extractedText", skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+    #[serde(rename = "imageFrames", skip_serializing_if = "Option::is_none")]
+    pub image_frames: Option<Vec<String>>,
+    #[serde(rename = "thumbnailPath", skip_serializing_if = "Option::is_none")]
+    pub thumbnail_path: Option<String>,
+    #[serde(rename = "createdAt", skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -49,28 +41,33 @@ pub struct ChatMessage {
     pub timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isThinking")]
-    #[serde(alias = "thinking")]
     #[serde(default)]
     pub is_thinking: Option<bool>,
+
+    // 平铺数据库中的核心消息字段
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(rename = "groupId", skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(rename = "isGroupMessage", skip_serializing_if = "Option::is_none")]
+    pub is_group_message: Option<bool>,
+
     #[serde(default)]
     pub attachments: Option<Vec<Attachment>>,
-    /// 捕获所有其他未定义的字段
-    #[serde(flatten)]
-    pub extra: serde_json::Value,
 }
 
 // --- 历史记录存取逻辑 ---
 
 #[tauri::command]
 pub async fn load_chat_history(
-    app_handle: AppHandle,
+    app_handle: tauri::AppHandle,
     owner_id: String,
     owner_type: String,
     topic_id: String,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<ChatMessage>, String> {
-    message_service::load_chat_history_internal(
+    crate::vcp_modules::message_service::load_chat_history_internal(
         &app_handle,
         &owner_id,
         &owner_type,
@@ -83,8 +80,8 @@ pub async fn load_chat_history(
 
 #[tauri::command]
 pub async fn append_single_message(
-    app_handle: AppHandle,
-    db_state: State<'_, DbState>,
+    app_handle: tauri::AppHandle,
+    db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
@@ -103,8 +100,8 @@ pub async fn append_single_message(
 
 #[tauri::command]
 pub async fn patch_single_message(
-    app_handle: AppHandle,
-    db_state: State<'_, DbState>,
+    app_handle: tauri::AppHandle,
+    db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
@@ -123,7 +120,7 @@ pub async fn patch_single_message(
 
 #[tauri::command]
 pub async fn delete_messages(
-    db_state: State<'_, DbState>,
+    db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     topic_id: String,
     msg_ids: Vec<String>,
 ) -> Result<(), String> {
@@ -132,8 +129,8 @@ pub async fn delete_messages(
 
 #[tauri::command]
 pub async fn truncate_history_after_timestamp(
-    app_handle: AppHandle,
-    db_state: State<'_, DbState>,
+    app_handle: tauri::AppHandle,
+    db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     owner_id: String,
     owner_type: String,
     topic_id: String,

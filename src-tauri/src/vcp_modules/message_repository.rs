@@ -12,31 +12,23 @@ impl MessageRepository {
         render_format: &str,
         render_content: &[u8],
     ) -> Result<(), String> {
-        let extra_json = serde_json::to_string(&message.extra).ok();
-
-        let agent_id = message.extra.get("agentId").and_then(|v| v.as_str());
-        let group_id = message.extra.get("groupId").and_then(|v| v.as_str());
-        let is_group_message = message
-            .extra
-            .get("isGroupMessage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
         sqlx::query(
             "INSERT INTO messages (
                 msg_id, topic_id, role, name, agent_id, content, timestamp,
                 is_thinking, is_group_message, group_id,
-                render_format, render_content, render_version, extra_json,
+                render_format, render_content, render_version,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
              ON CONFLICT(msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
                 name = excluded.name,
                 is_thinking = excluded.is_thinking,
+                agent_id = excluded.agent_id,
+                is_group_message = excluded.is_group_message,
+                group_id = excluded.group_id,
                 render_format = excluded.render_format,
                 render_content = excluded.render_content,
-                extra_json = excluded.extra_json,
                 updated_at = excluded.updated_at,
                 deleted_at = NULL",
         )
@@ -44,15 +36,14 @@ impl MessageRepository {
         .bind(topic_id)
         .bind(&message.role)
         .bind(&message.name)
-        .bind(agent_id)
+        .bind(&message.agent_id)
         .bind(&message.content)
         .bind(message.timestamp as i64)
         .bind(message.is_thinking)
-        .bind(is_group_message)
-        .bind(group_id)
+        .bind(message.is_group_message.unwrap_or(false))
+        .bind(&message.group_id)
         .bind(render_format)
         .bind(render_content)
-        .bind(extra_json)
         .bind(message.timestamp as i64) // created_at
         .bind(message.timestamp as i64) // updated_at
         .execute(&mut **tx)
@@ -75,11 +66,7 @@ impl MessageRepository {
                     format!("{:x}", sha2::Digest::finalize(hasher))
                 });
 
-                let internal_path = att.file_manager_data.as_ref().map(|d| d.internal_path.clone()).unwrap_or_default();
-                let fmd_type = att.file_manager_data.as_ref().map(|d| d.r#type.clone()).unwrap_or_else(|| att.r#type.clone());
-                let extracted_text = att.file_manager_data.as_ref().and_then(|d| d.extracted_text.clone());
-                let image_frames = att.file_manager_data.as_ref().and_then(|d| d.image_frames.as_ref()).and_then(|frames| serde_json::to_string(frames).ok());
-                let thumbnail_path = att.file_manager_data.as_ref().and_then(|d| d.thumbnail_path.clone());
+                let image_frames = att.image_frames.as_ref().and_then(|frames| serde_json::to_string(frames).ok());
 
                 sqlx::query(
                     "INSERT INTO attachments (
@@ -96,12 +83,12 @@ impl MessageRepository {
                         updated_at = excluded.updated_at"
                 )
                 .bind(&hash)
-                .bind(&fmd_type)
+                .bind(&att.r#type)
                 .bind(att.size as i64)
-                .bind(&internal_path)
-                .bind(extracted_text)
+                .bind(&att.internal_path)
+                .bind(&att.extracted_text)
                 .bind(image_frames)
-                .bind(thumbnail_path)
+                .bind(&att.thumbnail_path)
                 .bind(message.timestamp as i64)
                 .bind(message.timestamp as i64)
                 .execute(&mut **tx)
@@ -110,8 +97,8 @@ impl MessageRepository {
 
                 sqlx::query(
                     "INSERT INTO message_attachments (
-                        msg_id, hash, attachment_order, display_name, src, status, extra_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, '{}', ?)"
+                        msg_id, hash, attachment_order, display_name, src, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&message.id)
                 .bind(&hash)

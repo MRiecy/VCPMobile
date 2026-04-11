@@ -10,13 +10,14 @@ import { useNotificationStore } from "./notification";
  */
 export interface Topic {
   id: string;
-  agentId?: string; // 所属 Agent ID
+  ownerId?: string; // 所属实体的 ID
+  ownerType?: string; // 实体类型: agent | group
   name: string;
-  createdAt: number; // 修正为驼峰命名，对齐 Rust 端的 #[serde(rename = "createdAt")]
+  createdAt: number;
   locked?: boolean;
   unread?: boolean;
-  unreadCount?: number; // 界面显示的计数: >0 为数字, -1 为小点
-  messageCount?: number; // 话题中的总消息数
+  unreadCount?: number;
+  msgCount?: number;
 }
 
 /**
@@ -48,11 +49,12 @@ export const useTopicStore = defineStore("topic", () => {
       const index = topics.value.findIndex((t) => t.id === payload.topic_id);
       const updatedTopic: Topic = {
         id: payload.topic_id,
-        agentId: payload.agent_id,
+        ownerId: payload.owner_id,
+        ownerType: payload.owner_type,
         name: payload.title,
         createdAt: payload.created_at || Date.now(),
         unreadCount: payload.unread_count,
-        messageCount: payload.msg_count,
+        msgCount: payload.msg_count,
         locked: payload.locked,
         unread: payload.unread,
       };
@@ -119,13 +121,14 @@ export const useTopicStore = defineStore("topic", () => {
       // 命令对应 Rust 中的 get_topics
       const result = await invoke<any[]>("get_topics", { ownerId, ownerType });
 
-      // 映射 Rust 字段到前端状态 (Rust 已对齐 camelCase)
+      // 映射 Rust 字段到前端状态
       topics.value = result.map((t) => ({
         ...t,
-        agentId: ownerId,
-        name: t.title || t.name || t.id,
+        ownerId: ownerId,
+        ownerType: ownerType,
+        name: t.name || t.title || t.id,
         unreadCount: t.unreadCount || 0,
-        messageCount: t.messageCount || 0,
+        msgCount: t.msgCount || 0,
       }));
 
       console.log(
@@ -141,7 +144,11 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 创建新话题
    */
-  const createTopic = async (ownerId: string, ownerType: string, name: string) => {
+  const createTopic = async (
+    ownerId: string,
+    ownerType: string,
+    name: string,
+  ) => {
     try {
       console.log(
         `[TopicStore] Creating new topic "${name}" for ${ownerType} ${ownerId}`,
@@ -155,10 +162,12 @@ export const useTopicStore = defineStore("topic", () => {
       // 初始化默认状态
       const topicWithState: Topic = {
         ...newTopic,
+        ownerId,
+        ownerType,
         unreadCount: 0,
-        messageCount: 0,
+        msgCount: 0,
         unread: false,
-        locked: false,
+        locked: true,
       };
 
       topics.value.unshift(topicWithState);
@@ -182,7 +191,11 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 删除话题
    */
-  const deleteTopic = async (ownerId: string, ownerType: string, topicId: string) => {
+  const deleteTopic = async (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ) => {
     try {
       console.log(`[TopicStore] Deleting topic ${topicId}`);
       // 注意：确保 Rust 端已实现 delete_topic 命令
@@ -236,7 +249,11 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 切换话题锁定状态
    */
-  const toggleTopicLock = async (ownerId: string, ownerType: string, topicId: string) => {
+  const toggleTopicLock = async (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ) => {
     try {
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index === -1) return;

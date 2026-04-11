@@ -101,32 +101,28 @@ watch([() => props.content, isPreviewing], () => {
         <div class="i-ph:code-block w-3 h-3 text-emerald-400"></div>
         HTML 代码块
       </span>
-      <button 
-        @click.stop="togglePreview"
-        class="text-[10px] px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-all flex items-center gap-1 border border-emerald-500/20"
-      >
+      <button @click.stop="togglePreview"
+        class="text-[10px] px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 transition-all flex items-center gap-1 border border-emerald-500/20">
         <span v-if="isPreviewing" class="i-ph:code w-3 h-3"></span>
         <span v-else class="i-ph:play w-3 h-3"></span>
         {{ isPreviewing ? '返回代码' : '播放预览' }}
       </button>
     </div>
-    
+
     <div class="p-0 transition-all duration-300">
       <!-- 代码视图 (优化了溢出与换行策略) -->
-      <div v-show="!isPreviewing" class="max-h-[50vh] w-full overflow-x-auto overflow-y-auto bg-[#0d1117] p-3 text-[11px] font-mono text-gray-300 leading-relaxed rounded-b-xl custom-scrollbar">
+      <div v-show="!isPreviewing"
+        class="max-h-[50vh] w-full overflow-x-auto overflow-y-auto bg-[#0d1117] p-3 text-[11px] font-mono text-gray-300 leading-relaxed rounded-b-xl custom-scrollbar">
         <!-- 去掉 break-all，改用原生水平滚动，保留代码格式缩进 -->
         <pre class="w-full min-w-max"><code class="whitespace-pre">{{ content }}</code></pre>
       </div>
-      
+
       <!-- 预览视图 (iframe 沙箱：增加了最大宽度限制和滚动隔离) -->
-      <div v-show="isPreviewing" class="w-full max-w-full relative bg-[#1e1e1e]/50 backdrop-blur-md rounded-b-xl overflow-hidden" :style="{ height: iframeHeight, transition: 'height 0.3s ease' }">
-        <iframe
-          v-if="isPreviewing"
-          ref="iframeRef"
-          :srcdoc="iframeSrcdoc"
-          class="w-full h-full border-none absolute inset-0 block"
-          sandbox="allow-scripts allow-popups"
-        ></iframe>
+      <div v-show="isPreviewing"
+        class="w-full max-w-full relative bg-[#1e1e1e]/50 backdrop-blur-md rounded-b-xl overflow-hidden"
+        :style="{ height: iframeHeight, transition: 'height 0.3s ease' }">
+        <iframe v-if="isPreviewing" ref="iframeRef" :srcdoc="iframeSrcdoc"
+          class="w-full h-full border-none absolute inset-0 block" sandbox="allow-scripts allow-popups"></iframe>
       </div>
     </div>
   </div>
@@ -145,13 +141,16 @@ watch([() => props.content, isPreviewing], () => {
   width: 6px;
   height: 6px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-track {
   background: rgba(0, 0, 0, 0.1);
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.15);
   border-radius: 3px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.25);
 }

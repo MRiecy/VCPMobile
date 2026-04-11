@@ -25,7 +25,8 @@ defineExpose({ open, close });
 
     <!-- Drawer -->
     <Transition name="slide-up">
-      <div v-if="isOpen" class="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 rounded-t-3xl shadow-2xl max-h-[80vh] flex flex-col overflow-hidden pb-safe pointer-events-auto">
+      <div v-if="isOpen"
+        class="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 rounded-t-3xl shadow-2xl max-h-[80vh] flex flex-col overflow-hidden pb-safe pointer-events-auto">
         <!-- Handle -->
         <div class="flex-center py-3">
           <div class="w-12 h-1.5 bg-gray-300 dark:bg-gray-600 rounded-full"></div>

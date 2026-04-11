@@ -25,38 +25,21 @@ const handleEditorSave = (newContent: string) => {
 <template>
   <div class="fixed inset-0 pointer-events-none">
     <!-- 1. 全局基础 UI (Prompt/Toast) -->
-    <VcpPrompt
-      v-if="overlayStore.promptConfig"
-      class="pointer-events-auto"
-      :is-open="!!overlayStore.promptConfig"
-      :title="overlayStore.promptConfig.title"
-      :initial-value="overlayStore.promptConfig.initialValue"
-      :placeholder="overlayStore.promptConfig.placeholder"
-      @confirm="handlePromptConfirm"
-      @cancel="overlayStore.closePrompt()"
-      @update:isOpen="!$event && overlayStore.closePrompt()"
-    />
+    <VcpPrompt v-if="overlayStore.promptConfig" class="pointer-events-auto" :is-open="!!overlayStore.promptConfig"
+      :title="overlayStore.promptConfig.title" :initial-value="overlayStore.promptConfig.initialValue"
+      :placeholder="overlayStore.promptConfig.placeholder" @confirm="handlePromptConfirm"
+      @cancel="overlayStore.closePrompt()" @update:isOpen="!$event && overlayStore.closePrompt()" />
 
     <!-- 全局 Context Menu -->
-    <ContextMenuSheet
-      v-if="overlayStore.contextMenuConfig"
-      :is-open="!!overlayStore.contextMenuConfig"
-      :title="overlayStore.contextMenuConfig.title"
-      :actions="overlayStore.contextMenuConfig.actions"
-      @close="overlayStore.closeContextMenu()"
-      @action-click="overlayStore.closeContextMenu()"
-    />
+    <ContextMenuSheet v-if="overlayStore.contextMenuConfig" :is-open="!!overlayStore.contextMenuConfig"
+      :title="overlayStore.contextMenuConfig.title" :actions="overlayStore.contextMenuConfig.actions"
+      @close="overlayStore.closeContextMenu()" @action-click="overlayStore.closeContextMenu()" />
 
     <!-- 全局 FullScreenEditor -->
-    <FullScreenEditor
-      v-if="overlayStore.editorConfig"
-      class="pointer-events-auto"
-      :is-open="!!overlayStore.editorConfig"
-      :initial-value="overlayStore.editorConfig.initialValue"
-      @save="handleEditorSave"
-      @cancel="overlayStore.closeEditor()"
-      @update:isOpen="!$event && overlayStore.closeEditor()"
-    />
+    <FullScreenEditor v-if="overlayStore.editorConfig" class="pointer-events-auto"
+      :is-open="!!overlayStore.editorConfig" :initial-value="overlayStore.editorConfig.initialValue"
+      @save="handleEditorSave" @cancel="overlayStore.closeEditor()"
+      @update:isOpen="!$event && overlayStore.closeEditor()" />
 
     <ToastManager class="pointer-events-auto" />
 
@@ -66,5 +49,4 @@ const handleEditorSave = (newContent: string) => {
   </div>
 </template>
 
-<style scoped>
-</style>
+<style scoped></style>

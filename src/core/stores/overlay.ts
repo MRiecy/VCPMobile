@@ -9,14 +9,14 @@ export const useOverlayStore = defineStore('overlay', () => {
   const promptConfig = ref<PromptConfig | null>(null);
   const contextMenuConfig = ref<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
-  
+
   const isSettingsOpen = ref(false);
   const isSyncOpen = ref(false);
 
   const openSettings = () => {
     isSettingsOpen.value = true;
-    registerModal('SettingsView', () => { 
-      isSettingsOpen.value = false; 
+    registerModal('SettingsView', () => {
+      isSettingsOpen.value = false;
     });
   };
 

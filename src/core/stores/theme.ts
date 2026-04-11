@@ -58,25 +58,25 @@ export const useThemeStore = defineStore('theme', () => {
   const isDarkResolved = ref(true);
   const lastModeSwitchAt = ref(0);
   const MODE_SWITCH_DEBOUNCE_MS = 500;
-  
+
   let initialTheme = localStorage.getItem('vcp-theme-name');
   if (initialTheme && LEGACY_THEME_MAP[initialTheme]) {
     initialTheme = LEGACY_THEME_MAP[initialTheme];
     localStorage.setItem('vcp-theme-name', initialTheme);
   }
   const currentTheme = ref(initialTheme || DEFAULT_THEME);
-  
+
   const availableThemes = ref<ThemeInfo[]>([]);
 
   const fetchThemes = async () => {
     // Parse themes purely on frontend
     const themes: ThemeInfo[] = [];
-    
+
     for (const [path, content] of Object.entries(rawThemes)) {
       const fileName = path.split('/').pop() || '';
-      
+
       const name = THEME_DISPLAY_NAMES[fileName] || fileName.replace('.css', '').replace('themes-', '');
-      
+
       const extractVariables = (scopeRegex: RegExp) => {
         const variables: Record<string, string> = {};
         const scopeMatch = content.match(scopeRegex);
@@ -102,7 +102,7 @@ export const useThemeStore = defineStore('theme', () => {
         }
       });
     }
-    
+
     availableThemes.value = themes;
   };
 
@@ -110,15 +110,15 @@ export const useThemeStore = defineStore('theme', () => {
     try {
       currentTheme.value = fileName;
       localStorage.setItem('vcp-theme-name', fileName);
-      
+
       const themePath = `../../assets/themes/${fileName}`;
       const css = inlineThemes[themePath];
-      
+
       if (!css) {
         console.warn('Theme CSS not found in bundle:', fileName);
         return;
       }
-      
+
       let styleTag = document.getElementById('vcp-custom-theme');
       if (!styleTag) {
         styleTag = document.createElement('style');
@@ -126,7 +126,7 @@ export const useThemeStore = defineStore('theme', () => {
         document.head.appendChild(styleTag);
       }
       styleTag.textContent = css;
-      
+
       // Re-apply current mode to the new CSS rules
       applyTheme(mode.value);
     } catch (error) {

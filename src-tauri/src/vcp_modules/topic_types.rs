@@ -14,7 +14,8 @@ pub struct Topic {
     pub unread_count: i32,
     #[serde(rename = "msgCount", default)]
     pub msg_count: i32,
-    /// 捕获并保留所有额外的动态字段
-    #[serde(flatten)]
-    pub extra_fields: serde_json::Map<String, serde_json::Value>,
+    #[serde(rename = "ownerId", default)]
+    pub owner_id: String,
+    #[serde(rename = "ownerType", default)]
+    pub owner_type: String,
 }

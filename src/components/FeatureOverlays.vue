@@ -28,15 +28,9 @@ onMounted(() => {
 <template>
   <!-- 这里的组件虽然声明在此，但会通过 Teleport 渲染到 GlobalOverlayManager 中 -->
   <div v-if="isMounted">
-    <SettingsView 
-      :is-open="overlayStore.isSettingsOpen" 
-      @close="overlayStore.closeSettings()" 
-      @open-sync="overlayStore.openSync()" 
-    />
-    
-    <SyncView 
-      :is-open="overlayStore.isSyncOpen" 
-      @close="overlayStore.closeSync()" 
-    />
+    <SettingsView :is-open="overlayStore.isSettingsOpen" @close="overlayStore.closeSettings()"
+      @open-sync="overlayStore.openSync()" />
+
+    <SyncView :is-open="overlayStore.isSyncOpen" @close="overlayStore.closeSync()" />
   </div>
 </template>

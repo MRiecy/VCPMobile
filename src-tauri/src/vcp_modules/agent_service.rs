@@ -112,7 +112,8 @@ pub async fn read_agent_config_internal<R: Runtime>(
                 unread: tr.get::<i32, _>("unread") != 0,
                 unread_count: 0,
                 msg_count: 0,
-                extra_fields: serde_json::Map::new(),
+                owner_id: agent_id.to_string(),
+                owner_type: "agent".to_string(),
             });
         }
 
@@ -273,6 +274,26 @@ async fn internal_write_agent_config<R: Runtime>(
     let dto = AgentSyncDTO::from(new_config);
     let config_hash = compute_deterministic_hash(&dto);
 
+    // 只有当哈希发生变化时，才通知同步中心
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let rows = sqlx::query("SELECT config_hash FROM agents WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
+        
+        if old_hash.as_ref() != Some(&config_hash) {
+            let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
+                id: agent_id.to_string(),
+                data_type: SyncDataType::Agent,
+                hash: config_hash.clone(),
+                ts: now,
+            });
+        }
+    }
+
     sqlx::query(
         "UPDATE agents SET 
             name = ?, 
@@ -331,15 +352,7 @@ async fn internal_write_agent_config<R: Runtime>(
 
     tx.commit().await.map_err(|e| e.to_string())?;
     
-    // 通知同步中心：本地数据已变动
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-            id: agent_id.to_string(),
-            data_type: SyncDataType::Agent,
-            hash: config_hash,
-            ts: now,
-        });
-    }
+    // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 
     state.caches.insert(agent_id.to_string(), new_config.clone());
 
@@ -423,7 +436,8 @@ pub async fn create_agent(
                 unread: false,
                 unread_count: 0,
                 msg_count: 0,
-                extra_fields: serde_json::Map::new(),
+                owner_id: agent_id.clone(),
+                owner_type: "agent".to_string(),
             }],
         }
     };

@@ -37,65 +37,73 @@ const toggleExpand = () => {
 
 <style scoped>
 .vcp-thought-block {
-    background: rgba(0, 0, 0, 0.03) !important;
-    border-radius: 12px !important;
-    border: 1px solid rgba(0, 0, 0, 0.1);
-    margin: 10px 0 !important;
-    position: relative;
-    font-size: 0.92em !important;
-    line-height: 1.6;
-    width: fit-content;
-    max-width: 98%;
-    transition: all 0.3s ease;
+  background: rgba(0, 0, 0, 0.03) !important;
+  border-radius: 12px !important;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  margin: 10px 0 !important;
+  position: relative;
+  font-size: 0.92em !important;
+  line-height: 1.6;
+  width: fit-content;
+  max-width: 98%;
+  transition: all 0.3s ease;
 }
 
 html.dark .vcp-thought-block {
-    background: rgba(120, 120, 128, 0.05) !important;
-    border-color: rgba(120, 120, 128, 0.2);
+  background: rgba(120, 120, 128, 0.05) !important;
+  border-color: rgba(120, 120, 128, 0.2);
 }
 
 .thought-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
-    user-select: none;
-    opacity: 0.8;
-    transition: opacity 0.2s;
-    padding: 10px 15px !important;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.8;
+  transition: opacity 0.2s;
+  padding: 10px 15px !important;
 }
 
 .thought-header:hover {
-    opacity: 1;
+  opacity: 1;
 }
 
 .thought-icon {
-    font-size: 1.1em;
-    filter: grayscale(0.5);
+  font-size: 1.1em;
+  filter: grayscale(0.5);
 }
 
 .thought-label {
-    font-weight: 600;
-    font-size: 0.95em;
+  font-weight: 600;
+  font-size: 0.95em;
 }
 
 .thought-content {
-    padding: 0 15px 10px 15px;
-    border-top: 1px dashed rgba(120, 120, 128, 0.2);
-    margin-top: 5px;
-    padding-top: 10px;
+  padding: 0 15px 10px 15px;
+  border-top: 1px dashed rgba(120, 120, 128, 0.2);
+  margin-top: 5px;
+  padding-top: 10px;
 }
 
 .thought-body {
-    font-style: italic;
-    opacity: 0.8;
+  font-style: italic;
+  opacity: 0.8;
 }
 
 .animate-slide-down {
   animation: slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
 @keyframes slideDown {
-  from { opacity: 0; transform: translateY(-10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>

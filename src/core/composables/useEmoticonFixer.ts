@@ -42,18 +42,18 @@ export function useEmoticonFixer() {
         img.style.visibility = 'visible';
         return;
       }
-      
+
       const originalSrc = img.src;
-      
+
       // 2. 只有包含“表情包”关键词的才尝试修复
       const isEmoticon = decodeURIComponent(originalSrc).includes('表情包');
       if (!isEmoticon) {
         img.style.visibility = 'visible';
         return;
       }
-      
+
       img.dataset.vcpFixed = 'true';
-      
+
       try {
         const fixedUrl = await fixUrl(originalSrc);
         if (fixedUrl && fixedUrl !== originalSrc) {

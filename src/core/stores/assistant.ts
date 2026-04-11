@@ -10,7 +10,8 @@ export interface Topic {
   unread: boolean;
   unreadCount: number;
   msgCount: number;
-  [key: string]: any;
+  ownerId: string;
+  ownerType: string;
 }
 
 export interface AgentConfig {

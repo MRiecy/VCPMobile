@@ -3,41 +3,46 @@ import MarkdownBlock from './MarkdownBlock.vue';
 import type { ContentBlock } from '../../../core/composables/useContentProcessor';
 
 defineProps<{
-  content: string;
-  block: ContentBlock;
+    content: string;
+    block: ContentBlock;
 }>();
 </script>
 
 <template>
-  <div class="maid-diary-bubble">
-    <div class="diary-header">
-      <span class="diary-title">Maid's Diary</span>
-      <span v-if="block.date" class="diary-date">{{ block.date }}</span>
-    </div>
+    <div class="maid-diary-bubble">
+        <div class="diary-header">
+            <span class="diary-title">Maid's Diary</span>
+            <span v-if="block.date" class="diary-date">{{ block.date }}</span>
+        </div>
 
-    <div v-if="block.maid" class="diary-maid-info">
-      <span class="diary-maid-label">Maid:</span>
-      <span class="diary-maid-name">{{ block.maid }}</span>
-    </div>
+        <div v-if="block.maid" class="diary-maid-info">
+            <span class="diary-maid-label">Maid:</span>
+            <span class="diary-maid-name">{{ block.maid }}</span>
+        </div>
 
-    <div class="diary-content">
-      <MarkdownBlock :content="content" />
+        <div class="diary-content">
+            <MarkdownBlock :content="content" />
+        </div>
     </div>
-  </div>
 </template>
 
 <style scoped>
 .maid-diary-bubble {
-    background: #fdfaf6 !important; /* A very light, warm parchment color */
-    border: 1px solid #eaddd0; /* A soft, paper-like border */
+    background: #fdfaf6 !important;
+    /* A very light, warm parchment color */
+    border: 1px solid #eaddd0;
+    /* A soft, paper-like border */
     border-radius: 8px !important;
-    padding: 12px 14px 15px 36px !important; /* Adjusted padding for new icon placement */
-    color: #5d4037 !important; /* A warm, dark brown for text */
+    padding: 12px 14px 15px 36px !important;
+    /* Adjusted padding for new icon placement */
+    color: #5d4037 !important;
+    /* A warm, dark brown for text */
     box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
     margin-top: 10px !important;
     margin-bottom: 12px !important;
     position: relative;
-    overflow: visible; /* Allow for potential pseudo-elements to peek out */
+    overflow: visible;
+    /* Allow for potential pseudo-elements to peek out */
     line-height: 1.7;
     font-family: 'Georgia', 'Times New Roman', serif !important;
 }
@@ -51,7 +56,8 @@ defineProps<{
     font-size: 18px;
     opacity: 0.6;
     z-index: 2;
-    transform: rotate(0deg); /* Fixed tilt */
+    transform: rotate(0deg);
+    /* Fixed tilt */
 }
 
 .diary-header {
@@ -99,9 +105,11 @@ defineProps<{
 
 /* --- Maid Diary Dark Theme Overrides --- */
 html.dark .maid-diary-bubble {
-    background: #2c2a3a !important; /* A deep, slightly magical purple-gray */
+    background: #2c2a3a !important;
+    /* A deep, slightly magical purple-gray */
     border-color: #4a485f;
-    color: #d8d2c9 !important; /* A soft, parchment-like off-white */
+    color: #d8d2c9 !important;
+    /* A soft, parchment-like off-white */
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
 }
 
@@ -110,7 +118,8 @@ html.dark .diary-header {
 }
 
 html.dark .diary-title {
-    color: #ffb74d; /* A warm, golden-orange for the title */
+    color: #ffb74d;
+    /* A warm, golden-orange for the title */
 }
 
 html.dark .diary-date {

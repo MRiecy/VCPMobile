@@ -1,5 +1,7 @@
 use crate::vcp_modules::agent_types::AgentConfig;
+use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::group_types::GroupConfig;
+use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
 
 /// =================================================================
@@ -7,7 +9,6 @@ use serde::{Deserialize, Serialize};
 /// =================================================================
 
 /// 智能体同步数据传输对象
-/// 仅包含两端共有的、需要同步的核心字段
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSyncDTO {
@@ -71,6 +72,129 @@ impl From<&GroupConfig> for GroupSyncDTO {
             invite_prompt: config.invite_prompt.clone(),
             use_unified_model: config.use_unified_model,
             unified_model: config.unified_model.clone(),
+        }
+    }
+}
+
+/// 话题同步数据传输对象
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicSyncDTO {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub locked: bool,
+    pub unread: bool,
+    pub owner_id: String,
+    pub owner_type: String,
+}
+
+impl From<&Topic> for TopicSyncDTO {
+    fn from(topic: &Topic) -> Self {
+        Self {
+            id: topic.id.clone(),
+            name: topic.name.clone(),
+            created_at: topic.created_at,
+            locked: topic.locked,
+            unread: topic.unread,
+            owner_id: topic.owner_id.clone(),
+            owner_type: if topic.owner_type.is_empty() {
+                "agent".to_string()
+            } else {
+                topic.owner_type.clone()
+            },
+        }
+    }
+}
+
+/// 附件解析数据同步 DTO (跨端共享的计算/解析结果)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileManagerDataSyncDTO {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_frames: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+}
+
+/// 附件同步 DTO
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentSyncDTO {
+    pub r#type: String,
+    pub name: String,
+    pub size: u64,
+    pub hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+
+    // 附件解析元数据
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extracted_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_frames: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+}
+
+impl From<&Attachment> for AttachmentSyncDTO {
+    fn from(att: &Attachment) -> Self {
+        Self {
+            r#type: att.r#type.clone(),
+            name: att.name.clone(),
+            size: att.size,
+            hash: att.hash.clone().unwrap_or_default(),
+            status: att.status.clone(),
+            extracted_text: att.extracted_text.clone(),
+            image_frames: att.image_frames.clone(),
+            created_at: att.created_at,
+        }
+    }
+}
+
+/// 消息同步 DTO (双端共识契约)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSyncDTO {
+    pub id: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub content: String,
+    pub timestamp: u64,
+
+    // 扩展元数据 (仅包含“真理”，不包含本地路径等推导字段)
+    #[serde(rename = "isThinking", skip_serializing_if = "Option::is_none")]
+    pub is_thinking: Option<bool>,
+    #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(rename = "groupId", skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    #[serde(rename = "isGroupMessage", skip_serializing_if = "Option::is_none")]
+    pub is_group_message: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<AttachmentSyncDTO>>,
+}
+
+impl From<&ChatMessage> for MessageSyncDTO {
+    fn from(msg: &ChatMessage) -> Self {
+        Self {
+            id: msg.id.clone(),
+            role: msg.role.clone(),
+            name: msg.name.clone(),
+            content: msg.content.clone(),
+            timestamp: msg.timestamp,
+            is_thinking: msg.is_thinking,
+            agent_id: msg.agent_id.clone(),
+            group_id: msg.group_id.clone(),
+            is_group_message: msg.is_group_message,
+            attachments: msg
+                .attachments
+                .as_ref()
+                .map(|atts| atts.iter().map(AttachmentSyncDTO::from).collect()),
         }
     }
 }

@@ -111,7 +111,8 @@ pub async fn read_group_config_internal<R: Runtime>(
                 unread: tr.get::<i32, _>("unread") != 0,
                 unread_count: tr.get("unread_count"),
                 msg_count: tr.get("msg_count"),
-                extra_fields: serde_json::Map::new(),
+                owner_id: group_id.to_string(),
+                owner_type: "group".to_string(),
             });
         }
 
@@ -270,7 +271,8 @@ pub async fn create_group(
         unread: false,
         unread_count: 0,
         msg_count: 0,
-        extra_fields: serde_json::Map::new(),
+        owner_id: group_id.clone(),
+        owner_type: "group".to_string(),
     };
 
     let config = GroupConfig {
@@ -341,6 +343,26 @@ async fn internal_write_group_config<R: Runtime>(
 
     let dto = GroupSyncDTO::from(config);
     let config_hash = compute_deterministic_hash(&dto);
+
+    // 只有当哈希发生变化时，才通知同步中心
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let rows = sqlx::query("SELECT config_hash FROM groups WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
+        
+        if old_hash.as_ref() != Some(&config_hash) {
+            let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
+                id: group_id.to_string(),
+                data_type: SyncDataType::Group,
+                hash: config_hash.clone(),
+                ts: now,
+            });
+        }
+    }
 
     sqlx::query(
         "INSERT INTO groups (
@@ -426,15 +448,7 @@ async fn internal_write_group_config<R: Runtime>(
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    // 通知同步中心：本地数据已变动
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-            id: group_id.to_string(),
-            data_type: SyncDataType::Group,
-            hash: config_hash,
-            ts: now,
-        });
-    }
+    // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 
     state.caches.insert(group_id.to_string(), config.clone());
 

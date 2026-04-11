@@ -1,4 +1,4 @@
-use crate::vcp_modules::chat_manager::{Attachment, ChatMessage, FileManagerData};
+use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::message_render_compiler::MessageRenderCompiler;
 use crate::vcp_modules::emoticon_manager::EmoticonManagerState;
@@ -6,7 +6,6 @@ use crate::vcp_modules::settings_manager;
 use tauri::{AppHandle, Manager};
 use std::path::Path;
 use tokio::fs;
-use serde_json::json;
 
 /// =================================================================
 /// vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
@@ -27,7 +26,7 @@ pub async fn load_chat_history_internal(
     let offset = offset.unwrap_or(0);
 
     let rows = sqlx::query(
-        "SELECT msg_id, role, name, content, timestamp, is_thinking, extra_json 
+        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id 
          FROM messages 
          WHERE topic_id = ? AND deleted_at IS NULL 
          ORDER BY timestamp DESC 
@@ -49,12 +48,10 @@ pub async fn load_chat_history_internal(
         let content: String = row.get("content");
         let timestamp: i64 = row.get("timestamp");
         let is_thinking: Option<bool> = Some(row.get::<i64, _>("is_thinking") != 0);
-        let extra_json: String = row.get("extra_json");
-        let extra: serde_json::Value = serde_json::from_str(&extra_json).unwrap_or(json!({}));
 
         // 加载该消息的所有附件
         let att_rows = sqlx::query(
-            "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, 
+            "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
@@ -68,20 +65,25 @@ pub async fn load_chat_history_internal(
 
         let mut attachments = Vec::new();
         for ar in att_rows {
+            let hash: String = ar.get("hash");
+            let mime_type: String = ar.get("mime_type");
+            let internal_path: String = ar.get("internal_path");
+            let display_name: String = ar.get("display_name");
+            let size_i64: i64 = ar.get("size");
+            let created_at_i64: i64 = ar.get("created_at");
+            
             attachments.push(Attachment {
-                r#type: ar.get("mime_type"),
+                r#type: mime_type,
                 src: ar.get("src"),
-                name: ar.get("display_name"),
-                size: ar.get::<i64, _>("size") as u64,
-                hash: Some(ar.get("hash")),
+                name: display_name,
+                size: size_i64 as u64,
+                hash: Some(hash),
                 status: Some(ar.get("status")),
-                file_manager_data: Some(FileManagerData {
-                    internal_path: ar.get("internal_path"),
-                    r#type: ar.get("mime_type"),
-                    extracted_text: ar.get("extracted_text"),
-                    image_frames: ar.get::<Option<String>, _>("image_frames").and_then(|s| serde_json::from_str(&s).ok()),
-                    thumbnail_path: ar.get("thumbnail_path"),
-                }),
+                internal_path,
+                extracted_text: ar.get("extracted_text"),
+                image_frames: ar.get::<Option<String>, _>("image_frames").and_then(|s| serde_json::from_str(&s).ok()),
+                thumbnail_path: ar.get("thumbnail_path"),
+                created_at: Some(created_at_i64 as u64),
             });
         }
 
@@ -92,8 +94,10 @@ pub async fn load_chat_history_internal(
             content,
             timestamp: timestamp as u64,
             is_thinking,
+            agent_id: row.get("agent_id"),
+            group_id: row.get("group_id"),
+            is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
             attachments: if attachments.is_empty() { None } else { Some(attachments) },
-            extra,
         });
     }
 
@@ -143,15 +147,7 @@ async fn ensure_attachments_locally(app: &AppHandle, message: &mut ChatMessage) 
 
         // 强制归一化：将电脑路径修改为手机本地路径
         att.src = local_path_str.clone();
-        if let Some(fmd) = &mut att.file_manager_data {
-            fmd.internal_path = local_path_str;
-        } else {
-            att.file_manager_data = Some(FileManagerData {
-                internal_path: local_path_str,
-                r#type: att.r#type.clone(),
-                ..Default::default()
-            });
-        }
+        att.internal_path = local_path_str;
     }
     Ok(())
 }

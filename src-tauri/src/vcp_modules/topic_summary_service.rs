@@ -1,11 +1,9 @@
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
-
-use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 /// 话题总结的默认 Prompt
 const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一个简洁的话题标题。要求：1. 标题长度控制在10个汉字以内。2. 标题本身不能包含任何标点符号、数字编号 or 任何非标题文字。3. 直接给出标题文字，不要添加任何解释或前缀。";

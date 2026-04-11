@@ -55,13 +55,13 @@ export const useNotificationStore = defineStore('notification', () => {
     // 1. 入历史列表（置顶）
     historyList.value.unshift(notification);
     if (historyList.value.length > 100) historyList.value.pop();
-    
+
     unreadCount.value++;
 
     // 2. 推入活动气泡 (抽屉打开时抑制 Toast)
     if (!isDrawerOpen.value) {
       activeToasts.value.push(notification);
-      
+
       // 3. 自动移除逻辑 (如果 duration 为 0 则不自动消失)
       if (notification.duration !== 0) {
         setTimeout(() => {
@@ -97,12 +97,12 @@ export const useNotificationStore = defineStore('notification', () => {
           approved: action.value
         }
       };
-      
+
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         // 通过 vcp_log_service 接口回传
         await invoke('send_vcp_log_message', { payload: response });
-        
+
         // 处理后 UI 反馈：清空按钮并从 Toast 移除
         item.actions = [];
         item.message = `[已处理] 操作: ${action.label}`;

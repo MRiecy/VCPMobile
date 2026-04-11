@@ -17,7 +17,7 @@ pub async fn get_topics(
         "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count 
          FROM topics 
          WHERE owner_id = ? AND owner_type = ? AND deleted_at IS NULL 
-         ORDER BY updated_at DESC",
+         ORDER BY created_at DESC",
     )
     .bind(&owner_id)
     .bind(&owner_type)
@@ -36,7 +36,8 @@ pub async fn get_topics(
             unread: row.get::<i32, _>("unread") != 0,
             unread_count: row.get("unread_count"),
             msg_count: row.get("msg_count"),
-            extra_fields: serde_json::Map::new(),
+            owner_id: owner_id.clone(),
+            owner_type: owner_type.clone(),
         });
     }
     Ok(topics)
@@ -55,26 +56,23 @@ pub async fn create_topic(
         .unwrap()
         .as_millis() as i64;
 
-    let id = if owner_type == "group" {
-        format!("group_topic_{}", now)
-    } else {
-        format!("topic_{}", now)
-    };
+    let id = format!("topic_{}", now);
 
     let topic = Topic {
         id: id.clone(),
         name: name.clone(),
         created_at: now,
-        locked: false,
+        locked: true,
         unread: false,
         unread_count: 0,
         msg_count: 0,
-        extra_fields: serde_json::Map::new(),
+        owner_id: owner_id.clone(),
+        owner_type: owner_type.clone(),
     };
 
     sqlx::query(
-        "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, revision, msg_count, locked, unread, unread_count)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)",
+        "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, msg_count, locked, unread, unread_count)
+         VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0)",
     )
     .bind(&id)
     .bind(&owner_id)

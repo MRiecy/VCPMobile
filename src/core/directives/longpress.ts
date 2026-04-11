@@ -24,7 +24,7 @@ export const vLongpress: Directive = {
     const start = (e: Event) => {
       // 如果是鼠标事件且不是左键，跳过（右键由 contextmenu 处理）
       if (e.type === 'mousedown' && (e as MouseEvent).button !== 0) {
-        return; 
+        return;
       }
       isTouchMoved = false;
 
@@ -56,7 +56,7 @@ export const vLongpress: Directive = {
     };
 
     // --- 绑定事件 ---
-    
+
     // Touch events (移动端)
     el.addEventListener('touchstart', start, { passive: true });
     el.addEventListener('touchend', cancel);

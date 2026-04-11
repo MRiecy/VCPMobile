@@ -7,14 +7,52 @@ use sha2::{Digest, Sha256};
 
 /// 计算 JSON 的确定性 SHA-256 Hash
 pub fn compute_deterministic_hash<T: Serialize>(data: &T) -> String {
-    // 将对象序列化为 JSON 字符串
-    // 注意：serde_json 的转序列化对于字段顺序是确定的 (在相同的 Rust 版本和编译目标下)
-    if let Ok(json_str) = serde_json::to_string(data) {
+    if let Ok(val) = serde_json::to_value(data) {
+        let json_str = stable_stringify(&val);
         let mut hasher = Sha256::new();
         hasher.update(json_str.as_bytes());
         format!("{:x}", hasher.finalize())
     } else {
         "".to_string()
+    }
+}
+
+pub fn stable_stringify(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut res = String::new();
+            res.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    res.push(',');
+                }
+                res.push_str(&format!(
+                    "\"{}\":{}",
+                    k,
+                    stable_stringify(map.get(*k).unwrap())
+                ));
+            }
+            res.push('}');
+            res
+        }
+        serde_json::Value::Array(arr) => {
+            let mut res = String::new();
+            res.push('[');
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 {
+                    res.push(',');
+                }
+                res.push_str(&stable_stringify(v));
+            }
+            res.push(']');
+            res
+        }
+        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_default(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => "null".to_string(),
     }
 }
 
@@ -86,9 +124,13 @@ impl DiffResult {
             // ts 相等，但 hash 不同。触发仲裁：强制打破平局，保证多端绝对一致
             if local.hash < remote.hash {
                 // 字符串较小的胜出 (规则可以互换，只需双端一致即可)
-                DiffResult::Arbitrated { action: ArbitratedAction::Pull }
+                DiffResult::Arbitrated {
+                    action: ArbitratedAction::Pull,
+                }
             } else {
-                DiffResult::Arbitrated { action: ArbitratedAction::Push }
+                DiffResult::Arbitrated {
+                    action: ArbitratedAction::Push,
+                }
             }
         }
     }

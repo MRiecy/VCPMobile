@@ -62,7 +62,7 @@ const renderer = {
         console.warn('Failed to convert image path to asset protocol:', href, e);
       }
     }
-    
+
     let out = `<img src="${finalHref}" alt="${text}"`;
     if (title) {
       out += ` title="${title}"`;
@@ -86,7 +86,7 @@ const mathExtension = {
         // 匹配 $...$ (非换行，支持 \$ 转义)
         const dollarMatch = src.match(/^\$((?:[^\$\n]|\\\$)+?)\$/);
         if (dollarMatch) return { type: 'inlineMath', raw: dollarMatch[0], text: dollarMatch[1].trim() };
-        
+
         // 匹配 \(...\)
         const parenMatch = src.match(/^\\\(([\s\S]+?)\\\)/);
         if (parenMatch) return { type: 'inlineMath', raw: parenMatch[0], text: parenMatch[1].trim() };
@@ -106,11 +106,11 @@ const mathExtension = {
         // 匹配 $$...$$ (允许前置空格)
         const dollarMatch = src.match(/^ *\$\$([\s\S]+?)\$\$/);
         if (dollarMatch) return { type: 'blockMath', raw: dollarMatch[0], text: dollarMatch[1].trim() };
-        
+
         // 匹配 \[...\]
         const bracketMatch = src.match(/^ *\\\[([\s\S]+?)\\\]/);
         if (bracketMatch) return { type: 'blockMath', raw: bracketMatch[0], text: bracketMatch[1].trim() };
-        
+
         // 匹配 \begin{...}...\end{...}
         const envMatch = src.match(/^ *\\begin\{([a-z]*\*?)\}([\s\S]+?)\\end\{\1\}/);
         if (envMatch) return { type: 'blockMath', raw: envMatch[0], text: envMatch[0].trim() };
@@ -144,9 +144,9 @@ const updateDOM = () => {
   if (innerContentRef.value) {
     morphdom(innerContentRef.value, `<div class="vcp-markdown-inner">${renderedHtml.value}</div>`, {
       childrenOnly: false,
-      onBeforeElUpdated: function(fromEl, toEl) {
+      onBeforeElUpdated: function (fromEl, toEl) {
         if (fromEl.isEqualNode(toEl)) return false;
-        
+
         // Preserve VCP injected things
         if (fromEl.classList && fromEl.classList.contains('mermaid') && fromEl.tagName === 'DIV') {
           return false; // Don't overwrite rendered mermaid
@@ -154,7 +154,7 @@ const updateDOM = () => {
         if (fromEl.classList && (fromEl.classList.contains('language-math') || fromEl.classList.contains('math-inline')) && fromEl.querySelector('.katex')) {
           return false; // Don't overwrite rendered katex
         }
-        
+
         return true;
       }
     });
@@ -165,7 +165,7 @@ const updateDOM = () => {
 const debouncedProcessMagic = useDebounceFn(() => {
   if (innerContentRef.value) {
     const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
-                   || Math.random().toString(36).substring(2, 9);
+      || Math.random().toString(36).substring(2, 9);
     processMagic(innerContentRef.value, scopeId);
     if (isVisible.value) {
       renderHeavyContent();
@@ -176,13 +176,13 @@ const debouncedProcessMagic = useDebounceFn(() => {
 // 监听渲染内容变化
 watch(() => renderedHtml.value, async () => {
   updateDOM();
-  
+
   if (props.isStreaming) {
     debouncedProcessMagic();
   } else {
     await nextTick();
     const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
-                   || Math.random().toString(36).substring(2, 9);
+      || Math.random().toString(36).substring(2, 9);
     if (innerContentRef.value) {
       processMagic(innerContentRef.value, scopeId);
       if (isVisible.value) {
@@ -197,7 +197,7 @@ onMounted(async () => {
   if (!props.isStreaming && innerContentRef.value) {
     await nextTick();
     const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
-                   || Math.random().toString(36).substring(2, 9);
+      || Math.random().toString(36).substring(2, 9);
     processMagic(innerContentRef.value, scopeId);
   }
 });
@@ -229,7 +229,7 @@ const renderHeavyContent = async () => {
         if (el.querySelector('.katex')) return; // Already rendered
         const isBlock = el.classList.contains('language-math');
         try {
-          katex.render(el.textContent || '', el as HTMLElement, { 
+          katex.render(el.textContent || '', el as HTMLElement, {
             throwOnError: false,
             displayMode: isBlock
           });
@@ -255,7 +255,7 @@ const renderHeavyContent = async () => {
         const placeholder = el as HTMLElement;
         const encoded = placeholder.dataset.code;
         if (!encoded) continue;
-        
+
         try {
           const code = decodeURIComponent(atob(encoded));
           placeholder.innerHTML = code;
@@ -276,9 +276,9 @@ const renderHeavyContent = async () => {
 const handleContainerClick = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   const button = target.closest('button');
-  
+
   if (!button || button.dataset.vcpInteractive !== 'true') return;
-  
+
   e.preventDefault();
   e.stopPropagation();
 
@@ -319,13 +319,8 @@ watch(() => [props.content, props.isStreaming], () => {
 </script>
 
 <template>
-  <div 
-    ref="markdownContainer"
-    class="vcp-markdown-block prose prose-sm dark:prose-invert max-w-none"
-    v-intersection-observer.once
-    @intersect="handleIntersect"
-    @click="handleContainerClick"
-  >
+  <div ref="markdownContainer" class="vcp-markdown-block prose prose-sm dark:prose-invert max-w-none"
+    v-intersection-observer.once @intersect="handleIntersect" @click="handleContainerClick">
     <div ref="innerContentRef" class="vcp-markdown-inner"></div>
   </div>
 </template>
@@ -348,39 +343,39 @@ watch(() => [props.content, props.isStreaming], () => {
 
 /* VCP Role Divide Styles (Ported from VChat) */
 .vcp-role-divider {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 15px 0;
-    font-size: 0.85em;
-    color: var(--primary-text);
-    opacity: 0.7;
-    user-select: none;
-    clear: both;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 15px 0;
+  font-size: 0.85em;
+  color: var(--primary-text);
+  opacity: 0.7;
+  user-select: none;
+  clear: both;
 }
 
 .vcp-role-divider::before,
 .vcp-role-divider::after {
-    content: "";
-    flex: 1;
-    border-bottom: 1px dashed var(--border-color, #ccc);
-    margin: 0 15px;
+  content: "";
+  flex: 1;
+  border-bottom: 1px dashed var(--border-color, #ccc);
+  margin: 0 15px;
 }
 
 .vcp-role-divider.role-system {
-    color: #e67e22;
+  color: #e67e22;
 }
 
 .vcp-role-divider.role-assistant {
-    color: #3498db;
+  color: #3498db;
 }
 
 .vcp-role-divider.role-user {
-    color: #2ecc71;
+  color: #2ecc71;
 }
 
 .vcp-role-divider.type-end {
-    opacity: 0.5;
+  opacity: 0.5;
 }
 
 .vcp-markdown-block pre {
@@ -440,6 +435,7 @@ watch(() => [props.content, props.isStreaming], () => {
   font-size: 0.9em;
   border: none;
 }
+
 .dark .vcp-markdown-block code:not(pre code) {
   color: #ff8b8b;
   /* 暗黑模式下使用高级的透灰底色 */
@@ -481,13 +477,16 @@ watch(() => [props.content, props.isStreaming], () => {
 }
 
 /* 优化嵌套时的边距累加问题 */
-.vcp-markdown-block > .vcp-markdown-inner > :first-child {
+.vcp-markdown-block>.vcp-markdown-inner> :first-child {
   margin-top: 0 !important;
 }
-.vcp-markdown-block > .vcp-markdown-inner > :last-child {
+
+.vcp-markdown-block>.vcp-markdown-inner> :last-child {
   margin-bottom: 0 !important;
 }
-.vcp-markdown-block ul, .vcp-markdown-block ol {
+
+.vcp-markdown-block ul,
+.vcp-markdown-block ol {
   padding-left: 1.2em !important;
   margin-top: 0.5em !important;
   margin-bottom: 0.5em !important;
@@ -503,7 +502,8 @@ watch(() => [props.content, props.isStreaming], () => {
 }
 
 .vcp-markdown-block .katex-display {
-  padding-bottom: 0.5em; /* 防止垂直截断遮挡下标或滚动条 */
+  padding-bottom: 0.5em;
+  /* 防止垂直截断遮挡下标或滚动条 */
 }
 
 .vcp-markdown-block .math-inline {
@@ -520,6 +520,7 @@ watch(() => [props.content, props.isStreaming], () => {
 .vcp-markdown-block .math-inline::-webkit-scrollbar {
   height: 4px;
 }
+
 .vcp-markdown-block .language-math::-webkit-scrollbar-thumb,
 .vcp-markdown-block .katex-display::-webkit-scrollbar-thumb,
 .vcp-markdown-block .math-inline::-webkit-scrollbar-thumb {

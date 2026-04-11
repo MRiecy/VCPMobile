@@ -53,57 +53,29 @@ const rebuildEmoticonLibrary = async () => {
 
 <template>
   <div class="space-y-5 px-1">
-    <SettingsTextField 
-      v-model="settings.syncServerUrl" 
-      label="同步服务器 URL" 
-      placeholder="http://192.168.x.x:5974" 
-      mono
-    />
-    <SettingsTextField 
-      v-model="settings.syncToken" 
-      label="Mobile Sync Token" 
-      placeholder="输入桌面端 config.env 中的 Token" 
-      mono
-    />
+    <SettingsTextField v-model="settings.syncServerUrl" label="同步服务器 URL" placeholder="http://192.168.x.x:5974" mono />
+    <SettingsTextField v-model="settings.syncToken" label="Mobile Sync Token" placeholder="输入桌面端 config.env 中的 Token"
+      mono />
 
     <div class="pt-2 flex items-center justify-between gap-4">
-      <SettingsInlineStatus 
-        v-if="pingStatus.type"
-        :type="pingStatus.type" 
-        :message="pingStatus.message" 
-        class="flex-1"
-      />
+      <SettingsInlineStatus v-if="pingStatus.type" :type="pingStatus.type" :message="pingStatus.message"
+        class="flex-1" />
       <div class="flex gap-2 shrink-0">
-        <SettingsActionButton 
-          variant="secondary" 
-          size="sm"
-          :loading="pingStatus.type === 'loading'"
-          @click="testSyncConnection"
-        >
+        <SettingsActionButton variant="secondary" size="sm" :loading="pingStatus.type === 'loading'"
+          @click="testSyncConnection">
           测试连接
         </SettingsActionButton>
-        <SettingsActionButton 
-          variant="primary" 
-          size="sm"
-          @click="openSyncCenter"
-        >
+        <SettingsActionButton variant="primary" size="sm" @click="openSyncCenter">
           进入同步面板
         </SettingsActionButton>
       </div>
     </div>
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2">
-      <SettingsRow 
-        title="本地表情包修复库" 
-        :description="emoticonStatus.message || 'IDLE'"
-      >
+      <SettingsRow title="本地表情包修复库" :description="emoticonStatus.message || 'IDLE'">
         <template #action>
-          <SettingsActionButton 
-            variant="secondary" 
-            size="sm"
-            :loading="emoticonStatus.type === 'loading'"
-            @click="rebuildEmoticonLibrary"
-          >
+          <SettingsActionButton variant="secondary" size="sm" :loading="emoticonStatus.type === 'loading'"
+            @click="rebuildEmoticonLibrary">
             RESCAN
           </SettingsActionButton>
         </template>

@@ -46,17 +46,17 @@ export function useNotificationProcessor() {
       },
       {
         name: 'Redundant Connection Success',
-        match: (_t, m, p) => 
-          p?.type === 'connection_ack' && 
-          (m.toLowerCase().includes('successful') || 
-           String(p?.message || '').toLowerCase().includes('successful') ||
-           String(p?.data?.message || '').toLowerCase().includes('successful')),
+        match: (_t, m, p) =>
+          p?.type === 'connection_ack' &&
+          (m.toLowerCase().includes('successful') ||
+            String(p?.message || '').toLowerCase().includes('successful') ||
+            String(p?.data?.message || '').toLowerCase().includes('successful')),
         action: 'hide'
       },
       {
         name: 'Important Error Duration Extension',
-        match: (t, m, p) => 
-          t.toLowerCase().includes('error') || 
+        match: (t, m, p) =>
+          t.toLowerCase().includes('error') ||
           m.toLowerCase().includes('failed') ||
           (p?.type === 'vcp_log' && p?.data?.status === 'error'),
         action: 'show',
@@ -64,8 +64,8 @@ export function useNotificationProcessor() {
       },
       {
         name: 'DistPluginManager Noise Reduction',
-        match: (_t, m, p) => 
-          p?.data?.source === 'DistPluginManager' && 
+        match: (_t, m, p) =>
+          p?.data?.source === 'DistPluginManager' &&
           (m.toLowerCase().includes('heartbeat') || m.toLowerCase().includes('checking server status')),
         action: 'hide'
       }
@@ -104,7 +104,7 @@ export function useNotificationProcessor() {
     let message = '';
     let type: VcpNotification['type'] = 'info';
     let isPreformatted = false;
-    let duration = 7000; 
+    let duration = 7000;
     let actions: VcpNotification['actions'] = [];
 
     // 1. 核心 VCP 日志解析 (对标 renderVCPLogNotification)
@@ -113,7 +113,7 @@ export function useNotificationProcessor() {
       if (vcpData.tool_name && vcpData.status) {
         type = vcpData.status === 'error' ? 'error' : 'tool';
         title = `${vcpData.tool_name} ${vcpData.status}`;
-        
+
         let rawContent = String(vcpData.content || '');
         message = rawContent;
         isPreformatted = true;
@@ -134,7 +134,7 @@ export function useNotificationProcessor() {
           } else if (inner.MaidName) {
             title += ` (${inner.MaidName})`;
           }
-          
+
           let hasValidOutput = false;
           // 提取原始输出
           if (inner.original_plugin_output) {
@@ -154,7 +154,7 @@ export function useNotificationProcessor() {
             isPreformatted = false;
           }
         } catch (e) {
-            // 解析失败则保持 rawContent
+          // 解析失败则保持 rawContent
         }
 
         // 错误模式处理 (针对嵌套的 JSON 错误)
@@ -167,13 +167,13 @@ export function useNotificationProcessor() {
               message = errorMsg;
               isPreformatted = false;
             }
-          } catch (e) {}
+          } catch (e) { }
         }
       } else if (vcpData.source === 'DistPluginManager') {
         title = '分布式服务器';
         message = vcpData.content || JSON.stringify(vcpData);
       }
-    } 
+    }
     // 2. 审批请求 (对标 L142)
     else if (payload.type === 'tool_approval_request') {
       const approvalData = payload.data;
@@ -191,19 +191,19 @@ export function useNotificationProcessor() {
     else if (payload.type === 'video_generation_status') {
       type = 'info';
       title = '视频生成状态';
-      
+
       const vTs = payload.data?.timestamp;
       if (vTs && typeof vTs === 'string' && vTs.length >= 16) {
         title += ` (@ ${vTs.substring(11, 16)})`;
       }
-      
+
       message = payload.data?.original_plugin_output?.message || JSON.stringify(payload.data || {});
     }
     // 4. 日记创建状态 (对标桌面端 L118)
     else if (payload.type === 'daily_note_created') {
       const noteData = payload.data || {};
       title = `日记: ${noteData.maidName || 'N/A'} (${noteData.dateString || 'N/A'})`;
-      
+
       if (noteData.status === 'success') {
         type = 'success';
         message = noteData.message || '日记已成功创建。';
@@ -225,20 +225,20 @@ export function useNotificationProcessor() {
 
     // 5. 执行全局过滤引擎 (P0-1 功能)
     const filterResult = checkMessageFilter(title, message, payload);
-    
+
     if (filterResult.action === 'hide') {
       return { silent: true };
     }
 
-    return { 
-      title, 
-      message, 
-      type, 
-      isPreformatted, 
-      duration: filterResult.duration ?? duration, 
-      actions, 
-      rawPayload: payload, 
-      silent: false 
+    return {
+      title,
+      message,
+      type,
+      isPreformatted,
+      duration: filterResult.duration ?? duration,
+      actions,
+      rawPayload: payload,
+      silent: false
     };
   };
 

@@ -25,7 +25,7 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
         isFinishing: false
       });
       activeStreams.value.add(messageId);
-      
+
       // 核心渲染循环
       const loop = () => {
         const buf = streamBuffers.get(messageId);
@@ -33,14 +33,14 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
           activeStreams.value.delete(messageId);
           return;
         }
-        
+
         // 检查队列中是否有待显示的字符
         if (buf.semanticQueue.length > 0) {
           // 计算步长：如果积压严重，一帧多出几个字符；正常情况下每帧 1-2 个
           const backlog = buf.semanticQueue.length;
           // [保留神级底盘] 平滑排空
           const step = Math.max(1, Math.ceil(backlog / 8));
-          
+
           for (let i = 0; i < step; i++) {
             const char = buf.semanticQueue.shift();
             if (char) {
@@ -50,11 +50,11 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
 
           try {
             onUpdate(buf.displayedText);
-          } catch(e) {
+          } catch (e) {
             console.error('[StreamManager] UI Update failed:', e);
           }
         }
-        
+
         // 结束判定：没有积压且后端已发送 [DONE]
         if (buf.isFinishing && buf.semanticQueue.length === 0) {
           if (buf.onCompleteCallback) {
@@ -70,10 +70,10 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
     } else {
       const buffer = streamBuffers.get(messageId)!;
       buffer.fullText += chunk;
-      
+
       // 如果之前是因为 [DONE] 标记为结束但又有新 chunk 进来，重置状态
       if (buffer.isFinishing) buffer.isFinishing = false;
-      
+
       // [修复建议] 绝对禁止使用 push(...chunk)，防止栈溢出崩溃
       for (const char of chunk) {
         buffer.semanticQueue.push(char);
@@ -93,7 +93,7 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
         };
         return;
       }
-      
+
       // 标记为结束，loop 会在清空队列后触发回调并自动退出
       buffer.isFinishing = true;
       buffer.onCompleteCallback = onComplete;

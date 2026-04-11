@@ -14,7 +14,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <button 
+  <button
     class="settings-button flex items-center justify-center gap-2 transition-all duration-200 active:scale-95 disabled:opacity-40 disabled:pointer-events-none font-bold tracking-wider"
     :class="[
       fullWidth ? 'w-full' : 'px-5',
@@ -23,11 +23,9 @@ const emit = defineEmits<{
       variant === 'secondary' ? 'bg-black/5 dark:bg-white/10 hover:bg-black/10 dark:hover:bg-white/20 text-primary-text' : '',
       variant === 'danger' ? 'bg-red-500/10 hover:bg-red-500/20 text-red-500' : '',
       variant === 'ghost' ? 'bg-transparent hover:bg-black/5 dark:hover:bg-white/5 text-primary-text opacity-60 hover:opacity-100' : ''
-    ]"
-    :disabled="disabled || loading"
-    @click="emit('click')"
-  >
-    <div v-if="loading" class="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin shrink-0"></div>
+    ]" :disabled="disabled || loading" @click="emit('click')">
+    <div v-if="loading" class="w-3 h-3 rounded-full border-2 border-current border-t-transparent animate-spin shrink-0">
+    </div>
     <component v-else-if="icon" :is="icon" :size="size === 'sm' ? 14 : 16" class="shrink-0" />
     <slot></slot>
   </button>

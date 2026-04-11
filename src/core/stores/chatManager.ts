@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { useStreamManagerStore } from "./streamManager";
@@ -8,37 +8,45 @@ import { useSettingsStore } from "./settings";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
 import { syncService } from "../utils/syncService";
+import { useDocumentProcessor } from "../composables/useDocumentProcessor";
 
 /**
- * Attachment 接口定义
+ * Attachment 接口定义，严格对齐 Rust 端的 AttachmentSyncDTO / Attachment (仅保留核心字段)
  */
 export interface Attachment {
   type: string;
-  src: string;
-  resolvedSrc?: string; // 已在 Rust 端预转换的 asset:// 路径
   name: string;
   size: number;
+  src: string; // 仅用于前端 UI 临时渲染路径 (如 file:// 或 blob:)
+  resolvedSrc?: string; // Webview 可用的 asset:// 路径
   hash?: string;
+  status?: string;
+  internalPath?: string;
   extractedText?: string;
+  imageFrames?: string[];
+  thumbnailPath?: string;
+  createdAt?: number;
 }
 
 /**
- * ChatMessage 接口定义，与 Rust 端 ChatMessage 结构保持对齐
+ * ChatMessage 接口定义，严格对齐 Rust 端的 MessageSyncDTO / ChatMessage
  */
 export interface ChatMessage {
   id: string;
   role: string;
   name?: string;
   content: string;
-  displayedContent?: string; // 用于平滑流式显示的文本内容
-  processedContent?: string; // Rust 正则清洗后的成品内容
   timestamp: number;
+
   isThinking?: boolean;
-  avatarUrl?: string;
-  avatarColor?: string; // 兼容旧版历史记录中的气泡颜色
-  resolvedAvatarUrl?: string; // 已在 Rust 端预转换的 asset:// 路径
+  agentId?: string;
+  groupId?: string;
+  isGroupMessage?: boolean;
   attachments?: Attachment[];
-  extra?: Record<string, any>;
+
+  // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
+  displayedContent?: string; // 用于平滑流式显示的文本内容 (打字机效果暂存)
+  processedContent?: string; // 缓存 Rust 返回的 AST 或文本，避免重复解析
 }
 
 /**
@@ -196,36 +204,22 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 处理消息中的本地资源路径 (头像、附件)，使用 Tauri 原生 asset:// 协议绕过 WebView 限制
+   * 处理消息中的本地资源路径 (仅附件)，使用 Tauri 原生 asset:// 协议绕过 WebView 限制
    */
   const resolveMessageAssets = (msg: ChatMessage) => {
-    // 处理头像
-    if (
-      msg.avatarUrl &&
-      !msg.avatarUrl.startsWith("http") &&
-      !msg.avatarUrl.startsWith("data:")
-    ) {
-      try {
-        msg.resolvedAvatarUrl = convertFileSrc(msg.avatarUrl);
-      } catch (err) {
-        console.warn(
-          `[ChatManager] Failed to convert avatar path for message ${msg.id}:`,
-          err,
-        );
-      }
-    }
-
     // 处理附件 (仅处理图片类型)
     if (msg.attachments && msg.attachments.length > 0) {
       msg.attachments.forEach((att) => {
+        // Rust 后端返回的路径现在主要在 internalPath，如果不在，回退到 src
+        const sourcePath = att.internalPath || att.src;
         if (
           att.type.startsWith("image/") &&
-          att.src &&
-          !att.src.startsWith("http") &&
-          !att.src.startsWith("data:")
+          sourcePath &&
+          !sourcePath.startsWith("http") &&
+          !sourcePath.startsWith("data:")
         ) {
           try {
-            att.resolvedSrc = convertFileSrc(att.src);
+            att.resolvedSrc = convertFileSrc(sourcePath);
           } catch (err) {
             console.warn(
               `[ChatManager] Failed to convert attachment image path ${att.name}:`,
@@ -639,7 +633,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 重新生成回复 (历史切片回溯 + 无参请求)
+   * 发送消息
    */
   const sendMessage = async (content: string) => {
     if (
@@ -652,6 +646,29 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     const agentId = currentSelectedItem.value.id;
     const currentStaged = [...stagedAttachments.value];
 
+    // Clear staged area immediately for UI responsiveness
+    stagedAttachments.value = [];
+
+    // Document Processing JIT (Just-In-Time)
+    if (currentStaged.length > 0) {
+      const docProcessor = useDocumentProcessor();
+      for (const att of currentStaged) {
+        const ext = att.name.split(".").pop()?.toLowerCase();
+        // Only process documents and PDFs as requested
+        if (["txt", "md", "csv", "json", "docx", "pdf"].includes(ext || "")) {
+          try {
+            const result = await docProcessor.processAttachment(att);
+            if (result) {
+              if (result.extractedText) att.extractedText = result.extractedText;
+              if (result.imageFrames) att.imageFrames = result.imageFrames;
+            }
+          } catch (e) {
+            console.error(`[ChatManager] JIT document processing failed for ${att.name}:`, e);
+          }
+        }
+      }
+    }
+
     // 构造用户消息
     const now = Date.now();
     const userMsg: ChatMessage = {
@@ -663,9 +680,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     };
 
     currentChatHistory.value.push(userMsg);
-
-    // 清空暂存区
-    stagedAttachments.value = [];
 
     // 构造 AI 思考占位消息
     const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 7)}`;
@@ -864,11 +878,11 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           content: "",
           timestamp: Date.now(),
           isThinking: true,
-          extra: {
-            agentId: context.agentId,
-          },
+          agentId: context.agentId,
+          groupId: context.groupId,
+          isGroupMessage: true,
         };
-        currentChatHistory.value.push(msg);
+        currentChatHistory.value.push(msg as ChatMessage);
         // 保持排序
         currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
       }
@@ -918,7 +932,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
             }
 
             // 同时也喂给 streamManager，防止切回来时 buffer 为空
-            streamManager.appendChunk(actualMessageId, textChunk, () => {});
+            streamManager.appendChunk(actualMessageId, textChunk, () => { });
           }
         }
       } else if (type === "end" || type === "error") {

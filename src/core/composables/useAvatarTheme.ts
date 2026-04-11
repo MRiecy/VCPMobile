@@ -45,7 +45,7 @@ export function useAvatarTheme() {
       img.onload = async () => {
         const color = getDominantColor(img);
         colorCache.set(avatarUrl, color);
-        
+
         // 解析 URL 获取 owner_type
         let ownerType = 'agent';
         if (avatarUrl.includes('group/')) ownerType = 'group';
@@ -57,7 +57,7 @@ export function useAvatarTheme() {
         } catch (e) {
           console.error('Failed to save avatar color to Rust:', e);
         }
-        
+
         resolve(color);
       };
       img.onerror = () => resolve('#888888');

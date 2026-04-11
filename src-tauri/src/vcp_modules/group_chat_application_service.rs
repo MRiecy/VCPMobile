@@ -208,11 +208,10 @@ pub async fn process_group_chat_message(
                         .unwrap()
                         .as_millis() as u64,
                     is_thinking: Some(false),
+                    agent_id: Some(agent_id),
+                    group_id: Some(group_id.clone()),
+                    is_group_message: Some(true),
                     attachments: None,
-                    extra: json!({
-                        "agentId": agent_id,
-                        "avatarUrl": format!("vcp-avatar://agent/{}", agent_id)
-                    }),
                 };
 
                 // 立即进行一次断点存盘 (针对单个 Agent)
@@ -239,12 +238,7 @@ pub async fn process_group_chat_message(
     // 6. 统一收集结果并最终发射信号
     let agent_ids: Vec<String> = final_new_msgs
         .iter()
-        .filter_map(|m| {
-            m.extra
-                .get("agentId")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
+        .filter_map(|m| m.agent_id.clone())
         .collect();
 
     // 确保无论如何都发射“回合结束”信号给前端

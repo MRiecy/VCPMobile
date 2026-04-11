@@ -31,12 +31,14 @@ watch(
     <div class="p-6 border-b border-white/10 flex justify-between items-center shrink-0">
       <div class="flex items-center gap-2">
         <h3 class="font-bold text-xs uppercase tracking-[0.2em] opacity-80 text-primary-text">Notification Center</h3>
-        <span v-if="store.unreadCount > 0" class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white">
+        <span v-if="store.unreadCount > 0"
+          class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white">
           {{ store.unreadCount }}
         </span>
       </div>
       <div class="flex items-center gap-1">
-        <button @click="store.clearHistory" class="p-2 opacity-40 hover:opacity-100 hover:text-red-400 transition-all text-primary-text">
+        <button @click="store.clearHistory"
+          class="p-2 opacity-40 hover:opacity-100 hover:text-red-400 transition-all text-primary-text">
           <Trash2 :size="16" />
         </button>
         <button @click="emit('close')" class="p-2 opacity-40 hover:opacity-100 transition-opacity text-primary-text">
@@ -87,7 +89,12 @@ watch(
 }
 
 @keyframes vcp-shimmer {
-  0% { background-position: 250% 0; }
-  100% { background-position: -250% 0; }
+  0% {
+    background-position: 250% 0;
+  }
+
+  100% {
+    background-position: -250% 0;
+  }
 }
 </style>

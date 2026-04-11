@@ -82,7 +82,7 @@ pub fn determine_naturerandom_speakers(
             // Natural 模式: 分档逻辑
             let tag_in_others = recent_history
                 .iter()
-                .filter(|m| m.extra.get("agentId").and_then(|id| id.as_str()) != Some(&member.id))
+                .filter(|m| m.agent_id.as_deref() != Some(&member.id))
                 .any(|m| {
                     let clean_content = name_prefix_re.replace(&m.content, "").to_lowercase();
                     tags.iter()
@@ -101,9 +101,7 @@ pub fn determine_naturerandom_speakers(
                 // 仅出现在自身历史消息 -> 动态概率
                 let tag_in_own = recent_history
                     .iter()
-                    .filter(|m| {
-                        m.extra.get("agentId").and_then(|id| id.as_str()) == Some(&member.id)
-                    })
+                    .filter(|m| m.agent_id.as_deref() == Some(&member.id))
                     .any(|m| {
                         tags.iter()
                             .any(|t| m.content.to_lowercase().contains(&t.to_lowercase()))
@@ -116,15 +114,11 @@ pub fn determine_naturerandom_speakers(
                         .skip(1) // 跳过当前用户消息
                         .find(|m| m.role == "assistant");
 
-                    let is_last_speaker = last_ai_msg
-                        .and_then(|m| m.extra.get("agentId"))
-                        .and_then(|id| id.as_str())
-                        == Some(&member.id);
+                    let is_last_speaker =
+                        last_ai_msg.and_then(|m| m.agent_id.as_deref()) == Some(&member.id);
                     let own_msg_count = recent_history
                         .iter()
-                        .filter(|m| {
-                            m.extra.get("agentId").and_then(|id| id.as_str()) == Some(&member.id)
-                        })
+                        .filter(|m| m.agent_id.as_deref() == Some(&member.id))
                         .count();
 
                     let speak_chance = if is_last_speaker {

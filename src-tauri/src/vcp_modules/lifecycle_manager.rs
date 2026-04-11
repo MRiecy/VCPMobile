@@ -61,6 +61,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     handle.manage(GroupManagerState::new());
     handle.manage(SettingsState::new());
     handle.manage(ModelManagerState::new());
+    handle.manage(EmoticonManagerState::default());
     
     // 初始化同步管理器
     let sync_sender = init_sync_manager(handle.clone());

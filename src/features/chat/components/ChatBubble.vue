@@ -7,22 +7,16 @@ defineProps<{
 </script>
 
 <template>
-  <div
-    class="w-full min-w-0 flex flex-col"
-    :class="[
-      isUser ? 'items-end' : 'items-start',
-      isStreaming ? 'streaming' : '',
-    ]"
-  >
+  <div class="w-full min-w-0 flex flex-col" :class="[
+    isUser ? 'items-end' : 'items-start',
+    isStreaming ? 'streaming' : '',
+  ]">
     <div
       class="vcp-bubble-container rounded-2xl transition-all duration-300 relative backdrop-blur-md min-w-[60px] min-h-[36px]"
-      :class="
-        isUser
+      :class="isUser
           ? 'p-3 w-fit max-w-[85%] shadow-sm'
           : 'p-1.5 w-fit max-w-[100%] shadow-sm'
-      "
-      :style="bubbleStyle"
-    >
+        " :style="bubbleStyle">
       <slot />
     </div>
 
@@ -52,6 +46,7 @@ defineProps<{
   0% {
     background-position: 0% 50%;
   }
+
   100% {
     background-position: 200% 50%;
   }
@@ -63,12 +58,10 @@ defineProps<{
   inset: -2px;
   padding: 2px;
   border-radius: inherit;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--highlight-text, #3b82f6) 50%,
-    transparent 100%
-  );
+  background: linear-gradient(90deg,
+      transparent 0%,
+      var(--highlight-text, #3b82f6) 50%,
+      transparent 100%);
   background-size: 200% 100%;
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
