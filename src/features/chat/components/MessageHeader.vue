@@ -6,8 +6,8 @@ defineProps<{
   displayName?: string | null;
   nameStyle?: Record<string, string>;
   avatarUrl?: string | null;
-  avatarBorderColor?: string;
   avatarFallbackText: string;
+  avatarFallbackColor?: string;
 }>();
 </script>
 
@@ -20,7 +20,7 @@ defineProps<{
       :image-url="avatarUrl"
       :fallback-text="avatarFallbackText"
       :is-user="isUser"
-      :border-color="avatarBorderColor"
+      :fallback-color="avatarFallbackColor"
     />
 
     <div

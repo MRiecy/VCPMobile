@@ -1,17 +1,18 @@
 mod vcp_modules;
 
 use tauri::Manager;
+use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
 use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, read_agent_config,
     save_agent_config, update_agent_config, save_avatar_color,
 };
-use vcp_modules::app_settings_manager::{
-    notify_app_state, notify_network_state, read_app_settings,
-    set_theme, update_app_settings, write_app_settings,
+use vcp_modules::settings_manager::{
+    read_settings,
+    set_theme, update_settings, write_settings,
 };
 use vcp_modules::chat_manager::{
-    append_single_message, delete_messages, get_topic_delta, get_topic_fingerprint,
-    load_chat_history, patch_single_message, process_regex_for_message,
+    append_single_message, delete_messages,
+    load_chat_history, patch_single_message,
     truncate_history_after_timestamp,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
@@ -104,12 +105,12 @@ pub fn run() {
             sendToVCP,
             interruptRequest,
             test_vcp_connection,
+            handle_agent_chat_message,
             load_chat_history,
             append_single_message,
             patch_single_message,
             delete_messages,
             truncate_history_after_timestamp,
-            process_regex_for_message,
             process_message_content,
             get_topics,
             get_groups,
@@ -124,9 +125,9 @@ pub fn run() {
             save_agent_config,
             update_agent_config,
             save_avatar_color,
-            read_app_settings,
-            write_app_settings,
-            update_app_settings,
+            read_settings,
+            write_settings,
+            update_settings,
             handle_group_chat_message,
             create_agent,
             create_group,
@@ -134,16 +135,12 @@ pub fn run() {
             update_group_config,
             delete_agent,
             set_theme,
-            notify_app_state,
-            notify_network_state,
             store_file,
             pick_and_store_attachment,
             read_local_file_base64,
             get_attachment_real_path,
             open_file,
             cleanup_orphaned_attachments,
-            get_topic_delta,
-            get_topic_fingerprint,
             refresh_models,
             get_hot_models,
             get_favorite_models,
@@ -172,7 +169,11 @@ pub fn run() {
 
                 if parts.len() >= 2 {
                     let owner_type = parts[0];
-                    let owner_id = parts[1];
+                    let owner_id = if owner_type == "user" && parts[1] == "default" {
+                        "default_user"
+                    } else {
+                        parts[1]
+                    };
 
                     let row_res: Result<Option<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query("SELECT mime_type, image_data, dominant_color FROM avatars WHERE owner_type = ? AND owner_id = ?")
                         .bind(owner_type)

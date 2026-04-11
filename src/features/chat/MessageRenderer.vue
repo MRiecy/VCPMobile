@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ChatMessage } from "../../core/stores/chatManager";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useSettingsStore } from "../../core/stores/settings";
@@ -115,14 +114,13 @@ onMounted(() => {
     resolvedAvatarUrl.value &&
     !agentConfig.value?.avatarCalculatedColor
   ) {
-    extractAndSaveColor(
-      actualAgentId.value,
-      resolvedAvatarUrl.value,
-    ).then((color) => {
-      if (agentConfig.value && color) {
-        agentConfig.value.avatarCalculatedColor = color;
-      }
-    });
+    extractAndSaveColor(actualAgentId.value, resolvedAvatarUrl.value).then(
+      (color) => {
+        if (agentConfig.value && color) {
+          agentConfig.value.avatarCalculatedColor = color;
+        }
+      },
+    );
   }
 });
 
@@ -161,13 +159,12 @@ const updateContentBlocks = async (text: string) => {
   const options = {
     role: props.message.role,
     depth: props.depth || 0,
-    rules: (agentConfig.value as any)?.stripRegexes,
     messageId: props.message.id,
     isStreaming: isStreaming.value,
   };
 
   if (isStreaming.value) {
-    // 流式状态：跳过 Rust AST，全量正则生成混合 Markdown
+    // 流式状态：跳过 Rust AST，直接生成混合 Markdown
     const blocks = await processMessageContent(text || "", options);
     streamContent.value = blocks[0]?.content || "";
   } else {
@@ -227,7 +224,7 @@ watch(
 const bubbleStyle = computed(() => {
   if (isUser.value)
     return {
-      backgroundColor: "var(--user-bubble-bg, rgba(145, 109, 51, 0.573))",
+      backgroundColor: "var(--user-bubble-bg, rgba(145, 109, 51, 0.8))",
       color: "var(--user-text, #e8e8e8)",
       borderBottomRightRadius: "4px",
     };
@@ -235,10 +232,10 @@ const bubbleStyle = computed(() => {
   const color =
     agentConfig.value?.avatarCalculatedColor || props.message.avatarColor;
   const baseStyle: any = {
-    backgroundColor: "var(--assistant-bubble-bg, rgba(44, 62, 74, 0.577))",
+    backgroundColor: "var(--assistant-bubble-bg, rgba(44, 62, 74, 0.8))",
     color: "var(--agent-text, #e8e8e8)",
     borderBottomLeftRadius: "4px",
-    border: "1px solid rgba(128, 128, 128, 0.15)", // Subtle frosted border instead of solid heavy line
+    border: "1px solid rgba(255, 255, 255, 0.08)", // Even subtler border for better blending
   };
 
   if (color) {
@@ -272,12 +269,16 @@ const avatarFallbackText = computed(() => {
     : props.message.name || "AI";
 });
 
-const avatarBorderColor = computed(() => {
-  return isUser.value
-    ? undefined
-    : agentConfig.value?.avatarCalculatedColor ||
-        props.message.avatarColor ||
-        "transparent";
+const avatarFallbackColor = computed(() => {
+  if (isUser.value) {
+    return "rgb(226,54,56)";
+  }
+
+  return (
+    agentConfig.value?.avatarCalculatedColor ||
+    props.message.avatarColor ||
+    "#374151"
+  );
 });
 
 // 长按菜单触发逻辑
@@ -389,7 +390,7 @@ const handleSaveEdit = async (newContent: string) => {
   const chatStore = useChatManagerStore();
   if (newContent !== props.message.content) {
     await chatStore.updateMessageContent(props.message.id, newContent);
-    // 立即重新触发正则渲染
+    // 立即重新触发渲染
     await updateContentBlocks(newContent);
   }
 };
@@ -407,8 +408,8 @@ const handleSaveEdit = async (newContent: string) => {
       :display-name="displayName"
       :name-style="nameStyle"
       :avatar-url="resolvedAvatarUrl"
-      :avatar-border-color="avatarBorderColor"
       :avatar-fallback-text="avatarFallbackText"
+      :avatar-fallback-color="avatarFallbackColor"
     />
 
     <ChatBubble

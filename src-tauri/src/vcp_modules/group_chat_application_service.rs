@@ -3,6 +3,7 @@
 
 use crate::vcp_modules::agent_service::{read_agent_config, AgentConfigState};
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::context_assembler_utils::assemble_history_for_vcp;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
@@ -157,24 +158,23 @@ pub async fn process_group_chat_message(
                 .await;
 
         // 构造请求载荷
-        let mut model_config = speaker.extra.get("modelConfig").cloned().unwrap_or(json!({
+        let mut model_config = json!({
             "model": speaker.model,
             "temperature": speaker.temperature,
             "stream": true
-        }));
+        });
 
         if let Some(obj) = model_config.as_object_mut() {
-            obj.insert("stream".to_string(), json!(true));
+            if let Some(top_p) = speaker.top_p {
+                obj.insert("top_p".to_string(), json!(top_p));
+            }
+            if let Some(top_k) = speaker.top_k {
+                obj.insert("top_k".to_string(), json!(top_k));
+            }
         }
 
-        let mut messages = vec![json!({"role": "system", "content": system_prompt})];
-        for msg in &current_history_for_context {
-            messages.push(json!({
-                "role": msg.role,
-                "content": msg.content,
-                "name": msg.name
-            }));
-        }
+        let mut messages = assemble_history_for_vcp(&current_history_for_context);
+        messages.insert(0, json!({"role": "system", "content": system_prompt}));
 
         let request_payload = VcpRequestPayload {
             vcp_url,
@@ -211,11 +211,7 @@ pub async fn process_group_chat_message(
                     attachments: None,
                     extra: json!({
                         "agentId": agent_id,
-                        "avatarUrl": speaker
-                            .extra
-                            .get("avatar")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
+                        "avatarUrl": format!("vcp-avatar://agent/{}", agent_id)
                     }),
                 };
 

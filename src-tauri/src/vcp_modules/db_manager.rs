@@ -72,8 +72,10 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             temperature REAL NOT NULL DEFAULT 1,
             context_token_limit INTEGER NOT NULL DEFAULT 0,
             max_output_tokens INTEGER NOT NULL DEFAULT 0,
-            extra_json TEXT,
-            created_at BIGINT NOT NULL,
+            top_p REAL,
+            top_k INTEGER,
+            stream_output INTEGER NOT NULL DEFAULT 1,
+            config_hash TEXT NOT NULL DEFAULT '', -- 状态机同步指纹 (SHA-256)
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
         )",
@@ -81,7 +83,8 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-    // 3. groups 表 (群组配置 - 已移除冗余头像字段)
+
+    // 3. groups 表 (群组配置)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS groups (
             group_id TEXT PRIMARY KEY,
@@ -92,8 +95,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             use_unified_model INTEGER NOT NULL DEFAULT 0,
             unified_model TEXT,
             tag_match_mode TEXT,
-            extra_json TEXT,
-            created_at BIGINT NOT NULL,
+            config_hash TEXT NOT NULL DEFAULT '', -- 状态机同步指纹 (SHA-256)
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
         )",
@@ -109,9 +111,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             agent_id TEXT NOT NULL,
             member_tag TEXT,
             sort_order INTEGER NOT NULL DEFAULT 0,
-            created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
-            deleted_at BIGINT,
             PRIMARY KEY (group_id, agent_id)
         )",
     )
@@ -132,9 +132,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             unread INTEGER NOT NULL DEFAULT 0,
             unread_count INTEGER NOT NULL DEFAULT 0,
             msg_count INTEGER NOT NULL DEFAULT 0,
-            creator_source TEXT,
-            revision INTEGER NOT NULL DEFAULT 0,
-            extra_json TEXT,
             deleted_at BIGINT
         )",
     )
@@ -168,37 +165,34 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 6. attachments 表 (替代 attachment_index)
+    // 6. attachments 表 (物理文件真理之源)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS attachments (
-            attachment_hash TEXT PRIMARY KEY,
-            attachment_id TEXT NOT NULL,
-            name TEXT,
-            internal_file_name TEXT,
-            local_path TEXT NOT NULL,
-            src TEXT,
-            mime_type TEXT,
-            size BIGINT NOT NULL,
-            extracted_text TEXT,
-            thumbnail_path TEXT,
-            image_frames TEXT,
-            extra_json TEXT,
+            hash TEXT PRIMARY KEY,            -- 内容摘要 SHA-256
+            mime_type TEXT NOT NULL,          -- e.g., 'image/webp'
+            size BIGINT NOT NULL,             -- 文件大小
+            internal_path TEXT NOT NULL,      -- 本地物理存储路径
+            extracted_text TEXT,              -- OCR 或解析文本
+            image_frames TEXT,                -- 视频帧或 PDF 图片 (JSON Array)
+            thumbnail_path TEXT,              -- 缩略图路径
             created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL,
-            deleted_at BIGINT
+            updated_at BIGINT NOT NULL
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    // 7. message_attachments 表 (更名自 message_attachment_ref)
+    // 7. message_attachments 表 (逻辑引用上下文)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS message_attachments (
             msg_id TEXT NOT NULL,
-            attachment_hash TEXT NOT NULL,
-            attachment_order INTEGER NOT NULL,
-            extra_json TEXT,
+            hash TEXT NOT NULL,               -- 指向 attachments.hash
+            attachment_order INTEGER NOT NULL, -- 排序 (替代 sort_order 以保持兼容)
+            display_name TEXT NOT NULL,       -- 原始文件名
+            src TEXT,                         -- 来源 URL
+            status TEXT,                      -- 状态 (如 'removed')
+            extra_json TEXT,                  -- 预留扩展
             created_at BIGINT NOT NULL,
             PRIMARY KEY (msg_id, attachment_order)
         )",
@@ -207,34 +201,9 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 8. agent_regex_rules 表 (正式业务化)
+    // 8. settings 表 (存储全局配置)
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS agent_regex_rules (
-            rule_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            title TEXT,
-            find_pattern TEXT NOT NULL,
-            replace_with TEXT,
-            apply_to_roles TEXT,
-            apply_to_frontend INTEGER NOT NULL DEFAULT 1,
-            apply_to_context INTEGER NOT NULL DEFAULT 1,
-            min_depth INTEGER,
-            max_depth INTEGER,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            extra_json TEXT,
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL,
-            deleted_at BIGINT,
-            PRIMARY KEY (agent_id, rule_id)
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // 9. app_settings 表 (替代 settings.json)
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS app_settings (
+        "CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at BIGINT NOT NULL
@@ -244,7 +213,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 10. model_favorites 表 (替代 model_favorites.json)
+    // 9. model_favorites 表 (替代 model_favorites.json)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS model_favorites (
             model_id TEXT PRIMARY KEY,
@@ -255,7 +224,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
-    // 11. model_usage_stats 表 (替代 model_usage_stats.json)
+    // 10. model_usage_stats 表 (替代 model_usage_stats.json)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS model_usage_stats (
             model_id TEXT PRIMARY KEY,

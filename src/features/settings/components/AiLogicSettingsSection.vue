@@ -1,33 +1,22 @@
 <script setup lang="ts">
-import type { AppSettings } from '../../../core/stores/settings';
-import SettingsRow from '../../../components/settings/SettingsRow.vue';
-import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
+import SettingsRow from "../../../components/settings/SettingsRow.vue";
 
 defineProps<{
-  settings: AppSettings;
+  settings?: Record<string, unknown>;
 }>();
 </script>
 
 <template>
   <div class="divide-y divide-black/5 dark:divide-white/5 px-1">
-    <SettingsRow 
-      title="开启打字机流式输出 (Smooth Stream)" 
-      description="以固定帧率平滑渲染接收到的文字"
-    >
-      <template #action>
-        <SettingsSwitch v-model="settings.enableSmoothStreaming" />
-      </template>
-    </SettingsRow>
-
     <SettingsRow title="VCP 动态工具路由注入">
       <template #action>
-        <SettingsSwitch v-model="settings.enableVcpToolInjection" />
+        <span class="text-xs opacity-60">暂未启用</span>
       </template>
     </SettingsRow>
 
     <SettingsRow title="气泡主题 UI 规范注入">
       <template #action>
-        <SettingsSwitch v-model="settings.enableAgentBubbleTheme" />
+        <span class="text-xs opacity-60">暂未启用</span>
       </template>
     </SettingsRow>
   </div>

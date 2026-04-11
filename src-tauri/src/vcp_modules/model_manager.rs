@@ -1,4 +1,4 @@
-use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::db_manager::DbState;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -41,9 +41,9 @@ pub async fn get_cached_models(
 pub async fn refresh_models<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
-    settings_state: State<'_, AppSettingsState>,
+    settings_state: State<'_, SettingsState>,
 ) -> Result<Vec<ModelInfo>, String> {
-    let settings = read_app_settings(app.clone(), settings_state).await?;
+    let settings = read_settings(app.clone(), settings_state).await?;
     let vcp_url = settings.vcp_server_url;
     let vcp_api_key = settings.vcp_api_key;
 

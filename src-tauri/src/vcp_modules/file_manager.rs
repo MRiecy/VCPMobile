@@ -178,7 +178,7 @@ pub async fn store_file(
 
     // 3. 检查数据库中是否已存在该哈希，或磁盘上是否已存在文件
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT attachment_hash FROM attachments WHERE attachment_hash = ?")
+        sqlx::query_as("SELECT hash FROM attachments WHERE hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
@@ -195,15 +195,14 @@ pub async fn store_file(
 
         // 5. 更新数据库 (attachments)
         sqlx::query(
-            "INSERT INTO attachments (attachment_hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(attachment_hash) DO UPDATE SET local_path = excluded.local_path",
+            "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(hash) DO UPDATE SET internal_path = excluded.internal_path",
         )
         .bind(&hash)
-        .bind(format!("attachment_{}", hash))
-        .bind(&internal_path_str)
         .bind(&mime_type)
         .bind(file_bytes.len() as i64)
+        .bind(&internal_path_str)
         .bind(now as i64)
         .bind(now as i64)
         .execute(&db_state.pool)
@@ -339,7 +338,7 @@ pub async fn pick_and_store_attachment(
 
     // 6. 检查数据库中是否已存在该哈希，或磁盘上是否已存在文件
     let existing: Option<(String,)> =
-        sqlx::query_as("SELECT attachment_hash FROM attachments WHERE attachment_hash = ?")
+        sqlx::query_as("SELECT hash FROM attachments WHERE hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
@@ -376,15 +375,14 @@ pub async fn pick_and_store_attachment(
 
         // 7. 更新数据库 (attachments)
         sqlx::query(
-            "INSERT INTO attachments (attachment_hash, attachment_id, local_path, mime_type, size, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(attachment_hash) DO UPDATE SET local_path = excluded.local_path",
+            "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(hash) DO UPDATE SET internal_path = excluded.internal_path",
         )
         .bind(&hash)
-        .bind(format!("attachment_{}", hash))
-        .bind(&internal_path_str)
         .bind(&mime_type)
         .bind(file_size as i64)
+        .bind(&internal_path_str)
         .bind(now as i64)
         .bind(now as i64)
         .execute(&db_state.pool)
@@ -541,7 +539,7 @@ pub async fn cleanup_orphaned_attachments(
 
     // 2. 查 message_attachments 确定哪些 hash 正在被引用
     let used_hashes: std::collections::HashSet<String> =
-        sqlx::query_as::<_, (String,)>("SELECT DISTINCT attachment_hash FROM message_attachments")
+        sqlx::query_as::<_, (String,)>("SELECT DISTINCT hash FROM message_attachments")
             .fetch_all(&db_state.pool)
             .await
             .map_err(|e| e.to_string())?

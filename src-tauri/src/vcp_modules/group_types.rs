@@ -34,16 +34,10 @@ pub struct GroupConfig {
     /// 统一模型名称
     #[serde(default)]
     pub unified_model: Option<String>,
-    /// 创建时间戳
-    #[serde(default)]
-    pub created_at: i64,
     /// 话题列表
     #[serde(default)]
     pub topics: Vec<Topic>,
     /// 标签匹配模式 (strict, fuzzy)
     #[serde(default)]
     pub tag_match_mode: Option<String>,
-    /// 捕获所有未定义的字段
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
 }

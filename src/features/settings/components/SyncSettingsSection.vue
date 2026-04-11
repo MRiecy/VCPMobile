@@ -26,8 +26,7 @@ const testSyncConnection = async () => {
   pingStatus.value = { type: 'loading', message: '正在连接桌面端...' };
   try {
     const res = await syncService.pingServer(
-      props.settings.syncServerIp,
-      props.settings.syncServerPort,
+      props.settings.syncServerUrl,
       props.settings.syncToken
     );
     pingStatus.value = { type: 'success', message: `连接成功！设备: ${res.deviceName}` };
@@ -54,26 +53,12 @@ const rebuildEmoticonLibrary = async () => {
 
 <template>
   <div class="space-y-5 px-1">
-    <div class="flex gap-4">
-      <div class="flex-[2]">
-        <SettingsTextField 
-          v-model="settings.syncServerIp" 
-          label="同步服务器 IP" 
-          placeholder="192.168.x.x" 
-          mono
-        />
-      </div>
-      <div class="flex-1">
-        <SettingsTextField 
-          v-model.number="settings.syncServerPort" 
-          type="number" 
-          label="端口" 
-          placeholder="5974" 
-          mono
-          center
-        />
-      </div>
-    </div>
+    <SettingsTextField 
+      v-model="settings.syncServerUrl" 
+      label="同步服务器 URL" 
+      placeholder="http://192.168.x.x:5974" 
+      mono
+    />
     <SettingsTextField 
       v-model="settings.syncToken" 
       label="Mobile Sync Token" 

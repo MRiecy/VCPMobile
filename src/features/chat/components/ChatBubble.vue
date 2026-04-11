@@ -33,10 +33,9 @@ defineProps<{
 <style scoped>
 .vcp-bubble-container {
   word-break: break-word;
-  backdrop-filter: blur(12px) saturate(120%);
-  -webkit-backdrop-filter: blur(12px) saturate(120%);
+  backdrop-filter: blur(8px) saturate(110%);
+  -webkit-backdrop-filter: blur(8px) saturate(110%);
   transform: translateZ(0);
-  will-change: transform;
 }
 
 .vcp-bubble-container::after {
@@ -44,8 +43,8 @@ defineProps<{
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: 0 10px 30px -10px var(--dynamic-color, transparent);
-  opacity: 0.2;
+  box-shadow: 0 4px 15px -5px var(--dynamic-color, transparent);
+  opacity: 0.15;
   pointer-events: none;
 }
 

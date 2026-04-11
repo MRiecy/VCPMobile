@@ -5,11 +5,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 use crate::vcp_modules::agent_service::AgentConfigState;
-use crate::vcp_modules::app_settings_manager::AppSettingsState;
+use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
+use crate::vcp_modules::sync_manager::{init_sync_manager, SyncState};
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -58,16 +59,19 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     // 2. 基础状态管理注册
     handle.manage(AgentConfigState::new());
     handle.manage(GroupManagerState::new());
-    handle.manage(AppSettingsState::new());
+    handle.manage(SettingsState::new());
     handle.manage(ModelManagerState::new());
-    handle.manage(GroupManagerState::new());
+    
+    // 初始化同步管理器
+    let sync_sender = init_sync_manager(handle.clone());
+    handle.manage(SyncState { ws_sender: sync_sender });
 
     // 3. 服务级并行初始化 (这些服务彼此依赖较少)
     let emoticon_task = {
         let h = handle.clone();
         tokio::spawn(async move {
             let emoticon_state = h.state::<EmoticonManagerState>();
-            let settings_state = h.state::<AppSettingsState>();
+            let settings_state = h.state::<SettingsState>();
             if let Ok(lib) = internal_generate_library(&h, &settings_state).await {
                 *emoticon_state.library.lock().await = lib;
                 info!("[Lifecycle] Emoticon library loaded.");

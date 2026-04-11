@@ -4,6 +4,7 @@ defineProps<{
   fallbackText: string;
   isUser: boolean;
   borderColor?: string;
+  fallbackColor?: string;
 }>();
 </script>
 
@@ -20,7 +21,11 @@ defineProps<{
       <div
         v-else
         class="w-full h-full flex items-center justify-center text-xs font-bold text-white"
-        :class="isUser ? 'bg-primary' : 'bg-gray-700'"
+        :style="{
+          backgroundColor: isUser
+            ? fallbackColor || 'var(--primary)'
+            : fallbackColor || '#374151',
+        }"
       >
         {{ fallbackText.charAt(0).toUpperCase() }}
       </div>

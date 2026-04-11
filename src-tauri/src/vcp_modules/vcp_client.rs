@@ -16,6 +16,9 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
 use url::Url;
 
+use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
+use crate::vcp_modules::db_manager::DbState;
+
 /// =================================================================
 /// vcp_modules/vcp_client.rs - 统一的 VCP 请求处理模块 (Rust 重写版)
 /// =================================================================
@@ -168,19 +171,23 @@ pub async fn perform_vcp_request<R: Runtime>(
     }
 
     // === 1. 读取设置与动态路由切换 ===
-    let settings_path = app_data_path.join("settings.json");
     let mut enable_vcp_tool_injection = false;
     let mut agent_music_control = false;
     let mut enable_agent_bubble_theme = false;
 
-    if let Ok(content) = tokio::fs::read_to_string(&settings_path).await {
-        if let Ok(settings) = serde_json::from_str::<Value>(&content) {
-            enable_vcp_tool_injection = settings["enableVcpToolInjection"]
-                .as_bool()
+    if let Ok(settings) = load_app_settings(app).await {
+        if let Some(extra) = settings.extra.as_object() {
+            enable_vcp_tool_injection = extra
+                .get("enableVcpToolInjection")
+                .and_then(|v: &Value| v.as_bool())
                 .unwrap_or(false);
-            agent_music_control = settings["agentMusicControl"].as_bool().unwrap_or(false);
-            enable_agent_bubble_theme = settings["enableAgentBubbleTheme"]
-                .as_bool()
+            agent_music_control = extra
+                .get("agentMusicControl")
+                .and_then(|v: &Value| v.as_bool())
+                .unwrap_or(false);
+            enable_agent_bubble_theme = extra
+                .get("enableAgentBubbleTheme")
+                .and_then(|v: &Value| v.as_bool())
                 .unwrap_or(false);
         }
     }
@@ -453,6 +460,26 @@ pub async fn perform_vcp_request<R: Runtime>(
             .await
             .map_err(|e| format!("JSON解析失败: {}", e))?;
         Ok((json!({"response": vcp_response, "context": context}), false))
+    }
+}
+
+async fn load_app_settings<R: Runtime>(app: &AppHandle<R>) -> Result<Settings, String> {
+    let db_state = app.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let row = sqlx::query("SELECT value FROM settings WHERE key = 'global'")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(row) = row {
+        use sqlx::Row;
+        let content: String = row.get("value");
+        let settings = serde_json::from_str::<Settings>(&content)
+            .unwrap_or_else(|_| create_default_settings());
+        Ok(settings)
+    } else {
+        Ok(create_default_settings())
     }
 }
 

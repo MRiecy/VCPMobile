@@ -1,4 +1,4 @@
-use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
@@ -13,7 +13,7 @@ const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一
 /// 话题总结的默认模型
 const DEFAULT_SUMMARY_MODEL: &str = "gemini-2.5-flash";
 
-/// 话题总结的默认温度系数
+/// 话题总结的默认温度系数 (硬编码为 0.7)
 const DEFAULT_SUMMARY_TEMPERATURE: f64 = 0.7;
 
 /// AI 请求超时时间 (秒)
@@ -24,19 +24,18 @@ const AI_MAX_TOKENS: u32 = 4000;
 
 pub async fn summarize_topic(
     app_handle: AppHandle,
-    settings_state: State<'_, AppSettingsState>,
+    settings_state: State<'_, SettingsState>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
     agent_name: String,
 ) -> Result<String, String> {
-    let settings = read_app_settings(app_handle.clone(), settings_state).await?;
+    let settings = read_settings(app_handle.clone(), settings_state).await?;
     if settings.vcp_server_url.is_empty() || settings.vcp_api_key.is_empty() {
         return Err("VCP settings are missing".to_string());
     }
 
-    // 1. 获取最近消息 (最近4条) - 使用 Leviathan 架构 (DB Only)
-    let _db_state = app_handle.state::<DbState>();
+    // 1. 获取最近消息 (最近4条)
     let messages = message_service::load_chat_history_internal(
         &app_handle,
         &owner_id,
@@ -61,7 +60,7 @@ pub async fn summarize_topic(
         recent_content.push_str(&format!("{}: {}\n", role_name, msg.content));
     }
 
-    // 2. 构造 Prompt (对齐桌面端)
+    // 2. 构造 Prompt
     let summary_prompt = format!(
         "[待总结聊天记录: {}]\n{}",
         recent_content, DEFAULT_SUMMARY_PROMPT
@@ -73,12 +72,11 @@ pub async fn summarize_topic(
         .build()
         .map_err(|e| e.to_string())?;
 
-    let model = settings
-        .topic_summary_model
-        .unwrap_or_else(|| DEFAULT_SUMMARY_MODEL.to_string());
-    let temp = settings
-        .topic_summary_model_temperature
-        .unwrap_or(DEFAULT_SUMMARY_TEMPERATURE as f32);
+    let model = if settings.topic_summary_model.is_empty() {
+        DEFAULT_SUMMARY_MODEL.to_string()
+    } else {
+        settings.topic_summary_model
+    };
 
     let response = client
         .post(&settings.vcp_server_url)
@@ -87,7 +85,7 @@ pub async fn summarize_topic(
         .json(&json!({
             "messages": [{"role": "user", "content": summary_prompt}],
             "model": model,
-            "temperature": temp,
+            "temperature": DEFAULT_SUMMARY_TEMPERATURE,
             "max_tokens": AI_MAX_TOKENS,
             "stream": false
         }))
@@ -105,7 +103,7 @@ pub async fn summarize_topic(
         .unwrap_or("")
         .trim();
 
-    // 4. 清洗标题 (对齐桌面端 logic)
+    // 4. 清洗标题
     let clean_title = clean_summarized_title(raw_title);
 
     if clean_title.is_empty() {
@@ -116,10 +114,8 @@ pub async fn summarize_topic(
 }
 
 pub fn clean_summarized_title(raw: &str) -> String {
-    // 提取第一行
     let first_line = raw.lines().next().unwrap_or("").trim();
 
-    // 移除标点符号、前缀
     let mut cleaned = first_line
         .replace(|c: char| !c.is_alphanumeric() && !c.is_whitespace(), "")
         .replace("标题", "")
@@ -130,10 +126,8 @@ pub fn clean_summarized_title(raw: &str) -> String {
         .trim()
         .to_string();
 
-    // 移除所有空格
     cleaned = cleaned.replace(char::is_whitespace, "");
 
-    // 截断到12个字符
     let char_count = cleaned.chars().count();
     if char_count > 12 {
         cleaned.chars().take(12).collect()

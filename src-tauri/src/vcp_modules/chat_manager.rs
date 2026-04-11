@@ -1,29 +1,37 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::topic_sync_service::{
-    get_topic_delta_internal, get_topic_fingerprint_internal, TopicDelta, TopicFingerprint,
-};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct Attachment {
-    #[serde(default)]
+pub struct FileManagerData {
+    #[serde(rename = "internalPath")]
+    pub internal_path: String,
     pub r#type: String,
-    #[serde(default)]
-    pub src: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub size: u64,
-    #[serde(default)]
-    pub hash: Option<String>,
-    #[serde(default)]
     #[serde(rename = "extractedText")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extracted_text: Option<String>,
-    #[serde(default)]
+    #[serde(rename = "imageFrames")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_frames: Option<Vec<String>>,
     #[serde(rename = "thumbnailPath")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail_path: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct Attachment {
+    pub r#type: String,
+    pub src: String,
+    pub name: String,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(rename = "_fileManagerData")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_manager_data: Option<FileManagerData>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -49,21 +57,6 @@ pub struct ChatMessage {
     /// 捕获所有其他未定义的字段
     #[serde(flatten)]
     pub extra: serde_json::Value,
-}
-
-#[tauri::command]
-pub async fn process_regex_for_message(
-    db_state: State<'_, DbState>,
-    agent_id: String,
-    content: String,
-    scope: String,
-    role: String,
-    depth: i32,
-) -> Result<String, String> {
-    crate::vcp_modules::regex_service::apply_regex_rules(
-        &db_state, &agent_id, &content, &scope, &role, depth,
-    )
-    .await
 }
 
 // --- 历史记录存取逻辑 ---
@@ -157,30 +150,4 @@ pub async fn truncate_history_after_timestamp(
     .await
 }
 
-// --- 增量同步逻辑 (Delta Sync) ---
-
-// --- 指纹与同步优化 ---
-
-#[tauri::command]
-pub async fn get_topic_fingerprint(
-    app_handle: AppHandle,
-    _owner_id: String,
-    _owner_type: String,
-    topic_id: String,
-) -> Result<TopicFingerprint, String> {
-    get_topic_fingerprint_internal(&app_handle, &topic_id).await
-}
-
-/// 对比内存中的历史记录与磁盘文件，计算增量更新 (Delta)
-#[tauri::command]
-pub async fn get_topic_delta(
-    app_handle: AppHandle,
-    _db_state: State<'_, DbState>,
-    _owner_id: String,
-    _owner_type: String,
-    topic_id: String,
-    current_history: Vec<ChatMessage>,
-    fingerprint: Option<TopicFingerprint>,
-) -> Result<TopicDelta, String> {
-    get_topic_delta_internal(&app_handle, &topic_id, current_history, fingerprint).await
-}
+// --- 增量同步逻辑 (Delta Sync) (Moved to sync_manager.rs) ---

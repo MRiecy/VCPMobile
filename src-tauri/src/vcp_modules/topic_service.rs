@@ -1,7 +1,7 @@
 // TopicService: 处理会话话题生命周期的模块
 // 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
 
-use crate::vcp_modules::app_settings_manager::AppSettingsState;
+use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::topic_types::Topic;
 use tauri::{AppHandle, State};
@@ -152,7 +152,7 @@ pub async fn update_topic_title(
 #[tauri::command]
 pub async fn summarize_topic(
     app_handle: AppHandle,
-    settings_state: State<'_, AppSettingsState>,
+    settings_state: State<'_, SettingsState>,
     owner_id: String,
     owner_type: String,
     topic_id: String,

@@ -1,4 +1,4 @@
-use crate::vcp_modules::app_settings_manager::{read_app_settings, AppSettingsState};
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -136,7 +136,7 @@ fn extract_emoticon_info(url_str: &str) -> (Option<String>, Option<String>) {
 
 pub async fn internal_generate_library<R: Runtime>(
     app_handle: &AppHandle<R>,
-    settings_state: &State<'_, AppSettingsState>,
+    _settings_state: &SettingsState,
 ) -> Result<Vec<EmoticonItem>, String> {
     let config_dir = app_handle
         .path()
@@ -154,7 +154,8 @@ pub async fn internal_generate_library<R: Runtime>(
     }
 
     // 1. 获取配置
-    let settings = read_app_settings(app_handle.clone(), settings_state.clone()).await?;
+    let settings_state = app_handle.state::<SettingsState>();
+    let settings = read_settings(app_handle.clone(), settings_state).await?;
     let vcp_server_url = settings.vcp_server_url;
     if vcp_server_url.is_empty() {
         return Err("VCP Server URL is empty in settings".to_string());
@@ -250,7 +251,7 @@ pub async fn get_emoticon_library(
 #[tauri::command]
 pub async fn regenerate_emoticon_library<R: Runtime>(
     app_handle: AppHandle<R>,
-    settings_state: State<'_, AppSettingsState>,
+    settings_state: State<'_, SettingsState>,
     emoticon_state: State<'_, EmoticonManagerState>,
 ) -> Result<usize, String> {
     let library = internal_generate_library(&app_handle, &settings_state).await?;

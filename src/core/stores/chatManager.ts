@@ -6,7 +6,6 @@ import { listen } from "@tauri-apps/api/event";
 import { useStreamManagerStore } from "./streamManager";
 import { useSettingsStore } from "./settings";
 import { useAssistantStore } from "./assistant";
-import { useModelStore } from "./modelStore";
 import { useTopicStore } from "./topicListManager";
 import { syncService } from "../utils/syncService";
 
@@ -139,7 +138,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   const streamManager = useStreamManagerStore();
   const settingsStore = useSettingsStore();
   const assistantStore = useAssistantStore();
-  const modelStore = useModelStore();
   const topicStore = useTopicStore();
 
   // 用于拦截重新生成时的输入框补全
@@ -173,7 +171,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       console.log(`[ChatManager] Triggering AI summary for topic: ${topicId}`);
       try {
         const agentName =
-          assistantStore.agents.find((a: any) => a.id === ownerId)?.name || "AI";
+          assistantStore.agents.find((a: any) => a.id === ownerId)?.name ||
+          "AI";
         const newTitle = await invoke<string>("summarize_topic", {
           ownerId,
           ownerType,
@@ -183,7 +182,12 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
         if (newTitle) {
           console.log(`[ChatManager] AI Summarized Title: ${newTitle}`);
-          await topicStore.updateTopicTitle(ownerId, ownerType, topicId, newTitle);
+          await topicStore.updateTopicTitle(
+            ownerId,
+            ownerType,
+            topicId,
+            newTitle,
+          );
         }
       } catch (e) {
         console.error("[ChatManager] AI Summary failed:", e);
@@ -263,34 +267,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 对消息应用正则清洗 (Rust 下沉逻辑)
-   */
-  const processRegex = async (msg: ChatMessage, agentId: string) => {
-    // 只有 assistant 消息或需要清洗的用户消息才处理，且避免重复处理
-    const contentToProcess = msg.content;
-    if (msg.processedContent || !contentToProcess) return;
-
-    // 计算深度 (对齐桌面端逻辑)
-    const index = currentChatHistory.value.findIndex((m) => m.id === msg.id);
-    const depth =
-      index === -1 ? 0 : currentChatHistory.value.length - 1 - index;
-
-    try {
-      const processed = await invoke<string>("process_regex_for_message", {
-        agentId,
-        content: contentToProcess,
-        scope: "frontend",
-        role: msg.role,
-        depth: depth,
-      });
-      msg.processedContent = processed;
-    } catch (e) {
-      console.error("[ChatManager] Regex processing failed:", e);
-      msg.processedContent = contentToProcess; // 降级处理
-    }
-  };
-
-  /**
    * 加载聊天历史 (已优化：数据在 Rust 端完成预处理)
    */
   const loadHistory = async (
@@ -346,11 +322,10 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         currentSelectedItem.value = { id: ownerId, type: ownerType };
       }
 
-      // 异步预处理正则并解析本地资源路径
+      // 异步解析本地资源路径
       await Promise.all(
         history.map(async (msg) => {
           resolveMessageAssets(msg);
-          await processRegex(msg, ownerId);
         }),
       );
 
@@ -766,102 +741,17 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       }
 
       // --- 普通单 Agent 消息逻辑 ---
-      let agentConfig = assistantStore.agents.find(
-        (a: any) => a.id === agentId,
-      );
-      if (!agentConfig) {
-        agentConfig = await invoke("read_agent_config", {
-          agentId,
-          allowDefault: true,
-        });
-      }
-
-      const messagesForVcp: any[] = [];
-      if (agentConfig?.systemPrompt) {
-        let systemPrompt = agentConfig.systemPrompt;
-        systemPrompt = systemPrompt.replace(
-          /\{\{AgentName\}\}/g,
-          agentConfig.name || "AI",
-        );
-        messagesForVcp.push({ role: "system", content: systemPrompt });
-      }
-
-      // 核心：处理历史记录并转换多模态 Payload
-      const historyForVcp = await Promise.all(
-        currentChatHistory.value
-          .filter((m) => !m.isThinking)
-          .map(async (m) => {
-            // 如果没有附件且是纯文本，保持简单格式
-            if (!m.attachments || m.attachments.length === 0) {
-              return { role: m.role, content: m.content, name: m.name };
-            }
-
-            const contentParts: any[] = [];
-            let combinedText = m.content;
-
-            for (const att of m.attachments) {
-              // 1. 文本提取注入 (对齐桌面端)
-              if (att.extractedText) {
-                combinedText += `\n\n[附加文件: ${att.name}]\n${att.extractedText}\n[/附加文件结束: ${att.name}]`;
-              }
-
-              // 2. 多模态识别 (图片/音频/视频)
-              const isImage = att.type.startsWith("image/");
-              const isAudio = att.type.startsWith("audio/");
-              const isVideo = att.type.startsWith("video/");
-
-              if (isImage || isAudio || isVideo) {
-                // 关键重构：不再在前端读 Base64，而是传引用，由 Rust 后端在发送前动态读取
-                // 这样做极大减少了 IPC 通讯的内存压力，同时也绕过了 50MB 的限制 (Rust 端目前支持更大)
-                contentParts.push({
-                  type: "local_file",
-                  path: att.src,
-                  mime: att.type,
-                });
-              } else if (!att.extractedText) {
-                // 既非文本提取也非多模态（如普通压缩包），仅注入路径占位
-                combinedText += `\n\n[附加文件: ${att.name}] (不支持直接读取内容)`;
-              }
-            }
-
-            if (combinedText.trim()) {
-              contentParts.unshift({ type: "text", text: combinedText });
-            }
-
-            return {
-              role: m.role,
-              content: contentParts.length > 0 ? contentParts : m.content,
-              name: m.name,
-            };
-          }),
-      );
-
-      messagesForVcp.push(...historyForVcp);
-
-      const payload = {
+      const agentPayload = {
+        agentId,
+        topicId: currentTopicId.value,
+        userMessage: userMsg,
         vcpUrl,
         vcpApiKey,
-        messages: messagesForVcp,
-        modelConfig: {
-          model: agentConfig?.model || "gemini-2.0-flash",
-          temperature: agentConfig?.temperature ?? 0.7,
-          top_p: agentConfig?.topP,
-          top_k: agentConfig?.topK,
-          max_tokens: agentConfig?.maxOutputTokens,
-          contextTokenLimit: agentConfig?.contextTokenLimit,
-          stream: true,
-        },
-        messageId: thinkingId,
-        context: { agentId, topicId: currentTopicId.value },
+        thinkingMessageId: thinkingId,
       };
 
-      console.log("[ChatManager] Sending payload to VCP:", payload);
-
-      if (payload.modelConfig.model) {
-        modelStore.recordUsage(payload.modelConfig.model);
-      }
-
-      await invoke("sendToVCP", { payload });
+      console.log("[ChatManager] Sending agent payload:", agentPayload);
+      await invoke("handle_agent_chat_message", { payload: agentPayload });
     } catch (e) {
       console.error("[ChatManager] Failed to send message:", e);
 
@@ -1071,11 +961,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           }
 
           if (latestMsg) {
-            // 重新获取一次最新引用进行正则处理
-            if (currentSelectedItem.value?.id) {
-              await processRegex(latestMsg, currentSelectedItem.value.id);
-            }
-
             // 使用 patch (墓碑更新) 代替 append
             // 因为在发送瞬间我们已经 append 过一个思考态占位符了，现在是更新它的内容
             if (currentSelectedItem.value?.id && currentTopicId.value) {

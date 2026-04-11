@@ -41,11 +41,35 @@ const withTimeout = <T>(
 };
 
 export class SyncService {
-  private getBaseUrl(customIp?: string, customPort?: number): string {
+  private normalizeBaseUrl(rawUrl?: string): string {
+    const source = rawUrl?.trim() || "http://127.0.0.1:5974";
+    const normalized = source.replace(/\/+$/, "");
+    return normalized.endsWith("/api/mobile-sync")
+      ? normalized
+      : `${normalized}/api/mobile-sync`;
+  }
+
+  private getBaseUrl(customUrl?: string): string {
     const settingsStore = useSettingsStore();
-    const ip = customIp || settingsStore.settings?.syncServerIp || "127.0.0.1";
-    const port = customPort || settingsStore.settings?.syncServerPort || 5974;
-    return `http://${ip}:${port}/api/mobile-sync`;
+    return this.normalizeBaseUrl(
+      customUrl || settingsStore.settings?.syncServerUrl,
+    );
+  }
+
+  private getWsUrl(): string {
+    const settingsStore = useSettingsStore();
+    const rawUrl = settingsStore.settings?.syncServerUrl?.trim();
+
+    if (!rawUrl) {
+      return "ws://127.0.0.1:5974/";
+    }
+
+    const parsed = new URL(rawUrl);
+    parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+    parsed.pathname = "/";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
   }
 
   /**
@@ -65,11 +89,10 @@ export class SyncService {
    *
    */
   async pingServer(
-    customIp?: string,
-    customPort?: number,
+    customUrl?: string,
     customToken?: string,
   ): Promise<{ status: string; deviceName: string; message: string }> {
-    const url = `${this.getBaseUrl(customIp, customPort)}/ping`;
+    const url = `${this.getBaseUrl(customUrl)}/ping`;
     const settingsStore = useSettingsStore();
     const token =
       customToken !== undefined
@@ -179,12 +202,9 @@ export class SyncService {
    */
   async startSyncDaemon(): Promise<void> {
     const settingsStore = useSettingsStore();
-    const ip = settingsStore.settings?.syncServerIp || "127.0.0.1";
-    // 注意：WS 端口是主端口 + 1
-    const port = (settingsStore.settings?.syncServerPort || 5974) + 1;
     const token = encodeURIComponent(settingsStore.settings?.syncToken || "");
 
-    const wsUrl = `ws://${ip}:${port}/?token=${token}`;
+    const wsUrl = `${this.getWsUrl()}?token=${token}`;
     console.log("[SyncService] Starting sync daemon:", wsUrl);
 
     return await invoke("start_sync_daemon", { wsUrl });
