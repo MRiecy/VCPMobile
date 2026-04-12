@@ -21,18 +21,18 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
                         if !text.is_empty() {
                             combined_text.push_str(&format!(
                                 "\n\n[附加文件: {}]\n{}\n[/附加文件结束: {}]",
-                                att.name, text, att.name
+                                att.internal_path, text, att.name
                             ));
                         }
                     }
 
                     // 2. 处理多模态文件 (图片/音频/视频)
                     let mime = &att.r#type;
-                    let is_multimodal = mime.starts_with("image/")
-                        || mime.starts_with("audio/")
-                        || mime.starts_with("video/");
+                    let is_image = mime.starts_with("image/");
+                    let is_audio = mime.starts_with("audio/");
+                    let is_video = mime.starts_with("video/");
 
-                    if is_multimodal {
+                    if is_image || is_audio || is_video {
                         // 优先使用物理路径 internal_path
                         let path = if !att.internal_path.is_empty() {
                             att.internal_path.clone()
@@ -40,17 +40,26 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
                             att.src.clone()
                         };
 
+                        // 注入路径标记，对齐桌面端逻辑
+                        if is_image {
+                            combined_text.push_str(&format!("\n\n[附加图片: {}]", path));
+                        } else {
+                            combined_text.push_str(&format!("\n\n[附加文件: {}]", path));
+                        }
+
                         content_parts.push(json!({
                             "type": "local_file",
                             "path": path,
                             "mime": mime
                         }));
                     } else if att.extracted_text.is_none() {
-                        // 既没有提取文本也不是多模态，仅做标记
-                        combined_text.push_str(&format!(
-                            "\n\n[附加文件: {}] (不支持直接读取内容)",
-                            att.name
-                        ));
+                        // 既没有提取文本也不是多模态，仅做标记 (对齐桌面端 fallback)
+                        let path = if !att.internal_path.is_empty() {
+                            att.internal_path.clone()
+                        } else {
+                            att.src.clone()
+                        };
+                        combined_text.push_str(&format!("\n\n[附加文件: {}]", path));
                     }
                 }
             }
