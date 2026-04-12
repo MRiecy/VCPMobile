@@ -35,9 +35,12 @@ const { initRootHistory } = useModalHistory();
 const appRootRef = ref<HTMLElement | null>(null);
 const { direction, lengthX, lengthY } = useSwipe(appRootRef, {
   threshold: 15,
-  onSwipeEnd: () => {
+  onSwipeEnd: (e: TouchEvent | MouseEvent) => {
     // Only trigger if we aren't already showing drawers
     if (layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen) return;
+
+    // Check if the swipe originated from a restricted area (e.g. chat input or horizontal scroll areas)
+    if (e.target instanceof Element && e.target.closest('.no-swipe')) return;
 
     // Check angle: |deltaY| / deltaX < tan(30deg) ~ 0.577
     const absX = Math.abs(lengthX.value);

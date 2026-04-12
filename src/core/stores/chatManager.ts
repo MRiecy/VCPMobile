@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, nextTick } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -14,9 +14,11 @@ import { useDocumentProcessor } from "../composables/useDocumentProcessor";
  * Attachment 接口定义，严格对齐 Rust 端的 AttachmentSyncDTO / Attachment (仅保留核心字段)
  */
 export interface Attachment {
+  id?: string; // 纯前端 UI 稳定性标识 (Stable Key)
   type: string;
   name: string;
   size: number;
+  progress?: number; // 0-100 的真实上传进度
   src: string; // 仅用于前端 UI 临时渲染路径 (如 file:// 或 blob:)
   resolvedSrc?: string; // Webview 可用的 asset:// 路径
   hash?: string;
@@ -137,9 +139,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     Map<string, { content: string; topicId: string; ownerId: string }>
   >(new Map());
 
-  // 用于高性能同步的指纹缓存
-  const lastTopicFingerprint = ref<TopicFingerprint | null>(null);
-
   // 暂存的附件列表，准备随下一条消息发送
   const stagedAttachments = ref<Attachment[]>([]);
 
@@ -232,32 +231,164 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 触发原生文件选择器并暂存附件
+   * 触发文件选择器并暂存附件 (使用标准 HTML Input 完美解决 Android content:// 协议名和类型丢失问题)
    */
   const handleAttachment = async () => {
-    try {
-      // 调用 Rust 端原生的文件选择和存储逻辑
-      const attachmentData = await invoke<any>("pick_and_store_attachment");
+    return new Promise<void>((resolve, reject) => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = false;
+      // 允许所有类型
+      input.accept = "*/*";
 
-      if (attachmentData) {
-        console.log(
-          "[ChatManager] Attachment picked and stored:",
-          attachmentData,
-        );
+      input.onchange = async (e: Event) => {
+        try {
+          const target = e.target as HTMLInputElement;
+          if (!target.files || target.files.length === 0) {
+            resolve();
+            return;
+          }
 
-        // 将后端返回的元数据转为前端格式并推入暂存区
-        stagedAttachments.value.push({
-          type: attachmentData.mime_type,
-          src: attachmentData.internal_path,
-          name: attachmentData.name,
-          size: attachmentData.size,
-          hash: attachmentData.hash,
-        });
-      }
-    } catch (e) {
-      console.error("[ChatManager] Failed to pick or store attachment:", e);
-      // TODO: 添加 Toast 提示用户
-    }
+          const file = target.files[0];
+          console.log(
+            `[ChatManager] Selected file via HTML input: ${file.name}, type: ${file.type}, size: ${file.size}`,
+          );
+
+          // 1. 生成稳定 ID 并使用 unshift 插入首位 (实现“最新附件最先看到”)
+          const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          const blobUrl = URL.createObjectURL(file);
+
+          stagedAttachments.value.unshift({
+            id: stableId,
+            type: file.type || "application/octet-stream",
+            src: blobUrl,
+            name: file.name,
+            size: file.size,
+            status: "loading",
+          });
+
+          await nextTick();
+          window.dispatchEvent(new Event("resize"));
+
+          try {
+            let finalData: any = null;
+
+            // --- 分流策略：小文件 ( < 2MB ) 走 IPC，大文件走高速 TCP 链路 ---
+            if (file.size < 2 * 1024 * 1024) {
+              console.log(
+                `[ChatManager] Small file detected (<2MB), using store_file IPC for ${file.name}`,
+              );
+              // 将 File 转换为 Uint8Array (Tauri v2 支持直接传递二进制，严禁使用 Array.from)
+              const arrayBuffer = await file.arrayBuffer();
+              const bytes = new Uint8Array(arrayBuffer);
+
+              finalData = await invoke<any>("store_file", {
+                originalName: file.name,
+                fileBytes: bytes, // 直接传递，性能提升 100 倍
+                mimeType: file.type || "application/octet-stream",
+              });
+            } else {
+              console.log(
+                `[ChatManager] Large file detected, opening High-Speed Link for ${file.name} (${file.size} bytes)`,
+              );
+
+              // 1. 准备链路 (Rust 开启临时本地 TCP 接收器)
+              const endpoint = await invoke<any>("prepare_vcp_upload", {
+                metadata: {
+                  name: file.name,
+                  mime: file.type || "application/octet-stream",
+                  size: file.size,
+                },
+              });
+
+              // 2. 内核级搬运 (利用流式上传)
+              const xhr = new XMLHttpRequest();
+              const uploadPromise = new Promise((res, rej) => {
+                xhr.open("POST", endpoint.url, true);
+                xhr.setRequestHeader(
+                  "Content-Type",
+                  "application/octet-stream",
+                );
+                xhr.setRequestHeader("X-Upload-Token", endpoint.token);
+
+                let lastUpdate = 0;
+                xhr.upload.onprogress = (event) => {
+                  if (event.lengthComputable) {
+                    const now = Date.now();
+                    // 限制刷新频率为 ~30fps (每 33ms 刷新一次)，避免高频重绘导致卡顿
+                    if (now - lastUpdate < 33) return;
+                    lastUpdate = now;
+
+                    const progress = Math.round(
+                      (event.loaded / event.total) * 100,
+                    );
+                    const attIndex = stagedAttachments.value.findIndex(
+                      (a) => a.id === stableId,
+                    );
+                    if (attIndex !== -1) {
+                      stagedAttachments.value[attIndex].progress = progress;
+                    }
+                  }
+                };
+
+                xhr.onload = () => {
+                  if (xhr.status >= 200 && xhr.status < 300) {
+                    res(JSON.parse(xhr.responseText));
+                  } else {
+                    rej(new Error(`Upload failed with status ${xhr.status}`));
+                  }
+                };
+
+                xhr.onerror = () => rej(new Error("XHR Network Error"));
+                xhr.send(file);
+              });
+
+              finalData = await uploadPromise;
+            }
+
+            if (finalData) {
+              const index = stagedAttachments.value.findIndex(
+                (a) => a.id === stableId,
+              );
+              if (index !== -1) {
+                stagedAttachments.value[index] = {
+                  ...stagedAttachments.value[index],
+                  type: finalData.type,
+                  src: finalData.internalPath,
+                  name: finalData.name,
+                  size: finalData.size,
+                  hash: finalData.hash,
+                  status: "done",
+                };
+              }
+            }
+            resolve();
+          } catch (err) {
+            console.error("[ChatManager] High-speed upload failed:", err);
+            const index = stagedAttachments.value.findIndex(
+              (a) => a.id === stableId,
+            );
+            if (index !== -1) stagedAttachments.value.splice(index, 1);
+            reject(err);
+          } finally {
+            URL.revokeObjectURL(blobUrl);
+          }
+          resolve();
+        } catch (err) {
+          console.error(
+            "[ChatManager] Failed to pick or store attachment:",
+            err,
+          );
+          reject(err);
+        }
+      };
+
+      input.oncancel = () => {
+        resolve();
+      };
+
+      input.click();
+    });
   };
 
   /**
@@ -323,16 +454,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         }),
       );
 
-      // 获取并更新初始指纹，用于后续同步
-      lastTopicFingerprint.value = await invoke<TopicFingerprint>(
-        "get_topic_fingerprint",
-        {
-          ownerId,
-          ownerType,
-          topicId,
-        },
-      );
-
       console.log(
         `[ChatManager] History loaded: ${history.length} messages (Pre-processed by Rust)`,
       );
@@ -344,146 +465,51 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 保存聊天历史
+   * 保存聊天历史 (已弃用，迁移到 SQLite 自动保存)
    */
   const saveHistory = async () => {
-    if (!currentSelectedItem.value || !currentTopicId.value) return;
-
-    const ownerId = currentSelectedItem.value.id;
-    const ownerType = currentSelectedItem.value.type;
-    const topicId = currentTopicId.value;
-
-    try {
-      await invoke("save_chat_history", {
-        ownerId,
-        ownerType,
-        topicId,
-        history: currentChatHistory.value,
-      });
-
-      // 保存后立即刷新指纹，防止刚刚保存的动作触发外部同步
-      lastTopicFingerprint.value = await invoke<TopicFingerprint>(
-        "get_topic_fingerprint",
-        {
-          ownerId,
-          ownerType,
-          topicId,
-        },
-      );
-    } catch (e) {
-      console.error("[ChatManager] Failed to save history:", e);
-    }
+    console.log("[ChatManager] saveHistory is obsolete. SQLite auto-saves.");
   };
 
   /**
-   * 增量同步聊天历史 (已优化：指纹预检 + Rust 预处理)
+   * 增量同步聊天历史 (优化: 直接重载全量历史, Rust SQLite 查询极快)
    */
   const syncHistoryWithDelta = async () => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
 
-    const ownerId = currentSelectedItem.value.id;
-    const ownerType = currentSelectedItem.value.type;
-    const topicId = currentTopicId.value;
-
     try {
-      // 1. 获取最新指纹并与本地缓存比对
-      const newFingerprint = await invoke<TopicFingerprint>(
-        "get_topic_fingerprint",
-        {
-          ownerId,
-          ownerType,
-          topicId,
-        },
-      );
-
-      if (
-        lastTopicFingerprint.value &&
-        newFingerprint.mtime === lastTopicFingerprint.value.mtime &&
-        newFingerprint.size === lastTopicFingerprint.value.size &&
-        newFingerprint.msg_count === currentChatHistory.value.length
-      ) {
-        return;
-      }
-
-      console.log(
-        `[ChatManager] Fingerprint mismatch, calculating delta for topic: ${topicId}`,
-      );
-
-      // 2. 获取 Rust 端计算出的差异块
-      const delta = await invoke<TopicDelta>("get_topic_delta", {
-        ownerId,
-        ownerType,
-        topicId,
-        currentHistory: currentChatHistory.value,
-        fingerprint: lastTopicFingerprint.value,
+      const history = await invoke<ChatMessage[]>("load_chat_history", {
+        ownerId: currentSelectedItem.value.id,
+        ownerType: currentSelectedItem.value.type,
+        topicId: currentTopicId.value,
       });
 
-      if (delta.sync_skipped) {
-        lastTopicFingerprint.value = newFingerprint;
-        return;
-      }
-
-      if (
-        delta.added.length === 0 &&
-        delta.updated.length === 0 &&
-        delta.deleted_ids.length === 0
-      ) {
-        lastTopicFingerprint.value = newFingerprint;
-        return;
-      }
-
-      // 3. 处理删除的消息
-      if (delta.deleted_ids.length > 0) {
-        currentChatHistory.value = currentChatHistory.value.filter(
-          (m) => !delta.deleted_ids.includes(m.id),
+      // 合并流状态和最新数据
+      for (const newMsg of history) {
+        const existing = currentChatHistory.value.find(
+          (m) => m.id === newMsg.id,
         );
-      }
-
-      // 4. 处理更新的消息
-      for (const updatedMsg of delta.updated) {
-        if (updatedMsg.id === streamingMessageId.value) {
-          const index = currentChatHistory.value.findIndex(
-            (m) => m.id === updatedMsg.id,
-          );
-          if (index > -1) {
-            const { content, displayedContent, ...meta } = updatedMsg;
-            currentChatHistory.value[index] = {
-              ...currentChatHistory.value[index],
-              ...meta,
-            };
+        if (existing) {
+          if (existing.id !== streamingMessageId.value) {
+            Object.assign(existing, newMsg);
           }
-          continue;
-        }
-
-        const index = currentChatHistory.value.findIndex(
-          (m) => m.id === updatedMsg.id,
-        );
-        if (index > -1) {
-          currentChatHistory.value[index] = {
-            ...currentChatHistory.value[index],
-            ...updatedMsg,
-          };
+        } else {
+          currentChatHistory.value.push(newMsg);
         }
       }
 
-      // 5. 处理新增的消息
-      for (const addedMsg of delta.added) {
-        if (!currentChatHistory.value.some((m) => m.id === addedMsg.id)) {
-          currentChatHistory.value.push(addedMsg);
-        }
-      }
+      // 处理被删除的数据
+      currentChatHistory.value = currentChatHistory.value.filter(
+        (m) =>
+          history.some((hm) => hm.id === m.id) ||
+          m.id === streamingMessageId.value,
+      );
 
-      // 6. 重新排序以确保时间轴一致
       currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
 
-      // 更新指纹缓存
-      lastTopicFingerprint.value = newFingerprint;
-
-      console.log(
-        `[ChatManager] Delta sync complete (Optimized). Changes: +${delta.added.length} / ~${delta.updated.length} / -${delta.deleted_ids.length}`,
-      );
+      await Promise.all(currentChatHistory.value.map(resolveMessageAssets));
     } catch (e) {
-      console.error("[ChatManager] Delta sync failed:", e);
+      console.error("[ChatManager] Failed to sync delta:", e);
     }
   };
 
@@ -659,11 +685,15 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           try {
             const result = await docProcessor.processAttachment(att);
             if (result) {
-              if (result.extractedText) att.extractedText = result.extractedText;
+              if (result.extractedText)
+                att.extractedText = result.extractedText;
               if (result.imageFrames) att.imageFrames = result.imageFrames;
             }
           } catch (e) {
-            console.error(`[ChatManager] JIT document processing failed for ${att.name}:`, e);
+            console.error(
+              `[ChatManager] JIT document processing failed for ${att.name}:`,
+              e,
+            );
           }
         }
       }
@@ -932,7 +962,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
             }
 
             // 同时也喂给 streamManager，防止切回来时 buffer 为空
-            streamManager.appendChunk(actualMessageId, textChunk, () => { });
+            streamManager.appendChunk(actualMessageId, textChunk, () => {});
           }
         }
       } else if (type === "end" || type === "error") {

@@ -44,14 +44,12 @@ pub fn init_sync_manager(app_handle: AppHandle) -> mpsc::UnboundedSender<SyncCom
                             continue;
                         }
                         let ws_addr = if let Ok(mut u) = url::Url::parse(&s.sync_server_url) {
-                            let new_port = u.port().unwrap_or(5974) + 1;
                             let scheme = if u.scheme() == "https" { "wss" } else { "ws" };
                             u.set_scheme(scheme).ok();
-                            u.set_port(Some(new_port)).ok();
                             u.set_query(Some(&format!("token={}", s.sync_token)));
                             u.to_string()
                         } else {
-                            format!("ws://127.0.0.1:5975?token={}", s.sync_token)
+                            format!("ws://127.0.0.1:5974?token={}", s.sync_token)
                         };
                         (ws_addr, s.sync_server_url.clone())
                     }

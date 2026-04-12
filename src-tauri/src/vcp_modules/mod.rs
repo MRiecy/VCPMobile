@@ -31,3 +31,4 @@ pub mod topic_types;
 pub mod topic_summary_service;
 pub mod vcp_client;
 pub mod vcp_log_service;
+pub mod protocol_manager;

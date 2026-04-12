@@ -22,8 +22,9 @@ use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
-    cleanup_orphaned_attachments, get_attachment_real_path, open_file, pick_and_store_attachment,
+    cleanup_orphaned_attachments, get_attachment_real_path, open_file,
     read_local_file_base64, store_file,
+    init_chunked_upload, append_chunk, finish_chunked_upload, UploadManagerState,
 };
 use vcp_modules::group_chat_application_service::handle_group_chat_message;
 use vcp_modules::group_service::{
@@ -42,6 +43,7 @@ use vcp_modules::topic_service::{
 };
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
+use vcp_modules::protocol_manager::{register_vcp_protocols, prepare_vcp_upload};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -51,18 +53,25 @@ fn greet(name: &str) -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .register_uri_scheme_protocol("vcp", move |ctx, request| {
-            // 暂时占位，或者重构 `register_vcp_protocol` 以返回一个可以调用的函数/闭包
-            handle_vcp_request(ctx, request)
-        })
+    let mut builder = tauri::Builder::default();
+
+    // 1. 注册 URI 协议方案 (模块化管理)
+    builder = register_vcp_protocols(builder);
+
+    builder
         .setup(|app| {
-            // 初始化生命周期状态
-            app.manage(LifecycleState::new());
+            // 2. 初始化核心状态
+            app.manage(LifecycleState::new());    
+            app.manage(ActiveRequests::default());
+            app.manage(ContextSanitizer::default());
+            app.manage(UploadManagerState::new());
 
             let handle = app.handle().clone();
 
-            // 异步启动核心服务
+            // 1. 清理上传缓存 (调试期间暂时屏蔽，防止干扰)
+            // vcp_modules::file_manager::clear_upload_cache(&handle);
+
+            // 3. 异步引导核心服务
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(&handle).await {
                     eprintln!("[VCPCore] Bootstrap failed: {}", e);
@@ -71,8 +80,6 @@ pub fn run() {
 
             Ok(())
         })
-        .manage(ActiveRequests::default())
-        .manage(ContextSanitizer::default())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -98,8 +105,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             sendToVCP,
@@ -136,7 +141,10 @@ pub fn run() {
             delete_agent,
             set_theme,
             store_file,
-            pick_and_store_attachment,
+            init_chunked_upload,
+            append_chunk,
+            finish_chunked_upload,
+            prepare_vcp_upload,
             read_local_file_base64,
             get_attachment_real_path,
             open_file,
@@ -155,64 +163,6 @@ pub fn run() {
             get_core_status,
             get_last_error,
             ])
-            .register_asynchronous_uri_scheme_protocol("vcp-avatar", |context, request, responder| {
-            let app_handle = context.app_handle().clone();
-            let uri = request.uri().to_string();
-            // uri format: vcp-avatar://agent/{id} or vcp-avatar://user/default
-
-            tauri::async_runtime::spawn(async move {
-                let db_state = app_handle.state::<vcp_modules::db_manager::DbState>();
-                let pool = &db_state.pool;
-
-                let path = uri.strip_prefix("vcp-avatar://").unwrap_or("");
-                let parts: Vec<&str> = path.split('/').collect();
-
-                if parts.len() >= 2 {
-                    let owner_type = parts[0];
-                    let owner_id = if owner_type == "user" && parts[1] == "default" {
-                        "default_user"
-                    } else {
-                        parts[1]
-                    };
-
-                    let row_res: Result<Option<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query("SELECT mime_type, image_data, dominant_color FROM avatars WHERE owner_type = ? AND owner_id = ?")
-                        .bind(owner_type)
-                        .bind(owner_id)
-                        .fetch_optional(pool)
-                        .await;
-
-                    match row_res {
-                        Ok(Some(row)) => {
-                            use sqlx::Row;
-                            let mime: String = row.get("mime_type");
-                            let data: Vec<u8> = row.get("image_data");
-                            let color: Option<String> = row.get("dominant_color");
-                            
-                            let mut builder = tauri::http::Response::builder()
-                                .header("Content-Type", mime)
-                                .header("Access-Control-Allow-Origin", "*")
-                                .header("Cache-Control", "max-age=3600");
-                                
-                            if let Some(c) = color {
-                                builder = builder.header("X-Avatar-Color", c);
-                            }
-                            
-                            let response = builder.body(data).unwrap();
-                            responder.respond(response);
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Fallback: 404
-                let response = tauri::http::Response::builder()
-                    .status(404)
-                    .body(Vec::new())
-                    .unwrap();
-                responder.respond(response);
-            });
-            })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
