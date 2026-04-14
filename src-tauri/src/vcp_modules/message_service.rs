@@ -26,7 +26,7 @@ pub async fn load_chat_history_internal(
     let offset = offset.unwrap_or(0);
 
     let rows = sqlx::query(
-        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id 
+        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason 
          FROM messages 
          WHERE topic_id = ? AND deleted_at IS NULL 
          ORDER BY timestamp DESC 
@@ -97,6 +97,7 @@ pub async fn load_chat_history_internal(
             agent_id: row.get("agent_id"),
             group_id: row.get("group_id"),
             is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
+            finish_reason: row.get("finish_reason"),
             attachments: if attachments.is_empty() { None } else { Some(attachments) },
         });
     }
@@ -131,9 +132,9 @@ async fn ensure_attachments_locally(app: &AppHandle, message: &mut ChatMessage) 
         if !local_path.exists() {
             // 尝试下载
             let settings = settings_manager::read_settings(app.clone(), app.state()).await?;
-            if !settings.sync_server_url.is_empty() {
+            if !settings.sync_http_url.is_empty() {
                 let client = reqwest::Client::new();
-                let url = format!("{}/api/mobile-sync/download-attachment?hash={}", settings.sync_server_url, hash);
+                let url = format!("{}/api/mobile-sync/download-attachment?hash={}", settings.sync_http_url, hash);
                 match client.get(&url).header("x-sync-token", &settings.sync_token).send().await {
                     Ok(resp) if resp.status().is_success() => {
                         if let Ok(bytes) = resp.bytes().await {
@@ -168,12 +169,12 @@ pub async fn append_single_message(
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes).await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes, false).await?;
 
     let msg_count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(&topic_id).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+        .bind(&topic_id).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?.unwrap_or(0);
 
-    sqlx::query("UPDATE topics SET updated_at = ?, revision = revision + 1, msg_count = ? WHERE topic_id = ?")
+    sqlx::query("UPDATE topics SET updated_at = ?, msg_count = ? WHERE topic_id = ?")
         .bind(message.timestamp as i64).bind(msg_count).bind(&topic_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
@@ -187,6 +188,7 @@ pub async fn patch_single_message(
     _owner_type: &str,
     topic_id: String,
     mut message: ChatMessage,
+    skip_bubble: bool,
 ) -> Result<(), String> {
     // 自动补齐缺失附件 (从电脑下载)
     ensure_attachments_locally(&app_handle, &mut message).await?;
@@ -197,10 +199,10 @@ pub async fn patch_single_message(
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes).await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes, skip_bubble).await?;
 
     let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE topics SET updated_at = ?, revision = revision + 1 WHERE topic_id = ?")
+    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
         .bind(now).bind(&topic_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
@@ -222,9 +224,9 @@ pub async fn delete_messages(
     q.execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
     let msg_count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(topic_id).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+        .bind(topic_id).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?.unwrap_or(0);
 
-    sqlx::query("UPDATE topics SET msg_count = ?, updated_at = ?, revision = revision + 1 WHERE topic_id = ?")
+    sqlx::query("UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ?")
         .bind(msg_count).bind(now).bind(topic_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
@@ -244,8 +246,8 @@ pub async fn truncate_history_after_timestamp(
     sqlx::query("DELETE FROM messages WHERE topic_id = ? AND timestamp > ?")
         .bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
     let msg_count: i32 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(topic_id).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE topics SET msg_count = ?, updated_at = ?, revision = revision + 1 WHERE topic_id = ?")
+        .bind(topic_id).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?.unwrap_or(0);
+    sqlx::query("UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ?")
         .bind(msg_count).bind(timestamp).bind(topic_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())

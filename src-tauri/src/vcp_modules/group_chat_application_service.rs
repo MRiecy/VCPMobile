@@ -211,6 +211,7 @@ pub async fn process_group_chat_message(
                     agent_id: Some(agent_id),
                     group_id: Some(group_id.clone()),
                     is_group_message: Some(true),
+                    finish_reason: None,
                     attachments: None,
                 };
 

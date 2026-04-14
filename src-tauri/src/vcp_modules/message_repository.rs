@@ -1,4 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::hash_aggregator::HashAggregator;
 use sha2::Digest;
 
 /// Internal message repository for DB operations
@@ -11,14 +12,29 @@ impl MessageRepository {
         topic_id: &str,
         render_format: &str,
         render_content: &[u8],
+        skip_bubble: bool,
     ) -> Result<(), String> {
+        // 1. 计算核心内容指纹 (通过 HashAggregator)
+        let attachment_hashes: Vec<String> = message.attachments.as_ref()
+            .map(|atts| {
+                atts.iter()
+                    .map(|a| a.hash.clone().unwrap_or_default())
+                    .filter(|h| !h.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        
+        let content_hash = HashAggregator::compute_message_fingerprint(&message.content, &attachment_hashes);
+
+        // 2. 插入或更新消息
         sqlx::query(
             "INSERT INTO messages (
                 msg_id, topic_id, role, name, agent_id, content, timestamp,
-                is_thinking, is_group_message, group_id,
+                is_thinking, is_group_message, group_id, finish_reason,
                 render_format, render_content, render_version,
+                content_hash,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
              ON CONFLICT(msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
@@ -27,8 +43,10 @@ impl MessageRepository {
                 agent_id = excluded.agent_id,
                 is_group_message = excluded.is_group_message,
                 group_id = excluded.group_id,
+                finish_reason = excluded.finish_reason,
                 render_format = excluded.render_format,
                 render_content = excluded.render_content,
+                content_hash = excluded.content_hash,
                 updated_at = excluded.updated_at,
                 deleted_at = NULL",
         )
@@ -42,15 +60,17 @@ impl MessageRepository {
         .bind(message.is_thinking)
         .bind(message.is_group_message.unwrap_or(false))
         .bind(&message.group_id)
+        .bind(&message.finish_reason)
         .bind(render_format)
         .bind(render_content)
+        .bind(&content_hash)
         .bind(message.timestamp as i64) // created_at
         .bind(message.timestamp as i64) // updated_at
         .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
-        // Handle attachments
+        // Handle attachments (保持现状)
         sqlx::query("DELETE FROM message_attachments WHERE msg_id = ?")
             .bind(&message.id)
             .execute(&mut **tx)
@@ -60,7 +80,6 @@ impl MessageRepository {
         if let Some(attachments) = &message.attachments {
             for (i, att) in attachments.iter().enumerate() {
                 let hash = att.hash.clone().unwrap_or_else(|| {
-                    // Fallback hash generation
                     let mut hasher = sha2::Sha256::new();
                     sha2::Digest::update(&mut hasher, att.src.as_bytes());
                     format!("{:x}", sha2::Digest::finalize(hasher))
@@ -113,10 +132,11 @@ impl MessageRepository {
             }
         }
 
+        // 3. 触发聚合哈希冒泡 (通过 HashAggregator 统一处理)
+        if !skip_bubble {
+            HashAggregator::bubble_from_topic(tx, topic_id).await?;
+        }
+
         Ok(())
     }
-
-    // 已移除 clear_topic_data 和 rebuild_topic_data_state，
-    // 因为全量删除再重建的逻辑在数据库架构下是不安全且非必要的。
-    // 请直接使用 upsert_message 处理单条消息或批量循环处理。
 }

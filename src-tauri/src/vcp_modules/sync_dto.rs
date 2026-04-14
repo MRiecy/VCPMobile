@@ -59,6 +59,8 @@ pub struct GroupSyncDTO {
     pub use_unified_model: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unified_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_match_mode: Option<String>,
 }
 
 impl From<&GroupConfig> for GroupSyncDTO {
@@ -72,6 +74,7 @@ impl From<&GroupConfig> for GroupSyncDTO {
             invite_prompt: config.invite_prompt.clone(),
             use_unified_model: config.use_unified_model,
             unified_model: config.unified_model.clone(),
+            tag_match_mode: config.tag_match_mode.clone(),
         }
     }
 }
@@ -165,7 +168,7 @@ pub struct MessageSyncDTO {
     pub content: String,
     pub timestamp: u64,
 
-    // 扩展元数据 (仅包含“真理”，不包含本地路径等推导字段)
+    // 扩展元数据 (仅包含"真理"，不包含本地路径等推导字段)
     #[serde(rename = "isThinking", skip_serializing_if = "Option::is_none")]
     pub is_thinking: Option<bool>,
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
@@ -174,6 +177,8 @@ pub struct MessageSyncDTO {
     pub group_id: Option<String>,
     #[serde(rename = "isGroupMessage", skip_serializing_if = "Option::is_none")]
     pub is_group_message: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
@@ -191,6 +196,7 @@ impl From<&ChatMessage> for MessageSyncDTO {
             agent_id: msg.agent_id.clone(),
             group_id: msg.group_id.clone(),
             is_group_message: msg.is_group_message,
+            finish_reason: msg.finish_reason.clone(),
             attachments: msg
                 .attachments
                 .as_ref()

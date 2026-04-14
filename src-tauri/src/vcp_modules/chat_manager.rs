@@ -51,6 +51,8 @@ pub struct ChatMessage {
     pub group_id: Option<String>,
     #[serde(rename = "isGroupMessage", skip_serializing_if = "Option::is_none")]
     pub is_group_message: Option<bool>,
+    #[serde(rename = "finishReason", skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 
     #[serde(default)]
     pub attachments: Option<Vec<Attachment>>,
@@ -114,6 +116,7 @@ pub async fn patch_single_message(
         &owner_type,
         topic_id,
         message,
+        false,
     )
     .await
 }

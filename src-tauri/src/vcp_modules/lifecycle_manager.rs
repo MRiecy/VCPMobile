@@ -10,7 +10,7 @@ use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
-use crate::vcp_modules::sync_manager::{init_sync_manager, SyncState};
+use crate::vcp_modules::sync_manager::init_sync_manager;
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -64,8 +64,8 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     handle.manage(EmoticonManagerState::default());
     
     // 初始化同步管理器
-    let sync_sender = init_sync_manager(handle.clone());
-    handle.manage(SyncState { ws_sender: sync_sender });
+    let sync_state = init_sync_manager(handle.clone());
+    handle.manage(sync_state);
 
     // 3. 服务级并行初始化 (这些服务彼此依赖较少)
     let emoticon_task = {

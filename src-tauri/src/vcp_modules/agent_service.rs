@@ -5,7 +5,8 @@ use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_manager::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::{compute_deterministic_hash, SyncDataType};
+use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::hash_aggregator::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -218,13 +219,12 @@ pub async fn update_agent_config<R: Runtime>(
     }
 
     let new_config: AgentConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
-    
+
     // 3. 写入数据库 (原子化更新)
-    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config).await?;
+    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false).await?;
 
     Ok(new_config)
-}
-
+    }
 /// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
 pub async fn apply_sync_update<R: Runtime>(
     app_handle: &AppHandle<R>,
@@ -250,7 +250,7 @@ pub async fn apply_sync_update<R: Runtime>(
     config.stream_output = dto.stream_output;
 
     // 3. 写入数据库
-    internal_write_agent_config(app_handle, state, agent_id, &config).await?;
+    internal_write_agent_config(app_handle, state, agent_id, &config, true).await?;
 
     Ok(())
 }
@@ -260,6 +260,7 @@ async fn internal_write_agent_config<R: Runtime>(
     state: &AgentConfigState,
     agent_id: &str,
     new_config: &AgentConfig,
+    skip_bubble: bool,
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -272,7 +273,7 @@ async fn internal_write_agent_config<R: Runtime>(
 
     // 计算基于 DTO 的决定性哈希
     let dto = AgentSyncDTO::from(new_config);
-    let config_hash = compute_deterministic_hash(&dto);
+    let config_hash = HashAggregator::compute_agent_config_hash(&dto);
 
     // 只有当哈希发生变化时，才通知同步中心
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
@@ -352,7 +353,10 @@ async fn internal_write_agent_config<R: Runtime>(
 
     tx.commit().await.map_err(|e| e.to_string())?;
     
-    // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
+    // 触发聚合哈希冒泡 (更新 agents.content_hash)
+    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_agent_hash(&mut bubble_tx, agent_id).await?;
+    bubble_tx.commit().await.map_err(|e| e.to_string())?;
 
     state.caches.insert(agent_id.to_string(), new_config.clone());
 
@@ -448,7 +452,7 @@ pub async fn create_agent(
     
     // 1. 插入 agents 表
     let dto = AgentSyncDTO::from(&config);
-    let config_hash = compute_deterministic_hash(&dto);
+    let config_hash = HashAggregator::compute_agent_config_hash(&dto);
     sqlx::query(
         "INSERT INTO agents (agent_id, name, system_prompt, model, temperature, context_token_limit, max_output_tokens, top_p, top_k, stream_output, config_hash, updated_at) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -485,6 +489,12 @@ pub async fn create_agent(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
+
+    // 触发聚合哈希冒泡
+    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_agent_hash(&mut bubble_tx, &agent_id).await?;
+    bubble_tx.commit().await.map_err(|e| e.to_string())?;
+
     state.caches.insert(agent_id.clone(), config.clone());
 
     Ok(config)

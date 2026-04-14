@@ -75,7 +75,8 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             top_p REAL,
             top_k INTEGER,
             stream_output INTEGER NOT NULL DEFAULT 1,
-            config_hash TEXT NOT NULL DEFAULT '', -- 状态机同步指纹 (SHA-256)
+            config_hash TEXT NOT NULL DEFAULT '', -- 配置内容指纹
+            content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
         )",
@@ -95,7 +96,8 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             use_unified_model INTEGER NOT NULL DEFAULT 0,
             unified_model TEXT,
             tag_match_mode TEXT,
-            config_hash TEXT NOT NULL DEFAULT '', -- 状态机同步指纹 (SHA-256)
+            config_hash TEXT NOT NULL DEFAULT '', -- 配置内容指纹
+            content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
         )",
@@ -132,6 +134,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             unread INTEGER NOT NULL DEFAULT 0,
             unread_count INTEGER NOT NULL DEFAULT 0,
             msg_count INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Messages Root)
             deleted_at BIGINT
         )",
     )
@@ -156,6 +159,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             render_format TEXT,
             render_content BLOB,
             render_version INTEGER NOT NULL DEFAULT 1,
+            content_hash TEXT NOT NULL DEFAULT '', -- 消息内容指纹
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT

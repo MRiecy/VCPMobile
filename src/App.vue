@@ -12,6 +12,7 @@ import { useModalHistory } from "./core/composables/useModalHistory";
 import { useNotificationStore } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
+import { initSyncStatus } from "./core/composables/useSyncStatus";
 
 // Layout Components
 import BootScreen from "./components/layout/BootScreen.vue";
@@ -40,7 +41,7 @@ const { direction, lengthX, lengthY } = useSwipe(appRootRef, {
     if (layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen) return;
 
     // Check if the swipe originated from a restricted area (e.g. chat input or horizontal scroll areas)
-    if (e.target instanceof Element && e.target.closest('.no-swipe')) return;
+    if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
 
     // Check angle: |deltaY| / deltaX < tan(30deg) ~ 0.577
     const absX = Math.abs(lengthX.value);
@@ -97,10 +98,14 @@ const backgroundStyle = computed(() => {
 // 用于取消监听的清理函数
 let unlistenLog: (() => void) | null = null;
 let stopVcpLogWatch: (() => void) | null = null;
+let unlistenSyncStatus: (() => void) | null = null;
 
 onMounted(async () => {
   // 初始化全局表情包修复器
   initGlobalFixer();
+
+  // 初始化同步状态监听
+  unlistenSyncStatus = await initSyncStatus();
 
   bootstrapApp();
 
@@ -139,22 +144,32 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (unlistenSyncStatus) unlistenSyncStatus();
   if (unlistenLog) unlistenLog();
   if (stopVcpLogWatch) stopVcpLogWatch();
 });
 </script>
 
 <template>
-  <div ref="appRootRef" class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
+  <div
+    ref="appRootRef"
+    class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative"
+  >
     <!-- 0. 全局初始化加载层 & 错误看板 -->
     <BootScreen />
 
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">
-      <div :key="backgroundStyle.backgroundImage" class="vcp-background-layer" :style="backgroundStyle"></div>
+      <div
+        :key="backgroundStyle.backgroundImage"
+        class="vcp-background-layer"
+        :style="backgroundStyle"
+      ></div>
     </Transition>
-    <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
-      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
+    <div
+      class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
+      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"
+    ></div>
 
     <!-- 2. 主内容区先渲染，抽屉与遮罩在后声明，靠 DOM 顺位自然覆盖 -->
     <main class="flex-1 min-w-0 relative overflow-hidden">
@@ -165,17 +180,23 @@ onUnmounted(() => {
 
     <!-- 3. 抽屉遮罩层位于主内容之后、抽屉之前，点击空白即可关闭 -->
     <Transition name="fade">
-      <div v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden" @click.self="
+      <div
+        v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
+        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden"
+        @click.self="
           layoutStore.setLeftDrawer(false);
-        layoutStore.setRightDrawer(false);
-        "></div>
+          layoutStore.setRightDrawer(false);
+        "
+      ></div>
     </Transition>
 
     <!-- 4. 左右抽屉在遮罩之后声明，不写 z-index 也能稳定压过主内容 -->
     <AgentSidebar />
-    <RightSidebar class="pointer-events-auto shrink-0" :is-open="layoutStore.rightDrawerOpen"
-      @close="layoutStore.setRightDrawer(false)" />
+    <RightSidebar
+      class="pointer-events-auto shrink-0"
+      :is-open="layoutStore.rightDrawerOpen"
+      @close="layoutStore.setRightDrawer(false)"
+    />
 
     <!-- 5. 全局覆盖层管理器 -->
     <GlobalOverlayManager />

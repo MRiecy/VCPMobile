@@ -17,6 +17,20 @@ pub fn compute_deterministic_hash<T: Serialize>(data: &T) -> String {
     }
 }
 
+/// 计算一组哈希的聚合哈希 (Merkle Root)
+/// 规则：将所有哈希按 ID 字典序排列后，连接并计算总 Hash
+pub fn compute_merkle_root(mut hashes: Vec<String>) -> String {
+    if hashes.is_empty() {
+        return "".to_string();
+    }
+    hashes.sort();
+    let mut hasher = Sha256::new();
+    for h in hashes {
+        hasher.update(h.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn stable_stringify(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
@@ -58,12 +72,13 @@ pub fn stable_stringify(value: &serde_json::Value) -> String {
 
 /// 同步数据的实体类型
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "lowercase")]
 pub enum SyncDataType {
     Agent,
     Group,
     Avatar,
-    History,
+    Topic,
+    Message,
 }
 
 /// 核心状态向量 (State Vector / Fingerprint)

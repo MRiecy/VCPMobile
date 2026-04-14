@@ -5,9 +5,7 @@ use crate::vcp_modules::message_stream_protocol::handle_vcp_request;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use sha2::{Digest, Sha256};
-use std::time::UNIX_EPOCH;
 use std::fs;
-use std::io::Write;
 
 /// 协议指挥部：统一管理所有 VCP 私有协议
 pub fn register_vcp_protocols<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {

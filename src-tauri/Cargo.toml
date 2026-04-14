@@ -39,6 +39,7 @@ regex = "1"
 lazy_static = "1.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
+scopeguard = "1.2"
 log = "0.4"
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "macros"] }
 notify = "6"

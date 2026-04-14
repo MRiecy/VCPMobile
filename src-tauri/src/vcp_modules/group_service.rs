@@ -5,7 +5,8 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_manager::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::{compute_deterministic_hash, SyncDataType};
+use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::hash_aggregator::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -205,10 +206,10 @@ pub async fn update_group_config(
 
     let new_config: GroupConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &new_config).await?;
+    internal_write_group_config(&app_handle, &state, &group_id, &new_config, false).await?;
 
     Ok(new_config)
-}
+    }
 
 /// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
 pub async fn apply_sync_update<R: Runtime>(
@@ -232,13 +233,13 @@ pub async fn apply_sync_update<R: Runtime>(
     config.invite_prompt = dto.invite_prompt;
     config.use_unified_model = dto.use_unified_model;
     config.unified_model = dto.unified_model;
+    config.tag_match_mode = dto.tag_match_mode;
 
     // 3. 写入数据库
-    internal_write_group_config(app_handle, state, group_id, &config).await?;
-    
-    Ok(())
-}
+    internal_write_group_config(app_handle, state, group_id, &config, true).await?;
 
+    Ok(())
+    }
 #[tauri::command]
 pub async fn create_group(
     app_handle: AppHandle,
@@ -291,7 +292,7 @@ pub async fn create_group(
     };
 
     let dto = GroupSyncDTO::from(&config);
-    let config_hash = compute_deterministic_hash(&dto);
+    let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
     sqlx::query(
         "INSERT INTO groups (group_id, name, updated_at, mode, use_unified_model, config_hash) VALUES (?, ?, ?, 'sequential', 0, ?)"
@@ -321,6 +322,11 @@ pub async fn create_group(
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
+    // 触发聚合哈希冒泡
+    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_group_hash(&mut bubble_tx, &group_id).await?;
+    bubble_tx.commit().await.map_err(|e| e.to_string())?;
+
     state.caches.insert(group_id, config.clone());
     Ok(config)
 }
@@ -330,6 +336,7 @@ async fn internal_write_group_config<R: Runtime>(
     state: &GroupManagerState,
     group_id: &str,
     config: &GroupConfig,
+    skip_bubble: bool,
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -342,7 +349,7 @@ async fn internal_write_group_config<R: Runtime>(
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     let dto = GroupSyncDTO::from(config);
-    let config_hash = compute_deterministic_hash(&dto);
+    let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
     // 只有当哈希发生变化时，才通知同步中心
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
@@ -447,6 +454,11 @@ async fn internal_write_group_config<R: Runtime>(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
+
+    // 触发聚合哈希冒泡
+    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_group_hash(&mut bubble_tx, group_id).await?;
+    bubble_tx.commit().await.map_err(|e| e.to_string())?;
 
     // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 

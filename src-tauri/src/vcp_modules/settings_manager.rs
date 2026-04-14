@@ -20,7 +20,8 @@ pub struct Settings {
     pub vcp_log_key: String,
 
     // VCP 数据同步连接
-    pub sync_server_url: String,
+    pub sync_server_url: String,      // WebSocket 服务 URL (ws://ip:port)
+    pub sync_http_url: String,        // HTTP API 服务 URL (http://ip:port)
     pub sync_token: String,
 
     // 话题总结配置
@@ -59,6 +60,7 @@ pub fn create_default_settings() -> Settings {
         vcp_log_url: "".to_string(),
         vcp_log_key: "".to_string(),
         sync_server_url: "".to_string(),
+        sync_http_url: "".to_string(),
         sync_token: "".to_string(),
         topic_summary_model: "gemini-2.5-flash".to_string(),
         agent_order: vec![],

@@ -32,7 +32,6 @@ use vcp_modules::group_service::{
 };
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
-use vcp_modules::message_stream_protocol::handle_vcp_request;
 use vcp_modules::model_manager::{
     get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     toggle_favorite_model,
@@ -44,6 +43,7 @@ use vcp_modules::topic_service::{
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
 use vcp_modules::protocol_manager::{register_vcp_protocols, prepare_vcp_upload};
+use vcp_modules::sync_manager::get_sync_status;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -159,10 +159,11 @@ pub fn run() {
             send_vcp_log_message,
             get_emoticon_library,
             regenerate_emoticon_library,
-            fix_emoticon_url,
-            get_core_status,
-            get_last_error,
-            ])
+             fix_emoticon_url,
+             get_core_status,
+             get_last_error,
+             get_sync_status,
+             ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

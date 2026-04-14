@@ -8,7 +8,8 @@ export interface AppSettings {
   vcpApiKey: string;
   vcpLogUrl: string;
   vcpLogKey: string;
-  syncServerUrl: string;
+  syncServerUrl: string; // WebSocket URL
+  syncHttpUrl: string; // HTTP API URL
   syncToken: string;
   topicSummaryModel: string;
   agentOrder: string[];
