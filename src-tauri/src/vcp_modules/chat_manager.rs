@@ -44,11 +44,12 @@ pub struct ChatMessage {
     #[serde(default)]
     pub is_thinking: Option<bool>,
 
-    // 平铺数据库中的核心消息字段
     #[serde(rename = "agentId", skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     #[serde(rename = "groupId", skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(rename = "topicId", skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
     #[serde(rename = "isGroupMessage", skip_serializing_if = "Option::is_none")]
     pub is_group_message: Option<bool>,
     #[serde(rename = "finishReason", skip_serializing_if = "Option::is_none")]

@@ -72,8 +72,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             temperature REAL NOT NULL DEFAULT 1,
             context_token_limit INTEGER NOT NULL DEFAULT 0,
             max_output_tokens INTEGER NOT NULL DEFAULT 0,
-            top_p REAL,
-            top_k INTEGER,
             stream_output INTEGER NOT NULL DEFAULT 1,
             config_hash TEXT NOT NULL DEFAULT '', -- 配置内容指纹
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
@@ -98,6 +96,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             tag_match_mode TEXT,
             config_hash TEXT NOT NULL DEFAULT '', -- 配置内容指纹
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
+            created_at BIGINT NOT NULL DEFAULT 0,
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
         )",

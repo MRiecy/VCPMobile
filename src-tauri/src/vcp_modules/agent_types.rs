@@ -30,10 +30,6 @@ pub struct AgentConfig {
     #[serde(rename = "maxOutputTokens", default = "default_max_output")]
     pub max_output_tokens: i32,
 
-    #[serde(rename = "top_p", default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    #[serde(rename = "top_k", default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<i32>,
     #[serde(rename = "streamOutput", default = "default_true")]
     pub stream_output: bool,
 

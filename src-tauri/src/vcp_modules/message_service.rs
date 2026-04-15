@@ -96,6 +96,7 @@ pub async fn load_chat_history_internal(
             is_thinking,
             agent_id: row.get("agent_id"),
             group_id: row.get("group_id"),
+            topic_id: Some(topic_id.to_string()),
             is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
             finish_reason: row.get("finish_reason"),
             attachments: if attachments.is_empty() { None } else { Some(attachments) },

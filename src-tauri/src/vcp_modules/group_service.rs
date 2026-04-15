@@ -4,7 +4,7 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
-use crate::vcp_modules::sync_manager::{SyncCommand, SyncState};
+use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::hash_aggregator::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
@@ -130,6 +130,7 @@ pub async fn read_group_config_internal<R: Runtime>(
             unified_model: row.get("unified_model"),
             topics,
             tag_match_mode: row.get("tag_match_mode"),
+            created_at: row.get("created_at"),
         };
 
         state.caches.insert(group_id.to_string(), config.clone());
@@ -154,7 +155,7 @@ pub async fn save_group_config(
     let mutex = state.acquire_lock(&group_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &group).await
+    internal_write_group_config(&app_handle, &state, &group_id, &group, false).await
 }
 
 #[tauri::command]
@@ -217,6 +218,7 @@ pub async fn apply_sync_update<R: Runtime>(
     state: &GroupManagerState,
     group_id: &str,
     dto: GroupSyncDTO,
+    skip_bubble: bool,
 ) -> Result<(), String> {
     let mutex = state.acquire_lock(group_id).await;
     let _lock = mutex.lock().await;
@@ -236,10 +238,10 @@ pub async fn apply_sync_update<R: Runtime>(
     config.tag_match_mode = dto.tag_match_mode;
 
     // 3. 写入数据库
-    internal_write_group_config(app_handle, state, group_id, &config, true).await?;
+    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble).await?;
 
     Ok(())
-    }
+}
 #[tauri::command]
 pub async fn create_group(
     app_handle: AppHandle,
@@ -289,13 +291,14 @@ pub async fn create_group(
         unified_model: None,
         topics: vec![default_topic.clone()],
         tag_match_mode: Some("strict".to_string()),
+        created_at: timestamp,
     };
 
     let dto = GroupSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
     sqlx::query(
-        "INSERT INTO groups (group_id, name, updated_at, mode, use_unified_model, config_hash) VALUES (?, ?, ?, 'sequential', 0, ?)"
+        "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model, config_hash) VALUES (?, ?, ?, ?, 'sequential', 0, ?)"
     )
     .bind(&group_id)
     .bind(&name)
@@ -314,6 +317,7 @@ pub async fn create_group(
         .bind(&group_id)
         .bind(&topic.name)
         .bind(topic.created_at)
+        .bind(timestamp)
         .bind(timestamp)
         .execute(&mut *tx)
         .await
@@ -456,9 +460,11 @@ async fn internal_write_group_config<R: Runtime>(
     tx.commit().await.map_err(|e| e.to_string())?;
 
     // 触发聚合哈希冒泡
-    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-    HashAggregator::bubble_group_hash(&mut bubble_tx, group_id).await?;
-    bubble_tx.commit().await.map_err(|e| e.to_string())?;
+    if !skip_bubble {
+        let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
+        HashAggregator::bubble_group_hash(&mut bubble_tx, group_id).await?;
+        bubble_tx.commit().await.map_err(|e| e.to_string())?;
+    }
 
     // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 

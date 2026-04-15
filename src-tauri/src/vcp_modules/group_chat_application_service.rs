@@ -158,20 +158,11 @@ pub async fn process_group_chat_message(
                 .await;
 
         // 构造请求载荷
-        let mut model_config = json!({
+        let model_config = json!({
             "model": speaker.model,
             "temperature": speaker.temperature,
             "stream": true
         });
-
-        if let Some(obj) = model_config.as_object_mut() {
-            if let Some(top_p) = speaker.top_p {
-                obj.insert("top_p".to_string(), json!(top_p));
-            }
-            if let Some(top_k) = speaker.top_k {
-                obj.insert("top_k".to_string(), json!(top_k));
-            }
-        }
 
         let mut messages = assemble_history_for_vcp(&current_history_for_context);
         messages.insert(0, json!({"role": "system", "content": system_prompt}));
@@ -210,6 +201,7 @@ pub async fn process_group_chat_message(
                     is_thinking: Some(false),
                     agent_id: Some(agent_id),
                     group_id: Some(group_id.clone()),
+                    topic_id: Some(topic_id.clone()),
                     is_group_message: Some(true),
                     finish_reason: None,
                     attachments: None,

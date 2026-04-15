@@ -4,7 +4,7 @@
 use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
-use crate::vcp_modules::sync_manager::{SyncCommand, SyncState};
+use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::hash_aggregator::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
@@ -48,8 +48,6 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
         temperature: 1.0,
         context_token_limit: 1000000,
         max_output_tokens: 64000,
-        top_p: None,
-        top_k: None,
         stream_output: true,
         avatar_calculated_color: None,
         topics: vec![],
@@ -80,7 +78,7 @@ pub async fn read_agent_config_internal<R: Runtime>(
     let pool = &db_state.pool;
 
     let agent_row = sqlx::query(
-        "SELECT a.name, a.system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.top_p, a.top_k, a.stream_output, av.dominant_color 
+        "SELECT a.name, a.system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, av.dominant_color 
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
          WHERE a.agent_id = ? AND a.deleted_at IS NULL"
@@ -126,8 +124,6 @@ pub async fn read_agent_config_internal<R: Runtime>(
             temperature: row.get("temperature"),
             context_token_limit: row.get("context_token_limit"),
             max_output_tokens: row.get("max_output_tokens"),
-            top_p: row.get("top_p"),
-            top_k: row.get("top_k"),
             stream_output: row.get::<i32, _>("stream_output") != 0,
             avatar_calculated_color,
             topics,
@@ -159,7 +155,7 @@ pub async fn save_agent_config(
     let mutex = state.acquire_lock(&agent_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_agent_config(&app_handle, &state, &agent_id, &agent).await
+    internal_write_agent_config(&app_handle, &state, &agent_id, &agent, false).await
 }
 
 #[tauri::command]
@@ -231,6 +227,7 @@ pub async fn apply_sync_update<R: Runtime>(
     state: &AgentConfigState,
     agent_id: &str,
     dto: AgentSyncDTO,
+    skip_bubble: bool,
 ) -> Result<(), String> {
     let mutex = state.acquire_lock(agent_id).await;
     let _lock = mutex.lock().await;
@@ -245,12 +242,10 @@ pub async fn apply_sync_update<R: Runtime>(
     config.temperature = dto.temperature;
     config.context_token_limit = dto.context_token_limit;
     config.max_output_tokens = dto.max_output_tokens;
-    config.top_p = dto.top_p;
-    config.top_k = dto.top_k;
     config.stream_output = dto.stream_output;
 
     // 3. 写入数据库
-    internal_write_agent_config(app_handle, state, agent_id, &config, true).await?;
+    internal_write_agent_config(app_handle, state, agent_id, &config, skip_bubble).await?;
 
     Ok(())
 }
@@ -296,32 +291,32 @@ async fn internal_write_agent_config<R: Runtime>(
     }
 
     sqlx::query(
-        "UPDATE agents SET 
-            name = ?, 
-            system_prompt = ?, 
-            model = ?, 
-            temperature = ?, 
-            context_token_limit = ?, 
-            max_output_tokens = ?, 
-            top_p = ?, 
-            top_k = ?, 
-            stream_output = ?, 
-            config_hash = ?,
-            updated_at = ?
-         WHERE agent_id = ?",
+        "INSERT INTO agents (
+            agent_id, name, system_prompt, model, temperature, 
+            context_token_limit, max_output_tokens, 
+            stream_output, config_hash, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET
+            name = excluded.name, 
+            system_prompt = excluded.system_prompt, 
+            model = excluded.model, 
+            temperature = excluded.temperature, 
+            context_token_limit = excluded.context_token_limit, 
+            max_output_tokens = excluded.max_output_tokens, 
+            stream_output = excluded.stream_output, 
+            config_hash = excluded.config_hash,
+            updated_at = excluded.updated_at",
     )
+    .bind(agent_id)
     .bind(&new_config.name)
     .bind(&new_config.system_prompt)
     .bind(&new_config.model)
     .bind(new_config.temperature)
     .bind(new_config.context_token_limit)
     .bind(new_config.max_output_tokens)
-    .bind(new_config.top_p)
-    .bind(new_config.top_k)
     .bind(if new_config.stream_output { 1 } else { 0 })
     .bind(&config_hash)
     .bind(now)
-    .bind(agent_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -354,9 +349,11 @@ async fn internal_write_agent_config<R: Runtime>(
     tx.commit().await.map_err(|e| e.to_string())?;
     
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
-    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-    HashAggregator::bubble_agent_hash(&mut bubble_tx, agent_id).await?;
-    bubble_tx.commit().await.map_err(|e| e.to_string())?;
+    if !skip_bubble {
+        let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
+        HashAggregator::bubble_agent_hash(&mut bubble_tx, agent_id).await?;
+        bubble_tx.commit().await.map_err(|e| e.to_string())?;
+    }
 
     state.caches.insert(agent_id.to_string(), new_config.clone());
 
@@ -428,8 +425,6 @@ pub async fn create_agent(
             temperature: 0.7,
             context_token_limit: 1000000,
             max_output_tokens: 60000,
-            top_p: None,
-            top_k: None,
             stream_output: true,
             avatar_calculated_color: None,
             topics: vec![Topic {
@@ -454,8 +449,8 @@ pub async fn create_agent(
     let dto = AgentSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
     sqlx::query(
-        "INSERT INTO agents (agent_id, name, system_prompt, model, temperature, context_token_limit, max_output_tokens, top_p, top_k, stream_output, config_hash, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (agent_id, name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, updated_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&agent_id)
     .bind(&config.name)
@@ -464,8 +459,6 @@ pub async fn create_agent(
     .bind(config.temperature)
     .bind(config.context_token_limit)
     .bind(config.max_output_tokens)
-    .bind(config.top_p)
-    .bind(config.top_k)
     .bind(if config.stream_output { 1 } else { 0 })
     .bind(&config_hash)
     .bind(timestamp)

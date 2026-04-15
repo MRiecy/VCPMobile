@@ -40,4 +40,7 @@ pub struct GroupConfig {
     /// 标签匹配模式 (strict, fuzzy)
     #[serde(default)]
     pub tag_match_mode: Option<String>,
+    /// 创建时间戳
+    #[serde(default)]
+    pub created_at: i64,
 }

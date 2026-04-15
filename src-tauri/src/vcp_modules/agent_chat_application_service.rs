@@ -73,8 +73,6 @@ pub async fn handle_agent_chat_message(
     let model_config = json!({
         "model": agent_config.model,
         "temperature": agent_config.temperature,
-        "top_p": agent_config.top_p,
-        "top_k": agent_config.top_k,
         "max_tokens": agent_config.max_output_tokens,
         "contextTokenLimit": agent_config.context_token_limit,
         "stream": true

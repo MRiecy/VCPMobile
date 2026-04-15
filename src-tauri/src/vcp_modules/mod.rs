@@ -25,7 +25,7 @@ pub mod message_stream_protocol;
 pub mod model_manager;
 pub mod storage_paths;
 pub mod sync_dto;
-pub mod sync_manager;
+pub mod sync_service;
 pub mod sync_retry;
 pub mod sync_metrics;
 pub mod sync_types;

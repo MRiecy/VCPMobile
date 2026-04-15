@@ -1,5 +1,5 @@
 use crate::vcp_modules::sync_types::{compute_deterministic_hash, compute_merkle_root};
-use crate::vcp_modules::sync_dto::{AgentSyncDTO, GroupSyncDTO, TopicSyncDTO};
+use crate::vcp_modules::sync_dto::{AgentSyncDTO, GroupSyncDTO, AgentTopicSyncDTO, GroupTopicSyncDTO};
 use sqlx::{Sqlite, Transaction, Row};
 use sha2::{Digest, Sha256};
 
@@ -26,8 +26,13 @@ impl HashAggregator {
         compute_deterministic_hash(&serde_json::Value::Object(fingerprint_map))
     }
 
-    /// 计算话题元数据哈希
-    pub fn compute_topic_metadata_hash(dto: &TopicSyncDTO) -> String {
+    /// 计算 Agent Topic 元数据哈希
+    pub fn compute_agent_topic_metadata_hash(dto: &AgentTopicSyncDTO) -> String {
+        compute_deterministic_hash(dto)
+    }
+
+    /// 计算 Group Topic 元数据哈希
+    pub fn compute_group_topic_metadata_hash(dto: &GroupTopicSyncDTO) -> String {
         compute_deterministic_hash(dto)
     }
 

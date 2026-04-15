@@ -43,7 +43,7 @@ use vcp_modules::topic_service::{
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
 use vcp_modules::protocol_manager::{register_vcp_protocols, prepare_vcp_upload};
-use vcp_modules::sync_manager::get_sync_status;
+use vcp_modules::sync_service::get_sync_status;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
