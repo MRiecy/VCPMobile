@@ -6,7 +6,7 @@ use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::hash_aggregator::HashAggregator;
+use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -155,7 +155,7 @@ pub async fn save_group_config(
     let mutex = state.acquire_lock(&group_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &group, false).await
+    internal_write_group_config(&app_handle, &state, &group_id, &group, false, false).await
 }
 
 #[tauri::command]
@@ -207,7 +207,7 @@ pub async fn update_group_config(
 
     let new_config: GroupConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &new_config, false).await?;
+    internal_write_group_config(&app_handle, &state, &group_id, &new_config, false, false).await?;
 
     Ok(new_config)
     }
@@ -219,6 +219,7 @@ pub async fn apply_sync_update<R: Runtime>(
     group_id: &str,
     dto: GroupSyncDTO,
     skip_bubble: bool,
+    from_sync: bool,
 ) -> Result<(), String> {
     let mutex = state.acquire_lock(group_id).await;
     let _lock = mutex.lock().await;
@@ -236,9 +237,10 @@ pub async fn apply_sync_update<R: Runtime>(
     config.use_unified_model = dto.use_unified_model;
     config.unified_model = dto.unified_model;
     config.tag_match_mode = dto.tag_match_mode;
+    config.created_at = dto.created_at;
 
     // 3. 写入数据库
-    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble).await?;
+    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble, from_sync).await?;
 
     Ok(())
 }
@@ -341,6 +343,7 @@ async fn internal_write_group_config<R: Runtime>(
     group_id: &str,
     config: &GroupConfig,
     skip_bubble: bool,
+    from_sync: bool,
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -355,23 +358,25 @@ async fn internal_write_group_config<R: Runtime>(
     let dto = GroupSyncDTO::from(config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
-    // 只有当哈希发生变化时，才通知同步中心
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let rows = sqlx::query("SELECT config_hash FROM groups WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    // 只有非同步来源且哈希发生变化时，才通知同步中心
+    if !from_sync {
+        if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+            let rows = sqlx::query("SELECT config_hash FROM groups WHERE group_id = ?")
+                .bind(group_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
-        
-        if old_hash.as_ref() != Some(&config_hash) {
-            let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-                id: group_id.to_string(),
-                data_type: SyncDataType::Group,
-                hash: config_hash.clone(),
-                ts: now,
-            });
+            let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
+            
+            if old_hash.as_ref() != Some(&config_hash) {
+                let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
+                    id: group_id.to_string(),
+                    data_type: SyncDataType::Group,
+                    hash: config_hash.clone(),
+                    ts: now,
+                });
+            }
         }
     }
 

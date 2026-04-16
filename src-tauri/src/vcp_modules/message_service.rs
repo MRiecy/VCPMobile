@@ -191,13 +191,33 @@ pub async fn patch_single_message(
     mut message: ChatMessage,
     skip_bubble: bool,
 ) -> Result<(), String> {
-    // 自动补齐缺失附件 (从电脑下载)
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
     let emoticon_state = app_handle.state::<EmoticonManagerState>();
     let library = emoticon_state.library.lock().await;
     let blocks = MessageRenderCompiler::compile(&message.content, &library);
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+
+    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes, skip_bubble).await?;
+
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
+        .bind(now).bind(&topic_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn patch_single_message_no_app(
+    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    _owner_id: &str,
+    _owner_type: &str,
+    topic_id: String,
+    message: ChatMessage,
+    skip_bubble: bool,
+) -> Result<(), String> {
+    let render_bytes = Vec::new();
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes, skip_bubble).await?;

@@ -6,7 +6,7 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::hash_aggregator::HashAggregator;
+use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -155,7 +155,7 @@ pub async fn save_agent_config(
     let mutex = state.acquire_lock(&agent_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_agent_config(&app_handle, &state, &agent_id, &agent, false).await
+    internal_write_agent_config(&app_handle, &state, &agent_id, &agent, false, false).await
 }
 
 #[tauri::command]
@@ -217,7 +217,7 @@ pub async fn update_agent_config<R: Runtime>(
     let new_config: AgentConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
     // 3. 写入数据库 (原子化更新)
-    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false).await?;
+    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false, false).await?;
 
     Ok(new_config)
     }
@@ -228,6 +228,7 @@ pub async fn apply_sync_update<R: Runtime>(
     agent_id: &str,
     dto: AgentSyncDTO,
     skip_bubble: bool,
+    from_sync: bool,
 ) -> Result<(), String> {
     let mutex = state.acquire_lock(agent_id).await;
     let _lock = mutex.lock().await;
@@ -245,7 +246,7 @@ pub async fn apply_sync_update<R: Runtime>(
     config.stream_output = dto.stream_output;
 
     // 3. 写入数据库
-    internal_write_agent_config(app_handle, state, agent_id, &config, skip_bubble).await?;
+    internal_write_agent_config(app_handle, state, agent_id, &config, skip_bubble, from_sync).await?;
 
     Ok(())
 }
@@ -256,6 +257,7 @@ async fn internal_write_agent_config<R: Runtime>(
     agent_id: &str,
     new_config: &AgentConfig,
     skip_bubble: bool,
+    from_sync: bool,
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -270,23 +272,25 @@ async fn internal_write_agent_config<R: Runtime>(
     let dto = AgentSyncDTO::from(new_config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
 
-    // 只有当哈希发生变化时，才通知同步中心
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let rows = sqlx::query("SELECT config_hash FROM agents WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    // 只有非同步来源且哈希发生变化时，才通知同步中心
+    if !from_sync {
+        if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+            let rows = sqlx::query("SELECT config_hash FROM agents WHERE agent_id = ?")
+                .bind(agent_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
-        
-        if old_hash.as_ref() != Some(&config_hash) {
-            let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-                id: agent_id.to_string(),
-                data_type: SyncDataType::Agent,
-                hash: config_hash.clone(),
-                ts: now,
-            });
+            let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
+            
+            if old_hash.as_ref() != Some(&config_hash) {
+                let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
+                    id: agent_id.to_string(),
+                    data_type: SyncDataType::Agent,
+                    hash: config_hash.clone(),
+                    ts: now,
+                });
+            }
         }
     }
 
@@ -295,7 +299,7 @@ async fn internal_write_agent_config<R: Runtime>(
             agent_id, name, system_prompt, model, temperature, 
             context_token_limit, max_output_tokens, 
             stream_output, config_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name, 
             system_prompt = excluded.system_prompt, 
