@@ -8,33 +8,46 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default)]
     pub user_name: String,
     
     // VCP 核心服务器
+    #[serde(default)]
     pub vcp_server_url: String,
+    #[serde(default)]
     pub vcp_api_key: String,
+    #[serde(default)]
     pub vcp_log_url: String,
+    #[serde(default)]
     pub vcp_log_key: String,
 
     // VCP 数据同步连接
+    #[serde(default)]
     pub sync_server_url: String,      // WebSocket 服务 URL (ws://ip:port)
+    #[serde(default)]
     pub sync_http_url: String,        // HTTP API 服务 URL (http://ip:port)
+    #[serde(default)]
     pub sync_token: String,
 
     // 话题总结配置
+    #[serde(default)]
     pub topic_summary_model: String,
 
     // 排序逻辑 (移动端分组)
+    #[serde(default)]
     pub agent_order: Vec<String>,
+    #[serde(default)]
     pub group_order: Vec<String>,
 
+    #[serde(default)]
     pub current_theme_mode: Option<String>,
 
     /// 仅保留此字段用于前端未来扩展的透参
     #[serde(flatten)]
+    #[serde(default)]
     pub extra: serde_json::Value,
 }
 

@@ -1,5 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::hash_aggregator::HashAggregator;
+use crate::vcp_modules::sync_hash::HashAggregator;
 use sha2::Digest;
 
 /// Internal message repository for DB operations
