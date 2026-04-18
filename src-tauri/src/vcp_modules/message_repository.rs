@@ -15,7 +15,9 @@ impl MessageRepository {
         skip_bubble: bool,
     ) -> Result<(), String> {
         // 1. 计算核心内容指纹 (通过 HashAggregator)
-        let attachment_hashes: Vec<String> = message.attachments.as_ref()
+        let attachment_hashes: Vec<String> = message
+            .attachments
+            .as_ref()
             .map(|atts| {
                 atts.iter()
                     .map(|a| a.hash.clone().unwrap_or_default())
@@ -23,8 +25,9 @@ impl MessageRepository {
                     .collect()
             })
             .unwrap_or_default();
-        
-        let content_hash = HashAggregator::compute_message_fingerprint(&message.content, &attachment_hashes);
+
+        let content_hash =
+            HashAggregator::compute_message_fingerprint(&message.content, &attachment_hashes);
 
         // 2. 插入或更新消息
         sqlx::query(
@@ -85,7 +88,10 @@ impl MessageRepository {
                     format!("{:x}", sha2::Digest::finalize(hasher))
                 });
 
-                let image_frames = att.image_frames.as_ref().and_then(|frames| serde_json::to_string(frames).ok());
+                let image_frames = att
+                    .image_frames
+                    .as_ref()
+                    .and_then(|frames| serde_json::to_string(frames).ok());
 
                 sqlx::query(
                     "INSERT INTO attachments (
@@ -117,7 +123,7 @@ impl MessageRepository {
                 sqlx::query(
                     "INSERT INTO message_attachments (
                         msg_id, hash, attachment_order, display_name, src, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&message.id)
                 .bind(&hash)

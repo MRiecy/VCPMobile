@@ -80,7 +80,9 @@ pub struct AgentTopicSyncDTO {
     pub id: String,
     pub name: String,
     pub created_at: i64,
+    #[serde(default)]
     pub locked: bool,
+    #[serde(default)]
     pub unread: bool,
     pub owner_id: String,
 }

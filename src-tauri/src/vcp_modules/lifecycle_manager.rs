@@ -5,11 +5,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 use crate::vcp_modules::agent_service::AgentConfigState;
-use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
+use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::sync_service::init_sync_service;
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
@@ -62,7 +62,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     handle.manage(SettingsState::new());
     handle.manage(ModelManagerState::new());
     handle.manage(EmoticonManagerState::default());
-    
+
     // 初始化同步服务
     let sync_state = init_sync_service(handle.clone());
     handle.manage(sync_state);
@@ -90,7 +90,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     };
 
     // 4. 群组初始化 (如有需要可在此添加)
-    
+
     // 5. 等待并行任务完成
     let _ = tokio::join!(emoticon_task, model_task);
 

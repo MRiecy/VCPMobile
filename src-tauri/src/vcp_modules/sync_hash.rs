@@ -254,7 +254,10 @@ impl HashInitializer {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| e.to_string())?;
-                println!("[HashInitializer] Initialized config_hash for Agent {}", agent_id);
+                println!(
+                    "[HashInitializer] Initialized config_hash for Agent {}",
+                    agent_id
+                );
             }
         }
 
@@ -282,13 +285,17 @@ impl HashInitializer {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| e.to_string())?;
-                println!("[HashInitializer] Initialized config_hash for Group {}", group_id);
+                println!(
+                    "[HashInitializer] Initialized config_hash for Group {}",
+                    group_id
+                );
             }
         }
 
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn ensure_topic_content_hash(
         tx: &mut Transaction<'_, Sqlite>,
         topic_id: &str,
@@ -303,7 +310,10 @@ impl HashInitializer {
             let content_hash: String = r.get("content_hash");
             if content_hash.is_empty() || content_hash == "PENDING" {
                 HashAggregator::bubble_topic_hash(tx, topic_id).await?;
-                println!("[HashInitializer] Initialized content_hash for Topic {}", topic_id);
+                println!(
+                    "[HashInitializer] Initialized content_hash for Topic {}",
+                    topic_id
+                );
             }
         }
 

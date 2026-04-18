@@ -91,6 +91,12 @@ pub struct EntityState {
     pub hash: String,
     /// 绝对时间戳 / 逻辑时钟 (LWW 裁决标准)
     pub ts: i64,
+    /// 软删除时间戳 (可选，用于双向删除同步)
+    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<i64>,
+    /// 所有者类型 (仅用于 topic 类型，区分 agent_topic 和 group_topic)
+    #[serde(rename = "ownerType", skip_serializing_if = "Option::is_none")]
+    pub owner_type: Option<String>,
 }
 
 /// 阶段一：同步清单 (Manifest)
@@ -104,6 +110,7 @@ pub struct SyncManifest {
 /// 阶段二：差异判定结果
 /// 通过 LWW + Hash 决出的最终操作指令
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum DiffResult {
     /// 状态一致（Hash相同），跳过传输
     Skip,
@@ -116,12 +123,14 @@ pub enum DiffResult {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ArbitratedAction {
     Pull,
     Push,
 }
 
 /// 计算差异的核心静态方法 (无状态且纯粹)
+#[allow(dead_code)]
 impl DiffResult {
     /// 计算双端的差异。
     /// - `local`: 本地实体状态

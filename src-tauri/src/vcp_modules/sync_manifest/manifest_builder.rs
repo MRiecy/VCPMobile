@@ -1,8 +1,8 @@
-use crate::vcp_modules::sync_types::{EntityState, SyncDataType, SyncManifest, DiffResult};
-use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_dto::{AgentTopicSyncDTO, GroupTopicSyncDTO};
-use sqlx::SqlitePool;
+use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::sync_types::{EntityState, SyncDataType, SyncManifest};
 use sqlx::Row;
+use sqlx::SqlitePool;
 
 pub struct ManifestBuilder;
 
@@ -10,7 +10,7 @@ impl ManifestBuilder {
     pub async fn build_agent_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
             "SELECT agent_id, config_hash, content_hash, updated_at, deleted_at 
-             FROM agents"
+             FROM agents",
         )
         .fetch_all(pool)
         .await
@@ -26,6 +26,8 @@ impl ManifestBuilder {
                 id: r.get("agent_id"),
                 hash: h,
                 ts: r.get("updated_at"),
+                deleted_at: r.get("deleted_at"),
+                owner_type: None,
             });
         }
 
@@ -38,7 +40,7 @@ impl ManifestBuilder {
     pub async fn build_group_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
             "SELECT group_id, config_hash, content_hash, updated_at, deleted_at 
-             FROM groups"
+             FROM groups",
         )
         .fetch_all(pool)
         .await
@@ -54,6 +56,8 @@ impl ManifestBuilder {
                 id: r.get("group_id"),
                 hash: h,
                 ts: r.get("updated_at"),
+                deleted_at: r.get("deleted_at"),
+                owner_type: None,
             });
         }
 
@@ -107,6 +111,8 @@ impl ManifestBuilder {
                 id,
                 hash,
                 ts: r.get("updated_at"),
+                deleted_at: r.get("deleted_at"),
+                owner_type: Some(owner_type),
             });
         }
 
@@ -119,7 +125,7 @@ impl ManifestBuilder {
     pub async fn build_avatar_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
             "SELECT owner_id, owner_type, avatar_hash, updated_at 
-             FROM avatars"
+             FROM avatars",
         )
         .fetch_all(pool)
         .await
@@ -133,6 +139,8 @@ impl ManifestBuilder {
                 id: format!("{}:{}", owner_type, owner_id),
                 hash: r.get("avatar_hash"),
                 ts: r.get("updated_at"),
+                deleted_at: None,
+                owner_type: None,
             });
         }
 
@@ -147,7 +155,6 @@ impl ManifestBuilder {
         manifests.push(Self::build_agent_manifest(pool).await?);
         manifests.push(Self::build_group_manifest(pool).await?);
         manifests.push(Self::build_avatar_manifest(pool).await?);
-        manifests.push(Self::build_topic_manifest(pool).await?);
         Ok(manifests)
     }
 }
