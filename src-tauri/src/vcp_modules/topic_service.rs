@@ -1,10 +1,13 @@
 // TopicService: 处理会话话题生命周期的模块
 // 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
 
-use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::settings_manager::SettingsState;
+use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
+use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::Topic;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 #[tauri::command]
 pub async fn get_topics(
@@ -89,35 +92,35 @@ pub async fn create_topic(
 
 #[tauri::command]
 pub async fn delete_topic(
-    _app_handle: AppHandle,
+    app_handle: AppHandle,
     db_state: State<'_, DbState>,
-    _owner_id: String,
-    _owner_type: String,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
 ) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp_millis();
+
+    sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ?")
+        .bind(now)
+        .bind(&topic_id)
+        .execute(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+            data_type: SyncDataType::Topic,
+            id: topic_id.clone(),
+        });
+    }
+
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-
-    sqlx::query(
-        "DELETE FROM message_attachments WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ?)",
-    )
-    .bind(&topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    sqlx::query("DELETE FROM messages WHERE topic_id = ?")
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    sqlx::query("DELETE FROM topics WHERE topic_id = ?")
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    tx.commit().await.map_err(|e| e.to_string())?;
+    if owner_type == "agent" {
+        let _ = HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await;
+    } else if owner_type == "group" {
+        let _ = HashAggregator::bubble_group_hash(&mut tx, &owner_id).await;
+    }
+    let _ = tx.commit().await;
 
     Ok(())
 }

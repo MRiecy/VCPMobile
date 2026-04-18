@@ -4,9 +4,9 @@
 use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
+use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -220,8 +220,9 @@ pub async fn update_agent_config<R: Runtime>(
     internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false, false).await?;
 
     Ok(new_config)
-    }
+}
 /// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
+#[allow(dead_code)]
 pub async fn apply_sync_update<R: Runtime>(
     app_handle: &AppHandle<R>,
     state: &AgentConfigState,
@@ -246,7 +247,8 @@ pub async fn apply_sync_update<R: Runtime>(
     config.stream_output = dto.stream_output;
 
     // 3. 写入数据库
-    internal_write_agent_config(app_handle, state, agent_id, &config, skip_bubble, from_sync).await?;
+    internal_write_agent_config(app_handle, state, agent_id, &config, skip_bubble, from_sync)
+        .await?;
 
     Ok(())
 }
@@ -281,8 +283,11 @@ async fn internal_write_agent_config<R: Runtime>(
                 .await
                 .map_err(|e| e.to_string())?;
 
-            let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
-            
+            let old_hash = rows.and_then(|r| {
+                use sqlx::Row;
+                r.get::<Option<String>, _>("config_hash")
+            });
+
             if old_hash.as_ref() != Some(&config_hash) {
                 let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
                     id: agent_id.to_string(),
@@ -351,7 +356,7 @@ async fn internal_write_agent_config<R: Runtime>(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    
+
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
     if !skip_bubble {
         let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -359,7 +364,9 @@ async fn internal_write_agent_config<R: Runtime>(
         bubble_tx.commit().await.map_err(|e| e.to_string())?;
     }
 
-    state.caches.insert(agent_id.to_string(), new_config.clone());
+    state
+        .caches
+        .insert(agent_id.to_string(), new_config.clone());
 
     Ok(true)
 }
@@ -371,7 +378,6 @@ pub async fn delete_agent(
     state: State<'_, AgentConfigState>,
     agent_id: String,
 ) -> Result<bool, String> {
-    // 1. 删除 DB 记录 (软删除)
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = SystemTime::now()
@@ -386,8 +392,14 @@ pub async fn delete_agent(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2. 清理缓存
     state.caches.remove(&agent_id);
+
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+            data_type: SyncDataType::Agent,
+            id: agent_id.clone(),
+        });
+    }
 
     Ok(true)
 }
@@ -448,7 +460,7 @@ pub async fn create_agent(
     log::info!("[AgentService] Creating agent '{}' atomically.", agent_id);
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    
+
     // 1. 插入 agents 表
     let dto = AgentSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
@@ -473,7 +485,7 @@ pub async fn create_agent(
     for topic in &config.topics {
         sqlx::query(
             "INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at) 
-             VALUES (?, 'agent', ?, ?, ?, ?)"
+             VALUES (?, 'agent', ?, ?, ?, ?)",
         )
         .bind(&topic.id)
         .bind(&agent_id)

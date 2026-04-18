@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::vcp_modules::message_service;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Attachment {

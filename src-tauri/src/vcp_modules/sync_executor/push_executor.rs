@@ -1,13 +1,16 @@
-use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::sync_dto::{AgentSyncDTO, GroupSyncDTO, AgentTopicSyncDTO, GroupTopicSyncDTO, UserMessageSyncDTO, AgentMessageSyncDTO, GroupMessageSyncDTO};
 use crate::vcp_modules::agent_service;
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
+use crate::vcp_modules::sync_dto::{
+    AgentMessageSyncDTO, AgentSyncDTO, AgentTopicSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
+    GroupTopicSyncDTO, UserMessageSyncDTO,
+};
 use crate::vcp_modules::sync_utils::query_avatar_color;
-use tauri::{AppHandle, Manager, Runtime};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
-use sha2::{Sha256, Digest};
 use std::collections::HashSet;
 use std::sync::Arc;
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
 pub struct PushExecutor;
@@ -20,12 +23,14 @@ impl PushExecutor {
         sync_token: &str,
         agent_id: &str,
     ) -> Result<(), String> {
-        let config = agent_service::read_agent_config(app.clone(), app.state(), agent_id.to_string(), None).await?;
+        let config =
+            agent_service::read_agent_config(app.clone(), app.state(), agent_id.to_string(), None)
+                .await?;
         let dto = AgentSyncDTO::from(&config);
-        
+
         let idempotency_key = generate_idempotency_key("push", "agent", agent_id);
         let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-        
+
         let _ = client
             .post(&url)
             .header("x-sync-token", sync_token)
@@ -34,7 +39,6 @@ impl PushExecutor {
             .send()
             .await;
 
-        println!("[PushExecutor] Pushed Agent: {}", agent_id);
         Ok(())
     }
 
@@ -45,12 +49,14 @@ impl PushExecutor {
         sync_token: &str,
         group_id: &str,
     ) -> Result<(), String> {
-        let config = group_service::read_group_config(app.clone(), app.state(), group_id.to_string()).await?;
+        let config =
+            group_service::read_group_config(app.clone(), app.state(), group_id.to_string())
+                .await?;
         let dto = GroupSyncDTO::from(&config);
-        
+
         let idempotency_key = generate_idempotency_key("push", "group", group_id);
         let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-        
+
         let _ = client
             .post(&url)
             .header("x-sync-token", sync_token)
@@ -59,7 +65,6 @@ impl PushExecutor {
             .send()
             .await;
 
-        println!("[PushExecutor] Pushed Group: {}", group_id);
         Ok(())
     }
 
@@ -72,19 +77,24 @@ impl PushExecutor {
         owner_id: &str,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
-        
-        let row = sqlx::query("SELECT image_data, mime_type FROM avatars WHERE owner_id = ? AND owner_type = ?")
-            .bind(owner_id)
-            .bind(owner_type)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+
+        let row = sqlx::query(
+            "SELECT image_data, mime_type FROM avatars WHERE owner_id = ? AND owner_type = ?",
+        )
+        .bind(owner_id)
+        .bind(owner_type)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
         if let Some(r) = row {
             let image_data: Vec<u8> = r.get("image_data");
             let mime_type: String = r.get("mime_type");
-            
-            let url = format!("{}/api/mobile-sync/upload-avatar?id={}&type={}", http_url, owner_id, owner_type);
+
+            let url = format!(
+                "{}/api/mobile-sync/upload-avatar?id={}&type={}",
+                http_url, owner_id, owner_type
+            );
             let _ = client
                 .post(&url)
                 .header("x-sync-token", sync_token)
@@ -94,7 +104,6 @@ impl PushExecutor {
                 .await;
         }
 
-        println!("[PushExecutor] Pushed Avatar: {}:{}", owner_type, owner_id);
         Ok(())
     }
 
@@ -106,7 +115,7 @@ impl PushExecutor {
         topic_id: &str,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
-        
+
         let row = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?")
             .bind(topic_id)
             .fetch_optional(&db.pool)
@@ -125,7 +134,7 @@ impl PushExecutor {
 
             let idempotency_key = generate_idempotency_key("push", "agent_topic", topic_id);
             let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-            
+
             let _ = client
                 .post(&url)
                 .header("x-sync-token", sync_token)
@@ -135,7 +144,6 @@ impl PushExecutor {
                 .await;
         }
 
-        println!("[PushExecutor] Pushed Agent Topic: {}", topic_id);
         Ok(())
     }
 
@@ -147,12 +155,14 @@ impl PushExecutor {
         topic_id: &str,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
-        
-        let row = sqlx::query("SELECT topic_id, title, created_at, owner_id FROM topics WHERE topic_id = ?")
-            .bind(topic_id)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+
+        let row = sqlx::query(
+            "SELECT topic_id, title, created_at, owner_id FROM topics WHERE topic_id = ?",
+        )
+        .bind(topic_id)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
         if let Some(r) = row {
             let dto = GroupTopicSyncDTO {
@@ -164,7 +174,7 @@ impl PushExecutor {
 
             let idempotency_key = generate_idempotency_key("push", "group_topic", topic_id);
             let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-            
+
             let _ = client
                 .post(&url)
                 .header("x-sync-token", sync_token)
@@ -174,7 +184,6 @@ impl PushExecutor {
                 .await;
         }
 
-        println!("[PushExecutor] Pushed Group Topic: {}", topic_id);
         Ok(())
     }
 
@@ -187,7 +196,7 @@ impl PushExecutor {
         uploaded_hashes: Option<Arc<RwLock<HashSet<String>>>>,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
-        
+
         let topic_row = sqlx::query("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?")
             .bind(topic_id)
             .fetch_optional(&db.pool)
@@ -205,7 +214,8 @@ impl PushExecutor {
                 topic_id,
                 Some(1000),
                 None,
-            ).await?;
+            )
+            .await?;
 
             let dto_messages = build_message_dtos(app, &history, &owner_type).await;
 
@@ -220,7 +230,10 @@ impl PushExecutor {
             if let Ok(resp) = response {
                 if resp.status().is_success() {
                     if let Ok(result) = resp.json::<serde_json::Value>().await {
-                        if let Some(needed_hashes) = result.get("neededAttachmentHashes").and_then(|v| v.as_array()) {
+                        if let Some(needed_hashes) = result
+                            .get("neededAttachmentHashes")
+                            .and_then(|v| v.as_array())
+                        {
                             for hash_value in needed_hashes {
                                 if let Some(hash) = hash_value.as_str() {
                                     let should_upload = if let Some(ref tracker) = uploaded_hashes {
@@ -229,10 +242,13 @@ impl PushExecutor {
                                     } else {
                                         true
                                     };
-                                    
+
                                     if should_upload {
-                                        let _ = upload_attachment(app, client, http_url, sync_token, hash).await;
-                                        
+                                        let _ = upload_attachment(
+                                            app, client, http_url, sync_token, hash,
+                                        )
+                                        .await;
+
                                         if let Some(ref tracker) = uploaded_hashes {
                                             let mut tracker_guard = tracker.write().await;
                                             tracker_guard.insert(hash.to_string());
@@ -248,7 +264,6 @@ impl PushExecutor {
             }
         }
 
-        println!("[PushExecutor] Pushed messages for Topic: {}", topic_id);
         Ok(())
     }
 }
@@ -276,11 +291,13 @@ async fn build_message_dtos<R: Runtime>(
             let dto = UserMessageSyncDTO::from(msg);
             serde_json::to_value(dto).ok()
         } else if owner_type == "group" {
-            let avatar_color = query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default()).await;
+            let avatar_color =
+                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default()).await;
             let dto = GroupMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         } else {
-            let avatar_color = query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default()).await;
+            let avatar_color =
+                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default()).await;
             let dto = AgentMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         };
@@ -313,7 +330,9 @@ async fn upload_attachment<R: Runtime>(
         let internal_path: String = att_row.get("internal_path");
 
         let file_path = internal_path.trim_start_matches("file://");
-        let file_data = tokio::fs::read(file_path).await.map_err(|e| format!("读取附件失败: {}", e))?;
+        let file_data = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| format!("读取附件失败: {}", e))?;
 
         let url = format!(
             "{}/api/mobile-sync/upload-attachment?hash={}&type={}",
@@ -332,7 +351,7 @@ async fn upload_attachment<R: Runtime>(
             .map_err(|e| format!("上传附件失败: {}", e))?;
 
         if response.status().is_success() {
-            println!("[PushExecutor] Attachment uploaded: {}", hash);
+            log::debug!("[PushExecutor] Attachment uploaded: {}", hash);
         }
     }
 

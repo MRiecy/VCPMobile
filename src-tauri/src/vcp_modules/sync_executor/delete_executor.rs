@@ -1,4 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::sync_hash::HashAggregator;
+use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
 
 pub struct DeleteExecutor;
@@ -18,7 +20,10 @@ impl DeleteExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        println!("[DeleteExecutor] Soft deleted Agent: {}", agent_id);
+        let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+        HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
@@ -36,7 +41,10 @@ impl DeleteExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        println!("[DeleteExecutor] Soft deleted Group: {}", group_id);
+        let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+        HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
@@ -47,6 +55,12 @@ impl DeleteExecutor {
         let db = app.state::<DbState>();
         let now = chrono::Utc::now().timestamp_millis();
 
+        let parent_row = sqlx::query("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?")
+            .bind(topic_id)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
         sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ?")
             .bind(now)
             .bind(topic_id)
@@ -54,16 +68,35 @@ impl DeleteExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        println!("[DeleteExecutor] Soft deleted Topic: {}", topic_id);
+        if let Some(row) = parent_row {
+            let owner_id: String = row.get("owner_id");
+            let owner_type: String = row.get("owner_type");
+
+            let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+            if owner_type == "agent" {
+                let _ = HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await;
+            } else if owner_type == "group" {
+                let _ = HashAggregator::bubble_group_hash(&mut tx, &owner_id).await;
+            }
+            let _ = tx.commit().await;
+        }
+
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn soft_delete_message<R: Runtime>(
         app: &AppHandle<R>,
         msg_id: &str,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
         let now = chrono::Utc::now().timestamp_millis();
+
+        let topic_row = sqlx::query("SELECT topic_id FROM messages WHERE msg_id = ?")
+            .bind(msg_id)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
         sqlx::query("UPDATE messages SET deleted_at = ? WHERE msg_id = ?")
             .bind(now)
@@ -72,7 +105,13 @@ impl DeleteExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        println!("[DeleteExecutor] Soft deleted Message: {}", msg_id);
+        if let Some(row) = topic_row {
+            let topic_id: String = row.get("topic_id");
+            let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+            let _ = HashAggregator::bubble_from_topic(&mut tx, &topic_id).await;
+            let _ = tx.commit().await;
+        }
+
         Ok(())
     }
 
@@ -92,7 +131,6 @@ impl DeleteExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        println!("[DeleteExecutor] Soft deleted Avatar: {}:{}", owner_type, owner_id);
         Ok(())
     }
 
@@ -103,29 +141,33 @@ impl DeleteExecutor {
         let db = app.state::<DbState>();
         let threshold = chrono::Utc::now().timestamp_millis() - days * 24 * 60 * 60 * 1000;
 
-        let agents = sqlx::query("DELETE FROM agents WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-            .bind(threshold)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let agents =
+            sqlx::query("DELETE FROM agents WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+                .bind(threshold)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let groups = sqlx::query("DELETE FROM groups WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-            .bind(threshold)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let groups =
+            sqlx::query("DELETE FROM groups WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+                .bind(threshold)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let topics = sqlx::query("DELETE FROM topics WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-            .bind(threshold)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let topics =
+            sqlx::query("DELETE FROM topics WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+                .bind(threshold)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
-        let messages = sqlx::query("DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-            .bind(threshold)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let messages =
+            sqlx::query("DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+                .bind(threshold)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
         println!(
             "[DeleteExecutor] Cleaned up old records: agents={}, groups={}, topics={}, messages={}",

@@ -3,47 +3,42 @@ mod vcp_modules;
 use tauri::Manager;
 use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
 use vcp_modules::agent_service::{
-    create_agent, delete_agent, get_agents, read_agent_config,
-    save_agent_config, update_agent_config, save_avatar_color,
-};
-use vcp_modules::settings_manager::{
-    read_settings,
-    set_theme, update_settings, write_settings,
+    create_agent, delete_agent, get_agents, read_agent_config, save_agent_config,
+    save_avatar_color, update_agent_config,
 };
 use vcp_modules::chat_manager::{
-    append_single_message, delete_messages,
-    load_chat_history, patch_single_message,
+    append_single_message, delete_messages, load_chat_history, patch_single_message,
     truncate_history_after_timestamp,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
+use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 // use vcp_modules::db_manager::DbState;
 use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
-    cleanup_orphaned_attachments, get_attachment_real_path, open_file,
-    read_local_file_base64, store_file,
-    init_chunked_upload, append_chunk, finish_chunked_upload, UploadManagerState,
+    append_chunk, cleanup_orphaned_attachments, finish_chunked_upload, get_attachment_real_path,
+    init_chunked_upload, open_file, read_local_file_base64, store_file, UploadManagerState,
 };
 use vcp_modules::group_chat_application_service::handle_group_chat_message;
 use vcp_modules::group_service::{
-    create_group, get_groups, read_group_config, save_group_config, update_group_config,
+    create_group, delete_group, get_groups, read_group_config, save_group_config,
+    update_group_config,
 };
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_processor::process_message_content;
 use vcp_modules::model_manager::{
-    get_favorite_models, get_hot_models, record_model_usage, refresh_models,
-    toggle_favorite_model,
+    get_favorite_models, get_hot_models, record_model_usage, refresh_models, toggle_favorite_model,
 };
+use vcp_modules::protocol_manager::{prepare_vcp_upload, register_vcp_protocols};
+use vcp_modules::sync_service::get_sync_status;
 use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
     update_topic_title,
 };
 use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
 use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
-use vcp_modules::protocol_manager::{register_vcp_protocols, prepare_vcp_upload};
-use vcp_modules::sync_service::get_sync_status;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -61,7 +56,7 @@ pub fn run() {
     builder
         .setup(|app| {
             // 2. 初始化核心状态
-            app.manage(LifecycleState::new());    
+            app.manage(LifecycleState::new());
             app.manage(ActiveRequests::default());
             app.manage(ContextSanitizer::default());
             app.manage(UploadManagerState::new());
@@ -138,6 +133,7 @@ pub fn run() {
             create_group,
             save_group_config,
             update_group_config,
+            delete_group,
             delete_agent,
             set_theme,
             store_file,
@@ -159,11 +155,11 @@ pub fn run() {
             send_vcp_log_message,
             get_emoticon_library,
             regenerate_emoticon_library,
-             fix_emoticon_url,
-             get_core_status,
-             get_last_error,
-             get_sync_status,
-             ])
+            fix_emoticon_url,
+            get_core_status,
+            get_last_error,
+            get_sync_status,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

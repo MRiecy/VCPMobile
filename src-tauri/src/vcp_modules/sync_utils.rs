@@ -1,11 +1,11 @@
 use rand::Rng;
-use serde::Serialize;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::time::sleep;
 
+#[allow(dead_code)]
 pub struct RetryPolicy {
     pub max_retries: u32,
     pub base_delay_ms: u64,
@@ -24,6 +24,7 @@ impl Default for RetryPolicy {
     }
 }
 
+#[allow(dead_code)]
 impl RetryPolicy {
     pub fn default_clone(&self) -> Self {
         Self {
@@ -68,7 +69,11 @@ impl RetryPolicy {
                     }
 
                     let delay = self.calculate_delay(attempt);
-                    println!("[SyncRetry] Attempt {} failed, retrying in {:?}", attempt + 1, delay);
+                    println!(
+                        "[SyncRetry] Attempt {} failed, retrying in {:?}",
+                        attempt + 1,
+                        delay
+                    );
                     sleep(delay).await;
                     last_error = Some(e);
                 }
@@ -79,6 +84,7 @@ impl RetryPolicy {
     }
 }
 
+#[allow(dead_code)]
 pub fn is_network_retryable(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("timeout")
@@ -97,6 +103,7 @@ pub struct SyncMetrics {
     pub retries: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl SyncMetrics {
     pub fn new() -> Self {
         Self {
@@ -132,13 +139,6 @@ impl SyncMetrics {
         });
         let _ = app_handle.emit("vcp-sync-metrics", metrics);
     }
-}
-
-#[derive(Serialize)]
-pub struct SyncProgress {
-    pub current_op: String,
-    pub completed: u64,
-    pub total: u64,
 }
 
 pub async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> String {

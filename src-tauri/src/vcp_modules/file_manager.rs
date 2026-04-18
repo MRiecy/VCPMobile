@@ -55,6 +55,7 @@ pub struct AttachmentData {
 }
 
 /// 内部辅助函数：精细化 MIME 类型判定 (对齐桌面端 fileManager.js)
+#[allow(dead_code)]
 pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String {
     let ext = std::path::Path::new(original_name)
         .extension()
@@ -267,7 +268,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     }
 
-    // 3. 结构化文档 (PDF, Docx, etc.) 
+    // 3. 结构化文档 (PDF, Docx, etc.)
     // 后端目前不具备解析能力，直接返回 None，由前端 JIT 处理器或专门的插件负责处理
     None
 }
@@ -411,7 +412,10 @@ pub async fn init_chunked_upload(
     mime_type: String,
 ) -> Result<String, String> {
     let session_id = uuid::Uuid::new_v4().to_string();
-    let mut temp_path = app_handle.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let mut temp_path = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?;
     temp_path.push("uploads");
     if !temp_path.exists() {
         fs::create_dir_all(&temp_path).map_err(|e| e.to_string())?;
@@ -472,7 +476,10 @@ pub async fn finish_chunked_upload(
     state: State<'_, UploadManagerState>,
     session_id: String,
 ) -> Result<AttachmentData, String> {
-    let (_, session) = state.sessions.remove(&session_id).ok_or("上传会话已超时或不存在")?;
+    let (_, session) = state
+        .sessions
+        .remove(&session_id)
+        .ok_or("上传会话已超时或不存在")?;
 
     // 1. 获取已经算好的哈希值 (0 内存读取开销！)
     let hasher = session.hasher.lock().unwrap().clone();
@@ -484,20 +491,33 @@ pub async fn finish_chunked_upload(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    let internal_file_name = if ext.is_empty() { hash.clone() } else { format!("{}.{}", hash, ext) };
+    let internal_file_name = if ext.is_empty() {
+        hash.clone()
+    } else {
+        format!("{}.{}", hash, ext)
+    };
 
-    let mut attachments_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut attachments_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
     attachments_dir.push("data");
     attachments_dir.push("attachments");
-    if !attachments_dir.exists() { fs::create_dir_all(&attachments_dir).ok(); }
+    if !attachments_dir.exists() {
+        fs::create_dir_all(&attachments_dir).ok();
+    }
 
     let internal_file_path = attachments_dir.join(&internal_file_name);
     let internal_path_str = internal_file_path.to_str().unwrap().to_string();
 
     // 3. 移动临时文件到正式目录 (Rename 是毫秒级的)
-    fs::rename(&session.temp_path, &internal_file_path).map_err(|e| format!("移动文件失败: {}", e))?;
+    fs::rename(&session.temp_path, &internal_file_path)
+        .map_err(|e| format!("移动文件失败: {}", e))?;
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
     // 4. 入库记录
     sqlx::query(
@@ -505,12 +525,22 @@ pub async fn finish_chunked_upload(
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(hash) DO UPDATE SET internal_path = excluded.internal_path",
     )
-    .bind(&hash).bind(&session.mime_type).bind(final_size as i64)
-    .bind(&internal_path_str).bind(now as i64).bind(now as i64)
-    .execute(&db_state.pool).await.map_err(|e| e.to_string())?;
+    .bind(&hash)
+    .bind(&session.mime_type)
+    .bind(final_size as i64)
+    .bind(&internal_path_str)
+    .bind(now as i64)
+    .bind(now as i64)
+    .execute(&db_state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let extracted_text = try_extract_text(&internal_file_path, &session.mime_type);
-    let thumbnail_path = if session.mime_type.starts_with("image/") { generate_thumbnail(&internal_file_path, &hash) } else { None };
+    let thumbnail_path = if session.mime_type.starts_with("image/") {
+        generate_thumbnail(&internal_file_path, &hash)
+    } else {
+        None
+    };
 
     Ok(AttachmentData {
         id: format!("attachment_{}", hash),
@@ -525,7 +555,7 @@ pub async fn finish_chunked_upload(
         thumbnail_path,
     })
 }
-    /// 移动端/桌面端原生文件选取与存储 (流式防 OOM 优化版)
+/// 移动端/桌面端原生文件选取与存储 (流式防 OOM 优化版)
 #[tauri::command]
 pub async fn get_attachment_real_path(
     app_handle: AppHandle,
@@ -619,6 +649,7 @@ pub async fn read_local_file_base64(app_handle: AppHandle, path: String) -> Resu
 }
 
 /// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)
+#[allow(dead_code)]
 pub fn clear_upload_cache(app_handle: &AppHandle) {
     if let Ok(mut temp_path) = app_handle.path().app_cache_dir() {
         temp_path.push("uploads");

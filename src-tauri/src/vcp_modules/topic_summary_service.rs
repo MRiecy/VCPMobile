@@ -1,5 +1,5 @@
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::message_service;
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;

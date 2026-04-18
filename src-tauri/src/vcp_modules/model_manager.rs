@@ -1,5 +1,5 @@
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

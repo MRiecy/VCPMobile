@@ -33,7 +33,8 @@ pub async fn handle_agent_chat_message(
     let thinking_id = payload.thinking_message_id;
 
     // 1. 读取 Agent 配置
-    let agent_config = read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
+    let agent_config =
+        read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
 
     // 2. 将用户消息追加到数据库
     message_service::append_single_message(
@@ -62,11 +63,16 @@ pub async fn handle_agent_chat_message(
 
     // 5. 注入 System Prompt
     if !agent_config.system_prompt.is_empty() {
-        let system_content = agent_config.system_prompt.replace("{{AgentName}}", &agent_config.name);
-        messages.insert(0, json!({
-            "role": "system",
-            "content": system_content
-        }));
+        let system_content = agent_config
+            .system_prompt
+            .replace("{{AgentName}}", &agent_config.name);
+        messages.insert(
+            0,
+            json!({
+                "role": "system",
+                "content": system_content
+            }),
+        );
     }
 
     // 6. 构造 VCP 请求载荷

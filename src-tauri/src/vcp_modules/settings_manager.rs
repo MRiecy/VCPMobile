@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 pub struct Settings {
     #[serde(default)]
     pub user_name: String,
-    
+
     // VCP 核心服务器
     #[serde(default)]
     pub vcp_server_url: String,
@@ -26,9 +26,9 @@ pub struct Settings {
 
     // VCP 数据同步连接
     #[serde(default)]
-    pub sync_server_url: String,      // WebSocket 服务 URL (ws://ip:port)
+    pub sync_server_url: String, // WebSocket 服务 URL (ws://ip:port)
     #[serde(default)]
-    pub sync_http_url: String,        // HTTP API 服务 URL (http://ip:port)
+    pub sync_http_url: String, // HTTP API 服务 URL (http://ip:port)
     #[serde(default)]
     pub sync_token: String,
 

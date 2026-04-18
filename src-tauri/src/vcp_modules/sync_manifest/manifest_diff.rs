@@ -2,6 +2,7 @@ use crate::vcp_modules::sync_types::{DiffResult, EntityState};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum DiffAction {
     Pull,
     Push,
@@ -11,10 +12,12 @@ pub enum DiffAction {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ManifestDiff {
     pub actions: Vec<(String, DiffAction)>,
 }
 
+#[allow(dead_code)]
 impl ManifestDiff {
     pub fn compute(local_items: &[EntityState], remote_items: &[EntityState]) -> Self {
         let local_map: HashMap<&str, &EntityState> =
@@ -178,8 +181,8 @@ impl ManifestDiff {
                 let action_str = match action {
                     DiffAction::Pull => "PULL",
                     DiffAction::Push => "PUSH",
-                    DiffAction::Delete { deleted_at } => "DELETE",
-                    DiffAction::PushDelete { deleted_at } => "PUSH_DELETE",
+                    DiffAction::Delete { deleted_at: _ } => "DELETE",
+                    DiffAction::PushDelete { deleted_at: _ } => "PUSH_DELETE",
                     DiffAction::Skip => "SKIP",
                 };
 

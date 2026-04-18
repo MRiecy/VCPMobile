@@ -4,9 +4,9 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
+use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -166,10 +166,11 @@ pub async fn get_groups(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query("SELECT group_id FROM groups WHERE deleted_at IS NULL")
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let rows: Vec<sqlx::sqlite::SqliteRow> =
+        sqlx::query("SELECT group_id FROM groups WHERE deleted_at IS NULL")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     let mut groups = Vec::new();
     for row in rows {
@@ -210,9 +211,10 @@ pub async fn update_group_config(
     internal_write_group_config(&app_handle, &state, &group_id, &new_config, false, false).await?;
 
     Ok(new_config)
-    }
+}
 
 /// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
+#[allow(dead_code)]
 pub async fn apply_sync_update<R: Runtime>(
     app_handle: &AppHandle<R>,
     state: &GroupManagerState,
@@ -240,7 +242,8 @@ pub async fn apply_sync_update<R: Runtime>(
     config.created_at = dto.created_at;
 
     // 3. 写入数据库
-    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble, from_sync).await?;
+    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble, from_sync)
+        .await?;
 
     Ok(())
 }
@@ -266,7 +269,8 @@ pub async fn create_group(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let mut tx: sqlx::Transaction<'_, sqlx::Sqlite> = pool.begin().await.map_err(|e| e.to_string())?;
+    let mut tx: sqlx::Transaction<'_, sqlx::Sqlite> =
+        pool.begin().await.map_err(|e| e.to_string())?;
 
     let default_topic = Topic {
         id: default_topic_id.clone(),
@@ -313,7 +317,7 @@ pub async fn create_group(
     for topic in &config.topics {
         sqlx::query(
             "INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at) 
-             VALUES (?, 'group', ?, ?, ?, ?)"
+             VALUES (?, 'group', ?, ?, ?, ?)",
         )
         .bind(&topic.id)
         .bind(&group_id)
@@ -367,8 +371,11 @@ async fn internal_write_group_config<R: Runtime>(
                 .await
                 .map_err(|e| e.to_string())?;
 
-            let old_hash = rows.and_then(|r| { use sqlx::Row; r.get::<Option<String>, _>("config_hash") });
-            
+            let old_hash = rows.and_then(|r| {
+                use sqlx::Row;
+                r.get::<Option<String>, _>("config_hash")
+            });
+
             if old_hash.as_ref() != Some(&config_hash) {
                 let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
                     id: group_id.to_string(),
@@ -474,6 +481,38 @@ async fn internal_write_group_config<R: Runtime>(
     // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 
     state.caches.insert(group_id.to_string(), config.clone());
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn delete_group(
+    app_handle: AppHandle,
+    state: State<'_, GroupManagerState>,
+    group_id: String,
+) -> Result<bool, String> {
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ?")
+        .bind(now)
+        .bind(&group_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    state.caches.remove(&group_id);
+
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+            data_type: SyncDataType::Group,
+            id: group_id.clone(),
+        });
+    }
 
     Ok(true)
 }
