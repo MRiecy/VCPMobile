@@ -8,6 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
+fn default_sync_log_level() -> String {
+    "INFO".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -35,6 +39,10 @@ pub struct Settings {
     // 话题总结配置
     #[serde(default)]
     pub topic_summary_model: String,
+
+    // 同步日志配置
+    #[serde(default = "default_sync_log_level")]
+    pub sync_log_level: String,
 
     // 排序逻辑 (移动端分组)
     #[serde(default)]
@@ -76,6 +84,7 @@ pub fn create_default_settings() -> Settings {
         sync_http_url: "".to_string(),
         sync_token: "".to_string(),
         topic_summary_model: "gemini-2.5-flash".to_string(),
+        sync_log_level: "INFO".to_string(),
         agent_order: vec![],
         group_order: vec![],
         current_theme_mode: Some("dark".to_string()),

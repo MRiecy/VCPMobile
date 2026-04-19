@@ -8,10 +8,11 @@ export interface AppSettings {
   vcpApiKey: string;
   vcpLogUrl: string;
   vcpLogKey: string;
-  syncServerUrl: string; // WebSocket URL
-  syncHttpUrl: string; // HTTP API URL
+  syncServerUrl: string;
+  syncHttpUrl: string;
   syncToken: string;
   topicSummaryModel: string;
+  syncLogLevel: string;
   agentOrder: string[];
   groupOrder: string[];
   currentThemeMode?: string;
@@ -32,6 +33,7 @@ export const useSettingsStore = defineStore("settings", () => {
     } catch (e: any) {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to fetch settings:", e);
+      throw e;
     } finally {
       loading.value = false;
     }

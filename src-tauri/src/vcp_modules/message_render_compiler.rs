@@ -1,7 +1,8 @@
 use crate::vcp_modules::content_parser::{ensure_html_fenced, parse_content, ContentBlock};
-use crate::vcp_modules::emoticon_manager::{internal_fix_url, EmoticonItem};
+use crate::vcp_modules::emoticon_manager::{internal_fix_url, EmoticonItem, EmoticonManagerState};
 use percent_encoding::percent_decode_str;
 use regex::{Captures, Regex};
+use tauri::{AppHandle, State};
 
 pub struct MessageRenderCompiler;
 
@@ -63,7 +64,7 @@ impl MessageRenderCompiler {
                 .to_string()
         };
 
-        // 2. Ensure HTML fenced
+        // 2. Pre-process HTML fencing (Ported from content_parser robustly)
         let fenced_content = ensure_html_fenced(&fixed_content);
 
         // 3. Core parse
@@ -74,4 +75,17 @@ impl MessageRenderCompiler {
     pub fn serialize(blocks: &[ContentBlock]) -> Result<Vec<u8>, String> {
         serde_json::to_vec(blocks).map_err(|e| e.to_string())
     }
+}
+
+#[tauri::command]
+pub async fn process_message_content(
+    _app_handle: AppHandle,
+    content: String,
+    emoticon_state: State<'_, EmoticonManagerState>,
+) -> Result<Vec<ContentBlock>, String> {
+    // 1. 全量预解析 (调用统一的渲染编译器)
+    let library = emoticon_state.library.lock().await;
+    let blocks = MessageRenderCompiler::compile(&content, &library);
+
+    Ok(blocks)
 }

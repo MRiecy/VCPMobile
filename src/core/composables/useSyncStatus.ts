@@ -73,10 +73,32 @@ const applySyncStatus = (
 export const initSyncStatus = async () => {
   const notificationStore = useNotificationStore();
 
-  const unlisten = await listen("vcp-sync-status", (event: any) => {
+  // Existing sync status listener
+  const unlistenStatus = await listen("vcp-sync-status", (event: any) => {
     const status = String(event.payload.status || "disconnected");
     console.log(`[SyncStatus] Received vcp-sync-status event -> ${status}`);
     applySyncStatus(notificationStore, status, "event");
+  });
+
+  // NEW: VCP-log listener for sync errors
+  const unlistenLog = await listen("vcp-log", (event: any) => {
+    const { level, category, message, phase } = event.payload;
+
+    // Only handle sync-related logs
+    if (category !== "sync") return;
+
+    // Only show error notifications to user
+    if (level === "error") {
+      notificationStore.addNotification({
+        type: "error",
+        title: `同步错误 [${phase || "unknown"}]`,
+        message: message,
+        duration: 5000,
+      });
+    }
+
+    // Always log to console for debugging
+    console.log(`[VCPLog][${level}][${category}] ${message}`);
   });
 
   try {
@@ -87,7 +109,11 @@ export const initSyncStatus = async () => {
     console.error("[SyncStatus] Failed to query sync status snapshot:", error);
   }
 
-  return unlisten;
+  // Return both unlisten functions
+  return () => {
+    unlistenStatus();
+    unlistenLog();
+  };
 };
 
 export type SyncStatusUnlisten = UnlistenFn;

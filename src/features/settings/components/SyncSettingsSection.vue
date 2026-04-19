@@ -82,6 +82,7 @@ const rebuildEmoticonLibrary = async () => {
     />
     <SettingsTextField
       v-model="settings.syncToken"
+      is-secure
       label="Mobile Sync Token"
       placeholder="输入桌面端 config.env 中的 Token"
       mono

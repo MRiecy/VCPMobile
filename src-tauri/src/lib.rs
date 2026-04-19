@@ -27,7 +27,7 @@ use vcp_modules::group_service::{
     update_group_config,
 };
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
-use vcp_modules::message_processor::process_message_content;
+use vcp_modules::message_render_compiler::process_message_content;
 use vcp_modules::model_manager::{
     get_favorite_models, get_hot_models, record_model_usage, refresh_models, toggle_favorite_model,
 };

@@ -67,37 +67,36 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     let sync_state = init_sync_service(handle.clone());
     handle.manage(sync_state);
 
-    // 3. 服务级并行初始化 (这些服务彼此依赖较少)
-    let emoticon_task = {
+    // 3. 服务级后台初始化 (解耦阻塞)
+    // 我们将这些任务放入后台执行，不再使用 join! 等待。
+    // 这样前端能立刻收到 Ready 信号，而不需要等待表情包库扫完。
+    {
         let h = handle.clone();
         tokio::spawn(async move {
             let emoticon_state = h.state::<EmoticonManagerState>();
             let settings_state = h.state::<SettingsState>();
             if let Ok(lib) = internal_generate_library(&h, &settings_state).await {
                 *emoticon_state.library.lock().await = lib;
-                info!("[Lifecycle] Emoticon library loaded.");
+                info!("[Lifecycle] Emoticon library loaded in background.");
             }
-        })
-    };
+        });
+    }
 
-    let model_task = {
+    {
         let h = handle.clone();
         tokio::spawn(async move {
             let model_state = h.state::<ModelManagerState>();
             init_model_manager(&h, &model_state).await;
-            info!("[Lifecycle] Model manager initialized.");
-        })
-    };
+            info!("[Lifecycle] Model manager initialized in background.");
+        });
+    }
 
     // 4. 群组初始化 (如有需要可在此添加)
 
-    // 5. 等待并行任务完成
-    let _ = tokio::join!(emoticon_task, model_task);
-
-    // 6. 标记为就绪
+    // 5. 标记为就绪 (不再等待后台任务)
     *lifecycle.status.write().await = CoreStatus::Ready;
     let _ = handle.emit("vcp-core-ready", ());
-    info!("[Lifecycle] Bootstrap complete. Core is READY.");
+    info!("[Lifecycle] Bootstrap complete. Core is READY (Non-blocking).");
 
     Ok(())
 }

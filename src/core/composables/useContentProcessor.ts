@@ -8,7 +8,9 @@ export interface ContentBlock {
   | "diary"
   | "thought"
   | "button-click"
-  | "html-preview";
+  | "html-preview"
+  | "role-divider"
+  | "style";
   content: string;
   tool_name?: string;
   is_complete?: boolean;
@@ -18,6 +20,8 @@ export interface ContentBlock {
   maid?: string;
   date?: string;
   theme?: string;
+  role?: string;
+  is_end?: boolean;
 }
 
 const injectedStyles = new Map<string, string>();
@@ -137,79 +141,41 @@ export function useContentProcessor() {
   ): Promise<ContentBlock[]> => {
     if (!text) return [];
 
-    let processed = text;
+    // 1. Hybrid Pipeline branching
+    if (options.isStreaming) {
+      let processed = transformSpecialBlocksForStream(text);
 
-    // 0. 保护所有的代码围栏，防止跨界误伤提取
-    const fences: string[] = [];
-    processed = processed.replace(/```[\s\S]*?```/g, (match) => {
-      fences.push(match);
-      return `__VCP_CODE_FENCE_${fences.length - 1}__`;
-    });
-
-    // 1. Extract <style> tags to prevent them from being mangled by markdown or affecting global scope
-    // 此时已经排除了受保护的代码围栏中的 <style>
-    const styleRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
-    processed = processed.replace(styleRegex, (_, css) => {
-      if (options.messageId) injectScopedCss(css, options.messageId);
-      return ""; // Remove from main content
-    });
-
-    // 1.5 处理角色分割语法 (ROLE_DIVIDE) - 在代码围栏外执行
-    const ROLE_DIVIDER_REGEX =
-      /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
-    processed = processed.replace(
-      ROLE_DIVIDER_REGEX,
-      (_match, endMarker, role) => {
+      // Streaming mode still needs basic role divider placeholder for better UX
+      const ROLE_DIVIDER_REGEX = /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
+      processed = processed.replace(ROLE_DIVIDER_REGEX, (_match, endMarker, role) => {
         const isEnd = !!endMarker;
         const roleLower = role.toLowerCase();
-        let roleDisplay = "";
-
-        switch (roleLower) {
-          case "system":
-            roleDisplay = "System";
-            break;
-          case "assistant":
-            roleDisplay = "Assistant";
-            break;
-          case "user":
-            roleDisplay = "User";
-            break;
-          default:
-            roleDisplay = role;
-        }
-
-        const typeClass = isEnd ? "type-end" : "type-start";
         const actionText = isEnd ? "[结束]" : "[起始]";
+        return `\n<div class="vcp-role-divider role-${roleLower}"><span class="divider-text">角色分界: ${role} ${actionText}</span></div>\n`;
+      });
 
-        // 生成的 div 不会被 marked.js 再次转义，会作为原生 HTML 渲染
-        return `\n<div class="vcp-role-divider role-${roleLower} ${typeClass}"><span class="divider-text">角色分界: ${roleDisplay} ${actionText}</span></div>\n`;
-      },
-    );
-
-    // 1.8 还原代码围栏 (将受到保护的代码放回)
-    processed = processed.replace(/__VCP_CODE_FENCE_(\d+)__/g, (_, idx) => {
-      return fences[parseInt(idx, 10)];
-    });
-
-    // 2. Strip HTML comments to prevent them from being rendered as plain text
-    processed = processed.replace(/<!--[\s\S]*?-->/g, "");
-
-    // 3. Hybrid Pipeline branching
-    if (options.isStreaming) {
-      processed = transformSpecialBlocksForStream(processed);
       return [{ type: "markdown", content: processed }];
     }
 
-    // 4. Call Rust backend to parse the text into AST blocks (Static Mode)
+    // 2. Call Rust backend to parse the text into AST blocks (Static Mode)
     let blocks: ContentBlock[] = [];
     try {
-      blocks = await invoke("process_message_content", { content: processed });
+      blocks = await invoke("process_message_content", { content: text });
+
+      // 3. Post-process blocks for side-effects (CSS injection)
+      if (options.messageId) {
+        for (const block of blocks) {
+          if (block.type === "style") {
+            injectScopedCss(block.content, options.messageId);
+          }
+        }
+      }
     } catch (error) {
       console.error(
         "[useContentProcessor] Failed to parse content via Rust:",
         error,
       );
-      blocks = [{ type: "markdown", content: processed }];
+      blocks = [{ type: "markdown", content: text }];
     }
 
     return blocks;
