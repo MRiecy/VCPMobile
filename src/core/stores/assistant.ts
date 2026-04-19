@@ -105,7 +105,10 @@ export const useAssistantStore = defineStore("assistant", () => {
       agents.value = fetchedAgents;
       refreshUnreadCountsForItems(fetchedAgents);
     } catch (e: any) {
-      error.value = e.toString();
+      const msg = e.toString();
+      error.value = msg;
+      console.error("[AssistantStore] fetchAgents failed:", e);
+      throw e;
     } finally {
       loading.value = false;
     }
@@ -113,13 +116,16 @@ export const useAssistantStore = defineStore("assistant", () => {
 
   const fetchGroups = async () => {
     loading.value = true;
+    error.value = null;
     try {
       const fetchedGroups = await invoke<GroupConfig[]>("get_groups");
       groups.value = fetchedGroups;
       refreshUnreadCountsForItems(fetchedGroups);
     } catch (e: any) {
-      console.error("Failed to fetch groups:", e);
-      error.value = e.toString();
+      const msg = e.toString();
+      error.value = msg;
+      console.error("[AssistantStore] fetchGroups failed:", e);
+      throw e;
     } finally {
       loading.value = false;
     }

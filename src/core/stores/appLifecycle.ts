@@ -82,23 +82,49 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const runSequentialTask = async (task: PreloadTask) => {
     updatePhaseLabel(`预加载 ${task.label}...`);
     console.log(`[Lifecycle] [Sequential] START ${task.label}`);
-    await task.run();
-    console.log(`[Lifecycle] [Sequential] DONE ${task.label}`);
+    try {
+      await task.run();
+      console.log(`[Lifecycle] [Sequential] DONE ${task.label}`);
+    } catch (error) {
+      console.error(`[Lifecycle] [Sequential] FAILED ${task.label}:`, error);
+      throw error;
+    }
   };
 
   const runParallelTasks = async (tasks: PreloadTask[]) => {
     if (!tasks.length) return;
 
-    updatePhaseLabel(`并发预加载 ${tasks.map(task => task.label).join(' / ')}...`);
-    console.log(`[Lifecycle] [Parallel] START ${tasks.map(task => task.label).join(', ')}`);
+    const labels = tasks.map(task => task.label).join(' / ');
+    updatePhaseLabel(`并发预加载 ${labels}...`);
+    console.log(`[Lifecycle] [Parallel] START ${labels}`);
 
-    await Promise.all(tasks.map(async (task) => {
-      console.log(`[Lifecycle] [Parallel] -> ${task.label}`);
-      await task.run();
-      console.log(`[Lifecycle] [Parallel] <- ${task.label}`);
-    }));
-
-    console.log('[Lifecycle] [Parallel] DONE');
+    // 为并发任务添加硬超时保护 (20秒)
+    const PRELOAD_TIMEOUT = 20000;
+    
+    try {
+      await Promise.race([
+        Promise.all(tasks.map(async (task) => {
+          console.log(`[Lifecycle] [Parallel] -> ${task.label} (Starting)`);
+          const startTime = Date.now();
+          try {
+            await task.run();
+            const duration = Date.now() - startTime;
+            console.log(`[Lifecycle] [Parallel] <- ${task.label} (Success in ${duration}ms)`);
+          } catch (error) {
+            const duration = Date.now() - startTime;
+            console.error(`[Lifecycle] [Parallel] !! ${task.label} (Failed after ${duration}ms):`, error);
+            throw error;
+          }
+        })),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`并发预加载任务超时 (${labels})`)), PRELOAD_TIMEOUT)
+        )
+      ]);
+      console.log('[Lifecycle] [Parallel] ALL DONE');
+    } catch (error) {
+      console.error('[Lifecycle] [Parallel] One or more tasks failed or timed out');
+      throw error;
+    }
   };
 
   const startPreloading = async () => {

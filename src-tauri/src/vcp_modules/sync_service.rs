@@ -2,10 +2,12 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_hash::{HashAggregator, HashInitializer};
+use crate::vcp_modules::sync_logger::{SyncLogger, LogLevel};
 use crate::vcp_modules::sync_manifest::ManifestBuilder;
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::{SyncDataType, SyncManifest};
 use crate::vcp_modules::sync_utils::SyncMetrics;
+use crate::vcp_modules::settings_manager::read_settings;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -13,6 +15,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
@@ -35,6 +38,7 @@ pub struct SyncState {
     pub pending_tasks: Arc<AtomicU32>,
     #[allow(dead_code)]
     pub pending_message_topics: Arc<AtomicU32>,
+    pub sync_logger: Arc<Mutex<SyncLogger>>,
 }
 
 #[allow(dead_code)]
@@ -168,17 +172,24 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
     let pending_tasks = Arc::new(AtomicU32::new(0));
     let pending_message_topics = Arc::new(AtomicU32::new(0));
 
-    let db = app_handle.state::<DbState>();
-    let write_queue = Arc::new(DbWriteQueue::new(db.pool.clone()));
+	let db = app_handle.state::<DbState>();
+	let mut write_queue = DbWriteQueue::new(db.pool.clone());
 
-    let _metrics_task = metrics.clone();
-    let semaphore_task = network_semaphore.clone();
-    let pipeline_task = pipeline.clone();
-    let write_queue_task = write_queue.clone();
-    let pending_tasks_task = pending_tasks.clone();
-    let pending_msg_topics_task = pending_message_topics.clone();
+	// Initialize sync logger with default log level
+	let sync_log_level = LogLevel::INFO;
+	let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level)));
+	write_queue.set_logger(sync_logger.clone());
+	let write_queue = Arc::new(write_queue);
 
-    tauri::async_runtime::spawn(async move {
+	let _metrics_task = metrics.clone();
+	let semaphore_task = network_semaphore.clone();
+	let pipeline_task = pipeline.clone();
+	let write_queue_task = write_queue.clone();
+	let pending_tasks_task = pending_tasks.clone();
+	let pending_msg_topics_task = pending_message_topics.clone();
+	let sync_logger_task = sync_logger.clone();
+
+	tauri::async_runtime::spawn(async move {
         let http_client = reqwest::Client::new();
 
         loop {
@@ -215,18 +226,27 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
             match connect_async(&ws_url).await {
                 Ok((mut ws_stream, _)) => {
-                    println!("[SyncService] === Phase 1: Metadata ===");
+                    if let Ok(mut logger) = sync_logger_task.lock() {
+                        logger.start_phase("metadata", 0);
+                        logger.log(LogLevel::INFO, "metadata", "=== Phase 1: Metadata ===");
+                    }
                     publish_sync_status(&handle_clone, &connection_status_for_task, "connected")
                         .await;
 
                     let db = handle_clone.state::<DbState>();
                     if let Err(e) = HashInitializer::ensure_all_agent_hashes(&db.pool).await {
-                        println!("[SyncService] Hash init error: {}", e);
+                        if let Ok(mut logger) = sync_logger_task.lock() {
+                            logger.log(LogLevel::ERROR, "metadata", &format!("Hash init error: {}", e));
+                        }
                     }
                     if let Err(e) = HashInitializer::ensure_all_group_hashes(&db.pool).await {
-                        println!("[SyncService] Hash init error: {}", e);
+                        if let Ok(mut logger) = sync_logger_task.lock() {
+                            logger.log(LogLevel::ERROR, "metadata", &format!("Hash init error: {}", e));
+                        }
                     }
-                    println!("[SyncService] Phase 1 manifests sent, waiting for diff results...");
+                    if let Ok(mut logger) = sync_logger_task.lock() {
+                        logger.log(LogLevel::INFO, "metadata", "Phase 1 manifests sent, waiting for diff results...");
+                    }
 
                     if let Ok(manifests) = Phase1Metadata::build_all_manifests(&db.pool).await {
                         for manifest in manifests {
@@ -240,32 +260,48 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                 Some(cmd) = pipeline_rx.recv() => {
                                                     match cmd {
                                                         crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase1Completed => {
-                                                            println!("[SyncService] === Phase 2: Topics ===");
+                                                            if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                logger.start_phase("topic", 0);
+                                                                logger.log(LogLevel::INFO, "topic", "=== Phase 2: Topics ===");
+                                                            }
                                                             let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "topic" }).to_string().into())).await;
                                                         },
-                                    crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase2Completed => {
-                                        println!("[SyncService] === Phase 3: Messages ===");
-                                        let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "message" }).to_string().into())).await;
+                                                        crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase2Completed => {
+                                                            if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                logger.start_phase("message", 0);
+                                                                logger.log(LogLevel::INFO, "message", "=== Phase 3: Messages ===");
+                                                            }
+                                                            let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "message" }).to_string().into())).await;
 
-                                        let db = handle_clone.state::<DbState>();
-                                        if let Ok(topic_ids) = Phase3Message::get_all_active_topic_ids(&db.pool).await {
-                                            let topic_count = topic_ids.len() as u32;
-                                            pending_msg_topics_task.store(topic_count, Ordering::SeqCst);
-                                            if topic_count > 0 {
-                                                println!("[SyncService] Phase 3: requesting manifests for {} topics", topic_count);
-                                            }
-                                            for tid in topic_ids {
-                                                let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": tid });
-                                                let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                                            }
-                                            if topic_count == 0 {
-                                                println!("[SyncService] Phase 3 completed (no topics)");
-                                                let _ = tx_internal.send(SyncCommand::Phase3Completed);
-                                            }
-                                        }
-                                    },
+                                                            let db = handle_clone.state::<DbState>();
+                                                            if let Ok(topic_ids) = Phase3Message::get_all_active_topic_ids(&db.pool).await {
+                                                                let topic_count = topic_ids.len() as u32;
+                                                                pending_msg_topics_task.store(topic_count, Ordering::SeqCst);
+                                                                if topic_count > 0 {
+                                                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                        logger.log(LogLevel::INFO, "message", 
+                                                                            &format!("Phase 3: requesting manifests for {} topics", topic_count));
+                                                                    }
+                                                                }
+                                                                for tid in topic_ids {
+                                                                    let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": tid });
+                                                                    let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                                                }
+                                                                if topic_count == 0 {
+                                                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                        logger.log(LogLevel::INFO, "message", "Phase 3 completed (no topics)");
+                                                                        logger.complete_phase("message");
+                                                                    }
+                                                                    let _ = tx_internal.send(SyncCommand::Phase3Completed);
+                                                                }
+                                                            }
+                                                        },
                                                         crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase3Completed => {
-                                                            println!("[SyncService] === Sync Complete ===");
+                                                            if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                logger.log(LogLevel::INFO, "sync", "=== Sync Complete ===");
+                                                                logger.complete_phase("sync");
+                                                                logger.end_session();
+                                                            }
                                                             let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED" }).to_string().into())).await;
                                                         },
                                                     }
@@ -362,49 +398,80 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                             let delete_count = items_clone.iter().filter(|i| i["action"] == "DELETE").count() as u32;
                                             let push_delete_count = items_clone.iter().filter(|i| i["action"] == "PUSH_DELETE").count() as u32;
                                             let total_ops = pull_count + push_count + delete_count + push_delete_count;
-                                            if total_ops > 0 {
-                                                println!("[SyncService] {:?}: pull={} push={} delete={} push_delete={}", data_type, pull_count, push_count, delete_count, push_delete_count);
-                                            }
+		if total_ops > 0 {
+			if let Ok(mut logger) = sync_logger_task.lock() {
+				logger.log_operation("metadata", &data_type.to_string(), "manifest", true,
+					Some(&format!("pull={} push={} delete={} push_delete={}", pull_count, push_count, delete_count, push_delete_count)));
+			}
+		}
                                             pending_tasks_task.fetch_add(total_ops, Ordering::SeqCst);
 
                                             for item in items_clone {
                                                 let id = item["id"].as_str().unwrap_or_default().to_string();
                                                 let action = item["action"].as_str().unwrap_or_default().to_string();
 
-                                                let h_in = h.clone();
-                                                let c_in = c.clone();
-                                                let b_in = base.clone();
-                                                let s_in = sem.clone();
-                                                let token = settings.sync_token.clone();
-                                                let data_type_clone = data_type.clone();
-                                                let wq_in = wq.clone();
-                                                let pending = pending_tasks_task.clone();
-                                                let tx_internal_in = tx_internal.clone();
+		let h_in = h.clone();
+		let c_in = c.clone();
+		let b_in = base.clone();
+		let s_in = sem.clone();
+		let token = settings.sync_token.clone();
+		let data_type_clone = data_type.clone();
+		let wq_in = wq.clone();
+		let pending = pending_tasks_task.clone();
+		let tx_internal_in = tx_internal.clone();
+		let sync_logger_in = sync_logger_task.clone();
 
-                                                tauri::async_runtime::spawn(async move {
+		tauri::async_runtime::spawn(async move {
                                                     let _permit = s_in.acquire().await;
                                                     let should_decrement = true;
                                                     if action == "PULL" {
                                                         match data_type_clone {
                                                             SyncDataType::Agent => {
                                                                 match PullExecutor::pull_agent(&h_in, &c_in, &b_in, &token, &id, &wq_in).await {
-                                                                    Err(e) => log::error!("[SyncService] pull_agent error: {} - {}", id, e),
-                                                                    _ => {}
+						Err(e) => {
+							if let Ok(mut logger) = sync_logger_in.lock() {
+								logger.log_operation("metadata", "agent", &id, false,
+									Some(&format!("pull_agent error: {}", e)));
+							}
+						},
+						_ => {
+							if let Ok(mut logger) = sync_logger_in.lock() {
+								logger.log_operation("metadata", "agent", &id, true, Some("pulled from server"));
+							}
+						}
                                                                 }
                                                             },
                                                             SyncDataType::Group => {
                                                                 match PullExecutor::pull_group(&h_in, &c_in, &b_in, &token, &id, &wq_in).await {
-                                                                    Err(e) => log::error!("[SyncService] pull_group error: {} - {}", id, e),
-                                                                    _ => {}
+						Err(e) => {
+							if let Ok(mut logger) = sync_logger_in.lock() {
+								logger.log_operation("metadata", "group", &id, false,
+									Some(&format!("pull_group error: {}", e)));
+							}
+						},
+						_ => {
+							if let Ok(mut logger) = sync_logger_in.lock() {
+								logger.log_operation("metadata", "group", &id, true, Some("pulled from server"));
+							}
+						}
                                                                 }
                                                             },
                                                             SyncDataType::Avatar => {
                                                                 let parts: Vec<&str> = id.split(':').collect();
                                                                 if parts.len() == 2 {
-                                                                    match PullExecutor::pull_avatar(&h_in, &c_in, &b_in, &token, parts[0], parts[1], &wq_in).await {
-                                                                        Err(e) => log::error!("[SyncService] pull_avatar error: {} - {}", id, e),
-                                                                        _ => {}
-                                                                    }
+						match PullExecutor::pull_avatar(&h_in, &c_in, &b_in, &token, parts[0], parts[1], &wq_in).await {
+							Err(e) => {
+								if let Ok(mut logger) = sync_logger_in.lock() {
+									logger.log_operation("metadata", "avatar", &id, false,
+										Some(&format!("pull_avatar error: {}", e)));
+								}
+							},
+							_ => {
+								if let Ok(mut logger) = sync_logger_in.lock() {
+									logger.log_operation("metadata", "avatar", &id, true, Some("pulled from server"));
+								}
+							}
+						}
                                                                 }
                                                             },
                                                             _ => {}
@@ -439,14 +506,17 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         });
                                                     }
 
-                                                    if should_decrement {
-                                                        let remaining = pending.fetch_sub(1, Ordering::SeqCst);
-                                                        if remaining == 1 {
-                                                            println!("[SyncService] Phase 1 completed");
-                                                            let _ = tx_internal_in.send(SyncCommand::Phase1Completed);
-                                                        }
-                                                    }
-                                                });
+		if should_decrement {
+			let remaining = pending.fetch_sub(1, Ordering::SeqCst);
+			if remaining == 1 {
+				if let Ok(mut logger) = sync_logger_in.lock() {
+					logger.log(LogLevel::INFO, "metadata", "Phase 1 completed");
+					logger.complete_phase("metadata");
+				}
+				let _ = tx_internal_in.send(SyncCommand::Phase1Completed);
+			}
+		}
+	});
                                             }
                                         }
                                     },
@@ -467,28 +537,32 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                 let b_in = base.clone();
                                                 let token = settings.sync_token.clone();
                                                 let tid = topic_id.clone();
-                                                let sync_state = h.state::<SyncState>();
-                                                let uploaded_hashes = sync_state.uploaded_hashes.clone();
-                                                let pending_msg = pending_msg_topics_task.clone();
-                                                let tx_internal_msg = tx_internal.clone();
-                                                tauri::async_runtime::spawn(async move {
-                                                    let _ = PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await;
+		let sync_state = h.state::<SyncState>();
+		let uploaded_hashes = sync_state.uploaded_hashes.clone();
+		let pending_msg = pending_msg_topics_task.clone();
+		let tx_internal_msg = tx_internal.clone();
+		let sync_logger_msg = sync_logger_task.clone();
+		tauri::async_runtime::spawn(async move {
+			let _ = PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await;
 
-                                                    let db = h_in.state::<DbState>();
-                                                    if let Ok(mut tx) = db.pool.begin().await {
-                                                        let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
-                                                        let _ = tx.commit().await;
-                                                    }
+			let db = h_in.state::<DbState>();
+			if let Ok(mut tx) = db.pool.begin().await {
+				let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
+				let _ = tx.commit().await;
+			}
 
-                                                    let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
-                                                    if remaining == 1 {
-                                                        println!("[SyncService] Phase 3 completed");
-                                                        let _ = tx_internal_msg.send(SyncCommand::Phase3Completed);
-                                                    }
-                                                });
-                                            }
+			let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
+			if remaining == 1 {
+				if let Ok(mut logger) = sync_logger_msg.lock() {
+					logger.log(LogLevel::INFO, "message", "Phase 3 completed");
+					logger.complete_phase("message");
+				}
+				let _ = tx_internal_msg.send(SyncCommand::Phase3Completed);
+			}
+		});
+                                             }
 
-                                            if !to_pull_ids.is_empty() {
+                                             if !to_pull_ids.is_empty() {
                                                 let h_in = h.clone();
                                                 let c_in = c.clone();
                                                 let b_in = base.clone();
@@ -517,7 +591,10 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                             if !has_pull && !has_push {
                                                 let remaining = pending_msg_topics_task.fetch_sub(1, Ordering::SeqCst);
                                                 if remaining == 1 {
-                                                    println!("[SyncService] Phase 3 completed");
+                                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                                        logger.log(LogLevel::INFO, "message", "Phase 3 completed");
+                                                        logger.complete_phase("message");
+                                                    }
                                                     let _ = tx_internal.send(SyncCommand::Phase3Completed);
                                                 }
                                             }
@@ -605,43 +682,51 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
                                                                             for topic_id in pull_agent_topics {
                                                                                 let h_in = h.clone();
-                                                                                let c_in = c.clone();
-                                                                                let b_in = base.clone();
-                                                                                let token = settings.sync_token.clone();
-                                                                                let wq_in = wq.clone();
-                                                                                let pending = pending_tasks_task.clone();
-                                                                                let tx_internal_in = tx_internal.clone();
+	let c_in = c.clone();
+	let b_in = base.clone();
+	let token = settings.sync_token.clone();
+	let wq_in = wq.clone();
+	let pending = pending_tasks_task.clone();
+	let tx_internal_in = tx_internal.clone();
+	let sync_logger_topic = sync_logger_task.clone();
 
-                                                                                tauri::async_runtime::spawn(async move {
-                                                                                    let _ = PullExecutor::pull_agent_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
+	tauri::async_runtime::spawn(async move {
+		let _ = PullExecutor::pull_agent_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
 
-                                            let remaining = pending.fetch_sub(1, Ordering::SeqCst);
-                                            if remaining == 1 {
-                                                println!("[SyncService] Phase 2 completed");
-                                                let _ = tx_internal_in.send(SyncCommand::Phase2Completed);
-                                            }
-                                        });
+		let remaining = pending.fetch_sub(1, Ordering::SeqCst);
+		if remaining == 1 {
+			if let Ok(mut logger) = sync_logger_topic.lock() {
+				logger.log(LogLevel::INFO, "topic", "Phase 2 completed");
+				logger.complete_phase("topic");
+			}
+			let _ = tx_internal_in.send(SyncCommand::Phase2Completed);
+		}
+	});
                                     }
 
-                                    for topic_id in pull_group_topics {
-                                        let h_in = h.clone();
-                                        let c_in = c.clone();
-                                        let b_in = base.clone();
-                                        let token = settings.sync_token.clone();
-                                        let wq_in = wq.clone();
-                                        let pending = pending_tasks_task.clone();
-                                        let tx_internal_in = tx_internal.clone();
+	for topic_id in pull_group_topics {
+		let h_in = h.clone();
+		let c_in = c.clone();
+		let b_in = base.clone();
+		let token = settings.sync_token.clone();
+		let wq_in = wq.clone();
+		let pending = pending_tasks_task.clone();
+		let tx_internal_in = tx_internal.clone();
+		let sync_logger_topic = sync_logger_task.clone();
 
-                                        tauri::async_runtime::spawn(async move {
-                                            let _ = PullExecutor::pull_group_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
+		tauri::async_runtime::spawn(async move {
+			let _ = PullExecutor::pull_group_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
 
-                                            let remaining = pending.fetch_sub(1, Ordering::SeqCst);
-                                            if remaining == 1 {
-                                                println!("[SyncService] Phase 2 completed");
-                                                let _ = tx_internal_in.send(SyncCommand::Phase2Completed);
-                                            }
-                                        });
-                                    }
+			let remaining = pending.fetch_sub(1, Ordering::SeqCst);
+			if remaining == 1 {
+				if let Ok(mut logger) = sync_logger_topic.lock() {
+					logger.log(LogLevel::INFO, "topic", "Phase 2 completed");
+					logger.complete_phase("topic");
+				}
+				let _ = tx_internal_in.send(SyncCommand::Phase2Completed);
+			}
+		});
+	}
 
                                                                             for topic_id in push_agent_topics {
                                                                                 let h_in = h.clone();
@@ -666,7 +751,10 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                             }
 
                                     if is_empty {
-                                        println!("[SyncService] Phase 2 completed (no topics to sync)");
+                                        if let Ok(mut logger) = sync_logger_task.lock() {
+                                            logger.log(LogLevel::INFO, "topic", "Phase 2 completed (no topics to sync)");
+                                            logger.complete_phase("topic");
+                                        }
                                         let _ = tx_internal.send(SyncCommand::Phase2Completed);
                                     }
                                                                         }
@@ -704,18 +792,19 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
         });
     }
 
-    SyncState {
-        ws_sender: tx,
-        connection_status,
-        op_tracker,
-        metrics,
-        network_semaphore,
-        pipeline,
-        uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
-        write_queue,
-        pending_tasks,
-        pending_message_topics: Arc::new(AtomicU32::new(0)),
-    }
+	SyncState {
+		ws_sender: tx,
+		connection_status,
+		op_tracker,
+		metrics,
+		network_semaphore,
+		pipeline,
+		uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
+		write_queue,
+		pending_tasks,
+		pending_message_topics: Arc::new(AtomicU32::new(0)),
+		sync_logger,
+	}
 }
 
 #[tauri::command]

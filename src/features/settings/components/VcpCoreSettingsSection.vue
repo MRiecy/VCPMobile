@@ -46,13 +46,13 @@ const testVcpConnection = async () => {
   <div class="space-y-5 px-1">
     <SettingsTextField v-model="settings.vcpServerUrl" label="VCP 服务器 URL (HTTP/HTTPS)"
       placeholder="https://vcp-endpoint.com" />
-    <SettingsTextField v-model="settings.vcpApiKey" type="password" label="VCP API Key" placeholder="••••••••" />
+    <SettingsTextField v-model="settings.vcpApiKey" is-secure label="VCP API Key" placeholder="输入 API Key" />
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
     <SettingsTextField v-model="settings.vcpLogUrl" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:8024"
       mono />
-    <SettingsTextField v-model="settings.vcpLogKey" type="password" label="VCP WebSocket 鉴权 Key"
+    <SettingsTextField v-model="settings.vcpLogKey" is-secure label="VCP WebSocket 鉴权 Key"
       placeholder="输入 WebSocket Key" mono />
 
     <div class="pt-2 flex items-center justify-between gap-4">

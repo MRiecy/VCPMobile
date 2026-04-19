@@ -49,15 +49,15 @@ const THEME_DISPLAY_NAMES: Record<string, string> = {
 
 // Vite static asset imports
 // ?raw gets the exact source text (unprocessed) for parsing variables and names
-const rawThemes = import.meta.glob('../../assets/themes/*.css', { query: '?raw', eager: true, import: 'default' }) as Record<string, string>;
+const rawThemes = import.meta.glob('../../assets/themes/*.css', { query: '?raw', import: 'default' }) as Record<string, () => Promise<string>>;
 // ?inline gets the Vite-processed CSS (with valid asset URLs)
-const inlineThemes = import.meta.glob('../../assets/themes/*.css', { query: '?inline', eager: true, import: 'default' }) as Record<string, string>;
+const inlineThemes = import.meta.glob('../../assets/themes/*.css', { query: '?inline', import: 'default' }) as Record<string, () => Promise<string>>;
 
 export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>((localStorage.getItem('vcp-theme-mode') as ThemeMode) || 'system');
   const isDarkResolved = ref(true);
   const lastModeSwitchAt = ref(0);
-  const MODE_SWITCH_DEBOUNCE_MS = 500;
+  const MODE_SWITCH_DEBOUNCE_MS = 100;
 
   let initialTheme = localStorage.getItem('vcp-theme-name');
   if (initialTheme && LEGACY_THEME_MAP[initialTheme]) {
@@ -72,35 +72,40 @@ export const useThemeStore = defineStore('theme', () => {
     // Parse themes purely on frontend
     const themes: ThemeInfo[] = [];
 
-    for (const [path, content] of Object.entries(rawThemes)) {
-      const fileName = path.split('/').pop() || '';
+    for (const [path, loadRaw] of Object.entries(rawThemes)) {
+      try {
+        const content = await loadRaw();
+        const fileName = path.split('/').pop() || '';
 
-      const name = THEME_DISPLAY_NAMES[fileName] || fileName.replace('.css', '').replace('themes-', '');
+        const name = THEME_DISPLAY_NAMES[fileName] || fileName.replace('.css', '').replace('themes-', '');
 
-      const extractVariables = (scopeRegex: RegExp) => {
-        const variables: Record<string, string> = {};
-        const scopeMatch = content.match(scopeRegex);
-        if (scopeMatch && scopeMatch[1]) {
-          const varRegex = /(--[\w-]+)\s*:\s*(.*?);/g;
-          let match;
-          while ((match = varRegex.exec(scopeMatch[1])) !== null) {
-            variables[match[1]] = match[2].trim();
+        const extractVariables = (scopeRegex: RegExp) => {
+          const variables: Record<string, string> = {};
+          const scopeMatch = content.match(scopeRegex);
+          if (scopeMatch && scopeMatch[1]) {
+            const varRegex = /(--[\w-]+)\s*:\s*(.*?);/g;
+            let match;
+            while ((match = varRegex.exec(scopeMatch[1])) !== null) {
+              variables[match[1]] = match[2].trim();
+            }
           }
-        }
-        return variables;
-      };
+          return variables;
+        };
 
-      const rootScopeRegex = /:root\s*\{([\s\S]*?)\}/;
-      const lightThemeScopeRegex = /body\.light-theme\s*\{([\s\S]*?)\}/;
+        const rootScopeRegex = /:root\s*\{([\s\S]*?)\}/;
+        const lightThemeScopeRegex = /body\.light-theme\s*\{([\s\S]*?)\}/;
 
-      themes.push({
-        fileName,
-        name,
-        variables: {
-          dark: extractVariables(rootScopeRegex),
-          light: extractVariables(lightThemeScopeRegex)
-        }
-      });
+        themes.push({
+          fileName,
+          name,
+          variables: {
+            dark: extractVariables(rootScopeRegex),
+            light: extractVariables(lightThemeScopeRegex)
+          }
+        });
+      } catch (e) {
+        console.error(`Failed to load theme raw: ${path}`, e);
+      }
     }
 
     availableThemes.value = themes;
@@ -112,12 +117,14 @@ export const useThemeStore = defineStore('theme', () => {
       localStorage.setItem('vcp-theme-name', fileName);
 
       const themePath = `../../assets/themes/${fileName}`;
-      const css = inlineThemes[themePath];
+      const loadInline = inlineThemes[themePath];
 
-      if (!css) {
-        console.warn('Theme CSS not found in bundle:', fileName);
+      if (!loadInline) {
+        console.warn('Theme CSS loader not found:', fileName);
         return;
       }
+
+      const css = await loadInline();
 
       let styleTag = document.getElementById('vcp-custom-theme');
       if (!styleTag) {
@@ -135,13 +142,16 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const initTheme = async () => {
-    await fetchThemes();
-    const savedTheme = localStorage.getItem('vcp-theme-name');
-    if (savedTheme && inlineThemes[`../../assets/themes/${savedTheme}`]) {
-      await applyThemeFile(savedTheme);
-    } else {
-      await applyThemeFile(DEFAULT_THEME);
-    }
+    const savedTheme = localStorage.getItem('vcp-theme-name') || DEFAULT_THEME;
+    
+    // 1. 优先只加载当前主题，确保背景和基础样式瞬间呈现
+    await applyThemeFile(savedTheme);
+
+    // 2. 优雅地在浏览器空闲时再扫描全量主题元数据
+    const idleCallback = (window as any).requestIdleCallback || ((cb: any) => setTimeout(cb, 1000));
+    idleCallback(() => {
+      fetchThemes().catch(console.error);
+    });
   };
 
   const applyTheme = (newMode: ThemeMode) => {
@@ -181,7 +191,10 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const toggleTheme = () => {
-    setMode(mode.value === 'light' ? 'dark' : 'light');
+    // Use the resolved state to decide the next mode,
+    // this ensures that the first click always produces a visual change
+    // even if the current mode is 'system'.
+    setMode(isDarkResolved.value ? 'light' : 'dark');
   };
   // Listen for theme updates from backend
   listen('onThemeUpdated', (event) => {

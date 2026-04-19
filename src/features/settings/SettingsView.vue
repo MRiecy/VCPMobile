@@ -44,6 +44,7 @@ const settings = ref<AppSettings>({
   agentOrder: [],
   groupOrder: [],
   topicSummaryModel: "gemini-2.5-flash",
+  syncLogLevel: "INFO",
 });
 
 const loading = ref(true);

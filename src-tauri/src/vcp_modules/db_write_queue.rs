@@ -4,9 +4,12 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::sync_logger::{SyncLogger, LogLevel};
+use crate::vcp_modules::sync_retry::{retry_on_db_locked, RetryConfig};
 use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DbWriteTask {
     UpsertAgent {
         id: String,
@@ -37,8 +40,10 @@ pub enum DbWriteTask {
     },
 }
 
+#[derive(Clone)]
 pub struct DbWriteQueue {
     sender: mpsc::Sender<DbWriteTask>,
+    logger: Option<Arc<Mutex<SyncLogger>>>,
 }
 
 impl DbWriteQueue {
@@ -48,41 +53,34 @@ impl DbWriteQueue {
         tokio::spawn(async move {
             println!("[DbWriteQueue] Worker started");
 
+            let mut success_count = 0u32;
+            let mut error_count = 0u32;
+
             while let Some(task) = rx.recv().await {
-                match task {
+                let (task_type, id, result) = match task {
                     DbWriteTask::UpsertAgent { id, dto } => {
-                        if let Err(e) = Self::upsert_agent(&pool, &id, &dto).await {
-                            println!("[DbWriteQueue] Agent {} error: {}", id, e);
-                        }
+                        let result = Self::upsert_agent(&pool, &id, &dto).await;
+                        ("agent", id, result)
                     }
                     DbWriteTask::UpsertGroup { id, dto } => {
-                        if let Err(e) = Self::upsert_group(&pool, &id, &dto).await {
-                            println!("[DbWriteQueue] Group {} error: {}", id, e);
-                        }
+                        let result = Self::upsert_group(&pool, &id, &dto).await;
+                        ("group", id, result)
                     }
                     DbWriteTask::UpsertAvatar {
                         owner_type,
                         owner_id,
                         bytes,
                     } => {
-                        if let Err(e) =
-                            Self::upsert_avatar(&pool, &owner_type, &owner_id, &bytes).await
-                        {
-                            println!(
-                                "[DbWriteQueue] Avatar {}:{} error: {}",
-                                owner_type, owner_id, e
-                            );
-                        }
+                        let result = Self::upsert_avatar(&pool, &owner_type, &owner_id, &bytes).await;
+                        ("avatar", format!("{}:{}", owner_type, owner_id), result)
                     }
                     DbWriteTask::UpsertAgentTopic { topic_id, dto } => {
-                        if let Err(e) = Self::upsert_agent_topic(&pool, &topic_id, &dto).await {
-                            println!("[DbWriteQueue] AgentTopic {} error: {}", topic_id, e);
-                        }
+                        let result = Self::upsert_agent_topic(&pool, &topic_id, &dto).await;
+                        ("agent_topic", topic_id, result)
                     }
                     DbWriteTask::UpsertGroupTopic { topic_id, dto } => {
-                        if let Err(e) = Self::upsert_group_topic(&pool, &topic_id, &dto).await {
-                            println!("[DbWriteQueue] GroupTopic {} error: {}", topic_id, e);
-                        }
+                        let result = Self::upsert_group_topic(&pool, &topic_id, &dto).await;
+                        ("group_topic", topic_id, result)
                     }
                     DbWriteTask::UpsertMessages {
                         topic_id,
@@ -90,32 +88,59 @@ impl DbWriteQueue {
                         owner_type,
                         messages,
                     } => {
-                        if let Err(e) = Self::upsert_messages(
+                        let result = Self::upsert_messages(
                             &pool,
                             &topic_id,
                             &owner_id,
                             &owner_type,
                             &messages,
                         )
-                        .await
-                        {
-                            println!("[DbWriteQueue] Messages for {} error: {}", topic_id, e);
-                        }
+                        .await;
+                        ("messages", topic_id, result)
+                    }
+                };
+
+                match result {
+                    Ok(_) => {
+                        success_count += 1;
+                        println!("[DbWriteQueue] {} {} - success", task_type, id);
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        println!("[DbWriteQueue] {} {} error: {}", task_type, id, e);
                     }
                 }
             }
 
-            println!("[DbWriteQueue] Worker stopped");
+            println!(
+                "[DbWriteQueue] Worker stopped. Total: success={}, errors={}",
+                success_count, error_count
+            );
         });
 
-        Self { sender: tx }
-    }
-
-    pub async fn submit(&self, task: DbWriteTask) {
-        if let Err(e) = self.sender.send(task).await {
-            println!("[DbWriteQueue] Submit error: {}", e);
+        Self {
+            sender: tx,
+            logger: None,
         }
     }
+
+    pub fn set_logger(&mut self, logger: Arc<Mutex<SyncLogger>>) {
+        self.logger = Some(logger);
+    }
+
+	pub async fn submit(&self, task: DbWriteTask) {
+		if let Err(e) = self.sender.send(task).await {
+			println!("[DbWriteQueue] Submit error: {}", e);
+		}
+	}
+
+	pub fn log_operation(&self, task_type: &str, id: &str, success: bool, detail: Option<&str>) {
+		if let Some(ref logger) = self.logger {
+			if let Ok(mut logger) = logger.lock() {
+				logger.log_operation("write_queue", task_type, id, success, detail);
+			}
+		}
+	}
 
     async fn upsert_agent(
         pool: &sqlx::SqlitePool,
@@ -267,50 +292,60 @@ impl DbWriteQueue {
         topic_id: &str,
         dto: &AgentTopicSyncDTO,
     ) -> Result<(), String> {
-        // 先尝试写入 topic，如果 owner 不存在则跳过哈希更新
-        let now = chrono::Utc::now().timestamp_millis();
-
-        let result = sqlx::query(
-            "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
-            VALUES (?, ?, ?, 'agent', ?, ?, ?, ?)
-            ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at"
-        )
-        .bind(topic_id)
-        .bind(&dto.name)
-        .bind(&dto.owner_id)
-        .bind(dto.created_at)
-        .bind(if dto.locked { 1 } else { 0 })
-        .bind(if dto.unread { 1 } else { 0 })
-        .bind(now)
-        .execute(pool)
-        .await;
-
-        match result {
-            Ok(_) => {
-                // 只有当 owner 存在时才更新哈希
-                let owner_exists: bool = sqlx::query_scalar(
-                    "SELECT COUNT(*) > 0 FROM agents WHERE agent_id = ? AND deleted_at IS NULL",
+        let config = RetryConfig::default();
+        let operation_name = format!("upsert_agent_topic[{}]", topic_id);
+        
+        retry_on_db_locked(&config, || {
+            let pool = pool.clone();
+            let topic_id = topic_id.to_string();
+            let dto = dto.clone();
+            let now = chrono::Utc::now().timestamp_millis();
+            
+            async move {
+                // 先尝试写入 topic，如果 owner 不存在则跳过哈希更新
+                let result = sqlx::query(
+                    "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
+                    VALUES (?, ?, ?, 'agent', ?, ?, ?, ?)
+                    ON CONFLICT(topic_id) DO UPDATE SET
+                    title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at"
                 )
+                .bind(&topic_id)
+                .bind(&dto.name)
                 .bind(&dto.owner_id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or(false);
+                .bind(dto.created_at)
+                .bind(if dto.locked { 1 } else { 0 })
+                .bind(if dto.unread { 1 } else { 0 })
+                .bind(now)
+                .execute(&pool)
+                .await;
 
-                if owner_exists {
-                    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-                    HashAggregator::bubble_agent_hash(&mut tx, &dto.owner_id).await?;
-                    tx.commit().await.map_err(|e| e.to_string())?;
-                } else {
-                    println!(
-                        "[DbWriteQueue] AgentTopic {} inserted, but owner {} not yet available (will sync later)",
-                        topic_id, dto.owner_id
-                    );
+                match result {
+                    Ok(_) => {
+                        // 只有当 owner 存在时才更新哈希
+                        let owner_exists: bool = sqlx::query_scalar(
+                            "SELECT COUNT(*) > 0 FROM agents WHERE agent_id = ? AND deleted_at IS NULL",
+                        )
+                        .bind(&dto.owner_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap_or(false);
+
+                        if owner_exists {
+                            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+                            HashAggregator::bubble_agent_hash(&mut tx, &dto.owner_id).await?;
+                            tx.commit().await.map_err(|e| e.to_string())?;
+                        } else {
+                            println!(
+                                "[DbWriteQueue] AgentTopic {} inserted, but owner {} not yet available (will sync later)",
+                                topic_id, dto.owner_id
+                            );
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
                 }
-                Ok(())
             }
-            Err(e) => Err(e.to_string()),
-        }
+        }, &operation_name).await
     }
 
     async fn upsert_group_topic(

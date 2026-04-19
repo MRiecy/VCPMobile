@@ -392,27 +392,29 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 加载聊天历史 (已优化：数据在 Rust 端完成预处理)
+   * 加载聊天历史 (已优化：使用私有协议直连，搭载预编译 AST 且防 OOM)
    */
   const loadHistory = async (
     ownerId: string,
     ownerType: string,
     topicId: string,
-    limit: number = 50,
+    limit: number = 15,
     offset: number = 0,
   ) => {
     console.log(
-      `[ChatManager] Loading history for ${ownerId}, topic: ${topicId}`,
+      `[ChatManager] Loading history via VCP Protocol for ${ownerId}, topic: ${topicId}`,
     );
     loading.value = true;
     try {
-      const history = await invoke<ChatMessage[]>("load_chat_history", {
-        ownerId,
-        ownerType,
-        topicId,
-        limit,
-        offset,
-      });
+      // 使用私有协议绕过 IPC 的内存开销和序列化瓶颈
+      const url = `vcp://api/messages?owner_id=${ownerId}&owner_type=${ownerType}&topic_id=${topicId}&limit=${limit}&offset=${offset}`;
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        throw new Error(`VCP Protocol Error: ${response.status} ${response.statusText}`);
+      }
+      
+      const history = await response.json() as ChatMessage[];
 
       if (offset === 0) {
         currentChatHistory.value = history;
@@ -472,17 +474,21 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 增量同步聊天历史 (优化: 直接重载全量历史, Rust SQLite 查询极快)
+   * 增量同步聊天历史 (优化: 结合私有协议拉取最新消息)
    */
   const syncHistoryWithDelta = async () => {
     if (!currentSelectedItem.value || !currentTopicId.value) return;
 
     try {
-      const history = await invoke<ChatMessage[]>("load_chat_history", {
-        ownerId: currentSelectedItem.value.id,
-        ownerType: currentSelectedItem.value.type,
-        topicId: currentTopicId.value,
-      });
+      const limit = 50; // 同步依然保持较大范围以防错漏
+      const url = `vcp://api/messages?owner_id=${currentSelectedItem.value.id}&owner_type=${currentSelectedItem.value.type}&topic_id=${currentTopicId.value}&limit=${limit}&offset=0`;
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        throw new Error(`VCP Protocol Sync Error: ${response.status}`);
+      }
+      
+      const history = await response.json() as ChatMessage[];
 
       // 合并流状态和最新数据
       for (const newMsg of history) {

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import { useSwipe } from '@vueuse/core';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
@@ -15,6 +16,29 @@ const overlayStore = useOverlayStore();
 const activeTab = ref<'agents' | 'topics'>('agents');
 const searchQuery = ref('');
 
+const sidebarRef = ref<HTMLElement | null>(null);
+
+// 侧边栏内部监听左滑以关闭
+useSwipe(sidebarRef, {
+  threshold: 15,
+  onSwipeEnd: (e: TouchEvent | MouseEvent) => {
+    // 排除特定不响应滑动的区域
+    if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
+
+    const absX = Math.abs(lengthX.value);
+    const absY = Math.abs(lengthY.value);
+
+    // 如果是向左滑，且位移足够大，且角度符合水平滑动特征
+    if (direction.value === 'left' && absX > 50) {
+      if (absY / absX < 0.577) {
+        layoutStore.setLeftDrawer(false);
+      }
+    }
+  }
+});
+
+const { direction, lengthX, lengthY } = useSwipe(sidebarRef);
+
 const handleSelectAgent = () => {
   activeTab.value = 'topics';
 };
@@ -29,7 +53,7 @@ const openSettings = () => {
 </script>
 
 <template>
-  <aside class="vcp-drawer vcp-drawer-left flex flex-col" :class="{ 'is-open': layoutStore.leftDrawerOpen }">
+  <aside ref="sidebarRef" class="vcp-drawer vcp-drawer-left flex flex-col" :class="{ 'is-open': layoutStore.leftDrawerOpen }">
 
     <!-- 顶部 Tabs -->
     <div class="pt-safe px-4 pt-6 pb-2 shrink-0 border-b border-black/5 dark:border-white/5">

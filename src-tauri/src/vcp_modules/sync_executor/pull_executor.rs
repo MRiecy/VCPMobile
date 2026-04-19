@@ -87,8 +87,8 @@ impl PullExecutor {
         write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
         let url = format!(
-            "{}/api/mobile-sync/download-avatar?id={}",
-            http_url, owner_id
+            "{}/api/mobile-sync/download-avatar?id={}&type={}",
+            http_url, owner_id, owner_type
         );
         let res = client
             .get(&url)

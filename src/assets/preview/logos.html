@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+  <meta charset='UTF-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+  <title>Logo Previews - Round 4 (Ethereal V Variations)</title>
+  <style>
+    body {
+      background-color: #0f172a;
+      color: white;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 40px;
+      padding: 60px;
+      margin: 0;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .card {
+      background: #1e293b;
+      border-radius: 24px;
+      padding: 32px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05);
+      width: 260px;
+      transition: transform 0.2s;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+    }
+    .card h3 { 
+      margin: 0 0 8px 0; 
+      font-size: 18px; 
+      color: #f8fafc;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-align: center;
+    }
+    .card p {
+      margin: 0 0 24px 0;
+      font-size: 12px;
+      color: #94a3b8;
+      text-align: center;
+      line-height: 1.5;
+    }
+    .logo-container { 
+      width: 140px; 
+      height: 140px; 
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .app-icon {
+      width: 120px;
+      height: 120px;
+      background: #ffffff;
+      border-radius: 28px;
+      padding: 20px;
+      box-sizing: border-box;
+      box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+    }
+    .dark-icon {
+      background: #030712;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+  </style>
+</head>
+<body>
+
+  <div class='card'>
+    <h3>方案五：Ethereal V<br>(初版对照)</h3>
+    <p>原始的紫蓝渐变<br>作为基础参考</p>
+    <div class='logo-container'>
+      <div class="app-icon dark-icon">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+          <defs>
+            <linearGradient id="grad-v" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#38bdf8" />
+              <stop offset="50%" stop-color="#6366f1" />
+              <stop offset="100%" stop-color="#d946ef" />
+            </linearGradient>
+            <filter id="shadow-v" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#6366f1" flood-opacity="0.3"/>
+            </filter>
+          </defs>
+          <path d="M 45 55 L 100 155 L 155 55" fill="none" stroke="url(#grad-v)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow-v)" />
+          <circle cx="100" cy="40" r="14" fill="url(#grad-v)" filter="url(#shadow-v)" />
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class='card'>
+    <h3>方案 5.1：Ethereal V<br>(官方直出版)</h3>
+    <p>上一个版本的状态<br>纯青色的点，整体略平</p>
+    <div class='logo-container'>
+      <div class="app-icon dark-icon">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+          <defs>
+            <linearGradient id="grad-v-vcp1" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00e5ff" />   
+              <stop offset="50%" stop-color="#3b82f6" />  
+              <stop offset="100%" stop-color="#ff3366" /> 
+            </linearGradient>
+            <filter id="shadow-v-vcp1" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#ff3366" flood-opacity="0.3"/>
+            </filter>
+          </defs>
+          <path d="M 45 55 L 100 155 L 155 55" fill="none" stroke="url(#grad-v-vcp1)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow-v-vcp1)" />
+          <circle cx="100" cy="40" r="14" fill="#00e5ff" filter="url(#shadow-v-vcp1)" />
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class='card'>
+    <h3>方案 5.2：Ethereal V<br>(粉韵深邃版)</h3>
+    <p>降低青色占比，提升粉色存在感<br>顶部点采用渐变增加立体质感</p>
+    <div class='logo-container'>
+      <div class="app-icon dark-icon">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+          <defs>
+            <!-- 调整渐变比例：粉色更早出现 -->
+            <linearGradient id="grad-v-vcp2" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00e5ff" />   
+              <stop offset="35%" stop-color="#3b82f6" />  
+              <stop offset="80%" stop-color="#ff3366" /> 
+            </linearGradient>
+            <!-- 顶部小点的独立渐变，增加立体感 -->
+            <linearGradient id="dot-grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#ffffff" />
+              <stop offset="40%" stop-color="#00e5ff" />
+              <stop offset="100%" stop-color="#3b82f6" />
+            </linearGradient>
+            <filter id="shadow-v-vcp2" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#ff3366" flood-opacity="0.4"/>
+            </filter>
+            <!-- 为顶部点单独加一个高光阴影 -->
+            <filter id="glow-dot2" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#00e5ff" flood-opacity="0.5"/>
+            </filter>
+          </defs>
+          <path d="M 45 55 L 100 155 L 155 55" fill="none" stroke="url(#grad-v-vcp2)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow-v-vcp2)" />
+          <!-- 替换了单纯的青色，改为渐变立体点 -->
+          <circle cx="100" cy="40" r="14" fill="url(#dot-grad2)" filter="url(#glow-dot2)" />
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class='card'>
+    <h3>方案 5.3：Ethereal V<br>(红点聚焦版)</h3>
+    <p>V 字主体为赛博青蓝<br>顶部的灵魂点改为惊艳的芭比粉</p>
+    <div class='logo-container'>
+      <div class="app-icon dark-icon">
+        <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+          <defs>
+            <!-- V 字主体专注青蓝，冷峻科技感 -->
+            <linearGradient id="grad-v-vcp3" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#00e5ff" />   
+              <stop offset="100%" stop-color="#3b82f6" />  
+            </linearGradient>
+            <!-- 顶部点专属的粉色高光渐变 -->
+            <linearGradient id="dot-grad3" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#ff8da1" /> <!-- 浅粉 -->
+              <stop offset="100%" stop-color="#ff3366" /> <!-- 芭比粉 -->
+            </linearGradient>
+            <filter id="shadow-v-vcp3" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#3b82f6" flood-opacity="0.3"/>
+            </filter>
+            <!-- 粉色点的强发光 -->
+            <filter id="glow-dot3" x="-30%" y="-30%" width="160%" height="160%">
+              <feDropShadow dx="0" dy="2" stdDeviation="6" flood-color="#ff3366" flood-opacity="0.7"/>
+            </filter>
+          </defs>
+          <path d="M 45 55 L 100 155 L 155 55" fill="none" stroke="url(#grad-v-vcp3)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow-v-vcp3)" />
+          <!-- 悬浮的灵魂点改为高亮粉色 -->
+          <circle cx="100" cy="40" r="14" fill="url(#dot-grad3)" filter="url(#glow-dot3)" />
+        </svg>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

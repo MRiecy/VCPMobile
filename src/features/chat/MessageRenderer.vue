@@ -19,6 +19,7 @@ import ToolBlock from "./blocks/ToolBlock.vue";
 import DiaryBlock from "./blocks/DiaryBlock.vue";
 import ThoughtBlock from "./blocks/ThoughtBlock.vue";
 import HtmlPreviewBlock from "./blocks/HtmlPreviewBlock.vue";
+import RoleDividerBlock from "./blocks/RoleDividerBlock.vue";
 import ChatBubble from "./components/ChatBubble.vue";
 import MessageHeader from "./components/MessageHeader.vue";
 import ThinkingIndicator from "./components/ThinkingIndicator.vue";
@@ -409,6 +410,7 @@ const handleSaveEdit = async (newContent: string) => {
             <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
             <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
               :message-id="message.id" />
+            <RoleDividerBlock v-else-if="block.type === 'role-divider'" :block="block" />
             <div v-else-if="block.type === 'button-click'"
               class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
               {{ block.content }}

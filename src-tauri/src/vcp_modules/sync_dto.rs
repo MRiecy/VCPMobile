@@ -80,11 +80,18 @@ pub struct AgentTopicSyncDTO {
     pub id: String,
     pub name: String,
     pub created_at: i64,
-    #[serde(default)]
+    #[serde(default = "default_locked")]
     pub locked: bool,
-    #[serde(default)]
+    #[serde(default = "default_unread")]
     pub unread: bool,
     pub owner_id: String,
+}
+
+fn default_locked() -> bool {
+    true
+}
+fn default_unread() -> bool {
+    false
 }
 
 impl From<&Topic> for AgentTopicSyncDTO {

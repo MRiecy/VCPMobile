@@ -36,6 +36,10 @@ pub enum ContentBlock {
     ButtonClick { content: String },
     #[serde(rename = "html-preview")]
     HtmlPreview { content: String },
+    #[serde(rename = "role-divider")]
+    RoleDivider { role: String, is_end: bool },
+    #[serde(rename = "style")]
+    Style { content: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +57,9 @@ enum BlockType {
     Diary,
     HtmlFence,
     HtmlDoc,
+    Style,
+    RoleDivider,
+    CodeFence,
 }
 
 lazy_static! {
@@ -88,6 +95,13 @@ lazy_static! {
     // 修复：强行增加行首锚定符 ^，防止正文中的内联 `<!DOCTYPE html>` 触发解析截断
     static ref HTML_DOC_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
     static ref HTML_DOC_END: Regex = Regex::new(r"(?i)</html>").unwrap();
+
+    static ref ROLE_DIVIDER: Regex = Regex::new(r"(?i)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
+    static ref STYLE_TAG_START: Regex = Regex::new(r"(?i)<style\b[^>]*>").unwrap();
+    static ref STYLE_TAG_END: Regex = Regex::new(r"(?i)</style>").unwrap();
+
+    static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
+    static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*$").unwrap();
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?(div|p|img|span|a|h[1-6]|ul|ol|li|table|tr|td|th|section|article|header|footer|nav|aside|main|figure|figcaption|blockquote|pre|code|style|script|button|form|input|textarea|select|label|iframe|video|audio|canvas|svg)[\s>/]").unwrap();
@@ -154,6 +168,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             (DIARY_START.find(remaining), BlockType::Diary),
             (HTML_FENCE_START.find(remaining), BlockType::HtmlFence),
             (HTML_DOC_START.find(remaining), BlockType::HtmlDoc),
+            (ROLE_DIVIDER.find(remaining), BlockType::RoleDivider),
+            (STYLE_TAG_START.find(remaining), BlockType::Style),
+            (GENERIC_CODE_FENCE_START.find(remaining), BlockType::CodeFence),
         ];
 
         for (m_opt, b_type) in checks {
@@ -215,6 +232,17 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
                         }),
+                    BlockType::RoleDivider => (Some(0), Some(0), true), // RoleDivider is a single line marker
+                    BlockType::Style => {
+                        STYLE_TAG_END.find(search_area).map_or((None, None, false), |m| {
+                            (Some(m.start()), Some(m.end()), true)
+                        })
+                    }
+                    BlockType::CodeFence => {
+                        GENERIC_CODE_FENCE_END.find(search_area).map_or((None, None, false), |m| {
+                            (Some(m.start()), Some(m.end()), true)
+                        })
+                    }
                 };
 
                 let inner_content = if let Some(end_start) = end_marker_start {
@@ -291,6 +319,29 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             );
                         }
                         ContentBlock::HtmlPreview { content: full_html }
+                    }
+                    BlockType::RoleDivider => {
+                        let marker_text = &remaining[start_idx..end_idx];
+                        let caps = ROLE_DIVIDER.captures(marker_text).unwrap();
+                        let is_end = caps.get(1).is_some();
+                        let role = caps.get(2).unwrap().as_str().to_lowercase();
+                        ContentBlock::RoleDivider { role, is_end }
+                    }
+                    BlockType::Style => ContentBlock::Style {
+                        content: inner_content.to_string(),
+                    },
+                    BlockType::CodeFence => {
+                        let mut full_fence = String::new();
+                        full_fence.push_str(&remaining[start_idx..end_idx]);
+                        full_fence.push_str(inner_content);
+                        if is_complete {
+                            full_fence.push_str(
+                                &search_area[end_marker_start.unwrap()..end_marker_end.unwrap()],
+                            );
+                        }
+                        ContentBlock::Markdown {
+                            content: full_fence,
+                        }
                     }
                 };
 
@@ -431,30 +482,46 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
     (tool_name, status, details, footer_lines.join("\n"))
 }
 
-/// 预处理：确保裸露的 HTML 被 Markdown 代码块包裹
+/// 预处理：确保裸露的 HTML（包含 DOCTYPE 或完整的 html 标签）被 Markdown 代码块包裹
 pub fn ensure_html_fenced(text: &str) -> String {
-    // 修复：必须锚定行首，严禁截断正文中的内联 `<!DOCTYPE html>`
     let re_start = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
     let re_end = Regex::new(r"(?i)</html>").unwrap();
+    let re_fence = Regex::new(r"(?m)^[ \t]*```").unwrap();
 
-    if let Some(m_start) = re_start.find(text) {
-        let prefix = &text[..m_start.start()];
-        // 如果前面已经有 code fence 保护，则不进行干预
-        if prefix.trim_end().ends_with("```html") || prefix.trim_end().ends_with("```") {
-            return text.to_string();
+    let mut result = String::new();
+    let mut last_pos = 0;
+
+    // 寻找所有的 HTML 起始标记
+    for m_start in re_start.find_iter(text) {
+        if m_start.start() < last_pos {
+            continue;
         }
 
+        // 检查在该起始标记之前，处于未闭合状态的 ``` 数量
+        let prefix = &text[..m_start.start()];
+        let fence_count = re_fence.find_iter(prefix).count();
+
+        // 如果 fence_count 是奇数，说明当前处于代码块内部，跳过
+        if fence_count % 2 != 0 {
+            continue;
+        }
+
+        // 寻找配对的结束标记
         if let Some(m_end) = re_end.find(&text[m_start.start()..]) {
-            let end = m_start.start() + m_end.end();
-            let mut result = String::new();
-            result.push_str(prefix);
+            let end_pos = m_start.start() + m_end.end();
+
+            // 将之前的文本加入结果
+            result.push_str(&text[last_pos..m_start.start()]);
+
+            // 包裹 HTML
             result.push_str("\n```html\n");
-            result.push_str(&text[m_start.start()..end]);
+            result.push_str(&text[m_start.start()..end_pos]);
             result.push_str("\n```\n");
-            result.push_str(&text[end..]);
-            return result;
+
+            last_pos = end_pos;
         }
     }
 
-    text.to_string()
+    result.push_str(&text[last_pos..]);
+    result
 }

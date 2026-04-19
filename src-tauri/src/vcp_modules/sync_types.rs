@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt;
 
 /// =================================================================
 /// vcp_modules/sync_types.rs - 分布式 LWW+Hash 同步协议的核心数据结构
@@ -79,6 +80,18 @@ pub enum SyncDataType {
     Avatar,
     Topic,
     Message,
+}
+
+impl fmt::Display for SyncDataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SyncDataType::Agent => write!(f, "agent"),
+            SyncDataType::Group => write!(f, "group"),
+            SyncDataType::Avatar => write!(f, "avatar"),
+            SyncDataType::Topic => write!(f, "topic"),
+            SyncDataType::Message => write!(f, "message"),
+        }
+    }
 }
 
 /// 核心状态向量 (State Vector / Fingerprint)

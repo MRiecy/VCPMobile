@@ -130,11 +130,20 @@ const renderedHtml = computed(() => {
   const rawHtml = marked.parse(props.content) as string;
   // 保持安全过滤，但由于纠错已在 Rust 完成，不再需要放行 onerror
   return DOMPurify.sanitize(rawHtml, {
-    ADD_TAGS: ['iframe', 'canvas', 'script', 'style', 'button', 'img'],
+    ADD_TAGS: [
+      'iframe', 'canvas', 'script', 'style', 'button', 'img',
+      'svg', 'circle', 'line', 'text', 'animate', 'defs', 'linearGradient', 
+      'stop', 'filter', 'feDropShadow', 'path', 'g', 'polyline', 'polygon', 'rect',
+      'table', 'thead', 'tbody', 'tr', 'th', 'td'
+    ],
     ADD_ATTR: [
       'allow', 'allowfullscreen', 'frameborder', 'scrolling',
       'data-send', 'data-vcp-interactive', 'data-vcp-scoped',
-      'class', 'width', 'height'
+      'class', 'width', 'height',
+      'viewBox', 'fill', 'stroke', 'stroke-width', 'cx', 'cy', 'r', 'x', 'y', 
+      'x1', 'y1', 'x2', 'y2', 'd', 'filter', 'attributeName', 'from', 'to', 
+      'begin', 'dur', 'dx', 'dy', 'stdDeviation', 'flood-color', 'flood-opacity', 
+      'offset', 'stop-color', 'text-anchor', 'opacity', 'style', 'id'
     ],
     FORCE_BODY: true
   });
@@ -493,7 +502,7 @@ watch(() => [props.content, props.isStreaming], () => {
 }
 
 /* 修复：超长公式截断问题（为 KaTeX 公式容器分配独立的横向滚动上下文） */
-.vcp-markdown-block .language-math,
+.vcp-markdown-block .vcp-math-block,
 .vcp-markdown-block .katex-display {
   max-width: 100%;
   overflow-x: auto;
@@ -506,7 +515,7 @@ watch(() => [props.content, props.isStreaming], () => {
   /* 防止垂直截断遮挡下标或滚动条 */
 }
 
-.vcp-markdown-block .math-inline {
+.vcp-markdown-block .vcp-math-inline {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
@@ -515,16 +524,68 @@ watch(() => [props.content, props.isStreaming], () => {
 }
 
 /* 匹配整体美学的细长公式滚动条 */
-.vcp-markdown-block .language-math::-webkit-scrollbar,
+.vcp-markdown-block .vcp-math-block::-webkit-scrollbar,
 .vcp-markdown-block .katex-display::-webkit-scrollbar,
-.vcp-markdown-block .math-inline::-webkit-scrollbar {
+.vcp-markdown-block .vcp-math-inline::-webkit-scrollbar {
   height: 4px;
 }
 
-.vcp-markdown-block .language-math::-webkit-scrollbar-thumb,
+.vcp-markdown-block .vcp-math-block::-webkit-scrollbar-thumb,
 .vcp-markdown-block .katex-display::-webkit-scrollbar-thumb,
-.vcp-markdown-block .math-inline::-webkit-scrollbar-thumb {
+.vcp-markdown-block .vcp-math-inline::-webkit-scrollbar-thumb {
   background: rgba(150, 150, 150, 0.3);
   border-radius: 4px;
+}
+
+/* 强化 Emoji 字体栈，强制手机端渲染更精美的原生彩色表情 */
+.vcp-markdown-block {
+  font-family: inherit;
+}
+.vcp-markdown-block,
+.vcp-markdown-block * {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
+
+/* 移动端强力防护：防止硬编码的内联样式撑爆屏幕或导致排版面条化 */
+@media (max-width: 768px) {
+  /* 强制覆盖固定宽度，确保不会超出屏幕 */
+  .vcp-markdown-block [style*="width"] {
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+  
+  /* 强制将硬编码的 grid 转为单列或允许 flex 换行 */
+  .vcp-markdown-block [style*="display: grid"],
+  .vcp-markdown-block [style*="display:grid"] {
+    grid-template-columns: 1fr !important;
+  }
+  .vcp-markdown-block [style*="display: flex"],
+  .vcp-markdown-block [style*="display:flex"] {
+    flex-wrap: wrap !important;
+  }
+
+  /* 防止 SVG 因为硬编码的宽高过大而超出容器 */
+  .vcp-markdown-block svg {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  /* 为带有固定宽度的内联元素提供一个横向滚动安全网 */
+  .vcp-markdown-block > .vcp-markdown-inner > div[style] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+</style>
+p-markdown-block svg {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  /* 为带有固定宽度的内联元素提供一个横向滚动安全网 */
+  .vcp-markdown-block > .vcp-markdown-inner > div[style] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 </style>

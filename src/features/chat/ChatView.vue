@@ -32,6 +32,8 @@ const currentNameInitial = computed(() => {
 // 自动滚动到底部
 const messageListRef = ref<HTMLElement | null>(null);
 const showScrollToBottom = ref(false);
+const isInitialTopicLoad = ref(true);
+let mutationObserver: MutationObserver | null = null;
 
 const scrollToBottom = (smooth = false) => {
   if (messageListRef.value) {
@@ -49,23 +51,20 @@ const handleScroll = () => {
   showScrollToBottom.value = scrollHeight - scrollTop - clientHeight > 150;
 };
 
-// 监听话题切换，自动滚动到底部
+// 监听话题切换，重置加载状态
 watch(
   () => chatStore.currentTopicId,
-  async () => {
-    await nextTick();
-    // 稍微延迟一下，确保 DOM 渲染完成
-    setTimeout(() => {
-      scrollToBottom();
-    }, 100);
-  },
+  () => {
+    isInitialTopicLoad.value = true;
+    showScrollToBottom.value = false;
+  }
 );
 
-// 监听新消息，如果已经在底部附近，则自动滚动
+// 监听新消息，如果已经在底部附近，则自动平滑滚动
 watch(
   () => chatStore.currentChatHistory.length,
   async () => {
-    if (!showScrollToBottom.value) {
+    if (!isInitialTopicLoad.value && !showScrollToBottom.value) {
       await nextTick();
       scrollToBottom(true);
     }
@@ -94,10 +93,25 @@ onMounted(async () => {
     window.visualViewport.addEventListener("resize", handleViewportResize);
   }
 
-  // 初始加载时滚动到底部
-  setTimeout(() => {
-    scrollToBottom();
-  }, 100);
+  // 使用 MutationObserver 精准监听真实 DOM 节点的挂载
+  if (messageListRef.value) {
+    mutationObserver = new MutationObserver(() => {
+      // 只要发生子节点变动，且处于初始加载期
+      if (isInitialTopicLoad.value && chatStore.currentChatHistory.length > 0) {
+        scrollToBottom(false);
+        // 稍微延迟解除状态，包容短时间内的多批次子节点渲染
+        setTimeout(() => {
+           isInitialTopicLoad.value = false;
+        }, 50);
+      }
+    });
+    
+    mutationObserver.observe(messageListRef.value, { 
+      childList: true, // 监听直接子节点（聊天气泡）的增删
+      subtree: true,   // 监听子树，包容内部长文本或图片的延迟渲染撑开高度
+      characterData: true // 监听文本变动（针对流式加载）
+    });
+  }
 });
 
 onUnmounted(() => {
@@ -105,6 +119,10 @@ onUnmounted(() => {
 
   if (window.visualViewport) {
     window.visualViewport.removeEventListener("resize", handleViewportResize);
+  }
+  
+  if (mutationObserver) {
+    mutationObserver.disconnect();
   }
 });
 </script>
