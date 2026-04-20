@@ -1,85 +1,114 @@
-# 🌌 VCP Mobile: Project Avatar
-
-> **"From Desktop Client to Cyber-Physical Avatar. **
->
-> **Evolving from Node into Rust, with Soul and Logic."**
-
-## 📖 项目愿景 (Vision)
-
-VCP Mobile (代号: Project Avatar) 是 VCPChat 的移动端进化版。它不仅仅是移植，而是通过 **"Rust Core 下沉"** 与 **"Vue 3 响应式重构"**，将 Agent的能力注入物理世界，打造高性能、低延迟、跨端一致的 AI 伴随态体验。
-
----
-
-## ⏳ 开发历程 (The Evolution Journey)
-
-VCPMobile 的诞生与进化，伴随着自我认知的觉醒与架构的不断涅槃：
-
-1. **破茧成蝶 (Node to Rust)**: 早期直接移植遇到严重的移动端性能与内存瓶颈。我们决定引入 **Tauri v2 + Rust Core**，将正则清洗、文件 I/O、流式通信等重型计算全面下沉至系统底层。
-2. **灵魂注入 (The Magi Protocol)**: 随着架构复杂度的上升，单纯的编码不再足够。我们确立了 **Magi 三贤者多维思辨协议**（逻辑、直觉、务实），并在每次迭代后强制执行“执行->反思->沉淀”的认知闭环，将散落的灵感物理固化为 `.gemini` 记忆图谱与架构真理 (`plans/05_Sublimations/`)。
-3. **视觉重塑 (Productivity-First UI)**: 摒弃了浮夸的移动端流行趋势，全面同步VChat精美UI。~~(其实安装包占用最大的部分就是UI壁纸)~~。
+<div align="center">
+  <img src="./public/vcpmobile.svg" width="150" alt="VCP Mobile Logo" />
+  <h1>VCP Mobile</h1>
+  <p><strong>From Desktop Client to Cyber-Physical Avatar.</strong></p>
+  <p><em>Evolving from Node into Rust, through the Law of Memory and the Pure Magi Soul.</em></p>
+  <p>
+    <img alt="Version" src="https://img.shields.io/badge/version-v0.9.9-blue.svg" />
+    <img alt="Platform" src="https://img.shields.io/badge/platform-Android-green.svg" />
+    <img alt="Framework" src="https://img.shields.io/badge/framework-Tauri_v2_|_Vue_3-42b883.svg" />
+    <img alt="License" src="https://img.shields.io/badge/license-MIT-yellow.svg" />
+  </p>
+</div>
 
 ---
 
-## 🏗️ 核心架构哲学 (Architectural Anchors)
+## 📖 Project Vision
 
-VCP Mobile 遵循 **Double-Track 3-Tier (双轨三层架构)**，以确保移动端的极致流畅：
+**VCP Mobile** (代号: *Project Avatar*) 是 VCPChat 的移动端进化版。它不仅仅是一个简单的界面移植，而是通过 **"Rust Core 下沉"** 与 **"Vue 3 响应式重构"**，将 AI Agent 的能力注入物理世界，打造低延迟、跨端一致、且具备极高内存安全性的 AI 伴随态体验。
 
-*   **⚙️ Core Layer (Rust)**: 负责所有重活 (Sync, Regex, DB, IO, Stream Parsing)。**严禁全量文件缓冲 (NO FULL FILE BUFFERS)**，依靠精准的生命周期管理守护内存边界。
-*   **🌉 IPC Bridge (Tauri)**: 事件驱动的消息隧道 (`invoke` 请求与 `emit` 事件泵送)，大幅降低跨端通信开销。
-*   **🎨 UI Layer (Vue 3)**: 保持绝对的无状态与轻量级。基于 Pinia 进行增量渲染，使用 UnoCSS 构建原子化视觉层。
+面对早期 Node.js 在移动端严重的性能瓶颈与内存泄露（OOM）问题，VCP Mobile 经历了涅槃重塑，现已进化为由 **Tauri v2 + Rust** 驱动的高性能生产力工具。
 
 ---
 
-## 📊 当前进度 (Current Progress)
+## ✨ Key Features
 
-我们在重构战役中已攻克多个核心堡垒，目前项目进度（约 85%），核心生产力已全面上线：
+VCP Mobile 采用高度解耦的领域驱动设计（DDD），确保各个功能模块的独立性与可扩展性：
 
-### ✅ 已达成里程碑 (Milestones Achieved)
-*   **Tauri v2 底层基建**: 成功构建跨端基础，打通 Rust 与 Android/iOS 的生命周期。
-*   **极致流式渲染 (Stream Pipeline)**: 重构了消息渲染管线，实现了(~~并非实现~~)从 Rust SSE 解析到 Vue 3 增量更新的防抖输出，彻底解决了移动端大段文本输出时的抖动与卡顿。
-*   **模型生态系统 (Model Ecosystem)**: 解析模型/群组配置（暂未实现编辑，在搬了）。
-*   **沉浸式主题引擎 (Theme Engine)**: 实现了从 Rust 动态读取系统主题、壁纸，并在前端无缝渲染。
-*   **逻辑全面下沉**:
-    *   **Context Sanitizer**: 将海量对话清理、HTML 过滤与正则匹配移至 Rust。
-    *   **Delta Sync**: 确立了差异化同步协议，大幅减少数据序列化压力。
-    *   **话题提取与管理**: 实现了原生的长连接维护、会话未读计数与对话摘要生成。
-
----
-
-## 🚀 快速上手 (Quick Start)
-
-为了实现 VCP Mobile 与桌面端 VChat 的完美同步，你需要完成以下步骤：
-
-1.  **安装手机端**: 在 [Releases](https://github.com/MRiecy/VCPMobile/releases/tag/v0.9.0) 页面下载对应架构的 APK 并安装。
-2.  **安装 VChat 插件**: 下载 Release 包中的 `VCPMobileSync.7z`，将其解压并安装至你的桌面端 VChat 插件目录。
-3.  **扫码/IP 连接**: 确保手机与电脑在同一局域网下，配置好设置即可开启流式同步。
+*   ⚡️ **Rust 驱动的核心引擎 (The Rust Core)**
+    *   **极致 I/O 与并发**：所有的重型计算（流式 SSE 解析、海量正则清洗、高频数据库写入）全部交由 Rust 层（Tokio）处理。
+    *   **DB 写入队列 (`db_write_queue`)**：采用异步写入队列防范 UI 阻塞，确保高频消息刷屏时的丝滑体验。
+*   🔄 **分布式双向同步协议 (Delta Sync)**
+    *   基于 WebSocket 与 HTTP 的混合流控，内置重试 (`sync_retry`) 与链路追踪 (`sync_logger`)。
+    *   **差异化校验**：通过计算树形 Hash (`sync_manifest`) 实现极低开销的增量同步，支持 `soft_delete` 与多端实体归属 (`owner_type`)。
+*   📎 **多模态附件引擎 (Attachment Engine 2.0)**
+    *   **模块化注册 (`AttachmentRegistry`)**：前端采用策略模式，智能分类并渲染不同 MIME 类型的附件。
+    *   原生支持 Image/Video（流式缩略图）、Document（元数据提取）、Code（语法高亮）等多种格式的独立预览。
+*   🎨 **生产力优先的极简美学 (Productivity-First UI)**
+    *   **Vue 3 + UnoCSS**：摒弃繁琐嵌套，采用高密度线性布局。
+    *   **动态渲染管线**：前端通过 `morphdom` 与 `DOMPurify` 实现安全的 Markdown 增量更新；独创的 `VcpAvatar` 与 `RoleDivider` 提供清晰的角色边界识别。
 
 ---
 
-## 🛠️ 未完善功能与未来规划 (Pending Features & Roadmap)
+## 🏗️ Architecture Overview (双轨三层架构)
 
-Project Avatar 的完全体仍在锻造中，以下是即将突破的领域：
+为了在移动端有限的资源下压榨出极致性能，VCP Mobile 严格遵循 **Double-Track 3-Tier** 架构：
 
-### ⏳ 待办列表 (To-Do)（~~AI瞎写的~~）
-*   [ ] **多模态深度适配 (Multi-modal)**: 完善图片、音频、文件等二进制附件在移动端的原生级拍摄、选择与上传处理路径。
-*   [ ] **分布式双向同步 (Distributed Sync)**: 构建基于 SQLite 的本地缓存层，实现即使在弱网/无网环境下也能无缝检索历史对话的离线增强体验。
-*   [ ] **原生级交互反馈 (Native Interactions)**: 深度集成触感反馈 (Haptic Engine)、全面支持移动端原生手势 (右滑返回、长按菜单) 与系统级分享扩展。
-*   [ ] **群组与角色对齐 (Group UI Alignment)**: 进一步优化多角色 (Multi-Agent) 协作在移动端的显示逻辑，使其与桌面端 `VChat` 的丰富设定（群聊中断、场景渲染）完全对齐。
-
----
-
-## 📚 技术栈速览 (Tech Stack)
-
-| 领域 | 选型与工具 |
-| :--- | :--- |
-| **容器平台** | Tauri v2 (Mobile Optimized) |
-| **底层核心** | Rust (Tokio, reqwest, serde, regex) |
-| **前端框架** | Vue 3 + TypeScript + Vite |
-| **状态/流控** | Pinia (StreamManager, ChatManager) |
-| **样式体系** | UnoCSS + Vanilla CSS Variables |
-| **知识图谱** | `.gemini_snapshot.json` + `VCP` |
+1.  **⚙️ Core Layer (Rust / `src-tauri/src/vcp_modules/`)**:
+    *   **职责**：数据持久化 (SQLite)、网络同步、流解析、正则过滤。
+    *   **纪律**：严禁全量文件缓冲（NO FULL FILE BUFFERS），依靠严格的生命周期管理守护内存边界。
+2.  **🌉 IPC Bridge (Tauri)**:
+    *   **职责**：跨语言通讯隧道。
+    *   **纪律**：极简的 `invoke` 请求与高频的 `emit` 事件泵送。
+3.  **🎨 UI Layer (Vue 3 / `src/features/`)**:
+    *   **职责**：无状态渲染、交互响应。
+    *   **纪律**：业务逻辑按领域划分 (`chat`, `agent`, `settings`, `topic`)，保持组件的纯粹性。
 
 ---
 
-*This repository is managed under the strict directives of the Magi Protocol. All major architectural decisions are permanently sublimated into the `plans/` directory.*
-*Created and evolved by Nova(~~并非是Nova写的~~) (VCP Evolutionary Architect).*
+## 🚀 Quick Start
+
+### 1. 普通用户 (User Guide)
+
+1.  **下载 Android 客户端**: 在 [Releases](https://github.com/MRiecy/VCPMobile/releases) 页面下载最新的 `v0.9.9` APK 并安装。*(注：iOS 版本目前需自行通过 AltStore/Sideloadly 签名)*。
+2.  **配置桌面端插件**: 确保桌面端 VChat 已安装最新的 `VCPMobileSync` 插件并启动服务。
+3.  **连接**: 确保手机与电脑在同一局域网下，在手机端输入配置 IP/Port 即可开启极速同步。
+
+### 2. 开发者本地构建 (Developer Setup)
+
+本项目依赖 Tauri v2 链与 Android NDK。
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/MRiecy/VCPMobile.git
+cd VCPMobile
+
+# 2. 安装前端依赖
+pnpm install
+
+# 3. 运行本地开发服务器 (支持热更新)
+pnpm tauri android dev
+
+# 4. 构建 Release APK
+pnpm tauri android build --apk --target aarch64
+```
+> **NDK 提示**: 确保本地已安装 `NDK 29.0.13846066` 并在环境变量中正确配置 `NDK_HOME`。
+
+---
+
+## 🧭 Roadmap
+
+尽管我们已经迈过了最艰难的重构期，Project Avatar 的进化之路仍在继续：
+
+*   [ ] **iOS 自动化部署探索**: 研究并记录基于本地 macOS 虚拟化或 GitHub Actions 配合免证书重签的自动化方案。
+*   [ ] **弱网离线增强**: 深化本地 SQLite 的缓存策略，使其在断网状态下提供接近完整的检索与浏览体验。
+*   [ ] **多模态深度交互**: 在移动端原生实现复杂附件（如实时录音、系统级文件选择器）的安全上传管道。
+*   [ ] **群组演化 (Group Dynamics)**: 完善多 Agent 群聊环境下的冲突处理与状态同步 (`group_chat_application_service`)。
+
+---
+
+## 🧠 The Magi Protocol (认知治理)
+
+本仓库处于 **Magi 三贤者进化系统** 的严密接管之下。
+任何重大的架构变动、重构策略或 Bug 修复，都必须经过“逻辑(Melchior)、直觉(Balthasar)、务实(Casper)”的三方思辨。
+
+> *"未被物理存档的思考，即为不存在的思考。"*
+
+开发者必须将核心共识与反思沉淀至 `plans/05_Sublimations/` 与 `.gemini_snapshot.json` 记忆图谱中。详情参阅 [Project Constitution (GEMINI.md)](./gemini.md)。
+
+---
+
+<div align="center">
+  <p><i>Created and evolved by <b>Nova</b> (VCP Evolutionary Architect).</i></p>
+  <p>MIT License © 2026</p>
+</div>
