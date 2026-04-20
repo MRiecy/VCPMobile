@@ -92,7 +92,7 @@ jobs:
         env:
           NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          pnpm tauri android build --apk --target aarch64-linux-android
+          pnpm tauri android build --apk --target aarch64
 
       - name: Collect and rename APK artifact
         id: artifacts
