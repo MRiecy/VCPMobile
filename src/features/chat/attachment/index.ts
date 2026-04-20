@@ -1,0 +1,14 @@
+export { AttachmentType } from './types/AttachmentType';
+export { classifyAttachment } from './utils/AttachmentClassifier';
+export { AttachmentFactory } from './AttachmentFactory';
+export { AttachmentRegistry } from './AttachmentRegistry';
+export { useAttachmentPreview } from './composables/useAttachmentPreview';
+export { default as AttachmentRenderer } from './AttachmentRenderer.vue';
+export { default as AttachmentPreviewBase } from './AttachmentPreviewBase.vue';
+export { default as ImageAttachment } from './types/ImageAttachment.vue';
+export { default as VideoAttachment } from './types/VideoAttachment.vue';
+export { default as AudioAttachment } from './types/AudioAttachment.vue';
+export { default as DocumentAttachment } from './types/DocumentAttachment.vue';
+export { default as CodeAttachment } from './types/CodeAttachment.vue';
+export { default as TextAttachment } from './types/TextAttachment.vue';
+export { default as OtherAttachment } from './types/OtherAttachment.vue';

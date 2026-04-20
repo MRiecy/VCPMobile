@@ -9,8 +9,9 @@ use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
-use crate::vcp_modules::settings_manager::SettingsState;
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::sync_service::init_sync_service;
+use crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal;
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -78,6 +79,19 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             if let Ok(lib) = internal_generate_library(&h, &settings_state).await {
                 *emoticon_state.library.lock().await = lib;
                 info!("[Lifecycle] Emoticon library loaded in background.");
+            }
+
+            // 自动连接 VCP Log (后端自主维护)
+            if let Ok(settings) = read_settings(h.clone(), settings_state).await {
+                if !settings.vcp_log_url.is_empty() && !settings.vcp_log_key.is_empty() {
+                    info!("[Lifecycle] Auto-connecting VCP Log from settings...");
+                    let _ = init_vcp_log_connection_internal(
+                        h.clone(),
+                        settings.vcp_log_url,
+                        settings.vcp_log_key,
+                    )
+                    .await;
+                }
             }
         });
     }

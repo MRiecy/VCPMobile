@@ -30,11 +30,36 @@ impl ModelManagerState {
 }
 
 #[tauri::command]
-#[allow(dead_code)]
-pub async fn get_cached_models(
+pub async fn get_cached_models<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, ModelManagerState>,
 ) -> Result<Vec<ModelInfo>, String> {
-    Ok(state.cached_models.read().await.clone())
+    // 1. 优先尝试内存缓存
+    let mem_cached = state.cached_models.read().await.clone();
+    if !mem_cached.is_empty() {
+        return Ok(mem_cached);
+    }
+
+    // 2. 内存缺失时尝试从数据库 (settings 表) 读取
+    let db_state = app.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let row = sqlx::query("SELECT value FROM settings WHERE key = 'cached_models'")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(r) = row {
+        use sqlx::Row;
+        let json_str: String = r.get("value");
+        if let Ok(models) = serde_json::from_str::<Vec<ModelInfo>>(&json_str) {
+            // 回写到内存防止下次重复读取 DB
+            *state.cached_models.write().await = models.clone();
+            return Ok(models);
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 #[tauri::command]
@@ -92,7 +117,25 @@ pub async fn refresh_models<R: Runtime>(
                 .filter_map(|m| serde_json::from_value(m.clone()).ok())
                 .collect();
 
+            // 1. 更新内存缓存
             *state.cached_models.write().await = models.clone();
+
+            // 2. 持久化到数据库 (settings 表)
+            let db_state = app.state::<DbState>();
+            let pool = &db_state.pool;
+            let json_str = serde_json::to_string(&models).unwrap_or_default();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64;
+
+            let _ = sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('cached_models', ?, ?) 
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+                .bind(json_str)
+                .bind(now)
+                .execute(pool)
+                .await;
+
             Ok(models)
         } else {
             Err("Unexpected response format".to_string())

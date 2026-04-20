@@ -4,9 +4,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 pub enum PipelineCommand {
-    Phase1Completed,
-    Phase2Completed,
-    Phase3Completed,
+    Phase1,
+    Phase2,
+    Phase3,
 }
 
 pub struct SyncPipeline {
@@ -36,7 +36,7 @@ impl SyncPipeline {
                 progress: PhaseProgress::new(),
             };
         }
-        let _ = self.command_tx.send(PipelineCommand::Phase1Completed);
+        let _ = self.command_tx.send(PipelineCommand::Phase1);
         Ok(())
     }
 
@@ -47,7 +47,7 @@ impl SyncPipeline {
                 progress: PhaseProgress::new(),
             };
         }
-        let _ = self.command_tx.send(PipelineCommand::Phase2Completed);
+        let _ = self.command_tx.send(PipelineCommand::Phase2);
         Ok(())
     }
 
@@ -56,7 +56,7 @@ impl SyncPipeline {
             let mut state = self.state.write().await;
             *state = PipelinePhase::Completed;
         }
-        let _ = self.command_tx.send(PipelineCommand::Phase3Completed);
+        let _ = self.command_tx.send(PipelineCommand::Phase3);
         Ok(())
     }
 }

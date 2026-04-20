@@ -170,7 +170,10 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             (HTML_DOC_START.find(remaining), BlockType::HtmlDoc),
             (ROLE_DIVIDER.find(remaining), BlockType::RoleDivider),
             (STYLE_TAG_START.find(remaining), BlockType::Style),
-            (GENERIC_CODE_FENCE_START.find(remaining), BlockType::CodeFence),
+            (
+                GENERIC_CODE_FENCE_START.find(remaining),
+                BlockType::CodeFence,
+            ),
         ];
 
         for (m_opt, b_type) in checks {
@@ -233,16 +236,16 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             (Some(m.start()), Some(m.end()), true)
                         }),
                     BlockType::RoleDivider => (Some(0), Some(0), true), // RoleDivider is a single line marker
-                    BlockType::Style => {
-                        STYLE_TAG_END.find(search_area).map_or((None, None, false), |m| {
+                    BlockType::Style => STYLE_TAG_END
+                        .find(search_area)
+                        .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
-                        })
-                    }
-                    BlockType::CodeFence => {
-                        GENERIC_CODE_FENCE_END.find(search_area).map_or((None, None, false), |m| {
+                        }),
+                    BlockType::CodeFence => GENERIC_CODE_FENCE_END
+                        .find(search_area)
+                        .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
-                        })
-                    }
+                        }),
                 };
 
                 let inner_content = if let Some(end_start) = end_marker_start {
@@ -502,7 +505,7 @@ pub fn ensure_html_fenced(text: &str) -> String {
         let fence_count = re_fence.find_iter(prefix).count();
 
         // 如果 fence_count 是奇数，说明当前处于代码块内部，跳过
-        if fence_count % 2 != 0 {
+        if !fence_count.is_multiple_of(2) {
             continue;
         }
 

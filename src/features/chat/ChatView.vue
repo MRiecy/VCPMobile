@@ -1,33 +1,18 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick, computed } from "vue";
+import { ref, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useChatManagerStore } from "../../core/stores/chatManager";
 import { useThemeStore } from "../../core/stores/theme";
 import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
 import { useLayoutStore } from "../../core/stores/layout";
 import MessageRenderer from "./MessageRenderer.vue";
 import InputEnhancer from "./InputEnhancer.vue";
+import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import { ArrowDown } from "lucide-vue-next";
 
 const chatStore = useChatManagerStore();
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
-
-const currentAvatar = computed(() => {
-  if (!chatStore.currentSelectedItem) return null;
-  const { id, type } = chatStore.currentSelectedItem;
-  if (type === "agent") {
-    return `vcp-avatar://agent/${id}`;
-  } else if (type === "group") {
-    return `vcp-avatar://group/${id}`;
-  }
-  return null;
-});
-
-const currentNameInitial = computed(() => {
-  if (!chatStore.currentSelectedItem) return "";
-  return chatStore.currentSelectedItem.name.charAt(0).toUpperCase();
-});
 
 // 自动滚动到底部
 const messageListRef = ref<HTMLElement | null>(null);
@@ -144,13 +129,14 @@ onUnmounted(() => {
         </button>
 
         <!-- 头像展示 -->
-        <div v-if="chatStore.currentSelectedItem"
-          class="w-10 h-10 rounded-full overflow-hidden border border-black/10 dark:border-white/10 shrink-0 shadow-sm flex items-center justify-center bg-black/5 dark:bg-white/5">
-          <img v-if="currentAvatar" :src="currentAvatar" class="w-full h-full object-cover" />
-          <span v-else class="text-[12px] font-bold opacity-50">{{
-            currentNameInitial
-            }}</span>
-        </div>
+        <VcpAvatar 
+          v-if="chatStore.currentSelectedItem"
+          :owner-type="chatStore.currentSelectedItem.type" 
+          :owner-id="chatStore.currentSelectedItem.id" 
+          :fallback-name="chatStore.currentSelectedItem.name"
+          size="w-10 h-10"
+          rounded="rounded-full"
+        />
 
         <div class="flex flex-col min-w-0">
           <span class="font-bold text-sm text-primary-text truncate">

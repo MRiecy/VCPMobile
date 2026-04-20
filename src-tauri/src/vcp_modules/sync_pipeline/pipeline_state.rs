@@ -17,18 +17,22 @@ impl PhaseProgress {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum PipelinePhase {
+    #[default]
     Idle,
-    Phase1Metadata { progress: PhaseProgress },
-    Phase2Topic { progress: PhaseProgress },
-    Phase3Message { progress: PhaseProgress },
+    Phase1Metadata {
+        progress: PhaseProgress,
+    },
+    Phase2Topic {
+        progress: PhaseProgress,
+    },
+    Phase3Message {
+        progress: PhaseProgress,
+    },
     Completed,
-    Failed { error: String, phase: String },
-}
-
-impl Default for PipelinePhase {
-    fn default() -> Self {
-        PipelinePhase::Idle
-    }
+    Failed {
+        error: String,
+        phase: String,
+    },
 }

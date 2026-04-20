@@ -1,37 +1,84 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { ref } from "vue";
+import { useAssistantStore } from "../../../core/stores/assistant";
 import type { AppSettings } from "../../../core/stores/settings";
 import SettingsCard from "../../../components/settings/SettingsCard.vue";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
+import AvatarCropper from "../../../components/ui/AvatarCropper.vue";
+import VcpAvatar from "../../../components/ui/VcpAvatar.vue";
 
-const props = defineProps<{
+defineProps<{
   settings: AppSettings;
 }>();
 
-const fallbackStyle = computed(() => ({
-  backgroundColor: "rgb(226,54,56)",
-}));
+const assistantStore = useAssistantStore();
 
-const fallbackInitial = computed(() => {
-  const text = (props.settings.userName || "U").trim();
-  return text.charAt(0).toUpperCase() || "U";
-});
+// Avatar Logic
+const fileInput = ref<HTMLInputElement | null>(null);
+const isCropping = ref(false);
+const cropImg = ref("");
+const avatarVersion = ref(0);
+
+const triggerFileInput = () => {
+  fileInput.value?.click();
+};
+
+const handleFileChange = (e: Event) => {
+  const file = (e.target as HTMLInputElement).files?.[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    cropImg.value = event.target?.result as string;
+    isCropping.value = true;
+  };
+  reader.readAsDataURL(file);
+};
+
+// Removed avatarUrl computed as we use avatarDisplayUrl via IPC
+
+const onCropConfirm = async (blob: Blob) => {
+  isCropping.value = false;
+  
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+    
+    // Use assistantStore to save avatar and get notification
+    await assistantStore.saveAvatar("user", "user_avatar", blob.type, Array.from(bytes));
+
+    // Refresh avatar by updating timestamp
+    avatarVersion.value = Date.now();
+    console.log("Avatar updated, triggering reload");
+  } catch (err) {
+    console.error("Failed to save user avatar:", err);
+  }
+};
 </script>
 
 <template>
   <SettingsCard variant="glass">
     <div class="flex items-center gap-5">
-      <div
-        class="w-16 h-16 rounded-2xl bg-black/5 dark:bg-white/5 flex items-center justify-center relative overflow-hidden border-2 border-black/5 dark:border-white/10 shadow-inner shrink-0">
-        <img :src="`vcp-avatar://user/default?t=${Date.now()}`" class="w-full h-full object-cover relative z-10" />
-        <div class="absolute inset-0 flex items-center justify-center text-white text-xl font-bold"
-          :style="fallbackStyle">
-          {{ fallbackInitial }}
+      <div @click="triggerFileInput" class="group cursor-pointer active:scale-95 transition-all relative">
+        <VcpAvatar 
+          owner-type="user" 
+          owner-id="user_avatar" 
+          :version="avatarVersion"
+          :fallback-name="settings.userName"
+          size="w-16 h-16"
+          rounded="rounded-2xl"
+        />
+        <div class="absolute inset-0 rounded-2xl bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center z-20 transition-opacity">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
         </div>
       </div>
       <div class="flex-1 min-w-0">
         <SettingsTextField v-model="settings.userName" label="用户名" placeholder="输入你的名字..." />
       </div>
     </div>
+    <input type="file" ref="fileInput" class="hidden" accept="image/*" @change="handleFileChange" />
   </SettingsCard>
+
+  <!-- 头像裁剪器 -->
+  <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="isCropping = false" @confirm="onCropConfirm" />
 </template>

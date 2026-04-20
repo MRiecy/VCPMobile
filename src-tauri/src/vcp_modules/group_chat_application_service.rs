@@ -9,7 +9,9 @@ use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpRequestPayload};
+use crate::vcp_modules::vcp_client::{
+    perform_vcp_request, ActiveRequests, CancelledGroupTurns, VcpRequestPayload,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,6 +41,7 @@ pub async fn process_group_chat_message(
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     active_requests: State<'_, ActiveRequests>,
+    cancelled_turns: State<'_, CancelledGroupTurns>,
     params: GroupChatParams,
 ) -> Result<Value, String> {
     let group_id = params.group_id;
@@ -51,6 +54,9 @@ pub async fn process_group_chat_message(
         "[GroupChatAppService] process_group_chat_message invoked for group: {}",
         group_id
     );
+
+    // 0. 重置该话题的中断标记 (确保开启新回合)
+    cancelled_turns.0.remove(&topic_id);
 
     // 1. 加载群组配置
     let group_config =
@@ -88,7 +94,7 @@ pub async fn process_group_chat_message(
         &group_id,
         "group",
         &topic_id,
-        Some(20), // 限制上下文长度
+        Some(8), // 限制上下文长度
         None,
     )
     .await?;
@@ -119,6 +125,15 @@ pub async fn process_group_chat_message(
     let mut final_new_msgs = Vec::new();
 
     for speaker in speakers {
+        // 检查全局中断令牌：如果话题已被标记为取消，立即停止接力赛
+        if cancelled_turns.0.contains(&topic_id) {
+            println!(
+                "[GroupChatAppService] Group turn for topic {} was cancelled. Breaking loop.",
+                topic_id
+            );
+            break;
+        }
+
         let app_handle = app_handle.clone();
         let db_pool = db_state.pool.clone();
         let active_requests_map = active_requests.0.clone();
@@ -205,6 +220,7 @@ pub async fn process_group_chat_message(
                     is_group_message: Some(true),
                     finish_reason: None,
                     attachments: None,
+                    blocks: None,
                 };
 
                 // 立即进行一次断点存盘 (针对单个 Agent)
@@ -244,6 +260,9 @@ pub async fn process_group_chat_message(
         }),
     );
 
+    // 回合结束，清理中断标记
+    cancelled_turns.0.remove(&topic_id);
+
     Ok(json!({"status": "completed"}))
 }
 
@@ -254,6 +273,7 @@ pub async fn handle_group_chat_message(
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     active_requests: State<'_, ActiveRequests>,
+    cancelled_turns: State<'_, CancelledGroupTurns>,
     payload: GroupChatPayload,
 ) -> Result<Value, String> {
     log::info!(
@@ -267,6 +287,7 @@ pub async fn handle_group_chat_message(
         agent_state,
         db_state,
         active_requests,
+        cancelled_turns,
         GroupChatParams {
             group_id: payload.group_id,
             topic_id: payload.topic_id,

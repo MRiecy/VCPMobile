@@ -12,6 +12,7 @@ import { useDebounceFn } from '@vueuse/core';
 // import 'katex/dist/katex.min.css';
 import { useVcpMagic } from '../../../core/composables/useVcpMagic';
 import { useChatManagerStore } from '../../../core/stores/chatManager';
+import { useEmoticonFixer } from '../../../core/composables/useEmoticonFixer';
 
 const props = defineProps<{
   content: string;
@@ -24,6 +25,7 @@ const isVisible = ref(false);
 
 const { processMagic, cleanupMagic } = useVcpMagic();
 const chatStore = useChatManagerStore();
+const { processEmoticonsInContainer } = useEmoticonFixer();
 
 const marked = new Marked(
   markedHighlight({
@@ -167,6 +169,9 @@ const updateDOM = () => {
         return true;
       }
     });
+    
+    // Asynchronously process emoticons
+    processEmoticonsInContainer(innerContentRef.value);
   }
 };
 
@@ -566,18 +571,6 @@ watch(() => [props.content, props.isStreaming], () => {
 
   /* 防止 SVG 因为硬编码的宽高过大而超出容器 */
   .vcp-markdown-block svg {
-    max-width: 100% !important;
-    height: auto !important;
-  }
-
-  /* 为带有固定宽度的内联元素提供一个横向滚动安全网 */
-  .vcp-markdown-block > .vcp-markdown-inner > div[style] {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-}
-</style>
-p-markdown-block svg {
     max-width: 100% !important;
     height: auto !important;
   }

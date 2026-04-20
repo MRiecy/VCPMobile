@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 /// =================================================================
 /// vcp_modules/sync_dto.rs - 双端同步标准契约 (The Shared Truth)
 /// =================================================================
-
 /// 智能体同步数据传输对象
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -203,7 +202,7 @@ pub struct AgentMessageSyncDTO {
     pub timestamp: u64,
     #[serde(rename = "agentId")]
     pub agent_id: String,
-    #[serde(rename = "isThinking", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "isThinking", default)]
     pub is_thinking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,

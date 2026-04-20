@@ -178,6 +178,18 @@ async fn internal_write_settings<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     *state.cache.lock().await = Some(settings.clone());
+
+    // [强耦合联动] 只要配置写入成功，立即通知 VCP Log 服务更新连接状态 (自主维护连接)
+    let h = app_handle.clone();
+    let log_url = settings.vcp_log_url.clone();
+    let log_key = settings.vcp_log_key.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
+            h, log_url, log_key,
+        )
+        .await;
+    });
+
     Ok(true)
 }
 

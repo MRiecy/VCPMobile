@@ -329,6 +329,7 @@ pub async fn fix_emoticon_url(
 }
 
 /// 内部同步修复函数，用于消息处理器
+#[allow(dead_code)]
 pub fn internal_fix_url(original_src: &str, library: &[EmoticonItem]) -> String {
     if library.is_empty() {
         return original_src.to_string();

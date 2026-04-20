@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import { useRouter } from "vue-router";
 import Sortable from "sortablejs";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatManagerStore } from "../../core/stores/chatManager";
 import { useTopicStore } from "../../core/stores/topicListManager";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useSettingsStore } from "../../core/stores/settings";
+import { useOverlayStore } from "../../core/stores/overlay";
+import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 
 const props = defineProps<{
   searchQuery: string;
@@ -21,7 +22,7 @@ const chatStore = useChatManagerStore();
 const topicListStore = useTopicStore();
 const layoutStore = useLayoutStore();
 const settingsStore = useSettingsStore();
-const router = useRouter();
+const overlayStore = useOverlayStore();
 
 // --- Sorting Logic ---
 const groupListRef = ref<HTMLElement | null>(null);
@@ -163,11 +164,17 @@ const onTouchEnd = (id: string) => {
   }
 };
 
-const goToSettings = (id: string) => {
+const goToSettings = (id: string, type: 'agent' | 'group' = 'agent') => {
   activeSwipeId.value = null;
   currentSwipeX.value = 0;
+  // 核心修复：跳转前强制关闭侧边栏
   layoutStore.setLeftDrawer(false);
-  router.push("/agents/" + id);
+  
+  if (type === 'agent') {
+    overlayStore.openAgentSettings(id);
+  } else {
+    overlayStore.openGroupSettings(id);
+  }
 };
 
 const selectAgent = async (agentId: string) => {
@@ -230,20 +237,41 @@ const filteredCombinedItems = computed(() => {
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
         )" :key="group.id" class="relative rounded-xl overflow-hidden w-full drag-handle">
-          <div @click="selectGroup(group.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] transition-all"
-            :class="chatStore.currentSelectedItem?.id === group.id
-                ? 'border-purple-500/50 bg-purple-500/10 dark:bg-purple-500/20'
-                : 'border-black/5 dark:border-white/5'
-              ">
+          <!-- 背景设置按钮 -->
+          <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start z-0">
             <div
-              class="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10 overflow-hidden">
-              <img :src="`vcp-avatar://group/${group.id}`" class="w-full h-full object-cover" />
+              class="w-[80px] h-full flex items-center justify-center text-purple-600/70 dark:text-purple-400/70 hover:text-purple-600 dark:hover:text-purple-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5"
+              @click.stop="goToSettings(group.id, 'group')"
+              @touchstart.stop>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path
+                  d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
+                </path>
+              </svg>
             </div>
+          </div>
+
+          <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, group.id)"
+            @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd(group.id)"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] origin-center"
+            :class="[
+                chatStore.currentSelectedItem?.id === group.id
+                  ? 'border-purple-500/50 bg-purple-500/10 dark:bg-purple-500/20'
+                  : 'border-black/5 dark:border-white/5',
+                activeSwipeId === group.id
+                  ? 'transition-none'
+                  : 'transition-transform duration-200 ease-out',
+              ]" :style="{
+                transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
+              }">
+            <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
+              rounded="rounded-xl" />
             <div class="flex flex-col overflow-hidden flex-1">
               <span class="font-bold text-sm truncate text-primary-text">{{
                 group.name
-                }}</span>
+              }}</span>
               <span class="text-[9px] opacity-40 truncate uppercase tracking-tighter">{{ group.members.length }} Members
                 • {{ group.mode }}</span>
             </div>
@@ -264,10 +292,12 @@ const filteredCombinedItems = computed(() => {
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
         )" :key="agent.id" class="relative rounded-xl overflow-hidden w-full drag-handle">
-          <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start z-0"
-            @click.stop="goToSettings(agent.id)">
+          <!-- 背景设置按钮 -->
+          <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start z-0">
             <div
-              class="w-[80px] h-full flex items-center justify-center text-blue-600/70 dark:text-blue-400/70 hover:text-blue-600 dark:hover:text-blue-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5">
+              class="w-[80px] h-full flex items-center justify-center text-blue-600/70 dark:text-blue-400/70 hover:text-blue-600 dark:hover:text-blue-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5"
+              @click.stop="goToSettings(agent.id, 'agent')"
+              @touchstart.stop>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
                 stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"></circle>
@@ -297,10 +327,14 @@ const filteredCombinedItems = computed(() => {
             " class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse shrink-0"
               style="background: #ff6b6b"></div>
 
-            <div
-              class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10 overflow-hidden pointer-events-none">
-              <img :src="`vcp-avatar://agent/${agent.id}`" class="w-full h-full object-cover" />
-            </div>
+            <VcpAvatar 
+              owner-type="agent" 
+              :owner-id="agent.id" 
+              :fallback-name="agent.name" 
+              size="w-10 h-10" 
+              rounded="rounded-full"
+              class="pointer-events-none"
+            />
             <div class="flex flex-col overflow-hidden flex-1 pointer-events-none">
               <span class="font-bold text-sm truncate text-primary-text">{{
                 agent.name

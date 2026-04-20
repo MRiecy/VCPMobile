@@ -4,8 +4,9 @@ use tauri::Manager;
 use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
 use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, read_agent_config, save_agent_config,
-    save_avatar_color, update_agent_config,
+    update_agent_config,
 };
+use vcp_modules::avatar_service::{get_avatar, save_avatar_data};
 use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, patch_single_message,
     truncate_history_after_timestamp,
@@ -29,7 +30,8 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{bootstrap, get_core_status, get_last_error, LifecycleState};
 use vcp_modules::message_render_compiler::process_message_content;
 use vcp_modules::model_manager::{
-    get_favorite_models, get_hot_models, record_model_usage, refresh_models, toggle_favorite_model,
+    get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
+    toggle_favorite_model,
 };
 use vcp_modules::protocol_manager::{prepare_vcp_upload, register_vcp_protocols};
 use vcp_modules::sync_service::get_sync_status;
@@ -37,8 +39,13 @@ use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
     update_topic_title,
 };
-use vcp_modules::vcp_client::{interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests};
-use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
+use vcp_modules::vcp_client::{
+    interruptGroupTurn, interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests,
+    CancelledGroupTurns,
+};
+use vcp_modules::vcp_log_service::{
+    get_vcp_log_status, init_vcp_log_connection, send_vcp_log_message,
+};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -58,6 +65,7 @@ pub fn run() {
             // 2. 初始化核心状态
             app.manage(LifecycleState::new());
             app.manage(ActiveRequests::default());
+            app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());
             app.manage(UploadManagerState::new());
 
@@ -104,6 +112,7 @@ pub fn run() {
             greet,
             sendToVCP,
             interruptRequest,
+            interruptGroupTurn,
             test_vcp_connection,
             handle_agent_chat_message,
             load_chat_history,
@@ -124,7 +133,8 @@ pub fn run() {
             read_agent_config,
             save_agent_config,
             update_agent_config,
-            save_avatar_color,
+            save_avatar_data,
+            get_avatar,
             read_settings,
             write_settings,
             update_settings,
@@ -145,6 +155,7 @@ pub fn run() {
             get_attachment_real_path,
             open_file,
             cleanup_orphaned_attachments,
+            get_cached_models,
             refresh_models,
             get_hot_models,
             get_favorite_models,
@@ -152,6 +163,7 @@ pub fn run() {
             record_model_usage,
             summarize_topic,
             init_vcp_log_connection,
+            get_vcp_log_status,
             send_vcp_log_message,
             get_emoticon_library,
             regenerate_emoticon_library,

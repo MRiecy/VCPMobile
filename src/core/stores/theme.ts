@@ -54,7 +54,7 @@ const rawThemes = import.meta.glob('../../assets/themes/*.css', { query: '?raw',
 const inlineThemes = import.meta.glob('../../assets/themes/*.css', { query: '?inline', import: 'default' }) as Record<string, () => Promise<string>>;
 
 export const useThemeStore = defineStore('theme', () => {
-  const mode = ref<ThemeMode>((localStorage.getItem('vcp-theme-mode') as ThemeMode) || 'system');
+  const mode = ref<ThemeMode>((localStorage.getItem('vcp-theme-mode') as ThemeMode) || 'dark');
   const isDarkResolved = ref(true);
   const lastModeSwitchAt = ref(0);
   const MODE_SWITCH_DEBOUNCE_MS = 100;

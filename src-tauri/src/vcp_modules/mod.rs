@@ -1,7 +1,7 @@
 pub mod agent_chat_application_service;
 pub mod agent_service;
 pub mod agent_types;
-pub mod avatar_color_extractor;
+pub mod avatar_service;
 pub mod chat_manager;
 pub mod content_parser;
 pub mod context_assembler_utils;

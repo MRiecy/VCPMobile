@@ -447,7 +447,7 @@ pub async fn create_agent(
                 id: default_topic_id.clone(),
                 name: "主要对话".to_string(),
                 created_at: timestamp,
-                locked: false,
+                locked: true,
                 unread: false,
                 unread_count: 0,
                 msg_count: 0,
@@ -507,25 +507,4 @@ pub async fn create_agent(
     state.caches.insert(agent_id.clone(), config.clone());
 
     Ok(config)
-}
-
-#[tauri::command]
-pub async fn save_avatar_color(
-    app_handle: AppHandle,
-    owner_type: String,
-    owner_id: String,
-    color: String,
-) -> Result<bool, String> {
-    let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
-
-    sqlx::query("UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?")
-        .bind(color)
-        .bind(owner_type)
-        .bind(owner_id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(true)
 }

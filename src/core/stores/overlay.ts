@@ -12,6 +12,10 @@ export const useOverlayStore = defineStore('overlay', () => {
 
   const isSettingsOpen = ref(false);
   const isSyncOpen = ref(false);
+  const isAgentSettingsOpen = ref(false);
+  const agentSettingsId = ref('');
+  const isGroupSettingsOpen = ref(false);
+  const groupSettingsId = ref('');
 
   const openSettings = () => {
     isSettingsOpen.value = true;
@@ -36,6 +40,36 @@ export const useOverlayStore = defineStore('overlay', () => {
     if (isSyncOpen.value) {
       unregisterModal('SyncView');
       isSyncOpen.value = false;
+    }
+  };
+
+  const openAgentSettings = (id: string) => {
+    agentSettingsId.value = id;
+    isAgentSettingsOpen.value = true;
+    registerModal('AgentSettings', () => {
+      isAgentSettingsOpen.value = false;
+    });
+  };
+
+  const closeAgentSettings = () => {
+    if (isAgentSettingsOpen.value) {
+      unregisterModal('AgentSettings');
+      isAgentSettingsOpen.value = false;
+    }
+  };
+
+  const openGroupSettings = (id: string) => {
+    groupSettingsId.value = id;
+    isGroupSettingsOpen.value = true;
+    registerModal('GroupSettings', () => {
+      isGroupSettingsOpen.value = false;
+    });
+  };
+
+  const closeGroupSettings = () => {
+    if (isGroupSettingsOpen.value) {
+      unregisterModal('GroupSettings');
+      isGroupSettingsOpen.value = false;
     }
   };
 
@@ -84,10 +118,18 @@ export const useOverlayStore = defineStore('overlay', () => {
     editorConfig,
     isSettingsOpen,
     isSyncOpen,
+    isAgentSettingsOpen,
+    agentSettingsId,
+    isGroupSettingsOpen,
+    groupSettingsId,
     openSettings,
     closeSettings,
     openSync,
     closeSync,
+    openAgentSettings,
+    closeAgentSettings,
+    openGroupSettings,
+    closeGroupSettings,
     openPrompt,
     closePrompt,
     openContextMenu,

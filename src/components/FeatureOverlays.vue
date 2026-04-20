@@ -16,6 +16,8 @@ import { ref, onMounted } from 'vue';
 import { useOverlayStore } from '../core/stores/overlay';
 import SettingsView from '../features/settings/SettingsView.vue';
 import SyncView from '../features/settings/SyncView.vue';
+import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
+import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
 
 const overlayStore = useOverlayStore();
 const isMounted = ref(false);
@@ -32,5 +34,11 @@ onMounted(() => {
       @open-sync="overlayStore.openSync()" />
 
     <SyncView :is-open="overlayStore.isSyncOpen" @close="overlayStore.closeSync()" />
+
+    <AgentSettingsView :is-open="overlayStore.isAgentSettingsOpen" :id="overlayStore.agentSettingsId"
+      @close="overlayStore.closeAgentSettings()" />
+
+    <GroupSettingsView :is-open="overlayStore.isGroupSettingsOpen" :id="overlayStore.groupSettingsId"
+      @close="overlayStore.closeGroupSettings()" />
   </div>
 </template>

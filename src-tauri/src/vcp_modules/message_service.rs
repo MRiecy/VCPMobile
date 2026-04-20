@@ -1,5 +1,4 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
-use crate::vcp_modules::emoticon_manager::EmoticonManagerState;
 use crate::vcp_modules::message_render_compiler::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::settings_manager;
@@ -10,7 +9,6 @@ use tokio::fs;
 /// =================================================================
 /// vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
 /// =================================================================
-
 pub async fn load_chat_history_internal(
     _app_handle: &AppHandle,
     _owner_id: &str,
@@ -22,14 +20,14 @@ pub async fn load_chat_history_internal(
     let db_state = _app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
 
-    let limit = limit.unwrap_or(50);
+    let limit = limit.unwrap_or(9999);
     let offset = offset.unwrap_or(0);
 
     let rows = sqlx::query(
-        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason 
+        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content 
          FROM messages 
          WHERE topic_id = ? AND deleted_at IS NULL 
-         ORDER BY timestamp DESC 
+         ORDER BY timestamp DESC, rowid DESC 
          LIMIT ? OFFSET ?",
     )
     .bind(topic_id)
@@ -48,6 +46,13 @@ pub async fn load_chat_history_internal(
         let content: String = row.get("content");
         let timestamp: i64 = row.get("timestamp");
         let is_thinking: Option<bool> = Some(row.get::<i64, _>("is_thinking") != 0);
+
+        let render_content: Option<Vec<u8>> = row.get("render_content");
+        let blocks = if let Some(bytes) = render_content {
+            serde_json::from_slice(&bytes).ok()
+        } else {
+            None
+        };
 
         // 加载该消息的所有附件
         let att_rows = sqlx::query(
@@ -106,6 +111,7 @@ pub async fn load_chat_history_internal(
             } else {
                 Some(attachments)
             },
+            blocks,
         });
     }
 
@@ -123,8 +129,8 @@ async fn ensure_attachments_locally(
         None => return Ok(()),
     };
 
-    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let att_dir = app_data.join("attachments");
+    let app_config = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    let att_dir = app_config.join("data").join("attachments");
     if !att_dir.exists() {
         fs::create_dir_all(&att_dir)
             .await
@@ -137,12 +143,18 @@ async fn ensure_attachments_locally(
             None => continue,
         };
 
-        // 判定后缀
+        // 判定后缀 (对齐 file_manager.rs 逻辑)
         let ext = Path::new(&att.name)
             .extension()
             .and_then(|s| s.to_str())
-            .unwrap_or("bin");
-        let local_file_name = format!("{}.{}", hash, ext);
+            .unwrap_or("");
+
+        let local_file_name = if ext.is_empty() {
+            hash.clone()
+        } else {
+            format!("{}.{}", hash, ext)
+        };
+
         let local_path = att_dir.join(&local_file_name);
         let local_path_str = format!("file://{}", local_path.to_string_lossy());
 
@@ -171,8 +183,10 @@ async fn ensure_attachments_locally(
             }
         }
 
-        // 强制归一化：将电脑路径修改为手机本地路径
-        att.src = local_path_str.clone();
+        // 强制归一化：将 internal_path 修改为手机本地物理路径，保持 src 为原始来源
+        if att.src.is_empty() {
+            att.src = local_path_str.clone();
+        }
         att.internal_path = local_path_str;
     }
     Ok(())
@@ -188,9 +202,7 @@ pub async fn append_single_message(
 ) -> Result<(), String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    let emoticon_state = app_handle.state::<EmoticonManagerState>();
-    let library = emoticon_state.library.lock().await;
-    let blocks = MessageRenderCompiler::compile(&message.content, &library);
+    let blocks = MessageRenderCompiler::compile(&message.content);
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
@@ -229,9 +241,7 @@ pub async fn patch_single_message(
 ) -> Result<(), String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    let emoticon_state = app_handle.state::<EmoticonManagerState>();
-    let library = emoticon_state.library.lock().await;
-    let blocks = MessageRenderCompiler::compile(&message.content, &library);
+    let blocks = MessageRenderCompiler::compile(&message.content);
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;

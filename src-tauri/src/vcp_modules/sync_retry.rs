@@ -34,7 +34,8 @@ where
                 if attempt > 0 {
                     println!(
                         "[Retry] {} succeeded on attempt {}",
-                        operation_name, attempt + 1
+                        operation_name,
+                        attempt + 1
                     );
                 }
                 return Ok(result);
@@ -45,7 +46,10 @@ where
                 if e.contains("database is locked") && attempt < config.max_retries - 1 {
                     println!(
                         "[Retry] {} failed with database locked, retrying in {}ms (attempt {}/{})",
-                        operation_name, delay, attempt + 1, config.max_retries
+                        operation_name,
+                        delay,
+                        attempt + 1,
+                        config.max_retries
                     );
 
                     tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -78,11 +82,10 @@ mod tests {
     #[tokio::test]
     async fn test_retry_success_on_first_attempt() {
         let config = RetryConfig::default();
-        
-        let result = retry_on_db_locked(&config, || async {
-            Ok("success")
-        }, "test_operation").await;
-        
+
+        let result =
+            retry_on_db_locked(&config, || async { Ok("success") }, "test_operation").await;
+
         assert_eq!(result.unwrap(), "success");
     }
 
@@ -91,19 +94,24 @@ mod tests {
         let config = RetryConfig::default();
         let attempt = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempt_clone = attempt.clone();
-        
-        let result = retry_on_db_locked(&config, || {
-            let attempt = attempt_clone.clone();
-            async move {
-                let count = attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if count == 0 {
-                    Err("database is locked".to_string())
-                } else {
-                    Ok("success")
+
+        let result = retry_on_db_locked(
+            &config,
+            || {
+                let attempt = attempt_clone.clone();
+                async move {
+                    let count = attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if count == 0 {
+                        Err("database is locked".to_string())
+                    } else {
+                        Ok("success")
+                    }
                 }
-            }
-        }, "test_operation").await;
-        
+            },
+            "test_operation",
+        )
+        .await;
+
         assert_eq!(result.unwrap(), "success");
         assert_eq!(attempt.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
@@ -115,11 +123,14 @@ mod tests {
             base_delay_ms: 10,
             max_delay_ms: 100,
         };
-        
-        let result = retry_on_db_locked(&config, || async {
-            Err("database is locked".to_string())
-        }, "test_operation").await;
-        
+
+        let result = retry_on_db_locked::<_, _, String>(
+            &config,
+            || async { Err("database is locked".to_string()) },
+            "test_operation",
+        )
+        .await;
+
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("failed after 2 retries"));
     }
@@ -127,11 +138,14 @@ mod tests {
     #[tokio::test]
     async fn test_retry_non_retryable_error_immediate_failure() {
         let config = RetryConfig::default();
-        
-        let result = retry_on_db_locked(&config, || async {
-            Err("not found".to_string())
-        }, "test_operation").await;
-        
+
+        let result = retry_on_db_locked::<_, _, String>(
+            &config,
+            || async { Err("not found".to_string()) },
+            "test_operation",
+        )
+        .await;
+
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }

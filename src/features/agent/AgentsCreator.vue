@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { useRouter } from 'vue-router';
 import { useAssistantStore } from '../../core/stores/assistant';
 import { useOverlayStore } from '../../core/stores/overlay';
+import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useTopicStore } from '../../core/stores/topicListManager';
+import { useLayoutStore } from '../../core/stores/layout';
 
 const assistantStore = useAssistantStore();
+const chatStore = useChatManagerStore();
+const topicListStore = useTopicStore();
+const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
-const router = useRouter();
 
 const handleCreateAgent = async () => {
   console.info('[AgentsCreator] create-agent clicked');
@@ -21,7 +25,18 @@ const handleCreateAgent = async () => {
         const newAgent = await assistantStore.createAgent(name);
         await assistantStore.fetchAgents();
         if (newAgent?.id) {
-          await router.push(`/agents/${newAgent.id}`);
+          // 选中新创建的 Agent
+          chatStore.currentSelectedItem = {
+            id: newAgent.id,
+            name: newAgent.name,
+            type: 'agent'
+          };
+          // 加载话题列表
+          await topicListStore.loadTopicList(newAgent.id, 'agent');
+          // 关闭侧边栏
+          layoutStore.setLeftDrawer(false);
+          // 开启配置 Overlay
+          overlayStore.openAgentSettings(newAgent.id);
         }
       } catch (error) {
         console.error('[AgentsCreator] create-agent failed', error);
@@ -42,8 +57,22 @@ const handleCreateGroup = async () => {
       if (!name) return;
 
       try {
-        await assistantStore.createGroup(name);
+        const newGroup = await assistantStore.createGroup(name);
         await assistantStore.fetchGroups();
+        if (newGroup?.id) {
+          // 选中新创建的 Group
+          chatStore.currentSelectedItem = {
+            id: newGroup.id,
+            name: newGroup.name,
+            type: 'group'
+          };
+          // 加载话题列表
+          await topicListStore.loadTopicList(newGroup.id, 'group');
+          // 关闭侧边栏
+          layoutStore.setLeftDrawer(false);
+          // 开启配置 Overlay
+          overlayStore.openGroupSettings(newGroup.id);
+          }
       } catch (error) {
         console.error('[AgentsCreator] create-group failed', error);
         window.alert('创建 Group 失败');

@@ -2,6 +2,7 @@
 import { ref, watch, nextTick, computed } from 'vue';
 import { useChatManagerStore } from '../../core/stores/chatManager';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
+import GroupStopAllButton from './components/GroupStopAllButton.vue';
 
 const props = defineProps<{
   disabled?: boolean;
@@ -31,8 +32,8 @@ watch(input, () => {
   });
 });
 
-// 是否正在生成中
-const isGenerating = computed(() => !!chatStore.streamingMessageId);
+// 是否正在生成中 (修正：回归纯净逻辑，只要当前话题有活跃的网络流，即视为生成中)
+const isGenerating = computed(() => chatStore.activeStreamingIds.size > 0);
 
 // 监听并接收外部注入的“编辑消息”内容
 watch(() => chatStore.editMessageContent, async (newContent) => {
@@ -59,7 +60,9 @@ const handleSend = () => {
 
 const handleAction = () => {
   if (isGenerating.value) {
-    chatStore.stopGenerating();
+    // 停止当前所有活跃的生成流 (单聊只有一个，群聊则为当前并行或串行的 Agent)
+    const activeIds = Array.from(chatStore.activeStreamingIds);
+    activeIds.forEach(id => chatStore.stopMessage(id as string));
   } else {
     handleSend();
   }
@@ -84,7 +87,9 @@ const removeStagedAttachment = (index: number) => {
 </script>
 
 <template>
-  <div class="px-3 py-1 w-full transition-opacity duration-300 no-swipe" :class="{ 'opacity-70 pointer-events-none': disabled }">
+  <div class="px-3 py-1 w-full transition-opacity duration-300 no-swipe relative" :class="{ 'opacity-70 pointer-events-none': disabled }">
+    <!-- 全局群组停止按钮 (悬浮在输入框上方) -->
+    <GroupStopAllButton />
 
     <!-- 暂存附件预览区 -->
     <div v-if="chatStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">

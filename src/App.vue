@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, watch, ref } from "vue";
+import { onMounted, onUnmounted, computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSwipe } from "@vueuse/core";
 import { useThemeStore } from "./core/stores/theme";
-import { useSettingsStore } from "./core/stores/settings";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
 import { useLayoutStore } from "./core/stores/layout";
 import { useModalHistory } from "./core/composables/useModalHistory";
@@ -22,7 +21,6 @@ import GlobalOverlayManager from "./components/GlobalOverlayManager.vue";
 import FeatureOverlays from "./components/FeatureOverlays.vue";
 
 const themeStore = useThemeStore();
-const settingsStore = useSettingsStore();
 const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
@@ -97,7 +95,6 @@ const backgroundStyle = computed(() => {
 
 // 用于取消监听的清理函数
 let unlistenLog: (() => void) | null = null;
-let stopVcpLogWatch: (() => void) | null = null;
 let unlistenSyncStatus: (() => void) | null = null;
 
 onMounted(async () => {
@@ -107,7 +104,23 @@ onMounted(async () => {
   // 初始化同步状态监听
   unlistenSyncStatus = await initSyncStatus();
 
-  bootstrapApp();
+  await bootstrapApp();
+
+  // 获取当前 VCP Log 状态快照 (处理启动时已连接的情况)
+  try {
+    const logStatus = await invoke<string>("get_vcp_log_status");
+    if (logStatus === "connected") {
+      processPayload({
+        type: "connection_status",
+        status: "connected",
+        message: "已连接",
+        source: "VCPLog",
+        isSnapshot: true,
+      });
+    }
+  } catch (e) {
+    console.error("[App] Failed to query VCP Log status:", e);
+  }
 
   // 启动 VCP Log IPC 监听 (使用 1:1 移植的解析大脑)
   unlistenLog = await listen("vcp-system-event", (event: any) => {
@@ -119,25 +132,6 @@ onMounted(async () => {
     }
   });
 
-  // 保留 UI 直接依赖的日志链路初始化，但与启动编排解耦
-  stopVcpLogWatch = watch(
-    () => [
-      settingsStore.settings?.vcpLogUrl,
-      settingsStore.settings?.vcpLogKey,
-    ],
-    ([url, key]) => {
-      if (url && key) {
-        invoke("init_vcp_log_connection", {
-          url: String(url),
-          key: String(key),
-        }).catch((e) => {
-          console.error("[VCPLog] Failed to init connection:", e);
-        });
-      }
-    },
-    { immediate: true },
-  );
-
   // Operation Dummy Root: Wait for router and inject dummy layer
   await router.isReady();
   initRootHistory();
@@ -146,7 +140,6 @@ onMounted(async () => {
 onUnmounted(() => {
   if (unlistenSyncStatus) unlistenSyncStatus();
   if (unlistenLog) unlistenLog();
-  if (stopVcpLogWatch) stopVcpLogWatch();
 });
 </script>
 

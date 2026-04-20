@@ -75,10 +75,47 @@ export function useEmoticonFixer() {
     };
   };
 
+  const processEmoticonsInContainer = async (container: HTMLElement) => {
+    if (!container) return;
+
+    const imgs = container.querySelectorAll('img');
+    const promises: Promise<void>[] = [];
+
+    imgs.forEach((img) => {
+      // 避免重复处理
+      if (img.dataset.vcpProcessed === 'true') return;
+      img.dataset.vcpProcessed = 'true';
+
+      const originalSrc = decodeURIComponent(img.src);
+      const alt = decodeURIComponent(img.alt || '');
+
+      const isEmoticon = originalSrc.includes('表情包') || alt.includes('表情包');
+      if (isEmoticon) {
+        img.classList.add('vcp-emoticon');
+        const rawSrc = img.getAttribute('src') || originalSrc;
+        
+        const fixPromise = async () => {
+          try {
+            const fixedUrl = await fixUrl(rawSrc);
+            if (fixedUrl && fixedUrl !== rawSrc) {
+              img.src = fixedUrl;
+            }
+          } catch (e) {
+            console.error('[EmoticonFixer] Failed to fix emoticon:', rawSrc, e);
+          }
+        };
+        promises.push(fixPromise());
+      }
+    });
+
+    await Promise.allSettled(promises);
+  };
+
   return {
     fixUrl,
     getLibrary,
     regenerateLibrary,
-    initGlobalFixer
+    initGlobalFixer,
+    processEmoticonsInContainer
   };
 }

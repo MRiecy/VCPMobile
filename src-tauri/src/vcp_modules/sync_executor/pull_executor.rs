@@ -34,7 +34,7 @@ impl PullExecutor {
 
         let dto: AgentSyncDTO = res.json().await.map_err(|e| e.to_string())?;
         write_queue
-            .submit(DbWriteTask::UpsertAgent {
+            .submit(DbWriteTask::Agent {
                 id: agent_id.to_string(),
                 dto,
             })
@@ -68,7 +68,7 @@ impl PullExecutor {
 
         let dto: GroupSyncDTO = res.json().await.map_err(|e| e.to_string())?;
         write_queue
-            .submit(DbWriteTask::UpsertGroup {
+            .submit(DbWriteTask::Group {
                 id: group_id.to_string(),
                 dto,
             })
@@ -103,7 +103,7 @@ impl PullExecutor {
 
         let bytes = res.bytes().await.map_err(|e| e.to_string())?;
         write_queue
-            .submit(DbWriteTask::UpsertAvatar {
+            .submit(DbWriteTask::Avatar {
                 owner_type: owner_type.to_string(),
                 owner_id: owner_id.to_string(),
                 bytes: bytes.to_vec(),
@@ -143,7 +143,7 @@ impl PullExecutor {
 
         let dto: AgentTopicSyncDTO = res.json().await.map_err(|e| e.to_string())?;
         write_queue
-            .submit(DbWriteTask::UpsertAgentTopic {
+            .submit(DbWriteTask::AgentTopic {
                 topic_id: topic_id.to_string(),
                 dto,
             })
@@ -182,7 +182,7 @@ impl PullExecutor {
 
         let dto: GroupTopicSyncDTO = res.json().await.map_err(|e| e.to_string())?;
         write_queue
-            .submit(DbWriteTask::UpsertGroupTopic {
+            .submit(DbWriteTask::GroupTopic {
                 topic_id: topic_id.to_string(),
                 dto,
             })
@@ -214,7 +214,10 @@ impl PullExecutor {
             Some(r) => (r.get("owner_id"), r.get("owner_type")),
             None => {
                 // Topic 还未同步，使用占位值，后续 topic 同步时会更新
-                println!("[PullExecutor] Topic {} not yet available, messages will be linked later", topic_id);
+                println!(
+                    "[PullExecutor] Topic {} not yet available, messages will be linked later",
+                    topic_id
+                );
                 ("pending_owner".to_string(), "agent".to_string())
             }
         };
@@ -290,7 +293,7 @@ impl PullExecutor {
         }
 
         write_queue
-            .submit(DbWriteTask::UpsertMessages {
+            .submit(DbWriteTask::Messages {
                 topic_id: topic_id.to_string(),
                 owner_id,
                 owner_type,

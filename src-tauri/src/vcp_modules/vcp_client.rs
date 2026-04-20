@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -54,8 +54,19 @@ pub struct ActiveRequests(pub Arc<DashMap<String, oneshot::Sender<()>>>);
 
 impl Default for ActiveRequests {
     fn default() -> Self {
-        println!("[VCPClient] Initialized successfully.");
+        println!("[VCPClient] Initialized ActiveRequests successfully.");
         Self(Arc::new(DashMap::new()))
+    }
+}
+
+/// 群组回合取消令牌，用于标记需要中断接力赛的话题
+/// topicId -> true (存在即代表已取消)
+pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
+
+impl Default for CancelledGroupTurns {
+    fn default() -> Self {
+        println!("[VCPClient] Initialized CancelledGroupTurns successfully.");
+        Self(Arc::new(DashSet::new()))
     }
 }
 
@@ -64,6 +75,21 @@ async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
     app.path()
         .app_data_dir()
         .unwrap_or_else(|_| PathBuf::from("AppData"))
+}
+
+/// 中止群组的整个接力赛回合
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn interruptGroupTurn(
+    state: tauri::State<'_, CancelledGroupTurns>,
+    topic_id: String,
+) -> Result<Value, String> {
+    println!(
+        "[VCPClient] interruptGroupTurn called for topicId: {}",
+        topic_id
+    );
+    state.0.insert(topic_id);
+    Ok(json!({"status": "cancelled"}))
 }
 
 /// 核心请求函数：sendToVCP

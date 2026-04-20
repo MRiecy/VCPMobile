@@ -4,35 +4,35 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::sync_logger::{SyncLogger, LogLevel};
+use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_retry::{retry_on_db_locked, RetryConfig};
-use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum DbWriteTask {
-    UpsertAgent {
+    Agent {
         id: String,
         dto: AgentSyncDTO,
     },
-    UpsertGroup {
+    Group {
         id: String,
         dto: GroupSyncDTO,
     },
-    UpsertAvatar {
+    Avatar {
         owner_type: String,
         owner_id: String,
         bytes: Vec<u8>,
     },
-    UpsertAgentTopic {
+    AgentTopic {
         topic_id: String,
         dto: AgentTopicSyncDTO,
     },
-    UpsertGroupTopic {
+    GroupTopic {
         topic_id: String,
         dto: GroupTopicSyncDTO,
     },
-    UpsertMessages {
+    Messages {
         topic_id: String,
         owner_id: String,
         owner_type: String,
@@ -58,31 +58,32 @@ impl DbWriteQueue {
 
             while let Some(task) = rx.recv().await {
                 let (task_type, id, result) = match task {
-                    DbWriteTask::UpsertAgent { id, dto } => {
+                    DbWriteTask::Agent { id, dto } => {
                         let result = Self::upsert_agent(&pool, &id, &dto).await;
                         ("agent", id, result)
                     }
-                    DbWriteTask::UpsertGroup { id, dto } => {
+                    DbWriteTask::Group { id, dto } => {
                         let result = Self::upsert_group(&pool, &id, &dto).await;
                         ("group", id, result)
                     }
-                    DbWriteTask::UpsertAvatar {
+                    DbWriteTask::Avatar {
                         owner_type,
                         owner_id,
                         bytes,
                     } => {
-                        let result = Self::upsert_avatar(&pool, &owner_type, &owner_id, &bytes).await;
+                        let result =
+                            Self::upsert_avatar(&pool, &owner_type, &owner_id, &bytes).await;
                         ("avatar", format!("{}:{}", owner_type, owner_id), result)
                     }
-                    DbWriteTask::UpsertAgentTopic { topic_id, dto } => {
+                    DbWriteTask::AgentTopic { topic_id, dto } => {
                         let result = Self::upsert_agent_topic(&pool, &topic_id, &dto).await;
                         ("agent_topic", topic_id, result)
                     }
-                    DbWriteTask::UpsertGroupTopic { topic_id, dto } => {
+                    DbWriteTask::GroupTopic { topic_id, dto } => {
                         let result = Self::upsert_group_topic(&pool, &topic_id, &dto).await;
                         ("group_topic", topic_id, result)
                     }
-                    DbWriteTask::UpsertMessages {
+                    DbWriteTask::Messages {
                         topic_id,
                         owner_id,
                         owner_type,
@@ -128,19 +129,20 @@ impl DbWriteQueue {
         self.logger = Some(logger);
     }
 
-	pub async fn submit(&self, task: DbWriteTask) {
-		if let Err(e) = self.sender.send(task).await {
-			println!("[DbWriteQueue] Submit error: {}", e);
-		}
-	}
+    pub async fn submit(&self, task: DbWriteTask) {
+        if let Err(e) = self.sender.send(task).await {
+            println!("[DbWriteQueue] Submit error: {}", e);
+        }
+    }
 
-	pub fn log_operation(&self, task_type: &str, id: &str, success: bool, detail: Option<&str>) {
-		if let Some(ref logger) = self.logger {
-			if let Ok(mut logger) = logger.lock() {
-				logger.log_operation("write_queue", task_type, id, success, detail);
-			}
-		}
-	}
+    #[allow(dead_code)]
+    pub fn log_operation(&self, task_type: &str, id: &str, success: bool, detail: Option<&str>) {
+        if let Some(ref logger) = self.logger {
+            if let Ok(mut logger) = logger.lock() {
+                logger.log_operation("write_queue", task_type, id, success, detail);
+            }
+        }
+    }
 
     async fn upsert_agent(
         pool: &sqlx::SqlitePool,
@@ -294,13 +296,13 @@ impl DbWriteQueue {
     ) -> Result<(), String> {
         let config = RetryConfig::default();
         let operation_name = format!("upsert_agent_topic[{}]", topic_id);
-        
+
         retry_on_db_locked(&config, || {
             let pool = pool.clone();
             let topic_id = topic_id.to_string();
             let dto = dto.clone();
             let now = chrono::Utc::now().timestamp_millis();
-            
+
             async move {
                 // 先尝试写入 topic，如果 owner 不存在则跳过哈希更新
                 let result = sqlx::query(

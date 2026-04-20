@@ -276,7 +276,7 @@ pub async fn create_group(
         id: default_topic_id.clone(),
         name: "主要群聊".to_string(),
         created_at: timestamp,
-        locked: false,
+        locked: true,
         unread: false,
         unread_count: 0,
         msg_count: 0,
@@ -292,7 +292,7 @@ pub async fn create_group(
         mode: "sequential".to_string(),
         member_tags: Some(serde_json::json!({})),
         group_prompt: Some("".to_string()),
-        invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了...".to_string()),
+        invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
         use_unified_model: false,
         unified_model: None,
         topics: vec![default_topic.clone()],
@@ -308,6 +308,7 @@ pub async fn create_group(
     )
     .bind(&group_id)
     .bind(&name)
+    .bind(timestamp)
     .bind(timestamp)
     .bind(&config_hash)
     .execute(&mut *tx)

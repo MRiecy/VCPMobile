@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useNotificationStore } from "./notification";
 
 export interface Topic {
   id: string;
@@ -26,7 +27,7 @@ export interface AgentConfig {
   top_k?: number;
   streamOutput: boolean;
   avatarCalculatedColor?: string;
-  topics: Topic[];
+  topics?: Topic[];
 }
 
 export interface GroupConfig {
@@ -41,7 +42,7 @@ export interface GroupConfig {
   useUnifiedModel: boolean;
   unifiedModel?: string;
   tagMatchMode?: string;
-  topics: Topic[];
+  topics?: Topic[];
 }
 
 export const useAssistantStore = defineStore("assistant", () => {
@@ -49,6 +50,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const groups = ref<GroupConfig[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  const notificationStore = useNotificationStore();
 
   // 记录每个 item (agent 或 group) 的未读数量
   const unreadCounts = ref<Record<string, number>>({});
@@ -135,6 +137,12 @@ export const useAssistantStore = defineStore("assistant", () => {
     loading.value = true;
     try {
       const newAgent = await invoke<AgentConfig>("create_agent", { name });
+      notificationStore.addNotification({
+        type: "success",
+        title: "Agent 创建成功",
+        message: `助手 "${name}" 已就绪`,
+        toastOnly: true,
+      });
       // 不再自动全局 fetch，由生命周期或调用方决定是否增量更新
       return newAgent;
     } catch (e: any) {
@@ -145,10 +153,32 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
+  const deleteAgent = async (id: string) => {
+    try {
+      await invoke("delete_agent", { agentId: id });
+      await fetchAgents();
+      notificationStore.addNotification({
+        type: "success",
+        title: "Agent 删除成功",
+        message: "助手已从列表中移除",
+        toastOnly: true,
+      });
+    } catch (e: any) {
+      console.error("[AssistantStore] Failed to delete agent:", e);
+      throw e;
+    }
+  };
+
   const createGroup = async (name: string) => {
     loading.value = true;
     try {
       const newGroup = await invoke<GroupConfig>("create_group", { name });
+      notificationStore.addNotification({
+        type: "success",
+        title: "Group 创建成功",
+        message: `群组 "${name}" 已创建`,
+        toastOnly: true,
+      });
       // 不再自动全局 fetch
       return newGroup;
     } catch (e: any) {
@@ -159,12 +189,74 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
+  const deleteGroup = async (id: string) => {
+    try {
+      await invoke("delete_group", { groupId: id });
+      await fetchGroups();
+      notificationStore.addNotification({
+        type: "success",
+        title: "Group 删除成功",
+        message: "群组已解散",
+        toastOnly: true,
+      });
+    } catch (e: any) {
+      console.error("[AssistantStore] Failed to delete group:", e);
+      throw e;
+    }
+  };
+
   const saveAgent = async (agent: AgentConfig) => {
     try {
       await invoke("save_agent_config", { agent });
+      notificationStore.addNotification({
+        type: "success",
+        title: "Agent 配置保存成功",
+        message: "助手的最新设置已同步到核心",
+        toastOnly: true,
+      });
       await fetchAgents();
     } catch (e: any) {
       error.value = e.toString();
+      throw e;
+    }
+  };
+
+  const saveGroup = async (group: GroupConfig) => {
+    try {
+      await invoke("save_group_config", { group });
+      notificationStore.addNotification({
+        type: "success",
+        title: "Group 配置保存成功",
+        message: "群组设置已更新",
+        toastOnly: true,
+      });
+      await fetchGroups();
+    } catch (e: any) {
+      error.value = e.toString();
+      throw e;
+    }
+  };
+
+  const saveAvatar = async (ownerType: 'agent' | 'group' | 'user', ownerId: string, mimeType: string, imageData: number[]) => {
+    try {
+      const hash = await invoke<string>("save_avatar_data", {
+        ownerType,
+        ownerId,
+        mimeType,
+        imageData,
+      });
+      
+      const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? 'Group' : '用户';
+      notificationStore.addNotification({
+        type: "success",
+        title: `${label} 头像更新成功`,
+        message: "新头像已生效",
+        toastOnly: true,
+      });
+      
+      return hash;
+    } catch (e: any) {
+      console.error(`[AssistantStore] Failed to save avatar for ${ownerType}:`, e);
       throw e;
     }
   };
@@ -179,8 +271,12 @@ export const useAssistantStore = defineStore("assistant", () => {
     fetchAgents,
     fetchGroups,
     createAgent,
+    deleteAgent,
     createGroup,
+    deleteGroup,
     saveAgent,
+    saveGroup,
+    saveAvatar,
     refreshUnreadCountsForItems,
   };
 });

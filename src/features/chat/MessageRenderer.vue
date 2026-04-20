@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import type { ChatMessage } from "../../core/stores/chatManager";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useSettingsStore } from "../../core/stores/settings";
@@ -7,7 +7,6 @@ import {
   useContentProcessor,
   type ContentBlock,
 } from "../../core/composables/useContentProcessor";
-import { useAvatarTheme } from "../../core/composables/useAvatarTheme";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useChatManagerStore } from "../../core/stores/chatManager";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -35,7 +34,6 @@ const props = defineProps<{
 const assistantStore = useAssistantStore();
 const settingsStore = useSettingsStore();
 const { processMessageContent, removeScopedCss } = useContentProcessor();
-const { extractAndSaveColor } = useAvatarTheme();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
 
@@ -44,17 +42,16 @@ const chatStore = useChatManagerStore();
 const isUser = computed(() => props.message.role === "user");
 const isStreaming = computed(() => {
   if (isUser.value) return false;
-  if (props.message.isThinking) return true;
 
-  // 检查当前消息是否在所属会话的活动流中
+  // 检查当前消息是否在所属会话的活动流中 (修正：不再依赖 isThinking 状态)
   const itemId =
     props.message.agentId || props.message.groupId || props.agentId;
   const topicId = chatStore.currentTopicId;
   if (!itemId || !topicId) return false;
 
   const key = `${itemId}:${topicId}`;
-  const streams = chatStore.sessionActiveStreams?.get(key);
-  return streams ? streams.has(props.message.id) : false;
+  const streams = chatStore.sessionActiveStreams?.[key];
+  return streams ? streams.includes(props.message.id) : false;
 });
 
 // 获取当前消息实际对应的 Agent ID (对于群聊，从显式字段读取)
@@ -87,7 +84,7 @@ const agentConfig = computed(() => {
 
 // 获取头像 URL
 const resolvedAvatarUrl = computed(() => {
-  if (isUser.value) return "vcp-avatar://user/default";
+  if (isUser.value) return "vcp-avatar://user/user_avatar";
 
   // 优先使用匹配到的 Agent ID
   if (actualAgentId.value) {
@@ -103,24 +100,6 @@ const resolvedAvatarUrl = computed(() => {
   }
 
   return null;
-});
-
-onMounted(() => {
-  // If color is missing, extract it
-  if (
-    !isUser.value &&
-    actualAgentId.value &&
-    resolvedAvatarUrl.value &&
-    !agentConfig.value?.avatarCalculatedColor
-  ) {
-    extractAndSaveColor(actualAgentId.value, resolvedAvatarUrl.value).then(
-      (color) => {
-        if (agentConfig.value && color) {
-          agentConfig.value.avatarCalculatedColor = color;
-        }
-      },
-    );
-  }
 });
 
 onUnmounted(() => {
@@ -149,11 +128,21 @@ let pendingText: string | null = null;
 
 // 核心解析逻辑
 const updateContentBlocks = async (text: string) => {
-  if (!text && props.message.isThinking) {
+  if (!text && isStreaming.value) {
     contentBlocks.value = [];
     streamContent.value = "";
     return;
   }
+
+  // 1. 优先使用预编译的 AST (零解析渲染)
+  if (!isStreaming.value && props.message.blocks && props.message.blocks.length > 0) {
+    contentBlocks.value = props.message.blocks;
+    streamContent.value = "";
+    return;
+  }
+
+  // 如果连文本都没有，且没有块，退出
+  if (!text && !props.message.blocks) return;
 
   const options = {
     role: props.message.role,
@@ -167,10 +156,13 @@ const updateContentBlocks = async (text: string) => {
     const blocks = await processMessageContent(text || "", options);
     streamContent.value = blocks[0]?.content || "";
   } else {
-    // 静态完成状态：走严格的 AST 拆分 (Rust)
+    // 动态编译态 (例如流式刚结束，或者刚编辑完)
     isTransitioning.value = true;
     try {
-      contentBlocks.value = await processMessageContent(text || "", options);
+      const newBlocks = await processMessageContent(text || "", options);
+      contentBlocks.value = newBlocks;
+      // 可选：将新编译的块缓存到 message 对象上，防止后续频繁重编
+      props.message.blocks = newBlocks;
     } finally {
       // 确保无论解析成功失败，都能解除过渡状态
       isTransitioning.value = false;
@@ -275,7 +267,7 @@ const avatarFallbackColor = computed(() => {
 });
 
 // 长按菜单触发逻辑
-const showMessageContextMenu = () => {
+const showMessageContextMenu = async () => {
   const chatStore = useChatManagerStore();
 
   const actions: any[] = [];
@@ -292,47 +284,59 @@ const showMessageContextMenu = () => {
     });
   }
 
+  // 获取内容的统一方法，结合懒加载
+  const getFullText = async () => {
+    let text = props.message.content || streamContent.value;
+    if (!text && props.message.blocks) {
+      // 触发懒加载获取原文
+      text = await chatStore.fetchRawContent(props.message.id);
+    }
+    return text;
+  };
+
   // 2. 复制文本 (所有状态可用，除了纯占位符)
-  const fullText = props.message.content || streamContent.value;
-  if (fullText) {
-    actions.push({
-      label: "复制内容",
-      icon: Copy,
-      handler: async () => {
-        try {
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            await navigator.clipboard.writeText(fullText);
-          } else {
-            // Fallback for some old webviews
-            const textarea = document.createElement("textarea");
-            textarea.value = fullText;
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand("copy");
-            document.body.removeChild(textarea);
-          }
-          notificationStore.addNotification({
-            type: "success",
-            title: "复制成功",
-            message: "内容已复制到剪贴板",
-            duration: 2000,
-          });
-        } catch (e) {
-          console.error("[MessageContextMenu] Copy failed:", e);
+  // 为了不卡住菜单弹出，我们先在外部显示菜单，在 handler 中拉取内容
+  actions.push({
+    label: "复制内容",
+    icon: Copy,
+    handler: async () => {
+      try {
+        const fullText = await getFullText();
+        if (!fullText) return;
+        
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(fullText);
+        } else {
+          // Fallback for some old webviews
+          const textarea = document.createElement("textarea");
+          textarea.value = fullText;
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textarea);
         }
-      },
-    });
-  }
+        notificationStore.addNotification({
+          type: "success",
+          title: "复制成功",
+          message: "内容已复制到剪贴板",
+          duration: 2000,
+        });
+      } catch (e) {
+        console.error("[MessageContextMenu] Copy failed:", e);
+      }
+    },
+  });
 
   // 3. 编辑消息 (非流式状态下支持全屏编辑)
   if (!isStreaming.value) {
     actions.push({
       label: "编辑消息",
       icon: Edit2,
-      handler: () => {
+      handler: async () => {
+        const fullText = await getFullText();
         overlayStore.openEditor({
-          initialValue: props.message.content || streamContent.value || "",
-          onSave: (newContent) => handleSaveEdit(newContent),
+          initialValue: fullText || "",
+          onSave: (newContent: string) => handleSaveEdit(newContent),
         });
       },
     });
@@ -343,9 +347,10 @@ const showMessageContextMenu = () => {
     actions.push({
       label: "编辑重发",
       icon: Edit2,
-      handler: () => {
+      handler: async () => {
+        const fullText = await getFullText();
         // 将内容填入全局编辑状态供 InputEnhancer 读取
-        chatStore.editMessageContent = props.message.content;
+        chatStore.editMessageContent = fullText || "";
       },
     });
   }
@@ -397,7 +402,7 @@ const handleSaveEdit = async (newContent: string) => {
       :avatar-fallback-text="avatarFallbackText" :avatar-fallback-color="avatarFallbackColor" />
 
     <ChatBubble :is-user="isUser" :is-streaming="isStreaming" :bubble-style="bubbleStyle">
-      <ThinkingIndicator v-if="message.isThinking && streamContent === ''" />
+      <ThinkingIndicator v-if="isStreaming && streamContent === ''" />
 
       <template v-if="!showStreamView">
         <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
@@ -427,7 +432,7 @@ const handleSaveEdit = async (newContent: string) => {
       <AttachmentPreview v-if="message.attachments && message.attachments.length > 0" :attachments="message.attachments"
         class="pt-3 border-t border-black/5 dark:border-white/5" />
 
-      <StreamingTag v-if="message.isThinking && streamContent !== ''" />
+      <StreamingTag v-if="isStreaming && streamContent !== ''" />
 
       <template #footer>
         <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"

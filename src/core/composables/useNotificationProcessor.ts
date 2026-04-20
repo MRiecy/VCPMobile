@@ -92,11 +92,26 @@ export function useNotificationProcessor() {
     // 0. P2-7 Gap: 连接底层状态指示器 (vcp_log_status / connection_status)
     if (payload.type === 'vcp_log_status' || payload.type === 'connection_status') {
       const statusData = payload.data || payload;
+      const status = (statusData.status || 'connecting') as VcpStatus['status'];
+      const source = statusData.source || 'VCPLog';
+      
       store.updateStatus({
-        status: (statusData.status || 'connecting') as VcpStatus['status'],
+        status,
         message: statusData.message || '状态未知',
-        source: statusData.source || 'VCPLog'
+        source
       });
+
+      // 只有在连接成功时才弹出卡片（包括启动时的快照恢复）
+      if (status === 'connected') {
+        return {
+          title: `${source} 连接成功`,
+          message: statusData.message || '已建立实时数据通道',
+          type: 'success',
+          toastOnly: true, 
+          silent: false
+        };
+      }
+
       return { silent: true };
     }
 

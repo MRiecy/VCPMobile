@@ -2,20 +2,19 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_hash::{HashAggregator, HashInitializer};
-use crate::vcp_modules::sync_logger::{SyncLogger, LogLevel};
+use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
 use crate::vcp_modules::sync_manifest::ManifestBuilder;
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::{SyncDataType, SyncManifest};
 use crate::vcp_modules::sync_utils::SyncMetrics;
-use crate::vcp_modules::settings_manager::read_settings;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
@@ -38,6 +37,7 @@ pub struct SyncState {
     pub pending_tasks: Arc<AtomicU32>,
     #[allow(dead_code)]
     pub pending_message_topics: Arc<AtomicU32>,
+    #[allow(dead_code)]
     pub sync_logger: Arc<Mutex<SyncLogger>>,
 }
 
@@ -127,10 +127,9 @@ pub enum SyncCommand {
     RequestMessageManifest {
         topic_id: String,
     },
-    Phase1Completed,
-    Phase2Completed,
-    #[allow(dead_code)]
-    Phase3Completed,
+    Phase1,
+    Phase2,
+    Phase3,
     NotifyDelete {
         data_type: SyncDataType,
         id: String,
@@ -172,24 +171,24 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
     let pending_tasks = Arc::new(AtomicU32::new(0));
     let pending_message_topics = Arc::new(AtomicU32::new(0));
 
-	let db = app_handle.state::<DbState>();
-	let mut write_queue = DbWriteQueue::new(db.pool.clone());
+    let db = app_handle.state::<DbState>();
+    let mut write_queue = DbWriteQueue::new(db.pool.clone());
 
-	// Initialize sync logger with default log level
-	let sync_log_level = LogLevel::INFO;
-	let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level)));
-	write_queue.set_logger(sync_logger.clone());
-	let write_queue = Arc::new(write_queue);
+    // Initialize sync logger with default log level
+    let sync_log_level = LogLevel::Info;
+    let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level)));
+    write_queue.set_logger(sync_logger.clone());
+    let write_queue = Arc::new(write_queue);
 
-	let _metrics_task = metrics.clone();
-	let semaphore_task = network_semaphore.clone();
-	let pipeline_task = pipeline.clone();
-	let write_queue_task = write_queue.clone();
-	let pending_tasks_task = pending_tasks.clone();
-	let pending_msg_topics_task = pending_message_topics.clone();
-	let sync_logger_task = sync_logger.clone();
+    let _metrics_task = metrics.clone();
+    let semaphore_task = network_semaphore.clone();
+    let pipeline_task = pipeline.clone();
+    let write_queue_task = write_queue.clone();
+    let pending_tasks_task = pending_tasks.clone();
+    let pending_msg_topics_task = pending_message_topics.clone();
+    let sync_logger_task = sync_logger.clone();
 
-	tauri::async_runtime::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let http_client = reqwest::Client::new();
 
         loop {
@@ -228,24 +227,36 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                 Ok((mut ws_stream, _)) => {
                     if let Ok(mut logger) = sync_logger_task.lock() {
                         logger.start_phase("metadata", 0);
-                        logger.log(LogLevel::INFO, "metadata", "=== Phase 1: Metadata ===");
+                        logger.log(LogLevel::Info, "metadata", "=== Phase 1: Metadata ===");
                     }
                     publish_sync_status(&handle_clone, &connection_status_for_task, "connected")
                         .await;
 
                     let db = handle_clone.state::<DbState>();
                     if let Err(e) = HashInitializer::ensure_all_agent_hashes(&db.pool).await {
-                        if let Ok(mut logger) = sync_logger_task.lock() {
-                            logger.log(LogLevel::ERROR, "metadata", &format!("Hash init error: {}", e));
+                        if let Ok(logger) = sync_logger_task.lock() {
+                            logger.log(
+                                LogLevel::Error,
+                                "metadata",
+                                &format!("Hash init error: {}", e),
+                            );
                         }
                     }
                     if let Err(e) = HashInitializer::ensure_all_group_hashes(&db.pool).await {
-                        if let Ok(mut logger) = sync_logger_task.lock() {
-                            logger.log(LogLevel::ERROR, "metadata", &format!("Hash init error: {}", e));
+                        if let Ok(logger) = sync_logger_task.lock() {
+                            logger.log(
+                                LogLevel::Error,
+                                "metadata",
+                                &format!("Hash init error: {}", e),
+                            );
                         }
                     }
-                    if let Ok(mut logger) = sync_logger_task.lock() {
-                        logger.log(LogLevel::INFO, "metadata", "Phase 1 manifests sent, waiting for diff results...");
+                    if let Ok(logger) = sync_logger_task.lock() {
+                        logger.log(
+                            LogLevel::Info,
+                            "metadata",
+                            "Phase 1 manifests sent, waiting for diff results...",
+                        );
                     }
 
                     if let Ok(manifests) = Phase1Metadata::build_all_manifests(&db.pool).await {
@@ -257,519 +268,515 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
                     loop {
                         tokio::select! {
-                                                Some(cmd) = pipeline_rx.recv() => {
-                                                    match cmd {
-                                                        crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase1Completed => {
-                                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                logger.start_phase("topic", 0);
-                                                                logger.log(LogLevel::INFO, "topic", "=== Phase 2: Topics ===");
-                                                            }
-                                                            let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "topic" }).to_string().into())).await;
-                                                        },
-                                                        crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase2Completed => {
-                                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                logger.start_phase("message", 0);
-                                                                logger.log(LogLevel::INFO, "message", "=== Phase 3: Messages ===");
-                                                            }
-                                                            let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "message" }).to_string().into())).await;
+                                                                    Some(cmd) = pipeline_rx.recv() => {
+                                                                        match cmd {
+                                                                            crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase1 => {
+                                                                                if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                                    logger.start_phase("topic", 0);
+                                                                                    logger.log(LogLevel::Info, "topic", "=== Phase 2: Topics ===");
+                                                                                }
+                                                                                let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "topic" }).to_string().into())).await;
+                                                                            },
+                                                                            crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase2 => {
+                                                                                if let Ok(mut logger) = sync_logger_task.lock() {
+                                                                                    logger.start_phase("message", 0);
+                                                                                    logger.log(LogLevel::Info, "message", "=== Phase 3: Messages ===");
+                                                                                }
+                                                                                let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "message" }).to_string().into())).await;
 
-                                                            let db = handle_clone.state::<DbState>();
-                                                            if let Ok(topic_ids) = Phase3Message::get_all_active_topic_ids(&db.pool).await {
-                                                                let topic_count = topic_ids.len() as u32;
-                                                                pending_msg_topics_task.store(topic_count, Ordering::SeqCst);
-                                                                if topic_count > 0 {
-                                                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                        logger.log(LogLevel::INFO, "message", 
-                                                                            &format!("Phase 3: requesting manifests for {} topics", topic_count));
-                                                                    }
-                                                                }
-                                                                for tid in topic_ids {
-                                                                    let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": tid });
-                                                                    let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                                                                }
-                                                                if topic_count == 0 {
-                                                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                        logger.log(LogLevel::INFO, "message", "Phase 3 completed (no topics)");
-                                                                        logger.complete_phase("message");
-                                                                    }
-                                                                    let _ = tx_internal.send(SyncCommand::Phase3Completed);
-                                                                }
-                                                            }
-                                                        },
-                                                        crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase3Completed => {
-                                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                logger.log(LogLevel::INFO, "sync", "=== Sync Complete ===");
-                                                                logger.complete_phase("sync");
-                                                                logger.end_session();
-                                                            }
-                                                            let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED" }).to_string().into())).await;
-                                                        },
-                                                    }
-                                                },
-                                                Some(cmd) = rx.recv() => {
-                                                    match cmd {
-                                                        SyncCommand::NotifyLocalChange { id, data_type, hash, ts } => {
-                                                            let msg = json!({ "type": "SYNC_ENTITY_UPDATE", "id": id, "dataType": data_type, "hash": hash, "ts": ts });
-                                                            let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                                                        },
-                                                        SyncCommand::RequestMessageManifest { topic_id } => {
-                                                            let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": topic_id });
-                                                            let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                                                        },
-                                                        SyncCommand::Phase1Completed => {
-                                                            let db = handle_clone.state::<DbState>();
-                                                            let _ = pipeline_task.on_phase1_completed(&db.pool).await;
-                                                        },
-                                                        SyncCommand::Phase2Completed => {
-                                                            let _ = pipeline_task.on_phase2_completed().await;
-                                                        },
-                                                        SyncCommand::Phase3Completed => {
-                                                            let _ = pipeline_task.on_phase3_completed().await;
-                                                        },
-                                                        SyncCommand::NotifyDelete { data_type, id } => {
-                                                            let msg = json!({ "type": "SYNC_DELETE_NOTIFY", "id": id, "dataType": data_type });
-                                                            let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                                                        },
-                                                    }
-                                                },
-                                                Some(Ok(msg)) = ws_stream.next() => {
-                                                    if let Message::Text(text) = msg {
-                                                        let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                                                        if payload.is_null() { continue; }
-
-                                                        let h = handle_clone.clone();
-                                                        let c = http_client.clone();
-                                                        let base = http_url.clone();
-                                                        let sem = semaphore_task.clone();
-                                                        let wq = write_queue_task.clone();
-
-                                                        match payload["type"].as_str() {
-                                                            Some("SYNC_ENTITY_UPDATE") => {
-                                                                let id = payload["id"].as_str().unwrap_or_default().to_string();
-                                                                let owner_type = payload["ownerType"].as_str().unwrap_or("agent").to_string();
-                                                                let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                                                if data_type == SyncDataType::Message {
-                                                                    let _ = ws_stream.send(Message::Text(json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": id }).to_string().into())).await;
-                                                                } else {
-                                                                    tauri::async_runtime::spawn(async move {
-                                                                        let _permit = sem.acquire().await;
-                                                                        let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
-                                                                        match data_type {
-                                                                            SyncDataType::Agent => { let _ = PullExecutor::pull_agent(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
-                                                                            SyncDataType::Group => { let _ = PullExecutor::pull_group(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
-                                                                            SyncDataType::Topic => {
-                                                                                if owner_type == "group" {
-                                                                                    let _ = PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
-                                                                                } else {
-                                                                                    let _ = PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
+                                                                                let db = handle_clone.state::<DbState>();
+                                                                                if let Ok(topic_ids) = Phase3Message::get_all_active_topic_ids(&db.pool).await {
+                                                                                    let topic_count = topic_ids.len() as u32;
+                                                                                    pending_msg_topics_task.store(topic_count, Ordering::SeqCst);
+                                                                                    if topic_count > 0 {
+                                                                                        if let Ok(logger) = sync_logger_task.lock() {
+                                                                                            logger.log(LogLevel::Info, "message",
+                                                                                                &format!("Phase 3: requesting manifests for {} topics", topic_count));
+                                                                                        }
+                                                                                    }
+                                                                                    for tid in topic_ids {
+                                                                                        let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": tid });
+                                                                                        let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                                                                    }
+                                                                                    if topic_count == 0 {
+                                                                                        if let Ok(logger) = sync_logger_task.lock() {
+                                                                                            logger.log(LogLevel::Info, "message", "Phase 3 completed (no topics)");
+                                                                                            logger.complete_phase("message");
+                                                                                        }
+                                                                                        let _ = tx_internal.send(SyncCommand::Phase3);
+                                                                                    }
                                                                                 }
                                                                             },
-                                                                            _ => {}
+                                                                            crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase3 => {
+                                                                                 if let Ok(logger) = sync_logger_task.lock() {
+                                                                                     logger.log(LogLevel::Info, "sync", "=== Sync Complete ===");
+                                                                                     logger.complete_phase("sync");
+                                                                                     (*logger).end_session();
+                                                                                 }
+                                                                                let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED" }).to_string().into())).await;
+                                                                            },
+                                                                        }
+                                                                    },
+                                                                    Some(cmd) = rx.recv() => {
+                                                                        match cmd {
+                                                                            SyncCommand::NotifyLocalChange { id, data_type, hash, ts } => {
+                                                                                let msg = json!({ "type": "SYNC_ENTITY_UPDATE", "id": id, "dataType": data_type, "hash": hash, "ts": ts });
+                                                                                let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                                                            },
+                                                                            SyncCommand::RequestMessageManifest { topic_id } => {
+                                                                                let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": topic_id });
+                                                                                let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                                                            },
+                                                                            SyncCommand::Phase1 => {
+                                                                                let db = handle_clone.state::<DbState>();
+                                                                                let _ = pipeline_task.on_phase1_completed(&db.pool).await;
+                                                                            },
+                                                                            SyncCommand::Phase2 => {
+                                                                                let _ = pipeline_task.on_phase2_completed().await;
+                                                                            },
+                                                                            SyncCommand::Phase3 => {
+                                                                                let _ = pipeline_task.on_phase3_completed().await;
+                                                                            },
+                                                                            SyncCommand::NotifyDelete { data_type, id } => {
+                                                                                let msg = json!({ "type": "SYNC_DELETE_NOTIFY", "id": id, "dataType": data_type });
+                                                                                let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                                                            },
+                                                                        }
+                                                                    },
+                                                                    Some(Ok(msg)) = ws_stream.next() => {
+                                                                        if let Message::Text(text) = msg {
+                                                                            let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+                                                                            if payload.is_null() { continue; }
+
+                                                                            let h = handle_clone.clone();
+                                                                            let c = http_client.clone();
+                                                                            let base = http_url.clone();
+                                                                            let sem = semaphore_task.clone();
+                                                                            let wq = write_queue_task.clone();
+
+                                                                            match payload["type"].as_str() {
+                                                                                Some("SYNC_ENTITY_UPDATE") => {
+                                                                                    let id = payload["id"].as_str().unwrap_or_default().to_string();
+                                                                                    let owner_type = payload["ownerType"].as_str().unwrap_or("agent").to_string();
+                                                                                    let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
+                                                                                    if data_type == SyncDataType::Message {
+                                                                                        let _ = ws_stream.send(Message::Text(json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": id }).to_string().into())).await;
+                                                                                    } else {
+                                                                                        tauri::async_runtime::spawn(async move {
+                                                                                            let _permit = sem.acquire().await;
+                                                                                            let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
+                                                                                            match data_type {
+                                                                                                SyncDataType::Agent => { let _ = PullExecutor::pull_agent(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
+                                                                                                SyncDataType::Group => { let _ = PullExecutor::pull_group(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
+                                                                                                SyncDataType::Topic => {
+                                                                                                    if owner_type == "group" {
+                                                                                                        let _ = PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
+                                                                                                    } else {
+                                                                                                        let _ = PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
+                                                                                                    }
+                                                                                                },
+                                                                                                _ => {}
+                                                                                            }
+                                                                                        });
+                                                                                    }
+                                                                                },
+                                                                                Some("SYNC_DELETE_NOTIFY") => {
+                                                                                    use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                                                                                    let id = payload["id"].as_str().unwrap_or_default().to_string();
+                                                                                    let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
+                                                                                    tauri::async_runtime::spawn(async move {
+                                                                                        match data_type {
+                                                                                            SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h, &id).await; },
+                                                                                            SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h, &id).await; },
+                                                                                            SyncDataType::Topic => { let _ = DeleteExecutor::soft_delete_topic(&h, &id).await; },
+                                                                                            SyncDataType::Avatar => {
+                                                                                                let parts: Vec<&str> = id.split(':').collect();
+                                                                                                if parts.len() == 2 {
+                                                                                                    let _ = DeleteExecutor::soft_delete_avatar(&h, parts[0], parts[1]).await;
+                                                                                                }
+                                                                                            },
+                                                                                            _ => {}
+                                                                                        }
+                                                                                    });
+                                                                                },
+                                                        Some("SYNC_DIFF_RESULTS") => {
+                                                            if let Some(items) = payload["data"].as_array() {
+                                                                let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
+                                                                let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
+                                                                let items_clone: Vec<serde_json::Value> = items.clone();
+                                                                let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
+                                                                let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
+                                                                let delete_count = items_clone.iter().filter(|i| i["action"] == "DELETE").count() as u32;
+                                                                let push_delete_count = items_clone.iter().filter(|i| i["action"] == "PUSH_DELETE").count() as u32;
+                                                                let total_ops = pull_count + push_count + delete_count + push_delete_count;
+                            if total_ops > 0 {
+                                if let Ok(mut logger) = sync_logger_task.lock() {
+                                    logger.log_operation("metadata", &data_type.to_string(), "manifest", true,
+                                        Some(&format!("pull={} push={} delete={} push_delete={}", pull_count, push_count, delete_count, push_delete_count)));
+                                }
+                            }
+                                                                pending_tasks_task.fetch_add(total_ops, Ordering::SeqCst);
+
+                                                                for item in items_clone {
+                                                                    let id = item["id"].as_str().unwrap_or_default().to_string();
+                                                                    let action = item["action"].as_str().unwrap_or_default().to_string();
+
+                            let h_in = h.clone();
+                            let c_in = c.clone();
+                            let b_in = base.clone();
+                            let s_in = sem.clone();
+                            let token = settings.sync_token.clone();
+                            let data_type_clone = data_type.clone();
+                            let wq_in = wq.clone();
+                            let pending = pending_tasks_task.clone();
+                            let tx_internal_in = tx_internal.clone();
+                            let sync_logger_in = sync_logger_task.clone();
+
+                            tauri::async_runtime::spawn(async move {
+                                                                        let _permit = s_in.acquire().await;
+                                                                        let should_decrement = true;
+                                                                        if action == "PULL" {
+                                                                            match data_type_clone {
+                                                                                SyncDataType::Agent => {
+                                                                                    match PullExecutor::pull_agent(&h_in, &c_in, &b_in, &token, &id, &wq_in).await {
+                                            Err(e) => {
+                                                if let Ok(mut logger) = sync_logger_in.lock() {
+                                                    logger.log_operation("metadata", "agent", &id, false,
+                                                        Some(&format!("pull_agent error: {}", e)));
+                                                }
+                                            },
+                                            _ => {
+                                                if let Ok(mut logger) = sync_logger_in.lock() {
+                                                    logger.log_operation("metadata", "agent", &id, true, Some("pulled from server"));
+                                                }
+                                            }
+                                                                                    }
+                                                                                },
+                                                                                SyncDataType::Group => {
+                                                                                    match PullExecutor::pull_group(&h_in, &c_in, &b_in, &token, &id, &wq_in).await {
+                                            Err(e) => {
+                                                if let Ok(mut logger) = sync_logger_in.lock() {
+                                                    logger.log_operation("metadata", "group", &id, false,
+                                                        Some(&format!("pull_group error: {}", e)));
+                                                }
+                                            },
+                                            _ => {
+                                                if let Ok(mut logger) = sync_logger_in.lock() {
+                                                    logger.log_operation("metadata", "group", &id, true, Some("pulled from server"));
+                                                }
+                                            }
+                                                                                    }
+                                                                                },
+                                                                                SyncDataType::Avatar => {
+                                                                                    let parts: Vec<&str> = id.split(':').collect();
+                                                                                    if parts.len() == 2 {
+                                            match PullExecutor::pull_avatar(&h_in, &c_in, &b_in, &token, parts[0], parts[1], &wq_in).await {
+                                                Err(e) => {
+                                                    if let Ok(mut logger) = sync_logger_in.lock() {
+                                                        logger.log_operation("metadata", "avatar", &id, false,
+                                                            Some(&format!("pull_avatar error: {}", e)));
+                                                    }
+                                                },
+                                                _ => {
+                                                    if let Ok(mut logger) = sync_logger_in.lock() {
+                                                        logger.log_operation("metadata", "avatar", &id, true, Some("pulled from server"));
+                                                    }
+                                                }
+                                            }
+                                                                                    }
+                                                                                },
+                                                                                _ => {}
+                                                                            }
+                                                                        } else if action == "PUSH" {
+                                                                            match data_type_clone {
+                                                                                SyncDataType::Agent => { let _ = PushExecutor::push_agent(&h_in, &c_in, &b_in, &token, &id).await; },
+                                                                                SyncDataType::Group => { let _ = PushExecutor::push_group(&h_in, &c_in, &b_in, &token, &id).await; },
+                                                                                SyncDataType::Avatar => {
+                                                                                    let parts: Vec<&str> = id.split(':').collect();
+                                                                                    if parts.len() == 2 { let _ = PushExecutor::push_avatar(&h_in, &c_in, &b_in, &token, parts[0], parts[1]).await; }
+                                                                                },
+                                                                                _ => {}
+                                                                            }
+                                                                        } else if action == "DELETE" {
+                                                                            use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                                                                            match data_type_clone {
+                                                                                SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h_in, &id).await; },
+                                                                                SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h_in, &id).await; },
+                                                                                SyncDataType::Avatar => {
+                                                                                    let parts: Vec<&str> = id.split(':').collect();
+                                                                                    if parts.len() == 2 {
+                                                                                        let _ = DeleteExecutor::soft_delete_avatar(&h_in, parts[0], parts[1]).await;
+                                                                                    }
+                                                                                },
+                                                                                _ => {}
+                                                                            }
+                                                                        } else if action == "PUSH_DELETE" {
+                                                                            let _ = tx_internal_in.send(SyncCommand::NotifyDelete {
+                                                                                data_type: data_type_clone,
+                                                                                id: id.clone()
+                                                                            });
+                                                                        }
+
+                            if should_decrement {
+                                let remaining = pending.fetch_sub(1, Ordering::SeqCst);
+                                                                    if remaining == 1 {
+                                                                        if let Ok(logger) = sync_logger_in.lock() {
+                                                                            logger.log(LogLevel::Info, "metadata", "Phase 1 completed");
+                                                                            logger.complete_phase("metadata");
+                                                                        }
+                                                                        let _ = tx_internal_in.send(SyncCommand::Phase1);
+                                                                    }
+                            }
+                        });
+                                                                }
+                                                            }
+                                                        },
+                                                        Some("MESSAGE_MANIFEST_RESULTS") => {
+                                                            let topic_id = payload["topicId"].as_str().unwrap_or_default().to_string();
+                                                            if let Some(remote_msgs) = payload["messages"].as_array() {
+                                                                let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
+                                                                let db = h.state::<DbState>();
+
+                                                                let (to_pull_ids, to_push) = Phase3Message::compute_message_diff(&db.pool, &topic_id, remote_msgs).await.unwrap_or((Vec::new(), false));
+
+                                                                let has_pull = !to_pull_ids.is_empty();
+                                                                let has_push = to_push;
+
+                                                                if to_push {
+                                                                    let h_in = h.clone();
+                                                                    let c_in = c.clone();
+                                                                    let b_in = base.clone();
+                                                                    let token = settings.sync_token.clone();
+                                                                    let tid = topic_id.clone();
+                            let sync_state = h.state::<SyncState>();
+                            let uploaded_hashes = sync_state.uploaded_hashes.clone();
+                            let pending_msg = pending_msg_topics_task.clone();
+                            let tx_internal_msg = tx_internal.clone();
+                            let sync_logger_msg = sync_logger_task.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let _ = PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await;
+
+                                let db = h_in.state::<DbState>();
+                                if let Ok(mut tx) = db.pool.begin().await {
+                                    let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
+                                    let _ = tx.commit().await;
+                                }
+
+                                let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
+                                                                if remaining == 1 {
+                                                                    if let Ok(logger) = sync_logger_msg.lock() {
+                                                                        logger.log(LogLevel::Info, "message", "Phase 3 completed");
+                                                                        logger.complete_phase("message");
+                                                                    }
+                                                                    let _ = tx_internal_msg.send(SyncCommand::Phase3);
+                                                                }
+                            });
+                                                                 }
+
+                                                                 if !to_pull_ids.is_empty() {
+                                                                    let h_in = h.clone();
+                                                                    let c_in = c.clone();
+                                                                    let b_in = base.clone();
+                                                                    let token = settings.sync_token.clone();
+                                                                    let tid = topic_id.clone();
+                                                                    let wq_msg = wq.clone();
+                                                                    let pending_msg = pending_msg_topics_task.clone();
+                                                                    let tx_internal_msg = tx_internal.clone();
+                                                                    tauri::async_runtime::spawn(async move {
+                                                                        let _ = PullExecutor::pull_messages(&h_in, &c_in, &b_in, &token, &tid, &to_pull_ids, &wq_msg).await;
+
+                                                                        let db = h_in.state::<DbState>();
+                                                                        if let Ok(mut tx) = db.pool.begin().await {
+                                                                            let _ = HashAggregator::bubble_from_topic(&mut tx, &tid).await;
+                                                                            let _ = tx.commit().await;
+                                                                        }
+
+                                                                        let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
+                                                                        if remaining == 1 {
+                                                                            println!("[SyncService] Phase 3 completed");
+                                                                            let _ = tx_internal_msg.send(SyncCommand::Phase3);
                                                                         }
                                                                     });
                                                                 }
-                                                            },
-                                                            Some("SYNC_DELETE_NOTIFY") => {
-                                                                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                                                let id = payload["id"].as_str().unwrap_or_default().to_string();
-                                                                let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                                                tauri::async_runtime::spawn(async move {
-                                                                    match data_type {
-                                                                        SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h, &id).await; },
-                                                                        SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h, &id).await; },
-                                                                        SyncDataType::Topic => { let _ = DeleteExecutor::soft_delete_topic(&h, &id).await; },
-                                                                        SyncDataType::Avatar => {
-                                                                            let parts: Vec<&str> = id.split(':').collect();
-                                                                            if parts.len() == 2 {
-                                                                                let _ = DeleteExecutor::soft_delete_avatar(&h, parts[0], parts[1]).await;
-                                                                            }
-                                                                        },
-                                                                        _ => {}
+
+                                                                if !has_pull && !has_push {
+                                                                    let remaining = pending_msg_topics_task.fetch_sub(1, Ordering::SeqCst);
+                                                                    if remaining == 1 {
+                                                                        if let Ok(logger) = sync_logger_task.lock() {
+                                                                            logger.log(LogLevel::Info, "message", "Phase 3 completed");
+                                                                            logger.complete_phase("message");
+                                                                        }
+                                                                        let _ = tx_internal.send(SyncCommand::Phase3);
                                                                     }
-                                                                });
-                                                            },
-                                    Some("SYNC_DIFF_RESULTS") => {
-                                        if let Some(items) = payload["data"].as_array() {
-                                            let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                            let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
-                                            let items_clone: Vec<serde_json::Value> = items.clone();
-                                            let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
-                                            let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
-                                            let delete_count = items_clone.iter().filter(|i| i["action"] == "DELETE").count() as u32;
-                                            let push_delete_count = items_clone.iter().filter(|i| i["action"] == "PUSH_DELETE").count() as u32;
-                                            let total_ops = pull_count + push_count + delete_count + push_delete_count;
-		if total_ops > 0 {
-			if let Ok(mut logger) = sync_logger_task.lock() {
-				logger.log_operation("metadata", &data_type.to_string(), "manifest", true,
-					Some(&format!("pull={} push={} delete={} push_delete={}", pull_count, push_count, delete_count, push_delete_count)));
-			}
-		}
-                                            pending_tasks_task.fetch_add(total_ops, Ordering::SeqCst);
-
-                                            for item in items_clone {
-                                                let id = item["id"].as_str().unwrap_or_default().to_string();
-                                                let action = item["action"].as_str().unwrap_or_default().to_string();
-
-		let h_in = h.clone();
-		let c_in = c.clone();
-		let b_in = base.clone();
-		let s_in = sem.clone();
-		let token = settings.sync_token.clone();
-		let data_type_clone = data_type.clone();
-		let wq_in = wq.clone();
-		let pending = pending_tasks_task.clone();
-		let tx_internal_in = tx_internal.clone();
-		let sync_logger_in = sync_logger_task.clone();
-
-		tauri::async_runtime::spawn(async move {
-                                                    let _permit = s_in.acquire().await;
-                                                    let should_decrement = true;
-                                                    if action == "PULL" {
-                                                        match data_type_clone {
-                                                            SyncDataType::Agent => {
-                                                                match PullExecutor::pull_agent(&h_in, &c_in, &b_in, &token, &id, &wq_in).await {
-						Err(e) => {
-							if let Ok(mut logger) = sync_logger_in.lock() {
-								logger.log_operation("metadata", "agent", &id, false,
-									Some(&format!("pull_agent error: {}", e)));
-							}
-						},
-						_ => {
-							if let Ok(mut logger) = sync_logger_in.lock() {
-								logger.log_operation("metadata", "agent", &id, true, Some("pulled from server"));
-							}
-						}
-                                                                }
-                                                            },
-                                                            SyncDataType::Group => {
-                                                                match PullExecutor::pull_group(&h_in, &c_in, &b_in, &token, &id, &wq_in).await {
-						Err(e) => {
-							if let Ok(mut logger) = sync_logger_in.lock() {
-								logger.log_operation("metadata", "group", &id, false,
-									Some(&format!("pull_group error: {}", e)));
-							}
-						},
-						_ => {
-							if let Ok(mut logger) = sync_logger_in.lock() {
-								logger.log_operation("metadata", "group", &id, true, Some("pulled from server"));
-							}
-						}
-                                                                }
-                                                            },
-                                                            SyncDataType::Avatar => {
-                                                                let parts: Vec<&str> = id.split(':').collect();
-                                                                if parts.len() == 2 {
-						match PullExecutor::pull_avatar(&h_in, &c_in, &b_in, &token, parts[0], parts[1], &wq_in).await {
-							Err(e) => {
-								if let Ok(mut logger) = sync_logger_in.lock() {
-									logger.log_operation("metadata", "avatar", &id, false,
-										Some(&format!("pull_avatar error: {}", e)));
-								}
-							},
-							_ => {
-								if let Ok(mut logger) = sync_logger_in.lock() {
-									logger.log_operation("metadata", "avatar", &id, true, Some("pulled from server"));
-								}
-							}
-						}
-                                                                }
-                                                            },
-                                                            _ => {}
-                                                        }
-                                                    } else if action == "PUSH" {
-                                                        match data_type_clone {
-                                                            SyncDataType::Agent => { let _ = PushExecutor::push_agent(&h_in, &c_in, &b_in, &token, &id).await; },
-                                                            SyncDataType::Group => { let _ = PushExecutor::push_group(&h_in, &c_in, &b_in, &token, &id).await; },
-                                                            SyncDataType::Avatar => {
-                                                                let parts: Vec<&str> = id.split(':').collect();
-                                                                if parts.len() == 2 { let _ = PushExecutor::push_avatar(&h_in, &c_in, &b_in, &token, parts[0], parts[1]).await; }
-                                                            },
-                                                            _ => {}
-                                                        }
-                                                    } else if action == "DELETE" {
-                                                        use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                                        match data_type_clone {
-                                                            SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h_in, &id).await; },
-                                                            SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h_in, &id).await; },
-                                                            SyncDataType::Avatar => {
-                                                                let parts: Vec<&str> = id.split(':').collect();
-                                                                if parts.len() == 2 {
-                                                                    let _ = DeleteExecutor::soft_delete_avatar(&h_in, parts[0], parts[1]).await;
-                                                                }
-                                                            },
-                                                            _ => {}
-                                                        }
-                                                    } else if action == "PUSH_DELETE" {
-                                                        let _ = tx_internal_in.send(SyncCommand::NotifyDelete {
-                                                            data_type: data_type_clone,
-                                                            id: id.clone()
-                                                        });
-                                                    }
-
-		if should_decrement {
-			let remaining = pending.fetch_sub(1, Ordering::SeqCst);
-			if remaining == 1 {
-				if let Ok(mut logger) = sync_logger_in.lock() {
-					logger.log(LogLevel::INFO, "metadata", "Phase 1 completed");
-					logger.complete_phase("metadata");
-				}
-				let _ = tx_internal_in.send(SyncCommand::Phase1Completed);
-			}
-		}
-	});
-                                            }
-                                        }
-                                    },
-                                    Some("MESSAGE_MANIFEST_RESULTS") => {
-                                        let topic_id = payload["topicId"].as_str().unwrap_or_default().to_string();
-                                        if let Some(remote_msgs) = payload["messages"].as_array() {
-                                            let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
-                                            let db = h.state::<DbState>();
-
-                                            let (to_pull_ids, to_push) = Phase3Message::compute_message_diff(&db.pool, &topic_id, remote_msgs).await.unwrap_or((Vec::new(), false));
-
-                                            let has_pull = !to_pull_ids.is_empty();
-                                            let has_push = to_push;
-
-                                            if to_push {
-                                                let h_in = h.clone();
-                                                let c_in = c.clone();
-                                                let b_in = base.clone();
-                                                let token = settings.sync_token.clone();
-                                                let tid = topic_id.clone();
-		let sync_state = h.state::<SyncState>();
-		let uploaded_hashes = sync_state.uploaded_hashes.clone();
-		let pending_msg = pending_msg_topics_task.clone();
-		let tx_internal_msg = tx_internal.clone();
-		let sync_logger_msg = sync_logger_task.clone();
-		tauri::async_runtime::spawn(async move {
-			let _ = PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await;
-
-			let db = h_in.state::<DbState>();
-			if let Ok(mut tx) = db.pool.begin().await {
-				let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
-				let _ = tx.commit().await;
-			}
-
-			let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
-			if remaining == 1 {
-				if let Ok(mut logger) = sync_logger_msg.lock() {
-					logger.log(LogLevel::INFO, "message", "Phase 3 completed");
-					logger.complete_phase("message");
-				}
-				let _ = tx_internal_msg.send(SyncCommand::Phase3Completed);
-			}
-		});
-                                             }
-
-                                             if !to_pull_ids.is_empty() {
-                                                let h_in = h.clone();
-                                                let c_in = c.clone();
-                                                let b_in = base.clone();
-                                                let token = settings.sync_token.clone();
-                                                let tid = topic_id.clone();
-                                                let wq_msg = wq.clone();
-                                                let pending_msg = pending_msg_topics_task.clone();
-                                                let tx_internal_msg = tx_internal.clone();
-                                                tauri::async_runtime::spawn(async move {
-                                                    let _ = PullExecutor::pull_messages(&h_in, &c_in, &b_in, &token, &tid, &to_pull_ids, &wq_msg).await;
-
-                                                    let db = h_in.state::<DbState>();
-                                                    if let Ok(mut tx) = db.pool.begin().await {
-                                                        let _ = HashAggregator::bubble_from_topic(&mut tx, &tid).await;
-                                                        let _ = tx.commit().await;
-                                                    }
-
-                                                    let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
-                                                    if remaining == 1 {
-                                                        println!("[SyncService] Phase 3 completed");
-                                                        let _ = tx_internal_msg.send(SyncCommand::Phase3Completed);
-                                                    }
-                                                });
-                                            }
-
-                                            if !has_pull && !has_push {
-                                                let remaining = pending_msg_topics_task.fetch_sub(1, Ordering::SeqCst);
-                                                if remaining == 1 {
-                                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                                        logger.log(LogLevel::INFO, "message", "Phase 3 completed");
-                                                        logger.complete_phase("message");
-                                                    }
-                                                    let _ = tx_internal.send(SyncCommand::Phase3Completed);
-                                                }
-                                            }
-                                        }
-                                    },
-                        Some("PHASE_MANIFESTS") => {
-                            if let Some(manifests) = payload["manifests"].as_array() {
-                                for manifest in manifests {
-                                    let data_type_str = manifest["dataType"].as_str().unwrap_or_default();
-                                    let remote_items = manifest["items"].as_array().cloned().unwrap_or_default();
-
-                                    if data_type_str == "topic" {
-                                        let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
-                                        let db = h.state::<DbState>();
-
-                                        // 使用 build_topic_manifest 生成本地清单（包含正确的哈希计算）
-                                        let local_manifest = ManifestBuilder::build_topic_manifest(&db.pool).await.unwrap_or_else(|_| SyncManifest { data_type: SyncDataType::Topic, items: Vec::new() });
-                                        let local_items = local_manifest.items;
-
-                                        // 建立本地清单的 Map
-                                        let local_map: std::collections::HashMap<String, (String, Option<String>, i64)> = local_items
-                                            .into_iter()
-                                            .filter(|i| i.deleted_at.is_none())
-                                            .map(|i| (i.id.clone(), (i.owner_type.unwrap_or_default(), Some(i.hash), i.ts)))
-                                            .collect();
-
-                                        let mut pull_agent_topics = Vec::new();
-                                        let mut pull_group_topics = Vec::new();
-                                        let mut push_agent_topics = Vec::new();
-                                        let mut push_group_topics = Vec::new();
-
-                                        for remote in &remote_items {
-                                            let id = remote["id"].as_str().unwrap_or_default().to_string();
-                                            let remote_owner_type = remote["ownerType"].as_str().unwrap_or("agent");
-                                            let remote_hash = remote["hash"].as_str().map(|s| s.to_string());
-                                            let remote_ts = remote["ts"].as_i64().unwrap_or(0);
-
-                                            if let Some((local_owner_type, local_hash, local_ts)) = local_map.get(&id) {
-                                                if let Some(ref lh) = local_hash {
-                                                    if let Some(ref rh) = remote_hash {
-                                                        if lh != rh {
-                                                            if remote_ts > *local_ts {
-                                                                if remote_owner_type == "group" {
-                                                                    pull_group_topics.push(id);
-                                                                } else {
-                                                                    pull_agent_topics.push(id);
-                                                                }
-                                                            } else {
-                                                                if local_owner_type == "group" {
-                                                                    push_group_topics.push(id);
-                                                                } else {
-                                                                    push_agent_topics.push(id);
                                                                 }
                                                             }
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                if remote_owner_type == "group" {
-                                                    pull_group_topics.push(id);
-                                                } else {
-                                                    pull_agent_topics.push(id);
-                                                }
-                                            }
-                                        }
+                                                        },
+                                            Some("PHASE_MANIFESTS") => {
+                                                if let Some(manifests) = payload["manifests"].as_array() {
+                                                    for manifest in manifests {
+                                                        let data_type_str = manifest["dataType"].as_str().unwrap_or_default();
+                                                        let remote_items = manifest["items"].as_array().cloned().unwrap_or_default();
 
-                                        // 本地有但服务端没有的，需要 push
-                                        for (id, (owner_type, _, _)) in local_map.iter() {
-                                            if !remote_items.iter().any(|r| r["id"].as_str() == Some(id.as_str())) {
-                                                if owner_type == "group" {
-                                                    push_group_topics.push(id.clone());
-                                                } else {
-                                                    push_agent_topics.push(id.clone());
-                                                }
-                                            }
-                                        }
+                                                        if data_type_str == "topic" {
+                                                            let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
+                                                            let db = h.state::<DbState>();
 
-                                        let total_pull = (pull_agent_topics.len() + pull_group_topics.len()) as u32;
-                                        let total_push = (push_agent_topics.len() + push_group_topics.len()) as u32;
-                                        if total_pull > 0 || total_push > 0 {
-                                            println!("[SyncService] Topic diff: pull={} push={}", total_pull, total_push);
-                                        }
-                                        let is_empty = total_pull == 0;
-                                        pending_tasks_task.fetch_add(total_pull, Ordering::SeqCst);
+                                                            // 使用 build_topic_manifest 生成本地清单（包含正确的哈希计算）
+                                                            let local_manifest = ManifestBuilder::build_topic_manifest(&db.pool).await.unwrap_or_else(|_| SyncManifest { data_type: SyncDataType::Topic, items: Vec::new() });
+                                                            let local_items = local_manifest.items;
 
-                                                                            for topic_id in pull_agent_topics {
-                                                                                let h_in = h.clone();
-	let c_in = c.clone();
-	let b_in = base.clone();
-	let token = settings.sync_token.clone();
-	let wq_in = wq.clone();
-	let pending = pending_tasks_task.clone();
-	let tx_internal_in = tx_internal.clone();
-	let sync_logger_topic = sync_logger_task.clone();
+                                                            // 建立本地清单的 Map
+                                                            let local_map: std::collections::HashMap<String, (String, Option<String>, i64)> = local_items
+                                                                .into_iter()
+                                                                .filter(|i| i.deleted_at.is_none())
+                                                                .map(|i| (i.id.clone(), (i.owner_type.unwrap_or_default(), Some(i.hash), i.ts)))
+                                                                .collect();
 
-	tauri::async_runtime::spawn(async move {
-		let _ = PullExecutor::pull_agent_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
+                                                            let mut pull_agent_topics = Vec::new();
+                                                            let mut pull_group_topics = Vec::new();
+                                                            let mut push_agent_topics = Vec::new();
+                                                            let mut push_group_topics = Vec::new();
 
-		let remaining = pending.fetch_sub(1, Ordering::SeqCst);
-		if remaining == 1 {
-			if let Ok(mut logger) = sync_logger_topic.lock() {
-				logger.log(LogLevel::INFO, "topic", "Phase 2 completed");
-				logger.complete_phase("topic");
-			}
-			let _ = tx_internal_in.send(SyncCommand::Phase2Completed);
-		}
-	});
-                                    }
+                                                            for remote in &remote_items {
+                                                                let id = remote["id"].as_str().unwrap_or_default().to_string();
+                                                                let remote_owner_type = remote["ownerType"].as_str().unwrap_or("agent");
+                                                                let remote_hash = remote["hash"].as_str().map(|s| s.to_string());
+                                                                let remote_ts = remote["ts"].as_i64().unwrap_or(0);
 
-	for topic_id in pull_group_topics {
-		let h_in = h.clone();
-		let c_in = c.clone();
-		let b_in = base.clone();
-		let token = settings.sync_token.clone();
-		let wq_in = wq.clone();
-		let pending = pending_tasks_task.clone();
-		let tx_internal_in = tx_internal.clone();
-		let sync_logger_topic = sync_logger_task.clone();
-
-		tauri::async_runtime::spawn(async move {
-			let _ = PullExecutor::pull_group_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
-
-			let remaining = pending.fetch_sub(1, Ordering::SeqCst);
-			if remaining == 1 {
-				if let Ok(mut logger) = sync_logger_topic.lock() {
-					logger.log(LogLevel::INFO, "topic", "Phase 2 completed");
-					logger.complete_phase("topic");
-				}
-				let _ = tx_internal_in.send(SyncCommand::Phase2Completed);
-			}
-		});
-	}
-
-                                                                            for topic_id in push_agent_topics {
-                                                                                let h_in = h.clone();
-                                                                                let c_in = c.clone();
-                                                                                let b_in = base.clone();
-                                                                                let token = settings.sync_token.clone();
-
-                                                                                tauri::async_runtime::spawn(async move {
-                                                                                    let _ = PushExecutor::push_agent_topic(&h_in, &c_in, &b_in, &token, &topic_id).await;
-                                                                                });
+                                                                if let Some((local_owner_type, local_hash, local_ts)) = local_map.get(&id) {
+                                                                    if let Some(ref lh) = local_hash {
+                                                                        if let Some(ref rh) = remote_hash {
+                                                                            if lh != rh {
+                                                                                if remote_ts > *local_ts {
+                                                                                    if remote_owner_type == "group" {
+                                                                                        pull_group_topics.push(id);
+                                                                                    } else {
+                                                                                        pull_agent_topics.push(id);
+                                                                                    }
+                                                                                 } else if local_owner_type == "group" {
+                                                                                     push_group_topics.push(id);
+                                                                                 } else {
+                                                                                     push_agent_topics.push(id);
+                                                                                 }
                                                                             }
-
-                                                                            for topic_id in push_group_topics {
-                                                                                let h_in = h.clone();
-                                                                                let c_in = c.clone();
-                                                                                let b_in = base.clone();
-                                                                                let token = settings.sync_token.clone();
-
-                                                                                tauri::async_runtime::spawn(async move {
-                                                                                    let _ = PushExecutor::push_group_topic(&h_in, &c_in, &b_in, &token, &topic_id).await;
-                                                                                });
-                                                                            }
-
-                                    if is_empty {
-                                        if let Ok(mut logger) = sync_logger_task.lock() {
-                                            logger.log(LogLevel::INFO, "topic", "Phase 2 completed (no topics to sync)");
-                                            logger.complete_phase("topic");
-                                        }
-                                        let _ = tx_internal.send(SyncCommand::Phase2Completed);
-                                    }
                                                                         }
                                                                     }
+                                                                 } else if remote_owner_type == "group" {
+                                                                     pull_group_topics.push(id);
+                                                                 } else {
+                                                                     pull_agent_topics.push(id);
+                                                                 }
+                                                            }
+
+                                                            // 本地有但服务端没有的，需要 push
+                                                            for (id, (owner_type, _, _)) in local_map.iter() {
+                                                                if !remote_items.iter().any(|r| r["id"].as_str() == Some(id.as_str())) {
+                                                                    if owner_type == "group" {
+                                                                        push_group_topics.push(id.clone());
+                                                                    } else {
+                                                                        push_agent_topics.push(id.clone());
+                                                                    }
                                                                 }
-                                                            },
-                                                            Some("PHASE_COMPLETED") => {
-                                                                println!("[SyncService] Sync completed");
-                                                            },
-                                                            _ => {}
+                                                            }
+
+                                                            let total_pull = (pull_agent_topics.len() + pull_group_topics.len()) as u32;
+                                                            let total_push = (push_agent_topics.len() + push_group_topics.len()) as u32;
+                                                            if total_pull > 0 || total_push > 0 {
+                                                                println!("[SyncService] Topic diff: pull={} push={}", total_pull, total_push);
+                                                            }
+                                                            let is_empty = total_pull == 0;
+                                                            pending_tasks_task.fetch_add(total_pull, Ordering::SeqCst);
+
+                                                                                                for topic_id in pull_agent_topics {
+                                                                                                    let h_in = h.clone();
+                        let c_in = c.clone();
+                        let b_in = base.clone();
+                        let token = settings.sync_token.clone();
+                        let wq_in = wq.clone();
+                        let pending = pending_tasks_task.clone();
+                        let tx_internal_in = tx_internal.clone();
+                        let sync_logger_topic = sync_logger_task.clone();
+
+                        tauri::async_runtime::spawn(async move {
+                            let _ = PullExecutor::pull_agent_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
+
+                            let remaining = pending.fetch_sub(1, Ordering::SeqCst);
+                                if remaining == 1 {
+                                                                if let Ok(logger) = sync_logger_topic.lock() {
+                                                                    logger.log(LogLevel::Info, "topic", "Phase 2 completed");
+                                                                    logger.complete_phase("topic");
+                                                                }
+                                                                let _ = tx_internal_in.send(SyncCommand::Phase2);
+                                                            }
+                        });
                                                         }
-                                                    }
-                                                },
-                                                else => break,
-                                            }
+
+                        for topic_id in pull_group_topics {
+                            let h_in = h.clone();
+                            let c_in = c.clone();
+                            let b_in = base.clone();
+                            let token = settings.sync_token.clone();
+                            let wq_in = wq.clone();
+                            let pending = pending_tasks_task.clone();
+                            let tx_internal_in = tx_internal.clone();
+                            let sync_logger_topic = sync_logger_task.clone();
+
+                            tauri::async_runtime::spawn(async move {
+                                let _ = PullExecutor::pull_group_topic(&h_in, &c_in, &b_in, &token, &topic_id, &wq_in).await;
+
+                                let remaining = pending.fetch_sub(1, Ordering::SeqCst);
+                            if remaining == 1 {
+                                                                if let Ok(logger) = sync_logger_topic.lock() {
+                                                                    logger.log(LogLevel::Info, "topic", "Phase 2 completed");
+                                                                    logger.complete_phase("topic");
+                                                                }
+                                                                let _ = tx_internal_in.send(SyncCommand::Phase2);
+                                }
+                            });
+                        }
+
+                                                                                                for topic_id in push_agent_topics {
+                                                                                                    let h_in = h.clone();
+                                                                                                    let c_in = c.clone();
+                                                                                                    let b_in = base.clone();
+                                                                                                    let token = settings.sync_token.clone();
+
+                                                                                                    tauri::async_runtime::spawn(async move {
+                                                                                                        let _ = PushExecutor::push_agent_topic(&h_in, &c_in, &b_in, &token, &topic_id).await;
+                                                                                                    });
+                                                                                                }
+
+                                                                                                for topic_id in push_group_topics {
+                                                                                                    let h_in = h.clone();
+                                                                                                    let c_in = c.clone();
+                                                                                                    let b_in = base.clone();
+                                                                                                    let token = settings.sync_token.clone();
+
+                                                                                                    tauri::async_runtime::spawn(async move {
+                                                                                                        let _ = PushExecutor::push_group_topic(&h_in, &c_in, &b_in, &token, &topic_id).await;
+                                                                                                    });
+                                                                                                }
+
+                                                        if is_empty {
+                                                            if let Ok(logger) = sync_logger_task.lock() {
+                                                                logger.log(LogLevel::Info, "topic", "Phase 2 completed (no topics to sync)");
+                                                                logger.complete_phase("topic");
+                                                            }
+                                                            let _ = tx_internal.send(SyncCommand::Phase2);
+                                                        }
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                },
+                                                                                Some("PHASE_COMPLETED") => {
+                                                                                    println!("[SyncService] Sync completed");
+                                                                                },
+                                                                                _ => {}
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    else => break,
+                                                                }
                     }
                 }
                 Err(_) => {
@@ -792,19 +799,19 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
         });
     }
 
-	SyncState {
-		ws_sender: tx,
-		connection_status,
-		op_tracker,
-		metrics,
-		network_semaphore,
-		pipeline,
-		uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
-		write_queue,
-		pending_tasks,
-		pending_message_topics: Arc::new(AtomicU32::new(0)),
-		sync_logger,
-	}
+    SyncState {
+        ws_sender: tx,
+        connection_status,
+        op_tracker,
+        metrics,
+        network_semaphore,
+        pipeline,
+        uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
+        write_queue,
+        pending_tasks,
+        pending_message_topics: Arc::new(AtomicU32::new(0)),
+        sync_logger,
+    }
 }
 
 #[tauri::command]

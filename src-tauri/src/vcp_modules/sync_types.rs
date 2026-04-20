@@ -5,7 +5,6 @@ use std::fmt;
 /// =================================================================
 /// vcp_modules/sync_types.rs - 分布式 LWW+Hash 同步协议的核心数据结构
 /// =================================================================
-
 /// 计算 JSON 的确定性 SHA-256 Hash
 pub fn compute_deterministic_hash<T: Serialize>(data: &T) -> String {
     if let Ok(val) = serde_json::to_value(data) {

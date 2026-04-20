@@ -57,6 +57,9 @@ pub struct ChatMessage {
 
     #[serde(default)]
     pub attachments: Option<Vec<Attachment>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<serde_json::Value>,
 }
 
 // --- 历史记录存取逻辑 ---

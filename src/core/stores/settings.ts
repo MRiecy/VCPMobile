@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useNotificationStore } from "./notification";
 
 export interface AppSettings {
   userName: string;
@@ -23,6 +24,21 @@ export const useSettingsStore = defineStore("settings", () => {
   const settings = ref<AppSettings | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  const notificationStore = useNotificationStore();
+
+  const reconnectVcpLog = async () => {
+    if (!settings.value?.vcpLogUrl || !settings.value?.vcpLogKey) {
+      return;
+    }
+    try {
+      await invoke("init_vcp_log_connection", {
+        url: String(settings.value.vcpLogUrl),
+        key: String(settings.value.vcpLogKey),
+      });
+    } catch (e) {
+      console.error("[SettingsStore] Failed to init VCPLog:", e);
+    }
+  };
 
   const fetchSettings = async () => {
     loading.value = true;
@@ -45,6 +61,13 @@ export const useSettingsStore = defineStore("settings", () => {
     try {
       await invoke("write_settings", { settings: newSettings });
       settings.value = newSettings;
+
+      notificationStore.addNotification({
+        type: "success",
+        title: "设置更新成功",
+        message: "全局配置已持久化",
+        toastOnly: true,
+      });
     } catch (e: any) {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to save settings:", e);
@@ -60,6 +83,13 @@ export const useSettingsStore = defineStore("settings", () => {
     try {
       const updated = await invoke<AppSettings>("update_settings", { updates });
       settings.value = updated;
+
+      notificationStore.addNotification({
+        type: "success",
+        title: "配置同步成功",
+        message: "变更已生效",
+        toastOnly: true,
+      });
     } catch (e: any) {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to update settings:", e);
@@ -76,5 +106,6 @@ export const useSettingsStore = defineStore("settings", () => {
     fetchSettings,
     saveSettings,
     updateSettings,
+    reconnectVcpLog,
   };
 });

@@ -11,6 +11,7 @@ export interface VcpNotification {
   isPreformatted?: boolean;
   actions?: { label: string; value: boolean; color: string }[];
   silent?: boolean;
+  toastOnly?: boolean; // 仅作为 Toast 悬浮显示，不进入通知中心历史
   read?: boolean;
   rawPayload?: any; // 用于保存原始数据，方便处理 action
 }
@@ -52,11 +53,12 @@ export const useNotificationStore = defineStore('notification', () => {
       ...payload
     } as VcpNotification;
 
-    // 1. 入历史列表（置顶）
-    historyList.value.unshift(notification);
-    if (historyList.value.length > 100) historyList.value.pop();
-
-    unreadCount.value++;
+    // 1. 如果不是纯 Toast，则入历史列表（置顶）并增加未读数
+    if (!payload.toastOnly) {
+      historyList.value.unshift(notification);
+      if (historyList.value.length > 100) historyList.value.pop();
+      unreadCount.value++;
+    }
 
     // 2. 推入活动气泡 (抽屉打开时抑制 Toast)
     if (!isDrawerOpen.value) {

@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -13,6 +13,14 @@ use url::Url;
 lazy_static::lazy_static! {
     static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
+    // 关键修复：保持 Sender 和一个 Receiver 都在生命周期内，防止通道因无接收者而被视为关闭
+    static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
+    static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("disconnected".to_string()));
+}
+
+#[tauri::command]
+pub async fn get_vcp_log_status() -> Result<String, String> {
+    Ok(CURRENT_LOG_STATUS.read().await.clone())
 }
 
 #[tauri::command]
@@ -28,17 +36,7 @@ pub async fn send_vcp_log_message(payload: Value) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub async fn init_vcp_log_connection(
-    app: AppHandle,
-    url: String,
-    key: String,
-) -> Result<(), String> {
-    if LOG_CONNECTION_ACTIVE.swap(true, Ordering::SeqCst) {
-        println!("[VCPLog] Connection thread already active, ignoring request.");
-        return Ok(());
-    }
-
+fn parse_log_url(url: &str, key: &str) -> Result<Url, String> {
     let mut base_url = url.trim_end_matches('/').to_string();
     if !base_url.contains("/VCPlog") {
         base_url.push_str("/VCPlog");
@@ -53,23 +51,48 @@ pub async fn init_vcp_log_connection(
         format!("{}VCP_Key={}", base_url, key)
     };
 
-    let ws_url = match Url::parse(&url_with_key) {
-        Ok(u) => u,
-        Err(e) => {
-            LOG_CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
-            return Err(format!("Invalid URL: {}", e));
-        }
-    };
+    Url::parse(&url_with_key).map_err(|e| format!("Invalid URL: {}", e))
+}
 
+#[tauri::command]
+pub async fn init_vcp_log_connection(
+    app: AppHandle,
+    url: String,
+    key: String,
+) -> Result<(), String> {
+    init_vcp_log_connection_internal(app, url, key).await
+}
+
+pub async fn init_vcp_log_connection_internal<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    url: String,
+    key: String,
+) -> Result<(), String> {
+    // 如果 URL 或 Key 为空，发送 None 以停止现有连接并进入静默等待
+    if url.trim().is_empty() || key.trim().is_empty() {
+        let _ = WS_URL_CHANNEL.0.send(None);
+        return Ok(());
+    }
+
+    let ws_url = parse_log_url(&url, &key)?;
+
+    // Always send the new URL to the watch channel
+    let _ = WS_URL_CHANNEL.0.send(Some(ws_url.clone()));
+
+    if LOG_CONNECTION_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let h = app.clone();
     tauri::async_runtime::spawn(async move {
-        start_vcp_log_listener(app, ws_url).await;
+        start_vcp_log_listener(h).await;
     });
 
     Ok(())
 }
 
-async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
-    println!("[VCPLog] Starting background listener for {}", ws_url);
+async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
+    let mut url_rx = WS_URL_CHANNEL.0.subscribe();
 
     // 创建 mpsc 通道用于回传消息
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
@@ -81,7 +104,31 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
     }
 
     loop {
-        println!("[VCPLog] Attempting to connect...");
+        // 获取当前 URL
+        let ws_url = {
+            let val = url_rx.borrow().clone();
+            match val {
+                Some(u) => u,
+                None => {
+                    if url_rx.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        };
+
+        let masked_url = if ws_url.as_str().contains("VCP_Key=") {
+            let parts: Vec<&str> = ws_url.as_str().split("VCP_Key=").collect();
+            format!("{}VCP_Key=********", parts[0])
+        } else {
+            ws_url.to_string()
+        };
+        log::info!("[VCPLog] Attempting to connect to {}...", masked_url);
+
+        {
+            *CURRENT_LOG_STATUS.write().await = "connecting".to_string();
+        }
 
         let _ = app_handle.emit(
             "vcp-system-event",
@@ -96,7 +143,10 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
         let mut request = match ws_url.as_str().into_client_request() {
             Ok(req) => req,
             Err(e) => {
-                eprintln!(
+                {
+                    *CURRENT_LOG_STATUS.write().await = "error".to_string();
+                }
+                log::error!(
                     "[VCPLog] Failed to build request: {}. Retrying in 5 seconds...",
                     e
                 );
@@ -109,7 +159,11 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                         "source": "VCPLog"
                     }),
                 );
-                sleep(Duration::from_secs(5)).await;
+
+                tokio::select! {
+                    _ = url_rx.changed() => {},
+                    _ = sleep(Duration::from_secs(5)) => {},
+                }
                 continue;
             }
         };
@@ -143,12 +197,13 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".parse().unwrap()
         );
 
-        println!("[VCPLog] Request headers: {:?}", request.headers());
-
         match tokio::time::timeout(Duration::from_secs(10), connect_async(request)).await {
             Ok(connection_result) => match connection_result {
                 Ok((ws_stream, _)) => {
-                    println!("[VCPLog] Connected successfully.");
+                    {
+                        *CURRENT_LOG_STATUS.write().await = "connected".to_string();
+                    }
+                    log::info!("[VCPLog] Connected successfully to {}", masked_url);
 
                     let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -164,6 +219,11 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
 
                     loop {
                         tokio::select! {
+                            // 监听 URL 变更
+                            _ = url_rx.changed() => {
+                                log::info!("[VCPLog] URL changed, closing current connection.");
+                                break;
+                            }
                             // 处理接收到的消息
                             msg_result = ws_read.next() => {
                                 match msg_result {
@@ -173,7 +233,7 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                                             match serde_json::from_str::<Value>(text) {
                                                 Ok(payload) => {
                                                     if let Err(e) = app_handle.emit("vcp-system-event", payload) {
-                                                        eprintln!("[VCPLog] Failed to emit event to frontend: {}", e);
+                                                        log::error!("[VCPLog] Failed to emit event to frontend: {}", e);
                                                     }
                                                 }
                                                 Err(_) => {
@@ -186,11 +246,11 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                                         }
                                     }
                                     Some(Err(e)) => {
-                                        eprintln!("[VCPLog] WebSocket error during read: {}", e);
+                                        log::error!("[VCPLog] WebSocket error during read: {}", e);
                                         break;
                                     }
                                     None => {
-                                        println!("[VCPLog] Connection closed by server.");
+                                        log::warn!("[VCPLog] Connection closed by server.");
                                         break;
                                     }
                                 }
@@ -200,7 +260,7 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                                 if let Some(payload) = payload_opt {
                                     if let Ok(text) = serde_json::to_string(&payload) {
                                         if let Err(e) = ws_write.send(Message::Text(text.into())).await {
-                                            eprintln!("[VCPLog] Failed to send message: {}", e);
+                                            log::error!("[VCPLog] Failed to send message: {}", e);
                                             break;
                                         }
                                     }
@@ -209,7 +269,10 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                         }
                     }
 
-                    println!("[VCPLog] Disconnected.");
+                    log::info!("[VCPLog] Disconnected from {}.", ws_url);
+                    {
+                        *CURRENT_LOG_STATUS.write().await = "disconnected".to_string();
+                    }
                     let _ = app_handle.emit(
                         "vcp-system-event",
                         serde_json::json!({
@@ -221,7 +284,10 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                     );
                 }
                 Err(e) => {
-                    eprintln!("[VCPLog] Detailed Connection Error: {:?}. Status: {}", e, e);
+                    {
+                        *CURRENT_LOG_STATUS.write().await = "error".to_string();
+                    }
+                    log::error!("[VCPLog] Connection Error: {}. Status: {}", e, e);
                     let _ = app_handle.emit(
                         "vcp-system-event",
                         serde_json::json!({
@@ -234,7 +300,10 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
                 }
             },
             Err(_) => {
-                eprintln!(
+                {
+                    *CURRENT_LOG_STATUS.write().await = "error".to_string();
+                }
+                log::error!(
                     "[VCPLog] Connection timed out after 10 seconds. Retrying in 5 seconds..."
                 );
                 let _ = app_handle.emit(
@@ -249,6 +318,9 @@ async fn start_vcp_log_listener(app_handle: AppHandle, ws_url: Url) {
             }
         }
 
-        sleep(Duration::from_secs(5)).await;
+        tokio::select! {
+            _ = url_rx.changed() => log::info!("[VCPLog] URL changed during retry wait."),
+            _ = sleep(Duration::from_secs(5)) => {},
+        }
     }
 }

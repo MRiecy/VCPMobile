@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue';
+import { useEmoticonFixer } from '../../../core/composables/useEmoticonFixer';
 
 const props = defineProps<{
   content: string;
@@ -9,6 +10,8 @@ const props = defineProps<{
 const isPreviewing = ref(false);
 const iframeHeight = ref('100px');
 const iframeRef = ref<HTMLIFrameElement | null>(null);
+
+const { processEmoticonsInContainer } = useEmoticonFixer();
 
 // 唯一 ID 用于 iframe 通讯
 const frameId = `vcp-frame-${Math.random().toString(36).substr(2, 9)}`;
@@ -28,8 +31,13 @@ onMounted(() => {
 
 const iframeSrcdoc = ref('');
 
-watch([() => props.content, isPreviewing], () => {
+watch([() => props.content, isPreviewing], async () => {
   if (isPreviewing.value) {
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = props.content;
+    await processEmoticonsInContainer(tempDiv);
+    const processedContent = tempDiv.innerHTML;
+
     // 构造沙箱 HTML 环境
     iframeSrcdoc.value = `
       <!DOCTYPE html>
@@ -70,7 +78,7 @@ watch([() => props.content, isPreviewing], () => {
           </style>
       </head>
       <body>
-          <div id="vcp-wrapper">${props.content}</div>
+          <div id="vcp-wrapper">${processedContent}</div>
           <script>
               function updateHeight() {
                   const wrapper = document.getElementById('vcp-wrapper');

@@ -171,6 +171,12 @@ export const useTopicStore = defineStore("topic", () => {
       };
 
       topics.value.unshift(topicWithState);
+      notificationStore.addNotification({
+        type: "success",
+        title: "话题创建成功",
+        message: `已开启新话题: ${name}`,
+        toastOnly: true,
+      });
       return topicWithState;
     } catch (e: any) {
       console.error("[TopicStore] Failed to create topic:", e);
@@ -202,6 +208,13 @@ export const useTopicStore = defineStore("topic", () => {
       await invoke("delete_topic", { ownerId, ownerType, topicId });
 
       topics.value = topics.value.filter((t) => t.id !== topicId);
+
+      notificationStore.addNotification({
+        type: "success",
+        title: "话题删除成功",
+        message: "话题及其记录已被移除",
+        toastOnly: true,
+      });
 
       // 如果删除的是当前选中的话题，通知 chatManager
       if (chatManager.currentTopicId === topicId) {

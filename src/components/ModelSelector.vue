@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { useModelStore, type ModelInfo } from '../../core/stores/modelStore';
+import { useModelStore, type ModelInfo } from '../core/stores/modelStore';
 import {
   Search,
   Star,

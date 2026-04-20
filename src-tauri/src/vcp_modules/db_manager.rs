@@ -49,7 +49,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS avatars (
             owner_type TEXT NOT NULL,     -- 'agent', 'group', 'user', 'system'
-            owner_id TEXT NOT NULL,       -- 对应实体的 UUID 或 'default_user'
+            owner_id TEXT NOT NULL,       -- 对应实体的 UUID 或 'user_avatar'
             avatar_hash TEXT NOT NULL,    -- SHA-256 摘要，用于 WS 快速 Diff
             mime_type TEXT NOT NULL,      -- e.g., 'image/webp', 'image/png'
             image_data BLOB NOT NULL,     -- 物理二进制数据
@@ -151,7 +151,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             agent_id TEXT,
             content TEXT NOT NULL,
             timestamp BIGINT NOT NULL,
-            is_thinking INTEGER,
+            is_thinking INTEGER NOT NULL DEFAULT 0,
             is_group_message INTEGER NOT NULL DEFAULT 0,
             group_id TEXT,
             finish_reason TEXT,

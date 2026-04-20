@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, reactive } from 'vue';
 import { syncService, type SyncTreeNode } from '../../core/utils/syncService';
-import SyncFileTree from './SyncFileTree.vue';
+import SyncFileTree from '../../components/SyncFileTree.vue';
 
 const props = withDefaults(defineProps<{
   isOpen?: boolean;

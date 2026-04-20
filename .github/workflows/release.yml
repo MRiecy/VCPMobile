@@ -117,3 +117,4 @@ jobs:
           append_body: true
           files: |
             ${{ steps.artifacts.outputs.artifact_dir }}/*.apk
+

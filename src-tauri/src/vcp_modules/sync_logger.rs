@@ -2,27 +2,30 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[allow(dead_code)]
 pub enum LogLevel {
-    DEBUG = 0,
-    INFO = 1,
-    WARN = 2,
-    ERROR = 3,
+    Debug = 0,
+    Info = 1,
+    Warn = 2,
+    Error = 3,
 }
 
 impl LogLevel {
+    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s.to_uppercase().as_str() {
-            "DEBUG" => LogLevel::DEBUG,
-            "WARN" | "WARNING" => LogLevel::WARN,
-            "ERROR" => LogLevel::ERROR,
-            _ => LogLevel::INFO,
+            "DEBUG" => LogLevel::Debug,
+            "WARN" | "WARNING" => LogLevel::Warn,
+            "ERROR" => LogLevel::Error,
+            _ => LogLevel::Info,
         }
     }
 }
 
+#[allow(dead_code)]
 pub struct SyncPhaseMetrics {
     pub phase_name: String,
     pub started_at: Instant,
@@ -31,6 +34,7 @@ pub struct SyncPhaseMetrics {
     pub error_count: AtomicU32,
 }
 
+#[allow(dead_code)]
 pub struct PhaseSummary {
     pub phase: String,
     pub expected: u32,
@@ -40,6 +44,7 @@ pub struct PhaseSummary {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ErrorDetail {
     pub id: String,
     pub error: String,
@@ -68,10 +73,11 @@ impl ErrorAggregator {
 
         self.errors
             .entry(phase.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(detail);
     }
 
+    #[allow(dead_code)]
     pub fn get_summary(&self, phase: &str) -> Option<ErrorSummary> {
         let errors = self.errors.get(phase)?;
 
@@ -89,6 +95,7 @@ impl ErrorAggregator {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ErrorSummary {
     pub phase: String,
     pub total: usize,
@@ -131,10 +138,10 @@ impl SyncLogger {
         }
 
         let level_str = match level {
-            LogLevel::DEBUG => "DEBUG",
-            LogLevel::INFO => "INFO",
-            LogLevel::WARN => "WARN",
-            LogLevel::ERROR => "ERROR",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "ERROR",
         };
 
         println!(
@@ -155,7 +162,7 @@ impl SyncLogger {
         self.phases.insert(phase.to_string(), metrics);
 
         self.log(
-            LogLevel::INFO,
+            LogLevel::Info,
             phase,
             &format!("=== Phase START: expected={} ===", expected),
         );
@@ -178,9 +185,9 @@ impl SyncLogger {
         }
 
         let level = if success {
-            LogLevel::DEBUG
+            LogLevel::Debug
         } else {
-            LogLevel::ERROR
+            LogLevel::Error
         };
         let status = if success { "success" } else { "error" };
         let msg = match detail {
@@ -207,7 +214,7 @@ impl SyncLogger {
         let errors = metrics.error_count.load(Ordering::SeqCst);
 
         self.log(
-            LogLevel::INFO,
+            LogLevel::Info,
             phase,
             &format!(
                 "=== Phase COMPLETE: expected={}, success={}, errors={}, duration={}ms ===",
@@ -224,10 +231,12 @@ impl SyncLogger {
         })
     }
 
+    #[allow(dead_code)]
     pub fn get_error_summary(&self, phase: &str) -> Option<ErrorSummary> {
         self.error_aggregator.get_summary(phase)
     }
 
+    #[allow(dead_code)]
     pub fn get_session_id(&self) -> &str {
         &self.session_id
     }
@@ -236,6 +245,7 @@ impl SyncLogger {
         println!("[SyncService] === Session {} ended ===", self.session_id);
     }
 
+    #[allow(dead_code)]
     pub fn emit_to_vcp_log<R: tauri::Runtime>(
         &self,
         app_handle: &AppHandle<R>,
@@ -244,7 +254,7 @@ impl SyncLogger {
         message: &str,
     ) {
         // Only emit ERROR level to vcp-log by default (per user preference)
-        if level != LogLevel::ERROR {
+        if level != LogLevel::Error {
             return;
         }
 
@@ -252,10 +262,10 @@ impl SyncLogger {
             "vcp-log",
             serde_json::json!({
                 "level": match level {
-                    LogLevel::DEBUG => "debug",
-                    LogLevel::INFO => "info",
-                    LogLevel::WARN => "warn",
-                    LogLevel::ERROR => "error",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
                 },
                 "category": "sync",
                 "phase": phase,
@@ -267,6 +277,7 @@ impl SyncLogger {
     }
 
     // Convenience method for logging with vcp-log emission
+    #[allow(dead_code)]
     pub fn log_with_vcp<R: tauri::Runtime>(
         &mut self,
         app_handle: &AppHandle<R>,
@@ -294,21 +305,21 @@ mod tests {
 
     #[test]
     fn test_log_level_filtering() {
-        let logger = SyncLogger::new_session(LogLevel::INFO);
+        let logger = SyncLogger::new_session(LogLevel::Info);
 
-        assert!(logger.log_level >= LogLevel::INFO);
+        assert!(logger.log_level >= LogLevel::Info);
     }
 
     #[test]
     fn test_session_id_format() {
-        let logger = SyncLogger::new_session(LogLevel::INFO);
+        let logger = SyncLogger::new_session(LogLevel::Info);
         assert!(logger.session_id.starts_with("sync_"));
         assert!(logger.session_id.contains("_"));
     }
 
     #[test]
     fn test_phase_tracking() {
-        let mut logger = SyncLogger::new_session(LogLevel::INFO);
+        let mut logger = SyncLogger::new_session(LogLevel::Info);
         logger.start_phase("metadata", 10);
 
         logger.log_operation("metadata", "agent", "agent_001", true, None);
@@ -328,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_error_aggregation() {
-        let mut logger = SyncLogger::new_session(LogLevel::INFO);
+        let mut logger = SyncLogger::new_session(LogLevel::Info);
         logger.start_phase("metadata", 5);
 
         logger.log_operation(
@@ -348,10 +359,10 @@ mod tests {
 
     #[test]
     fn test_log_level_from_str() {
-        assert_eq!(LogLevel::from_str("debug"), LogLevel::DEBUG);
-        assert_eq!(LogLevel::from_str("INFO"), LogLevel::INFO);
-        assert_eq!(LogLevel::from_str("warn"), LogLevel::WARN);
-        assert_eq!(LogLevel::from_str("ERROR"), LogLevel::ERROR);
-        assert_eq!(LogLevel::from_str("unknown"), LogLevel::INFO);
+        assert_eq!(LogLevel::from_str("debug"), LogLevel::Debug);
+        assert_eq!(LogLevel::from_str("INFO"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("warn"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("ERROR"), LogLevel::Error);
+        assert_eq!(LogLevel::from_str("unknown"), LogLevel::Info);
     }
 }

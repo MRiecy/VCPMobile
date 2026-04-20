@@ -8,7 +8,7 @@ import VcpCoreSettingsSection from "./components/VcpCoreSettingsSection.vue";
 import TopicSummarySection from "./components/TopicSummarySection.vue";
 import MaintenanceSection from "./components/MaintenanceSection.vue";
 import ThemePicker from "./ThemePicker.vue";
-import ModelSelector from "../chat/ModelSelector.vue";
+import ModelSelector from "../../components/ModelSelector.vue";
 
 // 原子组件
 import SettingsSection from "../../components/settings/SettingsSection.vue";

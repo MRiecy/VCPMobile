@@ -60,7 +60,7 @@ impl MessageRepository {
         .bind(&message.agent_id)
         .bind(&message.content)
         .bind(message.timestamp as i64)
-        .bind(message.is_thinking)
+        .bind(message.is_thinking.unwrap_or(false))
         .bind(message.is_group_message.unwrap_or(false))
         .bind(&message.group_id)
         .bind(&message.finish_reason)
