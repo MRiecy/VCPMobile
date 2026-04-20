@@ -99,14 +99,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-artifacts
-          source_apk="src-tauri/gen/android/app/build/outputs/apk/arm64/release/app-arm64-release.apk"
-          target_apk="release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_arm64-v8a.apk"
-
-          if [[ ! -f "$source_apk" ]]; then
-            echo "Expected APK not found: $source_apk" >&2
+          
+          # 动态查找所有 release APK（适配不同 target 输出路径）
+          source_apk=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" -type f | head -n 1)
+          
+          if [[ -z "$source_apk" || ! -f "$source_apk" ]]; then
+            echo "No release APK found in apk outputs" >&2
+            find src-tauri/gen/android/app/build/outputs -name "*.apk" -type f || true
             exit 1
           fi
-
+          
+          target_apk="release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_arm64-v8a.apk"
           cp "$source_apk" "$target_apk"
           echo "artifact_dir=release-artifacts" >> "$GITHUB_OUTPUT"
 
