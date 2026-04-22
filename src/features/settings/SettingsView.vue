@@ -9,6 +9,8 @@ import TopicSummarySection from "./components/TopicSummarySection.vue";
 import MaintenanceSection from "./components/MaintenanceSection.vue";
 import ThemePicker from "./ThemePicker.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
+import DistributedSettingsSection from "../distributed/DistributedSettingsSection.vue";
+import ToolInteractionOverlay from "../distributed/ToolInteractionOverlay.vue";
 
 // 原子组件
 import SettingsSection from "../../components/settings/SettingsSection.vue";
@@ -179,6 +181,18 @@ watch(
             />
           </SettingsDisclosure>
 
+          <!-- 分布式节点 -->
+          <SettingsDisclosure
+            title="分布式节点"
+            description="作为移动端工具节点接入主服务器"
+            accent-color="bg-purple-500"
+          >
+            <DistributedSettingsSection
+              :settings="settings"
+              @save-request="saveSettings"
+            />
+          </SettingsDisclosure>
+
           <!-- 视觉长廊 -->
           <SettingsSection title="视觉长廊" accent-color="bg-orange-500">
             <SettingsCard no-padding>
@@ -212,6 +226,8 @@ watch(
             VCP MOBILE · PROJECT AVATAR<br />INTERNAL RELEASE 2026.04.07
           </div>
         </div>
+
+        <ToolInteractionOverlay />
 
         <ModelSelector
           :model-value="showSummaryModelSelector"

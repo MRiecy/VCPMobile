@@ -54,6 +54,7 @@ md5 = "0.7"
 tauri-plugin-log = "2"
 base64 = "0.22"
 tokio-tungstenite = "0.26"
+async-trait = "0.1"
 percent-encoding = "2"
 urlencoding = "2"
 

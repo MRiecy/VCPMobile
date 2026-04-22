@@ -1,3 +1,4 @@
+mod distributed;
 mod vcp_modules;
 
 use tauri::Manager;
@@ -68,6 +69,7 @@ pub fn run() {
             app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());
             app.manage(UploadManagerState::new());
+            app.manage(distributed::DistributedState::new());
 
             let handle = app.handle().clone();
 
@@ -171,6 +173,9 @@ pub fn run() {
             get_core_status,
             get_last_error,
             get_sync_status,
+            distributed::start_distributed_node,
+            distributed::stop_distributed_node,
+            distributed::get_distributed_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
