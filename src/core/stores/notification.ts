@@ -17,7 +17,7 @@ export interface VcpNotification {
 }
 
 export interface VcpStatus {
-  status: 'open' | 'closed' | 'error' | 'connecting' | 'connected' | 'disconnected';
+  status: 'open' | 'closed' | 'error' | 'connecting' | 'connected' | 'disconnected' | 'ready' | 'initializing';
   message: string;
   source: string;
 }
@@ -34,14 +34,47 @@ export const useNotificationStore = defineStore('notification', () => {
     source: 'VCPLog'
   });
 
+  const vcpCoreStatus = ref<VcpStatus>({
+    status: 'connecting',
+    message: '核心引擎初始化...',
+    source: 'Core'
+  });
+
   const updateStatus = (payload: VcpStatus) => {
     vcpStatus.value = payload;
+  };
+
+  const updateCoreStatus = (payload: VcpStatus) => {
+    vcpCoreStatus.value = payload;
   };
 
   const addNotification = (payload: Partial<VcpNotification>) => {
     if (payload.silent) return;
 
-    const id = Math.random().toString(36).substring(2, 9);
+    // --- 单例抑制逻辑 (P0 级别优化) ---
+    // 如果提供了固定 ID (如 vcp_log_conn_error)，则尝试查找并更新现有 Toast
+    if (payload.id) {
+      const existingIndex = activeToasts.value.findIndex(t => t.id === payload.id);
+      if (existingIndex !== -1) {
+        // 更新现有内容并重置计时
+        const updated = {
+          ...activeToasts.value[existingIndex],
+          ...payload,
+          timestamp: Date.now()
+        } as VcpNotification;
+        activeToasts.value[existingIndex] = updated;
+
+        // 如果设置了 duration，重置自动移除
+        if (updated.duration !== 0) {
+          setTimeout(() => {
+            activeToasts.value = activeToasts.value.filter(t => t.id !== updated.id);
+          }, updated.duration || 3000);
+        }
+        return;
+      }
+    }
+
+    const id = payload.id || Math.random().toString(36).substring(2, 9);
     const timestamp = Date.now();
     const notification: VcpNotification = {
       id,
@@ -55,9 +88,15 @@ export const useNotificationStore = defineStore('notification', () => {
 
     // 1. 如果不是纯 Toast，则入历史列表（置顶）并增加未读数
     if (!payload.toastOnly) {
-      historyList.value.unshift(notification);
-      if (historyList.value.length > 100) historyList.value.pop();
-      unreadCount.value++;
+      // 历史列表也进行 ID 查重，防止列表膨胀
+      const historyIndex = historyList.value.findIndex(n => n.id === id);
+      if (historyIndex !== -1) {
+        historyList.value[historyIndex] = notification;
+      } else {
+        historyList.value.unshift(notification);
+        if (historyList.value.length > 100) historyList.value.pop();
+        unreadCount.value++;
+      }
     }
 
     // 2. 推入活动气泡 (抽屉打开时抑制 Toast)
@@ -132,7 +171,9 @@ export const useNotificationStore = defineStore('notification', () => {
     unreadCount,
     isDrawerOpen,
     vcpStatus,
+    vcpCoreStatus,
     updateStatus,
+    updateCoreStatus,
     addNotification,
     clearHistory,
     markAllRead,

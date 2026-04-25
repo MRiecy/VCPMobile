@@ -10,7 +10,6 @@ impl MessageRepository {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         message: &ChatMessage,
         topic_id: &str,
-        render_format: &str,
         render_content: &[u8],
         skip_bubble: bool,
     ) -> Result<(), String> {
@@ -34,10 +33,10 @@ impl MessageRepository {
             "INSERT INTO messages (
                 msg_id, topic_id, role, name, agent_id, content, timestamp,
                 is_thinking, is_group_message, group_id, finish_reason,
-                render_format, render_content, render_version,
+                render_content,
                 content_hash,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
@@ -47,7 +46,6 @@ impl MessageRepository {
                 is_group_message = excluded.is_group_message,
                 group_id = excluded.group_id,
                 finish_reason = excluded.finish_reason,
-                render_format = excluded.render_format,
                 render_content = excluded.render_content,
                 content_hash = excluded.content_hash,
                 updated_at = excluded.updated_at,
@@ -64,7 +62,6 @@ impl MessageRepository {
         .bind(message.is_group_message.unwrap_or(false))
         .bind(&message.group_id)
         .bind(&message.finish_reason)
-        .bind(render_format)
         .bind(render_content)
         .bind(&content_hash)
         .bind(message.timestamp as i64) // created_at

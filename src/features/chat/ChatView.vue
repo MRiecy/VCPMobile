@@ -7,6 +7,7 @@ import { useLayoutStore } from "../../core/stores/layout";
 import MessageRenderer from "./MessageRenderer.vue";
 import InputEnhancer from "./InputEnhancer.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
+import CoreStatusIndicator from "../../components/ui/CoreStatusIndicator.vue";
 import { ArrowDown } from "lucide-vue-next";
 
 const chatStore = useChatManagerStore();
@@ -134,38 +135,26 @@ onUnmounted(() => {
           :owner-type="chatStore.currentSelectedItem.type" 
           :owner-id="chatStore.currentSelectedItem.id" 
           :fallback-name="chatStore.currentSelectedItem.name"
+          :dominant-color="chatStore.currentSelectedItem.avatarCalculatedColor"
+          :outer-border="true"
           size="w-10 h-10"
           rounded="rounded-full"
         />
 
         <div class="flex flex-col min-w-0">
-          <span class="font-bold text-sm text-primary-text truncate">
+          <span 
+            class="font-bold text-sm truncate transition-colors duration-500"
+            :style="{ color: chatStore.currentSelectedItem?.avatarCalculatedColor || 'var(--primary-text)' }"
+          >
             {{ chatStore.currentSelectedItem?.name || "VCP Mobile" }}
           </span>
-          <div class="flex items-center gap-1" :title="lifecycleStore.errorMsg || undefined">
-            <span class="w-1.5 h-1.5 rounded-full" :class="{
-              'bg-green-500 vcp-core-pulse core-glow-green':
-                lifecycleStore.state === 'READY',
-              'bg-red-500 vcp-core-pulse core-glow-red':
-                lifecycleStore.state === 'ERROR',
-              'bg-yellow-500':
-                lifecycleStore.state !== 'READY' &&
-                lifecycleStore.state !== 'ERROR',
-            }"></span>
-            <span class="text-[9px] opacity-40 uppercase font-mono tracking-tighter">
-              {{
-                lifecycleStore.state === "READY"
-                  ? "Core Active"
-                  : lifecycleStore.state === "ERROR"
-                    ? "Core Error"
-                    : "Booting..."
-              }}
-            </span>
-          </div>
-        </div>
-      </div>
+  <div class="flex items-center gap-1" :title="lifecycleStore.errorMsg || undefined">
+    <CoreStatusIndicator />
+  </div>
+</div>
+</div>
 
-      <div class="flex items-center gap-2 shrink-0">
+<div class="flex items-center gap-2 shrink-0">
         <!-- 黑白模式切换 (内联 SVG) -->
         <button @click="themeStore.toggleTheme()"
           class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5"
@@ -242,8 +231,7 @@ onUnmounted(() => {
 
     <!-- 3. 输入增强区 (固定底部) -->
     <footer class="px-4 py-1.5 bg-black/10 backdrop-blur-md border-t border-white/5 shrink-0">
-      <InputEnhancer :disabled="!chatStore.currentTopicId || chatStore.activeStreamingIds.size > 0
-        " @send="chatStore.sendMessage" />
+      <InputEnhancer :disabled="!chatStore.currentTopicId" @send="chatStore.sendMessage" />
       <div class="h-[var(--vcp-safe-bottom, 20px)]"></div>
     </footer>
   </div>
@@ -279,33 +267,6 @@ onUnmounted(() => {
 .fade-slide-up-leave-to {
   opacity: 0;
   transform: translateY(10px) scale(0.9);
-}
-
-/* 核心状态指示灯：独立动画与柔和辉光，防止被 AI 生成的样式污染 */
-.vcp-core-pulse {
-  animation: vcpCorePulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-
-@keyframes vcpCorePulse {
-
-  0%,
-  100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-
-  50% {
-    opacity: 0.5;
-    transform: scale(0.85);
-  }
-}
-
-.core-glow-green {
-  box-shadow: 0 0 6px 1px rgba(34, 197, 94, 0.6);
-}
-
-.core-glow-red {
-  box-shadow: 0 0 6px 1px rgba(239, 68, 68, 0.6);
 }
 
 .core-glow-red {

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Attachment {
     pub r#type: String,
+    /// 物理存储路径：真理之源。用于后续超栈文件追踪，或跨端同步时的原始路径参考
     #[serde(default)]
     pub src: String,
     pub name: String,

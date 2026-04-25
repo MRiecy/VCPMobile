@@ -23,11 +23,10 @@ export interface AgentConfig {
   temperature: number;
   contextTokenLimit: number;
   maxOutputTokens: number;
-  top_p?: number;
-  top_k?: number;
   streamOutput: boolean;
   avatarCalculatedColor?: string;
   topics?: Topic[];
+  currentTopicId?: string | null;
 }
 
 export interface GroupConfig {
@@ -43,6 +42,8 @@ export interface GroupConfig {
   unifiedModel?: string;
   tagMatchMode?: string;
   topics?: Topic[];
+  currentTopicId?: string | null;
+  createdAt?: number;
 }
 
 export const useAssistantStore = defineStore("assistant", () => {

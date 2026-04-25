@@ -36,6 +36,16 @@ pub struct Settings {
     #[serde(default)]
     pub sync_token: String,
 
+    // 管理接口鉴权 (用于表情包刷新等)
+    #[serde(default)]
+    pub admin_username: String,
+    #[serde(default)]
+    pub admin_password: String,
+
+    // 表情包图床密钥
+    #[serde(default)]
+    pub file_key: String,
+
     // 话题总结配置
     #[serde(default)]
     pub topic_summary_model: String,
@@ -83,6 +93,9 @@ pub fn create_default_settings() -> Settings {
         sync_server_url: "".to_string(),
         sync_http_url: "".to_string(),
         sync_token: "".to_string(),
+        admin_username: "".to_string(),
+        admin_password: "".to_string(),
+        file_key: "".to_string(),
         topic_summary_model: "gemini-2.5-flash".to_string(),
         sync_log_level: "INFO".to_string(),
         agent_order: vec![],

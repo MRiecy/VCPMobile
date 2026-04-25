@@ -43,4 +43,7 @@ pub struct GroupConfig {
     /// 创建时间戳
     #[serde(default)]
     pub created_at: i64,
+    /// 当前活跃话题 ID
+    #[serde(default)]
+    pub current_topic_id: Option<String>,
 }

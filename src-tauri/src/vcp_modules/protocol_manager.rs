@@ -8,6 +8,8 @@ use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use crate::vcp_host::native_portal::PortalState;
+
 /// 协议指挥部：统一管理所有 VCP 私有协议
 pub fn register_vcp_protocols<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder
@@ -24,6 +26,64 @@ pub fn register_vcp_protocols<R: Runtime>(builder: tauri::Builder<R>) -> tauri::
                 Box::new(move |res| responder.respond(res)),
             );
         })
+        // 3. 全屏门户协议：vcp-portal://render?id={id}
+        .register_asynchronous_uri_scheme_protocol("vcp-portal", |ctx, request, responder| {
+            let app_handle = ctx.app_handle().clone();
+            handle_vcp_portal_protocol(
+                app_handle,
+                request,
+                Box::new(move |res| responder.respond(res)),
+            );
+        })
+}
+
+fn handle_vcp_portal_protocol<R: Runtime>(
+    app_handle: AppHandle<R>,
+    request: Request<Vec<u8>>,
+    responder: Box<dyn FnOnce(Response<Vec<u8>>) + Send>,
+) {
+    let uri = request.uri().to_string();
+    log::info!("[PortalProtocol] Incoming URI: {}", uri);
+
+    // 解析出 id 参数
+    let parsed_url =
+        url::Url::parse(&uri).unwrap_or_else(|_| url::Url::parse("vcp-portal://error").unwrap());
+    let id = parsed_url
+        .query_pairs()
+        .find(|(k, _)| k == "id")
+        .map(|(_, v)| v.into_owned());
+
+    if let Some(id_val) = id {
+        let portal_state = app_handle.state::<PortalState>();
+        // 从缓存中取出（取出即删除，保证仅用一次，防止内存泄漏）
+        if let Some((_, html_content)) = portal_state.contents.remove(&id_val) {
+            log::info!(
+                "[PortalProtocol] Found content for id: {}, size: {}",
+                id_val,
+                html_content.len()
+            );
+            let response = Response::builder()
+                .header("Content-Type", "text/html; charset=utf-8")
+                .header("Access-Control-Allow-Origin", "*")
+                .body(html_content.into_bytes())
+                .unwrap();
+            responder(response);
+            return;
+        } else {
+            log::warn!("[PortalProtocol] Content not found for id: {}", id_val);
+        }
+    } else {
+        log::warn!("[PortalProtocol] No id parameter found in URI: {}", uri);
+    }
+
+    let error_html =
+        "<html><body><h1>Error: Content not found or expired</h1></body></html>".to_string();
+    let response = Response::builder()
+        .status(404)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(error_html.into_bytes())
+        .unwrap();
+    responder(response);
 }
 
 #[derive(serde::Deserialize)]

@@ -75,6 +75,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             stream_output INTEGER NOT NULL DEFAULT 1,
             config_hash TEXT NOT NULL DEFAULT '', -- 配置内容指纹
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
+            current_topic_id TEXT,                 -- 记录最后一次打开的话题 ID
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
         )",
@@ -82,6 +83,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 确保字段存在 (用于存量 DB 升级)
+    let _ = sqlx::query("ALTER TABLE agents ADD COLUMN current_topic_id TEXT")
+        .execute(pool)
+        .await;
 
     // 3. groups 表 (群组配置)
     sqlx::query(
@@ -96,6 +102,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             tag_match_mode TEXT,
             config_hash TEXT NOT NULL DEFAULT '', -- 配置内容指纹
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
+            current_topic_id TEXT,                 -- 记录最后一次打开的话题 ID
             created_at BIGINT NOT NULL DEFAULT 0,
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT
@@ -104,6 +111,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 确保字段存在 (用于存量 DB 升级)
+    let _ = sqlx::query("ALTER TABLE groups ADD COLUMN current_topic_id TEXT")
+        .execute(pool)
+        .await;
 
     // 4. group_members 表
     sqlx::query(
@@ -155,9 +167,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             is_group_message INTEGER NOT NULL DEFAULT 0,
             group_id TEXT,
             finish_reason TEXT,
-            render_format TEXT,
             render_content BLOB,
-            render_version INTEGER NOT NULL DEFAULT 1,
             content_hash TEXT NOT NULL DEFAULT '', -- 消息内容指纹
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
@@ -238,10 +248,32 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // 11. emoticon_library 表 (表情包修复库)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS emoticon_library (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE,
+            search_key TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // 索引
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_topics_owner
          ON topics(owner_id, owner_type, created_at DESC)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_emoticon_category
+         ON emoticon_library(category)",
     )
     .execute(pool)
     .await

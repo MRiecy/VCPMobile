@@ -15,7 +15,6 @@
 import { ref, onMounted } from 'vue';
 import { useOverlayStore } from '../core/stores/overlay';
 import SettingsView from '../features/settings/SettingsView.vue';
-import SyncView from '../features/settings/SyncView.vue';
 import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
 import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
 
@@ -30,10 +29,7 @@ onMounted(() => {
 <template>
   <!-- 这里的组件虽然声明在此，但会通过 Teleport 渲染到 GlobalOverlayManager 中 -->
   <div v-if="isMounted">
-    <SettingsView :is-open="overlayStore.isSettingsOpen" @close="overlayStore.closeSettings()"
-      @open-sync="overlayStore.openSync()" />
-
-    <SyncView :is-open="overlayStore.isSyncOpen" @close="overlayStore.closeSync()" />
+    <SettingsView :is-open="overlayStore.isSettingsOpen" @close="overlayStore.closeSettings()" />
 
     <AgentSettingsView :is-open="overlayStore.isAgentSettingsOpen" :id="overlayStore.agentSettingsId"
       @close="overlayStore.closeAgentSettings()" />

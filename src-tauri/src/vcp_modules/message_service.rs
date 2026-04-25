@@ -156,7 +156,7 @@ async fn ensure_attachments_locally(
         };
 
         let local_path = att_dir.join(&local_file_name);
-        let local_path_str = format!("file://{}", local_path.to_string_lossy());
+        let local_path_str = local_path.to_string_lossy().into_owned();
 
         if !local_path.exists() {
             // 尝试下载
@@ -183,9 +183,11 @@ async fn ensure_attachments_locally(
             }
         }
 
-        // 强制归一化：将 internal_path 修改为手机本地物理路径，保持 src 为原始来源
+        // 核心对齐：
+        // 1. src 保持物理路径（用于超栈追踪），如果来自电脑端，它已经包含 file:// 路径
+        // 2. internal_path 专门作为手机本地可访问路径，前端可通过 convertFileSrc 转换为 asset://
         if att.src.is_empty() {
-            att.src = local_path_str.clone();
+            att.src = format!("file://{}", local_path_str);
         }
         att.internal_path = local_path_str;
     }
@@ -206,8 +208,7 @@ pub async fn append_single_message(
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(&mut tx, &message, &topic_id, "astbin", &render_bytes, false)
-        .await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, false).await?;
 
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
@@ -245,15 +246,8 @@ pub async fn patch_single_message(
     let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(
-        &mut tx,
-        &message,
-        &topic_id,
-        "astbin",
-        &render_bytes,
-        skip_bubble,
-    )
-    .await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
+        .await?;
 
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
@@ -278,15 +272,8 @@ pub async fn patch_single_message_no_app(
     let render_bytes = Vec::new();
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(
-        &mut tx,
-        &message,
-        &topic_id,
-        "astbin",
-        &render_bytes,
-        skip_bubble,
-    )
-    .await?;
+    MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
+        .await?;
 
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
