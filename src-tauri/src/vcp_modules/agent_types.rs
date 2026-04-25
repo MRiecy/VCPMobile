@@ -40,6 +40,10 @@ pub struct AgentConfig {
     /// 话题列表
     #[serde(default)]
     pub topics: Vec<Topic>,
+
+    /// 当前活跃话题 ID
+    #[serde(rename = "currentTopicId", default)]
+    pub current_topic_id: Option<String>,
 }
 
 fn default_agent_name() -> String {

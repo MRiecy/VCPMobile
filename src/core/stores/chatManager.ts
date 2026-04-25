@@ -21,11 +21,11 @@ export interface Attachment {
   name: string;
   size: number;
   progress?: number; // 0-100 的真实上传进度
-  src: string; // 仅用于前端 UI 临时渲染路径 (如 file:// 或 blob:)
-  resolvedSrc?: string; // Webview 可用的 asset:// 路径
+  src: string; // 物理存储路径：真理之源。用于后续超栈文件追踪，或跨端同步时的原始路径参考
+  resolvedSrc?: string; // Webview 可用的 asset:// 路径 (运行时动态生成，不进行持久化)
   hash?: string;
   status?: string;
-  internalPath?: string;
+  internalPath?: string; // 手机本地物理路径，仅供前端通过 convertFileSrc 转换为安全 URL
   extractedText?: string;
   imageFrames?: string[];
   thumbnailPath?: string;
@@ -47,10 +47,13 @@ export interface ChatMessage {
   agentId?: string;
   groupId?: string;
   isGroupMessage?: boolean;
+  finishReason?: string;
   attachments?: Attachment[];
 
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
-  displayedContent?: string; // 用于平滑流式显示的文本内容 (打字机效果暂存)
+  displayedContent?: string; // 用于兼容旧版渲染器的全量文本
+  stableContent?: string;    // Aurora: 稳定区 HTML/Markdown
+  tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
   processedContent?: string; // 缓存 Rust 返回的 AST 或文本，避免重复解析
 }
 
@@ -158,6 +161,8 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
   // 用于拦截重新生成时的输入框补全
   const editMessageContent = ref("");
+  // 用于标记当前是否正在“编辑重发”某条历史消息
+  const editingOriginalMessageId = ref<string | null>(null);
 
   let listenersRegistered = false;
 
@@ -438,8 +443,10 @@ export const useChatManagerStore = defineStore("chatManager", () => {
               msg.content += buffer.content;
               msg.isThinking = false;
               // 同时也同步给 streamManager 确保平滑显示
-              streamManager.appendChunk(msgId, "", (text) => {
-                msg.displayedContent = text;
+              streamManager.appendChunk(msgId, "", (data) => {
+                msg.stableContent = data.stable;
+                msg.tailContent = data.tail;
+                msg.displayedContent = data.stable + data.tail;
               });
             }
           }
@@ -450,11 +457,29 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
       currentTopicId.value = topicId;
 
+      if (offset === 0) {
+        // --- 核心优化：记录当前活跃话题 ID 到后端持久化 ---
+        if (ownerType === 'agent') {
+          invoke('update_agent_config', { 
+            agentId: ownerId, 
+            updates: { currentTopicId: topicId } 
+          }).catch(e => console.warn('[ChatManager] Failed to persist currentTopicId:', e));
+        } else if (ownerType === 'group') {
+          invoke('update_group_config', { 
+            groupId: ownerId, 
+            updates: { currentTopicId: topicId } 
+          }).catch(e => console.warn('[ChatManager] Failed to persist currentTopicId:', e));
+        }
+      }
+
       if (
         !currentSelectedItem.value ||
         currentSelectedItem.value.id !== ownerId
       ) {
-        currentSelectedItem.value = { id: ownerId, type: ownerType };
+        // 更新当前选中的项目详情 (确保头像和色调同步)
+        const agent = assistantStore.agents.find(a => a.id === ownerId);
+        const group = assistantStore.groups.find(g => g.id === ownerId);
+        currentSelectedItem.value = agent ? { ...agent, type: 'agent' } : (group ? { ...group, type: 'group' } : { id: ownerId, type: ownerType });
       }
 
       // 异步解析本地资源路径
@@ -496,7 +521,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       await invoke("patch_single_message", {
         ownerId: currentSelectedItem.value.id,
         ownerType: currentSelectedItem.value.type,
-        topic_id: currentTopicId.value,
+        topicId: currentTopicId.value,
         message: msg,
       });
 
@@ -517,57 +542,15 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   };
 
   /**
-   * 发送消息
+   * 内部方法：触发 AI 生成逻辑 (对接 Rust 后端)
+   * 支持单 Agent 和多 Agent 群组。
+   * 它不负责创建用户消息，只负责根据已有的 userMsg 触发后续生成流。
    */
-  const sendMessage = async (content: string) => {
-    if (
-      !currentSelectedItem.value ||
-      !currentTopicId.value ||
-      (!content.trim() && stagedAttachments.value.length === 0)
-    )
-      return;
+  const triggerGeneration = async (userMsg: ChatMessage) => {
+    if (!currentSelectedItem.value || !currentTopicId.value) return;
 
     const agentId = currentSelectedItem.value.id;
-    const currentStaged = [...stagedAttachments.value];
-
-    // Clear staged area immediately for UI responsiveness
-    stagedAttachments.value = [];
-
-    // Document Processing JIT (Just-In-Time)
-    if (currentStaged.length > 0) {
-      const docProcessor = useDocumentProcessor();
-      for (const att of currentStaged) {
-        const ext = att.name.split(".").pop()?.toLowerCase();
-        // Only process documents and PDFs as requested
-        if (["txt", "md", "csv", "json", "docx", "pdf"].includes(ext || "")) {
-          try {
-            const result = await docProcessor.processAttachment(att);
-            if (result) {
-              if (result.extractedText)
-                att.extractedText = result.extractedText;
-              if (result.imageFrames) att.imageFrames = result.imageFrames;
-            }
-          } catch (e) {
-            console.error(
-              `[ChatManager] JIT document processing failed for ${att.name}:`,
-              e,
-            );
-          }
-        }
-      }
-    }
-
-    // 构造用户消息
     const now = Date.now();
-    const userMsg: ChatMessage = {
-      id: `msg_${now}_user_${Math.random().toString(36).substring(2, 7)}`,
-      role: "user",
-      content,
-      timestamp: now,
-      attachments: currentStaged.length > 0 ? currentStaged : undefined,
-    };
-
-    currentChatHistory.value.push(userMsg);
 
     // 构造 AI 思考占位消息
     const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 7)}`;
@@ -578,12 +561,19 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       timestamp: now + 1, // 增加 1ms 偏移，确保在时间序列上绝对位于提问之后
       isThinking: false,
       isGroupMessage: currentSelectedItem.value.type === "group",
-      groupId: currentSelectedItem.value.type === "group" ? currentSelectedItem.value.id : undefined,
-      agentId: currentSelectedItem.value.type === "agent" ? currentSelectedItem.value.id : undefined,
+      groupId:
+        currentSelectedItem.value.type === "group"
+          ? currentSelectedItem.value.id
+          : undefined,
+      agentId:
+        currentSelectedItem.value.type === "agent"
+          ? currentSelectedItem.value.id
+          : undefined,
     };
 
     currentChatHistory.value.push(thinkingMsg);
     streamingMessageId.value = thinkingId;
+
     if (currentSelectedItem.value?.id && currentTopicId.value) {
       addSessionStream(
         currentSelectedItem.value.id,
@@ -594,6 +584,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
     try {
       // 立即保存一次历史记录 (包含用户消息和思考态)
+      // 注意：由于 Rust 使用 ON CONFLICT DO UPDATE，即使 userMsg 已经存在也没关系
       if (currentSelectedItem.value?.id && currentTopicId.value) {
         await invoke("append_single_message", {
           ownerId: currentSelectedItem.value.id,
@@ -637,11 +628,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         };
 
         console.log("[ChatManager] Sending group payload:", groupPayload);
-        // 直接调用 Rust 端群组调度器，不再设置前端硬超时
         await invoke("handle_group_chat_message", { payload: groupPayload });
-
-        // 注意：这里不再立即移除 thinkingId，由后续的 vcp-stream type='end' 或 type='error' 来清理
-        // 或者由下一次 loadHistory/syncHistory 全量覆盖
         return;
       }
 
@@ -658,7 +645,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       console.log("[ChatManager] Sending agent payload:", agentPayload);
       await invoke("handle_agent_chat_message", { payload: agentPayload });
     } catch (e) {
-      console.error("[ChatManager] Failed to send message:", e);
+      console.error("[ChatManager] Failed to trigger generation:", e);
 
       const errorText = `\n\n> VCP错误: ${e instanceof Error ? e.message : String(e)}`;
 
@@ -680,7 +667,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           );
         }
       } else {
-        // Fallback if message was somehow lost
         currentChatHistory.value.push({
           id: `msg_${Date.now()}_system_error`,
           role: "system",
@@ -691,7 +677,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
       streamingMessageId.value = null;
       if (currentSelectedItem.value?.id && currentTopicId.value) {
-        // 查找当前的思考占位消息
         const msg = currentChatHistory.value.find((m) => m.id === thinkingId);
         if (msg) {
           await invoke("patch_single_message", {
@@ -703,6 +688,94 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         }
       }
     }
+  };
+
+  /**
+   * 发送消息
+   */
+  const sendMessage = async (content: string) => {
+    if (
+      !currentSelectedItem.value ||
+      !currentTopicId.value ||
+      (!content.trim() && stagedAttachments.value.length === 0)
+    )
+      return;
+
+    // --- 拦截：编辑重发逻辑 ---
+    if (editingOriginalMessageId.value) {
+      const originalId = editingOriginalMessageId.value;
+      editingOriginalMessageId.value = null; // 消费掉
+
+      const targetIndex = currentChatHistory.value.findIndex(
+        (m) => m.id === originalId,
+      );
+      if (targetIndex !== -1) {
+        const targetMsg = currentChatHistory.value[targetIndex];
+        targetMsg.content = content;
+        // 重置缓存
+        targetMsg.blocks = undefined;
+        targetMsg.processedContent = undefined;
+
+        // 1. 截断后端数据库 (删除该消息之后的所有内容)
+        await invoke("truncate_history_after_timestamp", {
+          ownerId: currentSelectedItem.value.id,
+          ownerType: currentSelectedItem.value.type,
+          topicId: currentTopicId.value,
+          timestamp: targetMsg.timestamp, // 严格大于该时间戳的消息都将被删除
+        });
+
+        // 2. 截断前端 UI 历史
+        currentChatHistory.value = currentChatHistory.value.slice(
+          0,
+          targetIndex + 1,
+        );
+
+        // 3. 重新发起生成
+        await triggerGeneration(targetMsg);
+        return;
+      }
+    }
+
+    const currentStaged = [...stagedAttachments.value];
+    // Clear staged area immediately for UI responsiveness
+    stagedAttachments.value = [];
+
+    // Document Processing JIT (Just-In-Time)
+    if (currentStaged.length > 0) {
+      const docProcessor = useDocumentProcessor();
+      for (const att of currentStaged) {
+        const ext = att.name.split(".").pop()?.toLowerCase();
+        // Only process documents and PDFs as requested
+        if (["txt", "md", "csv", "json", "docx", "pdf"].includes(ext || "")) {
+          try {
+            const result = await docProcessor.processAttachment(att);
+            if (result) {
+              if (result.extractedText)
+                att.extractedText = result.extractedText;
+              if (result.imageFrames) att.imageFrames = result.imageFrames;
+            }
+          } catch (e) {
+            console.error(
+              `[ChatManager] JIT document processing failed for ${att.name}:`,
+              e,
+            );
+          }
+        }
+      }
+    }
+
+    // 构造用户消息
+    const now = Date.now();
+    const userMsg: ChatMessage = {
+      id: `msg_${now}_user_${Math.random().toString(36).substring(2, 7)}`,
+      role: "user",
+      content,
+      timestamp: now,
+      attachments: currentStaged.length > 0 ? currentStaged : undefined,
+    };
+
+    currentChatHistory.value.push(userMsg);
+    await triggerGeneration(userMsg);
   };
 
   /**
@@ -763,7 +836,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     console.log(`[ChatManager] Global Group Interruption for topic: ${topicId}`);
     try {
       // 1. 发射后端熔断信号，打断 for 循环接力
-      await invoke("interruptGroupTurn", { topic_id: topicId });
+      await invoke("interruptGroupTurn", { topicId: topicId });
       
       // 2. 同时中止当前活跃的所有流消息（确保当前正在说话的 Agent 也立即停下）
       const activeIds = Array.from(activeStreamingIds.value);
@@ -783,7 +856,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       `[ChatManager] Sending interrupt signal for message: ${messageId}`,
     );
     try {
-      await invoke("interruptRequest", { message_id: messageId });
+      await invoke("interruptRequest", { messageId: messageId });
       // 本地伪造一个 end 事件，防止假死
       streamManager.finalizeStream(messageId);
 
@@ -795,6 +868,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       if (msgIndex !== -1) {
         msg = currentChatHistory.value[msgIndex];
         msg.isThinking = false;
+        msg.finishReason = "cancelled_by_user";
       }
 
       const ownerId = currentSelectedItem.value?.id;
@@ -835,20 +909,46 @@ export const useChatManagerStore = defineStore("chatManager", () => {
    * @param targetMessageId 用户想要重新生成的 AI 回复的 ID
    */
   const regenerateResponse = async (targetMessageId: string) => {
-    // 1. 查找此 AI 消息前的一条 用户消息
+    // 1. 查找此消息在历史记录中的位置
     const targetIndex = currentChatHistory.value.findIndex(
       (m) => m.id === targetMessageId,
     );
     if (targetIndex === -1) return;
 
-    // 我们采取“时间回退”策略，将聊天截断到这条 AI 消息之前，然后触发上一次的 prompt 再次请求
-    // 注意：桌面端通常需要回溯找到最近的一条 user 消息来作为输入，但在我们的架构下，
-    // 我们直接切片历史记录并发起空的 content 请求即可，因为 VCP 会自动拾取最新的完整 messages 数组
+    const targetMsg = currentChatHistory.value[targetIndex];
 
-    await deleteMessage(targetMessageId, true);
+    // 2. 截断后端数据库 (删除该 AI 消息及其之后的所有内容)
+    if (currentSelectedItem.value?.id && currentTopicId.value) {
+      await invoke("truncate_history_after_timestamp", {
+        ownerId: currentSelectedItem.value.id,
+        ownerType: currentSelectedItem.value.type,
+        topicId: currentTopicId.value,
+        timestamp: targetMsg.timestamp - 1, // 严格大于该时间戳的消息都将被删除，即包括目标消息本身
+      });
+    }
 
-    // 再次触发发送，留空内容即可，VCP 后端会用最后一句话作为基准续写
-    await sendMessage("");
+    // 3. 截断前端 UI 历史
+    currentChatHistory.value = currentChatHistory.value.slice(0, targetIndex);
+
+    // 4. 寻找距离目前最近的一条用户消息，作为触发生成的“引子”
+    // 即使在群聊中存在连续 Agent 消息，后端也会从数据库加载完整的、已截断的历史上下文。
+    let lastUserMsgIndex = currentChatHistory.value.length - 1;
+    while (
+      lastUserMsgIndex >= 0 &&
+      currentChatHistory.value[lastUserMsgIndex].role !== "user"
+    ) {
+      lastUserMsgIndex--;
+    }
+
+    if (lastUserMsgIndex === -1) {
+      console.warn("[ChatManager] Cannot regenerate: No user message found.");
+      return;
+    }
+
+    const lastUserMsg = currentChatHistory.value[lastUserMsgIndex];
+
+    // 5. 重新发起生成
+    await triggerGeneration(lastUserMsg);
   };
 
   /**
@@ -973,14 +1073,17 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           if (msg) {
             msg.content = msg.content || "";
             msg.content += textChunk;
-            // 使用 streamManager 平滑更新 displayedContent
+            // 使用 streamManager 平滑更新 Aurora 缓冲区
 
-            streamManager.appendChunk(actualMessageId, textChunk, (text) => {
+            streamManager.appendChunk(actualMessageId, textChunk, (data) => {
               const latestMsg = currentChatHistory.value.find(
                 (m) => m.id === actualMessageId,
               );
               if (latestMsg) {
-                latestMsg.displayedContent = text;
+                latestMsg.stableContent = data.stable;
+                latestMsg.tailContent = data.tail;
+                // 保持兼容性：displayedContent 为两者合并，供旧版组件使用
+                latestMsg.displayedContent = data.stable + data.tail;
               }
             });
           } else {
@@ -994,13 +1097,14 @@ export const useChatManagerStore = defineStore("chatManager", () => {
             }
 
             // 同时也喂给 streamManager，防止切回来时 buffer 为空
-            streamManager.appendChunk(actualMessageId, textChunk, () => {});
+            streamManager.appendChunk(actualMessageId, textChunk, (_data) => {});
           }
         }
       } else if (type === "end" || type === "error") {
         const errorMsg = event.payload.error;
+        const finishReason = event.payload.finish_reason;
         console.log(
-          `[ChatManager] Stream ${type} for ${actualMessageId}${errorMsg ? ": " + errorMsg : ""}. Draining queue...`,
+          `[ChatManager] Stream ${type} for ${actualMessageId}${errorMsg ? ": " + errorMsg : ""}. Reason: ${finishReason}. Draining queue...`,
         );
 
         // 流式结束时，等待 streamManager 缓冲队列排空后再切换状态
@@ -1011,6 +1115,9 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           if (latestMsg) {
             // 确保最终内容一致
             latestMsg.displayedContent = latestMsg.content;
+            if (finishReason) {
+              latestMsg.finishReason = finishReason;
+            }
           }
 
           // 清理活动流状态
@@ -1026,6 +1133,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
             if (latestMsg) {
               latestMsg.content += errorText;
               latestMsg.displayedContent = latestMsg.content;
+              latestMsg.finishReason = "error";
             } else {
               // 如果不在当前视图，暂时不处理系统错误消息的追加，
               // 因为我们没有全局的消息持久化更新接口（本阶段目标是打通多流基础）
@@ -1121,6 +1229,51 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     });
   };
 
+  /**
+   * 选择一个助手或群组，并自动跳转到最近的话题
+   */
+  const selectItem = async (item: any) => {
+    if (!item) return;
+    
+    const ownerId = item.id;
+    const ownerType = item.members ? 'group' : 'agent';
+    
+    // 如果已经选中了该项，且当前已有话题，则不重复加载（除非需要强制刷新）
+    if (currentSelectedItem.value?.id === ownerId && currentTopicId.value) {
+      return;
+    }
+
+    // 1. 获取目标项的最新配置（含 currentTopicId）
+    let targetTopicId = item.currentTopicId;
+
+    // 2. 如果没有记录的话题，或者记录的话题已失效，则尝试获取该 Owner 下最新的话题
+    if (!targetTopicId) {
+      try {
+        const topics = await invoke<any[]>("get_topics", {
+          ownerId,
+          ownerType,
+        });
+        if (topics && topics.length > 0) {
+          // 列表通常按 updated_at 倒序，取第一个
+          targetTopicId = topics[0].id || topics[0].topic_id;
+        }
+      } catch (e) {
+        console.error("[ChatManager] Failed to fetch fallback topics:", e);
+      }
+    }
+
+    if (targetTopicId) {
+      currentSelectedItem.value = { ...item, type: ownerType };
+      await loadHistory(ownerId, ownerType, targetTopicId);
+    } else {
+      // 没有任何话题的极端情况
+      console.warn(`[ChatManager] No topics found for ${ownerId}`);
+      currentSelectedItem.value = { ...item, type: ownerType };
+      currentChatHistory.value = [];
+      currentTopicId.value = null;
+    }
+  };
+
   return {
     ensureEventListenersRegistered,
     currentChatHistory,
@@ -1130,8 +1283,10 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     streamingMessageId,
     stagedAttachments,
     editMessageContent,
+    editingOriginalMessageId,
     sessionActiveStreams,
     loadHistory,
+    selectItem,
     fetchRawContent,
     sendMessage,
     handleAttachment,

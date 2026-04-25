@@ -33,7 +33,7 @@ const props = defineProps<{
 
 const assistantStore = useAssistantStore();
 const settingsStore = useSettingsStore();
-const { processMessageContent, removeScopedCss } = useContentProcessor();
+const { processMessageContent, removeScopedCss, transformSpecialBlocksForStream } = useContentProcessor();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
 
@@ -121,6 +121,19 @@ const isTransitioning = ref(false);
 const showStreamView = computed(
   () => isStreaming.value || isTransitioning.value,
 );
+
+// Aurora: 分层处理后的内容
+const processedStable = computed(() => {
+  if (!props.message.stableContent) return "";
+  return transformSpecialBlocksForStream(props.message.stableContent);
+});
+
+const processedTail = computed(() => {
+  if (props.message.tailContent !== undefined) {
+    return transformSpecialBlocksForStream(props.message.tailContent);
+  }
+  return streamContent.value;
+});
 
 // 节流状态
 let isProcessing = false;
@@ -351,6 +364,8 @@ const showMessageContextMenu = async () => {
         const fullText = await getFullText();
         // 将内容填入全局编辑状态供 InputEnhancer 读取
         chatStore.editMessageContent = fullText || "";
+        // 标记当前正在编辑重发的消息 ID
+        chatStore.editingOriginalMessageId = props.message.id;
       },
     });
   }
@@ -424,8 +439,16 @@ const handleSaveEdit = async (newContent: string) => {
         </div>
       </template>
       <template v-else>
-        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
-          <MarkdownBlock :content="streamContent" :is-streaming="true" />
+        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden aurora-container">
+          <!-- Aurora: 稳定层 (Frozen via v-memo) -->
+          <div v-if="processedStable" v-memo="[processedStable]" class="aurora-stable-layer">
+            <MarkdownBlock :content="processedStable" :is-streaming="false" />
+          </div>
+          
+          <!-- Aurora: 尾随层 (High-frequency updates) -->
+          <div class="aurora-tail-layer">
+            <MarkdownBlock :content="processedTail" :is-streaming="true" />
+          </div>
         </div>
       </template>
 
@@ -456,6 +479,22 @@ const handleSaveEdit = async (newContent: string) => {
 <style scoped>
 .animate-fade-in {
   animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.aurora-container {
+  /* 布局隔离：防止内部变动影响全局 */
+  contain: layout;
+}
+
+.aurora-stable-layer {
+  /* 稳定区：启用浏览器原生墓碑优化 */
+  content-visibility: auto;
+  contain-intrinsic-size: 0 50px;
+}
+
+.aurora-tail-layer {
+  /* 活跃区：确保动画不被裁切 */
+  position: relative;
 }
 
 @keyframes fadeIn {

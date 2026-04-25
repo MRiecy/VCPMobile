@@ -1,7 +1,8 @@
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
-use std::fs;
+use sqlx::Row;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
@@ -21,9 +22,10 @@ const VCP_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EmoticonItem {
-    pub url: String,
+    pub id: Option<i64>,
     pub category: String,
     pub filename: String,
+    pub url: String,
     #[serde(rename = "searchKey")]
     pub search_key: String,
 }
@@ -134,34 +136,29 @@ fn extract_emoticon_info(url_str: &str) -> (Option<String>, Option<String>) {
     }
 }
 
-pub async fn internal_generate_library<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    _settings_state: &SettingsState,
-) -> Result<Vec<EmoticonItem>, String> {
-    let config_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    let generated_lists_path = config_dir.join("generated_lists");
+#[derive(Deserialize)]
+struct EmojiListResponse {
+    data: std::collections::HashMap<String, Vec<String>>,
+}
 
-    println!(
-        "[EmoticonManager] Scanning path: {:?}",
-        generated_lists_path
-    );
-
-    if !generated_lists_path.exists() {
-        return Err("generated_lists directory not found".to_string());
-    }
-
+#[tauri::command]
+pub async fn regenerate_emoticon_library<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    emoticon_state: State<'_, EmoticonManagerState>,
+) -> Result<usize, String> {
     // 1. 获取配置
-    let settings_state = app_handle.state::<SettingsState>();
     let settings = read_settings(app_handle.clone(), settings_state).await?;
     let vcp_server_url = settings.vcp_server_url;
+    let admin_user = settings.admin_username;
+    let admin_pass = settings.admin_password;
+    let file_key = settings.file_key;
+
     if vcp_server_url.is_empty() {
         return Err("VCP Server URL is empty in settings".to_string());
     }
 
-    // 修复：保留端口号
+    // 2. 构造基础 URL (去除末尾斜杠并规范化)
     let base_url = if let Ok(u) = Url::parse(&vcp_server_url) {
         let scheme = u.scheme();
         let host = u.host_str().unwrap_or("");
@@ -174,98 +171,142 @@ pub async fn internal_generate_library<R: Runtime>(
         return Err("Invalid VCP Server URL".to_string());
     };
 
-    // 2. 获取密码 (鲁棒性改进)
-    let config_env_path = generated_lists_path.join("config.env");
-    if !config_env_path.exists() {
-        return Err("config.env not found in generated_lists".to_string());
+    // 3. 请求远程接口
+    let client = reqwest::Client::new();
+    let api_url = format!("{}/admin_api/emojis/list", base_url);
+
+    let resp = client
+        .get(&api_url)
+        .basic_auth(&admin_user, Some(&admin_pass))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch emoji list: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("API returned error status: {}", resp.status()));
     }
-    let config_content = fs::read_to_string(config_env_path).map_err(|e| e.to_string())?;
-    let password = config_content
-        .lines()
-        .find(|line| line.trim().starts_with("file_key="))
-        .and_then(|line| line.split('=').nth(1))
-        .ok_or_else(|| "file_key not found in config.env".to_string())?
-        .trim();
 
-    println!("[EmoticonManager] Password loaded, BaseURL: {}", base_url);
+    let payload: EmojiListResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse emoji JSON: {}", e))?;
 
-    // 3. 扫描 txt 文件
+    // 4. 处理并保存到数据库
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // 清空旧库
+    sqlx::query("DELETE FROM emoticon_library")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+
     let mut library = Vec::new();
-    let entries = fs::read_dir(&generated_lists_path).map_err(|e| e.to_string())?;
+    for (category, filenames) in payload.data {
+        for filename in filenames {
+            let encoded_filename = utf8_percent_encode(&filename, VCP_ENCODE_SET).to_string();
+            let encoded_category = utf8_percent_encode(&category, VCP_ENCODE_SET).to_string();
 
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        if file_name.ends_with("表情包.txt") {
-            let category = file_name.trim_end_matches(".txt").to_string();
-            let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let filenames: Vec<&str> = content
-                .split('|')
-                .filter(|s| !s.trim().is_empty())
-                .collect();
-
-            println!(
-                "[EmoticonManager] Loading category: {} ({} items)",
-                category,
-                filenames.len()
+            // 构造完整 URL: baseUrl/pw=fileKey/images/category/filename
+            let full_url = format!(
+                "{}/pw={}/images/{}/{}",
+                base_url, file_key, encoded_category, encoded_filename
             );
 
-            for filename in filenames {
-                // 使用 VCP_ENCODE_SET 以保留点号等字符
-                let encoded_filename = utf8_percent_encode(filename, VCP_ENCODE_SET).to_string();
-                let encoded_category = utf8_percent_encode(&category, VCP_ENCODE_SET).to_string();
-                let full_url = format!(
-                    "{}/pw={}/images/{}/{}",
-                    base_url, password, encoded_category, encoded_filename
-                );
+            let search_key = format!("{}/{}", category.to_lowercase(), filename.to_lowercase());
 
-                library.push(EmoticonItem {
-                    url: full_url,
-                    category: category.clone(),
-                    filename: filename.to_string(),
-                    search_key: format!("{}/{}", category.to_lowercase(), filename.to_lowercase()),
-                });
-            }
+            // 插入数据库
+            sqlx::query(
+                "INSERT INTO emoticon_library (category, filename, url, search_key) VALUES (?, ?, ?, ?)"
+            )
+            .bind(&category)
+            .bind(&filename)
+            .bind(&full_url)
+            .bind(&search_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            library.push(EmoticonItem {
+                id: None,
+                category: category.clone(),
+                filename: filename.clone(),
+                url: full_url,
+                search_key,
+            });
         }
     }
 
-    println!("[EmoticonManager] Total items: {}", library.len());
+    transaction.commit().await.map_err(|e| e.to_string())?;
 
-    // 保存到本地 json 缓存
-    let library_json_path = generated_lists_path.join("emoticon_library.json");
-    let json_content = serde_json::to_string_pretty(&library).map_err(|e| e.to_string())?;
-    let _ = fs::write(library_json_path, json_content);
-
-    Ok(library)
-}
-
-#[tauri::command]
-pub async fn get_emoticon_library(
-    emoticon_state: State<'_, EmoticonManagerState>,
-) -> Result<Vec<EmoticonItem>, String> {
-    let library = emoticon_state.library.lock().await;
-    Ok(library.clone())
-}
-
-#[tauri::command]
-pub async fn regenerate_emoticon_library<R: Runtime>(
-    app_handle: AppHandle<R>,
-    settings_state: State<'_, SettingsState>,
-    emoticon_state: State<'_, EmoticonManagerState>,
-) -> Result<usize, String> {
-    let library = internal_generate_library(&app_handle, &settings_state).await?;
     let count = library.len();
     *emoticon_state.library.lock().await = library;
+
+    println!(
+        "[EmoticonManager] Library regenerated via API: {} items",
+        count
+    );
     Ok(count)
 }
 
+pub async fn internal_load_library<R: Runtime>(
+    app_handle: &AppHandle<R>,
+) -> Result<Vec<EmoticonItem>, String> {
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let rows = sqlx::query("SELECT id, category, filename, url, search_key FROM emoticon_library")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut new_library = Vec::new();
+    for row in rows {
+        new_library.push(EmoticonItem {
+            id: Some(row.get("id")),
+            category: row.get("category"),
+            filename: row.get("filename"),
+            url: row.get("url"),
+            search_key: row.get("search_key"),
+        });
+    }
+    Ok(new_library)
+}
+
 #[tauri::command]
-pub async fn fix_emoticon_url(
+pub async fn get_emoticon_library<R: Runtime>(
+    app_handle: AppHandle<R>,
+    emoticon_state: State<'_, EmoticonManagerState>,
+) -> Result<Vec<EmoticonItem>, String> {
+    let mut library = emoticon_state.library.lock().await;
+    if !library.is_empty() {
+        return Ok(library.clone());
+    }
+
+    // 从数据库加载
+    let new_library = internal_load_library(&app_handle).await?;
+    *library = new_library.clone();
+    Ok(new_library)
+}
+
+#[tauri::command]
+pub async fn fix_emoticon_url<R: Runtime>(
+    app_handle: AppHandle<R>,
     original_src: String,
     emoticon_state: State<'_, EmoticonManagerState>,
 ) -> Result<String, String> {
-    let library = emoticon_state.library.lock().await;
+    let mut library_lock = emoticon_state.library.lock().await;
+
+    // 如果内存为空，尝试从数据库加载一次
+    if library_lock.is_empty() {
+        if let Ok(new_library) = internal_load_library(&app_handle).await {
+            *library_lock = new_library;
+        }
+    }
+
+    let library = &*library_lock;
     if library.is_empty() {
         return Ok(original_src);
     }

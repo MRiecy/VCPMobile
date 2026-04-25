@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, computed, ref } from "vue";
 import { useRouter } from "vue-router";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSwipe } from "@vueuse/core";
 import { useThemeStore } from "./core/stores/theme";
@@ -33,20 +32,18 @@ const { initRootHistory } = useModalHistory();
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
 const { direction, lengthX, lengthY } = useSwipe(appRootRef, {
-  threshold: 15,
+  threshold: 30, // 稍微提高阈值，防止微小误触
   onSwipeEnd: (e: TouchEvent | MouseEvent) => {
-    // Only trigger if we aren't already showing drawers
-    if (layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen) return;
+    // 只有在抽屉关闭时才从左往右滑开启
+    if (!layoutStore.leftDrawerOpen && !layoutStore.rightDrawerOpen) {
+      // 检查是否从受限区域发起
+      if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
 
-    // Check if the swipe originated from a restricted area (e.g. chat input or horizontal scroll areas)
-    if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
+      const absX = Math.abs(lengthX.value);
+      const absY = Math.abs(lengthY.value);
 
-    // Check angle: |deltaY| / deltaX < tan(30deg) ~ 0.577
-    const absX = Math.abs(lengthX.value);
-    const absY = Math.abs(lengthY.value);
-
-    if (direction.value === "right" && absX > 60) {
-      if (absY / absX < 0.577) {
+      // 从左往右划 (开启左侧边栏)
+      if (direction.value === "right" && absX > 60 && absY / absX < 0.6) {
         layoutStore.setLeftDrawer(true);
       }
     }
@@ -106,22 +103,6 @@ onMounted(async () => {
 
   await bootstrapApp();
 
-  // 获取当前 VCP Log 状态快照 (处理启动时已连接的情况)
-  try {
-    const logStatus = await invoke<string>("get_vcp_log_status");
-    if (logStatus === "connected") {
-      processPayload({
-        type: "connection_status",
-        status: "connected",
-        message: "已连接",
-        source: "VCPLog",
-        isSnapshot: true,
-      });
-    }
-  } catch (e) {
-    console.error("[App] Failed to query VCP Log status:", e);
-  }
-
   // 启动 VCP Log IPC 监听 (使用 1:1 移植的解析大脑)
   unlistenLog = await listen("vcp-system-event", (event: any) => {
     const payload = event.payload;
@@ -144,25 +125,16 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div
-    ref="appRootRef"
-    class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative"
-  >
+  <div ref="appRootRef" class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
     <!-- 0. 全局初始化加载层 & 错误看板 -->
     <BootScreen />
 
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">
-      <div
-        :key="backgroundStyle.backgroundImage"
-        class="vcp-background-layer"
-        :style="backgroundStyle"
-      ></div>
+      <div :key="backgroundStyle.backgroundImage" class="vcp-background-layer" :style="backgroundStyle"></div>
     </Transition>
-    <div
-      class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
-      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"
-    ></div>
+    <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
+      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
 
     <!-- 2. 主内容区先渲染，抽屉与遮罩在后声明，靠 DOM 顺位自然覆盖 -->
     <main class="flex-1 min-w-0 relative overflow-hidden">
@@ -173,23 +145,17 @@ onUnmounted(() => {
 
     <!-- 3. 抽屉遮罩层位于主内容之后、抽屉之前，点击空白即可关闭 -->
     <Transition name="fade">
-      <div
-        v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden"
-        @click.self="
+      <div v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
+        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden" @click.self="
           layoutStore.setLeftDrawer(false);
-          layoutStore.setRightDrawer(false);
-        "
-      ></div>
+        layoutStore.setRightDrawer(false);
+        "></div>
     </Transition>
 
     <!-- 4. 左右抽屉在遮罩之后声明，不写 z-index 也能稳定压过主内容 -->
     <AgentSidebar />
-    <RightSidebar
-      class="pointer-events-auto shrink-0"
-      :is-open="layoutStore.rightDrawerOpen"
-      @close="layoutStore.setRightDrawer(false)"
-    />
+    <RightSidebar class="pointer-events-auto shrink-0" :is-open="layoutStore.rightDrawerOpen"
+      @close="layoutStore.setRightDrawer(false)" />
 
     <!-- 5. 全局覆盖层管理器 -->
     <GlobalOverlayManager />

@@ -11,7 +11,6 @@ export const useOverlayStore = defineStore('overlay', () => {
   const editorConfig = ref<EditorConfig | null>(null);
 
   const isSettingsOpen = ref(false);
-  const isSyncOpen = ref(false);
   const isAgentSettingsOpen = ref(false);
   const agentSettingsId = ref('');
   const isGroupSettingsOpen = ref(false);
@@ -28,18 +27,6 @@ export const useOverlayStore = defineStore('overlay', () => {
     if (isSettingsOpen.value) {
       unregisterModal('SettingsView');
       isSettingsOpen.value = false;
-    }
-  };
-
-  const openSync = () => {
-    isSyncOpen.value = true;
-    registerModal('SyncView', () => { isSyncOpen.value = false; });
-  };
-
-  const closeSync = () => {
-    if (isSyncOpen.value) {
-      unregisterModal('SyncView');
-      isSyncOpen.value = false;
     }
   };
 
@@ -117,15 +104,12 @@ export const useOverlayStore = defineStore('overlay', () => {
     contextMenuConfig,
     editorConfig,
     isSettingsOpen,
-    isSyncOpen,
     isAgentSettingsOpen,
     agentSettingsId,
     isGroupSettingsOpen,
     groupSettingsId,
     openSettings,
     closeSettings,
-    openSync,
-    closeSync,
     openAgentSettings,
     closeAgentSettings,
     openGroupSettings,

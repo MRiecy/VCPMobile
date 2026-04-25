@@ -60,7 +60,7 @@ pub async fn read_group_config_internal<R: Runtime>(
     let pool = &db_state.pool;
 
     let group_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
+        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, g.current_topic_id, av.dominant_color 
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
          WHERE g.group_id = ? AND g.deleted_at IS NULL"
@@ -73,6 +73,7 @@ pub async fn read_group_config_internal<R: Runtime>(
     if let Some(row) = group_row {
         use sqlx::Row;
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
+        let current_topic_id: Option<String> = row.get("current_topic_id");
 
         let member_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
             "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? ORDER BY sort_order ASC"
@@ -131,6 +132,7 @@ pub async fn read_group_config_internal<R: Runtime>(
             topics,
             tag_match_mode: row.get("tag_match_mode"),
             created_at: row.get("created_at"),
+            current_topic_id,
         };
 
         state.caches.insert(group_id.to_string(), config.clone());
@@ -298,19 +300,21 @@ pub async fn create_group(
         topics: vec![default_topic.clone()],
         tag_match_mode: Some("strict".to_string()),
         created_at: timestamp,
+        current_topic_id: Some(default_topic_id.clone()),
     };
 
     let dto = GroupSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
     sqlx::query(
-        "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model, config_hash) VALUES (?, ?, ?, ?, 'sequential', 0, ?)"
+        "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model, config_hash, current_topic_id) VALUES (?, ?, ?, ?, 'sequential', 0, ?, ?)"
     )
     .bind(&group_id)
     .bind(&name)
     .bind(timestamp)
     .bind(timestamp)
     .bind(&config_hash)
+    .bind(&config.current_topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -392,8 +396,8 @@ async fn internal_write_group_config<R: Runtime>(
         "INSERT INTO groups (
             group_id, name, mode, 
             group_prompt, invite_prompt, use_unified_model, unified_model, 
-            tag_match_mode, created_at, config_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tag_match_mode, created_at, config_hash, current_topic_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(group_id) DO UPDATE SET
             name = excluded.name,
             mode = excluded.mode,
@@ -403,6 +407,7 @@ async fn internal_write_group_config<R: Runtime>(
             unified_model = excluded.unified_model,
             tag_match_mode = excluded.tag_match_mode,
             config_hash = excluded.config_hash,
+            current_topic_id = excluded.current_topic_id,
             updated_at = excluded.updated_at",
     )
     .bind(group_id)
@@ -415,6 +420,7 @@ async fn internal_write_group_config<R: Runtime>(
     .bind(&config.tag_match_mode)
     .bind(config.created_at)
     .bind(&config_hash)
+    .bind(&config.current_topic_id)
     .bind(now)
     .execute(&mut *tx)
     .await

@@ -183,6 +183,7 @@ export function useContentProcessor() {
 
   return {
     processMessageContent,
+    transformSpecialBlocksForStream,
     escapeHtml,
     removeScopedCss,
   };

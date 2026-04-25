@@ -9,11 +9,23 @@ const props = defineProps<{
   fallbackName?: string;
   size?: string; // 如 'w-10 h-10'
   rounded?: string; // 如 'rounded-xl'
+  outerBorder?: boolean;
+  dominantColor?: string | null;
 }>();
 
 const avatarStore = useAvatarStore();
 const avatarUrl = ref("");
 const imgExists = ref(false);
+
+// 处理主色调边框
+const borderStyle = computed(() => {
+  if (!props.outerBorder) return {};
+  const color = props.dominantColor || 'rgba(255, 255, 255, 0.1)';
+  return {
+    borderColor: color,
+    boxShadow: `0 0 10px ${color}44` // 增加发光
+  };
+});
 
 // 提取首字母用于 Fallback
 const initial = computed(() => {
@@ -74,8 +86,9 @@ const handleImgError = () => {
   <div :class="[
     size || 'w-10 h-10', 
     rounded || 'rounded-xl',
-    'relative overflow-hidden flex-shrink-0 flex items-center justify-center bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 shadow-inner'
-  ]">
+    'relative overflow-hidden flex-shrink-0 flex items-center justify-center bg-black/5 dark:bg-white/5 border shadow-inner transition-all duration-500',
+    outerBorder ? 'border-2' : 'border-black/5 dark:border-white/10'
+  ]" :style="borderStyle">
     <!-- Fallback 占位 (底层) -->
     <div 
       class="absolute inset-0 flex items-center justify-center text-white font-bold select-none"

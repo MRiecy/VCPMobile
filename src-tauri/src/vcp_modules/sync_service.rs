@@ -144,6 +144,7 @@ async fn publish_sync_status<R: Runtime>(
     app_handle: &AppHandle<R>,
     status: &Arc<RwLock<String>>,
     next_status: &str,
+    message: &str,
 ) {
     {
         let mut guard = status.write().await;
@@ -152,7 +153,17 @@ async fn publish_sync_status<R: Runtime>(
         }
         *guard = next_status.to_string();
     }
-    let _ = app_handle.emit("vcp-sync-status", json!({ "status": next_status }));
+
+    // 统一使用 vcp-system-event 发射，type 为明确的 vcp-sync-status
+    let _ = app_handle.emit(
+        "vcp-system-event",
+        json!({
+            "type": "vcp-sync-status",
+            "status": next_status,
+            "message": message,
+            "source": "Sync"
+        }),
+    );
 }
 
 pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
@@ -221,7 +232,13 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                 }
             };
 
-            publish_sync_status(&handle_clone, &connection_status_for_task, "connecting").await;
+            publish_sync_status(
+                &handle_clone,
+                &connection_status_for_task,
+                "connecting",
+                "同步服务连接中...",
+            )
+            .await;
 
             match connect_async(&ws_url).await {
                 Ok((mut ws_stream, _)) => {
@@ -229,18 +246,53 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                         logger.start_phase("metadata", 0);
                         logger.log(LogLevel::Info, "metadata", "=== Phase 1: Metadata ===");
                     }
-                    publish_sync_status(&handle_clone, &connection_status_for_task, "connected")
-                        .await;
+                    publish_sync_status(
+                        &handle_clone,
+                        &connection_status_for_task,
+                        "open",
+                        "同步服务已连接",
+                    )
+                    .await;
 
+                    // 增加同步成功卡片
+                    let _ = handle_clone.emit(
+                        "vcp-system-event",
+                        json!({
+                            "type": "vcp-log-message",
+                            "data": {
+                                "id": "vcp_sync_connection_status",
+                                "status": "success",
+                                "tool_name": "Sync",
+                                "content": "✅ 同步服务已建立长连接。准备执行元数据校对。",
+                                "source": "Sync"
+                            }
+                        }),
+                    );
                     let db = handle_clone.state::<DbState>();
                     if let Err(e) = HashInitializer::ensure_all_agent_hashes(&db.pool).await {
                         if let Ok(logger) = sync_logger_task.lock() {
                             logger.log(
                                 LogLevel::Error,
                                 "metadata",
-                                &format!("Hash init error: {}", e),
+                                &format!("Failed to initialize agent hashes: {}", e),
                             );
                         }
+
+                        // 发射逻辑错误通知卡片
+                        let _ = handle_clone.emit(
+        "vcp-system-event",
+        json!({
+            "type": "vcp-log-message",
+            "data": {
+                "id": "vcp_sync_connection_status",
+                "status": "error",
+                "tool_name": "同步初始化失败",
+                "content": format!("❌ 数据库就绪失败: {}\n\n提示：尝试重新启动应用，如果问题持续，请检查存储权限。", e),
+                "source": "Sync"
+            }
+        }),
+    );
+                        break; // 退出本次循环
                     }
                     if let Err(e) = HashInitializer::ensure_all_group_hashes(&db.pool).await {
                         if let Ok(logger) = sync_logger_task.lock() {
@@ -250,6 +302,22 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                 &format!("Hash init error: {}", e),
                             );
                         }
+
+                        // 发射逻辑错误通知卡片
+                        let _ = handle_clone.emit(
+                            "vcp-system-event",
+                            json!({
+                                "type": "vcp-log-message",
+                                "data": {
+                                    "id": "vcp_sync_connection_status",
+                                    "status": "error",
+                                    "tool_name": "同步初始化失败",
+                                    "content": format!("❌ 群组数据库就绪失败: {}\n\n提示：检查存储权限或数据库完整性。", e),
+                                    "source": "Sync"
+                                }
+                            }),
+                        );
+                        break;
                     }
                     if let Ok(logger) = sync_logger_task.lock() {
                         logger.log(
@@ -329,15 +397,56 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                             },
                                                                             SyncCommand::Phase1 => {
                                                                                 let db = handle_clone.state::<DbState>();
-                                                                                let _ = pipeline_task.on_phase1_completed(&db.pool).await;
+                                                                                if let Err(e) = pipeline_task.on_phase1_completed(&db.pool).await {
+                                                                                    let _ = handle_clone.emit(
+                                                                                        "vcp-system-event",
+                                                                                        json!({
+                                                                                            "type": "vcp-log-message",
+                                                                                            "data": {
+                                                                                                "id": "vcp_sync_connection_status",
+                                                                                                "status": "error",
+                                                                                                "tool_name": "同步阶段 1 失败",
+                                                                                                "content": format!("❌ 无法进入 Topic 同步阶段: {}", e),
+                                                                                                "source": "Sync"
+                                                                                            }
+                                                                                        }),
+                                                                                    );
+                                                                                }
                                                                             },
                                                                             SyncCommand::Phase2 => {
-                                                                                let _ = pipeline_task.on_phase2_completed().await;
+                                                                                if let Err(e) = pipeline_task.on_phase2_completed().await {
+                                                                                    let _ = handle_clone.emit(
+                                                                                        "vcp-system-event",
+                                                                                        json!({
+                                                                                            "type": "vcp-log-message",
+                                                                                            "data": {
+                                                                                                "id": "vcp_sync_connection_status",
+                                                                                                "status": "error",
+                                                                                                "tool_name": "同步阶段 2 失败",
+                                                                                                "content": format!("❌ 无法进入 Message 同步阶段: {}", e),
+                                                                                                "source": "Sync"
+                                                                                            }
+                                                                                        }),
+                                                                                    );
+                                                                                }
                                                                             },
                                                                             SyncCommand::Phase3 => {
-                                                                                let _ = pipeline_task.on_phase3_completed().await;
-                                                                            },
-                                                                            SyncCommand::NotifyDelete { data_type, id } => {
+                                                                                if let Err(e) = pipeline_task.on_phase3_completed().await {
+                                                                                    let _ = handle_clone.emit(
+                                                                                        "vcp-system-event",
+                                                                                        json!({
+                                                                                            "type": "vcp-log-message",
+                                                                                            "data": {
+                                                                                                "id": "vcp_sync_connection_status",
+                                                                                                "status": "error",
+                                                                                                "tool_name": "同步阶段 3 失败",
+                                                                                                "content": format!("❌ 无法结束同步任务: {}", e),
+                                                                                                "source": "Sync"
+                                                                                            }
+                                                                                        }),
+                                                                                    );
+                                                                                }
+                                                                            },                                                                            SyncCommand::NotifyDelete { data_type, id } => {
                                                                                 let msg = json!({ "type": "SYNC_DELETE_NOTIFY", "id": id, "dataType": data_type });
                                                                                 let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                                                             },
@@ -770,8 +879,21 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                                 },
                                                                                 Some("PHASE_COMPLETED") => {
                                                                                     println!("[SyncService] Sync completed");
-                                                                                },
-                                                                                _ => {}
+                                                                                    // 发送同步完成卡片
+                                                                                    let _ = handle_clone.emit(
+                                                                                        "vcp-system-event",
+                                                                                        json!({
+                                                                                            "type": "vcp-log-message",
+                                                                                            "data": {
+                                                                                                "id": "vcp_sync_connection_status",
+                                                                                                "status": "success",
+                                                                                                "tool_name": "Sync",
+                                                                                                "content": "✅ 同步任务已全部完成。本地数据库与桌面端已对齐。",
+                                                                                                "source": "Sync"
+                                                                                            }
+                                                                                        }),
+                                                                                    );
+                                                                                },                                                                                _ => {}
                                                                             }
                                                                         }
                                                                     },
@@ -779,9 +901,29 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                 }
                     }
                 }
-                Err(_) => {
-                    publish_sync_status(&handle_clone, &connection_status_for_task, "disconnected")
-                        .await;
+                Err(e) => {
+                    publish_sync_status(
+                        &handle_clone,
+                        &connection_status_for_task,
+                        "error",
+                        "同步服务连接失败",
+                    )
+                    .await;
+
+                    // 发射错误通知卡片
+                    let _ = handle_clone.emit(
+                        "vcp-system-event",
+                        json!({
+                            "type": "vcp-log-message",
+                            "data": {
+                                "id": "vcp_sync_connection_status",
+                                "status": "error",
+                                "tool_name": "同步服务失败",
+                                "content": format!("❌ 无法连接到同步服务: {}\n\n提示：\n1. 请检查桌面端 VCPMobileSync 插件是否已启动并启用分布式服务。\n2. 确保手机与桌面端处于同一局域网内。", e),
+                                "source": "Sync"
+                            }
+                        }),
+                    );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }

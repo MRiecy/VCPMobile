@@ -1,12 +1,17 @@
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { useAssistantStore } from './assistant';
 import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
+import { useNotificationStore } from './notification';
 
 export type AppState = 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR';
+
+export interface CoreStatus {
+  status: 'initializing' | 'ready' | 'error' | 'none';
+  message: string;
+}
 
 type PreloadTask = {
   label: string;
@@ -26,6 +31,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
   const themeStore = useThemeStore();
+  const notificationStore = useNotificationStore();
 
   let bootstrapPromise: Promise<void> | null = null;
   let coreReadyUnlisten: (() => void) | null = null;
@@ -76,6 +82,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     isBootstrapping.value = false;
     bootstrapPromise = null;
     setState('ERROR', message);
+    // 统一更新通知系统的核心状态槽
+    notificationStore.updateCoreStatus({ 
+      status: 'error', 
+      message, 
+      source: 'Core' 
+    });
     console.error('[Lifecycle] FATAL:', message);
   };
 
@@ -176,68 +188,82 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
   const waitForCoreReady = async () => {
     updatePhaseLabel('检查核心服务状态...');
+    
+    // 1. 同步一次当前状态
     const currentStatus = await invoke<string>('get_core_status');
-    console.log(`[Lifecycle] get_core_status -> ${currentStatus}`);
+    console.log(`[Lifecycle] Initial core status -> ${currentStatus}`);
 
     if (currentStatus === 'ready') {
-      console.log('[Lifecycle] Backend already ready, skip event wait.');
+      notificationStore.updateCoreStatus({ status: 'ready', message: '核心引擎已就绪', source: 'Core' });
       return;
     }
 
     if (currentStatus === 'error') {
       const lastError = await invoke<string | null>('get_last_error');
-      throw new Error(lastError || '后端在初始化阶段返回错误状态');
+      const msg = lastError || '核心服务在初始化阶段发生崩溃';
+      notificationStore.updateCoreStatus({ status: 'error', message: msg, source: 'Core' });
+      throw new Error(msg);
     }
 
-    updatePhaseLabel('等待 vcp-core-ready 事件...');
+    // 2. 等待状态变为 ready (由 useNotificationProcessor 触发)
+    updatePhaseLabel('等待核心就绪...');
 
-    await new Promise<void>(async (resolve, reject) => {
-      let settled = false;
+    await new Promise<void>((resolve, reject) => {
+      // 仅作为极端挂死的兜底
+      const timeoutId = setTimeout(() => {
+        unwatch();
+        reject(new Error(`等待核心引擎就绪超时（${CONNECT_TIMEOUT_MS}ms）`));
+      }, CONNECT_TIMEOUT_MS);
 
-      const settleResolve = () => {
-        if (settled) return;
-        settled = true;
-        cleanupConnectionWaiters();
-        resolve();
-      };
+      const unwatch = watch(
+        () => notificationStore.vcpCoreStatus.status,
+        (newStatus) => {
+          if (newStatus === 'ready') {
+            clearTimeout(timeoutId);
+            unwatch();
+            resolve();
+          } else if (newStatus === 'error') {
+            clearTimeout(timeoutId);
+            unwatch();
+            reject(new Error(notificationStore.vcpCoreStatus.message || '核心引擎启动失败'));
+          }
+        },
+        { immediate: true }
+      );
+    });
+  };
 
-      const settleReject = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        cleanupConnectionWaiters();
-        reject(error);
-      };
-
-      coreReadyUnlisten = await listen('vcp-core-ready', () => {
-        console.log('[Lifecycle] Received vcp-core-ready event');
-        settleResolve();
+  const hydrateSystemStatus = async () => {
+    try {
+      console.log('[Lifecycle] Fetching system status snapshot...');
+      const snapshot = await invoke<{ core: string; log: string; sync: string }>('get_system_snapshot');
+      
+      // 同步到 Notification Store (唯一真相源)
+      notificationStore.updateCoreStatus({
+        status: snapshot.core as any,
+        message: snapshot.core === 'ready' ? '核心引擎已就绪' : '核心引擎初始化中...',
+        source: 'Core'
       });
 
-      connectTimeoutId = setTimeout(async () => {
-        if (settled) return;
+      notificationStore.updateStatus({
+        status: snapshot.log as any,
+        message: snapshot.log === 'open' ? '已连接' : '正在连接...',
+        source: 'VCPLog'
+      });
 
-        try {
-          console.warn('[Lifecycle] Wait for core ready timed out, checking status again...');
-          const status = await invoke<string>('get_core_status');
-          console.log(`[Lifecycle] timeout get_core_status -> ${status}`);
+      // 还需要一个 updateSyncStatus? 目前暂用 updateStatus 逻辑手动适配
+      // 实际上我们可以给 notificationStore 加一个更通用的 updateIndicator(source, data)
+      // 但为了快速上线，我们先手动调一下
+      notificationStore.updateStatus({
+        status: snapshot.sync as any,
+        message: snapshot.sync === 'open' ? '已开启同步' : '同步未绪',
+        source: 'Sync'
+      });
 
-          if (status === 'ready') {
-            settleResolve();
-            return;
-          }
-
-          if (status === 'error') {
-            const lastError = await invoke<string | null>('get_last_error');
-            settleReject(new Error(lastError || '核心服务启动失败'));
-            return;
-          }
-
-          settleReject(new Error(`等待核心服务就绪超时（${CONNECT_TIMEOUT_MS}ms）`));
-        } catch (error) {
-          settleReject(error instanceof Error ? error : new Error(String(error)));
-        }
-      }, CONNECT_TIMEOUT_MS);
-    });
+      console.log('[Lifecycle] Snapshot hydrated:', snapshot);
+    } catch (e) {
+      console.error('[Lifecycle] Failed to hydrate status snapshot:', e);
+    }
   };
 
   const bootstrap = async () => {
@@ -253,6 +279,10 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         hasBootstrapped.value = false;
 
         setState('BOOTING', '开始前端主线程启动编排');
+        
+        // --- 核心优化：先拿快照，再跑流程 ---
+        await hydrateSystemStatus();
+
         updatePhaseLabel('初始化主题资源...');
         await themeStore.initTheme();
         console.log('[Lifecycle] Theme initialization complete');
@@ -278,6 +308,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     isBootstrapping,
     hasBootstrapped,
     lastTransitionAt,
+    coreStatus: computed(() => notificationStore.vcpCoreStatus),
     bootstrap
   };
 });

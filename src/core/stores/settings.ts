@@ -12,6 +12,9 @@ export interface AppSettings {
   syncServerUrl: string;
   syncHttpUrl: string;
   syncToken: string;
+  adminUsername?: string;
+  adminPassword?: string;
+  fileKey?: string;
   topicSummaryModel: string;
   syncLogLevel: string;
   agentOrder: string[];
@@ -25,20 +28,6 @@ export const useSettingsStore = defineStore("settings", () => {
   const loading = ref(false);
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
-
-  const reconnectVcpLog = async () => {
-    if (!settings.value?.vcpLogUrl || !settings.value?.vcpLogKey) {
-      return;
-    }
-    try {
-      await invoke("init_vcp_log_connection", {
-        url: String(settings.value.vcpLogUrl),
-        key: String(settings.value.vcpLogKey),
-      });
-    } catch (e) {
-      console.error("[SettingsStore] Failed to init VCPLog:", e);
-    }
-  };
 
   const fetchSettings = async () => {
     loading.value = true;
@@ -106,6 +95,5 @@ export const useSettingsStore = defineStore("settings", () => {
     fetchSettings,
     saveSettings,
     updateSettings,
-    reconnectVcpLog,
   };
 });

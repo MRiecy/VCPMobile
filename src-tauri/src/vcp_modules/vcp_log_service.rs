@@ -11,20 +11,19 @@ use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
 lazy_static::lazy_static! {
-    static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-    static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
-    // 关键修复：保持 Sender 和一个 Receiver 都在生命周期内，防止通道因无接收者而被视为关闭
-    static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
-    static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("disconnected".to_string()));
+static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
+// 关键修复：保持 Sender 和一个 Receiver 都在生命周期内，防止通道因无接收者而被视为关闭
+static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
+static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
+}
+
+pub async fn get_vcp_log_status_internal() -> String {
+    CURRENT_LOG_STATUS.read().await.clone()
 }
 
 #[tauri::command]
-pub async fn get_vcp_log_status() -> Result<String, String> {
-    Ok(CURRENT_LOG_STATUS.read().await.clone())
-}
-
-#[tauri::command]
-pub async fn send_vcp_log_message(payload: Value) -> Result<(), String> {
+pub async fn send_vcp_log_message(payload: serde_json::Value) -> Result<(), String> {
     let sender_lock = LOG_SENDER.lock().await;
     if let Some(sender) = sender_lock.as_ref() {
         sender
@@ -133,9 +132,9 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         let _ = app_handle.emit(
             "vcp-system-event",
             serde_json::json!({
-                "type": "connection_status",
+                "type": "vcp-log-status",
                 "status": "connecting",
-                "message": "Connecting...",
+                "message": "连接中...",
                 "source": "VCPLog"
             }),
         );
@@ -153,10 +152,25 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 let _ = app_handle.emit(
                     "vcp-system-event",
                     serde_json::json!({
-                        "type": "connection_status",
+                        "type": "vcp-log-status",
                         "status": "error",
-                        "message": format!("Request error: {}", e),
+                        "message": "连接错误",
                         "source": "VCPLog"
+                    }),
+                );
+
+                // 错误卡片 1：请求构建失败 (例如 URL 格式错误)
+                let _ = app_handle.emit(
+                    "vcp-system-event",
+                    serde_json::json!({
+                        "type": "vcp-log-message",
+                        "data": {
+                            "id": "vcp_log_connection_status",
+                            "status": "error",
+                            "tool_name": "VCPLog 请求异常",
+                            "content": format!("❌ 无法构造请求: {}\n\n提示：请检查配置的 URL 格式是否正确。", e),
+                            "source": "VCPLog"
+                        }
                     }),
                 );
 
@@ -201,7 +215,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             Ok(connection_result) => match connection_result {
                 Ok((ws_stream, _)) => {
                     {
-                        *CURRENT_LOG_STATUS.write().await = "connected".to_string();
+                        *CURRENT_LOG_STATUS.write().await = "open".to_string();
                     }
                     log::info!("[VCPLog] Connected successfully to {}", masked_url);
 
@@ -210,10 +224,25 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     let _ = app_handle.emit(
                         "vcp-system-event",
                         serde_json::json!({
-                            "type": "connection_status",
-                            "status": "connected",
-                            "message": "Connected to VCPLog",
+                            "type": "vcp-log-status",
+                            "status": "open",
+                            "message": "已连接",
                             "source": "VCPLog"
+                        }),
+                    );
+
+                    // 额外发送一条连接成功的通知卡片
+                    let _ = app_handle.emit(
+                        "vcp-system-event",
+                        serde_json::json!({
+                            "type": "vcp-log-message",
+                            "data": {
+                                "id": "vcp_log_connection_status",
+                                "status": "success",
+                                "tool_name": "VCPLog",
+                                "content": "✅ VCPLog 连接成功！已建立实时数据通道。",
+                                "source": "VCPLog"
+                            }
                         }),
                     );
 
@@ -271,14 +300,14 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                     log::info!("[VCPLog] Disconnected from {}.", ws_url);
                     {
-                        *CURRENT_LOG_STATUS.write().await = "disconnected".to_string();
+                        *CURRENT_LOG_STATUS.write().await = "closed".to_string();
                     }
                     let _ = app_handle.emit(
                         "vcp-system-event",
                         serde_json::json!({
-                            "type": "connection_status",
-                            "status": "disconnected",
-                            "message": "Disconnected from VCPLog",
+                            "type": "vcp-log-status",
+                            "status": "closed",
+                            "message": "连接已断开",
                             "source": "VCPLog"
                         }),
                     );
@@ -291,10 +320,24 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     let _ = app_handle.emit(
                         "vcp-system-event",
                         serde_json::json!({
-                            "type": "connection_status",
+                            "type": "vcp-log-status",
                             "status": "error",
-                            "message": format!("Connection failed: {}", e),
+                            "message": "连接错误",
                             "source": "VCPLog"
+                        }),
+                    );
+
+                    // 额外发送一条连接错误的通知卡片，辅助排查 (错误卡片 2)
+                    let _ = app_handle.emit(
+                        "vcp-system-event",
+                        serde_json::json!({
+                            "type": "vcp-log-message",
+                            "data": {
+                                "id": "vcp_log_connection_status",
+                                "status": "error",
+                                "tool_name": "VCPLog 连接失败",                                "content": format!("❌ 连接错误: {}\n\n提示：\n1. 请检查桌面端 VCP 是否已开启且 VCPLog 服务正常。\n2. 检查 VCP API 地址和 Key 配置是否正确。", e),
+                                "source": "VCPLog"
+                            }
                         }),
                     );
                 }
@@ -309,10 +352,25 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 let _ = app_handle.emit(
                     "vcp-system-event",
                     serde_json::json!({
-                        "type": "connection_status",
+                        "type": "vcp-log-status",
                         "status": "error",
-                        "message": "Connection timed out",
+                        "message": "连接错误",
                         "source": "VCPLog"
+                    }),
+                );
+
+                // 错误卡片 3：连接超时
+                let _ = app_handle.emit(
+                    "vcp-system-event",
+                    serde_json::json!({
+                        "type": "vcp-log-message",
+                        "data": {
+                            "id": "vcp_log_connection_status",
+                            "status": "error",
+                            "tool_name": "VCPLog 连接超时",
+                            "content": "❌ 连接 VCPLog 超时 (10s)。\n\n提示：\n1. 请检查桌面端是否处于运行状态。\n2. 确认手机与电脑是否处于同一局域网。",
+                            "source": "VCPLog"
+                        }
                     }),
                 );
             }

@@ -27,7 +27,6 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   close: [];
-  openSync: [];
 }>();
 
 const settingsStore = useSettingsStore();
@@ -41,6 +40,9 @@ const settings = ref<AppSettings>({
   syncServerUrl: "",
   syncHttpUrl: "",
   syncToken: "",
+  adminUsername: "",
+  adminPassword: "",
+  fileKey: "",
   agentOrder: [],
   groupOrder: [],
   topicSummaryModel: "gemini-2.5-flash",
@@ -56,10 +58,6 @@ const onSummaryModelSelect = (modelId: string) => {
 
 const closeSettings = () => {
   emit("close");
-};
-
-const openSyncView = () => {
-  emit("openSync");
 };
 
 const loadSettings = async () => {
@@ -163,7 +161,6 @@ watch(
             <SyncSettingsSection
               :settings="settings"
               @save-request="saveSettings"
-              @open-sync="openSyncView"
             />
           </SettingsDisclosure>
 

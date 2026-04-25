@@ -58,7 +58,7 @@ export function useNotificationProcessor() {
         match: (t, m, p) =>
           t.toLowerCase().includes('error') ||
           m.toLowerCase().includes('failed') ||
-          (p?.type === 'vcp_log' && p?.data?.status === 'error'),
+          (p?.type === 'vcp-log-message' && p?.data?.status === 'error'),
         action: 'show',
         duration: 15000
       },
@@ -89,29 +89,44 @@ export function useNotificationProcessor() {
    * 负责将后端原始 JSON 转化为前端 UI 可用的结构
    */
   const processPayload = (payload: any): Partial<VcpNotification> => {
-    // 0. P2-7 Gap: 连接底层状态指示器 (vcp_log_status / connection_status)
-    if (payload.type === 'vcp_log_status' || payload.type === 'connection_status') {
+    // 0. P2-7 Gap: 连接底层状态指示器 (VCPLog 与 Sync 同步状态)
+    // 这里的逻辑已重构：状态变化仅更新 Store 指示器，不再触发 Toast 弹窗 (静默化处理)
+    if (payload.type === 'vcp-log-status' || payload.type === 'vcp-sync-status') {
       const statusData = payload.data || payload;
       const status = (statusData.status || 'connecting') as VcpStatus['status'];
-      const source = statusData.source || 'VCPLog';
-      
+      const source = statusData.source || (payload.type === 'vcp-sync-status' ? 'Sync' : 'VCPLog');
+      const message = statusData.message || '状态未知';
+
       store.updateStatus({
         status,
-        message: statusData.message || '状态未知',
+        message,
         source
       });
 
-      // 只有在连接成功时才弹出卡片（包括启动时的快照恢复）
-      if (status === 'connected') {
+      // 彻底静默连接状态通知
+      return { silent: true };
+    }
+
+    // --- 核心引擎状态处理 (P0 级别) ---
+    if (payload.type === 'vcp-core-status') {
+      const { status, message } = payload;
+      
+      store.updateCoreStatus({ 
+        status: status as any, 
+        message: message || '核心状态变更',
+        source: 'Core'
+      });
+
+      // 核心错误需要强制弹窗
+      if (status === 'error') {
         return {
-          title: `${source} 连接成功`,
-          message: statusData.message || '已建立实时数据通道',
-          type: 'success',
-          toastOnly: true, 
-          silent: false
+          id: 'vcp_core_fatal_error',
+          title: '核心引擎异常',
+          message: message || '后端服务发生未知崩溃',
+          type: 'error',
+          duration: 0
         };
       }
-
       return { silent: true };
     }
 
@@ -123,7 +138,7 @@ export function useNotificationProcessor() {
     let actions: VcpNotification['actions'] = [];
 
     // 1. 核心 VCP 日志解析 (对标 renderVCPLogNotification)
-    if (payload.type === 'vcp_log' && payload.data) {
+    if (payload.type === 'vcp-log-message' && payload.data) {
       const vcpData = payload.data;
       if (vcpData.tool_name && vcpData.status) {
         type = vcpData.status === 'error' ? 'error' : 'tool';
@@ -172,14 +187,18 @@ export function useNotificationProcessor() {
           // 解析失败则保持 rawContent
         }
 
-        // 错误模式处理 (针对嵌套的 JSON 错误)
+        // 错误模式处理 (针对嵌套的 JSON 错误) - 对标桌面端 L56-70
         if (vcpData.status === 'error' && rawContent.includes('{')) {
+          const jsonStart = rawContent.indexOf('{');
+          const prefix = rawContent.substring(0, jsonStart).trim();
+          const jsonPart = rawContent.substring(jsonStart);
+          
           try {
-            const jsonPart = rawContent.substring(rawContent.indexOf('{'));
             const parsed = JSON.parse(jsonPart);
             const errorMsg = parsed.plugin_error || parsed.error || parsed.message;
             if (errorMsg) {
-              message = errorMsg;
+              // 保留前缀，如 "执行错误: [详细信息]"
+              message = prefix ? `${prefix}${prefix.endsWith(':') ? ' ' : ': '}${errorMsg}` : errorMsg;
               isPreformatted = false;
             }
           } catch (e) { }
@@ -187,6 +206,7 @@ export function useNotificationProcessor() {
       } else if (vcpData.source === 'DistPluginManager') {
         title = '分布式服务器';
         message = vcpData.content || JSON.stringify(vcpData);
+        isPreformatted = false;
       }
     }
     // 2. 审批请求 (对标 L142)
@@ -212,7 +232,14 @@ export function useNotificationProcessor() {
         title += ` (@ ${vTs.substring(11, 16)})`;
       }
 
-      message = payload.data?.original_plugin_output?.message || JSON.stringify(payload.data || {});
+      const output = payload.data?.original_plugin_output;
+      if (output && typeof output === 'object') {
+        message = output.message || JSON.stringify(output, null, 2);
+        isPreformatted = !output.message;
+      } else {
+        message = String(output || JSON.stringify(payload.data || {}));
+        isPreformatted = false;
+      }
     }
     // 4. 日记创建状态 (对标桌面端 L118)
     else if (payload.type === 'daily_note_created') {
@@ -226,11 +253,26 @@ export function useNotificationProcessor() {
         type = 'info';
         message = noteData.message || '日记处理状态: ' + (noteData.status || '未知');
       }
+      isPreformatted = false;
     }
-    // 5. 默认回退
+    // 5. 默认回退 (对标桌面端 L175-180: Generic type + message)
     else {
-      title = payload.type || 'VCP Message';
-      message = typeof payload === 'string' ? payload : (payload.message || JSON.stringify(payload));
+      if (typeof payload === 'object' && payload !== null) {
+        title = payload.type ? `类型: ${payload.type}` : 'VCP 消息';
+        message = payload.message || (payload.data?.message) || JSON.stringify(payload, null, 2);
+        
+        // 如果有附加数据，追加展示
+        if (payload.data && !payload.message) {
+          message = JSON.stringify(payload.data, null, 2);
+          isPreformatted = true;
+        } else {
+          isPreformatted = message.includes('{') || message.includes('\n');
+        }
+      } else {
+        title = 'VCP 消息';
+        message = String(payload);
+        isPreformatted = false;
+      }
     }
 
     // 统一截断 (L181)

@@ -5,8 +5,9 @@ import { ref } from 'vue';
 export const useStreamManagerStore = defineStore('streamManager', () => {
   const streamBuffers = new Map<string, {
     fullText: string;
-    displayedText: string;
-    semanticQueue: string[]; // 现已简化为纯字符队列
+    stableContent: string; // 已确定的稳定内容 (HTML)
+    tailContent: string;   // 正在生成的尾部内容 (Markdown/Text)
+    semanticQueue: string[];
     lastUpdateTime: number;
     isFinishing: boolean;
     onCompleteCallback?: () => void;
@@ -14,19 +15,34 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
 
   const activeStreams = ref(new Set<string>());
 
-  const appendChunk = (messageId: string, chunk: string, onUpdate: (text: string) => void) => {
+  /**
+   * 简单的 HTML 标签补全逻辑，防止流式输出截断导致 morphdom 崩溃
+   */
+  const balanceHtmlTags = (html: string) => {
+    const tags = ['div', 'pre', 'code', 'p', 'span', 'blockquote'];
+    let balanced = html;
+    for (const tag of tags) {
+      const openCount = (html.match(new RegExp(`<${tag}[^>]*>`, 'g')) || []).length;
+      const closeCount = (html.match(new RegExp(`</${tag}>`, 'g')) || []).length;
+      if (openCount > closeCount) {
+        balanced += `</${tag}>`.repeat(openCount - closeCount);
+      }
+    }
+    return balanced;
+  };
+
+  const appendChunk = (messageId: string, chunk: string, onUpdate: (data: { stable: string, tail: string }) => void) => {
     if (!streamBuffers.has(messageId)) {
-      const chars = [...chunk];
       streamBuffers.set(messageId, {
         fullText: chunk,
-        displayedText: '',
-        semanticQueue: chars,
+        stableContent: '',
+        tailContent: '',
+        semanticQueue: [...chunk],
         lastUpdateTime: performance.now(),
         isFinishing: false
       });
       activeStreams.value.add(messageId);
 
-      // 核心渲染循环
       const loop = () => {
         const buf = streamBuffers.get(messageId);
         if (!buf) {
@@ -34,32 +50,57 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
           return;
         }
 
-        // 检查队列中是否有待显示的字符
         if (buf.semanticQueue.length > 0) {
-          // 计算步长：如果积压严重，一帧多出几个字符；正常情况下每帧 1-2 个
           const backlog = buf.semanticQueue.length;
-          // [保留神级底盘] 平滑排空
           const step = Math.max(1, Math.ceil(backlog / 8));
 
           for (let i = 0; i < step; i++) {
             const char = buf.semanticQueue.shift();
             if (char) {
-              buf.displayedText += char;
+              buf.tailContent += char;
             }
           }
 
-          try {
-            onUpdate(buf.displayedText);
-          } catch (e) {
-            console.error('[StreamManager] UI Update failed:', e);
+          // [VCP-Aurora 核心算法] 增量沉淀逻辑
+          // 查找最后一个双换行符作为沉淀锚点
+          const lastBreak = buf.tailContent.lastIndexOf('\n\n');
+          if (lastBreak !== -1 && !buf.isFinishing) {
+            const potentialStable = buf.tailContent.substring(0, lastBreak + 2);
+            
+            // 严谨检测是否处于非稳定块内部 (使用计数法增强健壮性)
+            const countOpen = (str: string, pat: string) => (str.split(pat).length - 1);
+            
+            const isInCode = countOpen(potentialStable, '```') % 2 !== 0;
+            const isInThink = countOpen(potentialStable, '<think') > countOpen(potentialStable, '</think');
+            const isInVcpThink = countOpen(potentialStable, '[--- VCP元思考链') > countOpen(potentialStable, '[--- 元思考链结束 ---]');
+            const isInTool = countOpen(potentialStable, '<<<[TOOL_REQUEST]>>>') > countOpen(potentialStable, '<<<[END_TOOL_REQUEST]>>>');
+
+            if (!isInCode && !isInThink && !isInVcpThink && !isInTool) {
+              // 确认为稳定内容，进行沉淀
+              buf.stableContent += potentialStable;
+              buf.tailContent = buf.tailContent.substring(lastBreak + 2);
+              console.log('[Aurora] Sedimentation triggered, stable length:', buf.stableContent.length);
+            }
           }
+
+          onUpdate({ 
+            stable: buf.stableContent, 
+            tail: balanceHtmlTags(buf.tailContent) 
+          });
         }
 
-        // 结束判定：没有积压且后端已发送 [DONE]
         if (buf.isFinishing && buf.semanticQueue.length === 0) {
-          if (buf.onCompleteCallback) {
-            buf.onCompleteCallback();
+          // 流结束时，将所有剩余 tailContent 彻底沉淀到 stableContent
+          if (buf.tailContent) {
+            buf.stableContent += buf.tailContent;
+            buf.tailContent = '';
+            onUpdate({ 
+            stable: buf.stableContent, 
+            tail: balanceHtmlTags(buf.tailContent) 
+          });
           }
+          
+          if (buf.onCompleteCallback) buf.onCompleteCallback();
           activeStreams.value.delete(messageId);
           streamBuffers.delete(messageId);
         } else {
@@ -70,11 +111,7 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
     } else {
       const buffer = streamBuffers.get(messageId)!;
       buffer.fullText += chunk;
-
-      // 如果之前是因为 [DONE] 标记为结束但又有新 chunk 进来，重置状态
       if (buffer.isFinishing) buffer.isFinishing = false;
-
-      // [修复建议] 绝对禁止使用 push(...chunk)，防止栈溢出崩溃
       for (const char of chunk) {
         buffer.semanticQueue.push(char);
       }

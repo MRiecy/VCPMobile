@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 
 use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
-use crate::vcp_modules::emoticon_manager::{internal_generate_library, EmoticonManagerState};
+use crate::vcp_modules::emoticon_manager::{internal_load_library, EmoticonManagerState};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
@@ -43,16 +43,38 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     info!("[Lifecycle] Starting bootstrap sequence...");
 
-    // 1. 数据库初始化 (所有服务的基础)
+    // 发射初始状态
+    let _ = handle.emit(
+        "vcp-system-event",
+        serde_json::json!({
+            "type": "vcp-core-status",
+            "status": "initializing",
+            "message": "核心引擎初始化中...",
+            "source": "Core"
+        }),
+    );
+
+    // 1. 数据库初始化 (P0 - 绝对基础)
     let _pool = match init_db(&handle).await {
         Ok(p) => {
             handle.manage(DbState { pool: p.clone() });
             p
         }
         Err(e) => {
-            let err_msg = format!("Database init failed: {}", e);
+            let err_msg = format!("数据库初始化失败: {}", e);
             *lifecycle.last_error.write().await = Some(err_msg.clone());
             *lifecycle.status.write().await = CoreStatus::Error;
+
+            // 发射致命错误
+            let _ = handle.emit(
+                "vcp-system-event",
+                serde_json::json!({
+                    "type": "vcp-core-status",
+                    "status": "error",
+                    "message": &err_msg,
+                    "source": "Core"
+                }),
+            );
             return Err(err_msg);
         }
     };
@@ -64,34 +86,47 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     handle.manage(ModelManagerState::new());
     handle.manage(EmoticonManagerState::default());
 
+    // 3. 配置预加载 (P1 - 前端强依赖)
+    // 将配置读取前置，确保前端 Ready 后 fetchSettings 必然成功
+    let settings_state = handle.state::<SettingsState>();
+    let settings = match read_settings(handle.clone(), settings_state).await {
+        Ok(s) => s,
+        Err(e) => {
+            let err_msg = format!("基础配置读取失败: {}", e);
+            let _ = handle.emit(
+                "vcp-system-event",
+                serde_json::json!({
+                    "type": "vcp-core-status",
+                    "status": "error",
+                    "message": &err_msg,
+                    "source": "Core"
+                }),
+            );
+            return Err(err_msg);
+        }
+    };
+
     // 初始化同步服务
     let sync_state = init_sync_service(handle.clone());
     handle.manage(sync_state);
 
-    // 3. 服务级后台初始化 (解耦阻塞)
-    // 我们将这些任务放入后台执行，不再使用 join! 等待。
-    // 这样前端能立刻收到 Ready 信号，而不需要等待表情包库扫完。
+    // 4. 服务级后台初始化 (P2 - 非阻塞)
     {
         let h = handle.clone();
+        let s_url = settings.vcp_log_url.clone();
+        let s_key = settings.vcp_log_key.clone();
+
         tokio::spawn(async move {
             let emoticon_state = h.state::<EmoticonManagerState>();
-            let settings_state = h.state::<SettingsState>();
-            if let Ok(lib) = internal_generate_library(&h, &settings_state).await {
+            if let Ok(lib) = internal_load_library(&h).await {
                 *emoticon_state.library.lock().await = lib;
                 info!("[Lifecycle] Emoticon library loaded in background.");
             }
 
-            // 自动连接 VCP Log (后端自主维护)
-            if let Ok(settings) = read_settings(h.clone(), settings_state).await {
-                if !settings.vcp_log_url.is_empty() && !settings.vcp_log_key.is_empty() {
-                    info!("[Lifecycle] Auto-connecting VCP Log from settings...");
-                    let _ = init_vcp_log_connection_internal(
-                        h.clone(),
-                        settings.vcp_log_url,
-                        settings.vcp_log_key,
-                    )
-                    .await;
-                }
+            // 自动连接 VCP Log
+            if !s_url.is_empty() && !s_key.is_empty() {
+                info!("[Lifecycle] Auto-connecting VCP Log...");
+                let _ = init_vcp_log_connection_internal(h.clone(), s_url, s_key).await;
             }
         });
     }
@@ -105,14 +140,49 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         });
     }
 
-    // 4. 群组初始化 (如有需要可在此添加)
-
-    // 5. 标记为就绪 (不再等待后台任务)
+    // 5. 标记为就绪
     *lifecycle.status.write().await = CoreStatus::Ready;
-    let _ = handle.emit("vcp-core-ready", ());
-    info!("[Lifecycle] Bootstrap complete. Core is READY (Non-blocking).");
+
+    // 发射 Ready 信号
+    let _ = handle.emit(
+        "vcp-system-event",
+        serde_json::json!({
+            "type": "vcp-core-status",
+            "status": "ready",
+            "message": "核心引擎已就绪",
+            "source": "Core"
+        }),
+    );
+
+    info!("[Lifecycle] Bootstrap complete. Core is READY.");
 
     Ok(())
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SystemSnapshot {
+    pub core: CoreStatus,
+    pub log: String,
+    pub sync: String,
+}
+
+#[tauri::command]
+pub async fn get_system_snapshot(
+    state: State<'_, LifecycleState>,
+    app: AppHandle,
+) -> Result<SystemSnapshot, String> {
+    let core = *state.status.read().await;
+
+    // 获取 VCPLog 状态
+    let log = crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal().await;
+
+    // 获取 Sync 状态
+    let sync = match app.try_state::<crate::vcp_modules::sync_service::SyncState>() {
+        Some(s) => s.connection_status.read().await.clone(),
+        None => "closed".to_string(),
+    };
+
+    Ok(SystemSnapshot { core, log, sync })
 }
 
 #[tauri::command]
