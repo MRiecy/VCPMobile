@@ -104,7 +104,6 @@ impl DbWriteQueue {
                 match result {
                     Ok(_) => {
                         success_count += 1;
-                        println!("[DbWriteQueue] {} {} - success", task_type, id);
                     }
                     Err(e) => {
                         error_count += 1;
@@ -206,10 +205,10 @@ impl DbWriteQueue {
 
         sqlx::query(
             "INSERT INTO groups (
-                group_id, name, mode, 
-                group_prompt, invite_prompt, use_unified_model, unified_model, 
-                tag_match_mode, config_hash, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                group_id, name, mode,
+                group_prompt, invite_prompt, use_unified_model, unified_model,
+                tag_match_mode, created_at, config_hash, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(group_id) DO UPDATE SET
                 name = excluded.name,
                 mode = excluded.mode,
@@ -218,6 +217,7 @@ impl DbWriteQueue {
                 use_unified_model = excluded.use_unified_model,
                 unified_model = excluded.unified_model,
                 tag_match_mode = excluded.tag_match_mode,
+                created_at = excluded.created_at,
                 config_hash = excluded.config_hash,
                 updated_at = excluded.updated_at",
         )
@@ -229,6 +229,7 @@ impl DbWriteQueue {
         .bind(if dto.use_unified_model { 1 } else { 0 })
         .bind(&dto.unified_model)
         .bind(&dto.tag_match_mode)
+        .bind(dto.created_at)
         .bind(&config_hash)
         .bind(now)
         .execute(&mut *tx)
@@ -241,12 +242,18 @@ impl DbWriteQueue {
             .await
             .map_err(|e| e.to_string())?;
 
+        let member_tags = dto.member_tags.as_ref().and_then(|v| v.as_object());
+
         for member in &dto.members {
+            let tag = member_tags
+                .and_then(|m| m.get(member))
+                .and_then(|v| v.as_str());
             sqlx::query(
-                "INSERT INTO group_members (group_id, agent_id, sort_order, updated_at) VALUES (?, ?, 0, ?)"
+                "INSERT INTO group_members (group_id, agent_id, member_tag, sort_order, updated_at) VALUES (?, ?, ?, 0, ?)"
             )
             .bind(id)
             .bind(member)
+            .bind(tag)
             .bind(now)
             .execute(&mut *tx)
             .await

@@ -76,7 +76,7 @@ const close = () => emit("close");
 
       <!-- Main Content -->
       <div
-        class="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col items-center justify-center"
+        class="flex-1 overflow-auto vcp-scrollable p-4 flex flex-col items-center justify-center"
       >
         <!-- Text/Code/MD Viewer -->
         <div
@@ -143,14 +143,5 @@ const close = () => emit("close");
     opacity: 1;
     transform: scale(1);
   }
-}
-
-.custom-scrollbar::-webkit-scrollbar {
-  width: 4px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
 }
 </style>

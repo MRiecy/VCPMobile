@@ -51,7 +51,7 @@ const toggleExpand = () => {
 
     <!-- Content -->
     <div v-show="isExpanded"
-      class="tool-header-content border-t border-black/10 dark:border-white/10 p-3 animate-slide-down tool-content-scrollable custom-scrollbar">
+      class="tool-header-content border-t border-black/10 dark:border-white/10 p-3 animate-slide-down tool-content-scrollable vcp-scrollable">
       <template v-if="type === 'tool-use'">
         <pre class="text-[11px] font-mono whitespace-pre-wrap break-words">{{ content }}</pre>
       </template>

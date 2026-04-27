@@ -45,14 +45,15 @@ marked.setOptions({
 
 import { convertFileSrc } from '@tauri-apps/api/core';
 
-// Custom renderer for Mermaid and Images
+// Custom renderer for Mermaid, Images, Tables and Code blocks
 const renderer = {
   code({ text, lang }: { text: string; lang?: string; escaped?: boolean }) {
     if (lang === 'mermaid' || lang === 'flowchart' || lang === 'graph') {
       const encoded = btoa(encodeURIComponent(text));
       return `<div class="mermaid-placeholder" data-code="${encoded}">解析渲染中...</div>`;
     }
-    return false; // use default
+    const langClass = lang ? `hljs language-${lang}` : 'hljs';
+    return `<pre class="vcp-scrollable no-swipe"><code class="${langClass}">${text}</code></pre>\n`;
   },
   image({ href, title, text }: { href: string; title: string | null; text: string }) {
     let finalHref = href;
@@ -124,7 +125,14 @@ const mathExtension = {
   ]
 };
 
-marked.use({ renderer });
+marked.use({
+  renderer,
+  hooks: {
+    postprocess(html: string) {
+      return html.replace(/<table>/g, '<div class="vcp-scrollable no-swipe" style="overflow-x: auto;"><table>').replace(/<\/table>/g, '</table></div>');
+    }
+  }
+});
 marked.use(mathExtension);
 
 // Sanitize HTML with DOMPurify
@@ -257,6 +265,9 @@ const renderHeavyContent = async () => {
   }
 
   // 2. Render Mermaid (Lazy Load)
+  // [修复] 流式过程中跳过 Mermaid 渲染，避免解析不完整代码导致报错
+  if (props.isStreaming) return;
+
   const placeholders = innerContentRef.value.querySelectorAll('.mermaid-placeholder');
   if (placeholders.length > 0) {
     try {

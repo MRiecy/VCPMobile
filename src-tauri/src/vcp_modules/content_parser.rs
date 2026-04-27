@@ -107,6 +107,10 @@ lazy_static! {
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?(div|p|img|span|a|h[1-6]|ul|ol|li|table|tr|td|th|section|article|header|footer|nav|aside|main|figure|figcaption|blockquote|pre|code|style|script|button|form|input|textarea|select|label|iframe|video|audio|canvas|svg)[\s>/]").unwrap();
     static ref CHINESE_PARA_REGEX: Regex = Regex::new(r"^[\u4e00-\u9fa5]").unwrap();
     static ref VCP_SPECIAL_MARKER_REGEX: Regex = Regex::new(r"(?i)^(<<<|\[\[VCP|\[---|<think|</think)").unwrap();
+
+    static ref HTML_RE_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
+    static ref HTML_RE_END: Regex = Regex::new(r"(?i)</html>").unwrap();
+    static ref HTML_RE_FENCE: Regex = Regex::new(r"(?m)^[ \t]*```").unwrap();
 }
 
 pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
@@ -487,22 +491,18 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 
 /// 预处理：确保裸露的 HTML（包含 DOCTYPE 或完整的 html 标签）被 Markdown 代码块包裹
 pub fn ensure_html_fenced(text: &str) -> String {
-    let re_start = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
-    let re_end = Regex::new(r"(?i)</html>").unwrap();
-    let re_fence = Regex::new(r"(?m)^[ \t]*```").unwrap();
-
     let mut result = String::new();
     let mut last_pos = 0;
 
     // 寻找所有的 HTML 起始标记
-    for m_start in re_start.find_iter(text) {
+    for m_start in HTML_RE_START.find_iter(text) {
         if m_start.start() < last_pos {
             continue;
         }
 
         // 检查在该起始标记之前，处于未闭合状态的 ``` 数量
         let prefix = &text[..m_start.start()];
-        let fence_count = re_fence.find_iter(prefix).count();
+        let fence_count = HTML_RE_FENCE.find_iter(prefix).count();
 
         // 如果 fence_count 是奇数，说明当前处于代码块内部，跳过
         if !fence_count.is_multiple_of(2) {
@@ -510,7 +510,7 @@ pub fn ensure_html_fenced(text: &str) -> String {
         }
 
         // 寻找配对的结束标记
-        if let Some(m_end) = re_end.find(&text[m_start.start()..]) {
+        if let Some(m_end) = HTML_RE_END.find(&text[m_start.start()..]) {
             let end_pos = m_start.start() + m_end.end();
 
             // 将之前的文本加入结果

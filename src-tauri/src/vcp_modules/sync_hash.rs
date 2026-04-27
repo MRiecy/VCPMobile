@@ -28,11 +28,27 @@ impl HashAggregator {
     }
 
     pub fn compute_agent_topic_metadata_hash(dto: &AgentTopicSyncDTO) -> String {
-        compute_deterministic_hash(dto)
+        // 排除 owner_id，仅使用 topic 自身属性计算 hash
+        // 确保与桌面端 AGENT_TOPIC_SYNC_FIELDS ["id","name","createdAt","locked","unread"] 一致
+        let meta = serde_json::json!({
+            "id": &dto.id,
+            "name": &dto.name,
+            "createdAt": dto.created_at,
+            "locked": dto.locked,
+            "unread": dto.unread,
+        });
+        compute_deterministic_hash(&meta)
     }
 
     pub fn compute_group_topic_metadata_hash(dto: &GroupTopicSyncDTO) -> String {
-        compute_deterministic_hash(dto)
+        // 排除 owner_id，仅使用 topic 自身属性计算 hash
+        // 确保与桌面端 GROUP_TOPIC_SYNC_FIELDS ["id","name","createdAt"] 一致
+        let meta = serde_json::json!({
+            "id": &dto.id,
+            "name": &dto.name,
+            "createdAt": dto.created_at,
+        });
+        compute_deterministic_hash(&meta)
     }
 
     pub fn compute_agent_config_hash(dto: &AgentSyncDTO) -> String {
@@ -49,6 +65,7 @@ impl HashAggregator {
         format!("{:x}", hasher.finalize())
     }
 
+    #[allow(dead_code)]
     pub fn aggregate_agent_manifest_hash(config_hash: &str, content_hash: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(config_hash.as_bytes());
@@ -56,6 +73,7 @@ impl HashAggregator {
         format!("{:x}", hasher.finalize())
     }
 
+    #[allow(dead_code)]
     pub fn aggregate_group_manifest_hash(config_hash: &str, content_hash: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(config_hash.as_bytes());
@@ -63,6 +81,7 @@ impl HashAggregator {
         format!("{:x}", hasher.finalize())
     }
 
+    #[allow(dead_code)]
     pub fn aggregate_topic_manifest_hash(metadata_hash: &str, content_hash: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(metadata_hash.as_bytes());

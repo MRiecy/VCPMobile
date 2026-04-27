@@ -1,7 +1,13 @@
-import { defineStore } from 'pinia';
-import { ref } from 'vue';
+﻿import { defineStore } from 'pinia';
+import { ref, computed } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
 import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
+
+interface PageStackItem {
+  type: string;
+  id?: string;
+  modalId: string;
+}
 
 export const useOverlayStore = defineStore('overlay', () => {
   const { registerModal, unregisterModal } = useModalHistory();
@@ -10,56 +16,89 @@ export const useOverlayStore = defineStore('overlay', () => {
   const contextMenuConfig = ref<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
 
-  const isSettingsOpen = ref(false);
-  const isAgentSettingsOpen = ref(false);
-  const agentSettingsId = ref('');
-  const isGroupSettingsOpen = ref(false);
-  const groupSettingsId = ref('');
+  // --- Page Stack (Virtual Navigation Stack) ---
+  const pageStack = ref<PageStackItem[]>([]);
 
-  const openSettings = () => {
-    isSettingsOpen.value = true;
-    registerModal('SettingsView', () => {
-      isSettingsOpen.value = false;
+  const pageStackTop = computed(() => pageStack.value[pageStack.value.length - 1] || null);
+
+  const isSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'settings'));
+  const isAgentSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'agentSettings'));
+  const isGroupSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'groupSettings'));
+
+  const agentSettingsId = computed(() => {
+    const page = pageStack.value.find(p => p.type === 'agentSettings');
+    return page?.id || '';
+  });
+
+  const groupSettingsId = computed(() => {
+    const page = pageStack.value.find(p => p.type === 'groupSettings');
+    return page?.id || '';
+  });
+
+  const getPageZIndex = (type: string) => {
+    const index = pageStack.value.findIndex(p => p.type === type);
+    return index === -1 ? 50 : 50 + index;
+  };
+
+  const pushPage = (type: string, id?: string) => {
+    const modalId = `Page:${type}:${id || ''}`;
+    const top = pageStack.value[pageStack.value.length - 1];
+    if (top && top.type === type && top.id === id) return;
+
+    pageStack.value.push({ type, id, modalId });
+    registerModal(modalId, () => {
+      popPageInternal();
     });
+  };
+
+  // Internal pop: removes from pageStack only (used by handlePopState close callback)
+  const popPageInternal = () => {
+    if (pageStack.value.length === 0) return;
+    pageStack.value.pop();
+  };
+
+  // Public pop: removes from pageStack and syncs modal history (used by UI close buttons)
+  const popPage = () => {
+    if (pageStack.value.length === 0) return;
+    const top = pageStack.value[pageStack.value.length - 1];
+    unregisterModal(top.modalId);
+    pageStack.value.pop();
+  };
+
+  const popToRoot = () => {
+    while (pageStack.value.length > 0) {
+      const top = pageStack.value[pageStack.value.length - 1];
+      unregisterModal(top.modalId);
+      pageStack.value.pop();
+    }
+  };
+
+  // --- Legacy API wrappers (backward compatible) ---
+  const openSettings = () => {
+    pushPage('settings');
   };
 
   const closeSettings = () => {
-    if (isSettingsOpen.value) {
-      unregisterModal('SettingsView');
-      isSettingsOpen.value = false;
-    }
+    popPage();
   };
 
   const openAgentSettings = (id: string) => {
-    agentSettingsId.value = id;
-    isAgentSettingsOpen.value = true;
-    registerModal('AgentSettings', () => {
-      isAgentSettingsOpen.value = false;
-    });
+    pushPage('agentSettings', id);
   };
 
   const closeAgentSettings = () => {
-    if (isAgentSettingsOpen.value) {
-      unregisterModal('AgentSettings');
-      isAgentSettingsOpen.value = false;
-    }
+    popPage();
   };
 
   const openGroupSettings = (id: string) => {
-    groupSettingsId.value = id;
-    isGroupSettingsOpen.value = true;
-    registerModal('GroupSettings', () => {
-      isGroupSettingsOpen.value = false;
-    });
+    pushPage('groupSettings', id);
   };
 
   const closeGroupSettings = () => {
-    if (isGroupSettingsOpen.value) {
-      unregisterModal('GroupSettings');
-      isGroupSettingsOpen.value = false;
-    }
+    popPage();
   };
 
+  // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
     registerModal('Prompt', () => { promptConfig.value = null; });
@@ -100,20 +139,30 @@ export const useOverlayStore = defineStore('overlay', () => {
   };
 
   return {
-    promptConfig,
-    contextMenuConfig,
-    editorConfig,
+    // Page stack
+    pageStack,
+    pageStackTop,
+    getPageZIndex,
+    pushPage,
+    popPage,
+    popToRoot,
+    // Legacy visibility flags (computed)
     isSettingsOpen,
     isAgentSettingsOpen,
     agentSettingsId,
     isGroupSettingsOpen,
     groupSettingsId,
+    // Legacy open/close (now backed by page stack)
     openSettings,
     closeSettings,
     openAgentSettings,
     closeAgentSettings,
     openGroupSettings,
     closeGroupSettings,
+    // Modals
+    promptConfig,
+    contextMenuConfig,
+    editorConfig,
     openPrompt,
     closePrompt,
     openContextMenu,

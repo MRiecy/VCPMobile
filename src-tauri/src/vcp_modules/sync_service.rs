@@ -244,7 +244,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                 Ok((mut ws_stream, _)) => {
                     if let Ok(mut logger) = sync_logger_task.lock() {
                         logger.start_phase("metadata", 0);
-                        logger.log(LogLevel::Info, "metadata", "=== Phase 1: Metadata ===");
                     }
                     publish_sync_status(
                         &handle_clone,
@@ -319,13 +318,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                         );
                         break;
                     }
-                    if let Ok(logger) = sync_logger_task.lock() {
-                        logger.log(
-                            LogLevel::Info,
-                            "metadata",
-                            "Phase 1 manifests sent, waiting for diff results...",
-                        );
-                    }
+
 
                     if let Ok(manifests) = Phase1Metadata::build_all_manifests(&db.pool).await {
                         for manifest in manifests {
@@ -356,19 +349,13 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                                 if let Ok(topic_ids) = Phase3Message::get_all_active_topic_ids(&db.pool).await {
                                                                                     let topic_count = topic_ids.len() as u32;
                                                                                     pending_msg_topics_task.store(topic_count, Ordering::SeqCst);
-                                                                                    if topic_count > 0 {
-                                                                                        if let Ok(logger) = sync_logger_task.lock() {
-                                                                                            logger.log(LogLevel::Info, "message",
-                                                                                                &format!("Phase 3: requesting manifests for {} topics", topic_count));
-                                                                                        }
-                                                                                    }
+
                                                                                     for tid in topic_ids {
                                                                                         let msg = json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": tid });
                                                                                         let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                                                                     }
                                                                                     if topic_count == 0 {
                                                                                         if let Ok(logger) = sync_logger_task.lock() {
-                                                                                            logger.log(LogLevel::Info, "message", "Phase 3 completed (no topics)");
                                                                                             logger.complete_phase("message");
                                                                                         }
                                                                                         let _ = tx_internal.send(SyncCommand::Phase3);
@@ -377,7 +364,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                             },
                                                                             crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase3 => {
                                                                                  if let Ok(logger) = sync_logger_task.lock() {
-                                                                                     logger.log(LogLevel::Info, "sync", "=== Sync Complete ===");
                                                                                      logger.complete_phase("sync");
                                                                                      (*logger).end_session();
                                                                                  }
@@ -620,6 +606,18 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                                 _ => {}
                                                                             }
                                                                         } else if action == "PUSH_DELETE" {
+                                                                            use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                                                                            match data_type_clone {
+                                                                                SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h_in, &id).await; },
+                                                                                SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h_in, &id).await; },
+                                                                                SyncDataType::Avatar => {
+                                                                                    let parts: Vec<&str> = id.split(':').collect();
+                                                                                    if parts.len() == 2 {
+                                                                                        let _ = DeleteExecutor::soft_delete_avatar(&h_in, parts[0], parts[1]).await;
+                                                                                    }
+                                                                                },
+                                                                                _ => {}
+                                                                            }
                                                                             let _ = tx_internal_in.send(SyncCommand::NotifyDelete {
                                                                                 data_type: data_type_clone,
                                                                                 id: id.clone()
@@ -630,7 +628,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                 let remaining = pending.fetch_sub(1, Ordering::SeqCst);
                                                                     if remaining == 1 {
                                                                         if let Ok(logger) = sync_logger_in.lock() {
-                                                                            logger.log(LogLevel::Info, "metadata", "Phase 1 completed");
                                                                             logger.complete_phase("metadata");
                                                                         }
                                                                         let _ = tx_internal_in.send(SyncCommand::Phase1);
@@ -674,7 +671,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                 let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
                                                                 if remaining == 1 {
                                                                     if let Ok(logger) = sync_logger_msg.lock() {
-                                                                        logger.log(LogLevel::Info, "message", "Phase 3 completed");
                                                                         logger.complete_phase("message");
                                                                     }
                                                                     let _ = tx_internal_msg.send(SyncCommand::Phase3);
@@ -702,7 +698,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
                                                                         let remaining = pending_msg.fetch_sub(1, Ordering::SeqCst);
                                                                         if remaining == 1 {
-                                                                            println!("[SyncService] Phase 3 completed");
                                                                             let _ = tx_internal_msg.send(SyncCommand::Phase3);
                                                                         }
                                                                     });
@@ -712,7 +707,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                     let remaining = pending_msg_topics_task.fetch_sub(1, Ordering::SeqCst);
                                                                     if remaining == 1 {
                                                                         if let Ok(logger) = sync_logger_task.lock() {
-                                                                            logger.log(LogLevel::Info, "message", "Phase 3 completed");
                                                                             logger.complete_phase("message");
                                                                         }
                                                                         let _ = tx_internal.send(SyncCommand::Phase3);
@@ -790,8 +784,8 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
                                                             let total_pull = (pull_agent_topics.len() + pull_group_topics.len()) as u32;
                                                             let total_push = (push_agent_topics.len() + push_group_topics.len()) as u32;
-                                                            if total_pull > 0 || total_push > 0 {
-                                                                println!("[SyncService] Topic diff: pull={} push={}", total_pull, total_push);
+                                                            if let Ok(logger) = sync_logger_task.lock() {
+                                                                logger.log(LogLevel::Info, "topic", &format!("Topic diff: pull={} push={}", total_pull, total_push));
                                                             }
                                                             let is_empty = total_pull == 0;
                                                             pending_tasks_task.fetch_add(total_pull, Ordering::SeqCst);
@@ -812,7 +806,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                             let remaining = pending.fetch_sub(1, Ordering::SeqCst);
                                 if remaining == 1 {
                                                                 if let Ok(logger) = sync_logger_topic.lock() {
-                                                                    logger.log(LogLevel::Info, "topic", "Phase 2 completed");
                                                                     logger.complete_phase("topic");
                                                                 }
                                                                 let _ = tx_internal_in.send(SyncCommand::Phase2);
@@ -836,7 +829,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                 let remaining = pending.fetch_sub(1, Ordering::SeqCst);
                             if remaining == 1 {
                                                                 if let Ok(logger) = sync_logger_topic.lock() {
-                                                                    logger.log(LogLevel::Info, "topic", "Phase 2 completed");
                                                                     logger.complete_phase("topic");
                                                                 }
                                                                 let _ = tx_internal_in.send(SyncCommand::Phase2);
@@ -868,7 +860,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
                                                         if is_empty {
                                                             if let Ok(logger) = sync_logger_task.lock() {
-                                                                logger.log(LogLevel::Info, "topic", "Phase 2 completed (no topics to sync)");
                                                                 logger.complete_phase("topic");
                                                             }
                                                             let _ = tx_internal.send(SyncCommand::Phase2);
@@ -878,7 +869,6 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                                     }
                                                                                 },
                                                                                 Some("PHASE_COMPLETED") => {
-                                                                                    println!("[SyncService] Sync completed");
                                                                                     // 发送同步完成卡片
                                                                                     let _ = handle_clone.emit(
                                                                                         "vcp-system-event",

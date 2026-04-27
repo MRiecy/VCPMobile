@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Attachment {
+    #[serde(default)]
     pub r#type: String,
     /// 物理存储路径：真理之源。用于后续超栈文件追踪，或跨端同步时的原始路径参考
     #[serde(default)]
     pub src: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash: Option<String>,

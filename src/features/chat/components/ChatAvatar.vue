@@ -3,7 +3,9 @@ import VcpAvatar from "../../../components/ui/VcpAvatar.vue";
 import { computed } from "vue";
 
 const props = defineProps<{
-  imageUrl?: string | null;
+  ownerType?: "user" | "agent" | "group";
+  ownerId?: string;
+  imageUrl?: string | null; // 保持兼容，但优先使用上面的显式参数
   fallbackText: string;
   isUser: boolean;
   borderColor?: string;
@@ -11,17 +13,27 @@ const props = defineProps<{
 }>();
 
 const ownerInfo = computed(() => {
-  if (!props.imageUrl) return null;
-  if (props.imageUrl.startsWith('vcp-avatar://')) {
+  // 1. 优先使用显式参数
+  if (props.ownerType && props.ownerId) {
+    return { type: props.ownerType, id: props.ownerId };
+  }
+
+  // 2. 其次尝试解析 imageUrl (兼容旧代码)
+  if (props.imageUrl && props.imageUrl.startsWith('vcp-avatar://')) {
     const parts = props.imageUrl.replace('vcp-avatar://', '').split('/');
     if (parts.length >= 2) {
-      // 提取 ownerType (user/agent/group) 和 ownerId
       return { 
         type: parts[0] as "user" | "agent" | "group", 
         id: parts[1].split('?')[0] 
       };
     }
   }
+
+  // 3. 如果是用户且没有 ID，使用默认 user 标识
+  if (props.isUser) {
+    return { type: 'user' as const, id: 'user_avatar' };
+  }
+
   return null;
 });
 </script>

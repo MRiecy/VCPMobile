@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useTopicStore, type Topic } from "../../core/stores/topicListManager";
 import { useChatManagerStore } from "../../core/stores/chatManager";
@@ -105,6 +105,20 @@ const showTopicContextMenu = (topicId: string) => {
 
   overlayStore.openContextMenu(menuItems, "Topic Options");
 };
+
+// 兜底同步：当聊天上下文的选中项变化时，自动重新加载对应 Agent/Group 的话题列表
+watch(
+  () => chatStore.currentSelectedItem?.id,
+  (newId) => {
+    if (newId) {
+      const ownerType = assistantStore.agents.some((a) => a.id === newId)
+        ? "agent"
+        : "group";
+      topicListStore.loadTopicList(newId, ownerType);
+    }
+  },
+  { immediate: true },
+);
 
 const selectTopic = async (
   itemId: string,

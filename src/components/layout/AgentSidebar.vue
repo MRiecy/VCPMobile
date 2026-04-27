@@ -4,6 +4,7 @@ import { useSwipe } from '@vueuse/core';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useTopicStore } from '../../core/stores/topicListManager';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
 import SidebarSearch from '../../features/agent/SidebarSearch.vue';
 import AgentList from '../../features/agent/AgentList.vue';
@@ -14,6 +15,7 @@ import TopicCreator from '../../features/topic/TopicCreator.vue';
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const chatStore = useChatManagerStore();
+const topicListStore = useTopicStore();
 
 const activeTab = ref<'agents' | 'topics'>('agents');
 const searchQuery = ref('');
@@ -41,9 +43,12 @@ const { direction, lengthX, lengthY } = useSwipe(sidebarRef, {
 
 const handleSelectItem = async (item: any) => {
   activeTab.value = 'topics';
-  // 实现自动跳转到该项目的上次活跃话题
   if (item) {
+    // 1. 自动加载并渲染上次活跃话题（保留便利性）
     await chatStore.selectItem(item);
+    // 2. 同步加载该 Agent/Group 的完整话题列表到 Topics Tab
+    const ownerType = item.members ? 'group' : 'agent';
+    await topicListStore.loadTopicList(item.id, ownerType);
   }
 };
 

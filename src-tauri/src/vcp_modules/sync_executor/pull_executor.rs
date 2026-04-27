@@ -285,10 +285,13 @@ impl PullExecutor {
                 obj.remove("avatarColor");
             }
 
-            if let Ok(msg) =
-                serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(m_val)
-            {
-                parsed_messages.push(msg);
+            match serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(m_val.clone()) {
+                Ok(msg) => {
+                    parsed_messages.push(msg);
+                }
+                Err(e) => {
+                    println!("[PullExecutor] Failed to parse message in topic {}: {}. Raw value: {}", topic_id, e, m_val);
+                }
             }
         }
 

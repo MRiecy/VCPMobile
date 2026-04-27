@@ -117,6 +117,14 @@ export const useNotificationStore = defineStore('notification', () => {
     unreadCount.value = 0;
   };
 
+  const removeHistoryItem = (id: string) => {
+    const removed = historyList.value.find(n => n.id === id);
+    if (removed && !removed.read) {
+      unreadCount.value = Math.max(0, unreadCount.value - 1);
+    }
+    historyList.value = historyList.value.filter(n => n.id !== id);
+  };
+
   const markAllRead = () => {
     historyList.value.forEach(n => n.read = true);
     unreadCount.value = 0;
@@ -176,6 +184,7 @@ export const useNotificationStore = defineStore('notification', () => {
     updateCoreStatus,
     addNotification,
     clearHistory,
+    removeHistoryItem,
     markAllRead,
     executeAction
   };

@@ -64,6 +64,8 @@ const initSortable = () => {
     Sortable.create(groupListRef.value, {
       animation: 150,
       handle: ".drag-handle",
+      delay: 200,
+      delayOnTouchOnly: true,
       onEnd: (evt) => {
         const newOrder = orderedGroups.value.map((g) => g.id);
         const [movedItem] = newOrder.splice(evt.oldIndex!, 1);

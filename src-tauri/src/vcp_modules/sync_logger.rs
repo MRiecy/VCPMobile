@@ -119,10 +119,7 @@ impl SyncLogger {
             &rand::random::<u32>().to_string()[..8]
         );
 
-        println!(
-            "[SyncService] === Session {} started (log_level={:?}) ===",
-            session_id, log_level
-        );
+        println!("[Sync] Session started");
 
         Self {
             session_id,
@@ -137,17 +134,7 @@ impl SyncLogger {
             return;
         }
 
-        let level_str = match level {
-            LogLevel::Debug => "DEBUG",
-            LogLevel::Info => "INFO",
-            LogLevel::Warn => "WARN",
-            LogLevel::Error => "ERROR",
-        };
-
-        println!(
-            "[SyncService] [{}] [{}] [{}] {}",
-            self.session_id, level_str, phase, message
-        );
+        println!("[Sync] [{}] {}", phase, message);
     }
 
     pub fn start_phase(&mut self, phase: &str, expected: u32) {
@@ -164,7 +151,7 @@ impl SyncLogger {
         self.log(
             LogLevel::Info,
             phase,
-            &format!("=== Phase START: expected={} ===", expected),
+            &format!("Phase started (expected={})", expected),
         );
     }
 
@@ -217,8 +204,8 @@ impl SyncLogger {
             LogLevel::Info,
             phase,
             &format!(
-                "=== Phase COMPLETE: expected={}, success={}, errors={}, duration={}ms ===",
-                expected, success, errors, duration
+                "Phase completed in {}ms | expected={}, success={}, errors={}",
+                duration, expected, success, errors
             ),
         );
 
@@ -242,7 +229,7 @@ impl SyncLogger {
     }
 
     pub fn end_session(&self) {
-        println!("[SyncService] === Session {} ended ===", self.session_id);
+        println!("[Sync] Session ended");
     }
 
     #[allow(dead_code)]

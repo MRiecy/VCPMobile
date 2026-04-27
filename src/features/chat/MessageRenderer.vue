@@ -82,21 +82,23 @@ const agentConfig = computed(() => {
   return null;
 });
 
-// 获取头像 URL
-const resolvedAvatarUrl = computed(() => {
-  if (isUser.value) return "vcp-avatar://user/user_avatar";
-
-  // 优先使用匹配到的 Agent ID
-  if (actualAgentId.value) {
-    return `vcp-avatar://agent/${actualAgentId.value}`;
+// 获取头像所需的基础信息
+const avatarOwnerInfo = computed(() => {
+  if (isUser.value) {
+    return { type: 'user' as const, id: 'user_avatar' };
   }
 
-  // 如果没有 ID 只有名称，尝试按名称匹配 (兼容旧数据)
+  // 1. 优先使用匹配到的 Agent ID
+  if (actualAgentId.value) {
+    return { type: 'agent' as const, id: actualAgentId.value };
+  }
+
+  // 2. 如果只有名称，尝试从配置中反查 ID
   if (props.message.name) {
     const agent = assistantStore.agents.find(
       (a) => a.name === props.message.name,
     );
-    if (agent) return `vcp-avatar://agent/${agent.id}`;
+    if (agent) return { type: 'agent' as const, id: agent.id };
   }
 
   return null;
@@ -413,8 +415,15 @@ const handleSaveEdit = async (newContent: string) => {
   <div v-longpress="showMessageContextMenu"
     class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
-    <MessageHeader :is-user="isUser" :display-name="displayName" :name-style="nameStyle" :avatar-url="resolvedAvatarUrl"
-      :avatar-fallback-text="avatarFallbackText" :avatar-fallback-color="avatarFallbackColor" />
+    <MessageHeader 
+      :is-user="isUser" 
+      :display-name="displayName" 
+      :name-style="nameStyle" 
+      :owner-type="avatarOwnerInfo?.type"
+      :owner-id="avatarOwnerInfo?.id"
+      :avatar-fallback-text="avatarFallbackText" 
+      :avatar-fallback-color="avatarFallbackColor" 
+    />
 
     <ChatBubble :is-user="isUser" :is-streaming="isStreaming" :bubble-style="bubbleStyle">
       <ThinkingIndicator v-if="isStreaming && streamContent === ''" />

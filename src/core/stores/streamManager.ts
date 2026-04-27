@@ -104,10 +104,10 @@ export const useStreamManagerStore = defineStore('streamManager', () => {
           activeStreams.value.delete(messageId);
           streamBuffers.delete(messageId);
         } else {
-          requestAnimationFrame(loop);
+          setTimeout(loop, 50);
         }
       };
-      requestAnimationFrame(loop);
+      setTimeout(loop, 50);
     } else {
       const buffer = streamBuffers.get(messageId)!;
       buffer.fullText += chunk;

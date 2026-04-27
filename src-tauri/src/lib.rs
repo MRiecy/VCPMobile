@@ -1,4 +1,3 @@
-mod vcp_host;
 mod vcp_modules;
 
 use tauri::Manager;
@@ -16,7 +15,6 @@ use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 // use vcp_modules::db_manager::DbState;
 use tauri_plugin_log::{Target, TargetKind};
-use vcp_host::native_portal::window::{close_native_portal, open_native_portal};
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
@@ -70,7 +68,6 @@ pub fn run() {
             app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());
             app.manage(UploadManagerState::new());
-            app.manage(vcp_host::native_portal::PortalState::default());
 
             let handle = app.handle().clone();
 
@@ -88,11 +85,15 @@ pub fn run() {
         })
         .plugin(
             tauri_plugin_log::Builder::new()
-                .targets([
-                    Target::new(TargetKind::Stdout),
-                    Target::new(TargetKind::LogDir { file_name: None }),
-                    Target::new(TargetKind::Webview),
-                ])
+                .targets({
+                    let mut targets = vec![
+                        Target::new(TargetKind::Stdout),
+                        Target::new(TargetKind::LogDir { file_name: None }),
+                    ];
+                    #[cfg(any(debug_assertions, not(mobile)))]
+                    targets.push(Target::new(TargetKind::Webview));
+                    targets
+                })
                 .level(log::LevelFilter::Info)
                 .filter(|metadata| {
                     let target = metadata.target();
@@ -171,8 +172,6 @@ pub fn run() {
             get_emoticon_library,
             regenerate_emoticon_library,
             fix_emoticon_url,
-            open_native_portal,
-            close_native_portal,
             get_core_status,
             get_last_error,
             get_sync_status,

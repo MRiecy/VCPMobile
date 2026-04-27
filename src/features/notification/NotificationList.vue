@@ -3,19 +3,21 @@ import type { VcpNotification } from '../../core/stores/notification';
 import NotificationCard from './NotificationCard.vue';
 import NotificationEmptyState from './NotificationEmptyState.vue';
 import { useNotificationClipboard } from './composables/useNotificationClipboard';
+import { useNotificationStore } from '../../core/stores/notification';
 
 const props = defineProps<{
   items: VcpNotification[];
 }>();
 
 const { copyContent, getCopyIcon } = useNotificationClipboard();
+const store = useNotificationStore();
 </script>
 
 <template>
-  <div class="flex-1 overflow-y-auto custom-scrollbar">
+  <div class="flex-1 overflow-y-auto vcp-scrollable">
     <TransitionGroup name="list" tag="div" class="p-4 space-y-4">
       <NotificationCard v-for="item in props.items" :key="item.id" :item="item" :copy-icon="getCopyIcon(item.id)"
-        @copy="copyContent(item)" />
+        @copy="copyContent(item)" @remove="store.removeHistoryItem(item.id)" />
     </TransitionGroup>
 
     <div v-if="props.items.length === 0"
@@ -38,6 +40,6 @@ const { copyContent, getCopyIcon } = useNotificationClipboard();
 
 .list-leave-to {
   opacity: 0;
-  transform: scale(0.9);
+  transform: translateX(100%) scale(0.9);
 }
 </style>
