@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
+import SyncProgressOverlay from './SyncProgressOverlay.vue';
 
 const lifecycleStore = useAppLifecycleStore();
 
@@ -9,9 +10,9 @@ const reloadApp = () => {
 </script>
 
 <template>
-  <!-- 0. 全局初始化加载层 -->
+  <!-- 0. 全局初始化加载层 (通用) -->
   <Transition name="fade">
-    <div v-if="lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR'"
+    <div v-if="lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR' && lifecycleStore.state !== 'INITIAL_SYNCING'"
       class="fixed inset-0 z-[1000] bg-white/96 dark:bg-gray-950/96 backdrop-blur-md flex flex-col items-center justify-center gap-6 px-8 text-center">
       <div class="w-18 h-18 relative">
         <div class="absolute inset-0 rounded-full border-4 border-blue-500/15"></div>
@@ -27,6 +28,9 @@ const reloadApp = () => {
       </div>
     </div>
   </Transition>
+
+  <!-- 0.1 首次大数据同步专用加载层 (Neural Sync) -->
+  <SyncProgressOverlay />
 
   <!-- 0.5 全局错误看板 -->
   <Transition name="fade">

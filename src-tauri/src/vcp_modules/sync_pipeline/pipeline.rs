@@ -1,4 +1,3 @@
-use crate::vcp_modules::sync_hash::HashInitializer;
 use crate::vcp_modules::sync_pipeline::pipeline_state::{PhaseProgress, PipelinePhase};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -22,14 +21,7 @@ impl SyncPipeline {
         }
     }
 
-    pub fn state(&self) -> Arc<RwLock<PipelinePhase>> {
-        self.state.clone()
-    }
-
-    pub async fn on_phase1_completed(&self, pool: &sqlx::SqlitePool) -> Result<(), String> {
-        HashInitializer::ensure_all_agent_hashes(pool).await?;
-        HashInitializer::ensure_all_group_hashes(pool).await?;
-
+    pub async fn on_phase1_completed(&self) -> Result<(), String> {
         {
             let mut state = self.state.write().await;
             *state = PipelinePhase::Phase2Topic {

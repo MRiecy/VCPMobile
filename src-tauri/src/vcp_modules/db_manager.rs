@@ -29,8 +29,10 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
         .filename(&db_path)
         .create_if_missing(true);
 
-    // 性能优化：禁用同步以减少磁盘 IO 压力 (适合移动端)
-    connect_options = connect_options.journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+    // 性能优化：WAL 模式 + 30s busy_timeout，缓解高并发写入锁竞争
+    connect_options = connect_options
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(30));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)

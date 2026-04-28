@@ -215,40 +215,6 @@ pub async fn update_group_config(
     Ok(new_config)
 }
 
-/// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
-#[allow(dead_code)]
-pub async fn apply_sync_update<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    state: &GroupManagerState,
-    group_id: &str,
-    dto: GroupSyncDTO,
-    skip_bubble: bool,
-    from_sync: bool,
-) -> Result<(), String> {
-    let mutex = state.acquire_lock(group_id).await;
-    let _lock = mutex.lock().await;
-
-    // 1. 读取当前配置 (如果不存在则抛错，因为群组通常不应由手机端盲目创建)
-    let mut config = read_group_config_internal(app_handle, state, group_id).await?;
-
-    // 2. 局部覆盖核心字段
-    config.name = dto.name;
-    config.members = dto.members;
-    config.mode = dto.mode;
-    config.member_tags = dto.member_tags;
-    config.group_prompt = dto.group_prompt;
-    config.invite_prompt = dto.invite_prompt;
-    config.use_unified_model = dto.use_unified_model;
-    config.unified_model = dto.unified_model;
-    config.tag_match_mode = dto.tag_match_mode;
-    config.created_at = dto.created_at;
-
-    // 3. 写入数据库
-    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble, from_sync)
-        .await?;
-
-    Ok(())
-}
 #[tauri::command]
 pub async fn create_group(
     app_handle: AppHandle,

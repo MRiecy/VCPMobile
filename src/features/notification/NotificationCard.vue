@@ -90,37 +90,37 @@ const onTouchEnd = () => {
     @touchstart="onTouchStart"
     @touchmove="onTouchMove"
     @touchend="onTouchEnd"
-    class="group relative p-4 rounded-2xl border border-white/5 hover:bg-white/10 bg-[linear-gradient(110deg,rgba(255,255,255,0.05)_0%,rgba(255,255,255,0.05)_40%,rgba(255,255,255,0.1)_50%,rgba(255,255,255,0.05)_60%,rgba(255,255,255,0.05)_100%)] bg-[length:250%_100%] animate-[vcp-shimmer_15s_linear_infinite]"
+    class="group relative px-4 py-3 border-b border-black/5 dark:border-white/5 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
     :class="isDragging ? 'transition-none' : 'transition-transform duration-200 ease-out'"
     :style="{ transform: `translateX(${swipeX}px)` }">
-    <div class="flex gap-3">
-      <component :is="getIcon(props.item.type)" :size="16" :class="getTypeColor(props.item.type)"
-        class="mt-0.5 shrink-0" />
-      <div class="flex-1 min-w-0">
-        <div class="flex justify-between items-start mb-1">
-          <span class="text-[11px] font-bold opacity-90 truncate pr-2 text-primary-text">{{ props.item.title }}</span>
-          <span class="text-[9px] font-mono opacity-30 whitespace-nowrap text-primary-text">{{
-            format(props.item.timestamp, 'HH:mm:ss') }}</span>
+    <div class="flex items-start gap-3">
+      <component :is="getIcon(props.item.type)" :size="14" :class="getTypeColor(props.item.type)"
+        class="mt-0.5 shrink-0 opacity-80" />
+      
+      <div class="flex-1 min-w-0 flex flex-col gap-1">
+        <div class="flex justify-between items-center">
+          <span class="text-[11px] font-bold uppercase tracking-wider opacity-90 truncate pr-2 text-primary-text">{{ props.item.title }}</span>
+          <span class="text-[9px] font-mono opacity-40 whitespace-nowrap text-primary-text">{{ format(props.item.timestamp, 'HH:mm:ss') }}</span>
         </div>
 
         <div v-if="props.item.isPreformatted"
-          class="bg-black/20 p-1.5 rounded text-[0.85em] mt-1.5 max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-90 text-primary-text">
+          class="mt-1 pl-2 border-l-2 border-black/10 dark:border-white/10 text-[10px] max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-50 text-primary-text leading-tight">
           {{ props.item.message }}
         </div>
-        <div v-else class="text-[12px] leading-relaxed break-words text-primary-text opacity-60">
+        <div v-else class="text-[11px] leading-snug break-words text-primary-text opacity-60">
           {{ props.item.message }}
         </div>
 
-        <div v-if="props.item.actions && props.item.actions.length > 0" class="mt-4 flex gap-2">
+        <div v-if="props.item.actions && props.item.actions.length > 0" class="mt-2 flex gap-2">
           <button v-for="action in props.item.actions" :key="action.label" @click="handleAction(action)"
-            :class="getActionButtonClass(action)">
+            :class="getActionButtonClass(action)" class="!py-1.5 !px-3 !text-[10px] !rounded-md">
             {{ action.label }}
           </button>
         </div>
       </div>
 
       <button @click="$emit('copy')"
-        class="opacity-0 group-hover:opacity-40 hover:!opacity-100 transition-opacity p-1 text-primary-text">
+        class="opacity-0 group-hover:opacity-40 hover:!opacity-100 transition-opacity p-1 shrink-0 text-primary-text">
         <component :is="props.copyIcon" :size="14" />
       </button>
     </div>

@@ -14,6 +14,7 @@ import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 
 // Import block components
 import MarkdownBlock from "./blocks/MarkdownBlock.vue";
+import MathBlock from "./blocks/MathBlock.vue";
 import ToolBlock from "./blocks/ToolBlock.vue";
 import DiaryBlock from "./blocks/DiaryBlock.vue";
 import ThoughtBlock from "./blocks/ThoughtBlock.vue";
@@ -432,6 +433,7 @@ const handleSaveEdit = async (newContent: string) => {
         <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
           <template v-for="(block, index) in contentBlocks" :key="index">
             <MarkdownBlock v-if="block.type === 'markdown'" :content="block.content" :is-streaming="false" />
+            <MathBlock v-else-if="block.type === 'math'" :content="block.content" :block="block" />
             <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
               :block="block" />
             <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />

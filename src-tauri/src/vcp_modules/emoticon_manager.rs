@@ -141,13 +141,12 @@ struct EmojiListResponse {
     data: std::collections::HashMap<String, Vec<String>>,
 }
 
-#[tauri::command]
-pub async fn regenerate_emoticon_library<R: Runtime>(
-    app_handle: AppHandle<R>,
-    settings_state: State<'_, SettingsState>,
-    emoticon_state: State<'_, EmoticonManagerState>,
+/// Internal (non-Tauri-command) version callable from lifecycle/bootstrap.
+pub async fn refresh_emoticon_library_internal<R: Runtime>(
+    app_handle: &AppHandle<R>,
 ) -> Result<usize, String> {
     // 1. 获取配置
+    let settings_state = app_handle.state::<SettingsState>();
     let settings = read_settings(app_handle.clone(), settings_state).await?;
     let vcp_server_url = settings.vcp_server_url;
     let admin_user = settings.admin_username;
@@ -156,6 +155,12 @@ pub async fn regenerate_emoticon_library<R: Runtime>(
 
     if vcp_server_url.is_empty() {
         return Err("VCP Server URL is empty in settings".to_string());
+    }
+    if admin_user.is_empty() || admin_pass.is_empty() {
+        return Err("管理员账号或密码未配置，请在 设置 → 用户档案 或 设置 → 数据同步 中填写管理员账号和密码".to_string());
+    }
+    if file_key.is_empty() {
+        return Err("表情包图床密钥 (fileKey) 未配置，请在 设置 → 数据同步 中填写".to_string());
     }
 
     // 2. 构造基础 URL (去除末尾斜杠并规范化)
@@ -175,15 +180,17 @@ pub async fn regenerate_emoticon_library<R: Runtime>(
     let client = reqwest::Client::new();
     let api_url = format!("{}/admin_api/emojis/list", base_url);
 
-    let resp = client
-        .get(&api_url)
-        .basic_auth(&admin_user, Some(&admin_pass))
+    let mut req = client.get(&api_url);
+    if !admin_user.is_empty() && !admin_pass.is_empty() {
+        req = req.basic_auth(&admin_user, Some(&admin_pass));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| format!("Failed to fetch emoji list: {}", e))?;
 
     if !resp.status().is_success() {
-        return Err(format!("API returned error status: {}", resp.status()));
+        return Err(format!("API {} — URL: {}", resp.status(), api_url));
     }
 
     let payload: EmojiListResponse = resp
@@ -242,6 +249,7 @@ pub async fn regenerate_emoticon_library<R: Runtime>(
     transaction.commit().await.map_err(|e| e.to_string())?;
 
     let count = library.len();
+    let emoticon_state = app_handle.state::<EmoticonManagerState>();
     *emoticon_state.library.lock().await = library;
 
     println!(
@@ -249,6 +257,15 @@ pub async fn regenerate_emoticon_library<R: Runtime>(
         count
     );
     Ok(count)
+}
+
+#[tauri::command]
+pub async fn regenerate_emoticon_library<R: Runtime>(
+    app_handle: AppHandle<R>,
+    _settings_state: State<'_, SettingsState>,
+    _emoticon_state: State<'_, EmoticonManagerState>,
+) -> Result<usize, String> {
+    refresh_emoticon_library_internal(&app_handle).await
 }
 
 pub async fn internal_load_library<R: Runtime>(
@@ -367,59 +384,4 @@ pub async fn fix_emoticon_url<R: Runtime>(
     }
 
     Ok(original_src)
-}
-
-/// 内部同步修复函数，用于消息处理器
-#[allow(dead_code)]
-pub fn internal_fix_url(original_src: &str, library: &[EmoticonItem]) -> String {
-    if library.is_empty() {
-        return original_src.to_string();
-    }
-
-    let decoded_original = percent_decode_str(original_src).decode_utf8_lossy();
-    if library.iter().any(|item| {
-        let decoded_item = percent_decode_str(&item.url).decode_utf8_lossy();
-        decoded_item == decoded_original
-    }) {
-        return original_src.to_string();
-    }
-
-    if !decoded_original.contains("表情包") {
-        return original_src.to_string();
-    }
-
-    let (search_filename, search_package) = extract_emoticon_info(original_src);
-    let search_filename = match search_filename {
-        Some(f) => f,
-        None => return original_src.to_string(),
-    };
-
-    let mut best_match: Option<&EmoticonItem> = None;
-    let mut highest_score = -1.0;
-
-    for item in library.iter() {
-        let package_score = if let Some(sp) = &search_package {
-            get_similarity(sp, &item.category)
-        } else if search_package.is_none() && item.category.is_empty() {
-            1.0
-        } else {
-            0.5
-        };
-
-        let filename_score = get_similarity(&search_filename, &item.filename);
-        let score = (0.7 * package_score) + (0.3 * filename_score);
-
-        if score > highest_score {
-            highest_score = score;
-            best_match = Some(item);
-        }
-    }
-
-    if let Some(item) = best_match {
-        if highest_score > 0.6 {
-            return item.url.clone();
-        }
-    }
-
-    original_src.to_string()
 }

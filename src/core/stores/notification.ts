@@ -12,6 +12,7 @@ export interface VcpNotification {
   actions?: { label: string; value: boolean; color: string }[];
   silent?: boolean;
   toastOnly?: boolean; // 仅作为 Toast 悬浮显示，不进入通知中心历史
+  historyOnly?: boolean; // 仅进入通知中心历史，不弹出 Toast
   read?: boolean;
   rawPayload?: any; // 用于保存原始数据，方便处理 action
 }
@@ -52,11 +53,11 @@ export const useNotificationStore = defineStore('notification', () => {
     if (payload.silent) return;
 
     // --- 单例抑制逻辑 (P0 级别优化) ---
-    // 如果提供了固定 ID (如 vcp_log_conn_error)，则尝试查找并更新现有 Toast
+    // 如果提供了固定 ID (如 vcp_sync_connection_status)，则尝试查找并更新现有 Toast
     if (payload.id) {
+      // 1) 检查当前活动 Toast：如果同 ID 已在展示，直接原地更新
       const existingIndex = activeToasts.value.findIndex(t => t.id === payload.id);
       if (existingIndex !== -1) {
-        // 更新现有内容并重置计时
         const updated = {
           ...activeToasts.value[existingIndex],
           ...payload,
@@ -64,12 +65,22 @@ export const useNotificationStore = defineStore('notification', () => {
         } as VcpNotification;
         activeToasts.value[existingIndex] = updated;
 
-        // 如果设置了 duration，重置自动移除
         if (updated.duration !== 0) {
           setTimeout(() => {
             activeToasts.value = activeToasts.value.filter(t => t.id !== updated.id);
           }, updated.duration || 3000);
         }
+        return;
+      }
+
+      // 2) 检查历史记录：如果同 ID 在 30s 冷却窗口内已出现过，抑制新 Toast
+      const recentHistory = historyList.value.find(
+        n => n.id === payload.id && (Date.now() - n.timestamp) < 30_000
+      );
+      if (recentHistory) {
+        // 更新历史条目时间戳，但不弹出新 Toast
+        recentHistory.timestamp = Date.now();
+        recentHistory.message = payload.message || recentHistory.message;
         return;
       }
     }
@@ -99,8 +110,8 @@ export const useNotificationStore = defineStore('notification', () => {
       }
     }
 
-    // 2. 推入活动气泡 (抽屉打开时抑制 Toast)
-    if (!isDrawerOpen.value) {
+    // 2. 推入活动气泡 (抽屉打开或开启 historyOnly 时抑制 Toast)
+    if (!isDrawerOpen.value && !payload.historyOnly) {
       activeToasts.value.push(notification);
 
       // 3. 自动移除逻辑 (如果 duration 为 0 则不自动消失)

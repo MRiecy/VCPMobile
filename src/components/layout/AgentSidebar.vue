@@ -4,7 +4,6 @@ import { useSwipe } from '@vueuse/core';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatManagerStore } from '../../core/stores/chatManager';
-import { useTopicStore } from '../../core/stores/topicListManager';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
 import SidebarSearch from '../../features/agent/SidebarSearch.vue';
 import AgentList from '../../features/agent/AgentList.vue';
@@ -15,7 +14,6 @@ import TopicCreator from '../../features/topic/TopicCreator.vue';
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const chatStore = useChatManagerStore();
-const topicListStore = useTopicStore();
 
 const activeTab = ref<'agents' | 'topics'>('agents');
 const searchQuery = ref('');
@@ -44,11 +42,9 @@ const { direction, lengthX, lengthY } = useSwipe(sidebarRef, {
 const handleSelectItem = async (item: any) => {
   activeTab.value = 'topics';
   if (item) {
-    // 1. 自动加载并渲染上次活跃话题（保留便利性）
+    // 自动加载并渲染上次活跃话题（保留便利性）
+    // 话题列表的加载由 TopicList.vue 中的 watch 响应式驱动，此处无需重复调用
     await chatStore.selectItem(item);
-    // 2. 同步加载该 Agent/Group 的完整话题列表到 Topics Tab
-    const ownerType = item.members ? 'group' : 'agent';
-    await topicListStore.loadTopicList(item.id, ownerType);
   }
 };
 
@@ -74,9 +70,11 @@ const openSettings = () => {
     </div>
 
     <!-- 内容区 -->
-    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-2">
+    <div class="flex-1 overflow-hidden">
       <template v-if="activeTab === 'agents'">
-        <AgentList :searchQuery="searchQuery" @select-agent="handleSelectItem" @select-group="handleSelectItem" />
+        <div class="h-full overflow-y-auto px-4 py-4 space-y-2 vcp-scrollable">
+          <AgentList :searchQuery="searchQuery" @select-agent="handleSelectItem" @select-group="handleSelectItem" />
+        </div>
       </template>
 
       <template v-if="activeTab === 'topics'">

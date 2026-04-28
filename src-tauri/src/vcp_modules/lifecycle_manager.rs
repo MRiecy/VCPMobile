@@ -6,7 +6,9 @@ use tokio::sync::RwLock;
 
 use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
-use crate::vcp_modules::emoticon_manager::{internal_load_library, EmoticonManagerState};
+use crate::vcp_modules::emoticon_manager::{
+    internal_load_library, refresh_emoticon_library_internal, EmoticonManagerState,
+};
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
@@ -120,7 +122,16 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             let emoticon_state = h.state::<EmoticonManagerState>();
             if let Ok(lib) = internal_load_library(&h).await {
                 *emoticon_state.library.lock().await = lib;
-                info!("[Lifecycle] Emoticon library loaded in background.");
+                info!("[Lifecycle] Emoticon library loaded from DB.");
+            }
+
+            // Best-effort refresh from server (does not block startup)
+            match refresh_emoticon_library_internal(&h).await {
+                Ok(count) => info!(
+                    "[Lifecycle] Emoticon library auto-refreshed: {} items",
+                    count
+                ),
+                Err(e) => info!("[Lifecycle] Emoticon auto-refresh skipped: {}", e),
             }
 
             // 自动连接 VCP Log

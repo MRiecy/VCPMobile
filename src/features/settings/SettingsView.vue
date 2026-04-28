@@ -8,6 +8,7 @@ import SyncSettingsSection from "./components/SyncSettingsSection.vue";
 import VcpCoreSettingsSection from "./components/VcpCoreSettingsSection.vue";
 import TopicSummarySection from "./components/TopicSummarySection.vue";
 import MaintenanceSection from "./components/MaintenanceSection.vue";
+import UpdateSection from "./components/UpdateSection.vue";
 import ThemePicker from "./ThemePicker.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 
@@ -190,6 +191,13 @@ watch(
         <SettingsSection title="数据维护" accent-color="bg-red-500">
           <SettingsCard>
             <MaintenanceSection />
+          </SettingsCard>
+        </SettingsSection>
+
+        <!-- 关于 -->
+        <SettingsSection title="关于" accent-color="bg-gray-500">
+          <SettingsCard>
+            <UpdateSection />
           </SettingsCard>
         </SettingsSection>
 

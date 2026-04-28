@@ -2,14 +2,15 @@
   <AttachmentPreviewBase 
     :file="file" 
     :index="index" 
-    size="medium"
+    :show-remove="showRemove"
+    size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="w-full h-full flex items-center justify-center">
-      <div class="w-8 h-8 rounded-lg bg-gray-500/10 flex items-center justify-center border border-gray-500/20">
+    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[200px]">
+      <div class="w-9 h-9 shrink-0 rounded-lg bg-gray-500/10 flex items-center justify-center border border-gray-500/20">
         <svg
-          width="14"
-          height="14"
+          width="18"
+          height="18"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -22,9 +23,17 @@
             d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
           ></path>
           <polyline points="14 2 14 8 20 8"></polyline>
-          <line x1="16" y1="13" x2="8" y2="13"></line>
-          <line x1="16" y1="17" x2="8" y2="17"></line>
         </svg>
+      </div>
+
+      <!-- File Info -->
+      <div class="flex flex-col min-w-0">
+        <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
+          {{ file.name || 'File' }}
+        </div>
+        <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
+          {{ formatSize(file.size) }} • FILE
+        </div>
       </div>
     </div>
   </AttachmentPreviewBase>
@@ -34,10 +43,21 @@
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
 import type { Attachment } from "../../../../core/stores/chatManager";
 
-defineProps<{
+withDefaults(defineProps<{
   file: Attachment;
   index: number;
-}>();
+  showRemove?: boolean;
+}>(), {
+  showRemove: false
+});
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
+
+const formatSize = (bytes: number) => {
+  if (!bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
 </script>

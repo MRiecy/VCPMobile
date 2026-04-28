@@ -84,37 +84,6 @@ impl DeleteExecutor {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn soft_delete_message<R: Runtime>(
-        app: &AppHandle<R>,
-        msg_id: &str,
-    ) -> Result<(), String> {
-        let db = app.state::<DbState>();
-        let now = chrono::Utc::now().timestamp_millis();
-
-        let topic_row = sqlx::query("SELECT topic_id FROM messages WHERE msg_id = ?")
-            .bind(msg_id)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        sqlx::query("UPDATE messages SET deleted_at = ? WHERE msg_id = ?")
-            .bind(now)
-            .bind(msg_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if let Some(row) = topic_row {
-            let topic_id: String = row.get("topic_id");
-            let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
-            let _ = HashAggregator::bubble_from_topic(&mut tx, &topic_id).await;
-            let _ = tx.commit().await;
-        }
-
-        Ok(())
-    }
-
     pub async fn soft_delete_avatar<R: Runtime>(
         app: &AppHandle<R>,
         owner_type: &str,

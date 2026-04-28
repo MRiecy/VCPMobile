@@ -15,7 +15,7 @@ const store = useNotificationStore();
 
 <template>
   <div class="flex-1 overflow-y-auto vcp-scrollable">
-    <TransitionGroup name="list" tag="div" class="p-4 space-y-4">
+    <TransitionGroup name="list" tag="div" class="flex flex-col">
       <NotificationCard v-for="item in props.items" :key="item.id" :item="item" :copy-icon="getCopyIcon(item.id)"
         @copy="copyContent(item)" @remove="store.removeHistoryItem(item.id)" />
     </TransitionGroup>

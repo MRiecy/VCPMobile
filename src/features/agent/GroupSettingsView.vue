@@ -15,6 +15,7 @@ interface GroupConfig {
   id: string;
   name: string;
   avatar?: string;
+  avatarCalculatedColor?: string;
   members: string[];
   mode: string;
   memberTags: Record<string, string>;
@@ -271,11 +272,13 @@ const tagModeOptions = [
               :version="avatarVersion"
               :fallback-name="groupConfig.name"
               size="w-24 h-24"
-              rounded="rounded-3xl"
+              rounded="rounded-full"
+              outer-border
+              :dominant-color="groupConfig.avatarCalculatedColor"
               class="border-2 border-dashed border-black/10 dark:border-white/20 shadow-inner group-active:scale-95 transition-all"
             />
             <div
-              class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-3xl flex items-center justify-center transition-opacity cursor-pointer z-20">
+              class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-full flex items-center justify-center transition-opacity cursor-pointer z-20">
               <span class="text-[10px] text-white font-bold tracking-widest uppercase">更换头像</span>
             </div>
             <input type="file" ref="fileInput" class="hidden" accept="image/*" @change="handleFileChange" />
@@ -301,7 +304,9 @@ const tagModeOptions = [
                 :owner-id="agent.id"
                 :fallback-name="agent.name"
                 size="w-10 h-10"
-                rounded="rounded-xl"
+                rounded="rounded-full"
+                outer-border
+                dominant-color="var(--primary)"
               />
 
               <div class="flex-1 min-w-0">

@@ -120,7 +120,7 @@ onUnmounted(() => {
       <div class="flex items-center gap-3 min-w-0 flex-1">
         <!-- 侧边栏按钮 (使用内联 SVG 确保 100% 可见) -->
         <button @click="layoutStore.toggleLeftDrawer()"
-          class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5">
+          class="w-10 h-10 shrink-0 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
             stroke-linecap="round">
             <line x1="3" y1="12" x2="21" y2="12"></line>
@@ -139,9 +139,10 @@ onUnmounted(() => {
           :outer-border="true"
           size="w-10 h-10"
           rounded="rounded-full"
+          class="shrink-0"
         />
 
-        <div class="flex flex-col min-w-0">
+        <div class="flex flex-col min-w-0 flex-1">
           <span 
             class="font-bold text-sm truncate transition-colors duration-500"
             :style="{ color: chatStore.currentSelectedItem?.avatarCalculatedColor || 'var(--primary-text)' }"

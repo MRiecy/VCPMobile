@@ -12,6 +12,7 @@ interface AgentConfig {
   id: string;
   name: string;
   avatar?: string;
+  avatarCalculatedColor?: string;
   // Prompt settings
   systemPrompt: string;
   // Model settings
@@ -224,11 +225,13 @@ onMounted(async () => {
                 :version="avatarVersion"
                 :fallback-name="agentConfig.name"
                 size="w-24 h-24"
-                rounded="rounded-3xl"
+                rounded="rounded-full"
+                outer-border
+                :dominant-color="agentConfig.avatarCalculatedColor"
                 class="border-2 border-dashed border-black/10 dark:border-white/20 shadow-inner group-active:scale-95 transition-all"
               />
               <div
-                class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-3xl flex items-center justify-center transition-opacity cursor-pointer z-20">
+                class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-full flex items-center justify-center transition-opacity cursor-pointer z-20">
                 <span class="text-[10px] text-white font-bold tracking-widest uppercase">更换头像</span>
               </div>
               <input type="file" ref="fileInput" class="hidden" accept="image/*" @change="handleFileChange" />

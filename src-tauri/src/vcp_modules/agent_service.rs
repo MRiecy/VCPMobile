@@ -223,38 +223,6 @@ pub async fn update_agent_config<R: Runtime>(
 
     Ok(new_config)
 }
-/// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
-#[allow(dead_code)]
-pub async fn apply_sync_update<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    state: &AgentConfigState,
-    agent_id: &str,
-    dto: AgentSyncDTO,
-    skip_bubble: bool,
-    from_sync: bool,
-) -> Result<(), String> {
-    let mutex = state.acquire_lock(agent_id).await;
-    let _lock = mutex.lock().await;
-
-    // 1. 读取当前配置 (如果不存在则创建默认)
-    let mut config = read_agent_config_internal(app_handle, state, agent_id, Some(true)).await?;
-
-    // 2. 局部覆盖：将 DTO 字段应用到 config
-    config.name = dto.name;
-    config.system_prompt = dto.system_prompt;
-    config.model = dto.model;
-    config.temperature = dto.temperature;
-    config.context_token_limit = dto.context_token_limit;
-    config.max_output_tokens = dto.max_output_tokens;
-    config.stream_output = dto.stream_output;
-
-    // 3. 写入数据库
-    internal_write_agent_config(app_handle, state, agent_id, &config, skip_bubble, from_sync)
-        .await?;
-
-    Ok(())
-}
-
 async fn internal_write_agent_config<R: Runtime>(
     app_handle: &AppHandle<R>,
     state: &AgentConfigState,

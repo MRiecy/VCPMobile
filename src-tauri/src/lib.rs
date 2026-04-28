@@ -41,6 +41,7 @@ use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
     update_topic_title,
 };
+use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
     interruptGroupTurn, interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests,
     CancelledGroupTurns,
@@ -71,10 +72,10 @@ pub fn run() {
 
             let handle = app.handle().clone();
 
-            // 1. 清理上传缓存 (调试期间暂时屏蔽，防止干扰)
-            // vcp_modules::file_manager::clear_upload_cache(&handle);
+            // 1. 清理上传缓存
+            vcp_modules::file_manager::clear_upload_cache(&handle);
 
-            // 3. 异步引导核心服务
+            // 2. 异步引导核心服务
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(&handle).await {
                     eprintln!("[VCPCore] Bootstrap failed: {}", e);
@@ -175,6 +176,9 @@ pub fn run() {
             get_core_status,
             get_last_error,
             get_sync_status,
+            check_for_update,
+            download_update,
+            install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

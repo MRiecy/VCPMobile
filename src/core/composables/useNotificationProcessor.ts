@@ -136,10 +136,20 @@ export function useNotificationProcessor() {
     let isPreformatted = false;
     let duration = 7000;
     let actions: VcpNotification['actions'] = [];
+    let notificationId: string | undefined = undefined;
+    let historyOnly = false;
 
     // 1. 核心 VCP 日志解析 (对标 renderVCPLogNotification)
     if (payload.type === 'vcp-log-message' && payload.data) {
       const vcpData = payload.data;
+      // 保留后端传递的固定 ID，用于前端 Toast 去重（如 sync 重连错误抑制）
+      if (vcpData.id) {
+        notificationId = vcpData.id;
+        // 特殊处理：Sync 连接失败不弹出悬浮 Toast，仅进入历史记录
+        if (vcpData.id === 'vcp_sync_connection_status' && vcpData.status === 'error') {
+          historyOnly = true;
+        }
+      }
       if (vcpData.tool_name && vcpData.status) {
         type = vcpData.status === 'error' ? 'error' : 'tool';
         title = `${vcpData.tool_name} ${vcpData.status}`;
@@ -288,6 +298,7 @@ export function useNotificationProcessor() {
     }
 
     return {
+      id: notificationId,
       title,
       message,
       type,
@@ -295,7 +306,8 @@ export function useNotificationProcessor() {
       duration: filterResult.duration ?? duration,
       actions,
       rawPayload: payload,
-      silent: false
+      silent: false,
+      historyOnly
     };
   };
 

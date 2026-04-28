@@ -14,7 +14,7 @@ pub struct AgentSyncDTO {
     pub name: String,
     pub system_prompt: String,
     pub model: String,
-    pub temperature: f32,
+    pub temperature: f64,
     pub context_token_limit: i32,
     pub max_output_tokens: i32,
     pub stream_output: bool,
