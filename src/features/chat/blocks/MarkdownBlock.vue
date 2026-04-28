@@ -75,7 +75,7 @@ const renderer = {
   }
 };
 
-// VCP Math Extension for Marked
+// VCP Math Extension for Marked (inline only; block math is handled by MathBlock)
 const mathExtension = {
   extensions: [
     {
@@ -98,30 +98,6 @@ const mathExtension = {
         return `<span class="math-inline">${token.text}</span>`;
       }
     },
-    {
-      name: 'blockMath',
-      level: 'block',
-      start(src: string) {
-        const match = src.match(/\$\$|\\\[|\\begin/);
-        return match ? match.index : -1;
-      },
-      tokenizer(src: string) {
-        // 匹配 $$...$$ (允许前置空格)
-        const dollarMatch = src.match(/^ *\$\$([\s\S]+?)\$\$/);
-        if (dollarMatch) return { type: 'blockMath', raw: dollarMatch[0], text: dollarMatch[1].trim() };
-
-        // 匹配 \[...\]
-        const bracketMatch = src.match(/^ *\\\[([\s\S]+?)\\\]/);
-        if (bracketMatch) return { type: 'blockMath', raw: bracketMatch[0], text: bracketMatch[1].trim() };
-
-        // 匹配 \begin{...}...\end{...}
-        const envMatch = src.match(/^ *\\begin\{([a-z]*\*?)\}([\s\S]+?)\\end\{\1\}/);
-        if (envMatch) return { type: 'blockMath', raw: envMatch[0], text: envMatch[0].trim() };
-      },
-      renderer(token: any) {
-        return `<div class="language-math">${token.text}</div>`;
-      }
-    }
   ]
 };
 
@@ -248,11 +224,16 @@ const renderHeavyContent = async () => {
       (window as any).katex = katex; // 挂载到全局以便调试和兼容性
 
       texElements.forEach(el => {
+        if (!(el instanceof HTMLElement)) return;
         if (el.querySelector('.katex')) return; // Already rendered
+        const raw = el.textContent || '';
+        // 跳过非 LaTeX 内容：包含中文字符但没有 LaTeX 命令的表达式不是数学公式
+        if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(raw) && !/\\[a-zA-Z]+/.test(raw)) return;
         const isBlock = el.classList.contains('language-math');
         try {
-          katex.render(el.textContent || '', el as HTMLElement, {
+          katex.render(raw, el, {
             throwOnError: false,
+            strict: false,
             displayMode: isBlock
           });
         } catch (e) {

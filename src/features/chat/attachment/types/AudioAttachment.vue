@@ -2,25 +2,37 @@
   <AttachmentPreviewBase 
     :file="file" 
     :index="index" 
-    size="medium"
+    :show-remove="showRemove"
+    size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="w-full h-full flex items-center justify-center">
-      <div class="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center border border-purple-500/20">
+    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[200px]">
+      <div class="w-9 h-9 shrink-0 rounded-lg bg-purple-500/10 flex items-center justify-center border border-purple-500/20">
         <svg
-          width="14"
-          height="14"
+          width="18"
+          height="18"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
-          stroke-width="2"
+          stroke-width="2.5"
           stroke-linecap="round"
           stroke-linejoin="round"
           class="text-purple-500"
         >
-          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-          <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+          <path d="M9 18V5l12-2v13"></path>
+          <circle cx="6" cy="18" r="3"></circle>
+          <circle cx="18" cy="16" r="3"></circle>
         </svg>
+      </div>
+
+      <!-- File Info -->
+      <div class="flex flex-col min-w-0">
+        <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
+          {{ file.name || 'Audio' }}
+        </div>
+        <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
+          {{ formatSize(file.size) }} • AUDIO
+        </div>
       </div>
     </div>
   </AttachmentPreviewBase>
@@ -30,10 +42,21 @@
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
 import type { Attachment } from "../../../../core/stores/chatManager";
 
-defineProps<{
+withDefaults(defineProps<{
   file: Attachment;
   index: number;
-}>();
+  showRemove?: boolean;
+}>(), {
+  showRemove: false
+});
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
+
+const formatSize = (bytes: number) => {
+  if (!bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
 </script>

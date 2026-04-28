@@ -40,6 +40,8 @@ pub enum ContentBlock {
     RoleDivider { role: String, is_end: bool },
     #[serde(rename = "style")]
     Style { content: String },
+    #[serde(rename = "math")]
+    Math { content: String, display_mode: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +62,7 @@ enum BlockType {
     Style,
     RoleDivider,
     CodeFence,
+    Math,
 }
 
 lazy_static! {
@@ -102,6 +105,8 @@ lazy_static! {
 
     static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
     static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*$").unwrap();
+
+    static ref MATH_BLOCK_START: Regex = Regex::new(r"(?im)^[ \t]*(\$\$|\\\[|\\begin\{([a-z]+\*?)\})").unwrap();
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?(div|p|img|span|a|h[1-6]|ul|ol|li|table|tr|td|th|section|article|header|footer|nav|aside|main|figure|figcaption|blockquote|pre|code|style|script|button|form|input|textarea|select|label|iframe|video|audio|canvas|svg)[\s>/]").unwrap();
@@ -174,6 +179,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             (HTML_DOC_START.find(remaining), BlockType::HtmlDoc),
             (ROLE_DIVIDER.find(remaining), BlockType::RoleDivider),
             (STYLE_TAG_START.find(remaining), BlockType::Style),
+            (MATH_BLOCK_START.find(remaining), BlockType::Math),
             (
                 GENERIC_CODE_FENCE_START.find(remaining),
                 BlockType::CodeFence,
@@ -250,6 +256,32 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
                         }),
+                    BlockType::Math => {
+                        let start_marker = &remaining[start_idx..end_idx];
+                        let trimmed = start_marker.trim();
+                        if trimmed.starts_with("\\begin") {
+                            MATH_BLOCK_START
+                                .captures(start_marker)
+                                .and_then(|c| c.get(2))
+                                .and_then(|m| {
+                                    let env_name = m.as_str();
+                                    let end_str = format!("\\end{{{}}}", env_name);
+                                    let end_len = end_str.len();
+                                    search_area
+                                        .find(&end_str)
+                                        .map(|pos| (Some(pos), Some(pos + end_len), true))
+                                })
+                                .unwrap_or((None, None, false))
+                        } else if trimmed.starts_with("$$") {
+                            search_area
+                                .find("$$")
+                                .map_or((None, None, false), |pos| (Some(pos), Some(pos + 2), true))
+                        } else {
+                            search_area
+                                .find("\\]")
+                                .map_or((None, None, false), |pos| (Some(pos), Some(pos + 2), true))
+                        }
+                    }
                 };
 
                 let inner_content = if let Some(end_start) = end_marker_start {
@@ -348,6 +380,26 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                         ContentBlock::Markdown {
                             content: full_fence,
+                        }
+                    }
+                    BlockType::Math => {
+                        let start_marker = &remaining[start_idx..end_idx];
+                        let trimmed = start_marker.trim();
+                        if trimmed.starts_with("\\begin") {
+                            let math_content = if let Some(end_end) = end_marker_end {
+                                remaining[start_idx..content_start + end_end].to_string()
+                            } else {
+                                remaining[start_idx..].to_string()
+                            };
+                            ContentBlock::Math {
+                                content: math_content,
+                                display_mode: true,
+                            }
+                        } else {
+                            ContentBlock::Math {
+                                content: inner_content.trim().to_string(),
+                                display_mode: true,
+                            }
                         }
                     }
                 };

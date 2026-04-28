@@ -1,13 +1,14 @@
 <template>
-  <div class="attachment-preview-base relative flex items-center bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-xl"
-       :class="[sizeClass]">
+  <div class="attachment-preview-base relative flex items-center bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl transition-all"
+       :class="[sizeClass, { 'hover:bg-black/10 dark:hover:bg-white/10': !isLoading }]">
     <!-- Default slot for content -->
     <slot />
     
-    <!-- Delete Button -->
+    <!-- Delete Button (Only shown when showRemove is true) -->
     <button
+      v-if="showRemove"
       @click.stop="emit('remove', index)"
-      class="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500/90 backdrop-blur-md rounded-full flex items-center justify-center text-white shadow-md active:scale-90 transition-transform border border-white/20"
+      class="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800/90 backdrop-blur-md rounded-full flex items-center justify-center text-white shadow-lg active:scale-90 transition-transform border border-white/20 z-20"
     >
       <svg
         width="10"
@@ -27,7 +28,7 @@
     <!-- Loading Overlay -->
     <div
       v-if="isLoading"
-      class="absolute inset-0 bg-black/60 backdrop-blur-[2px] rounded-xl flex flex-col items-center justify-center z-10 gap-1"
+      class="absolute inset-0 bg-black/40 backdrop-blur-[1px] rounded-xl flex flex-col items-center justify-center z-10 gap-1"
     >
       <div
         class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"
@@ -47,11 +48,13 @@ import type { Attachment } from "../../../core/stores/chatManager";
 interface Props {
   file: Attachment;
   index: number;
-  size?: 'small' | 'medium' | 'large';
+  size?: 'small' | 'medium' | 'large' | 'auto';
+  showRemove?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  size: 'medium'
+  size: 'medium',
+  showRemove: false
 });
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
@@ -64,6 +67,8 @@ const sizeClass = computed(() => {
       return 'w-10 h-10';
     case 'large':
       return 'w-20 h-20';
+    case 'auto':
+      return 'min-w-[40px] h-auto';
     case 'medium':
     default:
       return 'w-14 h-14';

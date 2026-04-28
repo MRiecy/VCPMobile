@@ -3,6 +3,7 @@
     :file="file" 
     :index="index" 
     :size="size"
+    :show-remove="showRemove"
     @remove="emit('remove', index)"
   >
     <!-- Image Card -->
@@ -27,10 +28,12 @@ interface Props {
   file: Attachment;
   index: number;
   size?: 'small' | 'medium' | 'large';
+  showRemove?: boolean;
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  size: 'medium'
+  size: 'medium',
+  showRemove: false
 });
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();

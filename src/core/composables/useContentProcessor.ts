@@ -10,7 +10,8 @@ export interface ContentBlock {
   | "button-click"
   | "html-preview"
   | "role-divider"
-  | "style";
+  | "style"
+  | "math";
   content: string;
   tool_name?: string;
   is_complete?: boolean;
@@ -22,6 +23,7 @@ export interface ContentBlock {
   theme?: string;
   role?: string;
   is_end?: boolean;
+  display_mode?: boolean;
 }
 
 const injectedStyles = new Map<string, string>();
@@ -102,6 +104,21 @@ export function useContentProcessor() {
       (_, content) => {
         return `\n<div class="my-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-sm"><div class="flex items-center gap-2 mb-2 opacity-70 font-bold"><span class="grayscale">🧠</span> <span>思维链</span><span class="i-lucide-loader-2 animate-spin text-[12px]">...</span></div><div class="italic opacity-80">${content}</div></div>\n`;
       },
+    );
+    // MATH (block-level): \begin{name}...\end{name} environments
+    processed = processed.replace(
+      /\\begin\{([a-z]+\*?)\}([\s\S]*?)\\end\{\1\}/g,
+      (match) => `\n<div class="language-math">${match}</div>\n`,
+    );
+    // MATH (block-level): $$...$$
+    processed = processed.replace(
+      /\$\$([\s\S]*?)\$\$/g,
+      (_, formula) => `\n<div class="language-math">${formula.trim()}</div>\n`,
+    );
+    // MATH (block-level): \[...\]
+    processed = processed.replace(
+      /\\\[([\s\S]*?)\\\]/g,
+      (_, formula) => `\n<div class="language-math">${formula.trim()}</div>\n`,
     );
     // TOOL
     processed = processed.replace(

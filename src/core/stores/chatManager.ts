@@ -557,6 +557,10 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     const thinkingMsg: ChatMessage = {
       id: thinkingId,
       role: "assistant",
+      name:
+        currentSelectedItem.value.type === "agent"
+          ? currentSelectedItem.value.name || "Assistant"
+          : undefined,
       content: "",
       timestamp: now + 1, // 增加 1ms 偏移，确保在时间序列上绝对位于提问之后
       isThinking: false,
@@ -769,6 +773,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     const userMsg: ChatMessage = {
       id: `msg_${now}_user_${Math.random().toString(36).substring(2, 7)}`,
       role: "user",
+      name: settingsStore.settings?.userName || "User",
       content,
       timestamp: now,
       attachments: currentStaged.length > 0 ? currentStaged : undefined,
@@ -1001,6 +1006,25 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     if (listenersRegistered) return;
     listenersRegistered = true;
     console.log("[ChatManager] Registering Tauri listeners");
+
+    // 监听同步完成事件，自动刷新当前话题历史（如果无活跃流）
+    listen("vcp-sync-completed", async () => {
+      if (
+        currentTopicId.value &&
+        currentSelectedItem.value?.id &&
+        !isGroupGenerating.value &&
+        activeStreamingIds.value.size === 0
+      ) {
+        console.log(
+          `[ChatManager] Sync completed, reloading history for topic: ${currentTopicId.value}`,
+        );
+        await loadHistory(
+          currentSelectedItem.value.id,
+          currentSelectedItem.value.type,
+          currentTopicId.value,
+        );
+      }
+    });
 
     // 监听 AI 流式输出事件
     listen("vcp-stream", (event: any) => {

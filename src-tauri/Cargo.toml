@@ -1,6 +1,6 @@
 [package]
 name = "vcp-mobile"
-version = "0.9.9"
+version = "0.9.10"
 description = "A Tauri App"
 authors = ["MRiecy"]
 edition = "2021"
@@ -48,6 +48,7 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2"
+semver = "1"
 thiserror = "1"
 image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 md5 = "0.7"

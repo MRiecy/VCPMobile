@@ -23,8 +23,8 @@ const statusClass = computed(() => {
 </script>
 
 <template>
-  <div class="w-full text-center py-2 text-[11px] font-bold uppercase tracking-wider transition-colors duration-300"
+  <div class="w-full text-center py-1.5 text-[10px] font-black uppercase tracking-[0.2em] transition-colors duration-300 shadow-sm relative z-20"
     :class="statusClass">
-    {{ store.vcpStatus.source || 'VCPLog' }}: {{ store.vcpStatus.message || '状态未知' }}
+    {{ store.vcpStatus.source || 'VCPLog' }}: {{ store.vcpStatus.message || 'IDLE' }}
   </div>
 </template>

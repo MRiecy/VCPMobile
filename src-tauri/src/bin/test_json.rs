@@ -76,26 +76,47 @@ fn process_dir(dir: &Path, errors: &mut Vec<String>) {
                             let mut msg_val_mut = msg_val.clone();
                             // simulate PullExecutor manipulation
                             if let Some(obj) = msg_val_mut.as_object_mut() {
-                                if let Some(attachments) = obj.get_mut("attachments").and_then(|a| a.as_array_mut()) {
+                                if let Some(attachments) =
+                                    obj.get_mut("attachments").and_then(|a| a.as_array_mut())
+                                {
                                     for att in attachments {
                                         if let Some(att_obj) = att.as_object_mut() {
                                             // simulate the JS DTO transformation since the file on disk doesn't have it flattened yet
                                             // The JS side does:
                                             // type: att.type, name: att.name, size: att.size, hash: att._fileManagerData.hash
                                             // So let's flatten it here to match what Rust receives.
-                                            if let Some(data) = att_obj.get("_fileManagerData").cloned() {
+                                            if let Some(data) =
+                                                att_obj.get("_fileManagerData").cloned()
+                                            {
                                                 if let Some(data_obj) = data.as_object() {
                                                     if let Some(hash) = data_obj.get("hash") {
-                                                        att_obj.insert("hash".to_string(), hash.clone());
+                                                        att_obj.insert(
+                                                            "hash".to_string(),
+                                                            hash.clone(),
+                                                        );
                                                     }
-                                                    if let Some(extracted) = data_obj.get("extractedText") {
-                                                        att_obj.insert("extractedText".to_string(), extracted.clone());
+                                                    if let Some(extracted) =
+                                                        data_obj.get("extractedText")
+                                                    {
+                                                        att_obj.insert(
+                                                            "extractedText".to_string(),
+                                                            extracted.clone(),
+                                                        );
                                                     }
-                                                    if let Some(frames) = data_obj.get("imageFrames") {
-                                                        att_obj.insert("imageFrames".to_string(), frames.clone());
+                                                    if let Some(frames) =
+                                                        data_obj.get("imageFrames")
+                                                    {
+                                                        att_obj.insert(
+                                                            "imageFrames".to_string(),
+                                                            frames.clone(),
+                                                        );
                                                     }
-                                                    if let Some(created) = data_obj.get("createdAt") {
-                                                        att_obj.insert("createdAt".to_string(), created.clone());
+                                                    if let Some(created) = data_obj.get("createdAt")
+                                                    {
+                                                        att_obj.insert(
+                                                            "createdAt".to_string(),
+                                                            created.clone(),
+                                                        );
                                                     }
                                                 }
                                             }
@@ -108,9 +129,14 @@ fn process_dir(dir: &Path, errors: &mut Vec<String>) {
                             }
 
                             match serde_json::from_value::<ChatMessage>(msg_val_mut.clone()) {
-                                Ok(_) => {},
+                                Ok(_) => {}
                                 Err(e) => {
-                                    errors.push(format!("File: {}, Msg Index: {}, Error: {}", path.display(), i, e));
+                                    errors.push(format!(
+                                        "File: {}, Msg Index: {}, Error: {}",
+                                        path.display(),
+                                        i,
+                                        e
+                                    ));
                                 }
                             }
                         }

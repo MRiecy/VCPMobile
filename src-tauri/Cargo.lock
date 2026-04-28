@@ -6441,7 +6441,7 @@ checksum = "7ba6f5989077681266825251a52748b8c1d8a4ad098cc37e440103d0ea717fc0"
 
 [[package]]
 name = "vcp-mobile"
-version = "0.9.9"
+version = "0.9.10"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -6463,6 +6463,7 @@ dependencies = [
  "reqwest 0.12.28",
  "scopeguard",
  "scraper",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

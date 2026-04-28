@@ -1,7 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useChatManagerStore } from "./chatManager";
 import { useNotificationStore } from "./notification";
 
@@ -34,43 +33,17 @@ export const useTopicStore = defineStore("topic", () => {
   const currentAgentId = ref<string | null>(null);
 
   // --- 事件监听 (Event Listeners) ---
+  // 注意：topic-index-updated 事件当前在 Rust 侧未被 emit，已移除死代码
 
   /**
-   * 监听来自 Rust 的增量索引更新事件
+   * 使所有话题列表缓存失效
+   * 同步完成后调用，确保下次切到任意 Agent/Group 时重新加载最新话题
    */
-  listen("topic-index-updated", (event: any) => {
-    const payload = event.payload;
-    console.log(
-      `[TopicStore] Received incremental update for topic: ${payload.topic_id}`,
-    );
-
-    // 只有当更新的话题属于当前选中的 Agent 时才处理
-    if (currentAgentId.value === payload.agent_id) {
-      const index = topics.value.findIndex((t) => t.id === payload.topic_id);
-      const updatedTopic: Topic = {
-        id: payload.topic_id,
-        ownerId: payload.owner_id,
-        ownerType: payload.owner_type,
-        name: payload.title,
-        createdAt: payload.created_at || Date.now(),
-        unreadCount: payload.unread_count,
-        msgCount: payload.msg_count,
-        locked: payload.locked,
-        unread: payload.unread,
-      };
-
-      if (index !== -1) {
-        // 增量更新现有话题
-        topics.value[index] = {
-          ...topics.value[index],
-          ...updatedTopic,
-        };
-      } else {
-        // 发现新话题，插入到列表顶部
-        topics.value.unshift(updatedTopic);
-      }
-    }
-  });
+  const invalidateAllTopicCaches = () => {
+    topics.value = [];
+    // currentAgentId 保持不动，这样当前选中的话题列表会在 watch 中重新加载
+    console.log("[TopicStore] All topic caches invalidated");
+  };
 
   // --- 计算属性 (Getters) ---
 
@@ -120,6 +93,12 @@ export const useTopicStore = defineStore("topic", () => {
       // 1. 从 Rust 获取基础话题列表
       // 命令对应 Rust 中的 get_topics
       const result = await invoke<any[]>("get_topics", { ownerId, ownerType });
+
+      // 竞态检查：如果请求返回时，当前选中的 Agent 已经改变，则丢弃该结果
+      if (currentAgentId.value !== ownerId) {
+        console.warn(`[TopicStore] Discarding stale topics for ${ownerId} (Current: ${currentAgentId.value})`);
+        return;
+      }
 
       // 映射 Rust 字段到前端状态
       topics.value = result.map((t) => ({
@@ -328,5 +307,6 @@ export const useTopicStore = defineStore("topic", () => {
     currentAgentId,
     toggleTopicLock,
     setTopicUnread,
+    invalidateAllTopicCaches,
   };
 });

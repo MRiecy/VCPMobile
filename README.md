@@ -4,7 +4,7 @@
   <p><strong>From Desktop Client to Cyber-Physical Avatar.</strong></p>
   <p><em>Evolving from Node into Rust, through the Law of Memory and the Pure Magi Soul.</em></p>
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-v0.9.9-blue.svg" />
+    <img alt="Version" src="https://img.shields.io/badge/version-v0.9.10-blue.svg" />
     <img alt="Platform" src="https://img.shields.io/badge/platform-Android-green.svg" />
     <img alt="Framework" src="https://img.shields.io/badge/framework-Tauri_v2_|_Vue_3-42b883.svg" />
     <img alt="Rust" src="https://img.shields.io/badge/backend-Rust_|_Tokio-dea584.svg" />
@@ -129,7 +129,7 @@ VCP Mobile 的界面设计深受工业软件启发，拒绝过度装饰，强调
 
 ### 1. 📥 User Guide (普通用户)
 
-1.  **Download APK**: 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 页面下载最新的 `v0.9.9` APK 并安装。
+1.  **Download APK**: 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 页面下载最新的 `v0.9.10` APK 并安装。
 2.  **Plugin Setup**: 确保桌面端 VChat 已安装并启用 `VCPMobileSync` 插件（默认运行在 `3000` 端口）。
 3.  **Connection**: 手机与电脑需处于同一局域网。在手机端输入电脑 IP 地址即可开始秒级同步。
 

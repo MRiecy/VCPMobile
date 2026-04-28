@@ -66,9 +66,11 @@ const onCropConfirm = async (blob: Blob) => {
           :version="avatarVersion"
           :fallback-name="settings.userName"
           size="w-16 h-16"
-          rounded="rounded-2xl"
+          rounded="rounded-full"
+          outer-border
+          dominant-color="var(--primary)"
         />
-        <div class="absolute inset-0 rounded-2xl bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center z-20 transition-opacity">
+        <div class="absolute inset-0 rounded-full bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center z-20 transition-opacity">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
         </div>
       </div>

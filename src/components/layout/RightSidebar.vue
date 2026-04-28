@@ -28,20 +28,23 @@ watch(
 
 <template>
   <aside class="vcp-drawer vcp-drawer-right pt-safe flex flex-col" :class="{ 'is-open': props.isOpen }">
-    <div class="p-6 border-b border-white/10 flex justify-between items-center shrink-0">
+    <div class="px-5 py-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center shrink-0">
       <div class="flex items-center gap-2">
-        <h3 class="font-bold text-xs uppercase tracking-[0.2em] opacity-80 text-primary-text">Notification Center</h3>
+        <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-50 text-primary-text">Notifications</h3>
         <span v-if="store.unreadCount > 0"
-          class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white">
+          class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white animate-pulse">
           {{ store.unreadCount }}
         </span>
       </div>
-      <div class="flex items-center gap-1">
+      <div class="flex items-center -mr-2">
         <button @click="store.clearHistory"
-          class="p-2 opacity-40 hover:opacity-100 hover:text-red-400 transition-all text-primary-text">
+          class="w-10 h-10 flex items-center justify-center opacity-40 hover:opacity-100 hover:text-red-400 transition-all text-primary-text active:scale-90"
+          title="Clear all">
           <Trash2 :size="16" />
         </button>
-        <button @click="emit('close')" class="p-2 opacity-40 hover:opacity-100 transition-opacity text-primary-text">
+        <button @click="emit('close')" 
+          class="w-10 h-10 flex items-center justify-center opacity-40 hover:opacity-100 transition-opacity text-primary-text active:scale-90"
+          title="Close">
           <X :size="20" />
         </button>
       </div>

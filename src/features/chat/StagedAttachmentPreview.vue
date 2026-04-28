@@ -26,6 +26,7 @@ const isLoading = computed(() => props.file.status === "loading");
     <AttachmentRenderer 
       :file="file" 
       :index="index"
+      :show-remove="true"
       @remove="emit('remove', index)"
     />
 

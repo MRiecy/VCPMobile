@@ -6,6 +6,42 @@ use crate::vcp_modules::sync_dto::{
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
 
+/// 规范化桌面端返回的消息 JSON，修复常见字段类型不匹配
+fn normalize_desktop_message(val: &mut serde_json::Value) {
+    if let Some(obj) = val.as_object_mut() {
+        // isThinking: 数字 0/1 -> bool
+        if let Some(v) = obj.get("isThinking").and_then(|v| v.as_i64()) {
+            obj.insert("isThinking".to_string(), serde_json::json!(v != 0));
+        }
+        // isGroupMessage: 数字 0/1 -> bool
+        if let Some(v) = obj.get("isGroupMessage").and_then(|v| v.as_i64()) {
+            obj.insert("isGroupMessage".to_string(), serde_json::json!(v != 0));
+        }
+        // timestamp: 字符串数字 -> u64
+        if let Some(v) = obj.get("timestamp") {
+            if v.is_string() {
+                if let Some(s) = v.as_str() {
+                    if let Ok(n) = s.parse::<u64>() {
+                        obj.insert("timestamp".to_string(), serde_json::json!(n));
+                    }
+                }
+            }
+        }
+        // 附件 size: i64 -> u64
+        if let Some(attachments) = obj.get_mut("attachments").and_then(|a| a.as_array_mut()) {
+            for att in attachments {
+                if let Some(att_obj) = att.as_object_mut() {
+                    if let Some(v) = att_obj.get("size").and_then(|v| v.as_i64()) {
+                        if v >= 0 {
+                            att_obj.insert("size".to_string(), serde_json::json!(v as u64));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub struct PullExecutor;
 
 impl PullExecutor {
@@ -90,27 +126,58 @@ impl PullExecutor {
             "{}/api/mobile-sync/download-avatar?id={}&type={}",
             http_url, owner_id, owner_type
         );
-        let res = client
-            .get(&url)
-            .header("x-sync-token", sync_token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
 
-        if !res.status().is_success() {
-            return Err(format!("Pull avatar failed: {}", res.status()));
+        // 指数退避重试：avatar 下载受网络波动影响较大
+        let mut retries = 0;
+        let max_retries = 3;
+        let mut delay_ms = 200u64;
+        loop {
+            match client
+                .get(&url)
+                .header("x-sync-token", sync_token)
+                .send()
+                .await
+            {
+                Ok(res) => {
+                    if !res.status().is_success() {
+                        return Err(format!("Pull avatar failed: {}", res.status()));
+                    }
+                    match res.bytes().await {
+                        Ok(bytes) => {
+                            write_queue
+                                .submit(DbWriteTask::Avatar {
+                                    owner_type: owner_type.to_string(),
+                                    owner_id: owner_id.to_string(),
+                                    bytes: bytes.to_vec(),
+                                })
+                                .await;
+                            if retries > 0 {
+                                println!("[PullExecutor] Avatar {} {} succeeded after {} retries", owner_type, owner_id, retries);
+                            }
+                            return Ok(());
+                        }
+                        Err(e) if retries < max_retries => {
+                            retries += 1;
+                            println!("[PullExecutor] Avatar {} {} decode failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            delay_ms *= 2;
+                        }
+                        Err(e) => {
+                            return Err(format!("Pull avatar decode failed after {} retries: {}", max_retries, e));
+                        }
+                    }
+                }
+                Err(e) if retries < max_retries => {
+                    retries += 1;
+                    println!("[PullExecutor] Avatar {} {} request failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms *= 2;
+                }
+                Err(e) => {
+                    return Err(format!("Pull avatar request failed after {} retries: {}", max_retries, e));
+                }
+            }
         }
-
-        let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-        write_queue
-            .submit(DbWriteTask::Avatar {
-                owner_type: owner_type.to_string(),
-                owner_id: owner_id.to_string(),
-                bytes: bytes.to_vec(),
-            })
-            .await;
-
-        Ok(())
     }
 
     pub async fn pull_agent_topic<R: Runtime>(
@@ -198,7 +265,6 @@ impl PullExecutor {
         sync_token: &str,
         topic_id: &str,
         msg_ids: &[String],
-        write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
 
@@ -210,7 +276,7 @@ impl PullExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        let (owner_id, owner_type) = match topic_row {
+        let (_owner_id, _owner_type) = match topic_row {
             Some(r) => (r.get("owner_id"), r.get("owner_type")),
             None => {
                 // Topic 还未同步，使用占位值，后续 topic 同步时会更新
@@ -238,7 +304,56 @@ impl PullExecutor {
         let messages: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
         let mut parsed_messages = Vec::new();
 
+        // 1. 批量收集所有附件 hash，一次性查询本地路径（替代 N+1 查询）
+        let mut all_hashes = Vec::new();
+        for m_val in &messages {
+            if let Some(obj) = m_val.as_object() {
+                if let Some(attachments) = obj.get("attachments").and_then(|a| a.as_array()) {
+                    for att in attachments {
+                        if let Some(att_obj) = att.as_object() {
+                            if let Some(hash) = att_obj.get("hash").and_then(|h| h.as_str()) {
+                                if !hash.is_empty() {
+                                    all_hashes.push(hash.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut path_map = std::collections::HashMap::new();
+        if !all_hashes.is_empty() {
+            let placeholders = all_hashes
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT hash, internal_path FROM attachments WHERE hash IN ({})",
+                placeholders
+            );
+            let mut q = sqlx::query(&query);
+            for h in &all_hashes {
+                q = q.bind(h);
+            }
+            if let Ok(rows) = q.fetch_all(&db.pool).await {
+                for row in rows {
+                    if let (Ok(hash), Ok(path)) = (
+                        row.try_get::<String, _>("hash"),
+                        row.try_get::<String, _>("internal_path"),
+                    ) {
+                        path_map.insert(hash, path);
+                    }
+                }
+            }
+        }
+
+        // 2. 遍历消息，用缓存的 path_map 填充附件路径，并规范化桌面端字段
+        let mut failed_count = 0usize;
         for mut m_val in messages {
+            normalize_desktop_message(&mut m_val);
+
             if let Some(obj) = m_val.as_object_mut() {
                 if let Some(attachments) = obj.get_mut("attachments").and_then(|a| a.as_array_mut())
                 {
@@ -246,16 +361,7 @@ impl PullExecutor {
                         if let Some(att_obj) = att.as_object_mut() {
                             if let Some(hash) = att_obj.get("hash").and_then(|h| h.as_str()) {
                                 if !hash.is_empty() {
-                                    let existing_path: Option<String> = sqlx::query_scalar(
-                                        "SELECT internal_path FROM attachments WHERE hash = ?",
-                                    )
-                                    .bind(hash)
-                                    .fetch_optional(&db.pool)
-                                    .await
-                                    .ok()
-                                    .flatten();
-
-                                    if let Some(path) = existing_path {
+                                    if let Some(path) = path_map.get(hash) {
                                         att_obj
                                             .entry("internalPath".to_string())
                                             .or_insert(serde_json::json!(path));
@@ -285,25 +391,167 @@ impl PullExecutor {
                 obj.remove("avatarColor");
             }
 
-            match serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(m_val.clone()) {
+            match serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(
+                m_val.clone(),
+            ) {
                 Ok(msg) => {
                     parsed_messages.push(msg);
                 }
                 Err(e) => {
-                    println!("[PullExecutor] Failed to parse message in topic {}: {}. Raw value: {}", topic_id, e, m_val);
+                    failed_count += 1;
+                    if let Some(obj) = m_val.as_object() {
+                        println!(
+                            "[PullExecutor] Parse fail diagnostic for topic {} msg id={:?}:",
+                            topic_id,
+                            obj.get("id").or_else(|| obj.get("msgId"))
+                        );
+                        println!("  role={:?} timestamp={:?} isThinking={:?} isGroupMessage={:?} attachments={:?}",
+                            obj.get("role"), obj.get("timestamp"), obj.get("isThinking"), obj.get("isGroupMessage"), obj.get("attachments").map(|v| v.is_array()));
+                    }
+                    println!(
+                        "[PullExecutor] Failed to parse message in topic {}: {}. Raw value: {}",
+                        topic_id, e, m_val
+                    );
+                }
+            }
+        }
+        if failed_count > 0 {
+            println!("[PullExecutor] Topic {} message parse summary: total_requested={}, success={}, failed={}", topic_id, parsed_messages.len() + failed_count, parsed_messages.len(), failed_count);
+        }
+
+        // 直接写入数据库，绕过 DbWriteQueue（带指数退避重试）
+        let db = app.state::<DbState>();
+        let pool = &db.pool;
+
+        let topic_exists: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(topic_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+
+        let skip_bubble = !topic_exists;
+
+        if !parsed_messages.is_empty() {
+            let mut retries = 0;
+            let max_retries = 8;
+            let mut delay_ms = 100u64;
+            loop {
+                match try_upsert_messages(pool, topic_id, &parsed_messages, skip_bubble).await {
+                    Ok(()) => {
+                        if retries > 0 {
+                            println!(
+                                "[PullExecutor] Topic {}: DB write succeeded after {} retries",
+                                topic_id, retries
+                            );
+                        }
+                        break;
+                    }
+                    Err(e) if retries < max_retries => {
+                        retries += 1;
+                        println!("[PullExecutor] Topic {}: DB write failed (retry {}/{}): {}. Waiting {}ms", topic_id, retries, max_retries, e, delay_ms);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        delay_ms *= 2;
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "DB write failed after {} retries for topic {}: {}",
+                            max_retries, topic_id, e
+                        ));
+                    }
                 }
             }
         }
 
-        write_queue
-            .submit(DbWriteTask::Messages {
-                topic_id: topic_id.to_string(),
-                owner_id,
-                owner_type,
-                messages: parsed_messages,
-            })
-            .await;
-
         Ok(())
     }
+}
+
+async fn try_upsert_messages(
+    pool: &sqlx::SqlitePool,
+    topic_id: &str,
+    parsed_messages: &[crate::vcp_modules::chat_manager::ChatMessage],
+    _skip_bubble: bool,
+) -> Result<(), String> {
+    // 1. 串行编译 render_content（30 个并发 Task 已提供足够并行度，Task 内部串行避免线程调度开销）
+    let messages_with_render: Vec<_> = parsed_messages
+        .iter()
+        .map(|msg| {
+            let blocks =
+                crate::vcp_modules::message_render_compiler::MessageRenderCompiler::compile(
+                    &msg.content,
+                );
+            let bytes =
+                crate::vcp_modules::message_render_compiler::MessageRenderCompiler::serialize(
+                    &blocks,
+                )
+                .map_err(|e| e.to_string())?;
+            Ok((msg, bytes))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // 2. 批量 upsert messages（VALUES 批量插入，每批 50 条）
+    crate::vcp_modules::message_repository::MessageRepository::upsert_messages_batch(
+        &mut tx,
+        topic_id,
+        &messages_with_render,
+    )
+    .await?;
+
+    // 3. 更新 topic 元数据
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
+        .bind(now)
+        .bind(topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let topic_exists: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap_or(false);
+
+    if topic_exists {
+        let count: i32 = sqlx::query_scalar::<sqlx::Sqlite, i64>(
+            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(topic_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0) as i32;
+
+        sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+            .bind(count)
+            .bind(topic_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 在同一个 tx 内执行 hash bubble，避免第二个 tx 的锁竞争
+        if !_skip_bubble {
+            crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, topic_id)
+                .await?;
+        }
+
+        println!(
+            "[PullExecutor] Topic {}: batch upserted {} messages + bubble (direct tx), msg_count={}",
+            topic_id, parsed_messages.len(), count
+        );
+    } else {
+        println!(
+            "[PullExecutor] Messages for topic {} batch inserted ({} msgs, direct tx), but topic not yet available",
+            topic_id, parsed_messages.len()
+        );
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())
 }

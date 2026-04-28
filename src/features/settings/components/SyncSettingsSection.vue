@@ -65,7 +65,7 @@ const rebuildEmoticonLibrary = async () => {
 
       <SettingsRow
         title="表情包修复库"
-        :description="emoticonStatus.message || 'IDLE'"
+        description="从 VCP 服务器同步表情包元数据"
       >
         <template #action>
           <SettingsActionButton
@@ -78,6 +78,18 @@ const rebuildEmoticonLibrary = async () => {
           </SettingsActionButton>
         </template>
       </SettingsRow>
+
+      <div
+        v-if="emoticonStatus.message"
+        class="mt-1 text-xs px-1"
+        :class="{
+          'text-green-500': emoticonStatus.type === 'success',
+          'text-red-400': emoticonStatus.type === 'error',
+          'opacity-50': emoticonStatus.type === 'loading',
+        }"
+      >
+        {{ emoticonStatus.message }}
+      </div>
     </div>
   </div>
 </template>

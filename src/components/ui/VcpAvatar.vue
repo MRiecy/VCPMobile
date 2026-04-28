@@ -20,10 +20,12 @@ const imgExists = ref(false);
 // 处理主色调边框
 const borderStyle = computed(() => {
   if (!props.outerBorder) return {};
-  const color = props.dominantColor || 'rgba(255, 255, 255, 0.1)';
+  const color = props.dominantColor || 'var(--primary)';
+  // 使用 color-mix 混合出 60% 不透明度的边框，使其更自然地融入背景
+  const mixedColor = `color-mix(in srgb, ${color} 60%, transparent)`;
   return {
-    borderColor: color,
-    boxShadow: `0 0 10px ${color}44` // 增加发光
+    borderColor: mixedColor,
+    boxShadow: `0 0 8px ${color}33` // 减弱发光
   };
 });
 
@@ -87,7 +89,7 @@ const handleImgError = () => {
     size || 'w-10 h-10', 
     rounded || 'rounded-xl',
     'relative overflow-hidden flex-shrink-0 flex items-center justify-center bg-black/5 dark:bg-white/5 border shadow-inner transition-all duration-500',
-    outerBorder ? 'border-2' : 'border-black/5 dark:border-white/10'
+    outerBorder ? 'border' : 'border-black/5 dark:border-white/10'
   ]" :style="borderStyle">
     <!-- Fallback 占位 (底层) -->
     <div 

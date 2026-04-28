@@ -5,13 +5,45 @@ use crate::vcp_modules::sync_dto::{
     AgentMessageSyncDTO, AgentSyncDTO, AgentTopicSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
     GroupTopicSyncDTO, UserMessageSyncDTO,
 };
-use crate::vcp_modules::sync_utils::query_avatar_color;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
+
+async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> String {
+    if agent_id.is_empty() {
+        return "rgb(128, 128, 128)".to_string();
+    }
+
+    sqlx::query_scalar::<sqlx::Sqlite, Option<String>>(
+        "SELECT dominant_color FROM avatars WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL",
+    )
+    .bind(agent_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .unwrap_or_else(|| "rgb(128, 128, 128)".to_string())
+}
+
+async fn query_avatar_color_cached(
+    pool: &sqlx::SqlitePool,
+    cache: &dashmap::DashMap<String, String>,
+    agent_id: &str,
+) -> String {
+    if agent_id.is_empty() {
+        return "rgb(128, 128, 128)".to_string();
+    }
+    if let Some(cached) = cache.get(agent_id) {
+        return cached.clone();
+    }
+    let color = query_avatar_color(pool, agent_id).await;
+    cache.insert(agent_id.to_string(), color.clone());
+    color
+}
 
 pub struct PushExecutor;
 
@@ -284,6 +316,8 @@ async fn build_message_dtos<R: Runtime>(
     owner_type: &str,
 ) -> Vec<serde_json::Value> {
     let db = app.state::<DbState>();
+    let sync_state = app.state::<crate::vcp_modules::sync_service::SyncState>();
+    let cache = &sync_state.avatar_color_cache;
     let mut results = Vec::new();
 
     for msg in history {
@@ -291,13 +325,21 @@ async fn build_message_dtos<R: Runtime>(
             let dto = UserMessageSyncDTO::from(msg);
             serde_json::to_value(dto).ok()
         } else if owner_type == "group" {
-            let avatar_color =
-                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default()).await;
+            let avatar_color = query_avatar_color_cached(
+                &db.pool,
+                cache,
+                &msg.agent_id.clone().unwrap_or_default(),
+            )
+            .await;
             let dto = GroupMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         } else {
-            let avatar_color =
-                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default()).await;
+            let avatar_color = query_avatar_color_cached(
+                &db.pool,
+                cache,
+                &msg.agent_id.clone().unwrap_or_default(),
+            )
+            .await;
             let dto = AgentMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         };
