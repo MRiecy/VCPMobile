@@ -1,5 +1,3 @@
-use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::message_service;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
@@ -7,9 +5,9 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_retry::{retry_on_db_locked, RetryConfig};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum DbWriteTask {
     Agent {
         id: String,
@@ -32,11 +30,8 @@ pub enum DbWriteTask {
         topic_id: String,
         dto: GroupTopicSyncDTO,
     },
-    Messages {
-        topic_id: String,
-        owner_id: String,
-        owner_type: String,
-        messages: Vec<ChatMessage>,
+    Flush {
+        tx: oneshot::Sender<()>,
     },
 }
 
@@ -83,28 +78,15 @@ impl DbWriteQueue {
                         let result = Self::upsert_group_topic(&pool, &topic_id, &dto).await;
                         ("group_topic", topic_id, result)
                     }
-                    DbWriteTask::Messages {
-                        topic_id,
-                        owner_id,
-                        owner_type,
-                        messages,
-                    } => {
-                        let result = Self::upsert_messages(
-                            &pool,
-                            &topic_id,
-                            &owner_id,
-                            &owner_type,
-                            &messages,
-                        )
-                        .await;
-                        ("messages", topic_id, result)
+                    DbWriteTask::Flush { tx } => {
+                        let _ = tx.send(());
+                        continue;
                     }
                 };
 
                 match result {
                     Ok(_) => {
                         success_count += 1;
-                        println!("[DbWriteQueue] {} {} - success", task_type, id);
                     }
                     Err(e) => {
                         error_count += 1;
@@ -135,13 +117,14 @@ impl DbWriteQueue {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn log_operation(&self, task_type: &str, id: &str, success: bool, detail: Option<&str>) {
-        if let Some(ref logger) = self.logger {
-            if let Ok(mut logger) = logger.lock() {
-                logger.log_operation("write_queue", task_type, id, success, detail);
-            }
+    pub async fn flush(&self) {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self.sender.send(DbWriteTask::Flush { tx }).await {
+            println!("[DbWriteQueue] Flush submit error: {}", e);
+            return;
         }
+        let _ = rx.await;
+        println!("[DbWriteQueue] Flush completed");
     }
 
     async fn upsert_agent(
@@ -206,10 +189,10 @@ impl DbWriteQueue {
 
         sqlx::query(
             "INSERT INTO groups (
-                group_id, name, mode, 
-                group_prompt, invite_prompt, use_unified_model, unified_model, 
-                tag_match_mode, config_hash, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                group_id, name, mode,
+                group_prompt, invite_prompt, use_unified_model, unified_model,
+                tag_match_mode, created_at, config_hash, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(group_id) DO UPDATE SET
                 name = excluded.name,
                 mode = excluded.mode,
@@ -218,6 +201,7 @@ impl DbWriteQueue {
                 use_unified_model = excluded.use_unified_model,
                 unified_model = excluded.unified_model,
                 tag_match_mode = excluded.tag_match_mode,
+                created_at = excluded.created_at,
                 config_hash = excluded.config_hash,
                 updated_at = excluded.updated_at",
         )
@@ -229,6 +213,7 @@ impl DbWriteQueue {
         .bind(if dto.use_unified_model { 1 } else { 0 })
         .bind(&dto.unified_model)
         .bind(&dto.tag_match_mode)
+        .bind(dto.created_at)
         .bind(&config_hash)
         .bind(now)
         .execute(&mut *tx)
@@ -241,12 +226,18 @@ impl DbWriteQueue {
             .await
             .map_err(|e| e.to_string())?;
 
+        let member_tags = dto.member_tags.as_ref().and_then(|v| v.as_object());
+
         for member in &dto.members {
+            let tag = member_tags
+                .and_then(|m| m.get(member))
+                .and_then(|v| v.as_str());
             sqlx::query(
-                "INSERT INTO group_members (group_id, agent_id, sort_order, updated_at) VALUES (?, ?, 0, ?)"
+                "INSERT INTO group_members (group_id, agent_id, member_tag, sort_order, updated_at) VALUES (?, ?, ?, 0, ?)"
             )
             .bind(id)
             .bind(member)
+            .bind(tag)
             .bind(now)
             .execute(&mut *tx)
             .await
@@ -342,6 +333,26 @@ impl DbWriteQueue {
                                 topic_id, dto.owner_id
                             );
                         }
+
+                        // 补偿：如果该 topic 已有消息（因竞态先写入了消息），更新 msg_count
+                        let count: i32 = sqlx::query_scalar::<_, i64>(
+                            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL"
+                        )
+                        .bind(&topic_id)
+                        .fetch_optional(&pool)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0) as i32;
+                        if count > 0 {
+                            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+                                .bind(count)
+                                .bind(&topic_id)
+                                .execute(&pool)
+                                .await;
+                            println!("[DbWriteQueue] AgentTopic {} msg_count compensated to {}", topic_id, count);
+                        }
+
                         Ok(())
                     }
                     Err(e) => Err(e.to_string()),
@@ -393,77 +404,32 @@ impl DbWriteQueue {
                         topic_id, dto.owner_id
                     );
                 }
+
+                // 补偿：如果该 topic 已有消息（因竞态先写入了消息），更新 msg_count
+                let count: i32 = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+                )
+                .bind(topic_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0) as i32;
+                if count > 0 {
+                    let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+                        .bind(count)
+                        .bind(topic_id)
+                        .execute(pool)
+                        .await;
+                    println!(
+                        "[DbWriteQueue] GroupTopic {} msg_count compensated to {}",
+                        topic_id, count
+                    );
+                }
+
                 Ok(())
             }
             Err(e) => Err(e.to_string()),
         }
-    }
-
-    async fn upsert_messages(
-        pool: &sqlx::SqlitePool,
-        topic_id: &str,
-        owner_id: &str,
-        owner_type: &str,
-        messages: &[ChatMessage],
-    ) -> Result<(), String> {
-        // 检查 topic 是否存在，如果不存在则跳过更新 topic 的操作
-        let topic_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(topic_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
-
-        for msg in messages {
-            if topic_exists {
-                let _ = message_service::patch_single_message_no_app(
-                    pool,
-                    owner_id,
-                    owner_type,
-                    topic_id.to_string(),
-                    msg.clone(),
-                    false,
-                )
-                .await;
-            } else {
-                // Topic 还不存在，直接写入消息（不更新 topic）
-                let _ = message_service::patch_single_message_no_app(
-                    pool,
-                    owner_id,
-                    owner_type,
-                    topic_id.to_string(),
-                    msg.clone(),
-                    true, // skip_bubble = true，因为 topic 不存在
-                )
-                .await;
-            }
-        }
-
-        // 只有 topic 存在时才更新 msg_count
-        if topic_exists {
-            let count: i32 = sqlx::query_scalar::<sqlx::Sqlite, i64>(
-                "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-            )
-            .bind(topic_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(0) as i32;
-
-            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                .bind(count)
-                .bind(topic_id)
-                .execute(pool)
-                .await;
-        } else {
-            println!(
-                "[DbWriteQueue] Messages for topic {} inserted, but topic not yet available (will sync later)",
-                topic_id
-            );
-        }
-
-        Ok(())
     }
 }

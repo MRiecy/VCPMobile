@@ -41,10 +41,11 @@ pub struct VcpRequestPayload {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
-    pub r#type: String,         // 事件类型: "data", "end", "error"
+    pub r#type: String,         // 事件类型: "data", "end", "error", "reconnecting"
     pub chunk: Option<Value>,   // 数据块 (仅 type="data" 时有效)
     pub message_id: String,     // 消息ID
     pub context: Option<Value>, // 透传的上下文信息
+    pub finish_reason: Option<String>, // 结束原因
     pub error: Option<String>,  // 错误信息 (仅 type="error" 时有效)
 }
 
@@ -305,7 +306,9 @@ pub async fn perform_vcp_request<R: Runtime>(
 
     // === 5. 配置网络请求 ===
     let client = Client::builder()
-        // 移除硬超时限制，对齐桌面端，让长思考模型有充足时间生成，连接管理交给 VCP 服务器
+        // 不设 read_timeout：数小时自循环中，任何 read_timeout 都是定时炸弹
+        // tcp_keepalive(60s) 维持 TCP 层活性，防止 NAT/防火墙静默丢弃空闲连接
+        .tcp_keepalive(Duration::from_secs(60))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -325,6 +328,7 @@ pub async fn perform_vcp_request<R: Runtime>(
         let active_requests_inner = active_requests.clone();
 
         let mut full_content = String::new();
+        let mut last_finish_reason: Option<String> = None;
         let mut is_aborted = false;
         let mut abort_rx = abort_rx; // 取得所有权进入循环
 
@@ -343,6 +347,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                     chunk: None,
                     message_id: message_id_inner.clone(),
                     context: context_inner.clone(),
+                    finish_reason: Some("cancelled_by_user".to_string()),
                     error: Some("请求已中止".to_string()),
                 });
                 active_requests_inner.remove(&message_id_inner);
@@ -366,6 +371,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         chunk: None,
                                         message_id: message_id_inner.clone(),
                                         context: context_inner.clone(),
+                                        finish_reason: Some("cancelled_by_user".to_string()),
                                         error: Some("请求已中止".to_string()),
                                     });
                                     // 显式清理，防止 race
@@ -384,20 +390,28 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                         chunk: None,
                                                         message_id: message_id_inner.clone(),
                                                         context: context_inner.clone(),
+                                                        finish_reason: last_finish_reason.clone(),
                                                         error: None,
                                                     });
                                                     break;
                                                 }
                                                 if let Ok(chunk) = serde_json::from_str::<Value>(data) {
                                                     // 累加全量内容
-                                                    if let Some(text) = chunk["choices"][0]["delta"]["content"].as_str() {
-                                                        full_content.push_str(text);
+                                                    if let Some(choice) = chunk["choices"].as_array().and_then(|a| a.first()) {
+                                                        if let Some(text) = choice["delta"]["content"].as_str() {
+                                                            full_content.push_str(text);
+                                                        }
+                                                        if let Some(reason) = choice["finish_reason"].as_str() {
+                                                            last_finish_reason = Some(reason.to_string());
+                                                        }
                                                     }
+
                                                     let _ = app_handle.emit(&stream_channel, StreamEvent {
                                                         r#type: "data".to_string(),
                                                         chunk: Some(chunk),
                                                         message_id: message_id_inner.clone(),
                                                         context: context_inner.clone(),
+                                                        finish_reason: None,
                                                         error: None,
                                                     });
                                                 }
@@ -410,6 +424,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                 chunk: None,
                                                 message_id: message_id_inner.clone(),
                                                 context: context_inner.clone(),
+                                                finish_reason: Some("error".to_string()),
                                                 error: Some(format!("流读取错误: {}", e)),
                                             });
                                             break;
@@ -421,6 +436,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                 chunk: None,
                                                 message_id: message_id_inner.clone(),
                                                 context: context_inner.clone(),
+                                                finish_reason: Some("error".to_string()),
                                                 error: Some("网络连接意外断开".to_string()),
                                             });
                                             break;
@@ -438,6 +454,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                             chunk: None,
                             message_id: message_id_inner.clone(),
                             context: context_inner.clone(),
+                            finish_reason: Some("error".to_string()),
                             error: Some(format!("VCP服务器错误: {} - {}", status, text)),
                         });
                         active_requests_inner.remove(&message_id_inner);
@@ -449,6 +466,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                             chunk: None,
                             message_id: message_id_inner.clone(),
                             context: context_inner.clone(),
+                            finish_reason: Some("error".to_string()),
                             error: Some(format!("网络请求异常: {}", e)),
                         });
                         active_requests_inner.remove(&message_id_inner);
@@ -460,7 +478,11 @@ pub async fn perform_vcp_request<R: Runtime>(
 
         active_requests_inner.remove(&message_id_inner);
         Ok((
-            json!({ "fullContent": full_content, "streamingStarted": true }),
+            json!({
+                "fullContent": full_content,
+                "streamingStarted": true,
+                "finishReason": last_finish_reason
+            }),
             is_aborted,
         ))
     } else {

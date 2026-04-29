@@ -43,3 +43,40 @@ body {
   width: 1.2em;
   height: 1.2em;
 }
+
+/* 全局自定义滚动条区域 */
+.vcp-scrollable {
+  /* 允许滚动但不显示系统原生滚动条（回退） */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.3) transparent;
+}
+
+.vcp-scrollable::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.vcp-scrollable::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 4px;
+}
+
+.vcp-scrollable::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.3);
+  border-radius: 4px;
+}
+
+.vcp-scrollable::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.5);
+}
+
+/* 适配暗色模式的滚动条（暗色模式下默认是 document 具有 dark 类，这里同时兼容系统的 prefers-color-scheme） */
+:root.dark .vcp-scrollable::-webkit-scrollbar-thumb,
+@media (prefers-color-scheme: dark) {
+  .vcp-scrollable::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+  }
+  .vcp-scrollable::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+}

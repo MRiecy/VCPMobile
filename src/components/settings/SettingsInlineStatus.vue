@@ -3,6 +3,7 @@ defineProps<{
   type?: 'success' | 'error' | 'loading' | 'info';
   message: string;
   mono?: boolean;
+  multiline?: boolean;
 }>();
 </script>
 
@@ -14,9 +15,9 @@ defineProps<{
     type === 'info' ? 'text-primary-text opacity-40' : '',
     mono ? 'font-mono' : ''
   ]">
-    <div class="flex items-center gap-1.5">
-      <div v-if="type === 'loading'" class="w-1.5 h-1.5 rounded-full bg-current animate-ping"></div>
-      <span class="truncate">{{ message }}</span>
+    <div class="flex gap-1.5" :class="multiline ? 'items-start' : 'items-center'">
+      <div v-if="type === 'loading'" class="w-1.5 h-1.5 rounded-full bg-current animate-ping shrink-0 mt-0.5"></div>
+      <span :class="multiline ? 'whitespace-pre-wrap leading-relaxed' : 'truncate'">{{ message }}</span>
     </div>
   </div>
 </template>

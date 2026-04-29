@@ -3,6 +3,7 @@
     :is="currentComponent"
     :file="file"
     :index="index"
+    :show-remove="showRemove"
     @remove="emit('remove', index)"
   />
 </template>
@@ -17,9 +18,12 @@ import type { Attachment } from '../../../core/stores/chatManager';
 interface Props {
   file: Attachment;
   index: number;
+  showRemove?: boolean;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  showRemove: false
+});
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
 
 // Classify the attachment type

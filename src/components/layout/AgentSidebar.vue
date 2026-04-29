@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { useSwipe } from '@vueuse/core';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
+import { useChatManagerStore } from '../../core/stores/chatManager';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
 import SidebarSearch from '../../features/agent/SidebarSearch.vue';
 import AgentList from '../../features/agent/AgentList.vue';
@@ -12,6 +13,7 @@ import TopicCreator from '../../features/topic/TopicCreator.vue';
 
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
+const chatStore = useChatManagerStore();
 
 const activeTab = ref<'agents' | 'topics'>('agents');
 const searchQuery = ref('');
@@ -19,7 +21,7 @@ const searchQuery = ref('');
 const sidebarRef = ref<HTMLElement | null>(null);
 
 // 侧边栏内部监听左滑以关闭
-useSwipe(sidebarRef, {
+const { direction, lengthX, lengthY } = useSwipe(sidebarRef, {
   threshold: 15,
   onSwipeEnd: (e: TouchEvent | MouseEvent) => {
     // 排除特定不响应滑动的区域
@@ -37,10 +39,13 @@ useSwipe(sidebarRef, {
   }
 });
 
-const { direction, lengthX, lengthY } = useSwipe(sidebarRef);
-
-const handleSelectAgent = () => {
+const handleSelectItem = async (item: any) => {
   activeTab.value = 'topics';
+  if (item) {
+    // 自动加载并渲染上次活跃话题（保留便利性）
+    // 话题列表的加载由 TopicList.vue 中的 watch 响应式驱动，此处无需重复调用
+    await chatStore.selectItem(item);
+  }
 };
 
 const handleSelectTopic = () => {
@@ -65,9 +70,11 @@ const openSettings = () => {
     </div>
 
     <!-- 内容区 -->
-    <div class="flex-1 overflow-y-auto px-4 py-4 space-y-2">
+    <div class="flex-1 overflow-hidden">
       <template v-if="activeTab === 'agents'">
-        <AgentList :searchQuery="searchQuery" @select-agent="handleSelectAgent" />
+        <div class="h-full overflow-y-auto px-4 py-4 space-y-2 vcp-scrollable">
+          <AgentList :searchQuery="searchQuery" @select-agent="handleSelectItem" @select-group="handleSelectItem" />
+        </div>
       </template>
 
       <template v-if="activeTab === 'topics'">

@@ -2,14 +2,15 @@
   <AttachmentPreviewBase 
     :file="file" 
     :index="index" 
-    size="medium"
+    :show-remove="showRemove"
+    size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="w-full h-full flex items-center justify-center">
-      <div class="w-8 h-8 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
+    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[200px]">
+      <div class="w-9 h-9 shrink-0 rounded-lg bg-orange-500/10 flex items-center justify-center border border-orange-500/20">
         <svg
-          width="14"
-          height="14"
+          width="18"
+          height="18"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -27,18 +28,46 @@
           <polyline points="10 9 9 9 8 9"></polyline>
         </svg>
       </div>
+
+      <!-- File Info -->
+      <div class="flex flex-col min-w-0">
+        <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
+          {{ file.name || 'Document' }}
+        </div>
+        <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
+          {{ formatSize(file.size) }} • {{ extension }}
+        </div>
+      </div>
     </div>
   </AttachmentPreviewBase>
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
 import type { Attachment } from "../../../../core/stores/chatManager";
 
-defineProps<{
+const props = withDefaults(defineProps<{
   file: Attachment;
   index: number;
-}>();
+  showRemove?: boolean;
+}>(), {
+  showRemove: false
+});
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
+
+const extension = computed(() => {
+  if (!props.file.name) return 'DOC';
+  const parts = props.file.name.split('.');
+  return parts.length > 1 ? parts.pop()?.toUpperCase() : 'DOC';
+});
+
+const formatSize = (bytes: number) => {
+  if (!bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+};
 </script>

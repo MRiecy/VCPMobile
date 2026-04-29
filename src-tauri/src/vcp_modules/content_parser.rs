@@ -40,6 +40,8 @@ pub enum ContentBlock {
     RoleDivider { role: String, is_end: bool },
     #[serde(rename = "style")]
     Style { content: String },
+    #[serde(rename = "math")]
+    Math { content: String, display_mode: bool },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +62,7 @@ enum BlockType {
     Style,
     RoleDivider,
     CodeFence,
+    Math,
 }
 
 lazy_static! {
@@ -103,10 +106,16 @@ lazy_static! {
     static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
     static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*$").unwrap();
 
+    static ref MATH_BLOCK_START: Regex = Regex::new(r"(?im)^[ \t]*(\$\$|\\\[|\\begin\{([a-z]+\*?)\})").unwrap();
+
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?(div|p|img|span|a|h[1-6]|ul|ol|li|table|tr|td|th|section|article|header|footer|nav|aside|main|figure|figcaption|blockquote|pre|code|style|script|button|form|input|textarea|select|label|iframe|video|audio|canvas|svg)[\s>/]").unwrap();
     static ref CHINESE_PARA_REGEX: Regex = Regex::new(r"^[\u4e00-\u9fa5]").unwrap();
     static ref VCP_SPECIAL_MARKER_REGEX: Regex = Regex::new(r"(?i)^(<<<|\[\[VCP|\[---|<think|</think)").unwrap();
+
+    static ref HTML_RE_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
+    static ref HTML_RE_END: Regex = Regex::new(r"(?i)</html>").unwrap();
+    static ref HTML_RE_FENCE: Regex = Regex::new(r"(?m)^[ \t]*```").unwrap();
 }
 
 pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
@@ -170,6 +179,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             (HTML_DOC_START.find(remaining), BlockType::HtmlDoc),
             (ROLE_DIVIDER.find(remaining), BlockType::RoleDivider),
             (STYLE_TAG_START.find(remaining), BlockType::Style),
+            (MATH_BLOCK_START.find(remaining), BlockType::Math),
             (
                 GENERIC_CODE_FENCE_START.find(remaining),
                 BlockType::CodeFence,
@@ -246,6 +256,32 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
                         }),
+                    BlockType::Math => {
+                        let start_marker = &remaining[start_idx..end_idx];
+                        let trimmed = start_marker.trim();
+                        if trimmed.starts_with("\\begin") {
+                            MATH_BLOCK_START
+                                .captures(start_marker)
+                                .and_then(|c| c.get(2))
+                                .and_then(|m| {
+                                    let env_name = m.as_str();
+                                    let end_str = format!("\\end{{{}}}", env_name);
+                                    let end_len = end_str.len();
+                                    search_area
+                                        .find(&end_str)
+                                        .map(|pos| (Some(pos), Some(pos + end_len), true))
+                                })
+                                .unwrap_or((None, None, false))
+                        } else if trimmed.starts_with("$$") {
+                            search_area
+                                .find("$$")
+                                .map_or((None, None, false), |pos| (Some(pos), Some(pos + 2), true))
+                        } else {
+                            search_area
+                                .find("\\]")
+                                .map_or((None, None, false), |pos| (Some(pos), Some(pos + 2), true))
+                        }
+                    }
                 };
 
                 let inner_content = if let Some(end_start) = end_marker_start {
@@ -344,6 +380,26 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                         ContentBlock::Markdown {
                             content: full_fence,
+                        }
+                    }
+                    BlockType::Math => {
+                        let start_marker = &remaining[start_idx..end_idx];
+                        let trimmed = start_marker.trim();
+                        if trimmed.starts_with("\\begin") {
+                            let math_content = if let Some(end_end) = end_marker_end {
+                                remaining[start_idx..content_start + end_end].to_string()
+                            } else {
+                                remaining[start_idx..].to_string()
+                            };
+                            ContentBlock::Math {
+                                content: math_content,
+                                display_mode: true,
+                            }
+                        } else {
+                            ContentBlock::Math {
+                                content: inner_content.trim().to_string(),
+                                display_mode: true,
+                            }
                         }
                     }
                 };
@@ -487,22 +543,18 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 
 /// 预处理：确保裸露的 HTML（包含 DOCTYPE 或完整的 html 标签）被 Markdown 代码块包裹
 pub fn ensure_html_fenced(text: &str) -> String {
-    let re_start = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
-    let re_end = Regex::new(r"(?i)</html>").unwrap();
-    let re_fence = Regex::new(r"(?m)^[ \t]*```").unwrap();
-
     let mut result = String::new();
     let mut last_pos = 0;
 
     // 寻找所有的 HTML 起始标记
-    for m_start in re_start.find_iter(text) {
+    for m_start in HTML_RE_START.find_iter(text) {
         if m_start.start() < last_pos {
             continue;
         }
 
         // 检查在该起始标记之前，处于未闭合状态的 ``` 数量
         let prefix = &text[..m_start.start()];
-        let fence_count = re_fence.find_iter(prefix).count();
+        let fence_count = HTML_RE_FENCE.find_iter(prefix).count();
 
         // 如果 fence_count 是奇数，说明当前处于代码块内部，跳过
         if !fence_count.is_multiple_of(2) {
@@ -510,7 +562,7 @@ pub fn ensure_html_fenced(text: &str) -> String {
         }
 
         // 寻找配对的结束标记
-        if let Some(m_end) = re_end.find(&text[m_start.start()..]) {
+        if let Some(m_end) = HTML_RE_END.find(&text[m_start.start()..]) {
             let end_pos = m_start.start() + m_end.end();
 
             // 将之前的文本加入结果

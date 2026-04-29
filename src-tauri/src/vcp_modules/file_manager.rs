@@ -54,7 +54,6 @@ pub struct AttachmentData {
 }
 
 /// 内部辅助函数：精细化 MIME 类型判定 (对齐桌面端 fileManager.js)
-#[allow(dead_code)]
 pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String {
     let ext = std::path::Path::new(original_name)
         .extension()
@@ -389,12 +388,13 @@ pub async fn store_file(
     }
 
     // 3. 注册并返回元数据
+    let refined_mime = get_refined_mime_type(&original_name, &mime_type);
     register_attachment_internal(
         &app_handle,
         &db_state.pool,
         hash,
         original_name,
-        mime_type,
+        refined_mime,
         file_bytes.len() as u64,
         internal_path_str,
     )
@@ -424,10 +424,11 @@ pub async fn init_chunked_upload(
     // 创建空文件
     fs::File::create(&temp_path).map_err(|e| e.to_string())?;
 
+    let refined_mime = get_refined_mime_type(&original_name, &mime_type);
     let session = UploadSession {
         temp_path,
         original_name,
-        mime_type,
+        mime_type: refined_mime,
         hasher: Mutex::new(Sha256::new()),
         current_size: Mutex::new(0),
     };
@@ -648,7 +649,6 @@ pub async fn read_local_file_base64(app_handle: AppHandle, path: String) -> Resu
 }
 
 /// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)
-#[allow(dead_code)]
 pub fn clear_upload_cache(app_handle: &AppHandle) {
     if let Ok(mut temp_path) = app_handle.path().app_cache_dir() {
         temp_path.push("uploads");

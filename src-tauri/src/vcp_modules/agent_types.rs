@@ -22,7 +22,7 @@ pub struct AgentConfig {
     pub model: String,
     /// 模型采样温度 (0.0-2.0)
     #[serde(default = "default_temperature")]
-    pub temperature: f32,
+    pub temperature: f64,
     /// 上下文 Token 限制
     #[serde(rename = "contextTokenLimit", default = "default_context_limit")]
     pub context_token_limit: i32,
@@ -40,6 +40,10 @@ pub struct AgentConfig {
     /// 话题列表
     #[serde(default)]
     pub topics: Vec<Topic>,
+
+    /// 当前活跃话题 ID
+    #[serde(rename = "currentTopicId", default)]
+    pub current_topic_id: Option<String>,
 }
 
 fn default_agent_name() -> String {
@@ -48,7 +52,7 @@ fn default_agent_name() -> String {
 fn default_model() -> String {
     "gemini-2.5-flash".to_string()
 }
-fn default_temperature() -> f32 {
+fn default_temperature() -> f64 {
     1.0
 }
 fn default_context_limit() -> i32 {

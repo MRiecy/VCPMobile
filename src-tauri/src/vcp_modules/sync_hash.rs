@@ -28,15 +28,41 @@ impl HashAggregator {
     }
 
     pub fn compute_agent_topic_metadata_hash(dto: &AgentTopicSyncDTO) -> String {
-        compute_deterministic_hash(dto)
+        // 排除 owner_id，仅使用 topic 自身属性计算 hash
+        // 确保与桌面端 AGENT_TOPIC_SYNC_FIELDS ["id","name","createdAt","locked","unread"] 一致
+        let meta = serde_json::json!({
+            "id": &dto.id,
+            "name": &dto.name,
+            "createdAt": dto.created_at,
+            "locked": dto.locked,
+            "unread": dto.unread,
+        });
+        compute_deterministic_hash(&meta)
     }
 
     pub fn compute_group_topic_metadata_hash(dto: &GroupTopicSyncDTO) -> String {
-        compute_deterministic_hash(dto)
+        // 排除 owner_id，仅使用 topic 自身属性计算 hash
+        // 确保与桌面端 GROUP_TOPIC_SYNC_FIELDS ["id","name","createdAt"] 一致
+        let meta = serde_json::json!({
+            "id": &dto.id,
+            "name": &dto.name,
+            "createdAt": dto.created_at,
+        });
+        compute_deterministic_hash(&meta)
     }
 
     pub fn compute_agent_config_hash(dto: &AgentSyncDTO) -> String {
-        compute_deterministic_hash(dto)
+        // 对 temperature 统一格式化到2位小数，消除 f32/f64 精度差异导致的 hash 不一致
+        let meta = serde_json::json!({
+            "name": &dto.name,
+            "systemPrompt": &dto.system_prompt,
+            "model": &dto.model,
+            "temperature": (dto.temperature * 100.0).round() / 100.0,
+            "contextTokenLimit": dto.context_token_limit,
+            "maxOutputTokens": dto.max_output_tokens,
+            "streamOutput": dto.stream_output,
+        });
+        compute_deterministic_hash(&meta)
     }
 
     pub fn compute_group_config_hash(dto: &GroupSyncDTO) -> String {
@@ -46,27 +72,6 @@ impl HashAggregator {
     pub fn compute_avatar_hash(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
-    }
-
-    pub fn aggregate_agent_manifest_hash(config_hash: &str, content_hash: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(config_hash.as_bytes());
-        hasher.update(content_hash.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
-    pub fn aggregate_group_manifest_hash(config_hash: &str, content_hash: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(config_hash.as_bytes());
-        hasher.update(content_hash.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
-    pub fn aggregate_topic_manifest_hash(metadata_hash: &str, content_hash: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(metadata_hash.as_bytes());
-        hasher.update(content_hash.as_bytes());
         format!("{:x}", hasher.finalize())
     }
 
@@ -295,31 +300,6 @@ impl HashInitializer {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn ensure_topic_content_hash(
-        tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
-    ) -> Result<(), String> {
-        let row = sqlx::query("SELECT content_hash FROM topics WHERE topic_id = ?")
-            .bind(topic_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if let Some(r) = row {
-            let content_hash: String = r.get("content_hash");
-            if content_hash.is_empty() || content_hash == "PENDING" {
-                HashAggregator::bubble_topic_hash(tx, topic_id).await?;
-                println!(
-                    "[HashInitializer] Initialized content_hash for Topic {}",
-                    topic_id
-                );
-            }
-        }
-
-        Ok(())
-    }
-
     pub async fn ensure_all_agent_hashes(pool: &sqlx::SqlitePool) -> Result<(), String> {
         let rows = sqlx::query(
             "SELECT agent_id FROM agents WHERE config_hash = '' OR config_hash IS NULL OR config_hash = 'PENDING'",
@@ -328,13 +308,21 @@ impl HashInitializer {
         .await
         .map_err(|e| e.to_string())?;
 
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         for row in rows {
             let agent_id: String = row.get("agent_id");
-            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-            Self::ensure_agent_hashes(&mut tx, &agent_id).await?;
-            HashAggregator::bubble_agent_hash(&mut tx, &agent_id).await?;
-            tx.commit().await.map_err(|e| e.to_string())?;
+            if let Err(e) = Self::ensure_agent_hashes(&mut tx, &agent_id).await {
+                println!(
+                    "[HashInitializer] Failed to ensure hash for Agent {}: {}",
+                    agent_id, e
+                );
+            }
         }
+        tx.commit().await.map_err(|e| e.to_string())?;
 
         println!("[HashInitializer] Ensured all Agent hashes");
         Ok(())
@@ -348,13 +336,21 @@ impl HashInitializer {
         .await
         .map_err(|e| e.to_string())?;
 
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         for row in rows {
             let group_id: String = row.get("group_id");
-            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-            Self::ensure_group_hashes(&mut tx, &group_id).await?;
-            HashAggregator::bubble_group_hash(&mut tx, &group_id).await?;
-            tx.commit().await.map_err(|e| e.to_string())?;
+            if let Err(e) = Self::ensure_group_hashes(&mut tx, &group_id).await {
+                println!(
+                    "[HashInitializer] Failed to ensure hash for Group {}: {}",
+                    group_id, e
+                );
+            }
         }
+        tx.commit().await.map_err(|e| e.to_string())?;
 
         println!("[HashInitializer] Ensured all Group hashes");
         Ok(())
@@ -376,7 +372,7 @@ impl HashInitializer {
             name: row.get("name"),
             system_prompt: row.get("system_prompt"),
             model: row.get("model"),
-            temperature: row.get("temperature"),
+            temperature: row.get::<f64, _>("temperature"),
             context_token_limit: row.get("context_token_limit"),
             max_output_tokens: row.get("max_output_tokens"),
             stream_output: row.get::<i64, _>("stream_output") != 0,

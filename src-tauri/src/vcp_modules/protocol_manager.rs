@@ -1,9 +1,7 @@
-use crate::vcp_modules::avatar_service::extract_dominant_color_from_bytes;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_stream_protocol::handle_vcp_request;
 use sha2::{Digest, Sha256};
 use std::fs;
-use tauri::http::{Request, Response};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -14,15 +12,6 @@ pub fn register_vcp_protocols<R: Runtime>(builder: tauri::Builder<R>) -> tauri::
         // 1. 同步协议（已迁移为异步处理）：vcp://api/messages
         .register_asynchronous_uri_scheme_protocol("vcp", |ctx, request, responder| {
             handle_vcp_request(ctx, request, responder);
-        })
-        // 2. 异步头像协议：vcp-avatar://agent/{id}
-        .register_asynchronous_uri_scheme_protocol("vcp-avatar", |ctx, request, responder| {
-            let app_handle = ctx.app_handle().clone();
-            handle_avatar_protocol(
-                app_handle,
-                request,
-                Box::new(move |res| responder.respond(res)),
-            );
         })
 }
 
@@ -233,168 +222,4 @@ async fn finalize_high_speed_upload<R: Runtime>(
         dest_path.to_str().unwrap().to_string(),
     )
     .await
-}
-
-/// 处理头像读取协议 (vcp-avatar://agent/{id})
-fn handle_avatar_protocol<R: Runtime>(
-    app_handle: AppHandle<R>,
-    request: Request<Vec<u8>>,
-    responder: Box<dyn FnOnce(Response<Vec<u8>>) + Send>,
-) {
-    let uri = request.uri().to_string();
-
-    // 添加更详细的调试日志
-    log::info!("=== [AvatarProtocol] DEBUG START ===");
-    log::info!("[AvatarProtocol] Incoming URI: {}", uri);
-    log::info!("[AvatarProtocol] Request method: {:?}", request.method());
-    log::info!("[AvatarProtocol] Request headers: {:?}", request.headers());
-
-    tauri::async_runtime::spawn(async move {
-        let db_state = app_handle.state::<DbState>();
-        let pool = &db_state.pool;
-
-        // 使用 log::info! 以确保日志在移动端控制台可见
-        log::info!("[AvatarProtocol] Database pool acquired");
-
-        // 更加鲁棒的路径提取：
-        // 1. 原始格式: vcp-avatar://user/avatar
-        // 2. Android 映射格式: https://vcp-avatar.tauri.localhost/user/avatar
-        // 3. 某些 Webview 可能只传路径: /user/avatar
-        let path_part = if uri.starts_with("vcp-avatar://") {
-            uri.strip_prefix("vcp-avatar://").unwrap_or("")
-        } else if uri.contains("vcp-avatar.tauri.localhost/") {
-            uri.split("vcp-avatar.tauri.localhost/")
-                .last()
-                .unwrap_or("")
-        } else if uri.contains("/vcp-avatar/") {
-            uri.split("/vcp-avatar/").last().unwrap_or("")
-        } else {
-            uri.as_str()
-        };
-
-        // 移除查询参数并处理可能的双斜杠或前缀斜杠
-        let path = path_part
-            .split('?')
-            .next()
-            .unwrap_or("")
-            .trim_start_matches('/');
-        log::info!("[AvatarProtocol] Cleaned path: {}", path);
-        let parts: Vec<&str> = path.split('/').collect();
-
-        if parts.len() >= 2 {
-            let owner_type = parts[0];
-            let owner_id = parts[1];
-
-            log::info!(
-                "[AvatarProtocol] Parsed: type={}, id={}",
-                owner_type,
-                owner_id
-            );
-
-            // 首先检查数据库中是否有记录
-            let count_res: Result<Option<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
-                "SELECT COUNT(*) as count FROM avatars WHERE owner_type = ? AND owner_id = ?",
-            )
-            .bind(owner_type)
-            .bind(owner_id)
-            .fetch_optional(pool)
-            .await;
-
-            match count_res {
-                Ok(Some(count_row)) => {
-                    use sqlx::Row;
-                    let count: i64 = count_row.get("count");
-                    log::info!(
-                        "[AvatarProtocol] Found {} avatar records for {}/{}",
-                        count,
-                        owner_type,
-                        owner_id
-                    );
-                }
-                Ok(None) => {
-                    log::info!("[AvatarProtocol] No count query result");
-                }
-                Err(e) => {
-                    log::error!("[AvatarProtocol] Count query error: {}", e);
-                }
-            }
-
-            let row_res: Result<Option<sqlx::sqlite::SqliteRow>, sqlx::Error> = sqlx::query(
-                "SELECT mime_type, image_data, dominant_color FROM avatars WHERE owner_type = ? AND owner_id = ?"
-            )
-            .bind(owner_type)
-            .bind(owner_id)
-            .fetch_optional(pool)
-            .await;
-
-            match row_res {
-                Ok(Some(row)) => {
-                    use sqlx::Row;
-                    let mime: String = row.get("mime_type");
-                    let data: Vec<u8> = row.get("image_data");
-                    let color: Option<String> = row.get("dominant_color");
-
-                    log::info!(
-                        "[AvatarProtocol] Found data: size={}, mime={}",
-                        data.len(),
-                        mime
-                    );
-
-                    let final_color = match color {
-                        Some(c) => c,
-                        None => {
-                            let calculated = extract_dominant_color_from_bytes(&data)
-                                .unwrap_or_else(|_| "#808080".to_string());
-                            let pool_clone = pool.clone();
-                            let owner_type_clone = owner_type.to_string();
-                            let owner_id_clone = owner_id.to_string();
-                            let calculated_clone = calculated.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let _ = sqlx::query("UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?")
-                                    .bind(calculated_clone)
-                                    .bind(owner_type_clone)
-                                    .bind(owner_id_clone)
-                                    .execute(&pool_clone)
-                                    .await;
-                            });
-                            calculated
-                        }
-                    };
-
-                    log::info!(
-                        "[AvatarProtocol] Responding with: content-type={}, color={}",
-                        mime,
-                        final_color
-                    );
-
-                    let response = Response::builder()
-                        .header("Content-Type", mime)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .header("Cache-Control", "no-cache") // 调试期间禁用协议级缓存
-                        .header("X-Avatar-Color", final_color)
-                        .body(data)
-                        .unwrap();
-                    responder(response);
-                    log::info!("[AvatarProtocol] Response sent successfully");
-                    return;
-                }
-                Ok(None) => {
-                    log::warn!(
-                        "[AvatarProtocol] No record found in DB for {}/{}",
-                        owner_type,
-                        owner_id
-                    );
-                }
-                Err(e) => {
-                    log::error!("[AvatarProtocol] DB Error: {}", e);
-                }
-            }
-        } else {
-            log::warn!("[AvatarProtocol] Invalid path format: {:?}", parts);
-        }
-
-        log::warn!("[AvatarProtocol] 404 for URI: {}", uri);
-        log::info!("=== [AvatarProtocol] DEBUG END ===");
-        responder(Response::builder().status(404).body(Vec::new()).unwrap());
-    });
 }

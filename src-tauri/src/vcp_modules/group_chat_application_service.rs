@@ -202,8 +202,14 @@ pub async fn process_group_chat_message(
         let res_result =
             perform_vcp_request(&app_handle, active_requests_map, request_payload).await;
 
-        if let Ok((res, _is_aborted)) = res_result {
+        if let Ok((res, is_aborted)) = res_result {
             if let Some(full_content) = res["fullContent"].as_str() {
+                let finish_reason = if is_aborted {
+                    Some("cancelled_by_user".to_string())
+                } else {
+                    res["finishReason"].as_str().map(|s| s.to_string())
+                };
+
                 let ai_msg = ChatMessage {
                     id: message_id,
                     role: "assistant".to_string(),
@@ -218,7 +224,7 @@ pub async fn process_group_chat_message(
                     group_id: Some(group_id.clone()),
                     topic_id: Some(topic_id.clone()),
                     is_group_message: Some(true),
-                    finish_reason: None,
+                    finish_reason,
                     attachments: None,
                     blocks: None,
                 };

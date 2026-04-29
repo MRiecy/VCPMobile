@@ -60,7 +60,7 @@ pub async fn read_group_config_internal<R: Runtime>(
     let pool = &db_state.pool;
 
     let group_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
+        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, g.current_topic_id, av.dominant_color 
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
          WHERE g.group_id = ? AND g.deleted_at IS NULL"
@@ -73,6 +73,7 @@ pub async fn read_group_config_internal<R: Runtime>(
     if let Some(row) = group_row {
         use sqlx::Row;
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
+        let current_topic_id: Option<String> = row.get("current_topic_id");
 
         let member_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
             "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? ORDER BY sort_order ASC"
@@ -131,6 +132,7 @@ pub async fn read_group_config_internal<R: Runtime>(
             topics,
             tag_match_mode: row.get("tag_match_mode"),
             created_at: row.get("created_at"),
+            current_topic_id,
         };
 
         state.caches.insert(group_id.to_string(), config.clone());
@@ -213,40 +215,6 @@ pub async fn update_group_config(
     Ok(new_config)
 }
 
-/// 接收来自同步中心的 DTO 并局部应用到本地 (同步专用)
-#[allow(dead_code)]
-pub async fn apply_sync_update<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    state: &GroupManagerState,
-    group_id: &str,
-    dto: GroupSyncDTO,
-    skip_bubble: bool,
-    from_sync: bool,
-) -> Result<(), String> {
-    let mutex = state.acquire_lock(group_id).await;
-    let _lock = mutex.lock().await;
-
-    // 1. 读取当前配置 (如果不存在则抛错，因为群组通常不应由手机端盲目创建)
-    let mut config = read_group_config_internal(app_handle, state, group_id).await?;
-
-    // 2. 局部覆盖核心字段
-    config.name = dto.name;
-    config.members = dto.members;
-    config.mode = dto.mode;
-    config.member_tags = dto.member_tags;
-    config.group_prompt = dto.group_prompt;
-    config.invite_prompt = dto.invite_prompt;
-    config.use_unified_model = dto.use_unified_model;
-    config.unified_model = dto.unified_model;
-    config.tag_match_mode = dto.tag_match_mode;
-    config.created_at = dto.created_at;
-
-    // 3. 写入数据库
-    internal_write_group_config(app_handle, state, group_id, &config, skip_bubble, from_sync)
-        .await?;
-
-    Ok(())
-}
 #[tauri::command]
 pub async fn create_group(
     app_handle: AppHandle,
@@ -298,19 +266,21 @@ pub async fn create_group(
         topics: vec![default_topic.clone()],
         tag_match_mode: Some("strict".to_string()),
         created_at: timestamp,
+        current_topic_id: Some(default_topic_id.clone()),
     };
 
     let dto = GroupSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
     sqlx::query(
-        "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model, config_hash) VALUES (?, ?, ?, ?, 'sequential', 0, ?)"
+        "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model, config_hash, current_topic_id) VALUES (?, ?, ?, ?, 'sequential', 0, ?, ?)"
     )
     .bind(&group_id)
     .bind(&name)
     .bind(timestamp)
     .bind(timestamp)
     .bind(&config_hash)
+    .bind(&config.current_topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -392,8 +362,8 @@ async fn internal_write_group_config<R: Runtime>(
         "INSERT INTO groups (
             group_id, name, mode, 
             group_prompt, invite_prompt, use_unified_model, unified_model, 
-            tag_match_mode, created_at, config_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tag_match_mode, created_at, config_hash, current_topic_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(group_id) DO UPDATE SET
             name = excluded.name,
             mode = excluded.mode,
@@ -403,6 +373,7 @@ async fn internal_write_group_config<R: Runtime>(
             unified_model = excluded.unified_model,
             tag_match_mode = excluded.tag_match_mode,
             config_hash = excluded.config_hash,
+            current_topic_id = excluded.current_topic_id,
             updated_at = excluded.updated_at",
     )
     .bind(group_id)
@@ -415,6 +386,7 @@ async fn internal_write_group_config<R: Runtime>(
     .bind(&config.tag_match_mode)
     .bind(config.created_at)
     .bind(&config_hash)
+    .bind(&config.current_topic_id)
     .bind(now)
     .execute(&mut *tx)
     .await

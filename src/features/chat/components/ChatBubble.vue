@@ -1,9 +1,23 @@
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue';
+
+const props = defineProps<{
   isUser: boolean;
   isStreaming: boolean;
   bubbleStyle?: Record<string, string>;
 }>();
+
+const mergedStyle = computed(() => {
+  const base = props.bubbleStyle || {};
+  if (props.isStreaming) {
+    return {
+      ...base,
+      backdropFilter: 'none',
+      WebkitBackdropFilter: 'none',
+    };
+  }
+  return base;
+});
 </script>
 
 <template>
@@ -16,7 +30,7 @@ defineProps<{
       :class="isUser
           ? 'p-3 w-fit max-w-[85%] shadow-sm'
           : 'p-1.5 w-fit max-w-[100%] shadow-sm'
-        " :style="bubbleStyle">
+        " :style="mergedStyle">
       <slot />
     </div>
 

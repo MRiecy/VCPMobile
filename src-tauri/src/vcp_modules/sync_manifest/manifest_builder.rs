@@ -18,10 +18,7 @@ impl ManifestBuilder {
 
         let mut items = Vec::new();
         for r in rows {
-            let h = HashAggregator::aggregate_agent_manifest_hash(
-                r.get("config_hash"),
-                r.get("content_hash"),
-            );
+            let h: String = r.get("config_hash");
             items.push(EntityState {
                 id: r.get("agent_id"),
                 hash: h,
@@ -48,10 +45,7 @@ impl ManifestBuilder {
 
         let mut items = Vec::new();
         for r in rows {
-            let h = HashAggregator::aggregate_group_manifest_hash(
-                r.get("config_hash"),
-                r.get("content_hash"),
-            );
+            let h: String = r.get("config_hash");
             items.push(EntityState {
                 id: r.get("group_id"),
                 hash: h,
@@ -88,10 +82,7 @@ impl ManifestBuilder {
                     created_at: r.get("created_at"),
                     owner_id: r.get("owner_id"),
                 };
-                HashAggregator::aggregate_topic_manifest_hash(
-                    &HashAggregator::compute_group_topic_metadata_hash(&dto),
-                    r.get("content_hash"),
-                )
+                HashAggregator::compute_group_topic_metadata_hash(&dto)
             } else {
                 let dto = AgentTopicSyncDTO {
                     id: id.clone(),
@@ -101,10 +92,7 @@ impl ManifestBuilder {
                     unread: r.get::<i64, _>("unread") != 0,
                     owner_id: r.get("owner_id"),
                 };
-                HashAggregator::aggregate_topic_manifest_hash(
-                    &HashAggregator::compute_agent_topic_metadata_hash(&dto),
-                    r.get("content_hash"),
-                )
+                HashAggregator::compute_agent_topic_metadata_hash(&dto)
             };
 
             items.push(EntityState {

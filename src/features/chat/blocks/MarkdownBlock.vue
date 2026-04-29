@@ -45,14 +45,15 @@ marked.setOptions({
 
 import { convertFileSrc } from '@tauri-apps/api/core';
 
-// Custom renderer for Mermaid and Images
+// Custom renderer for Mermaid, Images, Tables and Code blocks
 const renderer = {
   code({ text, lang }: { text: string; lang?: string; escaped?: boolean }) {
     if (lang === 'mermaid' || lang === 'flowchart' || lang === 'graph') {
       const encoded = btoa(encodeURIComponent(text));
       return `<div class="mermaid-placeholder" data-code="${encoded}">解析渲染中...</div>`;
     }
-    return false; // use default
+    const langClass = lang ? `hljs language-${lang}` : 'hljs';
+    return `<pre class="vcp-scrollable no-swipe"><code class="${langClass}">${text}</code></pre>\n`;
   },
   image({ href, title, text }: { href: string; title: string | null; text: string }) {
     let finalHref = href;
@@ -74,7 +75,7 @@ const renderer = {
   }
 };
 
-// VCP Math Extension for Marked
+// VCP Math Extension for Marked (inline only; block math is handled by MathBlock)
 const mathExtension = {
   extensions: [
     {
@@ -97,34 +98,17 @@ const mathExtension = {
         return `<span class="math-inline">${token.text}</span>`;
       }
     },
-    {
-      name: 'blockMath',
-      level: 'block',
-      start(src: string) {
-        const match = src.match(/\$\$|\\\[|\\begin/);
-        return match ? match.index : -1;
-      },
-      tokenizer(src: string) {
-        // 匹配 $$...$$ (允许前置空格)
-        const dollarMatch = src.match(/^ *\$\$([\s\S]+?)\$\$/);
-        if (dollarMatch) return { type: 'blockMath', raw: dollarMatch[0], text: dollarMatch[1].trim() };
-
-        // 匹配 \[...\]
-        const bracketMatch = src.match(/^ *\\\[([\s\S]+?)\\\]/);
-        if (bracketMatch) return { type: 'blockMath', raw: bracketMatch[0], text: bracketMatch[1].trim() };
-
-        // 匹配 \begin{...}...\end{...}
-        const envMatch = src.match(/^ *\\begin\{([a-z]*\*?)\}([\s\S]+?)\\end\{\1\}/);
-        if (envMatch) return { type: 'blockMath', raw: envMatch[0], text: envMatch[0].trim() };
-      },
-      renderer(token: any) {
-        return `<div class="language-math">${token.text}</div>`;
-      }
-    }
   ]
 };
 
-marked.use({ renderer });
+marked.use({
+  renderer,
+  hooks: {
+    postprocess(html: string) {
+      return html.replace(/<table>/g, '<div class="vcp-scrollable no-swipe" style="overflow-x: auto;"><table>').replace(/<\/table>/g, '</table></div>');
+    }
+  }
+});
 marked.use(mathExtension);
 
 // Sanitize HTML with DOMPurify
@@ -240,11 +224,16 @@ const renderHeavyContent = async () => {
       (window as any).katex = katex; // 挂载到全局以便调试和兼容性
 
       texElements.forEach(el => {
+        if (!(el instanceof HTMLElement)) return;
         if (el.querySelector('.katex')) return; // Already rendered
+        const raw = el.textContent || '';
+        // 跳过非 LaTeX 内容：包含中文字符但没有 LaTeX 命令的表达式不是数学公式
+        if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(raw) && !/\\[a-zA-Z]+/.test(raw)) return;
         const isBlock = el.classList.contains('language-math');
         try {
-          katex.render(el.textContent || '', el as HTMLElement, {
+          katex.render(raw, el, {
             throwOnError: false,
+            strict: false,
             displayMode: isBlock
           });
         } catch (e) {
@@ -257,6 +246,9 @@ const renderHeavyContent = async () => {
   }
 
   // 2. Render Mermaid (Lazy Load)
+  // [修复] 流式过程中跳过 Mermaid 渲染，避免解析不完整代码导致报错
+  if (props.isStreaming) return;
+
   const placeholders = innerContentRef.value.querySelectorAll('.mermaid-placeholder');
   if (placeholders.length > 0) {
     try {

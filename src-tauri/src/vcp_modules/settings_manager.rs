@@ -36,6 +36,16 @@ pub struct Settings {
     #[serde(default)]
     pub sync_token: String,
 
+    // 管理接口鉴权 (用于表情包刷新等)
+    #[serde(default)]
+    pub admin_username: String,
+    #[serde(default)]
+    pub admin_password: String,
+
+    // 表情包图床密钥
+    #[serde(default)]
+    pub file_key: String,
+
     // 话题总结配置
     #[serde(default)]
     pub topic_summary_model: String,
@@ -83,6 +93,9 @@ pub fn create_default_settings() -> Settings {
         sync_server_url: "".to_string(),
         sync_http_url: "".to_string(),
         sync_token: "".to_string(),
+        admin_username: "".to_string(),
+        admin_password: "".to_string(),
+        file_key: "".to_string(),
         topic_summary_model: "gemini-2.5-flash".to_string(),
         sync_log_level: "INFO".to_string(),
         agent_order: vec![],
@@ -177,18 +190,30 @@ async fn internal_write_settings<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 判断 VCPLog 连接参数是否实际发生变化，避免无关设置（如排序顺序）更新导致重连
+    let should_reconnect = {
+        let old_cache = state.cache.lock().await;
+        if let Some(ref old) = *old_cache {
+            old.vcp_log_url != settings.vcp_log_url || old.vcp_log_key != settings.vcp_log_key
+        } else {
+            !settings.vcp_log_url.is_empty() || !settings.vcp_log_key.is_empty()
+        }
+    };
+
     *state.cache.lock().await = Some(settings.clone());
 
-    // [强耦合联动] 只要配置写入成功，立即通知 VCP Log 服务更新连接状态 (自主维护连接)
-    let h = app_handle.clone();
-    let log_url = settings.vcp_log_url.clone();
-    let log_key = settings.vcp_log_key.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
-            h, log_url, log_key,
-        )
-        .await;
-    });
+    // [强耦合联动] 仅当 VCPLog 连接参数实际变化时，才通知 VCP Log 服务更新连接状态
+    if should_reconnect {
+        let h = app_handle.clone();
+        let log_url = settings.vcp_log_url.clone();
+        let log_key = settings.vcp_log_key.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
+                h, log_url, log_key,
+            )
+            .await;
+        });
+    }
 
     Ok(true)
 }

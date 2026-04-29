@@ -2,10 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "vcp-portal-*"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "core:window:allow-close"
   ],
   "protocols": {
     "vcp-avatar": {
@@ -14,6 +15,10 @@
     },
     "vcp": {
       "name": "vcp",
+      "scopes": ["**"]
+    },
+    "vcp-portal": {
+      "name": "vcp-portal",
       "scopes": ["**"]
     }
   }

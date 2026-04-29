@@ -3,7 +3,6 @@ import { ref, computed, onMounted } from "vue";
 import Sortable from "sortablejs";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatManagerStore } from "../../core/stores/chatManager";
-import { useTopicStore } from "../../core/stores/topicListManager";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useSettingsStore } from "../../core/stores/settings";
 import { useOverlayStore } from "../../core/stores/overlay";
@@ -14,12 +13,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: "select-agent"): void;
+  (e: "select-agent", item: any): void;
+  (e: "select-group", item: any): void;
 }>();
 
 const assistantStore = useAssistantStore();
 const chatStore = useChatManagerStore();
-const topicListStore = useTopicStore();
 const layoutStore = useLayoutStore();
 const settingsStore = useSettingsStore();
 const overlayStore = useOverlayStore();
@@ -65,6 +64,8 @@ const initSortable = () => {
     Sortable.create(groupListRef.value, {
       animation: 150,
       handle: ".drag-handle",
+      delay: 200,
+      delayOnTouchOnly: true,
       onEnd: (evt) => {
         const newOrder = orderedGroups.value.map((g) => g.id);
         const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
@@ -180,27 +181,15 @@ const goToSettings = (id: string, type: 'agent' | 'group' = 'agent') => {
 const selectAgent = async (agentId: string) => {
   const agent = assistantStore.agents.find((a: any) => a.id === agentId);
   if (agent) {
-    chatStore.currentSelectedItem = {
-      id: agent.id,
-      name: agent.name,
-      type: "agent",
-    };
+    emit("select-agent", agent);
   }
-  await topicListStore.loadTopicList(agentId, "agent");
-  emit("select-agent");
 };
 
 const selectGroup = async (groupId: string) => {
   const group = assistantStore.groups.find((g) => g.id === groupId);
   if (group) {
-    chatStore.currentSelectedItem = {
-      id: group.id,
-      name: group.name,
-      type: "group",
-    };
+    emit("select-group", group);
   }
-  await topicListStore.loadTopicList(groupId, "group");
-  emit("select-agent");
 };
 
 const filteredCombinedItems = computed(() => {
@@ -267,7 +256,7 @@ const filteredCombinedItems = computed(() => {
                 transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
               }">
             <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
-              rounded="rounded-xl" />
+              rounded="rounded-full" outer-border :dominant-color="group.avatarCalculatedColor" />
             <div class="flex flex-col overflow-hidden flex-1">
               <span class="font-bold text-sm truncate text-primary-text">{{
                 group.name
@@ -333,7 +322,9 @@ const filteredCombinedItems = computed(() => {
               :fallback-name="agent.name" 
               size="w-10 h-10" 
               rounded="rounded-full"
+              outer-border
               class="pointer-events-none"
+              :dominant-color="agent.avatarCalculatedColor"
             />
             <div class="flex flex-col overflow-hidden flex-1 pointer-events-none">
               <span class="font-bold text-sm truncate text-primary-text">{{
