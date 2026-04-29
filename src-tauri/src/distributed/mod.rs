@@ -31,8 +31,15 @@ impl DistributedState {
 }
 
 // ============================================================
-// Tauri commands — the 3 entry points registered in lib.rs
+// Tauri commands — the 4 entry points registered in lib.rs
 // ============================================================
+
+/// Phase 2 sensor bridge: frontend pushes sensor data into the shared store.
+/// Called by SensorCollector.vue via invoke("update_sensor_data", { key, value }).
+#[tauri::command]
+pub fn update_sensor_data(key: String, value: String) {
+    tools::frontend_bridge::update_sensor(&key, value);
+}
 
 /// Start the distributed node connection.
 #[tauri::command]

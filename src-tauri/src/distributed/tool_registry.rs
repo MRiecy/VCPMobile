@@ -39,12 +39,12 @@ pub trait InteractiveTool: Send + Sync {
 
 /// Streaming: continuously produces data, pushed via update_static_placeholders.
 /// Mirrors VCPChat's static plugins + 30s cron push.
-#[allow(dead_code)]
 pub trait StreamingTool: Send + Sync {
     fn manifest(&self) -> ToolManifest;
     /// Placeholder key, e.g. "{{MobileSensorGyro}}"
     fn placeholder_key(&self) -> &str;
-    /// Polling interval in seconds
+    /// Polling interval in seconds (metadata — not yet used by client.rs push loop, see C2)
+    #[allow(dead_code)]
     fn poll_interval_secs(&self) -> u64;
     /// Read current snapshot value (must be fast/non-blocking)
     fn read_current(&self) -> Result<String, String>;
@@ -102,7 +102,6 @@ impl ToolRegistry {
     }
 
     /// Register a Streaming tool.
-    #[allow(dead_code)]
     pub fn register_streaming<T: StreamingTool + 'static>(&mut self, tool: T) {
         let name = tool.manifest().name.clone();
         self.tools

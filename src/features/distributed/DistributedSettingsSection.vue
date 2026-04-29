@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { computed, watch } from "vue";
 import type { AppSettings } from "../../core/stores/settings";
 import { useDistributed } from "./composables/useDistributed";
 

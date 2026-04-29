@@ -6453,6 +6453,7 @@ dependencies = [
  "hex",
  "image",
  "lazy_static",
+ "libc",
  "log",
  "lru",
  "md5",

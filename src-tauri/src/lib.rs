@@ -176,6 +176,7 @@ pub fn run() {
             distributed::start_distributed_node,
             distributed::stop_distributed_node,
             distributed::get_distributed_status,
+            distributed::update_sensor_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -11,6 +11,7 @@ import ThemePicker from "./ThemePicker.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import DistributedSettingsSection from "../distributed/DistributedSettingsSection.vue";
 import ToolInteractionOverlay from "../distributed/ToolInteractionOverlay.vue";
+import SensorCollector from "../distributed/SensorCollector.vue";
 
 // 原子组件
 import SettingsSection from "../../components/settings/SettingsSection.vue";
@@ -228,6 +229,7 @@ watch(
         </div>
 
         <ToolInteractionOverlay />
+        <SensorCollector />
 
         <ModelSelector
           :model-value="showSummaryModelSelector"
