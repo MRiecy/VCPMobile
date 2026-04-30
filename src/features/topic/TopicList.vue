@@ -138,7 +138,7 @@ const selectTopic = async (
   const ownerType = assistantStore.agents.some((a) => a.id === itemId)
     ? "agent"
     : "group";
-  await chatStore.loadHistory(itemId, ownerType, topicId);
+  await chatStore.loadHistoryPaginated(itemId, ownerType, topicId);
 
   // 更新当前选中项的名称 (保持 type)
   if (
@@ -200,7 +200,7 @@ const selectTopic = async (
             ">
           <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
           <div v-if="item.data.unreadCount === -1 || item.data.unread"
-            class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse shrink-0"
+            class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
             style="background: #ff6b6b"></div>
           <div v-else-if="item.data.unreadCount && item.data.unreadCount > 0"
             class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full border-2 border-white dark:border-gray-900 text-[9px] font-bold text-white flex items-center justify-center z-10 shadow-sm"

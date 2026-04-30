@@ -10,7 +10,6 @@ import { useModalHistory } from "./core/composables/useModalHistory";
 import { useNotificationStore } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
-import { initSyncStatus } from "./core/composables/useSyncStatus";
 
 // Layout Components
 import BootScreen from "./components/layout/BootScreen.vue";
@@ -92,14 +91,19 @@ const backgroundStyle = computed(() => {
 
 // 用于取消监听的清理函数
 let unlistenLog: (() => void) | null = null;
-let unlistenSyncStatus: (() => void) | null = null;
+
+
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    document.documentElement.classList.add("vcp-paused-animations");
+  } else {
+    document.documentElement.classList.remove("vcp-paused-animations");
+  }
+};
 
 onMounted(async () => {
   // 初始化全局表情包修复器
   initGlobalFixer();
-
-  // 初始化同步状态监听
-  unlistenSyncStatus = await initSyncStatus();
 
   await bootstrapApp();
 
@@ -116,11 +120,14 @@ onMounted(async () => {
   // Operation Dummy Root: Wait for router and inject dummy layer
   await router.isReady();
   initRootHistory();
+
+  // 监听页面可见性，切到后台时暂停所有 CSS 动画以节省 GPU
+  document.addEventListener("visibilitychange", handleVisibilityChange);
 });
 
 onUnmounted(() => {
-  if (unlistenSyncStatus) unlistenSyncStatus();
   if (unlistenLog) unlistenLog();
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
 </script>
 
@@ -185,7 +192,7 @@ body,
 .vcp-app-root {
   background-color: transparent;
   color: var(--primary-text);
-  height: 100dvh;
+  height: 100%;
 }
 
 .vcp-background-layer {
@@ -195,9 +202,6 @@ body,
   background-position: center;
   background-repeat: no-repeat;
   transition: background-image 0.8s ease-in-out;
-  transform: translateZ(0);
-  will-change: opacity, transform;
-  backface-visibility: hidden;
 }
 
 /* Transitions */
@@ -235,5 +239,12 @@ body,
     --vcp-safe-top: env(safe-area-inset-top);
     --vcp-safe-bottom: env(safe-area-inset-bottom);
   }
+}
+
+/* 全局动画暂停：切到后台时由 JS 添加此 class 到 <html> */
+.vcp-paused-animations *,
+.vcp-paused-animations *::before,
+.vcp-paused-animations *::after {
+  animation-play-state: paused !important;
 }
 </style>

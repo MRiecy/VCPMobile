@@ -54,7 +54,7 @@ const selectTopic = async (
     }
   }
 
-  await chatStore.loadHistory(itemId, ownerType, topicId);
+  await chatStore.loadHistoryPaginated(itemId, ownerType, topicId);
   chatStore.currentTopicId = topicId;
 
   const createdTopic = topicStore.topics.find((topic) => topic.id === topicId);

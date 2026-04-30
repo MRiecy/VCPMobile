@@ -7,6 +7,7 @@ if (!(window as any)._vcp_loaded_scripts) {
 
 export function useVcpMagic() {
   const trackedThreeInstances = new Map<HTMLElement, any[]>();
+  const MAX_TRACKED_THREE = 20;
   let isThreePatched = false;
 
   const replaceCdnUrls = (scriptContent: string) => {
@@ -68,14 +69,27 @@ export function useVcpMagic() {
       const originalRender = renderer.render;
       let associatedScene: any = null;
       let associatedCamera: any = null;
+      let isVisible = true;
+
+      // 使用 IntersectionObserver 检测是否位于视口内
+      const io = new IntersectionObserver((entries) => {
+        isVisible = entries[0]?.isIntersecting ?? true;
+      }, { threshold: 0 });
+      if (renderer.domElement) {
+        io.observe(renderer.domElement);
+      }
 
       renderer.render = function (scene: any, camera: any) {
         if (this._disposed) return;
+
+        // 页面在后台或元素不在视口内时跳过渲染，节省 GPU
+        if (document.hidden || !isVisible) return;
 
         if (scene && !associatedScene) associatedScene = scene;
         if (camera && !associatedCamera) associatedCamera = camera;
 
         if (!document.body.contains(this.domElement)) {
+          io.disconnect();
           if (!this._disposed) this.dispose();
           return;
         }
@@ -106,6 +120,11 @@ export function useVcpMagic() {
               trackedThreeInstances.set(contentDiv, []);
             }
             trackedThreeInstances.get(contentDiv)!.push({ renderer, getScene: () => associatedScene });
+            // 防御性清理：防止 Map 无界增长
+            if (trackedThreeInstances.size > MAX_TRACKED_THREE) {
+              const first = trackedThreeInstances.keys().next().value;
+              if (first) trackedThreeInstances.delete(first);
+            }
           }
           observer.disconnect();
         }

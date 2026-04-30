@@ -1,9 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import { useTopicStore } from "./topicListManager";
 
 export interface Topic {
   id: string;
@@ -55,26 +53,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
 
-  // 监听同步完成事件，自动刷新数据
-  listen("vcp-sync-completed", async (event: any) => {
-    const payload = event.payload || {};
-    console.log("[AssistantStore] Sync completed, refreshing agents and groups", payload);
-    if (payload.agentsChanged !== false) {
-      await fetchAgents();
-    }
-    if (payload.groupsChanged !== false) {
-      await fetchGroups();
-    }
-    // 强制所有话题列表缓存失效，下次切回时自动重新加载
-    const topicStore = useTopicStore();
-    topicStore.invalidateAllTopicCaches();
-    // 如果当前有选中的 item，也立即刷新其话题列表
-    if (topicStore.currentAgentId) {
-      const agent = agents.value.find((a) => a.id === topicStore.currentAgentId);
-      const ownerType = agent ? "agent" : "group";
-      await topicStore.loadTopicList(topicStore.currentAgentId, ownerType);
-    }
-  });
+  // 同步完成刷新已集中到 main.ts（window.location.reload），此处无需重复监听
 
   // 记录每个 item (agent 或 group) 的未读数量
   const unreadCounts = ref<Record<string, number>>({});

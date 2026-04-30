@@ -105,7 +105,14 @@ pub async fn load_chat_history_internal(
 
         let render_content: Option<Vec<u8>> = row.get("render_content");
         let blocks = if let Some(bytes) = render_content {
-            serde_json::from_slice(&bytes).ok()
+            serde_json::from_slice(&bytes).ok().and_then(|v: serde_json::Value| {
+                if let Some(arr) = v.as_array() {
+                    let filtered: Vec<serde_json::Value> = arr.iter().filter(|e| !e.is_null()).cloned().collect();
+                    if filtered.is_empty() { None } else { Some(serde_json::Value::Array(filtered)) }
+                } else {
+                    Some(v)
+                }
+            })
         } else {
             None
         };

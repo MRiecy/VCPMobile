@@ -63,6 +63,15 @@ export const useAvatarStore = defineStore("avatar", () => {
 
           // 核心修复：缓存版本号取 (后端实际时间戳 和 请求时间戳) 的最大值
           // 这样确保下次进入时 existing.version >= version 成立，切断死循环
+          const MAX_AVATAR_CACHE = 50;
+          if (cache.size >= MAX_AVATAR_CACHE) {
+            const firstKey = cache.keys().next().value;
+            if (firstKey) {
+              const old = cache.get(firstKey);
+              if (old) URL.revokeObjectURL(old.blobUrl);
+              cache.delete(firstKey);
+            }
+          }
           cache.set(key, { 
             blobUrl, 
             version: Math.max(result.updated_at, version) 

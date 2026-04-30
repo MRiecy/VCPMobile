@@ -41,6 +41,11 @@ async fn query_avatar_color_cached(
         return cached.clone();
     }
     let color = query_avatar_color(pool, agent_id).await;
+    // 防止缓存无界增长：超过 256 条目时清空
+    const AVATAR_COLOR_CACHE_MAX: usize = 256;
+    if cache.len() >= AVATAR_COLOR_CACHE_MAX {
+        cache.clear();
+    }
     cache.insert(agent_id.to_string(), color.clone());
     color
 }

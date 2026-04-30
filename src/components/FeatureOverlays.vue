@@ -17,6 +17,7 @@ import { useOverlayStore } from '../core/stores/overlay';
 import SettingsView from '../features/settings/SettingsView.vue';
 import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
 import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
+import SyncSessionView from '../features/sync/SyncSessionView.vue';
 
 const overlayStore = useOverlayStore();
 const isMounted = ref(false);
@@ -47,5 +48,7 @@ onMounted(() => {
       :z-index="overlayStore.getPageZIndex('groupSettings')"
       @close="overlayStore.closeGroupSettings()"
     />
+
+    <SyncSessionView />
   </div>
 </template>

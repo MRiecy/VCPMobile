@@ -1,6 +1,7 @@
 use log::info;
 use serde::Serialize;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::RwLock;
 
@@ -148,6 +149,18 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             let model_state = h.state::<ModelManagerState>();
             init_model_manager(&h, &model_state).await;
             info!("[Lifecycle] Model manager initialized in background.");
+        });
+    }
+
+    // DeleteExecutor 定时清理（原在 sync_service.rs 常驻循环中，现移至此处）
+    {
+        let h = handle.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(86400)).await;
+                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                let _ = DeleteExecutor::cleanup_old_deleted_records(&h, 30).await;
+            }
         });
     }
 

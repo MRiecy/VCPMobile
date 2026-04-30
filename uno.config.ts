@@ -13,8 +13,8 @@ export default defineConfig({
     ['flex-center', 'flex justify-center items-center'],
     ['flex-col-center', 'flex flex-col justify-center items-center'],
     ['btn', 'px-4 py-2 rounded-xl bg-blue-500 text-white hover:bg-blue-600 transition-all active:scale-95 cursor-pointer shadow-lg shadow-blue-500/20'],
-    ['card', 'p-4 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md shadow-xl'],
-    ['glass-panel', 'backdrop-blur-xl bg-white/5 border border-white/10'],
+    ['card', 'p-4 rounded-2xl bg-white/5 border border-white/10 shadow-xl'],
+    ['glass-panel', 'bg-white/5 border border-white/10'],
   ],
   presets: [
     presetUno(),

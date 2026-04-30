@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { ChevronDown, ChevronUp, Settings, Loader2 } from 'lucide-vue-next';
 import MarkdownBlock from './MarkdownBlock.vue';
 import type { ContentBlock } from '../../../core/composables/useContentProcessor';
@@ -11,14 +11,43 @@ const props = defineProps<{
 }>();
 
 const isExpanded = ref(props.type === 'tool-result' ? false : true);
+const toolBlockRef = ref<HTMLElement | null>(null);
+let observer: IntersectionObserver | null = null;
+
+onMounted(() => {
+  if (!toolBlockRef.value) return;
+  observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        toolBlockRef.value?.classList.remove('vcp-animation-paused');
+      } else {
+        toolBlockRef.value?.classList.add('vcp-animation-paused');
+      }
+    });
+  }, { threshold: 0 });
+  observer.observe(toolBlockRef.value);
+});
+
+onUnmounted(() => {
+  observer?.disconnect();
+});
 
 const toggleExpand = () => {
   isExpanded.value = !isExpanded.value;
 };
+
+// 检测工具结果值是否为图片（HTTP URL 或 base64 data URI）
+const isImageValue = (key: string, value: string): boolean => {
+  const imageKeys = ['可访问URL', '返回内容', 'url', 'image'];
+  if (!imageKeys.includes(key)) return false;
+  const isHttpImage = /^https?:\/\/[^\s]+$/i.test(value) && /\.(jpeg|jpg|png|gif|webp)([?&#]|$)/i.test(value);
+  const isBase64Image = /^data:image\/(png|jpeg|jpg|gif|webp);base64,/i.test(value);
+  return isHttpImage || isBase64Image;
+};
 </script>
 
 <template>
-  <div class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
+  <div ref="toolBlockRef" class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
     type === 'tool-use' ? 'is-tool-use' : 'is-tool-result',
     isExpanded ? 'shadow-md' : 'shadow-sm'
   ]">
@@ -59,9 +88,14 @@ const toggleExpand = () => {
         <div class="space-y-2">
           <div v-for="item in block.details" :key="item.key" class="text-xs flex flex-col sm:flex-row sm:items-start">
             <span class="detail-key font-bold mr-2 whitespace-nowrap mt-0.5">{{ item.key }}:</span>
-            <!-- 修复：取消特殊 key 判断，让所有 Tool Result 内容全面接入 Markdown 渲染管线 -->
             <div class="mt-1 sm:mt-0 flex-1 min-w-0">
-              <MarkdownBlock :content="item.value" class="compact-markdown" />
+              <!-- 图片值直接渲染为 img，其他值走 Markdown 管线 -->
+              <template v-if="item.value && isImageValue(item.key, item.value)">
+                <a :href="item.value" target="_blank" rel="noopener noreferrer" class="block">
+                  <img :src="item.value" class="max-w-full rounded-lg" loading="lazy" alt="Generated Image" />
+                </a>
+              </template>
+              <MarkdownBlock v-else :content="item.value || ''" class="compact-markdown" />
             </div>
           </div>
           <div v-if="block.footer" class="mt-2 pt-2 border-t border-black/10 dark:border-white/10 text-xs opacity-70">
@@ -127,6 +161,13 @@ const toggleExpand = () => {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* 离屏时暂停无限动画以节省 GPU */
+.vcp-tool-block.vcp-animation-paused.is-tool-use,
+.vcp-tool-block.vcp-animation-paused.is-tool-use::after,
+.vcp-tool-block.vcp-animation-paused.is-tool-use .tool-icon-container {
+  animation-play-state: paused !important;
 }
 
 /* --- Tool Use Bubble --- */

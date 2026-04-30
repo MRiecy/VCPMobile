@@ -99,7 +99,7 @@ lazy_static! {
     static ref HTML_DOC_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
     static ref HTML_DOC_END: Regex = Regex::new(r"(?i)</html>").unwrap();
 
-    static ref ROLE_DIVIDER: Regex = Regex::new(r"(?i)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
+    static ref ROLE_DIVIDER: Regex = Regex::new(r"(?im)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
     static ref STYLE_TAG_START: Regex = Regex::new(r"(?i)<style\b[^>]*>").unwrap();
     static ref STYLE_TAG_END: Regex = Regex::new(r"(?i)</style>").unwrap();
 
@@ -353,18 +353,21 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         full_html.push_str(&remaining[start_idx..end_idx]);
                         full_html.push_str(inner_content);
                         if is_complete {
-                            full_html.push_str(
-                                &search_area[end_marker_start.unwrap()..end_marker_end.unwrap()],
-                            );
+                            if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
+                                full_html.push_str(&search_area[s..e]);
+                            }
                         }
                         ContentBlock::HtmlPreview { content: full_html }
                     }
                     BlockType::RoleDivider => {
                         let marker_text = &remaining[start_idx..end_idx];
-                        let caps = ROLE_DIVIDER.captures(marker_text).unwrap();
-                        let is_end = caps.get(1).is_some();
-                        let role = caps.get(2).unwrap().as_str().to_lowercase();
-                        ContentBlock::RoleDivider { role, is_end }
+                        if let Some(caps) = ROLE_DIVIDER.captures(marker_text) {
+                            let is_end = caps.get(1).is_some();
+                            let role = caps.get(2).map(|m| m.as_str().to_lowercase()).unwrap_or_default();
+                            ContentBlock::RoleDivider { role, is_end }
+                        } else {
+                            ContentBlock::Markdown { content: marker_text.to_string() }
+                        }
                     }
                     BlockType::Style => ContentBlock::Style {
                         content: inner_content.to_string(),
@@ -374,9 +377,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         full_fence.push_str(&remaining[start_idx..end_idx]);
                         full_fence.push_str(inner_content);
                         if is_complete {
-                            full_fence.push_str(
-                                &search_area[end_marker_start.unwrap()..end_marker_end.unwrap()],
-                            );
+                            if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
+                                full_fence.push_str(&search_area[s..e]);
+                            }
                         }
                         ContentBlock::Markdown {
                             content: full_fence,
@@ -431,14 +434,15 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
     let mut last_end = 0;
 
     for cap in BUTTON_CLICK.captures_iter(text) {
-        let m = cap.get(0).unwrap();
+        let Some(m) = cap.get(0) else { continue };
+        let Some(button_content) = cap.get(1) else { continue };
         if m.start() > last_end {
             blocks.push(ContentBlock::Markdown {
                 content: text[last_end..m.start()].to_string(),
             });
         }
         blocks.push(ContentBlock::ButtonClick {
-            content: cap.get(1).unwrap().as_str().trim().to_string(),
+            content: button_content.as_str().trim().to_string(),
         });
         last_end = m.end();
     }
@@ -518,8 +522,10 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
                     details.push(ToolResultDetail { key, value: val });
                 }
             }
-            current_key = Some(captures.get(1).unwrap().as_str().trim().to_string());
-            current_value_lines = vec![captures.get(2).unwrap().as_str().trim().to_string()];
+            if let (Some(key_match), Some(val_match)) = (captures.get(1), captures.get(2)) {
+                current_key = Some(key_match.as_str().trim().to_string());
+                current_value_lines = vec![val_match.as_str().trim().to_string()];
+            }
         } else if current_key.is_some() {
             current_value_lines.push(line.to_string());
         } else if !trimmed.is_empty() {

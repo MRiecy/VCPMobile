@@ -100,4 +100,11 @@ watch(
     background-position: -250% 0;
   }
 }
+
+@media (hover: none) and (pointer: coarse) {
+  .vcp-drawer {
+    backdrop-filter: blur(4px) saturate(165%);
+    -webkit-backdrop-filter: blur(4px) saturate(165%);
+  }
+}
 </style>

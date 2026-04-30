@@ -235,4 +235,10 @@ watch(
   background-color: color-mix(in srgb, var(--primary-bg) 92%, transparent);
   backdrop-filter: blur(40px) saturate(180%);
 }
+
+@media (hover: none) and (pointer: coarse) {
+  .settings-view {
+    backdrop-filter: blur(4px) saturate(180%);
+  }
+}
 </style>

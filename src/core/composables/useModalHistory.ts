@@ -91,13 +91,26 @@ const handlePopState = (event: PopStateEvent) => {
   }
 };
 
+let popstateHandler: ((e: PopStateEvent) => void) | null = null;
+let listenerRegistered = false;
+
 // Initialize the popstate listener only once
-if (typeof window !== 'undefined') {
-  window.addEventListener('popstate', handlePopState);
+if (typeof window !== 'undefined' && !listenerRegistered) {
+  listenerRegistered = true;
+  popstateHandler = handlePopState;
+  window.addEventListener('popstate', popstateHandler);
 
   // Initial check: if we are at root, push the dummy state
   // Note: App.vue will call this again after router is ready to be 100% sure
   initRootHistory();
+}
+
+export function cleanupModalHistory() {
+  if (popstateHandler && typeof window !== 'undefined') {
+    window.removeEventListener('popstate', popstateHandler);
+    popstateHandler = null;
+    listenerRegistered = false;
+  }
 }
 
 export function useModalHistory() {

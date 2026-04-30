@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
-import SyncProgressOverlay from './SyncProgressOverlay.vue';
 
 const lifecycleStore = useAppLifecycleStore();
 
@@ -28,9 +27,6 @@ const reloadApp = () => {
       </div>
     </div>
   </Transition>
-
-  <!-- 0.1 首次大数据同步专用加载层 (Neural Sync) -->
-  <SyncProgressOverlay />
 
   <!-- 0.5 全局错误看板 -->
   <Transition name="fade">

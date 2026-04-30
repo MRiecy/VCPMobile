@@ -1,5 +1,5 @@
 {
-  "default": "icons/icon.png",
+  "default": "icons/icon.svg",
   "android_bg": "icons/android-background.svg",
   "android_fg": "icons/android-foreground.svg",
   "android_fg_scale": 100

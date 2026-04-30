@@ -35,17 +35,27 @@ pub enum DbWriteTask {
     },
 }
 
-#[derive(Clone)]
 pub struct DbWriteQueue {
     sender: mpsc::Sender<DbWriteTask>,
     logger: Option<Arc<Mutex<SyncLogger>>>,
+    _worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Clone for DbWriteQueue {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            logger: self.logger.clone(),
+            _worker: None,
+        }
+    }
 }
 
 impl DbWriteQueue {
     pub fn new(pool: sqlx::SqlitePool) -> Self {
         let (tx, mut rx) = mpsc::channel(256);
 
-        tokio::spawn(async move {
+        let worker = tokio::spawn(async move {
             println!("[DbWriteQueue] Worker started");
 
             let mut success_count = 0u32;
@@ -104,6 +114,7 @@ impl DbWriteQueue {
         Self {
             sender: tx,
             logger: None,
+            _worker: Some(worker),
         }
     }
 

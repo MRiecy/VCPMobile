@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vcpmobile.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>VCP Mobile</title>
     <style>
       body, html { margin: 0; padding: 0; width: 100%; height: 100%; }
@@ -22,20 +22,7 @@
     <div id="app">
       <div class="preloader">
         <div class="preloader-logo">
-          <svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
-            <defs>
-              <linearGradient id="grad-v-vcp" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stop-color="#00e5ff" />
-                <stop offset="50%" stop-color="#3b82f6" />
-                <stop offset="100%" stop-color="#ff3366" />
-              </linearGradient>
-              <filter id="shadow-v-vcp" x="-10%" y="-10%" width="120%" height="120%">
-                <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#ff3366" flood-opacity="0.3"/>
-              </filter>
-            </defs>
-            <path d="M 45 55 L 100 155 L 155 55" fill="none" stroke="url(#grad-v-vcp)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow-v-vcp)" />
-            <circle cx="100" cy="40" r="14" fill="#00e5ff" filter="url(#shadow-v-vcp)" />
-          </svg>
+          <img src="/vcpmobile.svg" width="100%" height="100%" alt="VCP Mobile" />
         </div>
         <div class="preloader-brand">VCP MOBILE</div>
       </div>

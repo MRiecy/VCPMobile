@@ -172,4 +172,15 @@ const openSettings = () => {
 .dark :deep(.glass-panel) {
   background: rgba(0, 0, 0, 0.2);
 }
+
+@media (hover: none) and (pointer: coarse) {
+  .vcp-drawer {
+    backdrop-filter: blur(4px) saturate(165%);
+    -webkit-backdrop-filter: blur(4px) saturate(165%);
+  }
+  :deep(.glass-panel) {
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+}
 </style>

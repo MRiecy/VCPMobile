@@ -60,6 +60,27 @@ impl Default for ActiveRequests {
     }
 }
 
+/// RAII guard：在 Drop 时自动从 ActiveRequests 中移除对应条目，防止 panic 导致泄漏
+pub struct ActiveRequestGuard {
+    requests: Arc<DashMap<String, oneshot::Sender<()>>>,
+    message_id: String,
+}
+
+impl ActiveRequestGuard {
+    pub fn new(requests: Arc<DashMap<String, oneshot::Sender<()>>>, message_id: String) -> Self {
+        Self {
+            requests,
+            message_id,
+        }
+    }
+}
+
+impl Drop for ActiveRequestGuard {
+    fn drop(&mut self) {
+        self.requests.remove(&self.message_id);
+    }
+}
+
 /// 群组回合取消令牌，用于标记需要中断接力赛的话题
 /// topicId -> true (存在即代表已取消)
 pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
@@ -150,6 +171,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                             let clean_path = path_str.replace("file://", "");
                             let path_buf = std::path::PathBuf::from(&clean_path);
 
+                            let mut converted = false;
                             if path_buf.exists() {
                                 // 提取扩展名决定 mime_type
                                 let ext = path_buf
@@ -174,7 +196,16 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         "type": part_type,
                                         part_type: { "url": data_url }
                                     }));
+                                    converted = true;
                                 }
+                            }
+
+                            // 修复：若文件不存在或读取失败，至少保留文本描述，避免内容静默丢失
+                            if !converted {
+                                new_parts.push(json!({
+                                    "type": "text",
+                                    "text": format!("[附件文件: {}]", clean_path)
+                                }));
                             }
                         }
                     } else {
@@ -225,6 +256,8 @@ pub async fn perform_vcp_request<R: Runtime>(
             url.set_path("/v1/chatvcp/completions");
             final_url = url.to_string();
         }
+    } else {
+        final_url = normalize_vcp_url(&final_url);
     }
 
     // === 2. 上下文注入 ===
@@ -315,6 +348,7 @@ pub async fn perform_vcp_request<R: Runtime>(
     // 创建并注册中止信号
     let (abort_tx, abort_rx) = oneshot::channel();
     active_requests.insert(payload.message_id.clone(), abort_tx);
+    let _guard = ActiveRequestGuard::new(active_requests.clone(), payload.message_id.clone());
 
     let message_id = payload.message_id.clone();
     let context = payload.context.clone();
@@ -358,7 +392,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                     Ok(resp) if resp.status().is_success() => {
                         let stream = resp.bytes_stream().map_err(IoError::other);
                         let reader = StreamReader::new(stream);
-                        let mut lines = FramedRead::new(reader, LinesCodec::new());
+                        let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 1024));
 
                         loop {
                             tokio::select! {
@@ -430,15 +464,28 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             break;
                                         }
                                         None => {
-                                            println!("[VCPClient] Stream ended unexpectedly (None)");
-                                            let _ = app_handle.emit(&stream_channel, StreamEvent {
-                                                r#type: "error".to_string(),
-                                                chunk: None,
-                                                message_id: message_id_inner.clone(),
-                                                context: context_inner.clone(),
-                                                finish_reason: Some("error".to_string()),
-                                                error: Some("网络连接意外断开".to_string()),
-                                            });
+                                            // 修复：若此前已收到有效 chunk，则视为正常结束（对齐桌面端行为）
+                                            if !full_content.is_empty() || last_finish_reason.is_some() {
+                                                println!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
+                                                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                    r#type: "end".to_string(),
+                                                    chunk: None,
+                                                    message_id: message_id_inner.clone(),
+                                                    context: context_inner.clone(),
+                                                    finish_reason: last_finish_reason.clone(),
+                                                    error: None,
+                                                });
+                                            } else {
+                                                println!("[VCPClient] Stream ended unexpectedly (None)");
+                                                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                    r#type: "error".to_string(),
+                                                    chunk: None,
+                                                    message_id: message_id_inner.clone(),
+                                                    context: context_inner.clone(),
+                                                    finish_reason: Some("error".to_string()),
+                                                    error: Some("网络连接意外断开".to_string()),
+                                                });
+                                            }
                                             break;
                                         }
                                     }
@@ -638,4 +685,22 @@ pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result
         let text = res.text().await.unwrap_or_default();
         Err(format!("验证失败 ({}): {}", status.as_u16(), text))
     }
+}
+
+/// Normalize a VCP server URL by appending `/v1/chat/completions` if missing.
+/// Handles URLs with or without trailing slashes in the existing path.
+pub fn normalize_vcp_url(url_str: &str) -> String {
+    if let Ok(url) = Url::parse(url_str) {
+        if !url.path().ends_with("/chat/completions") {
+            let mut url = url;
+            let new_path = if url.path().ends_with('/') {
+                format!("{}v1/chat/completions", url.path())
+            } else {
+                format!("{}/v1/chat/completions", url.path())
+            };
+            url.set_path(&new_path);
+            return url.to_string();
+        }
+    }
+    url_str.to_string()
 }

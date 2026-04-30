@@ -12,6 +12,6 @@
       </filter>
     </defs>
     <path d="M 45 55 L 100 155 L 155 55" fill="none" stroke="url(#grad-v-vcp)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow-v-vcp)" />
-    <circle cx="100" cy="40" r="14" fill="#00e5ff" filter="url(#shadow-v-vcp)" />
+    <path d="M 86 40 A 14 14 0 0 1 100 26 A 14 14 0 0 1 114 40 A 14 14 0 0 1 100 54 L 89 54 A 3 3 0 0 1 86 51 Z" fill="#00e5ff" transform="rotate(-15 100 40)" filter="url(#shadow-v-vcp)" />
   </g>
 </svg>

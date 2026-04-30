@@ -89,12 +89,12 @@ export function useNotificationProcessor() {
    * 负责将后端原始 JSON 转化为前端 UI 可用的结构
    */
   const processPayload = (payload: any): Partial<VcpNotification> => {
-    // 0. P2-7 Gap: 连接底层状态指示器 (VCPLog 与 Sync 同步状态)
-    // 这里的逻辑已重构：状态变化仅更新 Store 指示器，不再触发 Toast 弹窗 (静默化处理)
-    if (payload.type === 'vcp-log-status' || payload.type === 'vcp-sync-status') {
+    // 0. P2-7 Gap: 连接底层状态指示器 (VCPLog)
+    // 同步状态不再渲染到全局状态栏（同步已改为完全手动触发，避免状态栏干扰）
+    if (payload.type === 'vcp-log-status') {
       const statusData = payload.data || payload;
       const status = (statusData.status || 'connecting') as VcpStatus['status'];
-      const source = statusData.source || (payload.type === 'vcp-sync-status' ? 'Sync' : 'VCPLog');
+      const source = statusData.source || 'VCPLog';
       const message = statusData.message || '状态未知';
 
       store.updateStatus({
@@ -297,8 +297,7 @@ export function useNotificationProcessor() {
       return { silent: true };
     }
 
-    return {
-      id: notificationId,
+    const result: Partial<VcpNotification> = {
       title,
       message,
       type,
@@ -309,6 +308,12 @@ export function useNotificationProcessor() {
       silent: false,
       historyOnly
     };
+
+    if (notificationId) {
+      result.id = notificationId;
+    }
+
+    return result;
   };
 
   return { processPayload };
