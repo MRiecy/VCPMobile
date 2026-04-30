@@ -1,5 +1,5 @@
 ﻿import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, shallowRef, computed } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
 import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
 
@@ -13,7 +13,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const { registerModal, unregisterModal } = useModalHistory();
 
   const promptConfig = ref<PromptConfig | null>(null);
-  const contextMenuConfig = ref<ContextMenuConfig | null>(null);
+  const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
 
   // --- Page Stack (Virtual Navigation Stack) ---

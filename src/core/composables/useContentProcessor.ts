@@ -105,21 +105,9 @@ export function useContentProcessor() {
         return `\n<div class="my-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-sm"><div class="flex items-center gap-2 mb-2 opacity-70 font-bold"><span class="grayscale">🧠</span> <span>思维链</span><span class="i-lucide-loader-2 animate-spin text-[12px]">...</span></div><div class="italic opacity-80">${content}</div></div>\n`;
       },
     );
-    // MATH (block-level): \begin{name}...\end{name} environments
-    processed = processed.replace(
-      /\\begin\{([a-z]+\*?)\}([\s\S]*?)\\end\{\1\}/g,
-      (match) => `\n<div class="language-math">${match}</div>\n`,
-    );
-    // MATH (block-level): $$...$$
-    processed = processed.replace(
-      /\$\$([\s\S]*?)\$\$/g,
-      (_, formula) => `\n<div class="language-math">${formula.trim()}</div>\n`,
-    );
-    // MATH (block-level): \[...\]
-    processed = processed.replace(
-      /\\\[([\s\S]*?)\\\]/g,
-      (_, formula) => `\n<div class="language-math">${formula.trim()}</div>\n`,
-    );
+    // 注意：MATH block 的解析已迁移至 Rust 后端 parse_content，
+    // 流式模式下由 MessageRenderer 直接调用 process_message_content 获取 AST blocks，
+    // 不再在此做前端正则替换。
     // TOOL
     processed = processed.replace(
       /<<<\[TOOL_REQUEST\]>>>(.*?)(?:<<<\[END_TOOL_REQUEST\]>>>|$)/gs,
@@ -168,7 +156,8 @@ export function useContentProcessor() {
         const isEnd = !!endMarker;
         const roleLower = role.toLowerCase();
         const actionText = isEnd ? "[结束]" : "[起始]";
-        return `\n<div class="vcp-role-divider role-${roleLower}"><span class="divider-text">角色分界: ${role} ${actionText}</span></div>\n`;
+        const typeClass = isEnd ? 'type-end' : 'type-start';
+        return `\n<div class="vcp-role-divider role-${roleLower} ${typeClass}"><span class="divider-text">角色分界: ${role} ${actionText}</span></div>\n`;
       });
 
       return [{ type: "markdown", content: processed }];

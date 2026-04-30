@@ -19,8 +19,9 @@ use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
-    append_chunk, cleanup_orphaned_attachments, finish_chunked_upload, get_attachment_real_path,
-    init_chunked_upload, open_file, read_local_file_base64, store_file, UploadManagerState,
+    append_chunk, cancel_chunked_upload, cleanup_orphaned_attachments, finish_chunked_upload,
+    get_attachment_real_path, init_chunked_upload, open_file, read_local_file_base64, store_file,
+    UploadManagerState,
 };
 use vcp_modules::group_chat_application_service::handle_group_chat_message;
 use vcp_modules::group_service::{
@@ -36,7 +37,7 @@ use vcp_modules::model_manager::{
     toggle_favorite_model,
 };
 use vcp_modules::protocol_manager::{prepare_vcp_upload, register_vcp_protocols};
-use vcp_modules::sync_service::get_sync_status;
+use vcp_modules::sync_service::{get_sync_status, start_manual_sync};
 use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
     update_topic_title,
@@ -155,6 +156,7 @@ pub fn run() {
             init_chunked_upload,
             append_chunk,
             finish_chunked_upload,
+            cancel_chunked_upload,
             prepare_vcp_upload,
             read_local_file_base64,
             get_attachment_real_path,
@@ -176,6 +178,7 @@ pub fn run() {
             get_core_status,
             get_last_error,
             get_sync_status,
+            start_manual_sync,
             check_for_update,
             download_update,
             install_update,

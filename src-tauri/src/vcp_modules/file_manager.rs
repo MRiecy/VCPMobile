@@ -419,6 +419,34 @@ pub async fn init_chunked_upload(
     if !temp_path.exists() {
         fs::create_dir_all(&temp_path).map_err(|e| e.to_string())?;
     }
+
+    // 清理超过 24 小时的废弃上传临时文件
+    const ORPHAN_TTL_SECS: u64 = 86400;
+    let now = SystemTime::now();
+    if let Ok(entries) = fs::read_dir(&temp_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                let should_remove = if let Ok(metadata) = entry.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        now.duration_since(modified).map(|d| d.as_secs() > ORPHAN_TTL_SECS).unwrap_or(false)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if should_remove {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        state.sessions.remove(stem);
+                    }
+                    let _ = fs::remove_file(&path);
+                    log::info!("[FileManager] Removed orphan upload temp file: {:?}", path);
+                }
+            }
+        }
+    }
+
     temp_path.push(format!("{}.tmp", session_id));
 
     // 创建空文件
@@ -466,6 +494,21 @@ pub async fn append_chunk(
     file.write_all(&chunk_bytes)
         .map_err(|e| format!("追加分片失败: {}", e))?;
 
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_chunked_upload(
+    _app_handle: AppHandle,
+    state: State<'_, UploadManagerState>,
+    session_id: String,
+) -> Result<(), String> {
+    if let Some((_, session)) = state.sessions.remove(&session_id) {
+        if session.temp_path.exists() {
+            let _ = fs::remove_file(&session.temp_path);
+        }
+        log::info!("[FileManager] Cancelled and cleaned up upload session: {}", session_id);
+    }
     Ok(())
 }
 

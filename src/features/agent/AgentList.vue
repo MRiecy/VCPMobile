@@ -313,7 +313,7 @@ const filteredCombinedItems = computed(() => {
             <div v-if="
               assistantStore.unreadCounts[agent.id] === -1 ||
               assistantStore.unreadCounts[agent.id] > 0
-            " class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm animate-pulse shrink-0"
+            " class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
               style="background: #ff6b6b"></div>
 
             <VcpAvatar 

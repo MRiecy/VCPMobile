@@ -88,6 +88,11 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   const loading = ref(false);
   const streamingMessageId = ref<string | null>(null);
 
+  // 分页加载状态
+  const historyOffset = ref(0);        // 当前已加载的消息总数（= 下次请求的 offset 起点）
+  const hasMoreHistory = ref(true);    // 是否还有更多旧消息
+  const isLoadingHistory = ref(false); // 防止并发重复触发
+
   // 核心：记录每个会话（itemId + topicId）是否处于活动流状态
   // 格式: "itemId:topicId" -> [messageId1, messageId2, ...]
   const sessionActiveStreams = ref<Record<string, string[]>>({});
@@ -419,7 +424,11 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       `[ChatManager] Loading history via VCP Protocol for ${ownerId}, topic: ${topicId}`,
     );
     loading.value = true;
+    isLoadingHistory.value = true;
     try {
+      // [分页防护] 记录请求时的话题 ID，返回后若已切换则丢弃结果
+      const requestedTopicId = currentTopicId.value;
+
       // 使用标准 Tauri IPC 加载历史记录，解决自定义协议在 Android 上的兼容性问题
       const history = await invoke<ChatMessage[]>("load_chat_history", {
         ownerId,
@@ -429,8 +438,16 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         offset,
       });
 
+      // [话题一致性防护] 若用户在此期间切换了话题，丢弃旧结果
+      if (currentTopicId.value !== requestedTopicId && requestedTopicId !== null) {
+        console.warn(`[ChatManager] Topic changed during load (${requestedTopicId} -> ${currentTopicId.value}), discarding ${history.length} messages.`);
+        return;
+      }
+
       if (offset === 0) {
         currentChatHistory.value = history;
+        historyOffset.value = history.length;
+        hasMoreHistory.value = history.length >= limit;
 
         // 恢复后台缓存中的流式内容 (如果用户切回了正在流式的话题)
         backgroundStreamingBuffers.value.forEach((buffer, msgId) => {
@@ -451,8 +468,19 @@ export const useChatManagerStore = defineStore("chatManager", () => {
             }
           }
         });
+
+        // 清理不属于当前话题的后台缓存，防止无界增长
+        for (const [msgId, buffer] of backgroundStreamingBuffers.value.entries()) {
+          if (buffer.topicId !== topicId) {
+            backgroundStreamingBuffers.value.delete(msgId);
+          }
+        }
       } else {
         currentChatHistory.value = [...history, ...currentChatHistory.value];
+        historyOffset.value += history.length;
+        if (history.length < limit) {
+          hasMoreHistory.value = false;
+        }
       }
 
       currentTopicId.value = topicId;
@@ -496,7 +524,39 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       console.error("[ChatManager] Failed to load history:", e);
     } finally {
       loading.value = false;
+      isLoadingHistory.value = false;
     }
+  };
+
+  /**
+   * 首屏分批加载：先 5 条快速渲染，随即补 10 条（共 15 条）
+   */
+  const loadHistoryPaginated = async (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ) => {
+    // Step 1: 快速加载最新 5 条，替换数组
+    await loadHistory(ownerId, ownerType, topicId, 5, 0);
+    // Step 2: 如果确定还有更多，立即补 10 条（prepend 到前面）
+    if (hasMoreHistory.value && historyOffset.value === 5) {
+      await loadHistory(ownerId, ownerType, topicId, 10, 5);
+    }
+  };
+
+  /**
+   * 滚动触发：加载下一页旧消息
+   */
+  const loadMoreHistory = async () => {
+    if (!hasMoreHistory.value || isLoadingHistory.value) return;
+    if (!currentSelectedItem.value?.id || !currentTopicId.value) return;
+    await loadHistory(
+      currentSelectedItem.value.id,
+      currentSelectedItem.value.type,
+      currentTopicId.value,
+      15,
+      historyOffset.value,
+    );
   };
 
   /**
@@ -1007,24 +1067,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     listenersRegistered = true;
     console.log("[ChatManager] Registering Tauri listeners");
 
-    // 监听同步完成事件，自动刷新当前话题历史（如果无活跃流）
-    listen("vcp-sync-completed", async () => {
-      if (
-        currentTopicId.value &&
-        currentSelectedItem.value?.id &&
-        !isGroupGenerating.value &&
-        activeStreamingIds.value.size === 0
-      ) {
-        console.log(
-          `[ChatManager] Sync completed, reloading history for topic: ${currentTopicId.value}`,
-        );
-        await loadHistory(
-          currentSelectedItem.value.id,
-          currentSelectedItem.value.type,
-          currentTopicId.value,
-        );
-      }
-    });
+    // 同步完成刷新已集中到 main.ts（window.location.reload），此处无需重复监听
 
     // 监听 AI 流式输出事件
     listen("vcp-stream", (event: any) => {
@@ -1288,7 +1331,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
 
     if (targetTopicId) {
       currentSelectedItem.value = { ...item, type: ownerType };
-      await loadHistory(ownerId, ownerType, targetTopicId);
+      await loadHistoryPaginated(ownerId, ownerType, targetTopicId);
     } else {
       // 没有任何话题的极端情况
       console.warn(`[ChatManager] No topics found for ${ownerId}`);
@@ -1310,6 +1353,11 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     editingOriginalMessageId,
     sessionActiveStreams,
     loadHistory,
+    loadHistoryPaginated,
+    loadMoreHistory,
+    historyOffset,
+    hasMoreHistory,
+    isLoadingHistory,
     selectItem,
     fetchRawContent,
     sendMessage,

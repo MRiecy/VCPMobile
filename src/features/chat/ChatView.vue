@@ -17,9 +17,11 @@ const layoutStore = useLayoutStore();
 
 // 自动滚动到底部
 const messageListRef = ref<HTMLElement | null>(null);
+const chatViewContainerRef = ref<HTMLElement | null>(null);
 const showScrollToBottom = ref(false);
 const isInitialTopicLoad = ref(true);
 let mutationObserver: MutationObserver | null = null;
+let loadMoreObserver: IntersectionObserver | null = null;
 
 const scrollToBottom = (smooth = false) => {
   if (messageListRef.value) {
@@ -35,6 +37,42 @@ const handleScroll = () => {
   const { scrollTop, scrollHeight, clientHeight } = messageListRef.value;
   // 如果距离底部超过 150px，显示置底按钮
   showScrollToBottom.value = scrollHeight - scrollTop - clientHeight > 150;
+};
+
+// --- 无限滚动分页：IntersectionObserver 检测第 N-5 条消息 ---
+const setupLoadMoreObserver = () => {
+  if (loadMoreObserver) {
+    loadMoreObserver.disconnect();
+    loadMoreObserver = null;
+  }
+  if (!chatStore.hasMoreHistory || chatStore.isLoadingHistory) return;
+  if (!messageListRef.value) return;
+
+  const triggerIndex = chatStore.historyOffset - 6; // N-5 (0-indexed)
+  if (triggerIndex < 0) return;
+
+  const triggerMsg = chatStore.currentChatHistory[triggerIndex];
+  if (!triggerMsg) return;
+
+  const sentinel = messageListRef.value.querySelector(
+    `[data-message-id="${triggerMsg.id}"]`,
+  );
+  if (!sentinel) return;
+
+  loadMoreObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          // 触发加载后立即断开，防止快速来回滑动导致重复触发
+          loadMoreObserver?.disconnect();
+          loadMoreObserver = null;
+          chatStore.loadMoreHistory();
+        }
+      });
+    },
+    { root: messageListRef.value, threshold: 0 },
+  );
+  loadMoreObserver.observe(sentinel);
 };
 
 // 监听话题切换，重置加载状态
@@ -57,17 +95,48 @@ watch(
   },
 );
 
+// 历史消息数组变化后（prepend 或替换），重新绑定无限滚动哨兵
+watch(
+  () => chatStore.currentChatHistory.length,
+  async () => {
+    await nextTick();
+    setupLoadMoreObserver();
+  },
+);
+
 const handleVcpButtonClick = (e: any) => {
   if (e.detail && e.detail.text) {
     chatStore.sendMessage(e.detail.text);
   }
 };
 
-// --- OOM Defense: Viewport Handler Reference ---
-const handleViewportResize = () => {
-  if (chatStore.currentChatHistory.length > 0) {
+// --- Keyboard Offset & Viewport Handler ---
+let keyboardRafId: number | null = null;
+
+const applyKeyboardOffset = () => {
+  if (!chatViewContainerRef.value || !window.visualViewport) return;
+
+  const keyboardHeight = Math.max(
+    0,
+    window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop,
+  );
+
+  chatViewContainerRef.value.style.setProperty(
+    "--keyboard-offset",
+    `${keyboardHeight}px`,
+  );
+
+  if (keyboardHeight > 0 && chatStore.currentChatHistory.length > 0) {
     scrollToBottom(true);
   }
+};
+
+const handleViewportResize = () => {
+  if (keyboardRafId) return;
+  keyboardRafId = requestAnimationFrame(() => {
+    keyboardRafId = null;
+    applyKeyboardOffset();
+  });
 };
 
 onMounted(async () => {
@@ -77,6 +146,11 @@ onMounted(async () => {
   // 监听视口变化（键盘弹起）- 保持引用以便销毁
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", handleViewportResize);
+  }
+
+  // 监听任意元素获得焦点，即时补偿键盘偏移
+  if (chatViewContainerRef.value) {
+    chatViewContainerRef.value.addEventListener("focusin", applyKeyboardOffset);
   }
 
   // 使用 MutationObserver 精准监听真实 DOM 节点的挂载
@@ -98,6 +172,9 @@ onMounted(async () => {
       characterData: true // 监听文本变动（针对流式加载）
     });
   }
+
+  // 初始化无限滚动 observer
+  setupLoadMoreObserver();
 });
 
 onUnmounted(() => {
@@ -107,14 +184,21 @@ onUnmounted(() => {
     window.visualViewport.removeEventListener("resize", handleViewportResize);
   }
   
+  if (chatViewContainerRef.value) {
+    chatViewContainerRef.value.removeEventListener("focusin", applyKeyboardOffset);
+  }
+
   if (mutationObserver) {
     mutationObserver.disconnect();
+  }
+  if (loadMoreObserver) {
+    loadMoreObserver.disconnect();
   }
 });
 </script>
 
 <template>
-  <div class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden">
+  <div ref="chatViewContainerRef" class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden">
     <!-- 1. Header (强制保底高度 80px，确保刘海屏可见) -->
     <header class="vcp-header-fixed shrink-0 flex items-center justify-between gap-3 px-4 border-b border-white/5">
       <div class="flex items-center gap-3 min-w-0 flex-1">
@@ -216,8 +300,13 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <MessageRenderer v-for="msg in chatStore.currentChatHistory" :key="msg.id" :message="msg"
-        :agent-id="chatStore.currentSelectedItem?.id" />
+      <MessageRenderer
+        v-for="msg in chatStore.currentChatHistory"
+        :key="msg.id"
+        :message="msg"
+        :agent-id="chatStore.currentSelectedItem?.id"
+        :data-message-id="msg.id"
+      />
       <div class="h-20"></div>
       <!-- 底部填充，防止输入框挡住最后一条 -->
     </div>
@@ -233,7 +322,7 @@ onUnmounted(() => {
     <!-- 3. 输入增强区 (固定底部) -->
     <footer class="px-4 py-1.5 bg-black/10 backdrop-blur-md border-t border-white/5 shrink-0">
       <InputEnhancer :disabled="!chatStore.currentTopicId" @send="chatStore.sendMessage" />
-      <div class="h-[var(--vcp-safe-bottom, 20px)]"></div>
+      <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))]"></div>
     </footer>
   </div>
 </template>
@@ -247,6 +336,13 @@ onUnmounted(() => {
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid transparent;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .vcp-header-fixed {
+    backdrop-filter: blur(4px) saturate(180%);
+    -webkit-backdrop-filter: blur(4px) saturate(180%);
+  }
 }
 
 /* 隐藏滚动条 */

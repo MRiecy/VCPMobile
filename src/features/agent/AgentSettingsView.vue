@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatManagerStore } from "../../core/stores/chatManager";
@@ -111,6 +111,13 @@ const isSaving = ref(false);
 const saveSuccess = ref(false);
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 let isFirstLoad = true;
+
+onUnmounted(() => {
+  if (saveTimeout) {
+    clearTimeout(saveTimeout);
+    saveTimeout = null;
+  }
+});
 
 const loadConfig = async () => {
   if (props.id) {

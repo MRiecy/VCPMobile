@@ -5,14 +5,12 @@ import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import DOMPurify from 'dompurify';
 import morphdom from 'morphdom';
-import { useDebounceFn } from '@vueuse/core';
+
 // 移除同步导入，改为动态导入
 // import mermaid from 'mermaid';
 // import katex from 'katex';
 // import 'katex/dist/katex.min.css';
 import { useVcpMagic } from '../../../core/composables/useVcpMagic';
-import { useChatManagerStore } from '../../../core/stores/chatManager';
-import { useEmoticonFixer } from '../../../core/composables/useEmoticonFixer';
 
 const props = defineProps<{
   content: string;
@@ -24,8 +22,22 @@ const innerContentRef = ref<HTMLElement | null>(null);
 const isVisible = ref(false);
 
 const { processMagic, cleanupMagic } = useVcpMagic();
-const chatStore = useChatManagerStore();
-const { processEmoticonsInContainer } = useEmoticonFixer();
+
+// 并发保护：防止 onMounted 和 watch 同时触发多个 processMagic 调用
+let isProcessingMagic = false;
+const safeProcessMagic = async (el: HTMLElement, scopeId: string) => {
+  if (isProcessingMagic) return;
+  isProcessingMagic = true;
+  try {
+    await processMagic(el, scopeId);
+  } catch (e) {
+    console.error('[MarkdownBlock] processMagic error:', e);
+  } finally {
+    isProcessingMagic = false;
+  }
+};
+
+
 
 const marked = new Marked(
   markedHighlight({
@@ -95,7 +107,7 @@ const mathExtension = {
         if (parenMatch) return { type: 'inlineMath', raw: parenMatch[0], text: parenMatch[1].trim() };
       },
       renderer(token: any) {
-        return `<span class="math-inline">${token.text}</span>`;
+        return `<span class="math-inline vcp-math-inline">${token.text}</span>`;
       }
     },
   ]
@@ -113,7 +125,10 @@ marked.use(mathExtension);
 
 // Sanitize HTML with DOMPurify
 const renderedHtml = computed(() => {
-  const rawHtml = marked.parse(props.content) as string;
+  // Strip leading whitespace before HTML comment markers to prevent
+  // marked.js from treating indented <!-- ... --> as code blocks
+  const preprocessed = props.content.replace(/^[ \t]+<!--/gm, '<!--');
+  const rawHtml = marked.parse(preprocessed) as string;
   // 保持安全过滤，但由于纠错已在 Rust 完成，不再需要放行 onerror
   return DOMPurify.sanitize(rawHtml, {
     ADD_TAGS: [
@@ -146,7 +161,7 @@ const updateDOM = () => {
         if (fromEl.classList && fromEl.classList.contains('mermaid') && fromEl.tagName === 'DIV') {
           return false; // Don't overwrite rendered mermaid
         }
-        if (fromEl.classList && (fromEl.classList.contains('language-math') || fromEl.classList.contains('math-inline')) && fromEl.querySelector('.katex')) {
+        if (fromEl.classList && (fromEl.classList.contains('math-inline') || fromEl.classList.contains('vcp-math-inline')) && fromEl.querySelector('.katex')) {
           return false; // Don't overwrite rendered katex
         }
 
@@ -154,49 +169,31 @@ const updateDOM = () => {
       }
     });
     
-    // Asynchronously process emoticons
-    processEmoticonsInContainer(innerContentRef.value);
+
   }
 };
-
-// 节流处理复杂的 DOM 操作（Magic 和 重度渲染）
-const debouncedProcessMagic = useDebounceFn(() => {
-  if (innerContentRef.value) {
-    const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
-      || Math.random().toString(36).substring(2, 9);
-    processMagic(innerContentRef.value, scopeId);
-    if (isVisible.value) {
-      renderHeavyContent();
-    }
-  }
-}, 400);
 
 // 监听渲染内容变化
 watch(() => renderedHtml.value, async () => {
   updateDOM();
-
-  if (props.isStreaming) {
-    debouncedProcessMagic();
-  } else {
-    await nextTick();
-    const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
-      || Math.random().toString(36).substring(2, 9);
-    if (innerContentRef.value) {
-      processMagic(innerContentRef.value, scopeId);
-      if (isVisible.value) {
-        renderHeavyContent();
-      }
-    }
+  await nextTick();
+  if (isVisible.value) {
+    renderHeavyContent();
+  }
+  const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
+    || Math.random().toString(36).substring(2, 9);
+  if (innerContentRef.value) {
+    safeProcessMagic(innerContentRef.value, scopeId);
   }
 });
 
 onMounted(async () => {
   updateDOM();
-  if (!props.isStreaming && innerContentRef.value) {
-    await nextTick();
-    const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
-      || Math.random().toString(36).substring(2, 9);
-    processMagic(innerContentRef.value, scopeId);
+  await nextTick();
+  const scopeId = (markdownContainer.value?.closest('.vcp-message-item') as HTMLElement)?.dataset.messageId
+    || Math.random().toString(36).substring(2, 9);
+  if (innerContentRef.value) {
+    safeProcessMagic(innerContentRef.value, scopeId);
   }
 });
 
@@ -211,8 +208,8 @@ const renderHeavyContent = async () => {
 
   await nextTick();
 
-  // 1. Render KaTeX (Lazy Load)
-  const texElements = innerContentRef.value.querySelectorAll('.language-math, .math-inline');
+  // 1. Render KaTeX (Lazy Load) —— 仅处理 inline math，block math 由 MathBlock 独立组件处理
+  const texElements = innerContentRef.value.querySelectorAll('.math-inline, .vcp-math-inline');
   if (texElements.length > 0) {
     try {
       // 动态导入 KaTeX 及其样式
@@ -229,7 +226,7 @@ const renderHeavyContent = async () => {
         const raw = el.textContent || '';
         // 跳过非 LaTeX 内容：包含中文字符但没有 LaTeX 命令的表达式不是数学公式
         if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(raw) && !/\\[a-zA-Z]+/.test(raw)) return;
-        const isBlock = el.classList.contains('language-math');
+        const isBlock = false; // MarkdownBlock 仅处理 inline math
         try {
           katex.render(raw, el, {
             throwOnError: false,
@@ -279,37 +276,6 @@ const renderHeavyContent = async () => {
   }
 };
 
-const handleContainerClick = (e: MouseEvent) => {
-  const target = e.target as HTMLElement;
-  const button = target.closest('button');
-
-  if (!button || button.dataset.vcpInteractive !== 'true') return;
-
-  e.preventDefault();
-  e.stopPropagation();
-
-  if (button.disabled) return;
-
-  const sendText = button.dataset.send || button.textContent?.trim() || '';
-  if (!sendText) return;
-
-  let finalSendText = `[[点击按钮:${sendText}]]`;
-  if (finalSendText.length > 500) {
-    const truncated = sendText.substring(0, 500 - '[[点击按钮:]]'.length);
-    finalSendText = `[[点击按钮:${truncated}]]`;
-  }
-
-  // Visual feedback
-  button.disabled = true;
-  button.style.opacity = '0.6';
-  button.style.cursor = 'not-allowed';
-  const originalText = button.textContent;
-  button.textContent = `${originalText} ✓`;
-
-  // Send message
-  chatStore.sendMessage(finalSendText);
-};
-
 const handleIntersect = () => {
   isVisible.value = true;
   if (!props.isStreaming) {
@@ -326,7 +292,7 @@ watch(() => [props.content, props.isStreaming], () => {
 
 <template>
   <div ref="markdownContainer" class="vcp-markdown-block prose prose-sm dark:prose-invert max-w-none"
-    v-intersection-observer.once @intersect="handleIntersect" @click="handleContainerClick">
+    v-intersection-observer.once @intersect="handleIntersect">
     <div ref="innerContentRef" class="vcp-markdown-inner"></div>
   </div>
 </template>
@@ -345,43 +311,6 @@ watch(() => [props.content, props.isStreaming], () => {
 
 .vcp-markdown-inner {
   max-width: 100%;
-}
-
-/* VCP Role Divide Styles (Ported from VChat) */
-.vcp-role-divider {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 15px 0;
-  font-size: 0.85em;
-  color: var(--primary-text);
-  opacity: 0.7;
-  user-select: none;
-  clear: both;
-}
-
-.vcp-role-divider::before,
-.vcp-role-divider::after {
-  content: "";
-  flex: 1;
-  border-bottom: 1px dashed var(--border-color, #ccc);
-  margin: 0 15px;
-}
-
-.vcp-role-divider.role-system {
-  color: #e67e22;
-}
-
-.vcp-role-divider.role-assistant {
-  color: #3498db;
-}
-
-.vcp-role-divider.role-user {
-  color: #2ecc71;
-}
-
-.vcp-role-divider.type-end {
-  opacity: 0.5;
 }
 
 .vcp-markdown-block pre {
@@ -448,7 +377,7 @@ watch(() => [props.content, props.isStreaming], () => {
   background-color: rgba(255, 255, 255, 0.1);
 }
 
-/* 修复：VCP 专属引号高亮样式 (移除固定的 font-weight，允许与加粗 ** 完美嵌套) */
+/* VCP 专属引号高亮样式 —— injected by useVcpMagic.ts highlightTextPatterns() */
 .highlighted-quote {
   color: var(--quoted-text, #ff7f50) !important;
   display: inline !important;
@@ -465,7 +394,7 @@ watch(() => [props.content, props.isStreaming], () => {
   color: var(--highlight-text, #3498db) !important;
 }
 
-/* VCP 专属标签高亮样式 (@标签 和 @!警告) */
+/* VCP 专属标签高亮样式 —— injected by useVcpMagic.ts highlightTextPatterns() */
 .highlighted-tag {
   color: var(--highlight-text, #3498db) !important;
   font-weight: 600;
@@ -498,20 +427,7 @@ watch(() => [props.content, props.isStreaming], () => {
   margin-bottom: 0.5em !important;
 }
 
-/* 修复：超长公式截断问题（为 KaTeX 公式容器分配独立的横向滚动上下文） */
-.vcp-markdown-block .vcp-math-block,
-.vcp-markdown-block .katex-display {
-  max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-}
-
-.vcp-markdown-block .katex-display {
-  padding-bottom: 0.5em;
-  /* 防止垂直截断遮挡下标或滚动条 */
-}
-
+/* 修复：超长 inline 公式截断问题 */
 .vcp-markdown-block .vcp-math-inline {
   max-width: 100%;
   overflow-x: auto;
@@ -520,15 +436,11 @@ watch(() => [props.content, props.isStreaming], () => {
   vertical-align: middle;
 }
 
-/* 匹配整体美学的细长公式滚动条 */
-.vcp-markdown-block .vcp-math-block::-webkit-scrollbar,
-.vcp-markdown-block .katex-display::-webkit-scrollbar,
+/* 匹配整体美学的细长公式滚动条（inline math only） */
 .vcp-markdown-block .vcp-math-inline::-webkit-scrollbar {
   height: 4px;
 }
 
-.vcp-markdown-block .vcp-math-block::-webkit-scrollbar-thumb,
-.vcp-markdown-block .katex-display::-webkit-scrollbar-thumb,
 .vcp-markdown-block .vcp-math-inline::-webkit-scrollbar-thumb {
   background: rgba(150, 150, 150, 0.3);
   border-radius: 4px;

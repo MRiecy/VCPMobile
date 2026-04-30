@@ -474,22 +474,35 @@ async fn try_upsert_messages(
     parsed_messages: &[crate::vcp_modules::chat_manager::ChatMessage],
     _skip_bubble: bool,
 ) -> Result<(), String> {
-    // 1. 串行编译 render_content（30 个并发 Task 已提供足够并行度，Task 内部串行避免线程调度开销）
-    let messages_with_render: Vec<_> = parsed_messages
-        .iter()
-        .map(|msg| {
+    // 1. 串行编译 render_content，单条消息 panic 不拖垮整个 topic
+    let mut messages_with_render = Vec::new();
+    for msg in parsed_messages {
+        let content = msg.content.clone();
+        let result = std::panic::catch_unwind(|| {
             let blocks =
                 crate::vcp_modules::message_render_compiler::MessageRenderCompiler::compile(
-                    &msg.content,
+                    &content,
                 );
-            let bytes =
-                crate::vcp_modules::message_render_compiler::MessageRenderCompiler::serialize(
-                    &blocks,
-                )
-                .map_err(|e| e.to_string())?;
-            Ok((msg, bytes))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+            crate::vcp_modules::message_render_compiler::MessageRenderCompiler::serialize(&blocks)
+        });
+        match result {
+            Ok(Ok(bytes)) => messages_with_render.push((msg, bytes)),
+            Ok(Err(e)) => {
+                println!(
+                    "[PullExecutor] Serialize failed for msg {} (topic {}): {}. Skipping pre-render.",
+                    msg.id, topic_id, e
+                );
+                messages_with_render.push((msg, Vec::new()));
+            }
+            Err(_) => {
+                println!(
+                    "[PullExecutor] Compile panicked for msg {} (topic {}). Content length: {}. Skipping pre-render.",
+                    msg.id, topic_id, msg.content.len()
+                );
+                messages_with_render.push((msg, Vec::new()));
+            }
+        }
+    }
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 

@@ -80,7 +80,7 @@ impl HashAggregator {
         topic_id: &str,
     ) -> Result<String, String> {
         let rows = sqlx::query(
-            "SELECT content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY msg_id ASC",
+            "SELECT content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC",
         )
         .bind(topic_id)
         .fetch_all(&mut **tx)

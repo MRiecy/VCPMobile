@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch, nextTick } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage } from "../../core/stores/chatManager";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useSettingsStore } from "../../core/stores/settings";
@@ -7,6 +8,7 @@ import {
   useContentProcessor,
   type ContentBlock,
 } from "../../core/composables/useContentProcessor";
+import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useChatManagerStore } from "../../core/stores/chatManager";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -34,7 +36,8 @@ const props = defineProps<{
 
 const assistantStore = useAssistantStore();
 const settingsStore = useSettingsStore();
-const { processMessageContent, removeScopedCss, transformSpecialBlocksForStream } = useContentProcessor();
+const { processMessageContent, removeScopedCss } = useContentProcessor();
+const { processEmoticonsInContainer } = useEmoticonFixer();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
 
@@ -105,6 +108,17 @@ const avatarOwnerInfo = computed(() => {
   return null;
 });
 
+// 统一后处理：表情包修复（VCPMagic 已退回 MarkdownBlock 内部，避免破坏 Vue 虚拟 DOM）
+const runPostProcess = async () => {
+  try {
+    await nextTick();
+    if (!messageContentRef.value || !props.message.id) return;
+    processEmoticonsInContainer(messageContentRef.value);
+  } catch (e) {
+    console.error('[MessageRenderer] Post-process error:', e);
+  }
+};
+
 onUnmounted(() => {
   // 彻底防止 Scoped CSS 在组件销毁后泄漏内存或污染全局
   if (props.message && props.message.id) {
@@ -114,8 +128,14 @@ onUnmounted(() => {
 
 // 响应式消息块 (AST 树)
 const contentBlocks = ref<ContentBlock[]>([]);
-// 流式传输专用原始文本
+// 流式传输专用 Block 数组 (Rust AST 解析)
+const streamBlocks = ref<ContentBlock[]>([]);
+// 流式传输专用原始文本 (兼容旧逻辑)
 const streamContent = ref<string>("");
+// 内容容器 ref，用于统一后处理
+const messageContentRef = ref<HTMLElement | null>(null);
+
+watch([() => contentBlocks.value, () => streamBlocks.value], runPostProcess, { flush: 'post' });
 
 // 过渡状态：用于在流式结束、等待 Rust AST 解析完成前，保持流式视图不消失，防止闪烁
 const isTransitioning = ref(false);
@@ -124,19 +144,6 @@ const isTransitioning = ref(false);
 const showStreamView = computed(
   () => isStreaming.value || isTransitioning.value,
 );
-
-// Aurora: 分层处理后的内容
-const processedStable = computed(() => {
-  if (!props.message.stableContent) return "";
-  return transformSpecialBlocksForStream(props.message.stableContent);
-});
-
-const processedTail = computed(() => {
-  if (props.message.tailContent !== undefined) {
-    return transformSpecialBlocksForStream(props.message.tailContent);
-  }
-  return streamContent.value;
-});
 
 // 节流状态
 let isProcessing = false;
@@ -225,6 +232,42 @@ watch(
     }
   },
   { immediate: true },
+);
+
+// [重构] 流式模式 Rust AST 解析：监听 Aurora 稳定区/尾区变化，合并全文后调用 Rust 解析
+// 直接复用 Rust 后端的 parse_content，避免前端重复写正则
+let lastRustParseTime = 0;
+const RUST_PARSE_THROTTLE = 50; // ms，与 streamManager loop 周期对齐
+
+watch(
+  [() => props.message.stableContent, () => props.message.tailContent, () => isStreaming.value],
+  async ([stable, tail, streaming]) => {
+    if (!streaming) {
+      streamBlocks.value = [];
+      return;
+    }
+    const fullText = (stable || '') + (tail || '');
+    if (!fullText) {
+      streamBlocks.value = [];
+      return;
+    }
+
+    const now = performance.now();
+    if (now - lastRustParseTime < RUST_PARSE_THROTTLE) {
+      return;
+    }
+    lastRustParseTime = now;
+
+    try {
+      const blocks = await invoke<ContentBlock[]>('process_message_content', { content: fullText });
+      streamBlocks.value = blocks;
+    } catch (e) {
+      console.error('[MessageRenderer] Rust AST parse failed in streaming mode:', e);
+      streamBlocks.value = [{ type: 'markdown', content: fullText } as ContentBlock];
+    }
+  },
+  // { immediate: true } removed: streamBlocks watcher should only react to actual
+  // content changes, not fire on mount for every history message.
 );
 
 // 计算气泡背景颜色
@@ -427,46 +470,61 @@ const handleSaveEdit = async (newContent: string) => {
     />
 
     <ChatBubble :is-user="isUser" :is-streaming="isStreaming" :bubble-style="bubbleStyle">
-      <ThinkingIndicator v-if="isStreaming && streamContent === ''" />
+      <ThinkingIndicator v-if="isStreaming && streamBlocks.length === 0" />
 
       <template v-if="!showStreamView">
-        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
+        <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
           <template v-for="(block, index) in contentBlocks" :key="index">
-            <MarkdownBlock v-if="block.type === 'markdown'" :content="block.content" :is-streaming="false" />
-            <MathBlock v-else-if="block.type === 'math'" :content="block.content" :block="block" />
-            <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
-              :block="block" />
-            <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />
-            <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
-            <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
-            <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
-              :message-id="message.id" />
-            <RoleDividerBlock v-else-if="block.type === 'role-divider'" :block="block" />
-            <div v-else-if="block.type === 'button-click'"
-              class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
-              {{ block.content }}
-            </div>
+            <template v-if="block">
+              <MarkdownBlock v-if="block.type === 'markdown'" :content="block.content" :is-streaming="false" />
+              <MathBlock v-else-if="block.type === 'math'" :content="block.content" :block="block" />
+              <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
+                :block="block" />
+              <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />
+              <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
+              <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
+              <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
+                :message-id="message.id" />
+              <RoleDividerBlock v-else-if="block.type === 'role-divider'" :block="block" />
+              <div v-else-if="block.type === 'button-click'"
+                class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
+                {{ block.content }}
+              </div>
+            </template>
           </template>
         </div>
       </template>
       <template v-else>
-        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden aurora-container">
-          <!-- Aurora: 稳定层 (Frozen via v-memo) -->
-          <div v-if="processedStable" v-memo="[processedStable]" class="aurora-stable-layer">
-            <MarkdownBlock :content="processedStable" :is-streaming="false" />
-          </div>
-          
-          <!-- Aurora: 尾随层 (High-frequency updates) -->
-          <div class="aurora-tail-layer">
-            <MarkdownBlock :content="processedTail" :is-streaming="true" />
-          </div>
+        <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
+          <template v-for="(block, index) in streamBlocks" :key="`${block?.type || 'null'}-${index}`">
+            <template v-if="block">
+              <MarkdownBlock
+                v-if="block.type === 'markdown'"
+                :content="block.content"
+                :is-streaming="index === streamBlocks.length - 1"
+              />
+              <MathBlock v-else-if="block.type === 'math'" :content="block.content" :block="block" />
+              <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
+                :block="block" />
+              <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />
+              <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
+              <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
+              <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
+                :message-id="message.id" />
+              <RoleDividerBlock v-else-if="block.type === 'role-divider'" :block="block" />
+              <div v-else-if="block.type === 'button-click'"
+                class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
+                {{ block.content }}
+              </div>
+            </template>
+          </template>
         </div>
       </template>
 
       <AttachmentPreview v-if="message.attachments && message.attachments.length > 0" :attachments="message.attachments"
         class="pt-3 border-t border-black/5 dark:border-white/5" />
 
-      <StreamingTag v-if="isStreaming && streamContent !== ''" />
+      <StreamingTag v-if="isStreaming && streamBlocks.length > 0" />
 
       <template #footer>
         <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"

@@ -365,6 +365,7 @@ pub async fn delete_agent(
         .map_err(|e| e.to_string())?;
 
     state.caches.remove(&agent_id);
+    state.locks.remove(&agent_id);
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {

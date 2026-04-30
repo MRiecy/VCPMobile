@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { onScopeDispose, ref } from 'vue';
 
 export interface VcpNotification {
   id: string;
@@ -61,7 +61,8 @@ export const useNotificationStore = defineStore('notification', () => {
         const updated = {
           ...activeToasts.value[existingIndex],
           ...payload,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          id: payload.id || activeToasts.value[existingIndex].id,
         } as VcpNotification;
         activeToasts.value[existingIndex] = updated;
 
@@ -88,13 +89,13 @@ export const useNotificationStore = defineStore('notification', () => {
     const id = payload.id || Math.random().toString(36).substring(2, 9);
     const timestamp = Date.now();
     const notification: VcpNotification = {
-      id,
       timestamp,
       read: false,
       title: payload.title || 'VCP Notification',
       message: payload.message || '',
       type: payload.type || 'info',
-      ...payload
+      ...payload,
+      id,
     } as VcpNotification;
 
     // 1. 如果不是纯 Toast，则入历史列表（置顶）并增加未读数
@@ -174,7 +175,7 @@ export const useNotificationStore = defineStore('notification', () => {
   };
 
   // 幽灵 Toast 清理机制 (每 30s 检查一次)
-  setInterval(() => {
+  const ghostCleanupInterval = setInterval(() => {
     const now = Date.now();
     activeToasts.value = activeToasts.value.filter(toast => {
       // duration === 0 为审批类通知，不应被清理
@@ -183,6 +184,10 @@ export const useNotificationStore = defineStore('notification', () => {
       return now - toast.timestamp < duration + 5000; // 冗余 5s 后强制清理
     });
   }, 30000);
+
+  onScopeDispose(() => {
+    clearInterval(ghostCleanupInterval);
+  });
 
   return {
     historyList,

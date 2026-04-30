@@ -24,6 +24,7 @@ pub struct SyncState {
     pub connection_status: Arc<RwLock<String>>,
     pub uploaded_hashes: Arc<RwLock<HashSet<String>>>,
     pub avatar_color_cache: Arc<DashMap<String, String>>,
+    pub is_syncing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// 追踪 Phase 3 中已处理完成的 topic，替代 AtomicU32 避免双重递减下溢
@@ -47,10 +48,8 @@ impl Phase3Tracker {
         if is_new {
             let done = completed.len();
             let total = self.total.load(Ordering::SeqCst);
-            println!(
-                "[Sync] [message] Topic {} completed ({}/{})",
-                topic_id, done, total
-            );
+            let msg = format!("Topic {} completed ({}/{})", topic_id, done, total);
+            println!("[Sync] [message] {}", msg);
 
             // 发送实时进度事件
             let _ = app_handle.emit(
@@ -62,6 +61,13 @@ impl Phase3Tracker {
                     "message": format!("Syncing Messages: {}/{}", done, total)
                 }),
             );
+
+            // 发送前端日志事件
+            emit_sync_log(app_handle, "info", &msg);
+
+            if let Ok(mut logger) = logger.lock() {
+                logger.log_operation("message", "topic", topic_id, true, None);
+            }
 
             if done == total {
                 if let Ok(logger) = logger.lock() {
@@ -106,6 +112,7 @@ pub enum SyncCommand {
         data_type: SyncDataType,
         id: String,
     },
+    StartManualSync,
 }
 
 fn parse_sync_data_type(value: &Value) -> Option<SyncDataType> {
@@ -136,18 +143,53 @@ async fn publish_sync_status<R: Runtime>(
             "source": "Sync"
         }),
     );
+
+    // 同步发射到 Mini Log Terminal
+    let level = match next_status {
+        "open" => "success",
+        "error" => "error",
+        "connecting" => "info",
+        _ => "info",
+    };
+    emit_sync_log(app_handle, level, message);
 }
 
-pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
-    let (tx, mut rx) = mpsc::unbounded_channel::<SyncCommand>();
-    let (pipeline_tx, mut pipeline_rx) =
-        mpsc::unbounded_channel::<crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand>();
+pub fn init_sync_service(_app_handle: AppHandle) -> SyncState {
+    let (tx, _rx) = mpsc::unbounded_channel::<SyncCommand>();
+    SyncState {
+        ws_sender: tx,
+        connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
+        uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
+        avatar_color_cache: Arc::new(DashMap::new()),
+        is_syncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
+}
 
+async fn run_sync_session(
+    app_handle: AppHandle,
+    tx: mpsc::UnboundedSender<SyncCommand>,
+    mut rx: mpsc::UnboundedReceiver<SyncCommand>,
+    connection_status: Arc<RwLock<String>>,
+) {
     let handle_clone = app_handle.clone();
     let tx_internal = tx.clone();
-    let connection_status = Arc::new(RwLock::new(String::from("connecting")));
     let connection_status_for_task = connection_status.clone();
+
+    let http_client = reqwest::Client::new();
+    let mut retry_count = 0u32;
+    const MAX_RETRIES: u32 = 3;
+    let mut retry_delay = Duration::from_millis(500);
+
+    let db = app_handle.state::<DbState>();
+    let mut write_queue = DbWriteQueue::new(db.pool.clone());
+    let sync_log_level = LogLevel::Info;
+    let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level)));
+    write_queue.set_logger(sync_logger.clone());
+    let write_queue = Arc::new(write_queue);
+
     let network_semaphore = Arc::new(NetworkAwareSemaphore::new());
+    let (pipeline_tx, mut pipeline_rx) =
+        mpsc::unbounded_channel::<crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand>();
     let pipeline = Arc::new(SyncPipeline::new(pipeline_tx));
     let pending_tasks = Arc::new(AtomicU32::new(0));
     let total_tasks = Arc::new(AtomicU32::new(0));
@@ -156,28 +198,15 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
         total: std::sync::atomic::AtomicUsize::new(0),
     });
 
-    let db = app_handle.state::<DbState>();
-    let mut write_queue = DbWriteQueue::new(db.pool.clone());
-
-    // Initialize sync logger with default log level
-    let sync_log_level = LogLevel::Info;
-    let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level)));
-    write_queue.set_logger(sync_logger.clone());
-    let write_queue = Arc::new(write_queue);
-
     let semaphore_task = network_semaphore.clone();
     let pipeline_task = pipeline.clone();
     let write_queue_task = write_queue.clone();
     let pending_tasks_task = pending_tasks.clone();
     let total_tasks_task = total_tasks.clone();
     let pending_msg_topics_task = pending_message_topics.clone();
-    let _pending_msg_topics_for_manifests = pending_message_topics.clone();
     let sync_logger_task = sync_logger.clone();
 
-    tauri::async_runtime::spawn(async move {
-        let http_client = reqwest::Client::new();
-
-        loop {
+    loop {
             let (ws_url, http_url) = {
                 let settings_state =
                     handle_clone.state::<crate::vcp_modules::settings_manager::SettingsState>();
@@ -189,8 +218,15 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                 {
                     Ok(s) => {
                         if s.sync_server_url.is_empty() || s.sync_http_url.is_empty() {
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            continue;
+                            emit_sync_log(&handle_clone, "error", "同步服务 URL 未配置，请检查设置");
+                            publish_sync_status(
+                                &handle_clone,
+                                &connection_status_for_task,
+                                "error",
+                                "同步服务 URL 未配置",
+                            )
+                            .await;
+                            break;
                         }
                         let ws_addr = if let Ok(mut u) = url::Url::parse(&s.sync_server_url) {
                             u.set_query(Some(&format!("token={}", s.sync_token)));
@@ -201,8 +237,15 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                         (ws_addr, s.sync_http_url.clone())
                     }
                     Err(_) => {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
+                        emit_sync_log(&handle_clone, "error", "无法读取同步配置");
+                        publish_sync_status(
+                            &handle_clone,
+                            &connection_status_for_task,
+                            "error",
+                            "无法读取同步配置",
+                        )
+                        .await;
+                        break;
                     }
                 }
             };
@@ -217,9 +260,12 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
 
             match connect_async(&ws_url).await {
                 Ok((mut ws_stream, _)) => {
+                    retry_count = 0;
+                    retry_delay = Duration::from_millis(500);
                     if let Ok(mut logger) = sync_logger_task.lock() {
                         logger.start_phase("metadata", 0);
                     }
+                    emit_sync_log(&handle_clone, "info", "=== Phase 1: Metadata ===");
                     publish_sync_status(
                         &handle_clone,
                         &connection_status_for_task,
@@ -228,7 +274,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                     )
                     .await;
 
-                    // 增加同步成功卡片
+                    // 同步连接成功提示
                     let _ = handle_clone.emit(
                         "vcp-system-event",
                         json!({
@@ -237,7 +283,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                 "id": "vcp_sync_connection_status",
                                 "status": "success",
                                 "tool_name": "Sync",
-                                "content": "✅ 同步服务已建立长连接。准备执行元数据校对。",
+                                "content": "已连接桌面端",
                                 "source": "Sync"
                             }
                         }),
@@ -252,7 +298,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                             );
                         }
 
-                        // 发射逻辑错误通知卡片
+                        // 同步初始化失败提示
                         let _ = handle_clone.emit(
                             "vcp-system-event",
                             json!({
@@ -261,12 +307,13 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                     "id": "vcp_sync_connection_status",
                                     "status": "error",
                                     "tool_name": "同步初始化失败",
-                                    "content": format!("❌ 数据库就绪失败: {}\n\n提示：尝试重新启动应用，如果问题持续，请检查存储权限。", e),
+                                    "content": "数据库初始化失败",
                                     "source": "Sync"
                                 }
                             }),
                         );
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                         continue;
                     }
                     if let Err(e) = HashInitializer::ensure_all_group_hashes(&db.pool).await {
@@ -278,7 +325,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                             );
                         }
 
-                        // 发射逻辑错误通知卡片
+                        // 同步初始化失败提示
                         let _ = handle_clone.emit(
                             "vcp-system-event",
                             json!({
@@ -287,20 +334,14 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                     "id": "vcp_sync_connection_status",
                                     "status": "error",
                                     "tool_name": "同步初始化失败",
-                                    "content": format!("❌ 群组数据库就绪失败: {}\n\n提示：检查存储权限或数据库完整性。", e),
+                                    "content": "数据库初始化失败",
                                     "source": "Sync"
                                 }
                             }),
                         );
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                         continue;
-                    }
-
-                    if let Ok(manifests) = Phase1Metadata::build_all_manifests(&db.pool).await {
-                        for manifest in manifests {
-                            let msg = json!({ "type": "SYNC_MANIFEST", "data": manifest.items, "dataType": manifest.data_type, "phase": "metadata" });
-                            let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                        }
                     }
 
                     // Phase3 分批 diff 的待发送批次队列
@@ -319,6 +360,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                             logger.start_phase("topic", 0);
                                             logger.log(LogLevel::Info, "topic", "=== Phase 2: Topics ===");
                                         }
+                                        emit_sync_log(&handle_clone, "info", "=== Phase 2: Topics ===");
                                         let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "topic" }).to_string().into())).await;
                                     },
                                     crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase2 => {
@@ -326,6 +368,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                             logger.start_phase("message", 0);
                                             logger.log(LogLevel::Info, "message", "=== Phase 3: Messages ===");
                                         }
+                                        emit_sync_log(&handle_clone, "info", "=== Phase 3: Messages ===");
                                         let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "message" }).to_string().into())).await;
 
                                         let db = handle_clone.state::<DbState>();
@@ -343,8 +386,14 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                     if let Ok(logger) = sync_logger_task.lock() {
                                                         logger.complete_phase("message");
                                                     }
+                                                    emit_sync_log(&handle_clone, "success", "Message phase completed (no topics)");
                                                     let _ = tx_internal.send(SyncCommand::Phase3);
                                                 } else {
+                                                    // 清空可能残留的旧批次，防止断线重连后发送过时数据
+                                                    {
+                                                        let mut pending = pending_diff_batches.lock().await;
+                                                        pending.clear();
+                                                    }
                                                     // 按消息数量分批，每批最多 3000 条消息，避免超大 WS payload
                                                     let batches = build_diff_batches(topic_states);
                                                     let batch_count = batches.len();
@@ -375,11 +424,13 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                         }
                                     },
                                     crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Phase3 => {
-                                            if let Ok(logger) = sync_logger_task.lock() {
-                                                logger.complete_phase("sync");
-                                                (*logger).end_session();
-                                            }
+                                        if let Ok(logger) = sync_logger_task.lock() {
+                                            logger.complete_phase("sync");
+                                            (*logger).end_session();
+                                        }
                                         let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED" }).to_string().into())).await;
+                                        let _ = ws_stream.close(None).await;
+                                        break;
                                     },
                                 }
                             },
@@ -391,7 +442,13 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                     },
                                     SyncCommand::Phase1 => {
                                         write_queue_task.flush().await;
-                                        if let Err(e) = pipeline_task.on_phase1_completed().await {
+                                        // 新同步会话开始，清空附件上传追踪器
+                                        {
+                                            let sync_state = handle_clone.state::<SyncState>();
+                                            let mut guard = sync_state.uploaded_hashes.write().await;
+                                            guard.clear();
+                                        }
+                                        if let Err(_e) = pipeline_task.on_phase1_completed().await {
                                             let _ = handle_clone.emit(
                                                 "vcp-system-event",
                                                 json!({
@@ -400,7 +457,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         "id": "vcp_sync_connection_status",
                                                         "status": "error",
                                                         "tool_name": "同步阶段 1 失败",
-                                                        "content": format!("❌ 无法进入 Topic 同步阶段: {}", e),
+                                                        "content": "Topic 同步阶段失败",
                                                         "source": "Sync"
                                                     }
                                                 }),
@@ -409,7 +466,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                     },
                                     SyncCommand::Phase2 => {
                                         write_queue_task.flush().await;
-                                        if let Err(e) = pipeline_task.on_phase2_completed().await {
+                                        if let Err(_e) = pipeline_task.on_phase2_completed().await {
                                             let _ = handle_clone.emit(
                                                 "vcp-system-event",
                                                 json!({
@@ -418,7 +475,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         "id": "vcp_sync_connection_status",
                                                         "status": "error",
                                                         "tool_name": "同步阶段 2 失败",
-                                                        "content": format!("❌ 无法进入 Message 同步阶段: {}", e),
+                                                        "content": "Message 同步阶段失败",
                                                         "source": "Sync"
                                                     }
                                                 }),
@@ -456,7 +513,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                             let _ = tx.commit().await;
                                         }
 
-                                        if let Err(e) = pipeline_task.on_phase3_completed().await {
+                                        if let Err(_e) = pipeline_task.on_phase3_completed().await {
                                             let _ = handle_clone.emit(
                                                 "vcp-system-event",
                                                 json!({
@@ -465,7 +522,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         "id": "vcp_sync_connection_status",
                                                         "status": "error",
                                                         "tool_name": "同步阶段 3 失败",
-                                                        "content": format!("❌ 无法结束同步任务: {}", e),
+                                                        "content": "同步结束阶段失败",
                                                         "source": "Sync"
                                                     }
                                                 }),
@@ -473,10 +530,19 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                         }
                                     },
                                     SyncCommand::NotifyDelete { data_type, id } => {
-                                        let msg = json!({ "type": "SYNC_DELETE_NOTIFY", "id": id, "dataType": data_type });
+                                        let msg = json!({ "type": "SYNC_ENTITY_DELETE", "id": id, "dataType": data_type });
                                         let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                     },
-                                }
+                                    SyncCommand::StartManualSync => {
+                                        let db = handle_clone.state::<DbState>();
+                                        if let Ok(manifests) = Phase1Metadata::build_all_manifests(&db.pool).await {
+                                            for manifest in manifests {
+                                                let msg = json!({ "type": "SYNC_MANIFEST", "data": manifest.items, "dataType": manifest.data_type, "phase": "metadata" });
+                                                let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                            }
+                                        }
+                                    },
+                                    }
                             },
                             Some(Ok(msg)) = ws_stream.next() => {
                                 if let Message::Text(text) = msg {
@@ -494,26 +560,22 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                             let id = payload["id"].as_str().unwrap_or_default().to_string();
                                             let owner_type = payload["ownerType"].as_str().unwrap_or("agent").to_string();
                                             let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                            if data_type == SyncDataType::Message {
-                                                let _ = ws_stream.send(Message::Text(json!({ "type": "GET_MESSAGE_MANIFEST", "topicId": id }).to_string().into())).await;
-                                            } else {
-                                                tauri::async_runtime::spawn(async move {
-                                                    let _permit = sem.acquire().await;
-                                                    let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
-                                                    match data_type {
-                                                        SyncDataType::Agent => { let _ = PullExecutor::pull_agent(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
-                                                        SyncDataType::Group => { let _ = PullExecutor::pull_group(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
-                                                        SyncDataType::Topic => {
-                                                            if owner_type == "group" {
-                                                                let _ = PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
-                                                            } else {
-                                                                let _ = PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
-                                                            }
-                                                        },
-                                                        _ => {}
-                                                    }
-                                                });
-                                            }
+                                            tauri::async_runtime::spawn(async move {
+                                                let _permit = sem.acquire().await;
+                                                let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
+                                                match data_type {
+                                                    SyncDataType::Agent => { let _ = PullExecutor::pull_agent(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
+                                                    SyncDataType::Group => { let _ = PullExecutor::pull_group(&h, &c, &base, &settings.sync_token, &id, &wq).await; },
+                                                    SyncDataType::Topic => {
+                                                        if owner_type == "group" {
+                                                            let _ = PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
+                                                        } else {
+                                                            let _ = PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await;
+                                                        }
+                                                    },
+                                                    _ => {}
+                                                }
+                                            });
                                         },
                                         Some("SYNC_DELETE_NOTIFY") => {
                                             use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
@@ -682,6 +744,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                 if let Ok(logger) = sync_logger_in.lock() {
                                                                     logger.complete_phase("metadata");
                                                                 }
+                                                                emit_sync_log(&h_in, "success", "Metadata phase completed");
                                                                 let _ = tx_internal_in.send(SyncCommand::Phase1);
                                                             }
                                                         }
@@ -721,14 +784,20 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         let sync_logger_msg = sync_logger_task.clone();
                                                         tauri::async_runtime::spawn(async move {
                                                             let _permit = s_in.acquire().await;
-                                                            let _ = PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await;
-
-                                                            let db = h_in.state::<DbState>();
-                                                            if let Ok(mut tx) = db.pool.begin().await {
-                                                                let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
-                                                                let _ = tx.commit().await;
+                                                            match PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await {
+                                                                Ok(_) => {
+                                                                    let db = h_in.state::<DbState>();
+                                                                    if let Ok(mut tx) = db.pool.begin().await {
+                                                                        let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
+                                                                        let _ = tx.commit().await;
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    if let Ok(logger) = sync_logger_msg.lock() {
+                                                                        logger.log(LogLevel::Error, "message", &format!("push_messages failed for {}: {}", tid, e));
+                                                                    }
+                                                                }
                                                             }
-
                                                             tracker.mark_completed(&tid, &sync_logger_msg, &tx_internal_msg, &h_in).await;
                                                         });
                                                     }
@@ -745,7 +814,17 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         let sync_logger_msg = sync_logger_task.clone();
                                                         tauri::async_runtime::spawn(async move {
                                                             let _permit = s_in.acquire().await;
-                                                            let _ = PullExecutor::pull_messages(&h_in, &c_in, &b_in, &token, &tid, &to_pull_ids).await;
+                                                            match PullExecutor::pull_messages(&h_in, &c_in, &b_in, &token, &tid, &to_pull_ids).await {
+                                                                Ok(_) => {}
+                                                                Err(e) => {
+                                                                    let err_msg = format!("pull_messages failed for {}: {}", tid, e);
+                                                                    println!("[Sync] [message] {}", err_msg);
+                                                                    if let Ok(mut logger) = sync_logger_msg.lock() {
+                                                                        logger.log_operation("message", "topic", &tid, false, Some(&err_msg));
+                                                                    }
+                                                                    emit_sync_log(&h_in, "error", &err_msg);
+                                                                }
+                                                            }
                                                             tracker.mark_completed(&tid, &sync_logger_msg, &tx_internal_msg, &h_in).await;
                                                         });
                                                     }
@@ -872,6 +951,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                     if let Ok(logger) = sync_logger_topic.lock() {
                                                                         logger.complete_phase("topic");
                                                                     }
+                                                                    emit_sync_log(&h_in, "success", "Topic phase completed");
                                                                     let _ = tx_internal_in.send(SyncCommand::Phase2);
                                                                 }
                                                             });
@@ -905,6 +985,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                                     if let Ok(logger) = sync_logger_topic.lock() {
                                                                         logger.complete_phase("topic");
                                                                     }
+                                                                    emit_sync_log(&h_in, "success", "Topic phase completed");
                                                                     let _ = tx_internal_in.send(SyncCommand::Phase2);
                                                                 }
                                                             });
@@ -936,6 +1017,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                             if let Ok(logger) = sync_logger_task.lock() {
                                                                 logger.complete_phase("topic");
                                                             }
+                                                            emit_sync_log(&handle_clone, "success", "Topic phase completed (no changes)");
                                                             let _ = tx_internal.send(SyncCommand::Phase2);
                                                         }
                                                     }
@@ -945,17 +1027,9 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                         Some("PHASE_COMPLETED") => {
                                             write_queue_task.flush().await;
 
-                                            // 清除 agent/group 内存缓存，确保前端 fetchAgents() 读到最新数据
-                                            if let Some(agent_state) = handle_clone.try_state::<crate::vcp_modules::agent_service::AgentConfigState>() {
-                                                agent_state.caches.clear();
-                                                println!("[SyncService] AgentConfigState cache cleared after sync");
-                                            }
-                                            if let Some(group_state) = handle_clone.try_state::<crate::vcp_modules::group_service::GroupManagerState>() {
-                                                group_state.caches.clear();
-                                                println!("[SyncService] GroupManagerState cache cleared after sync");
-                                            }
+                                            emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
 
-                                            // 发送同步完成卡片
+                                            // 发送同步完成提示
                                             let _ = handle_clone.emit(
                                                 "vcp-system-event",
                                                 json!({
@@ -964,7 +1038,7 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                                                         "id": "vcp_sync_connection_status",
                                                         "status": "success",
                                                         "tool_name": "Sync",
-                                                        "content": "✅ 同步任务已全部完成。本地数据库与桌面端已对齐。",
+                                                        "content": "同步完成",
                                                         "source": "Sync"
                                                     }
                                                 }),
@@ -987,46 +1061,30 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
                             else => break,
                         }
                     }
+                    break; // 同步完成或异常，退出外层 loop
                 }
                 Err(e) => {
-                    publish_sync_status(
-                        &handle_clone,
-                        &connection_status_for_task,
-                        "error",
-                        "同步服务连接失败",
-                    )
-                    .await;
-
-                    // 发射错误通知卡片
-                    let _ = handle_clone.emit(
-                    "vcp-system-event",
-                    json!({
-                        "type": "vcp-log-message",
-                        "data": {
-                            "id": "vcp_sync_connection_status",
-                            "status": "error",
-                            "tool_name": "同步服务失败",
-                            "content": format!("❌ 无法连接到同步服务: {}\n\n提示：\n1. 请检查桌面端 VCPMobileSync 插件是否已启动并启用分布式服务。\n2. 确保手机与桌面端处于同一局域网内。", e),
-                            "source": "Sync"
-                        }
-                    }),
-                );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let err_detail = e.to_string();
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        let err_msg = format!("连接失败，已达到最大重试次数 | {}", err_detail);
+                        publish_sync_status(
+                            &handle_clone,
+                            &connection_status_for_task,
+                            "error",
+                            &err_msg,
+                        )
+                        .await;
+                        break;
+                    }
+                    let warn_msg = format!("连接失败，第 {} 次重试 | {}", retry_count, err_detail);
+                    emit_sync_log(&handle_clone, "warning", &warn_msg);
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
                 }
             }
         }
-    });
-
-    {
-        let h = app_handle.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(86400)).await;
-                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                let _ = DeleteExecutor::cleanup_old_deleted_records(&h, 30).await;
-            }
-        });
-    }
+}
 
     /// 每批最多包含的消息数，控制单次 WS payload 大小（约 3000 条消息 ≈ 400-500KB JSON）
     const MAX_MESSAGES_PER_BATCH: usize = 3000;
@@ -1069,15 +1127,42 @@ pub fn init_sync_service(app_handle: AppHandle) -> SyncState {
         batches
     }
 
-    SyncState {
-        ws_sender: tx,
-        connection_status,
-        uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
-        avatar_color_cache: Arc::new(DashMap::new()),
-    }
+fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
+    let _ = app_handle.emit(
+        "vcp-log",
+        json!({
+            "level": level,
+            "category": "sync",
+            "message": message,
+        }),
+    );
 }
 
 #[tauri::command]
 pub async fn get_sync_status(state: State<'_, SyncState>) -> Result<String, String> {
     Ok(state.connection_status.read().await.clone())
+}
+
+#[tauri::command]
+pub async fn start_manual_sync(
+    handle: AppHandle,
+    state: State<'_, SyncState>,
+) -> Result<(), String> {
+    if state.is_syncing.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("同步已在进行中".to_string());
+    }
+
+    let (tx, rx) = mpsc::unbounded_channel::<SyncCommand>();
+
+    let app_handle = handle.clone();
+    let connection_status = state.connection_status.clone();
+    let is_syncing = state.is_syncing.clone();
+
+    let tx_cmd = tx.clone();
+    tauri::async_runtime::spawn(async move {
+        run_sync_session(app_handle, tx, rx, connection_status).await;
+        is_syncing.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    tx_cmd.send(SyncCommand::StartManualSync).map_err(|e| e.to_string())
 }

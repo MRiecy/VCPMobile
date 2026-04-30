@@ -26,55 +26,45 @@ const typeClass = computed(() => {
 
 <template>
   <div class="vcp-role-divider" :class="[roleClass, typeClass]">
-    <div class="divider-line"></div>
     <span class="divider-text">角色分界: {{ roleDisplay }} {{ actionText }}</span>
-    <div class="divider-line"></div>
   </div>
 </template>
 
-<style scoped>
+<style>
+/* VCP Role Divide Styles (Ported from VChat / styles/messageRenderer.css) */
 .vcp-role-divider {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 16px 0;
-  opacity: 0.6;
-  font-size: 11px;
-  font-weight: bold;
-  font-family: var(--font-mono, monospace);
-  letter-spacing: 0.05em;
+  justify-content: center;
+  margin: 15px 0;
+  font-size: 0.85em;
+  color: var(--primary-text);
+  opacity: 0.7;
   user-select: none;
+  clear: both;
 }
 
-.divider-line {
+.vcp-role-divider::before,
+.vcp-role-divider::after {
+  content: "";
   flex: 1;
-  height: 1px;
-  background: currentColor;
-  opacity: 0.2;
+  border-bottom: 1px dashed var(--border-color, #ccc);
+  margin: 0 15px;
 }
 
-.divider-text {
-  white-space: nowrap;
-  padding: 2px 8px;
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  background: rgba(var(--dynamic-color-rgb, 0, 0, 0), 0.05);
+.vcp-role-divider.role-system {
+  color: #e67e22;
 }
 
-.role-system {
-  color: #fbbf24; /* Amber */
+.vcp-role-divider.role-assistant {
+  color: #3498db;
 }
 
-.role-assistant {
-  color: #3b82f6; /* Blue */
+.vcp-role-divider.role-user {
+  color: #2ecc71;
 }
 
-.role-user {
-  color: #10b981; /* Emerald */
-}
-
-.type-end {
-  opacity: 0.4;
-  filter: grayscale(0.5);
+.vcp-role-divider.type-end {
+  opacity: 0.5;
 }
 </style>

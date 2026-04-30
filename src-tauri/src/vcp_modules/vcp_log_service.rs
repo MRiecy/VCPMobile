@@ -102,6 +102,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         *sender_lock = Some(tx);
     }
 
+    let mut retry_delay = Duration::from_millis(1000);
     loop {
         // 获取当前 URL
         let ws_url = {
@@ -176,8 +177,9 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                 tokio::select! {
                     _ = url_rx.changed() => {},
-                    _ = sleep(Duration::from_secs(5)) => {},
+                    _ = sleep(retry_delay) => {},
                 }
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                 continue;
             }
         };
@@ -214,6 +216,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         match tokio::time::timeout(Duration::from_secs(10), connect_async(request)).await {
             Ok(connection_result) => match connection_result {
                 Ok((ws_stream, _)) => {
+                    retry_delay = Duration::from_millis(1000);
                     {
                         *CURRENT_LOG_STATUS.write().await = "open".to_string();
                     }
@@ -378,7 +381,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
         tokio::select! {
             _ = url_rx.changed() => log::info!("[VCPLog] URL changed during retry wait."),
-            _ = sleep(Duration::from_secs(5)) => {},
+            _ = sleep(retry_delay) => {},
         }
+        retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
     }
+    LOG_CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
+    log::info!("[VCPLog] Listener task terminated, connection flag reset.");
 }

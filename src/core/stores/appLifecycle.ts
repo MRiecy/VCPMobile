@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { computed, ref, watch } from 'vue';
+import { computed, onScopeDispose, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useAssistantStore } from './assistant';
 import { useSettingsStore } from './settings';
@@ -139,73 +139,21 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     }
   };
 
-  const checkAndTriggerInitialSync = async () => {
-    // 如果已经在同步中则忽略
-    if (state.value === 'INITIAL_SYNCING') return;
-
-    // 简单以 agent + group 的数量为判断标准，全新安装通常 < 10
-    const isSparse = assistantStore.combinedItems.length < 10;
-    const isSyncConnected = notificationStore.vcpStatus.status === 'connected';
-
-    if (isSparse && isSyncConnected) {
-      setState('INITIAL_SYNCING', '检测到本地数据稀疏且同步已连接，触发神经同步...');
-      
-      // 等待同步完成事件，或者超时 (60秒)
-      await new Promise<void>(async (resolve) => {
-        let eventUnlisten: (() => void) | null = null;
-        
-        const timeoutId = setTimeout(() => {
-          console.warn('[Lifecycle] Initial sync wait timeout, proceeding anyway');
-          cleanup();
-          resolve();
-        }, 60000);
-
-        const cleanup = () => {
-          clearTimeout(timeoutId);
-          unwatch();
-          if (eventUnlisten) eventUnlisten();
-        };
-
-        const unwatch = watch(
-          () => notificationStore.vcpStatus.message,
-          (msg) => {
-            if (msg.includes('同步任务已全部完成')) {
-              console.log('[Lifecycle] Initial sync detected completed via message');
-              cleanup();
-              resolve();
-            }
-          }
-        );
-        
-        // 同时也监听原生的完成事件
-        const { listen } = await import('@tauri-apps/api/event');
-        eventUnlisten = await listen('vcp-sync-completed', () => {
-          console.log('[Lifecycle] Initial sync detected via event');
-          cleanup();
-          resolve();
-        });
-      });
-      
-      // 同步完成后重新拉取一次数据
-      await assistantStore.fetchAgents();
-      await assistantStore.fetchGroups();
-
-      setState('READY', '神经同步完成，恢复就绪状态');
-    }
-  };
-
-  // 全局监听同步状态变化，动态触发初始同步（针对重装后用户去设置填了信息才连上的情况）
-  watch(
+  // 全局监听同步状态变化 (移除自动触发神经同步逻辑)
+  const unwatchVcpStatus = watch(
     () => notificationStore.vcpStatus.status,
     async (newStatus, oldStatus) => {
       if (newStatus === 'connected' && oldStatus !== 'connected' && state.value === 'READY') {
-        // 先确保本地数据是最新的，然后再判断是否少于10
+        // 仅在连接成功时重新拉取数据快照，但不触发耗时的 Manifest 全量同步
         await assistantStore.fetchAgents();
         await assistantStore.fetchGroups();
-        await checkAndTriggerInitialSync();
       }
     }
   );
+
+  onScopeDispose(() => {
+    unwatchVcpStatus();
+  });
 
   const startPreloading = async () => {
     if (state.value === 'PRELOADING' || state.value === 'READY') {
@@ -243,9 +191,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       await runParallelTasks(assistantParallelTasks);
 
       updatePhaseLabel('核心数据预加载完成');
-
-      // --- 首次大数据量同步判定 (Neural Sync 触发点) ---
-      await checkAndTriggerInitialSync();
 
       hasBootstrapped.value = true;
       isBootstrapping.value = false;
@@ -323,14 +268,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         source: 'VCPLog'
       });
 
-      // 还需要一个 updateSyncStatus? 目前暂用 updateStatus 逻辑手动适配
-      // 实际上我们可以给 notificationStore 加一个更通用的 updateIndicator(source, data)
-      // 但为了快速上线，我们先手动调一下
-      notificationStore.updateStatus({
-        status: snapshot.sync as any,
-        message: snapshot.sync === 'open' ? '已开启同步' : '同步未绪',
-        source: 'Sync'
-      });
+      // 同步状态不再渲染到全局状态栏（同步已改为完全手动触发）
 
       console.log('[Lifecycle] Snapshot hydrated:', snapshot);
     } catch (e) {

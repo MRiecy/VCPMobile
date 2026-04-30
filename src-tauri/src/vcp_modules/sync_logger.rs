@@ -40,10 +40,12 @@ impl ErrorAggregator {
     }
 
     pub fn add_error(&mut self, phase: &str, _id: &str, _error: &str, _retryable: bool) {
-        self.errors
-            .entry(phase.to_string())
-            .or_default()
-            .push(ErrorDetail);
+        const MAX_ERRORS_PER_PHASE: usize = 1000;
+        let vec = self.errors.entry(phase.to_string()).or_default();
+        if vec.len() >= MAX_ERRORS_PER_PHASE {
+            vec.remove(0);
+        }
+        vec.push(ErrorDetail);
     }
 }
 

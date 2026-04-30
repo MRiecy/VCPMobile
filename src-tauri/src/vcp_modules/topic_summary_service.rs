@@ -1,5 +1,6 @@
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::vcp_client::normalize_vcp_url;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -76,8 +77,9 @@ pub async fn summarize_topic(
         settings.topic_summary_model
     };
 
+    let vcp_url = normalize_vcp_url(&settings.vcp_server_url);
     let response = client
-        .post(&settings.vcp_server_url)
+        .post(&vcp_url)
         .header("Authorization", format!("Bearer {}", settings.vcp_api_key))
         .header("Content-Type", "application/json")
         .json(&json!({

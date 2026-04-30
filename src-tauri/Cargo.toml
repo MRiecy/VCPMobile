@@ -54,7 +54,7 @@ image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 md5 = "0.7"
 tauri-plugin-log = "2"
 base64 = "0.22"
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 percent-encoding = "2"
 urlencoding = "2"
 

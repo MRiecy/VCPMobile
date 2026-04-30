@@ -480,6 +480,7 @@ pub async fn delete_group(
         .map_err(|e| e.to_string())?;
 
     state.caches.remove(&group_id);
+    state.locks.remove(&group_id);
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {

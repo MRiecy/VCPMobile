@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../../core/stores/settings";
+import { useSyncSessionStore } from "../../../core/stores/syncSession";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
 import SettingsActionButton from "../../../components/settings/SettingsActionButton.vue";
 import SettingsRow from "../../../components/settings/SettingsRow.vue";
@@ -10,10 +11,16 @@ defineProps<{
   settings: AppSettings;
 }>();
 
+const syncStore = useSyncSessionStore();
+
 const emoticonStatus = ref<{
   type: "success" | "error" | "loading" | null;
   message: string;
 }>({ type: null, message: "" });
+
+const startManualSync = () => {
+  syncStore.open();
+};
 
 const rebuildEmoticonLibrary = async () => {
   emoticonStatus.value = { type: "loading", message: "正在从远程服务器获取..." };
@@ -90,6 +97,21 @@ const rebuildEmoticonLibrary = async () => {
       >
         {{ emoticonStatus.message }}
       </div>
+
+      <SettingsRow
+        title="全量神经同步"
+        description="手动触发与桌面端的数据全量比对与同步"
+      >
+        <template #action>
+          <SettingsActionButton
+            variant="secondary"
+            size="sm"
+            @click="startManualSync"
+          >
+            START SYNC
+          </SettingsActionButton>
+        </template>
+      </SettingsRow>
     </div>
   </div>
 </template>

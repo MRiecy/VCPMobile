@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, watch } from 'vue';
+import { onScopeDispose, ref, watch } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
@@ -170,11 +170,13 @@ export const useThemeStore = defineStore('theme', () => {
   }, { immediate: true });
 
   // Listen for system theme changes
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+  const handleMediaChange = () => {
     if (mode.value === 'system') {
       applyTheme('system');
     }
-  });
+  };
+  mediaQuery.addEventListener('change', handleMediaChange);
 
   const setMode = (newMode: ThemeMode) => {
     const now = Date.now();
@@ -197,11 +199,17 @@ export const useThemeStore = defineStore('theme', () => {
     setMode(isDarkResolved.value ? 'light' : 'dark');
   };
   // Listen for theme updates from backend
+  let unlistenTheme: (() => void) | null = null;
   listen('onThemeUpdated', (event) => {
     const fileName = event.payload as string;
     if (fileName !== currentTheme.value) {
       applyThemeFile(fileName);
     }
+  }).then((fn) => { unlistenTheme = fn; });
+
+  onScopeDispose(() => {
+    mediaQuery.removeEventListener('change', handleMediaChange);
+    if (unlistenTheme) unlistenTheme();
   });
 
   return {
