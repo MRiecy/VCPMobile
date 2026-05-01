@@ -59,9 +59,7 @@ pub async fn start_distributed_node(
 
 /// Stop the distributed node connection.
 #[tauri::command]
-pub async fn stop_distributed_node(
-    state: State<'_, DistributedState>,
-) -> Result<(), String> {
+pub async fn stop_distributed_node(state: State<'_, DistributedState>) -> Result<(), String> {
     let client = state.client.read().await;
     client.stop().await;
     Ok(())

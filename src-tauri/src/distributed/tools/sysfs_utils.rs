@@ -3,8 +3,8 @@
 // All functions are non-panicking — return empty/default on failure.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Safely read a sysfs/procfs file, returning trimmed content or empty string.
 pub fn read_sysfs(path: &str) -> String {
@@ -102,10 +102,7 @@ pub fn probe_glob(pattern: &str) -> Option<String> {
 
     let (dir_prefix, suffix) = (parts[0], parts[1]);
     // Find the parent directory to scan
-    let parent = match Path::new(dir_prefix).parent() {
-        Some(p) => p,
-        None => return None,
-    };
+    let parent = Path::new(dir_prefix).parent()?;
     let prefix_name = Path::new(dir_prefix)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -119,7 +116,12 @@ pub fn probe_glob(pattern: &str) -> Option<String> {
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with(&prefix_name) {
-            let candidate = format!("{}{}{}", dir_prefix.trim_end_matches(&prefix_name), name, suffix);
+            let candidate = format!(
+                "{}{}{}",
+                dir_prefix.trim_end_matches(&prefix_name),
+                name,
+                suffix
+            );
             if Path::new(&candidate).exists() {
                 return Some(candidate);
             }
@@ -162,7 +164,10 @@ impl ThrottledCache {
 
     /// Get the cached value (may be empty if never updated).
     pub fn get(&self) -> String {
-        self.cached_value.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.cached_value
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Get cached value, or refresh using the provided closure if stale.

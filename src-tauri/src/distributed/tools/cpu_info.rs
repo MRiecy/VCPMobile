@@ -119,7 +119,10 @@ impl CpuInfoTool {
 
     /// Read CPU temperature from thermal zone.
     fn read_temp(&self) -> String {
-        let mut zone = self.cpu_thermal_zone.lock().unwrap_or_else(|e| e.into_inner());
+        let mut zone = self
+            .cpu_thermal_zone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if zone.is_none() {
             // Probe once: try "cpu" keyword in thermal zone types
             *zone = Some(find_thermal_zone("cpu"));

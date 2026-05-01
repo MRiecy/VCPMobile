@@ -87,14 +87,11 @@ impl GpuInfoTool {
             *cache = Some(self.probe_gpu());
         }
         // Clone the inner data to return
-        match cache.as_ref().unwrap() {
-            Some(p) => Some(GpuPaths {
-                vendor: p.vendor.clone(),
-                usage_path: p.usage_path.clone(),
-                freq_path: p.freq_path.clone(),
-            }),
-            None => None,
-        }
+        cache.as_ref().unwrap().as_ref().map(|p| GpuPaths {
+            vendor: p.vendor.clone(),
+            usage_path: p.usage_path.clone(),
+            freq_path: p.freq_path.clone(),
+        })
     }
 
     fn read_usage(&self, paths: &GpuPaths) -> String {
@@ -112,9 +109,7 @@ impl GpuInfoTool {
         if raw.contains(' ') {
             let parts: Vec<&str> = raw.split_whitespace().collect();
             if parts.len() >= 2 {
-                if let (Ok(busy), Ok(total)) =
-                    (parts[0].parse::<u64>(), parts[1].parse::<u64>())
-                {
+                if let (Ok(busy), Ok(total)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
                     if total > 0 {
                         let pct = (busy as f64 / total as f64) * 100.0;
                         return format!("{:.0}%", pct);
@@ -163,7 +158,10 @@ impl GpuInfoTool {
     }
 
     fn read_temp(&self) -> String {
-        let mut zone = self.gpu_thermal_zone.lock().unwrap_or_else(|e| e.into_inner());
+        let mut zone = self
+            .gpu_thermal_zone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if zone.is_none() {
             *zone = Some(find_thermal_zone("gpu"));
         }

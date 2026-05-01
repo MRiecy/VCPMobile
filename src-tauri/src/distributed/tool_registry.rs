@@ -146,8 +146,7 @@ impl ToolRegistry {
             ToolEntry::Interactive(tool) => tool.execute(args, app).await,
             ToolEntry::Streaming(tool) => {
                 // For streaming tools, execute_tool returns a current snapshot.
-                tool.read_current()
-                    .map(|v| serde_json::Value::String(v))
+                tool.read_current().map(serde_json::Value::String)
             }
         }
     }

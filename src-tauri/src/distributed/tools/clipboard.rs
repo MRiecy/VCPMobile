@@ -16,7 +16,9 @@ impl OneShotTool for ClipboardTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileClipboard".to_string(),
-            description: "读取或写入移动设备的系统剪贴板。Read or write the mobile device system clipboard.".to_string(),
+            description:
+                "读取或写入移动设备的系统剪贴板。Read or write the mobile device system clipboard."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

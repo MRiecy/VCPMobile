@@ -11,9 +11,22 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::tool_registry::ToolRegistry;
 use super::types::*;
+
+/// Type alias for the WebSocket sink to avoid excessive complexity in signatures.
+type WsSink = Arc<
+    Mutex<
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            WsMessage,
+        >,
+    >,
+>;
 
 /// Distributed node state, shared across async tasks.
 pub struct DistributedClient {
@@ -182,8 +195,7 @@ impl DistributedClient {
                 }
             }
 
-            reconnect_interval =
-                std::cmp::min(reconnect_interval * 2, max_reconnect_interval);
+            reconnect_interval = std::cmp::min(reconnect_interval * 2, max_reconnect_interval);
         }
 
         log::info!("[Distributed] Connection loop exited.");
@@ -276,12 +288,7 @@ impl DistributedClient {
         app: &AppHandle,
         text: &str,
         device_name: &str,
-        ws_tx: &Arc<Mutex<futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            tokio_tungstenite::tungstenite::Message,
-        >>>,
+        ws_tx: &WsSink,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
     ) {
@@ -336,7 +343,8 @@ impl DistributedClient {
                 );
 
                 // Execute and return result.
-                let response = Self::execute_tool(app, &request_id, &tool_name, tool_args, registry).await;
+                let response =
+                    Self::execute_tool(app, &request_id, &tool_name, tool_args, registry).await;
                 Self::send_message(ws_tx, &response).await;
             }
 
@@ -354,12 +362,7 @@ impl DistributedClient {
     /// VCPChat ref: registerTools() line 271-308
     async fn register_tools(
         device_name: &str,
-        ws_tx: &Arc<Mutex<futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            tokio_tungstenite::tungstenite::Message,
-        >>>,
+        ws_tx: &WsSink,
         registry: &Arc<ToolRegistry>,
         status: &Arc<RwLock<DistributedStatus>>,
     ) {
@@ -388,32 +391,27 @@ impl DistributedClient {
 
     /// Report IP addresses to the main server.
     /// VCPChat ref: reportIPAddress() line 310-347
-    async fn report_ip(
-        device_name: &str,
-        ws_tx: &Arc<Mutex<futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            tokio_tungstenite::tungstenite::Message,
-        >>>,
-    ) {
+    async fn report_ip(device_name: &str, ws_tx: &WsSink) {
         // Collect local IPv4 addresses (simplified — no external crate needed)
         let local_ips = Vec::new(); // TODO: enumerate network interfaces in Phase 2
 
         // Optional: fetch public IP
-        let public_ip: Option<String> = match reqwest::get("https://api.ipify.org?format=json").await {
-            Ok(resp) => {
-                if let Ok(data) = resp.json::<Value>().await {
-                    data.get("ip").and_then(|v| v.as_str()).map(|s| s.to_string())
-                } else {
+        let public_ip: Option<String> =
+            match reqwest::get("https://api.ipify.org?format=json").await {
+                Ok(resp) => {
+                    if let Ok(data) = resp.json::<Value>().await {
+                        data.get("ip")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[Distributed] Could not fetch public IP: {}", e);
                     None
                 }
-            }
-            Err(e) => {
-                log::warn!("[Distributed] Could not fetch public IP: {}", e);
-                None
-            }
-        };
+            };
 
         let msg = OutgoingMessage::ReportIp {
             server_name: device_name.to_string(),
@@ -428,12 +426,7 @@ impl DistributedClient {
     /// VCPChat ref: pushStaticPlaceholderValues() line 374-398
     async fn push_static_placeholders(
         device_name: &str,
-        ws_tx: &Arc<Mutex<futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            tokio_tungstenite::tungstenite::Message,
-        >>>,
+        ws_tx: &WsSink,
         registry: &Arc<ToolRegistry>,
     ) {
         let placeholders = registry.get_all_placeholder_values();
@@ -485,15 +478,7 @@ impl DistributedClient {
     // ================================================================
 
     /// Serialize and send a message over WebSocket.
-    async fn send_message(
-        ws_tx: &Arc<Mutex<futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            tokio_tungstenite::tungstenite::Message,
-        >>>,
-        msg: &OutgoingMessage,
-    ) {
+    async fn send_message(ws_tx: &WsSink, msg: &OutgoingMessage) {
         match serde_json::to_string(msg) {
             Ok(json) => {
                 let mut tx = ws_tx.lock().await;

@@ -173,23 +173,11 @@ fn default_tool_type() -> String {
 // ============================================================
 
 /// Connection status emitted to the Vue frontend via Tauri events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DistributedStatus {
     pub connected: bool,
     pub server_id: Option<String>,
     pub client_id: Option<String>,
     pub registered_tools: usize,
     pub last_error: Option<String>,
-}
-
-impl Default for DistributedStatus {
-    fn default() -> Self {
-        Self {
-            connected: false,
-            server_id: None,
-            client_id: None,
-            registered_tools: 0,
-            last_error: None,
-        }
-    }
 }

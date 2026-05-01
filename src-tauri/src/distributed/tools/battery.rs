@@ -77,6 +77,9 @@ impl StreamingTool for BatteryInfoTool {
             return Ok("电池信息不可用".to_string());
         }
 
-        Ok(format!("电量: {} | 状态: {} | 温度: {}", capacity, status, temp))
+        Ok(format!(
+            "电量: {} | 状态: {} | 温度: {}",
+            capacity, status, temp
+        ))
     }
 }
