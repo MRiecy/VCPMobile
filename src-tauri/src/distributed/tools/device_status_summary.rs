@@ -26,8 +26,8 @@ impl DeviceStatusSummaryTool {
             if vals.len() >= 4 {
                 let total: u64 = vals.iter().sum();
                 let idle = vals[3];
-                if total > 0 {
-                    let usage = 100 - (idle * 100 / total);
+                if let Some(div_result) = (idle * 100).checked_div(total) {
+                    let usage = 100 - div_result;
                     format!("{}%", usage)
                 } else {
                     "N/A".to_string()
@@ -91,8 +91,7 @@ impl DeviceStatusSummaryTool {
                     .unwrap_or(0);
             }
         }
-        if total > 0 {
-            let pct = ((total - avail) * 100) / total;
+        if let Some(pct) = ((total - avail) * 100).checked_div(total) {
             format!("内存:{}%", pct)
         } else {
             "内存:N/A".to_string()
