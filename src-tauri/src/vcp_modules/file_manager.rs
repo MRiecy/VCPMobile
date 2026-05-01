@@ -429,7 +429,9 @@ pub async fn init_chunked_upload(
             if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
                 let should_remove = if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
-                        now.duration_since(modified).map(|d| d.as_secs() > ORPHAN_TTL_SECS).unwrap_or(false)
+                        now.duration_since(modified)
+                            .map(|d| d.as_secs() > ORPHAN_TTL_SECS)
+                            .unwrap_or(false)
                     } else {
                         false
                     }
@@ -507,7 +509,10 @@ pub async fn cancel_chunked_upload(
         if session.temp_path.exists() {
             let _ = fs::remove_file(&session.temp_path);
         }
-        log::info!("[FileManager] Cancelled and cleaned up upload session: {}", session_id);
+        log::info!(
+            "[FileManager] Cancelled and cleaned up upload session: {}",
+            session_id
+        );
     }
     Ok(())
 }
@@ -631,10 +636,20 @@ pub async fn get_attachment_real_path(
     }
 }
 
-/// 唤起系统默认应用打开文件
+/// 唤起系统默认应用打开文件或 URL
 #[tauri::command]
 pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String> {
     let clean_path = path.replace("file://", "");
+
+    // 网络 URL 直接打开，跳过本地路径安全校验
+    if clean_path.starts_with("http://") || clean_path.starts_with("https://") {
+        use tauri_plugin_opener::OpenerExt;
+        return app_handle
+            .opener()
+            .open_url(clean_path, Option::<String>::None)
+            .map_err(|e| e.to_string());
+    }
+
     let path_buf = std::path::PathBuf::from(&clean_path);
 
     // 安全校验：禁止打开系统敏感路径

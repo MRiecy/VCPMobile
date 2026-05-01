@@ -3,7 +3,7 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { ExternalLink } from "lucide-vue-next";
 import AttachmentViewer from "./AttachmentViewer.vue";
-import AttachmentRenderer from '../../features/chat/attachment/AttachmentRenderer.vue';
+import AttachmentRenderer from './AttachmentRenderer.vue';
 
 interface Attachment {
   type: string;
@@ -69,12 +69,14 @@ const openExternal = async (path: string) => {
       </button>
     </div>
 
-    <AttachmentViewer
-      :file="activeFile"
-      :is-open="isViewerOpen"
-      @close="isViewerOpen = false"
-      @open-external="openExternal"
-    />
+    <Teleport to="#vcp-feature-overlays">
+      <AttachmentViewer
+        :file="activeFile"
+        :is-open="isViewerOpen"
+        @close="isViewerOpen = false"
+        @open-external="openExternal"
+      />
+    </Teleport>
   </div>
 </template>
 

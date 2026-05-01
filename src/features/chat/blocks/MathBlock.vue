@@ -52,11 +52,11 @@ watch(() => props.content, async () => {
 
 <template>
   <div
-    class="math-block-container my-3 overflow-x-auto"
+    class="math-block-container my-3 no-swipe"
     v-intersection-observer.once
     @intersect="renderKatex"
   >
-    <div ref="katexEl" class="vcp-math-block text-xs opacity-40 font-mono">{{ content }}</div>
+    <div ref="katexEl" class="vcp-math-block text-xs font-mono vcp-scrollable">{{ content }}</div>
   </div>
 </template>
 
@@ -66,40 +66,15 @@ watch(() => props.content, async () => {
   -webkit-overflow-scrolling: touch;
 }
 
-.math-block-container .katex-display {
-  margin: 0.5em 0;
-}
-
-.math-block-container::-webkit-scrollbar {
-  height: 4px;
-}
-
-.math-block-container::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 150, 0.3);
-  border-radius: 4px;
-}
-
-/* 从 MarkdownBlock 迁移：block math 的溢出保护与滚动条样式 */
+/* 从 MarkdownBlock 迁移：block math 的溢出保护 */
 .vcp-math-block {
   max-width: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
 }
 
 .vcp-math-block .katex-display {
+  margin: 0.5em 0;
   padding-bottom: 0.5em;
-  /* 防止垂直截断遮挡下标或滚动条 */
-}
-
-.vcp-math-block::-webkit-scrollbar,
-.vcp-math-block .katex-display::-webkit-scrollbar {
-  height: 4px;
-}
-
-.vcp-math-block::-webkit-scrollbar-thumb,
-.vcp-math-block .katex-display::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 150, 0.3);
-  border-radius: 4px;
+  /* 防止垂直截断遮挡下标 */
 }
 </style>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed } from 'vue';
 import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useLongTextPaste } from './composables/useLongTextPaste';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
 
@@ -81,6 +82,8 @@ const triggerFilePick = async () => {
   await chatStore.handleAttachment();
 };
 
+const { handlePaste, handleBeforeInput } = useLongTextPaste(input);
+
 const removeStagedAttachment = (index: number) => {
   chatStore.stagedAttachments.splice(index, 1);
 };
@@ -122,7 +125,7 @@ const removeStagedAttachment = (index: number) => {
 
         <!-- 核心输入区 -->
         <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px]">
-          <textarea ref="textareaRef" v-model="input" @keydown="handleKeydown" rows="1"
+          <textarea ref="textareaRef" v-model="input" @keydown="handleKeydown" @paste="handlePaste" @beforeinput="handleBeforeInput" rows="1"
             class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[var(--primary-text)] text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide"
             style="max-height: 114px;"
             :placeholder="disabled ? '请先选择话题以开启对话' : '说点什么...'" :disabled="disabled"></textarea>

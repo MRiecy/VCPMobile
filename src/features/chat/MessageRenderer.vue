@@ -26,7 +26,7 @@ import ChatBubble from "./components/ChatBubble.vue";
 import MessageHeader from "./components/MessageHeader.vue";
 import ThinkingIndicator from "./components/ThinkingIndicator.vue";
 import StreamingTag from "./components/StreamingTag.vue";
-import AttachmentPreview from "../../components/ui/AttachmentPreview.vue";
+import AttachmentPreview from "./attachment/AttachmentPreview.vue";
 
 const props = defineProps<{
   message: ChatMessage;
@@ -199,7 +199,7 @@ watch(
     () =>
       props.message.processedContent ||
       props.message.displayedContent ||
-      props.message.content,
+      "",
     () => isStreaming.value,
   ],
   async ([newText, streaming]) => {
@@ -447,7 +447,12 @@ const showMessageContextMenu = async () => {
 
 const handleSaveEdit = async (newContent: string) => {
   const chatStore = useChatManagerStore();
-  if (newContent !== props.message.content) {
+  let currentContent = props.message.content || "";
+  if (!currentContent) {
+    currentContent = await chatStore.fetchRawContent(props.message.id);
+    props.message.content = currentContent;
+  }
+  if (newContent !== currentContent) {
     await chatStore.updateMessageContent(props.message.id, newContent);
     // 立即重新触发渲染
     await updateContentBlocks(newContent);

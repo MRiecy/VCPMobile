@@ -6,7 +6,7 @@
     size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[200px]">
+    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[180px]">
       <div class="w-9 h-9 shrink-0 rounded-lg bg-gray-500/10 flex items-center justify-center border border-gray-500/20">
         <svg
           width="18"
@@ -29,7 +29,7 @@
       <!-- File Info -->
       <div class="flex flex-col min-w-0">
         <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
-          {{ file.name || 'File' }}
+          {{ displayName }}
         </div>
         <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
           {{ formatSize(file.size) }} • FILE
@@ -40,10 +40,12 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
+import { truncateFileName } from "../utils/truncateFileName";
 import type { Attachment } from "../../../../core/stores/chatManager";
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   file: Attachment;
   index: number;
   showRemove?: boolean;
@@ -52,6 +54,8 @@ withDefaults(defineProps<{
 });
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
+
+const displayName = computed(() => truncateFileName(props.file.name || 'File'));
 
 const formatSize = (bytes: number) => {
   if (!bytes) return '0 B';

@@ -363,10 +363,15 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         let marker_text = &remaining[start_idx..end_idx];
                         if let Some(caps) = ROLE_DIVIDER.captures(marker_text) {
                             let is_end = caps.get(1).is_some();
-                            let role = caps.get(2).map(|m| m.as_str().to_lowercase()).unwrap_or_default();
+                            let role = caps
+                                .get(2)
+                                .map(|m| m.as_str().to_lowercase())
+                                .unwrap_or_default();
                             ContentBlock::RoleDivider { role, is_end }
                         } else {
-                            ContentBlock::Markdown { content: marker_text.to_string() }
+                            ContentBlock::Markdown {
+                                content: marker_text.to_string(),
+                            }
                         }
                     }
                     BlockType::Style => ContentBlock::Style {
@@ -435,7 +440,9 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
 
     for cap in BUTTON_CLICK.captures_iter(text) {
         let Some(m) = cap.get(0) else { continue };
-        let Some(button_content) = cap.get(1) else { continue };
+        let Some(button_content) = cap.get(1) else {
+            continue;
+        };
         if m.start() > last_end {
             blocks.push(ContentBlock::Markdown {
                 content: text[last_end..m.start()].to_string(),

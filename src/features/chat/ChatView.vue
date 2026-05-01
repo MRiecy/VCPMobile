@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { useChatManagerStore } from "../../core/stores/chatManager";
 import { useThemeStore } from "../../core/stores/theme";
 import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
@@ -19,9 +19,18 @@ const layoutStore = useLayoutStore();
 const messageListRef = ref<HTMLElement | null>(null);
 const chatViewContainerRef = ref<HTMLElement | null>(null);
 const showScrollToBottom = ref(false);
-const isInitialTopicLoad = ref(true);
-let mutationObserver: MutationObserver | null = null;
-let loadMoreObserver: IntersectionObserver | null = null;
+
+// 哨兵元素（IntersectionObserver 双哨兵架构，替代 scroll 事件）
+const topSentinelRef = ref<HTMLElement | null>(null);
+const bottomSentinelRef = ref<HTMLElement | null>(null);
+let topObserver: IntersectionObserver | null = null;
+let bottomObserver: IntersectionObserver | null = null;
+let topSentinelVisible = false;
+
+// 流式消息持续置底（RAF 轮询，替代 MutationObserver）
+const isStreamingActive = computed(() => chatStore.activeStreamingIds.size > 0);
+let scrollRafId: number | null = null;
+let lastScrollHeight = 0;
 
 const scrollToBottom = (smooth = false) => {
   if (messageListRef.value) {
@@ -32,77 +41,76 @@ const scrollToBottom = (smooth = false) => {
   }
 };
 
-const handleScroll = () => {
-  if (!messageListRef.value) return;
-  const { scrollTop, scrollHeight, clientHeight } = messageListRef.value;
-  // 如果距离底部超过 150px，显示置底按钮
-  showScrollToBottom.value = scrollHeight - scrollTop - clientHeight > 150;
-};
-
-// --- 无限滚动分页：IntersectionObserver 检测第 N-5 条消息 ---
-const setupLoadMoreObserver = () => {
-  if (loadMoreObserver) {
-    loadMoreObserver.disconnect();
-    loadMoreObserver = null;
-  }
-  if (!chatStore.hasMoreHistory || chatStore.isLoadingHistory) return;
-  if (!messageListRef.value) return;
-
-  const triggerIndex = chatStore.historyOffset - 6; // N-5 (0-indexed)
-  if (triggerIndex < 0) return;
-
-  const triggerMsg = chatStore.currentChatHistory[triggerIndex];
-  if (!triggerMsg) return;
-
-  const sentinel = messageListRef.value.querySelector(
-    `[data-message-id="${triggerMsg.id}"]`,
-  );
-  if (!sentinel) return;
-
-  loadMoreObserver = new IntersectionObserver(
+// --- IntersectionObserver 双哨兵架构 ---
+const setupTopSentinelObserver = () => {
+  if (!messageListRef.value || !topSentinelRef.value) return;
+  topObserver = new IntersectionObserver(
     (entries) => {
-      entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          // 触发加载后立即断开，防止快速来回滑动导致重复触发
-          loadMoreObserver?.disconnect();
-          loadMoreObserver = null;
-          chatStore.loadMoreHistory();
-        }
-      });
+      topSentinelVisible = entries[0].isIntersecting;
+      if (topSentinelVisible && chatStore.hasMoreHistory && !chatStore.isLoadingHistory) {
+        chatStore.loadMoreHistory();
+      }
     },
-    { root: messageListRef.value, threshold: 0 },
+    {
+      root: messageListRef.value,
+      rootMargin: "200px 0px 0px 0px", // 提前 200px 触发
+      threshold: 0,
+    },
   );
-  loadMoreObserver.observe(sentinel);
+  topObserver.observe(topSentinelRef.value);
 };
 
-// 监听话题切换，重置加载状态
+const setupBottomSentinelObserver = () => {
+  if (!messageListRef.value || !bottomSentinelRef.value) return;
+  bottomObserver = new IntersectionObserver(
+    (entries) => {
+      // 底部哨兵不可见 = 用户已离开底部 > 150px
+      showScrollToBottom.value = !entries[0].isIntersecting;
+    },
+    {
+      root: messageListRef.value,
+      rootMargin: "0px 0px 150px 0px", // 视口底部向下扩展 150px，哨兵在扩展区内 = 距底 ≤ 150px
+      threshold: 0,
+    },
+  );
+  bottomObserver.observe(bottomSentinelRef.value);
+};
+
+// 监听话题切换，重置置底按钮状态
 watch(
   () => chatStore.currentTopicId,
   () => {
-    isInitialTopicLoad.value = true;
     showScrollToBottom.value = false;
   }
 );
 
-// 监听新消息，如果已经在底部附近，则自动平滑滚动
+// 监听消息列表长度变化：首屏加载期间无动画置底，之后平滑滚动
 watch(
   () => chatStore.currentChatHistory.length,
   async () => {
-    if (!isInitialTopicLoad.value && !showScrollToBottom.value) {
+    if (!showScrollToBottom.value) {
       await nextTick();
-      scrollToBottom(true);
+      scrollToBottom(!chatStore.isLoadingHistory);
     }
   },
 );
 
-// 历史消息数组变化后（prepend 或替换），重新绑定无限滚动哨兵
-watch(
-  () => chatStore.currentChatHistory.length,
-  async () => {
-    await nextTick();
-    setupLoadMoreObserver();
-  },
-);
+
+
+
+
+// --- 阻止不可滚动区域的 touchmove，防止键盘弹起后 footer/空白区滑动导致页面被拖动 ---
+const handleContainerTouchMove = (e: TouchEvent) => {
+  if (e.target instanceof Element) {
+    // 放行可滚动区域内的 touchmove（消息列表、输入框、附件预览、侧边栏等）
+    const scrollable = e.target.closest(
+      ".overflow-y-auto, .overflow-x-auto, textarea, input, .vcp-scrollable",
+    );
+    if (scrollable) return;
+  }
+  // 在不可滚动区域阻止默认行为，阻断 WebView viewport panning
+  e.preventDefault();
+};
 
 const handleVcpButtonClick = (e: any) => {
   if (e.detail && e.detail.text) {
@@ -110,16 +118,48 @@ const handleVcpButtonClick = (e: any) => {
   }
 };
 
+// --- Streaming Auto-Scroll (RAF-based, replaces MutationObserver) ---
+const startStreamingScroll = () => {
+  if (scrollRafId) return;
+  lastScrollHeight = messageListRef.value?.scrollHeight ?? 0;
+  const tick = () => {
+    if (!messageListRef.value) return;
+    const sh = messageListRef.value.scrollHeight;
+    if (sh > lastScrollHeight && !showScrollToBottom.value) {
+      scrollToBottom(false);
+      lastScrollHeight = sh;
+    }
+    scrollRafId = requestAnimationFrame(tick);
+  };
+  scrollRafId = requestAnimationFrame(tick);
+};
+
+const stopStreamingScroll = () => {
+  if (scrollRafId) {
+    cancelAnimationFrame(scrollRafId);
+    scrollRafId = null;
+  }
+};
+
+watch(isStreamingActive, (active) => {
+  active ? startStreamingScroll() : stopStreamingScroll();
+});
+
 // --- Keyboard Offset & Viewport Handler ---
 let keyboardRafId: number | null = null;
 
 const applyKeyboardOffset = () => {
   if (!chatViewContainerRef.value || !window.visualViewport) return;
 
-  const keyboardHeight = Math.max(
+  let keyboardHeight = Math.max(
     0,
     window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop,
   );
+
+  // 阈值处理：若键盘高度很小，视为 adjustResize 已生效的计算误差，避免错误增加 footer 高度
+  if (keyboardHeight < 30) {
+    keyboardHeight = 0;
+  }
 
   chatViewContainerRef.value.style.setProperty(
     "--keyboard-offset",
@@ -153,28 +193,16 @@ onMounted(async () => {
     chatViewContainerRef.value.addEventListener("focusin", applyKeyboardOffset);
   }
 
-  // 使用 MutationObserver 精准监听真实 DOM 节点的挂载
-  if (messageListRef.value) {
-    mutationObserver = new MutationObserver(() => {
-      // 只要发生子节点变动，且处于初始加载期
-      if (isInitialTopicLoad.value && chatStore.currentChatHistory.length > 0) {
-        scrollToBottom(false);
-        // 稍微延迟解除状态，包容短时间内的多批次子节点渲染
-        setTimeout(() => {
-           isInitialTopicLoad.value = false;
-        }, 50);
-      }
-    });
-    
-    mutationObserver.observe(messageListRef.value, { 
-      childList: true, // 监听直接子节点（聊天气泡）的增删
-      subtree: true,   // 监听子树，包容内部长文本或图片的延迟渲染撑开高度
-      characterData: true // 监听文本变动（针对流式加载）
-    });
-  }
+  // 初始化 IntersectionObserver 双哨兵
+  setupTopSentinelObserver();
+  setupBottomSentinelObserver();
 
-  // 初始化无限滚动 observer
-  setupLoadMoreObserver();
+  // 兜底：若消息列表未产生滚动条但仍有更多数据，主动触发加载
+  if (messageListRef.value && messageListRef.value.scrollHeight <= messageListRef.value.clientHeight) {
+    if (chatStore.hasMoreHistory && !chatStore.isLoadingHistory) {
+      chatStore.loadMoreHistory();
+    }
+  }
 });
 
 onUnmounted(() => {
@@ -183,22 +211,20 @@ onUnmounted(() => {
   if (window.visualViewport) {
     window.visualViewport.removeEventListener("resize", handleViewportResize);
   }
-  
+
   if (chatViewContainerRef.value) {
     chatViewContainerRef.value.removeEventListener("focusin", applyKeyboardOffset);
   }
 
-  if (mutationObserver) {
-    mutationObserver.disconnect();
-  }
-  if (loadMoreObserver) {
-    loadMoreObserver.disconnect();
-  }
+  topObserver?.disconnect();
+  bottomObserver?.disconnect();
+
+  stopStreamingScroll();
 });
 </script>
 
 <template>
-  <div ref="chatViewContainerRef" class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden">
+  <div ref="chatViewContainerRef" class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden" @touchmove="handleContainerTouchMove">
     <!-- 1. Header (强制保底高度 80px，确保刘海屏可见) -->
     <header class="vcp-header-fixed shrink-0 flex items-center justify-between gap-3 px-4 border-b border-white/5">
       <div class="flex items-center gap-3 min-w-0 flex-1">
@@ -275,7 +301,7 @@ onUnmounted(() => {
     </header>
 
     <!-- 2. 消息展示区 (确保 flex-1 撑开) -->
-    <div ref="messageListRef" @scroll="handleScroll" class="flex-1 overflow-y-auto py-4 space-y-2 relative">
+    <div ref="messageListRef" class="flex-1 overflow-y-auto py-4 space-y-2 relative" style="overscroll-behavior-y: contain;">
       <!-- 零数据引导状态 -->
       <div v-if="chatStore.currentChatHistory.length === 0"
         class="absolute inset-0 flex flex-col items-center justify-center text-center px-10">
@@ -300,6 +326,9 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <!-- 顶部哨兵：IntersectionObserver 监听分页触发 -->
+      <div ref="topSentinelRef" class="h-0"></div>
+
       <MessageRenderer
         v-for="msg in chatStore.currentChatHistory"
         :key="msg.id"
@@ -307,8 +336,9 @@ onUnmounted(() => {
         :agent-id="chatStore.currentSelectedItem?.id"
         :data-message-id="msg.id"
       />
+      <!-- 底部哨兵：IntersectionObserver 监听置底按钮状态 -->
+      <div ref="bottomSentinelRef" class="h-0"></div>
       <div class="h-20"></div>
-      <!-- 底部填充，防止输入框挡住最后一条 -->
     </div>
 
     <!-- 一键置底按钮 -->
@@ -322,7 +352,7 @@ onUnmounted(() => {
     <!-- 3. 输入增强区 (固定底部) -->
     <footer class="px-4 py-1.5 bg-black/10 backdrop-blur-md border-t border-white/5 shrink-0">
       <InputEnhancer :disabled="!chatStore.currentTopicId" @send="chatStore.sendMessage" />
-      <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))]"></div>
+      <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))] no-swipe pointer-events-none"></div>
     </footer>
   </div>
 </template>

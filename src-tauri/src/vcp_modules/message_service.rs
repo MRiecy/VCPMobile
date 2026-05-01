@@ -17,6 +17,7 @@ pub async fn load_chat_history_internal(
     topic_id: &str,
     limit: Option<usize>,
     offset: Option<usize>,
+    include_content: bool,
 ) -> Result<Vec<ChatMessage>, String> {
     let db_state = _app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
@@ -99,20 +100,31 @@ pub async fn load_chat_history_internal(
         let msg_id: String = row.get("msg_id");
         let role: String = row.get("role");
         let name: Option<String> = row.get("name");
-        let content: String = row.get("content");
+        let content: String = if include_content {
+            row.get("content")
+        } else {
+            String::new()
+        };
         let timestamp: i64 = row.get("timestamp");
         let is_thinking: Option<bool> = Some(row.get::<i64, _>("is_thinking") != 0);
 
         let render_content: Option<Vec<u8>> = row.get("render_content");
         let blocks = if let Some(bytes) = render_content {
-            serde_json::from_slice(&bytes).ok().and_then(|v: serde_json::Value| {
-                if let Some(arr) = v.as_array() {
-                    let filtered: Vec<serde_json::Value> = arr.iter().filter(|e| !e.is_null()).cloned().collect();
-                    if filtered.is_empty() { None } else { Some(serde_json::Value::Array(filtered)) }
-                } else {
-                    Some(v)
-                }
-            })
+            serde_json::from_slice(&bytes)
+                .ok()
+                .and_then(|v: serde_json::Value| {
+                    if let Some(arr) = v.as_array() {
+                        let filtered: Vec<serde_json::Value> =
+                            arr.iter().filter(|e| !e.is_null()).cloned().collect();
+                        if filtered.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::Array(filtered))
+                        }
+                    } else {
+                        Some(v)
+                    }
+                })
         } else {
             None
         };

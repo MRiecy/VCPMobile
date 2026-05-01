@@ -8,8 +8,8 @@ use vcp_modules::agent_service::{
 };
 use vcp_modules::avatar_service::{get_avatar, save_avatar_data};
 use vcp_modules::chat_manager::{
-    append_single_message, delete_messages, load_chat_history, patch_single_message,
-    truncate_history_after_timestamp,
+    append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
+    patch_single_message, truncate_history_after_timestamp,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
@@ -122,6 +122,7 @@ pub fn run() {
             test_vcp_connection,
             handle_agent_chat_message,
             load_chat_history,
+            load_chat_history_streamed,
             append_single_message,
             patch_single_message,
             delete_messages,

@@ -6,7 +6,7 @@ use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpRequestPayload};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, State};
+use tauri::{ipc::Channel, AppHandle, State};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,6 +26,7 @@ pub async fn handle_agent_chat_message(
     db_state: State<'_, DbState>,
     active_requests: State<'_, ActiveRequests>,
     payload: AgentChatPayload,
+    stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
     let agent_id = payload.agent_id;
     let topic_id = payload.topic_id;
@@ -55,6 +56,7 @@ pub async fn handle_agent_chat_message(
         &topic_id,
         None, // 加载全部（或按需限制）
         None,
+        true,
     )
     .await?;
 
@@ -94,11 +96,16 @@ pub async fn handle_agent_chat_message(
             "agentId": agent_id,
             "topicId": topic_id
         })),
-        stream_channel: Some("vcp-stream".to_string()),
     };
 
     // 7. 发起请求
-    perform_vcp_request(&app_handle, active_requests.0.clone(), request_payload).await?;
+    perform_vcp_request(
+        &app_handle,
+        active_requests.0.clone(),
+        request_payload,
+        Some(stream_channel),
+    )
+    .await?;
 
     Ok(json!({ "status": "sent", "messageId": thinking_id }))
 }

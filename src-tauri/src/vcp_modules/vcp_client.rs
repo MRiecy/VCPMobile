@@ -10,7 +10,7 @@ use std::io::Error as IoError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
 use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
@@ -28,13 +28,12 @@ use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcpRequestPayload {
-    pub vcp_url: String,                // VCP服务器URL
-    pub vcp_api_key: String,            // API密钥
-    pub messages: Vec<Value>,           // 消息数组
-    pub model_config: Value,            // 模型配置 (包含 model, stream, temperature 等)
-    pub message_id: String,             // 消息ID (用于跟踪和中止)
-    pub context: Option<Value>,         // 上下文信息 (agentId, topicId等)
-    pub stream_channel: Option<String>, // 流式数据频道名称 (默认为 vcp-stream-event)
+    pub vcp_url: String,        // VCP服务器URL
+    pub vcp_api_key: String,    // API密钥
+    pub messages: Vec<Value>,   // 消息数组
+    pub model_config: Value,    // 模型配置 (包含 model, stream, temperature 等)
+    pub message_id: String,     // 消息ID (用于跟踪和中止)
+    pub context: Option<Value>, // 上下文信息 (agentId, topicId等)
 }
 
 /// 流式事件结构体，用于向前端发送数据
@@ -127,8 +126,10 @@ pub async fn sendToVCP<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, ActiveRequests>,
     payload: VcpRequestPayload,
+    stream_channel: Channel<StreamEvent>,
 ) -> Result<Value, String> {
-    let (res, _is_aborted) = perform_vcp_request(&app, state.0.clone(), payload).await?;
+    let (res, _is_aborted) =
+        perform_vcp_request(&app, state.0.clone(), payload, Some(stream_channel)).await?;
     Ok(res)
 }
 
@@ -138,16 +139,19 @@ pub async fn perform_vcp_request<R: Runtime>(
     app: &AppHandle<R>,
     active_requests: Arc<DashMap<String, oneshot::Sender<()>>>,
     payload: VcpRequestPayload,
+    stream_channel: Option<Channel<StreamEvent>>,
 ) -> Result<(Value, bool), String> {
     println!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
         payload.message_id, payload.context
     );
     let app_data_path = get_app_data_path(app).await;
-    let stream_channel = payload
-        .stream_channel
-        .clone()
-        .unwrap_or_else(|| "vcp-stream".to_string());
+
+    let send_stream_event = |event: StreamEvent| {
+        if let Some(ref ch) = stream_channel {
+            let _ = ch.send(event);
+        }
+    };
 
     // === 0. 数据验证和规范化 ===
     let mut messages: Vec<Value> = Vec::new();
@@ -356,7 +360,7 @@ pub async fn perform_vcp_request<R: Runtime>(
 
     if is_stream {
         // === 6. 流式处理模式 (同步等待，以便串行调用) ===
-        let app_handle = app.clone();
+        let _app_handle = app.clone();
         let message_id_inner = message_id.clone();
         let context_inner = context.clone();
         let active_requests_inner = active_requests.clone();
@@ -376,7 +380,7 @@ pub async fn perform_vcp_request<R: Runtime>(
         tokio::select! {
             _ = &mut abort_rx => {
                 println!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
-                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                send_stream_event(StreamEvent {
                     r#type: "end".to_string(),
                     chunk: None,
                     message_id: message_id_inner.clone(),
@@ -400,7 +404,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 _ = &mut abort_rx => {
                                     is_aborted = true;
                                     println!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
-                                    let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                    send_stream_event(StreamEvent {
                                         r#type: "end".to_string(),
                                         chunk: None,
                                         message_id: message_id_inner.clone(),
@@ -419,7 +423,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             if line.starts_with("data: ") {
                                                 let data = line.trim_start_matches("data: ").trim();
                                                 if data == "[DONE]" {
-                                                    let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                    send_stream_event(StreamEvent {
                                                         r#type: "end".to_string(),
                                                         chunk: None,
                                                         message_id: message_id_inner.clone(),
@@ -440,7 +444,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                         }
                                                     }
 
-                                                    let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                    send_stream_event(StreamEvent {
                                                         r#type: "data".to_string(),
                                                         chunk: Some(chunk),
                                                         message_id: message_id_inner.clone(),
@@ -453,7 +457,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         }
                                         Some(Err(e)) => {
                                             println!("[VCPClient] Stream read error: {:?}", e);
-                                            let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                            send_stream_event(StreamEvent {
                                                 r#type: "error".to_string(),
                                                 chunk: None,
                                                 message_id: message_id_inner.clone(),
@@ -467,7 +471,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             // 修复：若此前已收到有效 chunk，则视为正常结束（对齐桌面端行为）
                                             if !full_content.is_empty() || last_finish_reason.is_some() {
                                                 println!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
-                                                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                send_stream_event(StreamEvent {
                                                     r#type: "end".to_string(),
                                                     chunk: None,
                                                     message_id: message_id_inner.clone(),
@@ -477,7 +481,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                 });
                                             } else {
                                                 println!("[VCPClient] Stream ended unexpectedly (None)");
-                                                let _ = app_handle.emit(&stream_channel, StreamEvent {
+                                                send_stream_event(StreamEvent {
                                                     r#type: "error".to_string(),
                                                     chunk: None,
                                                     message_id: message_id_inner.clone(),
@@ -496,7 +500,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                     Ok(resp) => {
                         let status = resp.status();
                         let text = resp.text().await.unwrap_or_default();
-                        let _ = app_handle.emit(&stream_channel, StreamEvent {
+                        send_stream_event(StreamEvent {
                             r#type: "error".to_string(),
                             chunk: None,
                             message_id: message_id_inner.clone(),
@@ -508,7 +512,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                         return Err(format!("VCP Error: {}", status));
                     }
                     Err(e) => {
-                        let _ = app_handle.emit(&stream_channel, StreamEvent {
+                        send_stream_event(StreamEvent {
                             r#type: "error".to_string(),
                             chunk: None,
                             message_id: message_id_inner.clone(),

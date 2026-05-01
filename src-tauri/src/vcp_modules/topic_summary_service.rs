@@ -42,6 +42,7 @@ pub async fn summarize_topic(
         &topic_id,
         Some(4),
         None,
+        true,
     )
     .await?;
 

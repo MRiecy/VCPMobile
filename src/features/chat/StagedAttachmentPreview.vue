@@ -19,8 +19,8 @@ const isLoading = computed(() => props.file.status === "loading");
 
 <template>
   <div
-    class="relative shrink-0 flex items-center bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-xl"
-    :class="[isImage ? 'w-14 h-14' : 'px-2 py-1.5 max-w-[180px] h-12 gap-2']"
+    class="relative shrink-0 rounded-xl overflow-hidden"
+    :class="[isImage ? 'w-14 h-14' : 'max-w-[180px]']"
   >
     <!-- Use new component system -->
     <AttachmentRenderer 

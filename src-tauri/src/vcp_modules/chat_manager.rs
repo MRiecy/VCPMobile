@@ -40,6 +40,7 @@ pub struct ChatMessage {
     #[serde(alias = "senderName")]
     pub name: Option<String>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub content: String,
     #[serde(default)]
     pub timestamp: u64,
@@ -66,7 +67,46 @@ pub struct ChatMessage {
     pub blocks: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HistoryChunk {
+    pub message: ChatMessage,
+    pub index: usize,
+    pub is_last: bool,
+}
+
 // --- 历史记录存取逻辑 ---
+
+#[tauri::command]
+pub async fn load_chat_history_streamed(
+    app_handle: tauri::AppHandle,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    on_message: tauri::ipc::Channel<HistoryChunk>,
+) -> Result<(), String> {
+    let messages = crate::vcp_modules::message_service::load_chat_history_internal(
+        &app_handle,
+        &owner_id,
+        &owner_type,
+        &topic_id,
+        limit,
+        offset,
+        false,
+    )
+    .await?;
+    let total = messages.len();
+    for (index, message) in messages.into_iter().enumerate() {
+        let is_last = index == total.saturating_sub(1);
+        let _ = on_message.send(HistoryChunk {
+            message,
+            index,
+            is_last,
+        });
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn load_chat_history(
@@ -84,6 +124,7 @@ pub async fn load_chat_history(
         &topic_id,
         limit,
         offset,
+        false,
     )
     .await
 }

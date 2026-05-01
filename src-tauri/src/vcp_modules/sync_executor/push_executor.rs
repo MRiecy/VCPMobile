@@ -251,6 +251,7 @@ impl PushExecutor {
                 topic_id,
                 Some(1000),
                 None,
+                true,
             )
             .await?;
 

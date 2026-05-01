@@ -431,19 +431,14 @@ watch(() => [props.content, props.isStreaming], () => {
 .vcp-markdown-block .vcp-math-inline {
   max-width: 100%;
   overflow-x: auto;
-  overflow-y: hidden;
   display: inline-block;
   vertical-align: middle;
 }
 
-/* 匹配整体美学的细长公式滚动条（inline math only） */
-.vcp-markdown-block .vcp-math-inline::-webkit-scrollbar {
-  height: 4px;
-}
-
-.vcp-markdown-block .vcp-math-inline::-webkit-scrollbar-thumb {
-  background: rgba(150, 150, 150, 0.3);
-  border-radius: 4px;
+/* 修复：KaTeX 默认 display: inline 时内部复杂布局（inline-table、absolute 定位等）
+   导致 scrollWidth 被错误计算，在无明显溢出时仍显示滚动条 */
+.vcp-markdown-block .vcp-math-inline .katex {
+  display: inline-block;
 }
 
 /* 强化 Emoji 字体栈，强制手机端渲染更精美的原生彩色表情 */

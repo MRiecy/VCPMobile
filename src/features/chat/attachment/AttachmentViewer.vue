@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
+import { useModalHistory } from "../../../core/composables/useModalHistory";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { X, ExternalLink, Download } from "lucide-vue-next";
-import MarkdownBlock from "../../features/chat/blocks/MarkdownBlock.vue";
+import MarkdownBlock from "../blocks/MarkdownBlock.vue";
 
 interface Attachment {
   type: string;
@@ -18,6 +19,17 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits(["close", "open-external"]);
+
+const { registerModal, unregisterModal } = useModalHistory();
+const modalId = 'AttachmentViewer';
+
+watch(() => props.isOpen, (newVal) => {
+  if (newVal) {
+    registerModal(modalId, close);
+  } else {
+    unregisterModal(modalId);
+  }
+});
 
 const isImage = computed(() => props.file?.type.startsWith("image/"));
 const isText = computed(() => !!props.file?.extractedText);
@@ -44,30 +56,31 @@ const close = () => emit("close");
   <Transition name="viewer-fade">
     <div
       v-if="isOpen && file"
-      class="vcp-attachment-viewer fixed inset-0 z-[1000] flex flex-col bg-black/90 backdrop-blur-2xl"
+      class="vcp-attachment-viewer fixed inset-0 z-[1000] flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] pointer-events-auto"
+      @click.self="close"
     >
       <!-- Toolbar -->
       <div
-        class="flex items-center justify-between px-4 py-4 border-b border-white/10 shrink-0"
+        class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10"
       >
-        <div class="flex flex-col overflow-hidden mr-4">
-          <span class="text-sm font-bold text-white truncate">{{
+        <div class="flex flex-col overflow-hidden mr-4 min-w-0">
+          <span class="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{{
             file.name
           }}</span>
-          <span class="text-[10px] text-white/40 uppercase tracking-widest">{{
+          <span class="text-[10px] text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{
             file.type
           }}</span>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-1">
           <button
             @click="$emit('open-external', file.src)"
-            class="p-2 hover:bg-white/10 rounded-full text-white/70 transition-colors"
+            class="p-2 -mr-1 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5"
           >
             <ExternalLink :size="20" />
           </button>
           <button
             @click="close"
-            class="p-2 hover:bg-white/10 rounded-full text-white transition-colors"
+            class="p-2 -mr-2 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5"
           >
             <X :size="24" />
           </button>
@@ -76,12 +89,12 @@ const close = () => emit("close");
 
       <!-- Main Content -->
       <div
-        class="flex-1 overflow-auto vcp-scrollable p-4 flex flex-col items-center justify-center"
+        class="flex-1 overflow-auto vcp-scrollable pb-[env(safe-area-inset-bottom)]"
       >
         <!-- Text/Code/MD Viewer -->
         <div
           v-if="isText"
-          class="w-full max-w-4xl bg-white/5 rounded-2xl p-6 border border-white/10 shadow-2xl"
+          class="w-full px-5 py-6 text-[15px] leading-relaxed"
         >
           <MarkdownBlock :content="file.extractedText!" :is-streaming="false" />
         </div>
@@ -89,25 +102,25 @@ const close = () => emit("close");
         <!-- Image Viewer -->
         <div
           v-else-if="isImage"
-          class="relative group max-w-full max-h-full flex items-center justify-center"
+          class="h-full w-full flex items-center justify-center p-4"
         >
           <img
             :src="renderSrc"
-            class="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl animate-zoom-in"
+            class="max-w-full max-h-full object-contain rounded-lg shadow-2xl animate-zoom-in"
             @click.stop
           />
         </div>
 
         <!-- Unsupported Format -->
-        <div v-else class="flex flex-col items-center gap-6 opacity-50">
+        <div v-else class="h-full flex flex-col items-center justify-center gap-6 p-4">
           <div
-            class="w-20 h-20 rounded-3xl bg-white/5 flex items-center justify-center border border-white/10"
+            class="w-20 h-20 rounded-3xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center border border-black/5 dark:border-white/10"
           >
-            <Download :size="40" />
+            <Download :size="40" class="text-gray-400 dark:text-gray-500" />
           </div>
           <div class="text-center">
-            <p class="text-white font-bold">暂不支持在线预览该格式</p>
-            <p class="text-xs text-white/40 mt-1">
+            <p class="text-gray-800 dark:text-gray-200 font-bold">暂不支持在线预览该格式</p>
+            <p class="text-xs text-gray-400 dark:text-gray-500 mt-1">
               请点击右上角按钮使用系统应用打开
             </p>
           </div>

@@ -12,3 +12,5 @@ export { default as DocumentAttachment } from './types/DocumentAttachment.vue';
 export { default as CodeAttachment } from './types/CodeAttachment.vue';
 export { default as TextAttachment } from './types/TextAttachment.vue';
 export { default as OtherAttachment } from './types/OtherAttachment.vue';
+export { default as AttachmentPreview } from './AttachmentPreview.vue';
+export { default as AttachmentViewer } from './AttachmentViewer.vue';

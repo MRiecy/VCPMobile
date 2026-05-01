@@ -17,6 +17,10 @@ html, body, #app {
   padding: 0;
 }
 
+html {
+  overscroll-behavior: none;
+}
+
 body {
   background-color: var(--primary-bg);
   color: var(--primary-text);

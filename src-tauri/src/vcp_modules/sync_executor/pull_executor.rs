@@ -152,7 +152,10 @@ impl PullExecutor {
                                 })
                                 .await;
                             if retries > 0 {
-                                println!("[PullExecutor] Avatar {} {} succeeded after {} retries", owner_type, owner_id, retries);
+                                println!(
+                                    "[PullExecutor] Avatar {} {} succeeded after {} retries",
+                                    owner_type, owner_id, retries
+                                );
                             }
                             return Ok(());
                         }
@@ -163,7 +166,10 @@ impl PullExecutor {
                             delay_ms *= 2;
                         }
                         Err(e) => {
-                            return Err(format!("Pull avatar decode failed after {} retries: {}", max_retries, e));
+                            return Err(format!(
+                                "Pull avatar decode failed after {} retries: {}",
+                                max_retries, e
+                            ));
                         }
                     }
                 }
@@ -174,7 +180,10 @@ impl PullExecutor {
                     delay_ms *= 2;
                 }
                 Err(e) => {
-                    return Err(format!("Pull avatar request failed after {} retries: {}", max_retries, e));
+                    return Err(format!(
+                        "Pull avatar request failed after {} retries: {}",
+                        max_retries, e
+                    ));
                 }
             }
         }

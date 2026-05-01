@@ -15,7 +15,7 @@ use crate::vcp_modules::vcp_client::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{ipc::Channel, AppHandle, Emitter, State};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +33,7 @@ pub struct GroupChatParams {
     pub user_message: ChatMessage,
     pub vcp_url: String,
     pub vcp_api_key: String,
+    pub stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
 }
 
 pub async fn process_group_chat_message(
@@ -44,6 +45,7 @@ pub async fn process_group_chat_message(
     cancelled_turns: State<'_, CancelledGroupTurns>,
     params: GroupChatParams,
 ) -> Result<Value, String> {
+    let stream_channel = params.stream_channel;
     let group_id = params.group_id;
     let topic_id = params.topic_id;
     let user_message = params.user_message;
@@ -96,6 +98,7 @@ pub async fn process_group_chat_message(
         &topic_id,
         Some(8), // 限制上下文长度
         None,
+        true,
     )
     .await?;
 
@@ -150,6 +153,7 @@ pub async fn process_group_chat_message(
             &topic_id,
             None,
             None,
+            true,
         )
         .await?;
 
@@ -195,12 +199,16 @@ pub async fn process_group_chat_message(
                 "isGroupMessage": true,
                 "agentName": agent_name
             })),
-            stream_channel: None,
         };
 
         // 执行请求 (串行等待)
-        let res_result =
-            perform_vcp_request(&app_handle, active_requests_map, request_payload).await;
+        let res_result = perform_vcp_request(
+            &app_handle,
+            active_requests_map,
+            request_payload,
+            stream_channel.clone(),
+        )
+        .await;
 
         if let Ok((res, is_aborted)) = res_result {
             if let Some(full_content) = res["fullContent"].as_str() {
@@ -273,6 +281,7 @@ pub async fn process_group_chat_message(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_group_chat_message(
     app_handle: AppHandle,
     group_state: State<'_, GroupManagerState>,
@@ -281,6 +290,7 @@ pub async fn handle_group_chat_message(
     active_requests: State<'_, ActiveRequests>,
     cancelled_turns: State<'_, CancelledGroupTurns>,
     payload: GroupChatPayload,
+    stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
     log::info!(
         "[GroupChatAppService] handle_group_chat_message invoked for group: {}",
@@ -300,6 +310,7 @@ pub async fn handle_group_chat_message(
             user_message: payload.user_message,
             vcp_url: payload.vcp_url,
             vcp_api_key: payload.vcp_api_key,
+            stream_channel: Some(stream_channel),
         },
     )
     .await

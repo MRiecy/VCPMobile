@@ -6,7 +6,7 @@
     size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[200px]">
+    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[180px]">
       <div class="relative w-9 h-9 shrink-0 rounded-lg overflow-hidden bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10">
         <img 
           v-if="thumbnailSrc"
@@ -26,7 +26,7 @@
       <!-- File Info -->
       <div class="flex flex-col min-w-0">
         <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
-          {{ file.name || 'Video' }}
+          {{ displayName }}
         </div>
         <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
           {{ formatSize(file.size) }} • VIDEO
@@ -40,6 +40,7 @@
 import { computed } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
+import { truncateFileName } from "../utils/truncateFileName";
 import type { Attachment } from "../../../../core/stores/chatManager";
 
 const props = withDefaults(defineProps<{
@@ -51,6 +52,8 @@ const props = withDefaults(defineProps<{
 });
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
+
+const displayName = computed(() => truncateFileName(props.file.name || 'Video'));
 
 const thumbnailSrc = computed(() => {
   const src = props.file.thumbnailPath || props.file.src;
