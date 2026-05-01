@@ -91,24 +91,56 @@ jobs:
         shell: bash
         env:
           NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ env.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ env.ANDROID_KEY_PASSWORD }}
         run: |
           pnpm tauri android build --apk --target aarch64
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          # 定位 apksigner（Android build-tools 中）
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -n 1)
+          if [[ -z "$APK_SIGNER" ]]; then
+            echo "apksigner not found in build-tools" >&2
+            exit 1
+          fi
+
+          # 定位构建产物
+          SOURCE_APK=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" -type f | head -n 1)
+          if [[ -z "$SOURCE_APK" || ! -f "$SOURCE_APK" ]]; then
+            echo "No release APK found" >&2
+            find src-tauri/gen/android/app/build/outputs -name "*.apk" -type f || true
+            exit 1
+          fi
+
+          echo "APK path: $SOURCE_APK"
+
+          # 1. 验证签名有效性（失败会中断）
+          echo "=== apksigner verify ==="
+          "$APK_SIGNER" verify -v "$SOURCE_APK"
+
+          # 2. 打印证书指纹（方便核对密钥库一致性）
+          echo "=== Certificate Info ==="
+          keytool -printcert -jarfile "$SOURCE_APK" | grep -E "(SHA1|SHA256|Valid from)"
+
+          # 3. 保存路径供后续步骤使用
+          echo "SOURCE_APK=$SOURCE_APK" >> "$GITHUB_ENV"
 
       - name: Collect and rename APK artifact
         id: artifacts
         shell: bash
         run: |
           mkdir -p release-artifacts
-          
-          # 动态查找所有 release APK（适配不同 target 输出路径）
-          source_apk=$(find src-tauri/gen/android/app/build/outputs/apk -name "*-release.apk" -type f | head -n 1)
-          
+
+          source_apk="${{ env.SOURCE_APK }}"
           if [[ -z "$source_apk" || ! -f "$source_apk" ]]; then
-            echo "No release APK found in apk outputs" >&2
-            find src-tauri/gen/android/app/build/outputs -name "*.apk" -type f || true
+            echo "SOURCE_APK not set or file missing" >&2
             exit 1
           fi
-          
+
           target_apk="release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_arm64-v8a.apk"
           cp "$source_apk" "$target_apk"
           echo "artifact_dir=release-artifacts" >> "$GITHUB_OUTPUT"
