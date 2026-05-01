@@ -100,6 +100,10 @@ jobs:
 
       - name: Verify APK signature
         shell: bash
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEY_ALIAS: ${{ env.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           # 定位 apksigner（Android build-tools 中）
           APK_SIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -n 1)
@@ -122,9 +126,27 @@ jobs:
           echo "=== apksigner verify ==="
           "$APK_SIGNER" verify -v "$SOURCE_APK"
 
-          # 2. 打印证书指纹（方便核对密钥库一致性）
-          echo "=== Certificate Info ==="
-          keytool -printcert -jarfile "$SOURCE_APK" | grep -E "(SHA1|SHA256|Valid from)"
+          # 2. 提取并比对证书指纹（keytool 不支持 v2-only，改用 apksigner）
+          echo "=== APK Certificate ==="
+          "$APK_SIGNER" verify --print-certs "$SOURCE_APK"
+
+          APK_SHA256=$("$APK_SIGNER" verify --print-certs "$SOURCE_APK" | grep "SHA-256 digest:" | awk '{print $NF}')
+          KEYSTORE_SHA256=$(echo "$ANDROID_KEYSTORE_PASSWORD" | keytool -list -v -keystore "$ANDROID_KEYSTORE_PATH" -alias "$ANDROID_KEY_ALIAS" 2>/dev/null | grep "SHA256:" | awk '{print $2}' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+
+          echo "=== Fingerprint Comparison ==="
+          echo "APK:      $APK_SHA256"
+          echo "Keystore: $KEYSTORE_SHA256"
+
+          if [[ -n "$KEYSTORE_SHA256" && "$APK_SHA256" != "$KEYSTORE_SHA256" ]]; then
+            echo "ERROR: APK certificate does NOT match keystore!" >&2
+            exit 1
+          fi
+
+          # 兜底检查：确保证书不是 Android Debug
+          if "$APK_SIGNER" verify --print-certs "$SOURCE_APK" | grep -qi "Android Debug"; then
+            echo "ERROR: APK is signed with Android Debug key!" >&2
+            exit 1
+          fi
 
           # 3. 保存路径供后续步骤使用
           echo "SOURCE_APK=$SOURCE_APK" >> "$GITHUB_ENV"
