@@ -7,8 +7,8 @@ use serde_json::json;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-use super::sysfs_utils::{read_sysfs, find_thermal_zone};
 use super::frontend_bridge;
+use super::sysfs_utils::{find_thermal_zone, read_sysfs};
 
 pub struct DeviceStatusSummaryTool;
 
@@ -57,7 +57,8 @@ impl DeviceStatusSummaryTool {
         let busy = read_sysfs("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage");
         if !busy.is_empty() {
             let temp = read_sysfs("/sys/class/kgsl/kgsl-3d0/temp")
-                .parse::<i64>().ok()
+                .parse::<i64>()
+                .ok()
                 .map(|t| format!("/{}°C", t / 1000))
                 .unwrap_or_default();
             return Some(format!("GPU:{}{}", busy.trim_end_matches('%'), temp));
@@ -77,9 +78,17 @@ impl DeviceStatusSummaryTool {
         let mut avail = 0u64;
         for line in info.lines() {
             if line.starts_with("MemTotal:") {
-                total = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                total = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
             } else if line.starts_with("MemAvailable:") {
-                avail = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                avail = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
             }
         }
         if total > 0 {

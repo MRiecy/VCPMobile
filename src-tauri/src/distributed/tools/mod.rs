@@ -6,19 +6,19 @@ mod clipboard;
 mod device_info;
 mod notification;
 
-mod sysfs_utils;
 mod battery;
 mod cpu_info;
 mod gpu_info;
 mod memory_info;
 mod network_info;
 mod storage_info;
+mod sysfs_utils;
 
+mod ambient_sensor;
+mod device_status_summary;
 pub(crate) mod frontend_bridge;
 mod location;
 mod motion_sensor;
-mod ambient_sensor;
-mod device_status_summary;
 
 use super::tool_registry::ToolRegistry;
 

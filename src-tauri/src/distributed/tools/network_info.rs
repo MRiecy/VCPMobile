@@ -88,14 +88,8 @@ impl NetworkInfoTool {
 
     /// Read traffic statistics for an interface.
     fn read_traffic(&self, iface: &str) -> String {
-        let rx = read_sysfs_u64(&format!(
-            "/sys/class/net/{}/statistics/rx_bytes",
-            iface
-        ));
-        let tx = read_sysfs_u64(&format!(
-            "/sys/class/net/{}/statistics/tx_bytes",
-            iface
-        ));
+        let rx = read_sysfs_u64(&format!("/sys/class/net/{}/statistics/rx_bytes", iface));
+        let tx = read_sysfs_u64(&format!("/sys/class/net/{}/statistics/tx_bytes", iface));
 
         match (rx, tx) {
             (Some(r), Some(t)) => {

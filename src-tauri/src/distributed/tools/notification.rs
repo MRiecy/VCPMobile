@@ -16,7 +16,9 @@ impl OneShotTool for NotificationTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileNotification".to_string(),
-            description: "在移动设备上发送本地通知。Send a local notification on the mobile device.".to_string(),
+            description:
+                "在移动设备上发送本地通知。Send a local notification on the mobile device."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

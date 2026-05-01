@@ -7,9 +7,9 @@ use serde_json::json;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-use super::sysfs_utils::ThrottledCache;
 #[cfg(unix)]
 use super::sysfs_utils::format_bytes;
+use super::sysfs_utils::ThrottledCache;
 
 pub struct StorageInfoTool {
     cache: ThrottledCache,
@@ -25,9 +25,8 @@ impl StorageInfoTool {
     /// Read storage info using libc::statvfs (Unix/Android only).
     #[cfg(unix)]
     fn read_storage(&self) -> String {
-        let path = std::ffi::CString::new("/data").unwrap_or_else(|_| {
-            std::ffi::CString::new("/").unwrap()
-        });
+        let path = std::ffi::CString::new("/data")
+            .unwrap_or_else(|_| std::ffi::CString::new("/").unwrap());
 
         unsafe {
             let mut stat: libc::statvfs = std::mem::zeroed();
