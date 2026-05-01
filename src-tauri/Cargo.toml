@@ -55,6 +55,8 @@ md5 = "0.7"
 tauri-plugin-log = "2"
 base64 = "0.22"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+async-trait = "0.1"
+libc = "0.2"
 percent-encoding = "2"
 urlencoding = "2"
 

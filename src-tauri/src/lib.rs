@@ -1,3 +1,4 @@
+mod distributed;
 mod vcp_modules;
 
 use tauri::Manager;
@@ -70,6 +71,7 @@ pub fn run() {
             app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());
             app.manage(UploadManagerState::new());
+            app.manage(distributed::DistributedState::new());
 
             let handle = app.handle().clone();
 
@@ -180,6 +182,10 @@ pub fn run() {
             get_last_error,
             get_sync_status,
             start_manual_sync,
+            distributed::start_distributed_node,
+            distributed::stop_distributed_node,
+            distributed::get_distributed_status,
+            distributed::update_sensor_data,
             check_for_update,
             download_update,
             install_update,

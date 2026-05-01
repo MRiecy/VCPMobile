@@ -11,6 +11,9 @@ import MaintenanceSection from "./components/MaintenanceSection.vue";
 import UpdateSection from "./components/UpdateSection.vue";
 import ThemePicker from "./ThemePicker.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
+import DistributedSettingsSection from "../distributed/DistributedSettingsSection.vue";
+import ToolInteractionOverlay from "../distributed/ToolInteractionOverlay.vue";
+import SensorCollector from "../distributed/SensorCollector.vue";
 
 // 原子组件
 import SettingsSection from "../../components/settings/SettingsSection.vue";
@@ -148,75 +151,105 @@ watch(
           :default-open="true"
           accent-color="bg-blue-500"
         >
-          <VcpCoreSettingsSection
-            :settings="settings"
-            @save-request="saveSettings"
-          />
-        </SettingsDisclosure>
+          正在加载设置...
+        </div>
+        <div v-else class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe">
+          <!-- 用户档案 -->
+          <UserProfileSection :settings="settings" />
 
-        <!-- 数据同步 -->
-        <SettingsDisclosure
-          title="数据同步"
-          description="连接桌面端同步插件"
-          accent-color="bg-green-500"
-        >
-          <SyncSettingsSection
-            :settings="settings"
-            @save-request="saveSettings"
-          />
-        </SettingsDisclosure>
+          <!-- 核心连接 -->
+          <SettingsDisclosure
+            title="核心连接"
+            description="VCP Server API 与 WebSocket 鉴权"
+            :default-open="true"
+            accent-color="bg-blue-500"
+          >
+            <VcpCoreSettingsSection
+              :settings="settings"
+              @save-request="saveSettings"
+            />
+          </SettingsDisclosure>
 
-        <!-- 话题总结 -->
-        <SettingsDisclosure
-          title="话题总结"
-          description="配置总结专用模型"
-          accent-color="bg-yellow-500"
-        >
-          <TopicSummarySection
-            :settings="settings"
-            @open-model-selector="showSummaryModelSelector = true"
-          />
-        </SettingsDisclosure>
+          <!-- 数据同步 -->
+          <SettingsDisclosure
+            title="数据同步"
+            description="连接桌面端同步插件"
+            accent-color="bg-green-500"
+          >
+            <SyncSettingsSection
+              :settings="settings"
+              @save-request="saveSettings"
+              @open-sync="openSyncView"
+            />
+          </SettingsDisclosure>
 
-        <!-- 视觉长廊 -->
-        <SettingsSection title="视觉长廊" accent-color="bg-orange-500">
-          <SettingsCard no-padding>
-            <div class="p-4">
-              <ThemePicker />
-            </div>
-          </SettingsCard>
-        </SettingsSection>
+          <!-- 话题总结 -->
+          <SettingsDisclosure
+            title="话题总结"
+            description="配置总结专用模型"
+            accent-color="bg-yellow-500"
+          >
+            <TopicSummarySection
+              :settings="settings"
+              @open-model-selector="showSummaryModelSelector = true"
+            />
+          </SettingsDisclosure>
 
-        <!-- 数据维护 -->
-        <SettingsSection title="数据维护" accent-color="bg-red-500">
-          <SettingsCard>
-            <MaintenanceSection />
-          </SettingsCard>
-        </SettingsSection>
+          <!-- 分布式节点 -->
+          <SettingsDisclosure
+            title="分布式节点"
+            description="作为移动端工具节点接入主服务器"
+            accent-color="bg-purple-500"
+          >
+            <DistributedSettingsSection
+              :settings="settings"
+              @save-request="saveSettings"
+            />
+          </SettingsDisclosure>
 
-        <!-- 关于 -->
-        <SettingsSection title="关于" accent-color="bg-gray-500">
-          <SettingsCard>
-            <UpdateSection />
-          </SettingsCard>
-        </SettingsSection>
+          <!-- 视觉长廊 -->
+          <SettingsSection title="视觉长廊" accent-color="bg-orange-500">
+            <SettingsCard no-padding>
+              <div class="p-4">
+                <ThemePicker />
+              </div>
+            </SettingsCard>
+          </SettingsSection>
 
-        <div class="h-4"></div>
+          <!-- 数据维护 -->
+          <SettingsSection title="数据维护" accent-color="bg-red-500">
+            <SettingsCard>
+              <MaintenanceSection />
+            </SettingsCard>
+          </SettingsSection>
 
-        <SettingsActionButton
-          variant="primary"
-          size="lg"
-          full-width
-          @click="saveSettings"
-        >
-          保存并应用变更
-        </SettingsActionButton>
+          <div class="h-4"></div>
+
+          <SettingsActionButton
+            variant="primary"
+            size="lg"
+            full-width
+            @click="saveSettings"
+          >
+            保存并应用变更
+          </SettingsActionButton>
 
         <div
           class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest"
         >
           VCP MOBILE · PROJECT AVATAR<br />INTERNAL RELEASE 2026.04.07
         </div>
+
+        <ToolInteractionOverlay />
+        <SensorCollector />
+
+        <ModelSelector
+          :model-value="showSummaryModelSelector"
+          @update:model-value="showSummaryModelSelector = $event"
+          :current-model="settings.topicSummaryModel"
+          title="选择总结专用模型"
+          @select="onSummaryModelSelect"
+        />
       </div>
 
       <ModelSelector

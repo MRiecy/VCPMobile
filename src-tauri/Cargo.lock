@@ -6348,6 +6348,7 @@ checksum = "7ba6f5989077681266825251a52748b8c1d8a4ad098cc37e440103d0ea717fc0"
 name = "vcp-mobile"
 version = "0.9.10"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "chrono",
  "dashmap",
@@ -6357,6 +6358,7 @@ dependencies = [
  "hex",
  "image",
  "lazy_static",
+ "libc",
  "log",
  "lru",
  "md5",
