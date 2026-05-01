@@ -141,19 +141,6 @@ watch(
         正在加载设置...
       </div>
       <div v-else class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe">
-        <!-- 用户档案 -->
-        <UserProfileSection :settings="settings" />
-
-        <!-- 核心连接 -->
-        <SettingsDisclosure
-          title="核心连接"
-          description="VCP Server API 与 WebSocket 鉴权"
-          :default-open="true"
-          accent-color="bg-blue-500"
-        >
-          正在加载设置...
-        </div>
-        <div v-else class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe">
           <!-- 用户档案 -->
           <UserProfileSection :settings="settings" />
 
@@ -179,7 +166,6 @@ watch(
             <SyncSettingsSection
               :settings="settings"
               @save-request="saveSettings"
-              @open-sync="openSyncView"
             />
           </SettingsDisclosure>
 
@@ -223,6 +209,13 @@ watch(
             </SettingsCard>
           </SettingsSection>
 
+          <!-- 关于 -->
+          <SettingsSection title="关于" accent-color="bg-gray-500">
+            <SettingsCard>
+              <UpdateSection />
+            </SettingsCard>
+          </SettingsSection>
+
           <div class="h-4"></div>
 
           <SettingsActionButton
@@ -251,14 +244,6 @@ watch(
           @select="onSummaryModelSelect"
         />
       </div>
-
-      <ModelSelector
-        :model-value="showSummaryModelSelector"
-        @update:model-value="showSummaryModelSelector = $event"
-        :current-model="settings.topicSummaryModel"
-        title="选择总结专用模型"
-        @select="onSummaryModelSelect"
-      />
     </div>
   </SlidePage>
 </template>
