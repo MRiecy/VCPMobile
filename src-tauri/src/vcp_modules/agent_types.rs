@@ -7,6 +7,7 @@ fn default_true() -> bool {
 
 /// 智能体(Agent)的完整配置结构
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     /// 智能体 ID
     #[serde(default)]
@@ -15,7 +16,7 @@ pub struct AgentConfig {
     #[serde(default = "default_agent_name")]
     pub name: String,
     /// 系统提示词 (System Prompt)
-    #[serde(rename = "systemPrompt", default)]
+    #[serde(default)]
     pub system_prompt: String,
     /// 使用的模型 (如: "gemini-2.0-flash")
     #[serde(default = "default_model")]
@@ -24,17 +25,17 @@ pub struct AgentConfig {
     #[serde(default = "default_temperature")]
     pub temperature: f64,
     /// 上下文 Token 限制
-    #[serde(rename = "contextTokenLimit", default = "default_context_limit")]
+    #[serde(default = "default_context_limit")]
     pub context_token_limit: i32,
     /// 单次输出最大 Token 数
-    #[serde(rename = "maxOutputTokens", default = "default_max_output")]
+    #[serde(default = "default_max_output")]
     pub max_output_tokens: i32,
 
-    #[serde(rename = "streamOutput", default = "default_true")]
+    #[serde(default = "default_true")]
     pub stream_output: bool,
 
     // avatars 表派生字段
-    #[serde(rename = "avatarCalculatedColor", default)]
+    #[serde(default)]
     pub avatar_calculated_color: Option<String>,
 
     /// 话题列表
@@ -42,7 +43,7 @@ pub struct AgentConfig {
     pub topics: Vec<Topic>,
 
     /// 当前活跃话题 ID
-    #[serde(rename = "currentTopicId", default)]
+    #[serde(default)]
     pub current_topic_id: Option<String>,
 }
 

@@ -11,6 +11,9 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
   // --- 连接状态机 ---
   const status = ref<'idle' | 'connecting' | 'connected' | 'error' | 'completed'>('idle');
 
+  // --- 面板视图 ---
+  const activeTab = ref<'live' | 'history'>('live');
+
   // --- 同步完成后需刷新标志（once-set，不受断连等异常状态影响） ---
   const needsReload = ref(false);
 
@@ -23,11 +26,19 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
 
   const open = () => {
     isOpen.value = true;
-    canDismiss.value = true; // 初始可退出，连接成功后锁定
-    status.value = 'connecting';
+    canDismiss.value = true;
+    status.value = 'idle';
+    activeTab.value = 'live';
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
     registerListeners();
+  };
+
+  const startSync = () => {
+    if (status.value !== 'idle') return;
+    status.value = 'connecting';
+    logs.value = [];
+    progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
     invoke('start_manual_sync').catch((e: any) => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';
@@ -38,16 +49,26 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
   const close = () => {
     if (!canDismiss.value) return;
     isOpen.value = false;
+    activeTab.value = 'live';
     cleanupListeners();
   };
 
-  const copyLogs = () => {
-    const text = logs.value.map(l => `[${l.time}] ${l.message}`).reverse().join('\n');
-    navigator.clipboard.writeText(text).then(() => {
-      pushLog('success', '日志已复制到剪贴板');
-    }).catch(() => {
-      pushLog('error', '复制失败');
-    });
+  const copyLogs = async () => {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const files = await invoke<Array<{ filename: string }>>('list_sync_log_files');
+      if (files && files.length > 0) {
+        const content = await invoke<string>('read_sync_log_file', { filename: files[0].filename });
+        await navigator.clipboard.writeText(content);
+        pushLog('success', '完整日志已复制到剪贴板');
+      } else {
+        const text = logs.value.map(l => `[${l.time}] ${l.message}`).join('\n');
+        await navigator.clipboard.writeText(text);
+        pushLog('success', '会话日志已复制到剪贴板');
+      }
+    } catch (e: any) {
+      pushLog('error', `复制失败: ${e}`);
+    }
   };
 
   const registerListeners = () => {
@@ -81,12 +102,17 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
   };
 
   const pushLog = (level: string, message: string) => {
-    logs.value.unshift({ level, message, time: new Date().toLocaleTimeString() });
-    if (logs.value.length > 50) logs.value.pop();
+    logs.value.push({ level, message, time: new Date().toLocaleTimeString() });
+    if (logs.value.length > 200) logs.value.shift();
   };
 
   const markReloaded = () => {
     needsReload.value = false;
+  };
+
+  const switchTab = (tab: 'live' | 'history') => {
+    if (status.value === 'connected') return;
+    activeTab.value = tab;
   };
 
   return {
@@ -96,9 +122,12 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     needsReload,
     logs,
     progressData,
+    activeTab,
     open,
     close,
+    startSync,
     copyLogs,
     markReloaded,
+    switchTab,
   };
 });

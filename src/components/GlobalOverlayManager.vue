@@ -23,7 +23,7 @@ const handleEditorSave = (newContent: string) => {
 </script>
 
 <template>
-  <div class="fixed inset-0 pointer-events-none">
+  <div class="fixed inset-0 pointer-events-none z-[60]">
     <!-- 1. 全局基础 UI (Prompt/Toast) -->
     <VcpPrompt v-if="overlayStore.promptConfig" class="pointer-events-auto" :is-open="!!overlayStore.promptConfig"
       :title="overlayStore.promptConfig.title" :initial-value="overlayStore.promptConfig.initialValue"

@@ -3,8 +3,7 @@ import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppSettings } from '../../../core/stores/settings';
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
-import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
-import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
+import SettingsActionWithStatus from '../../../components/settings/SettingsActionWithStatus.vue';
 
 const props = defineProps<{
   settings: AppSettings;
@@ -55,12 +54,14 @@ const testVcpConnection = async () => {
     <SettingsTextField v-model="settings.vcpLogKey" is-secure label="VCP WebSocket 鉴权 Key"
       placeholder="输入 WebSocket Key" mono />
 
-    <div class="pt-2 flex items-center justify-between gap-4">
-      <SettingsInlineStatus v-if="vcpPingStatus.type" :type="vcpPingStatus.type" :message="vcpPingStatus.message"
-        class="flex-1" />
-      <SettingsActionButton variant="primary" :loading="vcpPingStatus.type === 'loading'" @click="testVcpConnection">
-        验证连接
-      </SettingsActionButton>
-    </div>
+    <SettingsActionWithStatus
+      button-variant="primary"
+      button-label="验证连接"
+      :button-loading="vcpPingStatus.type === 'loading'"
+      :status-type="vcpPingStatus.type"
+      :status-message="vcpPingStatus.message"
+      status-multiline
+      @action-click="testVcpConnection"
+    />
   </div>
 </template>

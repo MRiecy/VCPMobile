@@ -179,13 +179,17 @@ const updateContentBlocks = async (text: string) => {
     const blocks = await processMessageContent(text || "", options);
     streamContent.value = blocks[0]?.content || "";
   } else {
-    // 动态编译态 (例如流式刚结束，或者刚编辑完)
+    // 动态编译态 (例如流式刚结束，或者刚编辑完，或者历史消息缺少预编译)
+    const hadBlocks = !!props.message.blocks && props.message.blocks.length > 0;
     isTransitioning.value = true;
     try {
       const newBlocks = await processMessageContent(text || "", options);
       contentBlocks.value = newBlocks;
-      // 可选：将新编译的块缓存到 message 对象上，防止后续频繁重编
-      props.message.blocks = newBlocks;
+      
+      // 核心修复：如果原始消息缺少预编译块，或者这是刚解析出的新块，则尝试保存到数据库
+      if (!hadBlocks || text !== props.message.content) {
+        chatStore.persistMessageBlocks(props.message.id, newBlocks);
+      }
     } finally {
       // 确保无论解析成功失败，都能解除过渡状态
       isTransitioning.value = false;
@@ -199,6 +203,7 @@ watch(
     () =>
       props.message.processedContent ||
       props.message.displayedContent ||
+      props.message.content ||
       "",
     () => isStreaming.value,
   ],
@@ -345,10 +350,10 @@ const showMessageContextMenu = async () => {
 
   // 获取内容的统一方法，结合懒加载
   const getFullText = async () => {
-    let text = props.message.content || streamContent.value;
-    if (!text && props.message.blocks) {
+    const text = props.message.content ?? streamContent.value;
+    if (text === undefined || text === null || text === "") {
       // 触发懒加载获取原文
-      text = await chatStore.fetchRawContent(props.message.id);
+      return await chatStore.fetchRawContent(props.message.id);
     }
     return text;
   };
@@ -447,8 +452,8 @@ const showMessageContextMenu = async () => {
 
 const handleSaveEdit = async (newContent: string) => {
   const chatStore = useChatManagerStore();
-  let currentContent = props.message.content || "";
-  if (!currentContent) {
+  let currentContent = props.message.content;
+  if (currentContent === undefined || currentContent === null || currentContent === "") {
     currentContent = await chatStore.fetchRawContent(props.message.id);
     props.message.content = currentContent;
   }

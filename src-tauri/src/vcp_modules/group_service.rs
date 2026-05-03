@@ -262,7 +262,7 @@ pub async fn create_group(
         group_prompt: Some("".to_string()),
         invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
         use_unified_model: false,
-        unified_model: None,
+        unified_model: Some("".to_string()),
         topics: vec![default_topic.clone()],
         tag_match_mode: Some("strict".to_string()),
         created_at: timestamp,

@@ -24,6 +24,9 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
 
     println!("[DBManager] Initializing SQLite at: {:?}", db_path);
 
+    // 自动迁移旧版附件 (Android)
+    let _ = crate::vcp_modules::file_manager::migrate_legacy_attachments(app_handle);
+
     // 配置连接选项
     let mut connect_options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&db_path)

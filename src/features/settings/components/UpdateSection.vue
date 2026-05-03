@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { useUpdateDownloader } from '../../../core/composables/useUpdateDownloader';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
 import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
@@ -15,11 +16,6 @@ interface UpdateInfo {
   releasePageUrl: string | null;
   releaseNotes: string | null;
   apkSize: number | null;
-}
-
-interface DownloadProgress {
-  downloaded: number;
-  total: number | null;
 }
 
 type UpdateStatus =
@@ -59,6 +55,8 @@ const formatBytes = (bytes: number) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
+const { downloadAndInstall: startDownload } = useUpdateDownloader();
+
 const checkUpdate = async () => {
   status.value = { type: 'checking' };
   try {
@@ -88,27 +86,8 @@ const downloadAndInstall = async () => {
 
   status.value = { type: 'downloading', progress: 0, total: null };
 
-  const channel = new Channel<DownloadProgress>();
-  channel.onmessage = (msg) => {
-    status.value = { type: 'downloading', progress: msg.downloaded, total: msg.total };
-  };
-
-  let apkPath: string;
   try {
-    apkPath = await invoke('download_update', {
-      url: info.downloadUrl,
-      onProgress: channel,
-    });
-  } catch (e: any) {
-    status.value = { type: 'error', message: `下载失败: ${e}` };
-    return;
-  }
-
-  status.value = { type: 'installing' };
-
-  try {
-    await invoke('install_update', { apkPath });
-    // 安装器已唤起，给用户提供提示
+    await startDownload(info.downloadUrl);
     status.value = { type: 'idle' };
   } catch (e: any) {
     // 本地安装失败，尝试用浏览器打开直链或 Release 页面
@@ -125,7 +104,7 @@ const downloadAndInstall = async () => {
     } catch {
       // ignore
     }
-    status.value = { type: 'error', message: `安装失败: ${e}` };
+    status.value = { type: 'error', message: `更新失败: ${e}` };
   }
 };
 </script>

@@ -75,8 +75,8 @@ lazy_static! {
     static ref THOUGHT_START: Regex = Regex::new(r"(?im)^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
     static ref THOUGHT_END: Regex = Regex::new(r"(?im)^[ \t]*\[--- 元思考链结束 ---\]").unwrap();
 
-    static ref THINK_START: Regex = Regex::new(r"(?im)^[ \t]*(?i)<think(?:ing)?>").unwrap();
-    static ref THINK_END: Regex = Regex::new(r"(?im)^[ \t]*(?i)</think(?:ing)?>").unwrap();
+    static ref THINK_START: Regex = Regex::new(r"(?i)<think(?:ing)?>").unwrap();
+    static ref THINK_END: Regex = Regex::new(r"(?i)</think(?:ing)?>").unwrap();
 
     static ref TOOL_RESULT_START: Regex = Regex::new(r"(?im)^[ \t]*\[\[VCP调用结果信息汇总:").unwrap();
     static ref TOOL_RESULT_END: Regex = Regex::new(r"(?im)^[ \t]*VCP调用结果结束\]\]").unwrap();

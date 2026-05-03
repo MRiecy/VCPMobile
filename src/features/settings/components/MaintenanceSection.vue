@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import SettingsRow from '../../../components/settings/SettingsRow.vue';
-import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
-import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
+import SettingsActionWithStatus from '../../../components/settings/SettingsActionWithStatus.vue';
 
 const cleanupStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 
@@ -21,17 +19,17 @@ const cleanupAttachments = async () => {
 
 <template>
   <div class="space-y-2">
-    <SettingsRow title="附件库垃圾回收 (GC)" description="深度扫描并删除未被引用的孤立附件与缩略图">
-      <template #action>
-        <SettingsActionButton variant="danger" size="sm" :loading="cleanupStatus.type === 'loading'"
-          @click="cleanupAttachments">
-          立即清理
-        </SettingsActionButton>
-      </template>
-    </SettingsRow>
-
-    <div v-if="cleanupStatus.type" class="mt-3">
-      <SettingsInlineStatus :type="cleanupStatus.type" :message="cleanupStatus.message" mono />
-    </div>
+    <SettingsActionWithStatus
+      title="附件库垃圾回收 (GC)"
+      description="深度扫描并删除未被引用的孤立附件与缩略图"
+      button-variant="danger"
+      button-size="sm"
+      button-label="立即清理"
+      :button-loading="cleanupStatus.type === 'loading'"
+      :status-type="cleanupStatus.type"
+      :status-message="cleanupStatus.message"
+      status-mono
+      @action-click="cleanupAttachments"
+    />
   </div>
 </template>

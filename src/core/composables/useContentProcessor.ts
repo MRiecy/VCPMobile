@@ -91,18 +91,26 @@ export function useContentProcessor() {
     // THOUGHT
     processed = processed.replace(
       /\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]([\s\S]*?)(?:\[--- 元思考链结束 ---\]|$)/gs,
-      (_, theme, content) => {
+      (match, theme, content) => {
+        const isComplete = match.includes("[--- 元思考链结束 ---]");
         const displayTheme = theme
           ? theme.trim().replace(/"/g, "")
           : "元思考链";
-        return `\n<div class="my-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-sm"><div class="flex items-center gap-2 mb-2 opacity-70 font-bold"><span class="grayscale">🧠</span> <span>${displayTheme}</span><span class="i-lucide-loader-2 animate-spin text-[12px]">...</span></div><div class="italic opacity-80">${content}</div></div>\n`;
+        const statusLabel = isComplete ? `${displayTheme} (已完成)` : displayTheme;
+        const loader = isComplete ? "" : '<span class="i-lucide-loader-2 animate-spin text-[12px]">...</span>';
+        
+        return `\n<div class="my-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-sm"><div class="flex items-center gap-2 mb-2 opacity-70 font-bold"><span class="grayscale">🧠</span> <span>${statusLabel}</span>${loader}</div><div class="italic opacity-80">${content}</div></div>\n`;
       },
     );
     // THINK (Standard)
     processed = processed.replace(
       /<think(?:ing)?>([\s\S]*?)(?:<\/think(?:ing)?>|$)/gi,
-      (_, content) => {
-        return `\n<div class="my-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-sm"><div class="flex items-center gap-2 mb-2 opacity-70 font-bold"><span class="grayscale">🧠</span> <span>思维链</span><span class="i-lucide-loader-2 animate-spin text-[12px]">...</span></div><div class="italic opacity-80">${content}</div></div>\n`;
+      (match, content) => {
+        const isComplete = match.toLowerCase().includes("</think");
+        const statusLabel = isComplete ? "思索完毕" : "思维链";
+        const loader = isComplete ? "" : '<span class="i-lucide-loader-2 animate-spin text-[12px]">...</span>';
+
+        return `\n<div class="my-2 p-3 bg-black/5 dark:bg-white/5 rounded-xl border border-black/10 dark:border-white/10 text-sm"><div class="flex items-center gap-2 mb-2 opacity-70 font-bold"><span class="grayscale">🧠</span> <span>${statusLabel}</span>${loader}</div><div class="italic opacity-80">${content}</div></div>\n`;
       },
     );
     // 注意：MATH block 的解析已迁移至 Rust 后端 parse_content，

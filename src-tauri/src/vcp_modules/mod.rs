@@ -19,7 +19,6 @@ pub mod lifecycle_manager;
 pub mod message_render_compiler;
 pub mod message_repository;
 pub mod message_service;
-pub mod message_stream_protocol;
 pub mod model_manager;
 pub mod protocol_manager;
 pub mod settings_manager;
@@ -34,6 +33,8 @@ pub mod topic_types;
 pub mod vcp_client;
 pub mod vcp_log_service;
 
+pub mod frontend_update_manager;
+pub mod ota_assets;
 pub mod sync_executor;
 pub mod sync_hash;
 pub mod sync_manifest;

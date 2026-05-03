@@ -244,12 +244,24 @@ impl PushExecutor {
             let owner_id: String = r.get("owner_id");
             let owner_type: String = r.get("owner_type");
 
+            // 推送时必须加载该 topic 的全部消息，否则会导致桌面端 hash 不一致
+            let msg_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+            )
+            .bind(topic_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap_or(0);
+            if msg_count > 9999 {
+                println!("[PushExecutor] WARN: topic {} has {} messages, exceeding single-batch load limit. Consider incremental push protocol.", topic_id, msg_count);
+            }
+
             let history = crate::vcp_modules::message_service::load_chat_history_internal(
                 app,
                 &owner_id,
                 &owner_type,
                 topic_id,
-                Some(1000),
+                None,
                 None,
                 true,
             )
@@ -272,6 +284,8 @@ impl PushExecutor {
                             .get("neededAttachmentHashes")
                             .and_then(|v| v.as_array())
                         {
+                            // 1. 筛选出真正需要上传的附件 hash
+                            let mut hashes_to_upload = Vec::new();
                             for hash_value in needed_hashes {
                                 if let Some(hash) = hash_value.as_str() {
                                     let should_upload = if let Some(ref tracker) = uploaded_hashes {
@@ -280,19 +294,31 @@ impl PushExecutor {
                                     } else {
                                         true
                                     };
-
                                     if should_upload {
-                                        let _ = upload_attachment(
-                                            app, client, http_url, sync_token, hash,
-                                        )
-                                        .await;
-
-                                        if let Some(ref tracker) = uploaded_hashes {
-                                            let mut tracker_guard = tracker.write().await;
-                                            tracker_guard.insert(hash.to_string());
-                                        }
+                                        hashes_to_upload.push(hash.to_string());
                                     } else {
                                         println!("[PushExecutor] Skipping already uploaded attachment: {}", hash);
+                                    }
+                                }
+                            }
+
+                            // 2. 限流并发上传（最多 3 个并发）
+                            const MAX_CONCURRENT_UPLOADS: usize = 3;
+                            for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
+                                let futures: Vec<_> = chunk
+                                    .iter()
+                                    .map(|hash| {
+                                        upload_attachment(app, client, http_url, sync_token, hash)
+                                    })
+                                    .collect();
+                                let results = futures_util::future::join_all(futures).await;
+                                // 3. 批量标记已上传
+                                if let Some(ref tracker) = uploaded_hashes {
+                                    let mut tracker_guard = tracker.write().await;
+                                    for (hash, result) in chunk.iter().zip(results) {
+                                        if result.is_ok() {
+                                            tracker_guard.insert(hash.clone());
+                                        }
                                     }
                                 }
                             }
@@ -377,16 +403,27 @@ async fn upload_attachment<R: Runtime>(
         let mime_type: String = att_row.get("mime_type");
         let internal_path: String = att_row.get("internal_path");
 
+        let name_row =
+            sqlx::query("SELECT display_name FROM message_attachments WHERE hash = ? LIMIT 1")
+                .bind(hash)
+                .fetch_optional(&db.pool)
+                .await
+                .unwrap_or(None);
+        let display_name = name_row
+            .map(|r| r.get::<String, _>("display_name"))
+            .unwrap_or_else(|| "unnamed".to_string());
+
         let file_path = internal_path.trim_start_matches("file://");
         let file_data = tokio::fs::read(file_path)
             .await
             .map_err(|e| format!("读取附件失败: {}", e))?;
 
         let url = format!(
-            "{}/api/mobile-sync/upload-attachment?hash={}&type={}",
+            "{}/api/mobile-sync/upload-attachment?hash={}&type={}&name={}",
             http_url,
             hash,
-            urlencoding::encode(&mime_type)
+            urlencoding::encode(&mime_type),
+            urlencoding::encode(&display_name)
         );
 
         let response = client

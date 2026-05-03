@@ -180,6 +180,62 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     info!("[Lifecycle] Bootstrap complete. Core is READY.");
 
+    // 6. 后台静默检查前端热更新（完全非阻塞）
+    {
+        let h = handle.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            info!("[FrontendUpdate] Starting background check...");
+
+            match crate::vcp_modules::frontend_update_manager::check_for_frontend_update(h.clone())
+                .await
+            {
+                Ok(info) => {
+                    if info.has_update {
+                        if let Some(url) = info.download_url {
+                            info!(
+                                "[FrontendUpdate] New version available: {}, downloading...",
+                                info.remote_version
+                            );
+                            match crate::vcp_modules::frontend_update_manager::download_frontend_update_inner(
+                                &h,
+                                &url,
+                                None,
+                            )
+                            .await
+                            {
+                                Ok(zip_path) => {
+                                    if let Err(e) = crate::vcp_modules::frontend_update_manager::apply_frontend_update(
+                                        h.clone(),
+                                        zip_path,
+                                        info.remote_version.clone(),
+                                    )
+                                    .await
+                                    {
+                                        log::error!("[FrontendUpdate] Apply failed: {}", e);
+                                    } else {
+                                        info!(
+                                            "[FrontendUpdate] Version {} downloaded and applied. Will take effect on next cold start.",
+                                            info.remote_version
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("[FrontendUpdate] Download failed: {}", e);
+                                }
+                            }
+                        }
+                    } else {
+                        info!("[FrontendUpdate] No frontend update available.");
+                    }
+                }
+                Err(e) => {
+                    log::error!("[FrontendUpdate] Check failed: {}", e);
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 

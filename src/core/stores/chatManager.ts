@@ -8,7 +8,6 @@ import { useSettingsStore } from "./settings";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
 import { useNotificationStore } from "./notification";
-import { syncService } from "../utils/syncService";
 import { useDocumentProcessor } from "../composables/useDocumentProcessor";
 import type { ContentBlock } from "../composables/useContentProcessor";
 
@@ -491,6 +490,17 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         onMessage: channel,
       });
 
+      // [空列表兜底] 新建话题或空话题时 Rust 端不会发送任何 Channel 消息，
+      // 导致 completePromise 永不 resolve。此处手动处理空列表情况。
+      if (receivedCount === 0) {
+        if (offset === 0) {
+          currentChatHistory.value = [];
+          hasMoreHistory.value = false;
+          historyOffset.value = 0;
+        }
+        (resolveComplete as (() => void) | null)?.();
+      }
+
       // 等待最后一条消息处理完毕
       await completePromise;
 
@@ -634,12 +644,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
         toastOnly: true,
       });
 
-      // 触发同步到桌面端
-      syncService.pushTopicToDesktop(
-        currentSelectedItem.value.id,
-        currentTopicId.value,
-        currentChatHistory.value,
-      );
     }
   };
 
@@ -661,7 +665,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       role: "assistant",
       name:
         currentSelectedItem.value.type === "agent"
-          ? currentSelectedItem.value.name || "Assistant"
+          ? (assistantStore.agents.find((a) => a.id === agentId)?.name || "Assistant")
           : undefined,
       content: "",
       timestamp: now + 1, // 增加 1ms 偏移，确保在时间序列上绝对位于提问之后
@@ -705,12 +709,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           message: thinkingMsg,
         });
 
-        // 触发同步到桌面端
-        syncService.pushTopicToDesktop(
-          currentSelectedItem.value.id,
-          currentTopicId.value,
-          currentChatHistory.value,
-        );
       }
 
       const settings = settingsStore.settings;
@@ -929,9 +927,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
       currentChatHistory.value.splice(targetIndex, 1);
     }
 
-    // 触发同步到桌面端
-    syncService.pushTopicToDesktop(ownerId, topicId, currentChatHistory.value);
-
     notificationStore.addNotification({
       type: "success",
       title: "消息已删除",
@@ -1000,12 +995,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
           topicId,
           message: msg,
         });
-        // 触发同步到桌面端
-        syncService.pushTopicToDesktop(
-          ownerId,
-          topicId,
-          currentChatHistory.value,
-        );
       }
     } catch (e) {
       console.error(
@@ -1073,33 +1062,12 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     }
 
     try {
-      const url = `vcp://api/messages?msg_id=${encodeURIComponent(messageId)}&fetch_raw=true`;
       console.log(`[ChatManager] Lazy loading raw content for message: ${messageId}`);
-      const rawData = await new Promise<{ content: string }>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('GET', url, true);
-        xhr.responseType = 'json';
-        
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve(xhr.response);
-          } else {
-            reject(new Error(`VCP fetch_raw request failed with status ${xhr.status}`));
-          }
-        };
-        
-        xhr.onerror = () => {
-          reject(new Error('VCP Network Error during fetch_raw'));
-        };
-        
-        xhr.send();
-      });
-
-      if (existingMsg && rawData && typeof rawData.content === 'string') {
-        existingMsg.content = rawData.content;
-        return rawData.content;
+      const content = await invoke<string>('fetch_raw_message_content', { messageId });
+      if (existingMsg) {
+        existingMsg.content = content;
       }
-      return "";
+      return content;
     } catch (e) {
       console.error(`[ChatManager] Failed to fetch raw content for ${messageId}:`, e);
       return "";
@@ -1348,6 +1316,26 @@ export const useChatManagerStore = defineStore("chatManager", () => {
   /**
    * 选择一个助手或群组，并自动跳转到最近的话题
    */
+  const selectTopicById = async (itemId: string, topicId: string) => {
+    // 立即更新 currentTopicId，确保话题列表高亮实时响应
+    currentTopicId.value = topicId;
+
+    const ownerType = assistantStore.agents.some((a) => a.id === itemId)
+      ? "agent"
+      : "group";
+
+    // [关键] 在 loadHistory 之前设置 currentSelectedItem，保持与原始逻辑一致的时序
+    const agent = assistantStore.agents.find((a: any) => a.id === itemId);
+    const group = assistantStore.groups.find((g) => g.id === itemId);
+    if (agent) {
+      currentSelectedItem.value = { ...agent, type: "agent" };
+    } else if (group) {
+      currentSelectedItem.value = { ...group, type: "group" };
+    }
+
+    await loadHistoryPaginated(itemId, ownerType, topicId);
+  };
+
   const selectItem = async (item: any) => {
     if (!item) return;
     
@@ -1379,14 +1367,36 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     }
 
     if (targetTopicId) {
-      currentSelectedItem.value = { ...item, type: ownerType };
-      await loadHistoryPaginated(ownerId, ownerType, targetTopicId);
+      await selectTopicById(ownerId, targetTopicId);
     } else {
       // 没有任何话题的极端情况
       console.warn(`[ChatManager] No topics found for ${ownerId}`);
       currentSelectedItem.value = { ...item, type: ownerType };
       currentChatHistory.value = [];
       currentTopicId.value = null;
+    }
+  };
+
+  /**
+   * 异步将实时计算出的 AST 块持久化到数据库
+   */
+  const persistMessageBlocks = async (messageId: string, blocks: ContentBlock[]) => {
+    const msg = currentChatHistory.value.find((m) => m.id === messageId);
+    if (!msg || !currentSelectedItem.value?.id || !currentTopicId.value) return;
+
+    // 仅当内存中尚无预编译块，或内容发生变化时才持久化，避免无效写入
+    msg.blocks = blocks;
+    
+    try {
+      await invoke("patch_single_message", {
+        ownerId: currentSelectedItem.value.id,
+        ownerType: currentSelectedItem.value.type,
+        topicId: currentTopicId.value,
+        message: msg,
+      });
+      console.log(`[ChatManager] Persisted pre-computed blocks for ${messageId}`);
+    } catch (e) {
+      console.warn(`[ChatManager] Failed to persist blocks for ${messageId}:`, e);
     }
   };
 
@@ -1408,6 +1418,7 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     hasMoreHistory,
     isLoadingHistory,
     selectItem,
+    selectTopicById,
     fetchRawContent,
     sendMessage,
     handleAttachment,
@@ -1418,5 +1429,6 @@ export const useChatManagerStore = defineStore("chatManager", () => {
     regenerateResponse,
     isGroupGenerating,
     activeStreamingIds,
+    persistMessageBlocks,
   };
 });

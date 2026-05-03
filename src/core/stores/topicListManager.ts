@@ -195,11 +195,15 @@ export const useTopicStore = defineStore("topic", () => {
         toastOnly: true,
       });
 
-      // 如果删除的是当前选中的话题，通知 chatManager
+      // 如果删除的是当前选中的话题，自动载入最新的一个
       if (chatManager.currentTopicId === topicId) {
-        // 修复响应式误用：在 setup store 中，跨 store 访问 ref 需要通过 .value
-        (chatManager as any).currentTopicId = null;
-        (chatManager as any).currentChatHistory = [];
+        const nextTopic = topics.value[0];
+        if (nextTopic) {
+          await chatManager.selectTopicById(ownerId, nextTopic.id);
+        } else {
+          chatManager.currentTopicId = null;
+          chatManager.currentChatHistory = [];
+        }
       }
     } catch (e) {
       console.error("[TopicStore] Failed to delete topic:", e);

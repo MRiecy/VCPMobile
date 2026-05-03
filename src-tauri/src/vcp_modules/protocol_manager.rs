@@ -1,19 +1,9 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::message_stream_protocol::handle_vcp_request;
 use sha2::{Digest, Sha256};
 use std::fs;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-
-/// 协议指挥部：统一管理所有 VCP 私有协议
-pub fn register_vcp_protocols<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    builder
-        // 1. 同步协议（已迁移为异步处理）：vcp://api/messages
-        .register_asynchronous_uri_scheme_protocol("vcp", |ctx, request, responder| {
-            handle_vcp_request(ctx, request, responder);
-        })
-}
 
 #[derive(serde::Deserialize)]
 pub struct UploadMetadata {
@@ -198,9 +188,7 @@ async fn finalize_high_speed_upload<R: Runtime>(
         format!("{}.{}", hash, ext)
     };
 
-    let mut dest = app_handle.path().app_config_dir().unwrap();
-    dest.push("data");
-    dest.push("attachments");
+    let dest = crate::vcp_modules::file_manager::get_attachments_root_dir(app_handle)?;
     if !dest.exists() {
         fs::create_dir_all(&dest).ok();
     }

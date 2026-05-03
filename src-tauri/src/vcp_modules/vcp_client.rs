@@ -440,7 +440,9 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                             full_content.push_str(text);
                                                         }
                                                         if let Some(reason) = choice["finish_reason"].as_str() {
-                                                            last_finish_reason = Some(reason.to_string());
+                                                            last_finish_reason = Some(
+                                                                if reason == "stop" { "completed".to_string() } else { reason.to_string() }
+                                                            );
                                                         }
                                                     }
 
