@@ -1,6 +1,6 @@
 [package]
 name = "vcp-mobile"
-version = "0.9.11"
+version = "0.9.12"
 description = "A Tauri App"
 authors = ["MRiecy"]
 edition = "2021"
@@ -54,6 +54,9 @@ image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 md5 = "0.7"
 tauri-plugin-log = "2"
 base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+mime_guess = "2"
+tauri-utils = "2"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"
 libc = "0.2"

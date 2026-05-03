@@ -346,8 +346,14 @@ impl DbWriteQueue {
                         }
 
                         // 补偿：如果该 topic 已有消息（因竞态先写入了消息），更新 msg_count
-                        let count: i32 = sqlx::query_scalar::<_, i64>(
-                            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL"
+                        let current_msg_count: i32 = sqlx::query_scalar("SELECT msg_count FROM topics WHERE topic_id = ?")
+                            .bind(&topic_id)
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap_or(0);
+
+                        let actual_count: i32 = sqlx::query_scalar::<_, i64>(
+                            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
                         )
                         .bind(&topic_id)
                         .fetch_optional(&pool)
@@ -355,13 +361,17 @@ impl DbWriteQueue {
                         .ok()
                         .flatten()
                         .unwrap_or(0) as i32;
-                        if count > 0 {
+
+                        if actual_count > 0 && actual_count != current_msg_count {
                             let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                                .bind(count)
+                                .bind(actual_count)
                                 .bind(&topic_id)
                                 .execute(&pool)
                                 .await;
-                            println!("[DbWriteQueue] AgentTopic {} msg_count compensated to {}", topic_id, count);
+                            println!(
+                                "[DbWriteQueue] Topic {} msg_count compensated to {}",
+                                topic_id, actual_count
+                            );
                         }
 
                         Ok(())
@@ -417,7 +427,14 @@ impl DbWriteQueue {
                 }
 
                 // 补偿：如果该 topic 已有消息（因竞态先写入了消息），更新 msg_count
-                let count: i32 = sqlx::query_scalar::<_, i64>(
+                let current_msg_count: i32 =
+                    sqlx::query_scalar("SELECT msg_count FROM topics WHERE topic_id = ?")
+                        .bind(topic_id)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+
+                let actual_count: i32 = sqlx::query_scalar::<_, i64>(
                     "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
                 )
                 .bind(topic_id)
@@ -426,15 +443,16 @@ impl DbWriteQueue {
                 .ok()
                 .flatten()
                 .unwrap_or(0) as i32;
-                if count > 0 {
+
+                if actual_count > 0 && actual_count != current_msg_count {
                     let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                        .bind(count)
+                        .bind(actual_count)
                         .bind(topic_id)
                         .execute(pool)
                         .await;
                     println!(
-                        "[DbWriteQueue] GroupTopic {} msg_count compensated to {}",
-                        topic_id, count
+                        "[DbWriteQueue] Topic {} msg_count compensated to {}",
+                        topic_id, actual_count
                     );
                 }
 

@@ -11,6 +11,7 @@ const APK_ASSET_SUFFIX: &str = "arm64-v8a.apk";
 const APK_FILENAME: &str = "update.apk";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub has_update: bool,
     pub current_version: String,

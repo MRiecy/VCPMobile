@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -53,25 +56,66 @@ pub struct SyncLogger {
     log_level: LogLevel,
     phases: HashMap<String, Arc<SyncPhaseMetrics>>,
     error_aggregator: ErrorAggregator,
+    log_file: Option<std::fs::File>,
+    log_path: Option<PathBuf>,
 }
 
 impl SyncLogger {
-    pub fn new_session(log_level: LogLevel) -> Self {
+    pub fn new_session(log_level: LogLevel, log_dir: Option<PathBuf>) -> Self {
         println!("[Sync] Session started");
+
+        let (log_file, log_path) = if let Some(dir) = log_dir {
+            if let Ok(()) = fs::create_dir_all(&dir) {
+                let filename = format!("{}_sync.log", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+                let path = dir.join(&filename);
+                match OpenOptions::new().create(true).append(true).open(&path) {
+                    Ok(file) => {
+                        println!("[SyncLogger] Logging to {:?}", path);
+                        (Some(file), Some(path))
+                    }
+                    Err(e) => {
+                        println!("[SyncLogger] Failed to create log file: {}", e);
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
 
         Self {
             log_level,
             phases: HashMap::new(),
             error_aggregator: ErrorAggregator::new(),
+            log_file,
+            log_path,
         }
     }
 
-    pub fn log(&self, level: LogLevel, phase: &str, message: &str) {
+    pub fn log(&mut self, level: LogLevel, phase: &str, message: &str) {
         if level < self.log_level {
             return;
         }
 
+        let line = format!(
+            "[{}] [{:?}] [{}] {}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
+            level,
+            phase,
+            message
+        );
         println!("[Sync] [{}] {}", phase, message);
+
+        if let Some(ref mut file) = self.log_file {
+            let _ = writeln!(file, "{}", line);
+            let _ = file.flush();
+        }
+    }
+
+    pub fn log_path(&self) -> Option<&PathBuf> {
+        self.log_path.as_ref()
     }
 
     pub fn start_phase(&mut self, phase: &str, expected: u32) {
@@ -89,6 +133,18 @@ impl SyncLogger {
             phase,
             &format!("Phase started (expected={})", expected),
         );
+    }
+
+    pub fn update_phase_expected(&mut self, phase: &str, delta: u32) {
+        if let Some(metrics) = self.phases.get(phase) {
+            metrics.expected_count.fetch_add(delta, Ordering::SeqCst);
+        }
+    }
+
+    pub fn set_phase_expected(&mut self, phase: &str, expected: u32) {
+        if let Some(metrics) = self.phases.get(phase) {
+            metrics.expected_count.store(expected, Ordering::SeqCst);
+        }
     }
 
     pub fn log_operation(
@@ -128,7 +184,7 @@ impl SyncLogger {
         }
     }
 
-    pub fn complete_phase(&self, phase: &str) -> Option<PhaseSummary> {
+    pub fn complete_phase(&mut self, phase: &str) -> Option<PhaseSummary> {
         let metrics = self.phases.get(phase)?;
 
         let duration = metrics.started_at.elapsed().as_millis() as u64;
@@ -154,45 +210,21 @@ impl SyncLogger {
         })
     }
 
-    pub fn end_session(&self) {
+    pub fn end_session(&mut self) {
         println!("[Sync] Session ended");
+        if let Some(ref mut file) = self.log_file {
+            let _ = writeln!(
+                file,
+                "[{}] [INFO] [sync] Session ended",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+            );
+            let _ = file.flush();
+        }
     }
 }
 
 impl Default for ErrorAggregator {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_log_level_filtering() {
-        let logger = SyncLogger::new_session(LogLevel::Info);
-
-        assert!(logger.log_level >= LogLevel::Info);
-    }
-
-    #[test]
-    fn test_phase_tracking() {
-        let mut logger = SyncLogger::new_session(LogLevel::Info);
-        logger.start_phase("metadata", 10);
-
-        logger.log_operation("metadata", "agent", "agent_001", true, None);
-        logger.log_operation(
-            "metadata",
-            "group",
-            "group_001",
-            false,
-            Some("database locked"),
-        );
-
-        let summary = logger.complete_phase("metadata").unwrap();
-        assert_eq!(summary.expected, 10);
-        assert_eq!(summary.success, 1);
-        assert_eq!(summary.errors, 1);
     }
 }

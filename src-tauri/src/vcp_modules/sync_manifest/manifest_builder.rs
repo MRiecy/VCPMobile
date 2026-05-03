@@ -73,6 +73,9 @@ impl ManifestBuilder {
         let mut items = Vec::new();
         for r in rows {
             let id: String = r.get("topic_id");
+            if id == "default" {
+                continue;
+            }
             let owner_type: String = r.get("owner_type");
 
             let hash = if owner_type == "group" {
@@ -138,7 +141,7 @@ impl ManifestBuilder {
         })
     }
 
-    pub async fn build_all_manifests(pool: &SqlitePool) -> Result<Vec<SyncManifest>, String> {
+    pub async fn build_phase1_manifests(pool: &SqlitePool) -> Result<Vec<SyncManifest>, String> {
         let mut manifests = Vec::new();
         manifests.push(Self::build_agent_manifest(pool).await?);
         manifests.push(Self::build_group_manifest(pool).await?);

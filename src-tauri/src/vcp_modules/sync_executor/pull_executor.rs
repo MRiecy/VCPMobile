@@ -113,6 +113,90 @@ impl PullExecutor {
         Ok(())
     }
 
+    pub async fn pull_entities_batch<R: Runtime>(
+        _app: &AppHandle<R>,
+        client: &reqwest::Client,
+        http_url: &str,
+        sync_token: &str,
+        requests: Vec<serde_json::Value>,
+        write_queue: &DbWriteQueue,
+    ) -> Result<(), String> {
+        let url = format!("{}/api/mobile-sync/download-entities", http_url);
+        let res = client
+            .post(&url)
+            .header("x-sync-token", sync_token)
+            .json(&serde_json::json!({ "requests": requests }))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !res.status().is_success() {
+            return Err(format!("Pull entities batch failed: {}", res.status()));
+        }
+
+        let results: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
+        for item in results {
+            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let r#type = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let data = item.get("data").cloned().unwrap_or(serde_json::Value::Null);
+
+            match r#type {
+                "agent" => {
+                    if let Ok(dto) = serde_json::from_value::<AgentSyncDTO>(data) {
+                        write_queue
+                            .submit(DbWriteTask::Agent {
+                                id: id.to_string(),
+                                dto,
+                            })
+                            .await;
+                    }
+                }
+                "group" => {
+                    if let Ok(dto) = serde_json::from_value::<GroupSyncDTO>(data) {
+                        write_queue
+                            .submit(DbWriteTask::Group {
+                                id: id.to_string(),
+                                dto,
+                            })
+                            .await;
+                    }
+                }
+                "agent_topic" => {
+                    if id == "default" {
+                        continue;
+                    }
+                    if let Ok(dto) = serde_json::from_value::<AgentTopicSyncDTO>(data) {
+                        write_queue
+                            .submit(DbWriteTask::AgentTopic {
+                                topic_id: id.to_string(),
+                                dto,
+                            })
+                            .await;
+                    }
+                }
+                "group_topic" => {
+                    if id == "default" {
+                        continue;
+                    }
+                    if let Ok(dto) = serde_json::from_value::<GroupTopicSyncDTO>(data) {
+                        write_queue
+                            .submit(DbWriteTask::GroupTopic {
+                                topic_id: id.to_string(),
+                                dto,
+                            })
+                            .await;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn pull_avatar<R: Runtime>(
         _app: &AppHandle<R>,
         client: &reqwest::Client,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, watch, ref, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { useVirtualList } from "@vueuse/core";
 import { useTopicStore, type Topic } from "../../core/stores/topicListManager";
@@ -30,6 +30,25 @@ const currentTopics = computed<TopicViewModel[]>(() => {
 const { list, containerProps, wrapperProps } = useVirtualList(currentTopics, {
   itemHeight: 74, // 10(h-10) + padding/margins, 约 74px
 });
+
+// 拦截容器引用，用于数据变化时手动控制滚动位置
+const scrollContainerRef = ref<HTMLElement | null>(null);
+const bindContainerRef = (el: unknown) => {
+  const htmlEl = el as HTMLElement | null;
+  containerProps.ref.value = htmlEl;
+  scrollContainerRef.value = htmlEl;
+};
+
+// 新建话题后自动滚动到顶部，强制虚拟列表重新计算并让用户看到新话题
+watch(
+  () => topicListStore.topics.length,
+  async (newLen, oldLen) => {
+    if (newLen > oldLen && scrollContainerRef.value) {
+      await nextTick();
+      scrollContainerRef.value.scrollTop = 0;
+    }
+  },
+);
 
 const showTopicContextMenu = (topicId: string) => {
   // 每次打开菜单时，从 store 中获取最新的 topic 状态，避免闭包捕获旧状态
@@ -135,34 +154,10 @@ const selectTopic = async (
     await router.push("/chat");
   }
 
-  const ownerType = assistantStore.agents.some((a) => a.id === itemId)
-    ? "agent"
-    : "group";
-  await chatStore.loadHistoryPaginated(itemId, ownerType, topicId);
+  await chatStore.selectTopicById(itemId, topicId);
 
-  // 更新当前选中项的名称 (保持 type)
-  if (
-    !chatStore.currentSelectedItem ||
-    chatStore.currentSelectedItem.id !== itemId
-  ) {
-    const agent = assistantStore.agents.find((a: any) => a.id === itemId);
-    if (agent) {
-      chatStore.currentSelectedItem = {
-        id: agent.id,
-        name: agent.name,
-        type: "agent",
-      };
-    } else {
-      const group = assistantStore.groups.find((g) => g.id === itemId);
-      if (group) {
-        chatStore.currentSelectedItem = {
-          id: group.id,
-          name: group.name,
-          type: "group",
-        };
-      }
-    }
-  } else {
+  // 顶部栏显示话题标题
+  if (chatStore.currentSelectedItem) {
     chatStore.currentSelectedItem.name = topicName;
   }
 
@@ -184,7 +179,7 @@ const selectTopic = async (
     <span class="text-xs">暂无话题，请先选择助手</span>
   </div>
 
-  <div v-else v-bind="containerProps" class="h-full overflow-y-auto vcp-scrollable px-4 py-4">
+  <div v-else :ref="bindContainerRef" :style="containerProps.style" @scroll="containerProps.onScroll" class="h-full overflow-y-auto vcp-scrollable px-4 py-4">
     <div v-bind="wrapperProps" class="flex flex-col">
       <div v-for="item in list" :key="item.data.id" class="pb-2" @click="
         selectTopic(

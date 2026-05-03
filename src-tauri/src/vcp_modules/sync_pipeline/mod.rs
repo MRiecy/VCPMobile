@@ -1,5 +1,4 @@
 pub mod phase1_metadata;
-pub mod phase2_topic;
 pub mod phase3_message;
 pub mod pipeline;
 pub mod pipeline_state;

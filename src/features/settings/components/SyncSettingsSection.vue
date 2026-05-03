@@ -5,6 +5,7 @@ import type { AppSettings } from "../../../core/stores/settings";
 import { useSyncSessionStore } from "../../../core/stores/syncSession";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
 import SettingsActionButton from "../../../components/settings/SettingsActionButton.vue";
+import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
 import SettingsRow from "../../../components/settings/SettingsRow.vue";
 
 defineProps<{
@@ -70,37 +71,21 @@ const rebuildEmoticonLibrary = async () => {
         mono
       />
 
-      <SettingsRow
+      <SettingsActionWithStatus
         title="表情包修复库"
         description="从 VCP 服务器同步表情包元数据"
-      >
-        <template #action>
-          <SettingsActionButton
-            variant="secondary"
-            size="sm"
-            :loading="emoticonStatus.type === 'loading'"
-            @click="rebuildEmoticonLibrary"
-          >
-            REFRESH
-          </SettingsActionButton>
-        </template>
-      </SettingsRow>
-
-      <div
-        v-if="emoticonStatus.message"
-        class="mt-1 text-xs px-1"
-        :class="{
-          'text-green-500': emoticonStatus.type === 'success',
-          'text-red-400': emoticonStatus.type === 'error',
-          'opacity-50': emoticonStatus.type === 'loading',
-        }"
-      >
-        {{ emoticonStatus.message }}
-      </div>
+        button-variant="secondary"
+        button-size="sm"
+        button-label="REFRESH"
+        :button-loading="emoticonStatus.type === 'loading'"
+        :status-type="emoticonStatus.type"
+        :status-message="emoticonStatus.message"
+        @action-click="rebuildEmoticonLibrary"
+      />
 
       <SettingsRow
         title="全量神经同步"
-        description="手动触发与桌面端的数据全量比对与同步"
+        description="打开全量神经同步面板，查看历史日志或开始同步"
       >
         <template #action>
           <SettingsActionButton
@@ -108,7 +93,7 @@ const rebuildEmoticonLibrary = async () => {
             size="sm"
             @click="startManualSync"
           >
-            START SYNC
+            OPEN PANEL
           </SettingsActionButton>
         </template>
       </SettingsRow>

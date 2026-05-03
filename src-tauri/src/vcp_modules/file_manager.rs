@@ -14,6 +14,116 @@ use std::sync::Mutex;
 /// =================================================================
 /// vcp_modules/file_manager.rs - 附件物理存储与分片上传管理
 /// =================================================================
+/// 核心路径解析：获取附件存储根目录
+/// Android: /storage/emulated/0/Android/data/<pkg>/files/attachments
+/// Windows: %APPDATA%/<pkg>/data/attachments
+pub fn get_attachments_root_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        // document_dir 在 Android 上通常指向 .../files/documents
+        if let Ok(mut path) = app_handle.path().document_dir() {
+            path.pop(); // 弹出 documents
+            path.push("attachments");
+            return Ok(path);
+        }
+    }
+
+    // 桌面端或 Fallback: 使用内部配置目录下的 data/attachments
+    let mut path = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("Failed to get app_config_dir: {}", e))?;
+    path.push("data");
+    path.push("attachments");
+    Ok(path)
+}
+
+/// 核心路径解析：获取缩略图存储根目录
+pub fn get_thumbnails_root_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
+    let mut path = get_attachments_root_dir(app_handle)?;
+    path.pop(); // 弹出 attachments
+    path.push("thumbnails");
+    Ok(path)
+}
+
+/// 迁移逻辑：将旧的内部存储附件迁移到新的外部存储目录 (仅限 Android)
+pub fn migrate_legacy_attachments(_app_handle: &AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let app_handle = _app_handle;
+        let mut old_dir = app_handle
+            .path()
+            .app_config_dir()
+            .map_err(|e| e.to_string())?;
+        old_dir.push("data");
+        old_dir.push("attachments");
+
+        let new_dir = get_attachments_root_dir(app_handle)?;
+
+        if old_dir.exists() && old_dir != new_dir {
+            if !new_dir.exists() {
+                fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
+            }
+
+            log::info!(
+                "[FileManager] Migrating attachments from {:?} to {:?}",
+                old_dir,
+                new_dir
+            );
+
+            if let Ok(entries) = fs::read_dir(&old_dir) {
+                for entry in entries.flatten() {
+                    let old_path = entry.path();
+                    if old_path.is_file() {
+                        let file_name = old_path.file_name().unwrap();
+                        let new_path = new_dir.join(file_name);
+                        if !new_path.exists() {
+                            let _ = fs::rename(&old_path, &new_path);
+                        } else {
+                            let _ = fs::remove_file(&old_path);
+                        }
+                    }
+                }
+            }
+
+            // 迁移缩略图
+            let mut old_thumb_dir = old_dir.clone();
+            old_thumb_dir.pop();
+            old_thumb_dir.push("thumbnails");
+
+            let new_thumb_dir = get_thumbnails_root_dir(app_handle)?;
+            if old_thumb_dir.exists() {
+                if !new_thumb_dir.exists() {
+                    let _ = fs::create_dir_all(&new_thumb_dir);
+                }
+                if let Ok(entries) = fs::read_dir(&old_thumb_dir) {
+                    for entry in entries.flatten() {
+                        let old_path = entry.path();
+                        if old_path.is_file() {
+                            let file_name = old_path.file_name().unwrap();
+                            let new_path = new_thumb_dir.join(file_name);
+                            if !new_path.exists() {
+                                let _ = fs::rename(&old_path, &new_path);
+                            } else {
+                                let _ = fs::remove_file(&old_path);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 清理旧目录
+            let _ = fs::remove_dir_all(&old_dir);
+            let _ = fs::remove_dir_all(&old_thumb_dir);
+        }
+    }
+    Ok(())
+}
+
 pub struct UploadSession {
     pub temp_path: std::path::PathBuf,
     pub original_name: String,
@@ -116,9 +226,15 @@ pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String 
 }
 
 /// 内部辅助函数：生成图片缩略图
-pub fn generate_thumbnail(original_path: &std::path::Path, hash: &str) -> Option<String> {
-    let mut thumb_path = original_path.parent()?.to_path_buf();
-    thumb_path.push("thumbnails");
+pub fn generate_thumbnail<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    original_path: &std::path::Path,
+    hash: &str,
+) -> Option<String> {
+    let thumb_path = match get_thumbnails_root_dir(app_handle) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
 
     if !thumb_path.exists() {
         let _ = fs::create_dir_all(&thumb_path);
@@ -147,11 +263,21 @@ fn ensure_safe_path(app_handle: &AppHandle, path: &std::path::Path) -> Result<()
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
-    // 允许访问 App 配置目录及其子目录
-    if path.starts_with(&config_dir) {
+
+    // 允许访问 App 配置目录 (内部) 或 附件目录 (可能在外部)
+    let attachments_dir = get_attachments_root_dir(app_handle)?;
+    let thumbnails_dir = get_thumbnails_root_dir(app_handle)?;
+
+    if path.starts_with(&config_dir)
+        || path.starts_with(&attachments_dir)
+        || path.starts_with(&thumbnails_dir)
+    {
         Ok(())
     } else {
-        Err("非法路径访问：禁止访问应用数据目录以外的文件".to_string())
+        Err(format!(
+            "非法路径访问：禁止访问应用授权范围以外的文件 ({:?})",
+            path
+        ))
     }
 }
 
@@ -162,9 +288,7 @@ pub fn resolve_attachment_path(
     hash: &str,
     original_name: &str,
 ) -> Option<String> {
-    let mut attachments_dir = app_handle.path().app_config_dir().ok()?;
-    attachments_dir.push("data");
-    attachments_dir.push("attachments");
+    let attachments_dir = get_attachments_root_dir(app_handle).ok()?;
 
     let ext = std::path::Path::new(original_name)
         .extension()
@@ -273,7 +397,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
 
 /// 将文件元数据注册到数据库并触发后处理 (缩略图、文本提取)
 pub async fn register_attachment_internal<R: tauri::Runtime>(
-    _app_handle: &tauri::AppHandle<R>,
+    app_handle: &tauri::AppHandle<R>,
     pool: &sqlx::SqlitePool,
     hash: String,
     original_name: String,
@@ -309,7 +433,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
 
     // 3. 生成缩略图 (如果适用)
     let thumbnail_path = if mime_type.starts_with("image/") {
-        generate_thumbnail(&internal_file_path, &hash)
+        generate_thumbnail(app_handle, &internal_file_path, &hash)
     } else {
         None
     };
@@ -368,12 +492,7 @@ pub async fn store_file(
         format!("{}.{}", hash, file_extension)
     };
 
-    let mut attachments_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    attachments_dir.push("data");
-    attachments_dir.push("attachments");
+    let attachments_dir = get_attachments_root_dir(&app_handle)?;
 
     if !attachments_dir.exists() {
         fs::create_dir_all(&attachments_dir).map_err(|e| e.to_string())?;
@@ -545,12 +664,7 @@ pub async fn finish_chunked_upload(
         format!("{}.{}", hash, ext)
     };
 
-    let mut attachments_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    attachments_dir.push("data");
-    attachments_dir.push("attachments");
+    let attachments_dir = get_attachments_root_dir(&app_handle)?;
     if !attachments_dir.exists() {
         fs::create_dir_all(&attachments_dir).ok();
     }
@@ -585,7 +699,7 @@ pub async fn finish_chunked_upload(
 
     let extracted_text = try_extract_text(&internal_file_path, &session.mime_type);
     let thumbnail_path = if session.mime_type.starts_with("image/") {
-        generate_thumbnail(&internal_file_path, &hash)
+        generate_thumbnail(&app_handle, &internal_file_path, &hash)
     } else {
         None
     };
@@ -610,12 +724,7 @@ pub async fn get_attachment_real_path(
     hash: String,
     original_name: String,
 ) -> Result<String, String> {
-    let mut attachments_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    attachments_dir.push("data");
-    attachments_dir.push("attachments");
+    let attachments_dir = get_attachments_root_dir(&app_handle)?;
 
     let file_extension = std::path::Path::new(&original_name)
         .extension()
@@ -725,12 +834,7 @@ pub async fn cleanup_orphaned_attachments(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
 ) -> Result<String, String> {
-    let mut attachments_dir = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| e.to_string())?;
-    attachments_dir.push("data");
-    attachments_dir.push("attachments");
+    let attachments_dir = get_attachments_root_dir(&app_handle)?;
 
     if !attachments_dir.exists() {
         return Ok("没有附件需要清理".to_string());
@@ -771,13 +875,16 @@ pub async fn cleanup_orphaned_attachments(
                 let _ = fs::remove_file(path);
 
                 // 同时删除可能的缩略图
-                if let Some(parent) = path.parent() {
-                    let thumb_path = parent
+                let thumb_path = match get_thumbnails_root_dir(&app_handle) {
+                    Ok(p) => p.join(format!("{}_thumb.webp", hash)),
+                    Err(_) => path
+                        .parent()
+                        .unwrap()
                         .join("thumbnails")
-                        .join(format!("{}_thumb.webp", hash));
-                    if thumb_path.exists() {
-                        let _ = fs::remove_file(thumb_path);
-                    }
+                        .join(format!("{}_thumb.webp", hash)),
+                };
+                if thumb_path.exists() {
+                    let _ = fs::remove_file(thumb_path);
                 }
 
                 deleted_count += 1;

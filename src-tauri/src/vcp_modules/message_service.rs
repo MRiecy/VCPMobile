@@ -1,4 +1,5 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
+use crate::vcp_modules::file_manager::get_attachments_root_dir;
 use crate::vcp_modules::message_render_compiler::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::settings_manager;
@@ -22,22 +23,27 @@ pub async fn load_chat_history_internal(
     let db_state = _app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
 
-    let limit = limit.unwrap_or(9999);
     let offset = offset.unwrap_or(0);
 
-    let rows = sqlx::query(
+    let query_str = if limit.is_some() {
         "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content 
          FROM messages 
          WHERE topic_id = ? AND deleted_at IS NULL 
          ORDER BY timestamp DESC, rowid DESC 
-         LIMIT ? OFFSET ?",
-    )
-    .bind(topic_id)
-    .bind(limit as i64)
-    .bind(offset as i64)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+         LIMIT ? OFFSET ?"
+    } else {
+        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content 
+         FROM messages 
+         WHERE topic_id = ? AND deleted_at IS NULL 
+         ORDER BY timestamp DESC, rowid DESC"
+    };
+
+    let mut q = sqlx::query(query_str).bind(topic_id);
+    if let Some(l) = limit {
+        q = q.bind(l as i64);
+        q = q.bind(offset as i64);
+    }
+    let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
 
     // 收集所有 msg_id，用于批量查询附件
     let mut msg_ids = Vec::new();
@@ -162,8 +168,7 @@ async fn ensure_attachments_locally(
         None => return Ok(()),
     };
 
-    let app_config = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    let att_dir = app_config.join("data").join("attachments");
+    let att_dir = get_attachments_root_dir(app)?;
     if !att_dir.exists() {
         fs::create_dir_all(&att_dir)
             .await
@@ -237,8 +242,12 @@ pub async fn append_single_message(
 ) -> Result<(), String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    let blocks = MessageRenderCompiler::compile(&message.content);
-    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    let render_bytes = if let Some(blocks_val) = &message.blocks {
+        serde_json::to_vec(blocks_val).map_err(|e| e.to_string())?
+    } else {
+        let blocks = MessageRenderCompiler::compile(&message.content);
+        MessageRenderCompiler::serialize(&blocks)?
+    };
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, false).await?;
@@ -264,6 +273,29 @@ pub async fn append_single_message(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn fetch_raw_message_content(
+    app_handle: tauri::AppHandle,
+    message_id: String,
+) -> Result<String, String> {
+    let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
+    let pool = &db_state.pool;
+
+    let row = sqlx::query("SELECT content FROM messages WHERE msg_id = ?")
+        .bind(&message_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            let content: String = r.get(0);
+            Ok(content)
+        }
+        None => Err(format!("Message {} not found", message_id)),
+    }
+}
+
 pub async fn patch_single_message(
     app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -275,8 +307,13 @@ pub async fn patch_single_message(
 ) -> Result<(), String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    let blocks = MessageRenderCompiler::compile(&message.content);
-    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    // 优先使用传入的 blocks，如果缺失则实时编译（支持前端预渲染兜底）
+    let render_bytes = if let Some(blocks_val) = &message.blocks {
+        serde_json::to_vec(blocks_val).map_err(|e| e.to_string())?
+    } else {
+        let blocks = MessageRenderCompiler::compile(&message.content);
+        MessageRenderCompiler::serialize(&blocks)?
+    };
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
@@ -303,8 +340,12 @@ pub async fn patch_single_message_no_app(
     message: ChatMessage,
     skip_bubble: bool,
 ) -> Result<(), String> {
-    let blocks = MessageRenderCompiler::compile(&message.content);
-    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    let render_bytes = if let Some(blocks_val) = &message.blocks {
+        serde_json::to_vec(blocks_val).map_err(|e| e.to_string())?
+    } else {
+        let blocks = MessageRenderCompiler::compile(&message.content);
+        MessageRenderCompiler::serialize(&blocks)?
+    };
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)

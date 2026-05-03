@@ -165,6 +165,14 @@ jobs:
 
           target_apk="release-artifacts/VCPMobile_v${{ steps.meta.outputs.version }}_arm64-v8a.apk"
           cp "$source_apk" "$target_apk"
+
+          # 打包前端热更新资源
+          if [[ -d "dist" ]]; then
+            frontend_zip="release-artifacts/frontend-dist-v${{ steps.meta.outputs.version }}.zip"
+            (cd dist && zip -r "../$frontend_zip" .)
+            echo "frontend_zip=$frontend_zip" >> "$GITHUB_ENV"
+          fi
+
           echo "artifact_dir=release-artifacts" >> "$GITHUB_OUTPUT"
 
       - name: Update GitHub Release assets
@@ -174,4 +182,5 @@ jobs:
           append_body: true
           files: |
             ${{ steps.artifacts.outputs.artifact_dir }}/*.apk
+            ${{ steps.artifacts.outputs.artifact_dir }}/frontend-dist-*.zip
 
