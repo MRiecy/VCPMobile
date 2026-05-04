@@ -3,7 +3,7 @@ import { computed, watch, ref, nextTick } from "vue";
 import { useRouter } from "vue-router";
 import { useVirtualList } from "@vueuse/core";
 import { useTopicStore, type Topic } from "../../core/stores/topicListManager";
-import { useChatManagerStore } from "../../core/stores/chatManager";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useOverlayStore } from "../../core/stores/overlay";
@@ -14,7 +14,7 @@ const emit = defineEmits<{
 }>();
 
 const topicListStore = useTopicStore();
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
@@ -58,7 +58,7 @@ const showTopicContextMenu = (topicId: string) => {
   const itemId =
     topic.ownerId ||
     topicListStore.currentAgentId ||
-    chatStore.currentSelectedItem?.id ||
+    sessionStore.currentSelectedItem?.id ||
     "default_agent";
   const ownerType = assistantStore.agents.some((a) => a.id === itemId)
     ? "agent"
@@ -133,7 +133,7 @@ const showTopicContextMenu = (topicId: string) => {
 
 // 兜底同步：当聊天上下文的选中项变化时，自动重新加载对应 Agent/Group 的话题列表
 watch(
-  () => chatStore.currentSelectedItem?.id,
+  () => sessionStore.currentSelectedItem?.id,
   (newId) => {
     if (newId) {
       const ownerType = assistantStore.agents.some((a) => a.id === newId)
@@ -154,11 +154,11 @@ const selectTopic = async (
     await router.push("/chat");
   }
 
-  await chatStore.selectTopicById(itemId, topicId);
+  await sessionStore.selectTopicById(itemId, topicId);
 
   // 顶部栏显示话题标题
-  if (chatStore.currentSelectedItem) {
-    chatStore.currentSelectedItem.name = topicName;
+  if (sessionStore.currentSelectedItem) {
+    sessionStore.currentSelectedItem.name = topicName;
   }
 
   // 在移动端，选择话题后自动关闭侧边栏
@@ -183,13 +183,13 @@ const selectTopic = async (
     <div v-bind="wrapperProps" class="flex flex-col">
       <div v-for="item in list" :key="item.data.id" class="pb-2" @click="
         selectTopic(
-          item.data.ownerId || chatStore.currentSelectedItem?.id || 'default_agent',
+          item.data.ownerId || sessionStore.currentSelectedItem?.id || 'default_agent',
           item.data.id,
           item.data.name,
         )
         " v-longpress="() => showTopicContextMenu(item.data.id)">
         <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 active:scale-95 transition-all border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
-          :class="chatStore.currentTopicId === item.data.id
+          :class="sessionStore.currentTopicId === item.data.id
               ? 'border-green-500/50 bg-green-500/10 dark:bg-green-500/20'
               : 'border-black/5 dark:border-white/5'
             ">

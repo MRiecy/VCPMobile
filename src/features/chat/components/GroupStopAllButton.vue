@@ -1,19 +1,21 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { useChatManagerStore } from '../../../core/stores/chatManager';
+import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
+import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
 import { Octagon } from 'lucide-vue-next';
 
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
+const streamStore = useChatStreamStore();
 
 const isVisible = computed(() => {
-  return chatStore.isGroupGenerating && chatStore.activeStreamingIds.size > 0;
+  return streamStore.isGroupGenerating && streamStore.activeStreamingIds.size > 0;
 });
 
-const activeCount = computed(() => chatStore.activeStreamingIds.size);
+const activeCount = computed(() => streamStore.activeStreamingIds.size);
 
 const handleStopAll = () => {
-  if (chatStore.currentTopicId) {
-    chatStore.stopGroupTurn(chatStore.currentTopicId);
+  if (sessionStore.currentTopicId) {
+    streamStore.stopGroupTurn(sessionStore.currentTopicId);
   }
 };
 </script>

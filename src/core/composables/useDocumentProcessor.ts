@@ -1,6 +1,6 @@
 import * as pdfjsLib from "pdfjs-dist";
 import mammoth from "mammoth";
-import { Attachment } from "../stores/chatManager";
+import { Attachment } from "../types/chat";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 // Configure PDF.js worker

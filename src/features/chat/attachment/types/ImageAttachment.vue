@@ -22,7 +22,7 @@
 import { computed } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
-import type { Attachment } from "../../../../core/stores/chatManager";
+import type { Attachment } from "../../../../core/types/chat";
 
 interface Props {
   file: Attachment;

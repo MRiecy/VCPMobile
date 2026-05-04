@@ -13,7 +13,7 @@ import { computed } from 'vue';
 import { AttachmentRegistry } from './AttachmentRegistry';
 import { AttachmentType } from './types/AttachmentType';
 import { classifyAttachment } from './utils/AttachmentClassifier';
-import type { Attachment } from '../../../core/stores/chatManager';
+import type { Attachment } from '../../../core/types/chat';
 
 interface Props {
   file: Attachment;

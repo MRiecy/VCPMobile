@@ -1,12 +1,14 @@
 import { ref, nextTick, watch, type Ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { useChatManagerStore } from '../../../core/stores/chatManager';
+import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
+import { useAttachmentStore } from '../../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../../core/stores/notification';
 
 const LONG_TEXT_THRESHOLD = 1200;
 
 export function useLongTextPaste(input: Ref<string>) {
-  const chatStore = useChatManagerStore();
+  const sessionStore = useChatSessionStore();
+  const attachmentStore = useAttachmentStore();
   const notificationStore = useNotificationStore();
   const isProcessing = ref(false);
 
@@ -14,7 +16,7 @@ export function useLongTextPaste(input: Ref<string>) {
    * 校验是否已选择 Agent 和话题
    */
   const assertTopicSelected = (): boolean => {
-    if (!chatStore.currentSelectedItem?.id || !chatStore.currentTopicId) {
+    if (!sessionStore.currentSelectedItem?.id || !sessionStore.currentTopicId) {
       notificationStore.addNotification({
         type: 'warning',
         title: '无法粘贴长文本',
@@ -35,7 +37,7 @@ export function useLongTextPaste(input: Ref<string>) {
     const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
     // 1. 插入 loading 占位
-    chatStore.stagedAttachments.unshift({
+    attachmentStore.stagedAttachments.unshift({
       id: stableId,
       type: 'text/plain',
       src: '',
@@ -55,10 +57,10 @@ export function useLongTextPaste(input: Ref<string>) {
       });
 
       // 3. 更新为完成状态
-      const index = chatStore.stagedAttachments.findIndex(a => a.id === stableId);
+      const index = attachmentStore.stagedAttachments.findIndex(a => a.id === stableId);
       if (index !== -1) {
-        chatStore.stagedAttachments[index] = {
-          ...chatStore.stagedAttachments[index],
+        attachmentStore.stagedAttachments[index] = {
+          ...attachmentStore.stagedAttachments[index],
           type: finalData.type,
           src: finalData.internalPath,
           name: finalData.name,
@@ -77,8 +79,8 @@ export function useLongTextPaste(input: Ref<string>) {
       });
     } catch (err) {
       console.error('[useLongTextPaste] Failed to stage text as file:', err);
-      const index = chatStore.stagedAttachments.findIndex(a => a.id === stableId);
-      if (index !== -1) chatStore.stagedAttachments.splice(index, 1);
+      const index = attachmentStore.stagedAttachments.findIndex(a => a.id === stableId);
+      if (index !== -1) attachmentStore.stagedAttachments.splice(index, 1);
       notificationStore.addNotification({
         type: 'error',
         title: '附件保存失败',

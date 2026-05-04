@@ -48,8 +48,8 @@ use vcp_modules::sync_service::{
     read_sync_log_file, start_manual_sync,
 };
 use vcp_modules::topic_service::{
-    create_topic, delete_topic, get_topics, set_topic_unread, summarize_topic, toggle_topic_lock,
-    update_topic_title,
+    create_topic, delete_topic, get_topics, get_topics_streamed, regenerate_topic_response,
+    set_topic_unread, summarize_topic, toggle_topic_lock, update_topic_title,
 };
 use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
@@ -176,6 +176,7 @@ pub fn run() {
             truncate_history_after_timestamp,
             process_message_content,
             get_topics,
+            get_topics_streamed,
             get_groups,
             read_group_config,
             create_topic,
@@ -183,6 +184,7 @@ pub fn run() {
             update_topic_title,
             toggle_topic_lock,
             set_topic_unread,
+            regenerate_topic_response,
             get_agents,
             read_agent_config,
             save_agent_config,

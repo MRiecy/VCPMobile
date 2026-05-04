@@ -18,6 +18,9 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
+const EXPECTED_PLUGIN_VERSION: &str = "0.9.13";
+const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct SyncState {
     pub ws_sender: mpsc::UnboundedSender<SyncCommand>,
     pub connection_status: Arc<RwLock<String>>,
@@ -214,9 +217,13 @@ async fn run_sync_session(
     let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level, log_dir)));
     {
         let sync_state = app_handle.state::<SyncState>();
-        if let Ok(path) = sync_logger.lock().map(|l| l.log_path().cloned()) {
-            let mut guard = sync_state.current_log_path.blocking_write();
-            *guard = path.map(|p| p.to_string_lossy().to_string());
+        let log_path = {
+            let logger = sync_logger.lock();
+            logger.ok().and_then(|l| l.log_path().cloned())
+        };
+        if let Some(path) = log_path {
+            let mut guard = sync_state.current_log_path.write().await;
+            *guard = Some(path.to_string_lossy().to_string());
         }
     }
     write_queue.set_logger(sync_logger.clone());
@@ -298,6 +305,75 @@ async fn run_sync_session(
             Ok((mut ws_stream, _)) => {
                 retry_count = 0;
                 retry_delay = Duration::from_millis(500);
+
+                // ── 版本验证握手 ──
+                {
+                    let version_req = json!({
+                        "type": "VERSION_CHECK",
+                        "mobileVersion": env!("CARGO_PKG_VERSION")
+                    });
+                    let _ = ws_stream
+                        .send(Message::Text(version_req.to_string().into()))
+                        .await;
+                    emit_sync_log(&handle_clone, "info", "正在验证桌面端插件版本...");
+
+                    let version_ok = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
+                        while let Some(Ok(msg)) = ws_stream.next().await {
+                            if let Message::Text(text) = msg {
+                                if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                                    if payload.get("type").and_then(|v| v.as_str())
+                                        == Some("VERSION_ACK")
+                                    {
+                                        return payload
+                                            .get("version")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+
+                    match version_ok {
+                        Some(plugin_version) => {
+                            if plugin_version == EXPECTED_PLUGIN_VERSION {
+                                emit_sync_log(
+                                    &handle_clone,
+                                    "success",
+                                    &format!("桌面端插件版本 v{} 验证通过", plugin_version),
+                                );
+                            } else {
+                                publish_sync_status(
+                                    &handle_clone,
+                                    &connection_status_for_task,
+                                    "error",
+                                    &format!(
+                                        "桌面端插件版本 v{} 与期望版本 v{} 不兼容",
+                                        plugin_version, EXPECTED_PLUGIN_VERSION
+                                    ),
+                                )
+                                .await;
+                                emit_sync_log(&handle_clone, "error", "请前往 https://github.com/MRiecy/VCPMobile/releases 下载最新同步插件");
+                                break;
+                            }
+                        }
+                        None => {
+                            publish_sync_status(
+                                &handle_clone,
+                                &connection_status_for_task,
+                                "error",
+                                "版本验证超时，桌面端插件可能过旧或不支持版本校验",
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                }
+
                 if let Ok(mut logger) = sync_logger_task.lock() {
                     logger.start_phase("metadata", 0);
                 }

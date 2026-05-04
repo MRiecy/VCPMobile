@@ -3,7 +3,7 @@ import { computed } from "vue";
 import AttachmentRenderer from "./attachment/AttachmentRenderer.vue";
 import { classifyAttachment } from "./attachment/utils/AttachmentClassifier";
 import { AttachmentType } from "./attachment/types/AttachmentType";
-import type { Attachment } from "../../core/stores/chatManager";
+import type { Attachment } from "../../core/types/chat";
 
 const props = defineProps<{ file: Attachment; index: number }>();
 const emit = defineEmits<{ (e: "remove", index: number): void }>();

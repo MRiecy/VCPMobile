@@ -7,7 +7,8 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::Topic;
-use tauri::{AppHandle, Manager, State};
+use serde_json::Value;
+use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 #[tauri::command]
 pub async fn get_topics(
@@ -44,6 +45,56 @@ pub async fn get_topics(
         });
     }
     Ok(topics)
+}
+
+#[tauri::command]
+pub async fn get_topics_streamed(
+    db_state: State<'_, DbState>,
+    owner_id: String,
+    owner_type: String,
+    on_chunk: Channel<Vec<Topic>>,
+) -> Result<(), String> {
+    let pool = &db_state.pool;
+    let mut rows = sqlx::query(
+        "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count 
+         FROM topics 
+         WHERE owner_id = ? AND owner_type = ? AND deleted_at IS NULL 
+         ORDER BY created_at DESC",
+    )
+    .bind(&owner_id)
+    .bind(&owner_type)
+    .fetch(pool);
+
+    use futures_util::StreamExt;
+    let mut chunk = Vec::new();
+    let chunk_size = 15;
+
+    while let Some(row_result) = rows.next().await {
+        let row = row_result.map_err(|e| e.to_string())?;
+        use sqlx::Row;
+        chunk.push(Topic {
+            id: row.get("topic_id"),
+            name: row.get("title"),
+            created_at: row.get("created_at"),
+            locked: row.get::<i32, _>("locked") != 0,
+            unread: row.get::<i32, _>("unread") != 0,
+            unread_count: row.get("unread_count"),
+            msg_count: row.get("msg_count"),
+            owner_id: owner_id.clone(),
+            owner_type: owner_type.clone(),
+        });
+
+        if chunk.len() >= chunk_size {
+            on_chunk.send(chunk.clone()).map_err(|e| e.to_string())?;
+            chunk.clear();
+        }
+    }
+
+    if !chunk.is_empty() {
+        on_chunk.send(chunk).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -204,8 +255,9 @@ pub async fn set_topic_unread(
     topic_id: String,
     unread: bool,
 ) -> Result<(), String> {
+    let unread_int = if unread { 1 } else { 0 };
     sqlx::query("UPDATE topics SET unread = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(unread)
+        .bind(unread_int)
         .bind(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -218,4 +270,123 @@ pub async fn set_topic_unread(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn regenerate_topic_response(
+    app_handle: AppHandle,
+    agent_state: State<'_, crate::vcp_modules::agent_service::AgentConfigState>,
+    group_state: State<'_, crate::vcp_modules::group_service::GroupManagerState>,
+    db_state: State<'_, DbState>,
+    active_requests: State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
+    cancelled_turns: State<'_, crate::vcp_modules::vcp_client::CancelledGroupTurns>,
+    settings_state: State<'_, SettingsState>,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
+    target_user_msg_id: String,
+    thinking_id: Option<String>,
+    stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
+) -> Result<Value, String> {
+    println!(
+        "[TopicService] Regenerating response for topic: {}, target msg: {}, thinking_id: {:?}",
+        topic_id, target_user_msg_id, thinking_id
+    );
+
+    // 1. 获取目标用户消息，确保内容完整
+    let user_msg = crate::vcp_modules::message_service::fetch_raw_message_content(
+        app_handle.clone(),
+        target_user_msg_id.clone(),
+    )
+    .await?;
+
+    // 2. 加载消息元数据（为了获取 timestamp 以后续截断）
+    let pool = &db_state.pool;
+    let row = sqlx::query("SELECT timestamp, role, name, agent_id, group_id, is_thinking, is_group_message FROM messages WHERE msg_id = ?")
+        .bind(&target_user_msg_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    use sqlx::Row;
+    let timestamp: i64 = row.get("timestamp");
+
+    // 3. 截断该消息之后的所有历史
+    crate::vcp_modules::message_service::truncate_history_after_timestamp(
+        app_handle.clone(),
+        &db_state.pool,
+        &owner_id,
+        &owner_type,
+        &topic_id,
+        timestamp,
+    )
+    .await?;
+
+    // 4. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
+    let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {
+        id: target_user_msg_id,
+        role: row.get("role"),
+        name: row.get("name"),
+        content: user_msg,
+        timestamp: timestamp as u64,
+        is_thinking: Some(row.get::<i64, _>("is_thinking") != 0),
+        agent_id: row.get("agent_id"),
+        group_id: row.get("group_id"),
+        topic_id: Some(topic_id.clone()),
+        is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
+        finish_reason: None,
+        attachments: None, // 重新生成时，上下文组装会自动从数据库重新拉取附件
+        blocks: None,
+    };
+
+    // 5. 获取配置并发起生成
+    let settings =
+        crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
+            .await?;
+
+    if owner_type == "agent" {
+        let final_thinking_id = thinking_id.unwrap_or_else(|| {
+            format!(
+                "msg_{}_assistant_regen",
+                chrono::Utc::now().timestamp_millis()
+            )
+        });
+        crate::vcp_modules::agent_chat_application_service::internal_process_agent_chat_message(
+            app_handle,
+            agent_state,
+            db_state,
+            active_requests,
+            crate::vcp_modules::agent_chat_application_service::AgentChatPayload {
+                agent_id: owner_id,
+                topic_id: topic_id.clone(),
+                user_message: chat_msg,
+                vcp_url: settings.vcp_server_url,
+                vcp_api_key: settings.vcp_api_key,
+                thinking_message_id: final_thinking_id,
+            },
+            stream_channel,
+            false, // skip append_user_msg
+        )
+        .await
+    } else {
+        crate::vcp_modules::group_chat_application_service::internal_process_group_chat_message(
+            app_handle,
+            group_state,
+            agent_state,
+            db_state,
+            active_requests,
+            cancelled_turns,
+            crate::vcp_modules::group_chat_application_service::GroupChatParams {
+                group_id: owner_id,
+                topic_id: topic_id.clone(),
+                user_message: chat_msg,
+                vcp_url: settings.vcp_server_url,
+                vcp_api_key: settings.vcp_api_key,
+                stream_channel: Some(stream_channel),
+            },
+            false, // skip append_user_msg
+        )
+        .await
+    }
 }

@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { useChatManagerStore } from "./chatManager";
+import { invoke, Channel } from "@tauri-apps/api/core";
+import { useChatSessionStore } from "./chatSessionStore";
+import { useChatHistoryStore } from "./chatHistoryStore";
 import { useNotificationStore } from "./notification";
 
 /**
@@ -23,7 +24,7 @@ export interface Topic {
  * 话题列表管理 Store
  */
 export const useTopicStore = defineStore("topic", () => {
-  const chatManager = useChatManagerStore();
+  const sessionStore = useChatSessionStore();
   const notificationStore = useNotificationStore();
 
   // --- 状态 (State) ---
@@ -82,36 +83,48 @@ export const useTopicStore = defineStore("topic", () => {
    * @param ownerId Agent ID or Group ID
    * @param ownerType "agent" or "group"
    */
-  const loadTopicList = async (ownerId: string, ownerType: string) => {
+  const loadTopicList = async (ownerId: string, owner_type: string) => {
     if (!ownerId) return;
 
     currentAgentId.value = ownerId;
-    console.log(`[TopicStore] Loading topics for ${ownerType}: ${ownerId}`);
+    console.log(`[TopicStore] Loading topics for ${owner_type}: ${ownerId}`);
     loading.value = true;
 
     try {
-      // 1. 从 Rust 获取基础话题列表
-      // 命令对应 Rust 中的 get_topics
-      const result = await invoke<any[]>("get_topics", { ownerId, ownerType });
+      // 1. 创建 Channel 用于接收流式数据
+      const channel = new Channel<Topic[]>();
+      
+      // 每次开始加载前，清空当前列表（或根据业务决定是否保留）
+      topics.value = [];
 
-      // 竞态检查：如果请求返回时，当前选中的 Agent 已经改变，则丢弃该结果
-      if (currentAgentId.value !== ownerId) {
-        console.warn(`[TopicStore] Discarding stale topics for ${ownerId} (Current: ${currentAgentId.value})`);
-        return;
-      }
+      channel.onmessage = (chunk) => {
+        // 竞态检查：如果请求返回时，当前选中的 Agent 已经改变，则丢弃该结果
+        if (currentAgentId.value !== ownerId) return;
 
-      // 映射 Rust 字段到前端状态
-      topics.value = result.map((t) => ({
-        ...t,
-        ownerId: ownerId,
-        ownerType: ownerType,
-        name: t.name || t.title || t.id,
-        unreadCount: t.unreadCount || 0,
-        msgCount: t.msgCount || 0,
-      }));
+        const mappedChunk = chunk.map((t) => ({
+          ...t,
+          ownerId: ownerId,
+          ownerType: owner_type,
+          name: t.name || (t as any).title || t.id,
+          unreadCount: (t as any).unreadCount || 0,
+          msgCount: (t as any).msgCount || 0,
+        }));
+
+        // 增量推入
+        topics.value.push(...mappedChunk);
+        // 强制触发虚拟列表重绘 (因为是 push，Vue 数组变动本身能响应，但为了保险对齐方案 A)
+        topics.value = [...topics.value];
+      };
+
+      // 调用 Rust 命令开始流式获取
+      await invoke("get_topics_streamed", { 
+        ownerId, 
+        ownerType: owner_type,
+        onChunk: channel 
+      });
 
       console.log(
-        `[TopicStore] Topic list loaded (Backend computed): ${result.length} topics`,
+        `[TopicStore] Topic list streaming completed for ${ownerId}`,
       );
     } catch (e) {
       console.error("[TopicStore] Failed to load topics:", e);
@@ -150,6 +163,8 @@ export const useTopicStore = defineStore("topic", () => {
       };
 
       topics.value.unshift(topicWithState);
+      // 强制触发虚拟列表重绘
+      topics.value = [...topics.value];
       notificationStore.addNotification({
         type: "success",
         title: "话题创建成功",
@@ -196,13 +211,14 @@ export const useTopicStore = defineStore("topic", () => {
       });
 
       // 如果删除的是当前选中的话题，自动载入最新的一个
-      if (chatManager.currentTopicId === topicId) {
+      if (sessionStore.currentTopicId === topicId) {
         const nextTopic = topics.value[0];
+        const historyStore = useChatHistoryStore();
         if (nextTopic) {
-          await chatManager.selectTopicById(ownerId, nextTopic.id);
+          await sessionStore.selectTopicById(ownerId, nextTopic.id);
         } else {
-          chatManager.currentTopicId = null;
-          chatManager.currentChatHistory = [];
+          sessionStore.currentTopicId = null;
+          historyStore.currentChatHistory = [];
         }
       }
     } catch (e) {
@@ -235,6 +251,8 @@ export const useTopicStore = defineStore("topic", () => {
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
         topics.value[index] = { ...topics.value[index], name: newTitle };
+        // 强制触发虚拟列表重绘
+        topics.value = [...topics.value];
       }
     } catch (e) {
       console.error("[TopicStore] Failed to update topic title:", e);
@@ -267,6 +285,8 @@ export const useTopicStore = defineStore("topic", () => {
         locked: targetLockState,
       });
       topics.value[index] = { ...topics.value[index], locked: targetLockState };
+      // 强制触发虚拟列表重绘
+      topics.value = [...topics.value];
     } catch (e) {
       console.error("[TopicStore] Failed to toggle topic lock:", e);
       throw e;
@@ -292,10 +312,85 @@ export const useTopicStore = defineStore("topic", () => {
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
         topics.value[index] = { ...topics.value[index], unread: unread };
+        // 强制触发虚拟列表重绘
+        topics.value = [...topics.value];
       }
     } catch (e) {
       console.error("[TopicStore] Failed to set topic unread:", e);
       throw e;
+    }
+  };
+
+  /**
+   * 增加话题的消息计数 (UI 乐观更新)
+   */
+  const incrementTopicMsgCount = (topicId: string) => {
+    const index = topics.value.findIndex((t) => t.id === topicId);
+    if (index !== -1) {
+      topics.value[index] = { 
+        ...topics.value[index], 
+        msgCount: (topics.value[index].msgCount || 0) + 1 
+      };
+      topics.value = [...topics.value];
+    }
+  };
+
+  /**
+   * 增加话题的未读计数 (UI 乐观更新)
+   */
+  const incrementTopicUnreadCount = (topicId: string) => {
+    const index = topics.value.findIndex((t) => t.id === topicId);
+    if (index !== -1) {
+      const topic = topics.value[index];
+      // 如果不是当前选中的话题，才增加未读数
+      if (sessionStore.currentTopicId !== topicId) {
+        topics.value[index] = { 
+          ...topic, 
+          unreadCount: (topic.unreadCount || 0) + 1,
+          unread: true
+        };
+        topics.value = [...topics.value];
+      }
+    }
+  };
+
+  /**
+   * 减少话题的消息计数 (UI 乐观更新)
+   */
+  const decrementTopicMsgCount = (topicId: string, count: number = 1) => {
+    const index = topics.value.findIndex((t) => t.id === topicId);
+    if (index !== -1) {
+      topics.value[index] = { 
+        ...topics.value[index], 
+        msgCount: Math.max(0, (topics.value[index].msgCount || 0) - count) 
+      };
+      topics.value = [...topics.value];
+    }
+  };
+
+  /**
+   * 标记话题为已读 (清空未读数并取消未读标记)
+   */
+  const markTopicAsRead = (topicId: string) => {
+    const index = topics.value.findIndex((t) => t.id === topicId);
+    if (index !== -1) {
+      const topic = topics.value[index];
+      if (topic.unread || (topic.unreadCount && topic.unreadCount > 0)) {
+        topics.value[index] = { 
+          ...topic, 
+          unread: false, 
+          unreadCount: 0 
+        };
+        topics.value = [...topics.value];
+        
+        // 同步到后端
+        invoke("set_topic_unread", { 
+          ownerId: topic.ownerId, 
+          ownerType: topic.ownerType, 
+          topicId, 
+          unread: false 
+        }).catch(() => {});
+      }
     }
   };
 
@@ -312,5 +407,9 @@ export const useTopicStore = defineStore("topic", () => {
     toggleTopicLock,
     setTopicUnread,
     invalidateAllTopicCaches,
+    incrementTopicMsgCount,
+    incrementTopicUnreadCount,
+    decrementTopicMsgCount,
+    markTopicAsRead,
   };
 });
