@@ -43,7 +43,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import type { Attachment } from "../../../core/stores/chatManager";
+import type { Attachment } from "../../../core/types/chat";
 
 interface Props {
   file: Attachment;

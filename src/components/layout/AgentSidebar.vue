@@ -3,7 +3,7 @@ import { ref } from 'vue';
 import { useSwipe } from '@vueuse/core';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
-import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
 import SidebarSearch from '../../features/agent/SidebarSearch.vue';
 import AgentList from '../../features/agent/AgentList.vue';
@@ -13,7 +13,7 @@ import TopicCreator from '../../features/topic/TopicCreator.vue';
 
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
 
 const activeTab = ref<'agents' | 'topics'>('agents');
 const searchQuery = ref('');
@@ -44,7 +44,7 @@ const handleSelectItem = async (item: any) => {
   if (item) {
     // 自动加载并渲染上次活跃话题（保留便利性）
     // 话题列表的加载由 TopicList.vue 中的 watch 响应式驱动，此处无需重复调用
-    await chatStore.selectItem(item);
+    await sessionStore.selectItem(item);
   }
 };
 

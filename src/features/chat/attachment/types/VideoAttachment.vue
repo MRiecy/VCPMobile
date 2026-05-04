@@ -41,7 +41,7 @@ import { computed } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
 import { truncateFileName } from "../utils/truncateFileName";
-import type { Attachment } from "../../../../core/stores/chatManager";
+import type { Attachment } from "../../../../core/types/chat";
 
 const props = withDefaults(defineProps<{
   file: Attachment;

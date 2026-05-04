@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage } from "../../core/stores/chatManager";
+import type { ChatMessage } from "../../core/types/chat";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useSettingsStore } from "../../core/stores/settings";
 import {
@@ -10,7 +10,9 @@ import {
 } from "../../core/composables/useContentProcessor";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { useOverlayStore } from "../../core/stores/overlay";
-import { useChatManagerStore } from "../../core/stores/chatManager";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
+import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
+import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useNotificationStore } from "../../core/stores/notification";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 
@@ -41,7 +43,9 @@ const { processEmoticonsInContainer } = useEmoticonFixer();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
 
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
+const historyStore = useChatHistoryStore();
+const streamStore = useChatStreamStore();
 
 const isUser = computed(() => props.message.role === "user");
 const isStreaming = computed(() => {
@@ -50,11 +54,11 @@ const isStreaming = computed(() => {
   // 检查当前消息是否在所属会话的活动流中 (修正：不再依赖 isThinking 状态)
   const itemId =
     props.message.agentId || props.message.groupId || props.agentId;
-  const topicId = chatStore.currentTopicId;
+  const topicId = sessionStore.currentTopicId;
   if (!itemId || !topicId) return false;
 
   const key = `${itemId}:${topicId}`;
-  const streams = chatStore.sessionActiveStreams?.[key];
+  const streams = streamStore.sessionActiveStreams?.[key];
   return streams ? streams.includes(props.message.id) : false;
 });
 
@@ -188,11 +192,13 @@ const updateContentBlocks = async (text: string) => {
       
       // 核心修复：如果原始消息缺少预编译块，或者这是刚解析出的新块，则尝试保存到数据库
       if (!hadBlocks || text !== props.message.content) {
-        chatStore.persistMessageBlocks(props.message.id, newBlocks);
+        historyStore.persistMessageBlocks(props.message.id, newBlocks);
       }
     } finally {
       // 确保无论解析成功失败，都能解除过渡状态
       isTransitioning.value = false;
+      // 过渡结束，可以安全清理流式块
+      streamBlocks.value = [];
     }
   }
 };
@@ -247,8 +253,8 @@ const RUST_PARSE_THROTTLE = 50; // ms，与 streamManager loop 周期对齐
 watch(
   [() => props.message.stableContent, () => props.message.tailContent, () => isStreaming.value],
   async ([stable, tail, streaming]) => {
+    // 如果不在流式状态，不要立即清空 streamBlocks，留给过渡状态使用
     if (!streaming) {
-      streamBlocks.value = [];
       return;
     }
     const fullText = (stable || '') + (tail || '');
@@ -332,8 +338,6 @@ const avatarFallbackColor = computed(() => {
 
 // 长按菜单触发逻辑
 const showMessageContextMenu = async () => {
-  const chatStore = useChatManagerStore();
-
   const actions: any[] = [];
 
   // 1. 如果正在流式生成，提供强制中止功能 (最高优先级)
@@ -343,7 +347,7 @@ const showMessageContextMenu = async () => {
       icon: StopCircle,
       danger: true,
       handler: () => {
-        chatStore.stopMessage(props.message.id);
+        streamStore.stopMessage(props.message.id);
       },
     });
   }
@@ -353,7 +357,7 @@ const showMessageContextMenu = async () => {
     const text = props.message.content ?? streamContent.value;
     if (text === undefined || text === null || text === "") {
       // 触发懒加载获取原文
-      return await chatStore.fetchRawContent(props.message.id);
+      return await historyStore.fetchRawContent(props.message.id);
     }
     return text;
   };
@@ -414,9 +418,9 @@ const showMessageContextMenu = async () => {
       handler: async () => {
         const fullText = await getFullText();
         // 将内容填入全局编辑状态供 InputEnhancer 读取
-        chatStore.editMessageContent = fullText || "";
+        historyStore.editMessageContent = fullText || "";
         // 标记当前正在编辑重发的消息 ID
-        chatStore.editingOriginalMessageId = props.message.id;
+        historyStore.editingOriginalMessageId = props.message.id;
       },
     });
   }
@@ -427,7 +431,7 @@ const showMessageContextMenu = async () => {
       label: "重新生成",
       icon: RotateCcw,
       handler: () => {
-        chatStore.regenerateResponse(props.message.id);
+        historyStore.regenerateResponse(props.message.id);
       },
     });
   }
@@ -439,7 +443,7 @@ const showMessageContextMenu = async () => {
     danger: true,
     handler: () => {
       if (confirm("确定要删除这条消息吗？")) {
-        chatStore.deleteMessage(props.message.id);
+        historyStore.deleteMessage(props.message.id);
       }
     },
   });
@@ -451,14 +455,13 @@ const showMessageContextMenu = async () => {
 };
 
 const handleSaveEdit = async (newContent: string) => {
-  const chatStore = useChatManagerStore();
   let currentContent = props.message.content;
   if (currentContent === undefined || currentContent === null || currentContent === "") {
-    currentContent = await chatStore.fetchRawContent(props.message.id);
+    currentContent = await historyStore.fetchRawContent(props.message.id);
     props.message.content = currentContent;
   }
   if (newContent !== currentContent) {
-    await chatStore.updateMessageContent(props.message.id, newContent);
+    await historyStore.updateMessageContent(props.message.id, newContent);
     // 立即重新触发渲染
     await updateContentBlocks(newContent);
   }

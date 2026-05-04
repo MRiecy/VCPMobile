@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import Sortable from "sortablejs";
 import { useAssistantStore } from "../../core/stores/assistant";
-import { useChatManagerStore } from "../../core/stores/chatManager";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useSettingsStore } from "../../core/stores/settings";
 import { useOverlayStore } from "../../core/stores/overlay";
@@ -18,7 +18,7 @@ const emit = defineEmits<{
 }>();
 
 const assistantStore = useAssistantStore();
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
 const layoutStore = useLayoutStore();
 const settingsStore = useSettingsStore();
 const overlayStore = useOverlayStore();
@@ -246,7 +246,7 @@ const filteredCombinedItems = computed(() => {
             @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd(group.id)"
             class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] origin-center"
             :class="[
-                chatStore.currentSelectedItem?.id === group.id
+                sessionStore.currentSelectedItem?.id === group.id
                   ? 'border-purple-500/50 bg-purple-500/10 dark:bg-purple-500/20'
                   : 'border-black/5 dark:border-white/5',
                 activeSwipeId === group.id
@@ -301,7 +301,7 @@ const filteredCombinedItems = computed(() => {
             @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd(agent.id)"
             class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] origin-center"
             :class="[
-              chatStore.currentSelectedItem?.id === agent.id
+              sessionStore.currentSelectedItem?.id === agent.id
                 ? 'border-blue-500/50 bg-blue-500/10 dark:bg-blue-500/20'
                 : 'border-black/5 dark:border-white/5',
               activeSwipeId === agent.id

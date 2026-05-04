@@ -28,6 +28,27 @@ pub async fn handle_agent_chat_message(
     payload: AgentChatPayload,
     stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
+    internal_process_agent_chat_message(
+        app_handle,
+        agent_state,
+        db_state,
+        active_requests,
+        payload,
+        stream_channel,
+        true, // append_user_msg
+    )
+    .await
+}
+
+pub async fn internal_process_agent_chat_message(
+    app_handle: AppHandle,
+    agent_state: State<'_, AgentConfigState>,
+    db_state: State<'_, DbState>,
+    active_requests: State<'_, ActiveRequests>,
+    payload: AgentChatPayload,
+    stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
+    append_user_msg: bool,
+) -> Result<Value, String> {
     let agent_id = payload.agent_id;
     let topic_id = payload.topic_id;
     let user_message = payload.user_message;
@@ -37,16 +58,18 @@ pub async fn handle_agent_chat_message(
     let agent_config =
         read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
 
-    // 2. 将用户消息追加到数据库
-    message_service::append_single_message(
-        app_handle.clone(),
-        &db_state.pool,
-        &agent_id,
-        "agent",
-        topic_id.clone(),
-        user_message.clone(),
-    )
-    .await?;
+    // 2. 只有在需要时才将用户消息追加到数据库 (重新生成时设为 false)
+    if append_user_msg {
+        message_service::append_single_message(
+            app_handle.clone(),
+            &db_state.pool,
+            &agent_id,
+            "agent",
+            topic_id.clone(),
+            user_message.clone(),
+        )
+        .await?;
+    }
 
     // 3. 加载完整历史记录用于上下文组装
     let history = message_service::load_chat_history_internal(
@@ -94,7 +117,8 @@ pub async fn handle_agent_chat_message(
         message_id: thinking_id.clone(),
         context: Some(json!({
             "agentId": agent_id,
-            "topicId": topic_id
+            "topicId": topic_id,
+            "agentName": agent_config.name
         })),
     };
 

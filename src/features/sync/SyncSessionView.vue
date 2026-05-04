@@ -176,14 +176,14 @@ const handleClose = async () => {
           </div>
 
           <!-- 日志终端 -->
-          <div class="flex-1 px-4 overflow-hidden">
-            <div class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed h-full overflow-y-auto flex flex-col-reverse">
+          <div class="flex-1 px-4 overflow-hidden flex flex-col min-h-0">
+            <div class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto flex flex-col-reverse min-h-0">
               <div v-if="store.logs.length === 0" class="text-white/20 italic">
                 等待连接...
               </div>
               <template v-else>
                 <div v-for="log in visibleLogs" :key="log.time + log.message"
-                     class="truncate mb-0.5"
+                     class="break-words mb-0.5"
                      :class="logColor(log.level)">
                   [{{ log.time }}] {{ log.message }}
                 </div>

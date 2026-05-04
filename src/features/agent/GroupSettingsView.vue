@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
-import { useChatManagerStore } from "../../core/stores/chatManager";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
@@ -44,7 +44,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits(["close"]);
 
 const assistantStore = useAssistantStore();
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
 
 const groupConfig = ref<GroupConfig>({
   id: props.id,
@@ -214,8 +214,8 @@ const handleDelete = async () => {
   if (confirm("确定要删除这个群组吗？所有聊天记录将被标记为删除。")) {
     try {
       await assistantStore.deleteGroup(props.id);
-      if (chatStore.currentSelectedItem?.id === props.id) {
-        chatStore.currentSelectedItem = null;
+      if (sessionStore.currentSelectedItem?.id === props.id) {
+        sessionStore.currentSelectedItem = null;
       }
       emit("close");
     } catch (err) {

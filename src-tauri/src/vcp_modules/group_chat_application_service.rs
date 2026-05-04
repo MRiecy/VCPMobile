@@ -36,7 +36,8 @@ pub struct GroupChatParams {
     pub stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
 }
 
-pub async fn process_group_chat_message(
+#[allow(clippy::too_many_arguments)]
+pub async fn internal_process_group_chat_message(
     app_handle: AppHandle,
     group_state: State<'_, GroupManagerState>,
     agent_state: State<'_, AgentConfigState>,
@@ -44,6 +45,7 @@ pub async fn process_group_chat_message(
     active_requests: State<'_, ActiveRequests>,
     cancelled_turns: State<'_, CancelledGroupTurns>,
     params: GroupChatParams,
+    append_user_msg: bool,
 ) -> Result<Value, String> {
     let stream_channel = params.stream_channel;
     let group_id = params.group_id;
@@ -79,16 +81,18 @@ pub async fn process_group_chat_message(
         }
     }
 
-    // 3. 异步追加用户消息 (不再需要全量 load 再全量 save)
-    message_service::append_single_message(
-        app_handle.clone(),
-        &db_state.pool,
-        &group_id,
-        "group",
-        topic_id.clone(),
-        user_message.clone(),
-    )
-    .await?;
+    // 3. 异步追加用户消息 (重新生成时设为 false)
+    if append_user_msg {
+        message_service::append_single_message(
+            app_handle.clone(),
+            &db_state.pool,
+            &group_id,
+            "group",
+            topic_id.clone(),
+            user_message.clone(),
+        )
+        .await?;
+    }
 
     // 为了给 AI 决策提供上下文，我们只读取最新的 20 条（或按需分配）
     let current_history = message_service::load_chat_history_internal(
@@ -297,7 +301,7 @@ pub async fn handle_group_chat_message(
         payload.group_id
     );
 
-    process_group_chat_message(
+    internal_process_group_chat_message(
         app_handle,
         group_state,
         agent_state,
@@ -312,6 +316,7 @@ pub async fn handle_group_chat_message(
             vcp_api_key: payload.vcp_api_key,
             stream_channel: Some(stream_channel),
         },
+        true, // append_user_msg
     )
     .await
 }

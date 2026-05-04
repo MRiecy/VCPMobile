@@ -29,7 +29,7 @@ const mergedStyle = computed(() => {
       class="vcp-bubble-container rounded-2xl transition-all duration-300 relative backdrop-blur-md min-w-[60px] min-h-[36px]"
       :class="isUser
           ? 'p-3 w-fit max-w-[85%] shadow-sm'
-          : 'p-1.5 w-fit max-w-[100%] shadow-sm'
+          : 'p-1.5 w-fit max-w-[100%] min-w-0 shadow-sm'
         " :style="mergedStyle">
       <slot />
     </div>

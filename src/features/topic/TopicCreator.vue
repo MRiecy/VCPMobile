@@ -2,12 +2,12 @@
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { useTopicStore } from "../../core/stores/topicListManager";
-import { useChatManagerStore } from "../../core/stores/chatManager";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useLayoutStore } from "../../core/stores/layout";
 
 const topicStore = useTopicStore();
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
 const layoutStore = useLayoutStore();
 const router = useRouter();
@@ -16,7 +16,7 @@ const isCreating = ref(false);
 
 const currentItemId = computed(
   () =>
-    chatStore.currentSelectedItem?.id || assistantStore.agents[0]?.id || null,
+    sessionStore.currentSelectedItem?.id || assistantStore.agents[0]?.id || null,
 );
 const canCreateTopic = computed(
   () => Boolean(currentItemId.value) && !isCreating.value,
@@ -31,31 +31,8 @@ const selectTopic = async (
     await router.push("/chat");
   }
 
-  let ownerType = "agent";
-  const agent = assistantStore.agents.find((a: any) => a.id === itemId);
-  if (agent) {
-    chatStore.currentSelectedItem = {
-      id: agent.id,
-      name: agent.name,
-      type: "agent",
-    };
-    ownerType = "agent";
-  } else {
-    const group = assistantStore.groups.find(
-      (groupItem) => groupItem.id === itemId,
-    );
-    if (group) {
-      chatStore.currentSelectedItem = {
-        id: group.id,
-        name: group.name,
-        type: "group",
-      };
-      ownerType = "group";
-    }
-  }
-
-  await chatStore.loadHistoryPaginated(itemId, ownerType, topicId);
-  chatStore.currentTopicId = topicId;
+  // 使用统一的 sessionStore 选择话题，历史加载由 ChatView 的 watcher 响应
+  await sessionStore.selectTopicById(itemId, topicId);
 
   const createdTopic = topicStore.topics.find((topic) => topic.id === topicId);
   if (createdTopic) {
@@ -70,7 +47,7 @@ const handleCreateTopic = async () => {
 
   console.info(
     "[TopicCreator] create-topic clicked",
-    chatStore.currentSelectedItem,
+    sessionStore.currentSelectedItem,
   );
 
   if (!currentItemId.value) {

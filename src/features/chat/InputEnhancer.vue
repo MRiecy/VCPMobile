@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed } from 'vue';
-import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
+import { useChatStreamStore } from '../../core/stores/chatStreamStore';
+import { useAttachmentStore } from '../../core/stores/attachmentStore';
 import { useLongTextPaste } from './composables/useLongTextPaste';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
@@ -15,7 +17,9 @@ const emit = defineEmits<{
 }>();
 
 const input = ref('');
-const chatStore = useChatManagerStore();
+const historyStore = useChatHistoryStore();
+const streamStore = useChatStreamStore();
+const attachmentStore = useAttachmentStore();
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
 // 自动调整输入框高度
@@ -34,13 +38,13 @@ watch(input, () => {
 });
 
 // 是否正在生成中 (修正：回归纯净逻辑，只要当前话题有活跃的网络流，即视为生成中)
-const isGenerating = computed(() => chatStore.activeStreamingIds.size > 0);
+const isGenerating = computed(() => streamStore.activeStreamingIds.size > 0);
 
 // 监听并接收外部注入的“编辑消息”内容
-watch(() => chatStore.editMessageContent, async (newContent) => {
+watch(() => historyStore.editMessageContent, async (newContent) => {
   if (newContent) {
     input.value = newContent;
-    chatStore.editMessageContent = ''; // 消费掉
+    historyStore.editMessageContent = ''; // 消费掉
     // 强制更新高度和焦点
     await nextTick();
     if (textareaRef.value) {
@@ -53,7 +57,7 @@ watch(() => chatStore.editMessageContent, async (newContent) => {
 
 const handleSend = () => {
   // 允许纯附件消息发送（即 input 为空但有暂存附件）
-  if ((input.value.trim() || chatStore.stagedAttachments.length > 0) && !props.disabled) {
+  if ((input.value.trim() || attachmentStore.stagedAttachments.length > 0) && !props.disabled) {
     emit('send', input.value);
     input.value = '';
   }
@@ -62,8 +66,8 @@ const handleSend = () => {
 const handleAction = () => {
   if (isGenerating.value) {
     // 停止当前所有活跃的生成流 (单聊只有一个，群聊则为当前并行或串行的 Agent)
-    const activeIds = Array.from(chatStore.activeStreamingIds);
-    activeIds.forEach(id => chatStore.stopMessage(id as string));
+    const activeIds = Array.from(streamStore.activeStreamingIds);
+    activeIds.forEach(id => streamStore.stopMessage(id as string));
   } else {
     handleSend();
   }
@@ -79,13 +83,13 @@ const handleKeydown = (e: KeyboardEvent) => {
 const triggerFilePick = async () => {
   if (props.disabled) return;
   emit('attach');
-  await chatStore.handleAttachment();
+  await attachmentStore.handleAttachment();
 };
 
 const { handlePaste, handleBeforeInput } = useLongTextPaste(input);
 
 const removeStagedAttachment = (index: number) => {
-  chatStore.stagedAttachments.splice(index, 1);
+  attachmentStore.stagedAttachments.splice(index, 1);
 };
 
 // --- 阻止 textarea 边界滑动导致页面被拖动 ---
@@ -134,10 +138,10 @@ const handleTextareaTouchMove = (e: TouchEvent) => {
     <GroupStopAllButton />
 
     <!-- 暂存附件预览区 -->
-    <div v-if="chatStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
+    <div v-if="attachmentStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
       <TransitionGroup name="list">
         <StagedAttachmentPreview 
-          v-for="(file, idx) in chatStore.stagedAttachments" 
+          v-for="(file, idx) in attachmentStore.stagedAttachments" 
           :key="file.id || idx" 
           :file="file" 
           :index="idx"
@@ -178,10 +182,10 @@ const handleTextareaTouchMove = (e: TouchEvent) => {
           :class="[
             isGenerating ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-blue-500 text-white',
             {
-              'opacity-30 scale-90': !isGenerating && !input.trim() && chatStore.stagedAttachments.length === 0,
-              'hover:bg-blue-600': !isGenerating && (input.trim() || chatStore.stagedAttachments.length > 0)
+              'opacity-30 scale-90': !isGenerating && !input.trim() && attachmentStore.stagedAttachments.length === 0,
+              'hover:bg-blue-600': !isGenerating && (input.trim() || attachmentStore.stagedAttachments.length > 0)
             }
-          ]" :disabled="!isGenerating && !input.trim() && chatStore.stagedAttachments.length === 0">
+          ]" :disabled="!isGenerating && !input.trim() && attachmentStore.stagedAttachments.length === 0">
           <!-- 停止图标 -->
           <svg v-if="isGenerating" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
             <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>

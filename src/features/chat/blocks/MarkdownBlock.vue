@@ -334,14 +334,17 @@ watch(() => [props.content, props.isStreaming], () => {
 .vcp-markdown-block .vcp-emoticon {
   max-width: 110px;
   max-height: 110px;
+  width: auto;
+  height: auto;
+  object-fit: contain;
   display: inline-block;
   vertical-align: middle;
   margin: 4px;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.05);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  /* 平滑显示效果 */
-  transition: all 0.3s ease;
+  /* 平滑显示效果：仅过渡 transform 与 border-color，避免 width/height 插值导致比例失真 */
+  transition: transform 0.3s ease, border-color 0.3s ease;
 }
 
 .vcp-markdown-block .vcp-emoticon:hover {

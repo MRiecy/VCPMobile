@@ -151,9 +151,9 @@ onMounted(() => {
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-relaxed">
+      <div class="flex-1 overflow-y-auto overflow-x-auto px-4 py-3 font-mono text-[10px] leading-relaxed min-w-0">
         <div v-for="(line, i) in visibleLines()" :key="i"
-          class="truncate text-white/70"
+          class="whitespace-nowrap text-white/70"
           :class="{
             'text-green-400': line.includes('[INFO]') && line.includes('success'),
             'text-red-400': line.includes('[Error]') || line.includes('failed') || line.includes('error'),

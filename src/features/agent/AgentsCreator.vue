@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { useAssistantStore } from '../../core/stores/assistant';
 import { useOverlayStore } from '../../core/stores/overlay';
-import { useChatManagerStore } from '../../core/stores/chatManager';
+import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import { useTopicStore } from '../../core/stores/topicListManager';
 import { useLayoutStore } from '../../core/stores/layout';
 
 const assistantStore = useAssistantStore();
-const chatStore = useChatManagerStore();
+const sessionStore = useChatSessionStore();
 const topicListStore = useTopicStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
@@ -26,7 +26,7 @@ const handleCreateAgent = async () => {
         await assistantStore.fetchAgents();
         if (newAgent?.id) {
           // 选中新创建的 Agent
-          chatStore.currentSelectedItem = {
+          sessionStore.currentSelectedItem = {
             id: newAgent.id,
             name: newAgent.name,
             type: 'agent'
@@ -60,8 +60,8 @@ const handleCreateGroup = async () => {
         const newGroup = await assistantStore.createGroup(name);
         await assistantStore.fetchGroups();
         if (newGroup?.id) {
-          // 选中新创建的 Group
-          chatStore.currentSelectedItem = {
+          // 选中新创建 of Group
+          sessionStore.currentSelectedItem = {
             id: newGroup.id,
             name: newGroup.name,
             type: 'group'
