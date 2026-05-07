@@ -46,7 +46,7 @@ const handleAction = (action: ActionItem) => {
   <Teleport to="body">
     <!-- 遮罩层 -->
     <Transition name="fade">
-      <div v-if="modelValue" class="fixed inset-0 bg-black/50 z-[999] backdrop-blur-[2px]" @click="close"
+      <div v-if="modelValue" class="fixed inset-0 bg-black/50 z-[999]" @click="close"
         @touchmove.prevent>
       </div>
     </Transition>
@@ -54,7 +54,7 @@ const handleAction = (action: ActionItem) => {
     <!-- 抽屉内容 -->
     <Transition name="slide-up">
       <div v-if="modelValue"
-        class="fixed bottom-0 left-0 right-0 z-[1000] bg-white/90 dark:bg-gray-900/90 backdrop-blur-xl rounded-t-[2rem] shadow-2xl p-4 flex flex-col border-t border-white/20 dark:border-white/5"
+        class="fixed bottom-0 left-0 right-0 z-[1000] bg-white/90 dark:bg-gray-900/90 rounded-t-[2rem] shadow-2xl p-4 flex flex-col border-t border-white/20 dark:border-white/5"
         style="padding-bottom: calc(env(safe-area-inset-bottom, 20px) + 16px);">
 
         <!-- 顶部拉手条 -->

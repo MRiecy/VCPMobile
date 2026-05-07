@@ -188,11 +188,12 @@ const selectTopic = async (
           item.data.name,
         )
         " v-longpress="() => showTopicContextMenu(item.data.id)">
-        <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 active:scale-95 transition-all border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
-          :class="sessionStore.currentTopicId === item.data.id
-              ? 'border-green-500/50 bg-green-500/10 dark:bg-green-500/20'
-              : 'border-black/5 dark:border-white/5'
-            ">
+        <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer transition-all duration-300 z-10 w-full active:scale-[0.98] origin-center"
+          :class="[
+            sessionStore.currentTopicId === item.data.id
+              ? 'glass-panel-active'
+              : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5'
+          ]">
           <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
           <div v-if="item.data.unreadCount === -1 || item.data.unread"
             class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
@@ -204,7 +205,8 @@ const selectTopic = async (
           </div>
 
           <div
-            class="relative w-10 h-10 rounded-xl bg-gradient-to-br from-green-500/10 to-emerald-500/10 flex items-center justify-center shrink-0 border border-black/10 dark:border-white/10">
+            class="relative w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border border-black/5 dark:border-white/10"
+            style="background: color-mix(in srgb, var(--highlight-text) 10%, transparent); color: var(--highlight-text)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
             </svg>
@@ -223,7 +225,7 @@ const selectTopic = async (
                 {{ item.data.msgCount }}
               </span>
             </div>
-            <span class="text-[9px] opacity-40 truncate font-mono tracking-tighter">{{
+            <span class="text-[9px] text-secondary-text opacity-70 truncate font-mono tracking-tighter">{{
               item.data.id
               }}</span>
           </div>

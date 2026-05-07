@@ -8,15 +8,7 @@ const props = defineProps<{
 }>();
 
 const mergedStyle = computed(() => {
-  const base = props.bubbleStyle || {};
-  if (props.isStreaming) {
-    return {
-      ...base,
-      backdropFilter: 'none',
-      WebkitBackdropFilter: 'none',
-    };
-  }
-  return base;
+  return props.bubbleStyle || {};
 });
 </script>
 
@@ -26,11 +18,11 @@ const mergedStyle = computed(() => {
     isStreaming ? 'streaming' : '',
   ]">
     <div
-      class="vcp-bubble-container rounded-2xl transition-all duration-300 relative backdrop-blur-md min-w-[60px] min-h-[36px]"
-      :class="isUser
-          ? 'p-3 w-fit max-w-[85%] shadow-sm'
-          : 'p-1.5 w-fit max-w-[100%] min-w-0 shadow-sm'
-        " :style="mergedStyle">
+      class="vcp-bubble-container message-bubble rounded-2xl transition-all duration-300 relative min-w-[60px] min-h-[36px]"
+      :class="[
+        isUser ? 'p-3 w-fit max-w-[85%] vcp-bubble-user' : 'p-1.5 w-fit max-w-[100%] min-w-0 vcp-bubble-agent',
+        bubbleStyle && bubbleStyle['--dynamic-color'] ? 'vcp-bubble-dynamic' : ''
+      ]" :style="mergedStyle">
       <slot />
     </div>
 
@@ -40,9 +32,8 @@ const mergedStyle = computed(() => {
 
 <style scoped>
 .vcp-bubble-container {
+  position: relative;
   word-break: break-word;
-  backdrop-filter: blur(8px) saturate(110%);
-  -webkit-backdrop-filter: blur(8px) saturate(110%);
   transform: translateZ(0);
 }
 

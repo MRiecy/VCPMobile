@@ -91,4 +91,8 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     selectTopicById,
     selectItem,
   };
+}, {
+  persist: {
+    pick: ['currentSelectedItem', 'currentTopicId'],
+  },
 });

@@ -30,7 +30,7 @@ watch(
   <aside class="vcp-drawer vcp-drawer-right pt-safe flex flex-col" :class="{ 'is-open': props.isOpen }">
     <div class="px-5 py-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center shrink-0">
       <div class="flex items-center gap-2">
-        <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-50 text-primary-text">Notifications</h3>
+        <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-70 text-primary-text">Notifications</h3>
         <span v-if="store.unreadCount > 0"
           class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white animate-pulse">
           {{ store.unreadCount }}
@@ -62,9 +62,7 @@ watch(
   bottom: 0;
   width: 82vw;
   max-width: 340px;
-  background-color: color-mix(in srgb, var(--secondary-bg) 85%, transparent);
-  backdrop-filter: blur(18px) saturate(165%);
-  -webkit-backdrop-filter: blur(18px) saturate(165%);
+  background-color: color-mix(in srgb, var(--secondary-bg) 95%, transparent);
   transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -102,9 +100,5 @@ watch(
 }
 
 @media (hover: none) and (pointer: coarse) {
-  .vcp-drawer {
-    backdrop-filter: blur(4px) saturate(165%);
-    -webkit-backdrop-filter: blur(4px) saturate(165%);
-  }
 }
 </style>

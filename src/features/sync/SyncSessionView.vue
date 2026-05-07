@@ -4,12 +4,12 @@ import { X, Copy, Play } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
 import { useSyncSessionStore } from '../../core/stores/syncSession';
-import { useAssistantStore } from '../../core/stores/assistant';
-import { useTopicStore } from '../../core/stores/topicListManager';
+import { useOverlayStore } from '../../core/stores/overlay';
+import { useDataReload } from '../../core/composables/useDataReload';
 
 const store = useSyncSessionStore();
-const assistantStore = useAssistantStore();
-const topicStore = useTopicStore();
+const overlayStore = useOverlayStore();
+const { performFullReload } = useDataReload();
 
 const visibleLogs = computed(() => {
   // 只渲染最近 100 条，避免 DOM 过重；内存中保留 200 条
@@ -76,17 +76,12 @@ const handleClose = async () => {
     const confirmed = confirm('同步已完成，数据已更新。点击确认立即刷新以生效。');
     if (confirmed) {
       store.markReloaded();
-      store.close();
-      // 全量数据刷新
-      await Promise.all([
-        assistantStore.fetchAgents(),
-        assistantStore.fetchGroups(),
-      ]);
-      topicStore.invalidateAllTopicCaches();
+      overlayStore.closeSyncSession();
+      await performFullReload();
       return;
     }
   }
-  store.close();
+  overlayStore.closeSyncSession();
 };
 </script>
 

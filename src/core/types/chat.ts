@@ -1,6 +1,71 @@
-import type { ContentBlock } from "../composables/useContentProcessor";
+export interface MessageShell {
+  avatarColor: string;
+  bubbleBorderColor: string;
+  bubbleBoxShadow: string;
+  displayName: string;
+  avatarFallbackText: string;
+  avatarFallbackColor: string;
+  isUser: boolean;
+}
 
-export type { ContentBlock };
+export type MarkdownNode = {
+  type: "paragraph" | "heading" | "code_block" | "blockquote" | "list" | "table" | "thematic_break" | "raw_html" | "mermaid";
+  children?: InlineNode[];
+  level?: number;
+  lang?: string;
+  code?: string;
+  highlighted_html?: string;
+  theme?: string;
+  ordered?: boolean;
+  items?: MarkdownNode[][];
+  header?: InlineNode[][];
+  rows?: InlineNode[][][];
+  wrapper_class?: string;
+  content?: string;
+  encoded?: string;
+};
+
+export type InlineNode = {
+  type: "text" | "strong" | "emphasis" | "code" | "link" | "image" | "line_break" | "soft_break" | "inline_math" | "quoted_text" | "highlight_tag" | "alert_tag" | "raw_html_inline";
+  value?: string;
+  children?: InlineNode[];
+  href?: string;
+  src?: string;
+  alt?: string;
+  title?: string;
+  needs_asset_conversion?: boolean;
+  content?: string;
+  svg?: string;
+  display_mode?: boolean;
+};
+
+export interface ContentBlock {
+  type:
+  | "markdown"
+  | "tool-use"
+  | "tool-result"
+  | "diary"
+  | "thought"
+  | "button-click"
+  | "html-preview"
+  | "role-divider"
+  | "style"
+  | "math";
+  content?: string;
+  nodes?: MarkdownNode[]; // For type: "markdown", "diary", "thought"
+  tool_name?: string;
+  is_complete?: boolean;
+  status?: string;
+  details?: Array<{ key: string; value: string }>;
+  footer?: string;
+  maid?: string;
+  date?: string;
+  theme?: string;
+  role?: string;
+  is_end?: boolean;
+  display_mode?: boolean;
+  svg?: string; // For type: "math"
+}
 
 /**
  * Attachment 接口定义，严格对齐 Rust 端的 AttachmentSyncDTO / Attachment (仅保留核心字段)
@@ -31,6 +96,7 @@ export interface ChatMessage {
   name?: string;
   content?: string; // 原文，现在变为按需懒加载的可选字段
   blocks?: ContentBlock[]; // 预编译的 AST 数据块，前端直接渲染
+  shell?: MessageShell; // 预计算的外壳属性
   timestamp: number;
 
   isThinking?: boolean;
@@ -41,10 +107,9 @@ export interface ChatMessage {
   attachments?: Attachment[];
 
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
-  displayedContent?: string; // 用于兼容旧版渲染器的全量文本
+  displayedContent?: string; // Aurora 流式管道全量文本（TODO: 流式管道重构后移除）
   stableContent?: string;    // Aurora: 稳定区 HTML/Markdown
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
-  processedContent?: string; // 缓存 Rust 返回的 AST 或文本，避免重复解析
 }
 
 /**
@@ -77,6 +142,15 @@ export interface TopicFingerprint {
 }
 
 /**
+ * Aurora 语义沉淀更新，由 Rust 流式管道推送
+ */
+export interface AuroraUpdate {
+  stable: string;
+  tail: string;
+  content: string;
+}
+
+/**
  * StreamEvent 接口定义，用于 Rust Channel 事件分发
  */
 export interface StreamEvent {
@@ -87,4 +161,5 @@ export interface StreamEvent {
   context?: any;
   finishReason?: string;
   error?: string;
+  aurora?: AuroraUpdate;
 }

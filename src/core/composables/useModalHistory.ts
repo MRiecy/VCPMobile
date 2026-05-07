@@ -1,6 +1,5 @@
 import { ref } from 'vue';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { router } from '../router';
 
 /**
  * VCP Mobile Unified Modal History Stack 2.0 (Operation Aegis)
@@ -16,11 +15,11 @@ interface ModalInstance {
 // Global stack to track open modals across the entire application
 const modalStack = ref<ModalInstance[]>([]);
 
-// Flag to prevent redundant history.back() when closing via popstate
-let isProcessingPopState = false;
-
-// Flag to silently block popstate callback when closing via UI (history.back())
-let isInternalBack = false;
+// Modal history runtime state machine
+// IDLE: normal state
+// POPSTATE_HANDLING: currently processing a browser popstate event (closing top modal)
+// INTERNAL_BACK: triggered an internal history.back() from unregisterModal
+let state: 'IDLE' | 'POPSTATE_HANDLING' | 'INTERNAL_BACK' = 'IDLE';
 
 // Double-tap to exit state
 export const showExitToast = ref(false);
@@ -43,8 +42,8 @@ export const initRootHistory = () => {
 
 const handlePopState = (event: PopStateEvent) => {
   // 1. Check if this back was triggered by unregisterModal (UI action)
-  if (isInternalBack) {
-    isInternalBack = false;
+  if (state === 'INTERNAL_BACK') {
+    state = 'IDLE';
     return;
   }
 
@@ -52,7 +51,7 @@ const handlePopState = (event: PopStateEvent) => {
   // 对于 /settings、/agents/:id 这类真实路由页，返回手势应该交给 vue-router，
   // 不能误判成“要退出应用”或“要关闭底层侧边栏”。
   // 只有在主界面（/ 或 /chat）时，我们才拦截返回手势用于操作 Overlay。
-  const currentPath = router.currentRoute.value.path;
+  const currentPath = window.location.hash.replace(/^#/, '') || '/';
   if (currentPath !== '/chat' && currentPath !== '/') {
     return;
   }
@@ -61,12 +60,11 @@ const handlePopState = (event: PopStateEvent) => {
   if (modalStack.value.length > 0) {
     const topModal = modalStack.value[modalStack.value.length - 1];
 
-    isProcessingPopState = true;
+    state = 'POPSTATE_HANDLING';
     try {
       topModal.close();
-      modalStack.value.pop();
     } finally {
-      isProcessingPopState = false;
+      state = 'IDLE';
     }
     return;
   }
@@ -139,10 +137,12 @@ export function useModalHistory() {
     const index = modalStack.value.findIndex(m => m.id === id);
     if (index === -1) return;
 
-    if (!isProcessingPopState) {
+    // If we're currently handling a popstate event, don't trigger history.back()
+    // to avoid recursive popstate. The modal will be removed from stack regardless.
+    if (state !== 'POPSTATE_HANDLING') {
       const currentState = window.history.state;
       if (currentState && currentState.vcpModalId === id) {
-        isInternalBack = true;
+        state = 'INTERNAL_BACK';
         window.history.back();
       }
     }

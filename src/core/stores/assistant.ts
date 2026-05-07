@@ -58,43 +58,24 @@ export const useAssistantStore = defineStore("assistant", () => {
   // 记录每个 item (agent 或 group) 的未读数量
   const unreadCounts = ref<Record<string, number>>({});
 
-  const refreshUnreadCountsForItems = async (
-    fetchedItems: (AgentConfig | GroupConfig)[],
-  ) => {
+  /**
+   * 批量刷新未读计数（替代 N+1 逐个查询）
+   * 调用后端 get_unread_counts 一次获取所有 owner 的未读状态
+   */
+  const refreshUnreadCounts = async () => {
     try {
-      for (const item of fetchedItems) {
-        try {
-          const ownerType = (item as any).members ? "group" : "agent";
-          const topics = await invoke<any[]>("get_topics", {
-            ownerId: item.id,
-            ownerType,
-          });
-          let hasUnread = false;
-          let totalCount = 0;
-
-          for (const topic of topics) {
-            if (topic.unread) hasUnread = true;
-            if (topic.unreadCount > 0) {
-              totalCount += topic.unreadCount;
-              hasUnread = true;
-            }
-          }
-
-          if (hasUnread) {
-            unreadCounts.value[item.id] = totalCount > 0 ? totalCount : -1;
-          } else {
-            delete unreadCounts.value[item.id];
-          }
-        } catch (err) {
-          console.warn(
-            `[AssistantStore] Failed to fetch topics for unread count ${item.id}:`,
-            err,
-          );
-        }
-      }
+      const counts = await invoke<Record<string, number>>("get_unread_counts");
+      unreadCounts.value = counts;
     } catch (err) {
-      console.error("[AssistantStore] refreshUnreadCountsForItems error", err);
+      console.error("[AssistantStore] Failed to refresh unread counts:", err);
     }
+  };
+
+  /** @deprecated 保留兼容，实际调用批量接口 */
+  const refreshUnreadCountsForItems = async (
+    _fetchedItems: (AgentConfig | GroupConfig)[],
+  ) => {
+    await refreshUnreadCounts();
   };
 
   const combinedItems = computed(() => [

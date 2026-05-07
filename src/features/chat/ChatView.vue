@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
@@ -12,6 +12,8 @@ import InputEnhancer from "./InputEnhancer.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import CoreStatusIndicator from "../../components/ui/CoreStatusIndicator.vue";
 import { ArrowDown } from "lucide-vue-next";
+import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
+import { useChatScroll } from "../../core/composables/useChatScroll";
 
 const sessionStore = useChatSessionStore();
 const historyStore = useChatHistoryStore();
@@ -20,67 +22,35 @@ const streamStore = useChatStreamStore();
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
+const { keyboardHeight, forceRecalculate } = useKeyboardInsets();
 
-// 自动滚动到底部
+// 容器 refs
 const messageListRef = ref<HTMLElement | null>(null);
 const chatViewContainerRef = ref<HTMLElement | null>(null);
-const showScrollToBottom = ref(false);
 
-// 哨兵元素（IntersectionObserver 双哨兵架构，替代 scroll 事件）
+// 哨兵元素 refs
 const topSentinelRef = ref<HTMLElement | null>(null);
 const bottomSentinelRef = ref<HTMLElement | null>(null);
-let topObserver: IntersectionObserver | null = null;
-let bottomObserver: IntersectionObserver | null = null;
-let topSentinelVisible = false;
 
-// 流式消息持续置底（RAF 轮询，替代 MutationObserver）
+// 流式状态
 const isStreamingActive = computed(() => streamStore.activeStreamingIds.size > 0);
-let scrollRafId: number | null = null;
-let lastScrollHeight = 0;
 
-const scrollToBottom = (smooth = false) => {
-  if (messageListRef.value) {
-    messageListRef.value.scrollTo({
-      top: messageListRef.value.scrollHeight,
-      behavior: smooth ? "smooth" : "auto",
-    });
-  }
-};
-
-// --- IntersectionObserver 双哨兵架构 ---
-const setupTopSentinelObserver = () => {
-  if (!messageListRef.value || !topSentinelRef.value) return;
-  topObserver = new IntersectionObserver(
-    (entries) => {
-      topSentinelVisible = entries[0].isIntersecting;
-      if (topSentinelVisible && historyStore.hasMoreHistory && !historyStore.isLoadingHistory) {
-        historyStore.loadMoreHistory();
-      }
-    },
-    {
-      root: messageListRef.value,
-      rootMargin: "200px 0px 0px 0px", // 提前 200px 触发
-      threshold: 0,
-    },
-  );
-  topObserver.observe(topSentinelRef.value);
-};
-
-const setupBottomSentinelObserver = () => {
-  if (!messageListRef.value || !bottomSentinelRef.value) return;
-  bottomObserver = new IntersectionObserver(
-    (entries) => {
-      // 底部哨兵不可见 = 用户已离开底部 > 150px
-      showScrollToBottom.value = !entries[0].isIntersecting;
-    },
-    {
-      root: messageListRef.value,
-      rootMargin: "0px 0px 150px 0px", // 视口底部向下扩展 150px，哨兵在扩展区内 = 距底 ≤ 150px
-      threshold: 0,
-    },
-  );
-  bottomObserver.observe(bottomSentinelRef.value);
-};
+// 滚动管理 composable（封装 IO 双哨兵 + RAF 轮询 + 消息新增自动滚动）
+const {
+  showScrollToBottom,
+  scrollToBottom,
+  setupObservers,
+  startAutoScroll,
+  stopAutoScroll,
+  checkAndLoadMore,
+  dispose: disposeChatScroll,
+} = useChatScroll({
+  messageListRef,
+  messageCount: computed(() => historyStore.currentChatHistory.length),
+  hasMoreHistory: computed(() => historyStore.hasMoreHistory),
+  isLoadingHistory: computed(() => historyStore.isLoadingHistory),
+  onLoadMore: () => historyStore.loadMoreHistory(),
+});
 
 // 监听话题切换，触发历史加载与状态重置
 watch(
@@ -102,31 +72,14 @@ watch(
   { immediate: true }
 );
 
-// 监听消息列表长度变化：首屏加载期间无动画置底，之后平滑滚动
-watch(
-  () => historyStore.currentChatHistory.length,
-  async () => {
-    if (!showScrollToBottom.value) {
-      await nextTick();
-      scrollToBottom(!historyStore.isLoadingHistory);
-    }
-  },
-);
-
-
-
-
-
-// --- 阻止不可滚动区域的 touchmove，防止键盘弹起后 footer/空白区滑动导致页面被拖动 ---
+// --- 阻止非交互空白区域的 touchmove，防止 WebView viewport 被拖动 ---
 const handleContainerTouchMove = (e: TouchEvent) => {
   if (e.target instanceof Element) {
-    // 放行可滚动区域内的 touchmove（消息列表、输入框、附件预览、侧边栏等）
     const scrollable = e.target.closest(
-      ".overflow-y-auto, .overflow-x-auto, textarea, input, .vcp-scrollable",
+      ".overflow-y-auto, .overflow-x-auto, textarea, input, .vcp-scrollable, button, a",
     );
     if (scrollable) return;
   }
-  // 在不可滚动区域阻止默认行为，阻断 WebView viewport panning
   e.preventDefault();
 };
 
@@ -136,113 +89,43 @@ const handleVcpButtonClick = (e: any) => {
   }
 };
 
-// --- Streaming Auto-Scroll (RAF-based, replaces MutationObserver) ---
-const startStreamingScroll = () => {
-  if (scrollRafId) return;
-  lastScrollHeight = messageListRef.value?.scrollHeight ?? 0;
-  const tick = () => {
-    if (!messageListRef.value) return;
-    const sh = messageListRef.value.scrollHeight;
-    
-    // 只要 scrollHeight 发生变化，且用户处于置底状态，就尝试置底
-    // sh < lastScrollHeight 通常发生在气泡重渲染或高度坍缩时，此时也需要重置追踪器
-    if (sh !== lastScrollHeight) {
-      if (!showScrollToBottom.value) {
-        scrollToBottom(false);
-      }
-      lastScrollHeight = sh;
-    }
-    scrollRafId = requestAnimationFrame(tick);
-  };
-  scrollRafId = requestAnimationFrame(tick);
-};
-
-const stopStreamingScroll = () => {
-  if (scrollRafId) {
-    cancelAnimationFrame(scrollRafId);
-    scrollRafId = null;
-  }
-};
-
 watch(isStreamingActive, (active) => {
-  active ? startStreamingScroll() : stopStreamingScroll();
+  active ? startAutoScroll() : stopAutoScroll();
 });
 
-// --- Keyboard Offset & Viewport Handler ---
-let keyboardRafId: number | null = null;
-
-const applyKeyboardOffset = () => {
-  if (!chatViewContainerRef.value || !window.visualViewport) return;
-
-  let keyboardHeight = Math.max(
-    0,
-    window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop,
-  );
-
-  // 阈值处理：若键盘高度很小，视为 adjustResize 已生效的计算误差，避免错误增加 footer 高度
-  if (keyboardHeight < 30) {
-    keyboardHeight = 0;
-  }
+// --- Keyboard Offset & Inset Handler ---
+watch(keyboardHeight, (height) => {
+  if (!chatViewContainerRef.value) return;
 
   chatViewContainerRef.value.style.setProperty(
     "--keyboard-offset",
-    `${keyboardHeight}px`,
+    `${height}px`,
   );
 
-  if (keyboardHeight > 0 && historyStore.currentChatHistory.length > 0) {
+  if (height > 0 && historyStore.currentChatHistory.length > 0) {
     scrollToBottom(true);
   }
-};
-
-const handleViewportResize = () => {
-  if (keyboardRafId) return;
-  keyboardRafId = requestAnimationFrame(() => {
-    keyboardRafId = null;
-    applyKeyboardOffset();
-  });
-};
+});
 
 onMounted(async () => {
-  // 监听来自内联 HTML 按钮的点击事件
   window.addEventListener("vcp-button-click", handleVcpButtonClick);
 
-  // 监听视口变化（键盘弹起）- 保持引用以便销毁
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", handleViewportResize);
-  }
-
-  // 监听任意元素获得焦点，即时补偿键盘偏移
   if (chatViewContainerRef.value) {
-    chatViewContainerRef.value.addEventListener("focusin", applyKeyboardOffset);
+    chatViewContainerRef.value.addEventListener("focusin", forceRecalculate);
   }
 
-  // 初始化 IntersectionObserver 双哨兵
-  setupTopSentinelObserver();
-  setupBottomSentinelObserver();
-
-  // 兜底：若消息列表未产生滚动条但仍有更多数据，主动触发加载
-  if (messageListRef.value && messageListRef.value.scrollHeight <= messageListRef.value.clientHeight) {
-    if (historyStore.hasMoreHistory && !historyStore.isLoadingHistory) {
-      historyStore.loadMoreHistory();
-    }
-  }
+  setupObservers(topSentinelRef, bottomSentinelRef);
+  checkAndLoadMore();
 });
 
 onUnmounted(() => {
   window.removeEventListener("vcp-button-click", handleVcpButtonClick);
 
-  if (window.visualViewport) {
-    window.visualViewport.removeEventListener("resize", handleViewportResize);
-  }
-
   if (chatViewContainerRef.value) {
-    chatViewContainerRef.value.removeEventListener("focusin", applyKeyboardOffset);
+    chatViewContainerRef.value.removeEventListener("focusin", forceRecalculate);
   }
 
-  topObserver?.disconnect();
-  bottomObserver?.disconnect();
-
-  stopStreamingScroll();
+  disposeChatScroll();
 });
 </script>
 
@@ -367,13 +250,13 @@ onUnmounted(() => {
     <!-- 一键置底按钮 -->
     <Transition name="fade-slide-up">
       <button v-if="showScrollToBottom" @click="scrollToBottom(true)"
-        class="absolute bottom-24 right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 backdrop-blur-md rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-50 active:scale-90 transition-all">
+        class="absolute bottom-24 right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-50 active:scale-90 transition-all">
         <ArrowDown :size="20" />
       </button>
     </Transition>
 
     <!-- 3. 输入增强区 (固定底部) -->
-    <footer class="px-4 py-1.5 bg-black/10 backdrop-blur-md border-t border-white/5 shrink-0">
+    <footer class="px-4 py-1.5 bg-black/10 border-t border-white/5 shrink-0">
       <InputEnhancer :disabled="!sessionStore.currentTopicId" @send="historyStore.sendMessage" />
       <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))] no-swipe pointer-events-none"></div>
     </footer>
@@ -386,16 +269,7 @@ onUnmounted(() => {
   padding-top: calc(var(--vcp-safe-top, 24px) + 8px);
   padding-bottom: 12px;
   background-color: color-mix(in srgb, var(--secondary-bg) 80%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid transparent;
-}
-
-@media (hover: none) and (pointer: coarse) {
-  .vcp-header-fixed {
-    backdrop-filter: blur(4px) saturate(180%);
-    -webkit-backdrop-filter: blur(4px) saturate(180%);
-  }
 }
 
 /* 隐藏滚动条 */

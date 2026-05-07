@@ -42,7 +42,7 @@ const handleAction = async (item: VcpNotification, action: any) => {
   <div class="fixed top-safe left-0 right-0 z-[200] pointer-events-none px-4 pt-4 flex flex-col items-center gap-2">
     <TransitionGroup name="toast">
       <div v-for="toast in store.activeToasts" :key="toast.id"
-        class="pointer-events-auto flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-black/85 backdrop-blur-md border border-white/10 shadow-lg max-w-sm w-full overflow-hidden">
+        class="pointer-events-auto flex items-center justify-between gap-3 px-3 py-2 rounded-xl bg-black/85 border border-white/10 shadow-lg max-w-sm w-full overflow-hidden">
         
         <div class="flex items-center gap-2.5 min-w-0 flex-1">
           <component :is="getIcon(toast.type)" :size="14"

@@ -218,40 +218,42 @@ const filteredCombinedItems = computed(() => {
       <h3 class="px-2 text-[10px] font-black uppercase tracking-widest opacity-30">
         Agent Groups
       </h3>
-      <div ref="groupListRef" class="space-y-2">
+      <div ref="groupListRef" class="space-y-2 px-1">
         <div v-for="group in orderedGroups.filter(
           (group) =>
             !searchQuery.trim() ||
             group.name
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
-        )" :key="group.id" class="relative rounded-xl overflow-hidden w-full drag-handle">
+        )" :key="group.id" class="relative w-full drag-handle mb-2">
+          
           <!-- 背景设置按钮 -->
-          <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start z-0">
-            <div
-              class="w-[80px] h-full flex items-center justify-center text-purple-600/70 dark:text-purple-400/70 hover:text-purple-600 dark:hover:text-purple-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5"
-              @click.stop="goToSettings(group.id, 'group')"
-              @touchstart.stop>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path
-                  d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
-                </path>
-              </svg>
+          <div class="absolute inset-0 rounded-xl overflow-hidden z-0 pointer-events-none">
+            <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start">
+              <div
+                class="w-[80px] h-full flex items-center justify-center text-purple-600/70 dark:text-purple-400/70 hover:text-purple-600 dark:hover:text-purple-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5 pointer-events-auto"
+                @click.stop="goToSettings(group.id, 'group')"
+                @touchstart.stop>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path
+                    d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z">
+                  </path>
+                </svg>
+              </div>
             </div>
           </div>
 
+          <!-- 滑动与玻璃层 -->
           <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, group.id)"
             @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd(group.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] origin-center"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center transition-all duration-300"
             :class="[
                 sessionStore.currentSelectedItem?.id === group.id
-                  ? 'border-purple-500/50 bg-purple-500/10 dark:bg-purple-500/20'
-                  : 'border-black/5 dark:border-white/5',
-                activeSwipeId === group.id
-                  ? 'transition-none'
-                  : 'transition-transform duration-200 ease-out',
+                  ? 'glass-panel-active'
+                  : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
+                activeSwipeId === group.id ? 'transition-none' : '',
               ]" :style="{
                 transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
               }">
@@ -261,7 +263,7 @@ const filteredCombinedItems = computed(() => {
               <span class="font-bold text-sm truncate text-primary-text">{{
                 group.name
               }}</span>
-              <span class="text-[9px] opacity-40 truncate uppercase tracking-tighter">{{ group.members.length }} Members
+              <span class="text-[9px] text-secondary-text opacity-80 truncate uppercase tracking-tighter">{{ group.members.length }} Members
                 • {{ group.mode }}</span>
             </div>
           </div>
@@ -273,40 +275,42 @@ const filteredCombinedItems = computed(() => {
       <h3 class="px-2 text-[10px] font-black uppercase tracking-widest opacity-30">
         Individual Agents
       </h3>
-      <div ref="agentListRef" class="space-y-2">
+      <div ref="agentListRef" class="space-y-2 px-1">
         <div v-for="agent in orderedAgents.filter(
           (agent) =>
             !searchQuery.trim() ||
             agent.name
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
-        )" :key="agent.id" class="relative rounded-xl overflow-hidden w-full drag-handle">
+        )" :key="agent.id" class="relative w-full drag-handle mb-2">
+          
           <!-- 背景设置按钮 -->
-          <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start z-0">
-            <div
-              class="w-[80px] h-full flex items-center justify-center text-blue-600/70 dark:text-blue-400/70 hover:text-blue-600 dark:hover:text-blue-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5"
-              @click.stop="goToSettings(agent.id, 'agent')"
-              @touchstart.stop>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-                stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="3"></circle>
-                <path
-                  d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
-                </path>
-              </svg>
+          <div class="absolute inset-0 rounded-xl overflow-hidden z-0 pointer-events-none">
+            <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start">
+              <div
+                class="w-[80px] h-full flex items-center justify-center text-blue-600/70 dark:text-blue-400/70 hover:text-blue-600 dark:hover:text-blue-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5 pointer-events-auto"
+                @click.stop="goToSettings(agent.id, 'agent')"
+                @touchstart.stop>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path
+                    d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z">
+                  </path>
+                </svg>
+              </div>
             </div>
           </div>
 
+          <!-- 滑动与玻璃层 -->
           <div @click="selectAgent(agent.id)" @touchstart="onTouchStart($event, agent.id)"
             @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd(agent.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer hover:bg-black/5 dark:hover:bg-white/5 z-10 w-full active:scale-[0.98] origin-center"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center transition-all duration-300"
             :class="[
               sessionStore.currentSelectedItem?.id === agent.id
-                ? 'border-blue-500/50 bg-blue-500/10 dark:bg-blue-500/20'
-                : 'border-black/5 dark:border-white/5',
-              activeSwipeId === agent.id
-                ? 'transition-none'
-                : 'transition-transform duration-200 ease-out',
+                ? 'glass-panel-active'
+                : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
+              activeSwipeId === agent.id ? 'transition-none' : '',
             ]" :style="{
             transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)`,
           }">
@@ -330,7 +334,7 @@ const filteredCombinedItems = computed(() => {
               <span class="font-bold text-sm truncate text-primary-text">{{
                 agent.name
                 }}</span>
-              <span class="text-[10px] opacity-40 truncate">{{
+              <span class="text-[10px] text-secondary-text opacity-80 truncate">{{
                 agent.model
                 }}</span>
             </div>

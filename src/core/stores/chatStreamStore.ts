@@ -39,6 +39,22 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     return streams ? streams.length > 0 : false;
   });
 
+  // 全局流消息池上限，防止极端场景下 OOM
+  const MAX_STREAM_MESSAGES = 100;
+
+  const enforceStreamPoolLimit = () => {
+    if (activeStreamMessages.size <= MAX_STREAM_MESSAGES) return;
+    const excess = activeStreamMessages.size - MAX_STREAM_MESSAGES;
+    // 按插入顺序（Map 保持插入顺序）清理最旧的非活跃消息
+    for (const [id] of activeStreamMessages) {
+      if (excess <= 0) break;
+      // 只删除已完成的流（不在当前活跃会话中）
+      if (!activeStreamingIds.value.has(id)) {
+        activeStreamMessages.delete(id);
+      }
+    }
+  };
+
   // 辅助方法：管理会话流状态
   const addSessionStream = (
     ownerId: string,
@@ -52,6 +68,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     if (!sessionActiveStreams.value[key].includes(messageId)) {
       sessionActiveStreams.value[key].push(messageId);
     }
+    // 新增流时检查并执行上限保护
+    enforceStreamPoolLimit();
   };
 
   const removeSessionStream = (

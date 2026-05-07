@@ -1,0 +1,87 @@
+export const meta = {
+  fileName: 'themes-porcelain-brocade.css',
+  name: '瓷与锦',
+};
+
+export const variables = {
+  dark: {
+  "--chat-wallpaper-dark": "'wallpaper_jin.jpg'",
+  "--primary-bg": "#0A1921",
+  "--secondary-bg": "#0D2A38",
+  "--tertiary-bg": "#061318",
+  "--accent-bg": "#174A5E",
+  "--border-color": "#174A5E",
+  "--input-bg": "#081F29",
+  "--panel-bg-dark": "rgba(13, 42, 56, 0.8)",
+  "--primary-text": "#E0E6E9",
+  "--secondary-text": "#d8e6ec",
+  "--highlight-text": "#E8B95A",
+  "--text-on-accent": "#1A1A1A",
+  "--placeholder-text": "#6a7e89",
+  "--quoted-text": "#FFB74D",
+  "--user-text": "#E0E6E9",
+  "--agent-text": "#E0E6E9",
+  "--user-bubble-bg": "rgba(232, 185, 90, 0.15)",
+  "--assistant-bubble-bg": "rgba(13, 42, 56, 0.3)",
+  "--button-bg": "#DAA520",
+  "--button-hover-bg": "#C89B4A",
+  "--danger-color": "#e57373",
+  "--danger-hover-bg": "#ef5350",
+  "--success-color": "#66bb6a",
+  "--notification-bg": "#0D2A38",
+  "--notification-header-bg": "#174A5E",
+  "--notification-border": "#E8B95A",
+  "--tool-bubble-bg": "rgba(23, 74, 94, 0.2)",
+  "--tool-bubble-border": "#E8B95A",
+  "--scrollbar-track": "rgba(13, 42, 56, 0.5)",
+  "--scrollbar-thumb": "rgba(232, 185, 90, 0.6)",
+  "--scrollbar-thumb-hover": "rgba(232, 185, 90, 0.8)",
+  "--shimmer-color-transparent": "rgba(224, 230, 233, 0.4)",
+  "--shimmer-color-highlight": "rgba(224, 230, 233, 0.8)",
+  "--panel-text-shadow": "0 1px 2px rgba(0, 0, 0, 0.5)",
+  "--panel-bg": "var(--panel-bg-dark)"
+},
+  light: {
+  "--chat-wallpaper-light": "'wallpaper_ci.jpg'",
+  "--primary-bg": "#F7F8FA",
+  "--secondary-bg": "#FFFFFF",
+  "--tertiary-bg": "#EFF2F5",
+  "--accent-bg": "#E6EBF0",
+  "--border-color": "#E0E6EB",
+  "--input-bg": "#FFFFFF",
+  "--panel-bg-light": "rgba(255, 255, 255, 0.85)",
+  "--primary-text": "#34495E",
+  "--secondary-text": "#6C7A89",
+  "--highlight-text": "#4A90E2",
+  "--text-on-accent": "#FFFFFF",
+  "--placeholder-text": "#a0aab3",
+  "--quoted-text": "#007BFF",
+  "--user-text": "#34495E",
+  "--agent-text": "#34495E",
+  "--user-bubble-bg": "rgba(74, 144, 226, 0.15)",
+  "--assistant-bubble-bg": "rgba(230, 235, 240, 0.5)",
+  "--button-bg": "#4A90E2",
+  "--button-hover-bg": "#357ABD",
+  "--danger-color": "#e74c3c",
+  "--danger-hover-bg": "#c0392b",
+  "--success-color": "#4caf50",
+  "--notification-bg": "#EFF2F5",
+  "--notification-header-bg": "#f0f0f0",
+  "--notification-border": "#4A90E2",
+  "--tool-bubble-bg": "rgba(224, 230, 235, 0.2)",
+  "--tool-bubble-border": "#4A90E2",
+  "--scrollbar-track": "rgba(200, 200, 200, 0.7)",
+  "--scrollbar-thumb": "rgba(74, 144, 226, 0.7)",
+  "--scrollbar-thumb-hover": "rgba(74, 144, 226, 0.9)",
+  "--shimmer-color-transparent": "rgba(52, 73, 94, 0.04)",
+  "--shimmer-color-highlight": "rgba(52, 73, 94, 0.08)",
+  "--panel-bg": "var(--panel-bg-light)"
+},
+};
+
+export const extraCss = `
+.tool-bubble {
+    border: 1px solid var(--tool-bubble-border);
+    background: var(--tool-bubble-bg);
+}
+`;

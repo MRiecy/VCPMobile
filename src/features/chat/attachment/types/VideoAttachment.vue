@@ -15,7 +15,7 @@
         />
         <!-- Video Play Icon Overlay -->
         <div class="absolute inset-0 flex items-center justify-center">
-          <div class="w-5 h-5 rounded-full bg-blue-500/20 backdrop-blur-sm flex items-center justify-center border border-blue-500/30">
+          <div class="w-5 h-5 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/30">
             <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-blue-500 translate-x-[0.5px]">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>

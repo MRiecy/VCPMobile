@@ -1,4 +1,5 @@
 mod distributed;
+mod pre_renderer;
 mod vcp_modules;
 
 use tauri::Manager;
@@ -36,7 +37,7 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
-use vcp_modules::message_render_compiler::process_message_content;
+use vcp_modules::message_render_compiler::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::fetch_raw_message_content;
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
@@ -48,8 +49,9 @@ use vcp_modules::sync_service::{
     read_sync_log_file, start_manual_sync,
 };
 use vcp_modules::topic_service::{
-    create_topic, delete_topic, get_topics, get_topics_streamed, regenerate_topic_response,
-    set_topic_unread, summarize_topic, toggle_topic_lock, update_topic_title,
+    create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
+    regenerate_topic_response, set_topic_unread, summarize_topic, toggle_topic_lock,
+    update_topic_title,
 };
 use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
@@ -175,8 +177,10 @@ pub fn run() {
             delete_messages,
             truncate_history_after_timestamp,
             process_message_content,
+            rebuild_all_pre_renders,
             get_topics,
             get_topics_streamed,
+            get_unread_counts,
             get_groups,
             read_group_config,
             create_topic,

@@ -42,3 +42,6 @@ plans/Archive_Assets/
 # Local Release Artifacts
 releases/
 vector/
+
+# Cargo registry cache
+.cargo

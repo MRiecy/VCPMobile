@@ -92,44 +92,8 @@ const removeStagedAttachment = (index: number) => {
   attachmentStore.stagedAttachments.splice(index, 1);
 };
 
-// --- 阻止 textarea 边界滑动导致页面被拖动 ---
-const lastTouchY = ref(0);
-
-const handleTextareaTouchStart = (e: TouchEvent) => {
-  if (e.touches.length > 0) {
-    lastTouchY.value = e.touches[0].clientY;
-  }
-};
-
-const handleTextareaTouchMove = (e: TouchEvent) => {
-  if (!textareaRef.value || e.touches.length === 0) return;
-  const el = textareaRef.value;
-  const scrollTop = el.scrollTop;
-  const scrollHeight = el.scrollHeight;
-  const clientHeight = el.clientHeight;
-  const currentY = e.touches[0].clientY;
-  const deltaY = lastTouchY.value - currentY;
-
-  // 内容未溢出时，直接阻止页面被拖动
-  if (scrollHeight <= clientHeight) {
-    e.preventDefault();
-    return;
-  }
-
-  // 在顶部且继续向下滑动（试图拉出上层/适应层）
-  if (scrollTop <= 0 && deltaY < 0) {
-    e.preventDefault();
-    return;
-  }
-
-  // 在底部且继续向上滑动（试图推出页面）
-  if (scrollTop + clientHeight >= scrollHeight - 1 && deltaY > 0) {
-    e.preventDefault();
-    return;
-  }
-
-  lastTouchY.value = currentY;
-};
+// 注意：textarea 上的 touch 拦截已移除，交由 WebView 原生处理 focus 与滚动。
+// 若后续仍需防止 rubber-band，应在容器层面（ChatView）统一处理，而非在 input 上。
 </script>
 
 <template>
@@ -152,7 +116,7 @@ const handleTextareaTouchMove = (e: TouchEvent) => {
 
     <div class="flex items-end gap-2 px-1">
       <div
-        class="flex-1 flex items-end gap-2 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-[1.75rem] px-2 py-1 shadow-sm backdrop-blur-md relative overflow-hidden">
+        class="flex-1 flex items-end gap-2 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-[1.75rem] px-2 py-1 shadow-sm relative overflow-hidden">
         
         <!-- 附件按钮 (归位到 Pill 内部) -->
         <button @click="triggerFilePick"
@@ -168,8 +132,8 @@ const handleTextareaTouchMove = (e: TouchEvent) => {
 
         <!-- 核心输入区 -->
         <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px]">
-          <textarea ref="textareaRef" v-model="input" @keydown="handleKeydown" @paste="handlePaste" @beforeinput="handleBeforeInput" @touchstart="handleTextareaTouchStart" @touchmove="handleTextareaTouchMove" rows="1"
-            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[var(--primary-text)] text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide"
+          <textarea ref="textareaRef" v-model="input" @keydown="handleKeydown" @paste="handlePaste" @beforeinput="handleBeforeInput" rows="1"
+            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[var(--primary-text)] text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide vcp-textarea"
             style="max-height: 114px;"
             :placeholder="disabled ? '请先选择话题以开启对话' : '说点什么...'" :disabled="disabled"></textarea>
           
@@ -219,5 +183,12 @@ const handleTextareaTouchMove = (e: TouchEvent) => {
 .scrollbar-hide {
   -ms-overflow-style: none;
   scrollbar-width: none;
+}
+
+/* 优化 Android WebView 中 textarea 的点击与 focus 行为 */
+.vcp-textarea {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  cursor: text;
 }
 </style>

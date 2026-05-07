@@ -33,7 +33,7 @@ const isLoading = computed(() => props.file.status === "loading");
     <!-- Loading Overlay -->
     <div
       v-if="isLoading"
-      class="absolute inset-0 bg-black/60 backdrop-blur-[2px] rounded-xl flex flex-col items-center justify-center z-10 gap-1"
+      class="absolute inset-0 bg-black/60 rounded-xl flex flex-col items-center justify-center z-10 gap-1"
     >
       <div
         class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"

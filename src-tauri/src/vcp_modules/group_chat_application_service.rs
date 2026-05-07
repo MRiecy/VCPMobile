@@ -239,6 +239,7 @@ pub async fn internal_process_group_chat_message(
                     finish_reason,
                     attachments: None,
                     blocks: None,
+                    shell: None,
                 };
 
                 // 立即进行一次断点存盘 (针对单个 Agent)

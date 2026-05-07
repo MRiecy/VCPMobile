@@ -39,7 +39,7 @@ const { direction, lengthX, lengthY } = useSwipe(appRootRef, {
     // 只有在抽屉关闭时才从左往右滑开启
     if (!layoutStore.leftDrawerOpen && !layoutStore.rightDrawerOpen) {
       // 检查是否从受限区域发起
-      if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
+      if (e.target instanceof Element && e.target.closest(".no-swipe, .vcp-scrollable")) return;
 
       const absX = Math.abs(lengthX.value);
       const absY = Math.abs(lengthY.value);
@@ -61,7 +61,7 @@ const bootstrapApp = async () => {
 };
 
 const backgroundStyle = computed(() => {
-  const themeInfo = themeStore.availableThemes.find(
+  const themeInfo = themeStore.currentThemeInfo || themeStore.availableThemes.find(
     (t) => t.fileName === themeStore.currentTheme,
   );
   if (!themeInfo) return {};
@@ -156,7 +156,7 @@ onUnmounted(() => {
     <!-- 3. 抽屉遮罩层位于主内容之后、抽屉之前，点击空白即可关闭 -->
     <Transition name="fade">
       <div v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-        class="vcp-overlay fixed inset-0 bg-black/12 backdrop-blur-[1px] md:hidden" @click.self="
+        class="vcp-overlay fixed inset-0 bg-black/12 md:hidden" @click.self="
           layoutStore.setLeftDrawer(false);
         layoutStore.setRightDrawer(false);
         "></div>
@@ -260,4 +260,6 @@ body,
 .vcp-paused-animations *::after {
   animation-play-state: paused !important;
 }
+
+
 </style>

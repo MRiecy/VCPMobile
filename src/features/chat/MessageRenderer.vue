@@ -1,34 +1,31 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch, nextTick } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import type { ChatMessage } from "../../core/types/chat";
-import { useAssistantStore } from "../../core/stores/assistant";
-import { useSettingsStore } from "../../core/stores/settings";
-import {
-  useContentProcessor,
-  type ContentBlock,
-} from "../../core/composables/useContentProcessor";
-import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
+import { computed, ref, watch, nextTick } from "vue";
+import type { ChatMessage, ContentBlock } from "../../core/types/chat";
 import { useOverlayStore } from "../../core/stores/overlay";
-import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useNotificationStore } from "../../core/stores/notification";
+import { useMessageEvents } from "../../core/composables/useMessageEvents";
+import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
+import { renderMarkdownNodes } from "../../core/utils/astRenderer";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 
-// Import block components
-import MarkdownBlock from "./blocks/MarkdownBlock.vue";
-import MathBlock from "./blocks/MathBlock.vue";
-import ToolBlock from "./blocks/ToolBlock.vue";
-import DiaryBlock from "./blocks/DiaryBlock.vue";
-import ThoughtBlock from "./blocks/ThoughtBlock.vue";
-import HtmlPreviewBlock from "./blocks/HtmlPreviewBlock.vue";
-import RoleDividerBlock from "./blocks/RoleDividerBlock.vue";
+const { processEmoticonsInContainer } = useEmoticonFixer();
+const mermaidCache = new Map<string, string>();
+const renderingMermaids = new Set<string>();
+
+// UI Components
 import ChatBubble from "./components/ChatBubble.vue";
 import MessageHeader from "./components/MessageHeader.vue";
 import ThinkingIndicator from "./components/ThinkingIndicator.vue";
 import StreamingTag from "./components/StreamingTag.vue";
 import AttachmentPreview from "./attachment/AttachmentPreview.vue";
+
+// Interactive Block Components
+import ToolBlock from "./blocks/ToolBlock.vue";
+import ThoughtBlock from "./blocks/ThoughtBlock.vue";
+import HtmlPreviewBlock from "./blocks/HtmlPreviewBlock.vue";
 
 const props = defineProps<{
   message: ChatMessage;
@@ -36,24 +33,29 @@ const props = defineProps<{
   depth?: number;
 }>();
 
-const assistantStore = useAssistantStore();
-const settingsStore = useSettingsStore();
-const { processMessageContent, removeScopedCss } = useContentProcessor();
-const { processEmoticonsInContainer } = useEmoticonFixer();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
-
-const sessionStore = useChatSessionStore();
 const historyStore = useChatHistoryStore();
+const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 
-const isUser = computed(() => props.message.role === "user");
-const isStreaming = computed(() => {
-  if (isUser.value) return false;
+// === Shell Properties (Pre-computed in Rust) ===
+const shell = computed(() => props.message.shell);
 
-  // 检查当前消息是否在所属会话的活动流中 (修正：不再依赖 isThinking 状态)
-  const itemId =
-    props.message.agentId || props.message.groupId || props.agentId;
+// === Streaming State ===
+
+// 数据层面：消息是否处于任意活跃流中（不依赖当前话题）
+const isMessageInActiveStream = computed(() => {
+  for (const streams of Object.values(streamStore.sessionActiveStreams || {})) {
+    if (streams.includes(props.message.id)) return true;
+  }
+  return false;
+});
+
+// UI 层面：消息是否在当前视口中显示流式状态
+const isStreaming = computed(() => {
+  if (shell.value?.isUser) return false;
+  const itemId = props.message.agentId || props.agentId;
   const topicId = sessionStore.currentTopicId;
   if (!itemId || !topicId) return false;
 
@@ -62,340 +64,226 @@ const isStreaming = computed(() => {
   return streams ? streams.includes(props.message.id) : false;
 });
 
-// 获取当前消息实际对应的 Agent ID (对于群聊，从显式字段读取)
-const actualAgentId = computed(() => {
-  return props.message.agentId || props.agentId;
-});
-
-// 获取当前 Agent 的配置
-const agentConfig = computed(() => {
-  if (isUser.value) return null;
-
-  // 1. 优先按 ID 查找
-  if (actualAgentId.value) {
-    const agent = assistantStore.agents.find(
-      (a) => a.id === actualAgentId.value,
-    );
-    if (agent) return agent;
-  }
-
-  // 2. 针对群聊历史数据，可能只有名称没有 ID，尝试按名称查找
-  if (props.message.name) {
-    const agent = assistantStore.agents.find(
-      (a) => a.name === props.message.name,
-    );
-    if (agent) return agent;
-  }
-
-  return null;
-});
-
-// 获取头像所需的基础信息
-const avatarOwnerInfo = computed(() => {
-  if (isUser.value) {
-    return { type: 'user' as const, id: 'user_avatar' };
-  }
-
-  // 1. 优先使用匹配到的 Agent ID
-  if (actualAgentId.value) {
-    return { type: 'agent' as const, id: actualAgentId.value };
-  }
-
-  // 2. 如果只有名称，尝试从配置中反查 ID
-  if (props.message.name) {
-    const agent = assistantStore.agents.find(
-      (a) => a.name === props.message.name,
-    );
-    if (agent) return { type: 'agent' as const, id: agent.id };
-  }
-
-  return null;
-});
-
-// 统一后处理：表情包修复（VCPMagic 已退回 MarkdownBlock 内部，避免破坏 Vue 虚拟 DOM）
-const runPostProcess = async () => {
-  try {
-    await nextTick();
-    if (!messageContentRef.value || !props.message.id) return;
-    processEmoticonsInContainer(messageContentRef.value);
-  } catch (e) {
-    console.error('[MessageRenderer] Post-process error:', e);
-  }
-};
-
-onUnmounted(() => {
-  // 彻底防止 Scoped CSS 在组件销毁后泄漏内存或污染全局
-  if (props.message && props.message.id) {
-    removeScopedCss(props.message.id);
-  }
-});
-
-// 响应式消息块 (AST 树)
-const contentBlocks = ref<ContentBlock[]>([]);
-// 流式传输专用 Block 数组 (Rust AST 解析)
-const streamBlocks = ref<ContentBlock[]>([]);
-// 流式传输专用原始文本 (兼容旧逻辑)
-const streamContent = ref<string>("");
-// 内容容器 ref，用于统一后处理
+// === Event Delegation ===
 const messageContentRef = ref<HTMLElement | null>(null);
+useMessageEvents(messageContentRef);
 
-watch([() => contentBlocks.value, () => streamBlocks.value], runPostProcess, { flush: 'post' });
+// === Block Rendering Helper ===
+function isPlainBlock(type: string): boolean {
+  return [
+    "markdown",
+    "diary",
+    "role-divider",
+    "button-click",
+  ].includes(type);
+}
 
-// 过渡状态：用于在流式结束、等待 Rust AST 解析完成前，保持流式视图不消失，防止闪烁
-const isTransitioning = ref(false);
-
-// 决定当前 UI 显示哪个视图：只要在流式中，或者正在过渡中，就显示流式纯文本视图
-const showStreamView = computed(
-  () => isStreaming.value || isTransitioning.value,
-);
-
-// 节流状态
-let isProcessing = false;
-let pendingText: string | null = null;
-
-// 核心解析逻辑
-const updateContentBlocks = async (text: string) => {
-  if (!text && isStreaming.value) {
-    contentBlocks.value = [];
-    streamContent.value = "";
-    return;
-  }
-
-  // 1. 优先使用预编译的 AST (零解析渲染)
-  if (!isStreaming.value && props.message.blocks && props.message.blocks.length > 0) {
-    contentBlocks.value = props.message.blocks;
-    streamContent.value = "";
-    return;
-  }
-
-  // 如果连文本都没有，且没有块，退出
-  if (!text && !props.message.blocks) return;
-
-  const options = {
-    role: props.message.role,
-    depth: props.depth || 0,
-    messageId: props.message.id,
-    isStreaming: isStreaming.value,
-  };
-
-  if (isStreaming.value) {
-    // 流式状态：跳过 Rust AST，直接生成混合 Markdown
-    const blocks = await processMessageContent(text || "", options);
-    streamContent.value = blocks[0]?.content || "";
-  } else {
-    // 动态编译态 (例如流式刚结束，或者刚编辑完，或者历史消息缺少预编译)
-    const hadBlocks = !!props.message.blocks && props.message.blocks.length > 0;
-    isTransitioning.value = true;
-    try {
-      const newBlocks = await processMessageContent(text || "", options);
-      contentBlocks.value = newBlocks;
-      
-      // 核心修复：如果原始消息缺少预编译块，或者这是刚解析出的新块，则尝试保存到数据库
-      if (!hadBlocks || text !== props.message.content) {
-        historyStore.persistMessageBlocks(props.message.id, newBlocks);
+function renderBlockHtml(block: ContentBlock): string {
+  switch (block.type) {
+    case "markdown":
+      if (block.nodes && block.nodes.length > 0) {
+        return `<div class="vcp-markdown-block">${renderMarkdownNodes(block.nodes, props.message.id)}</div>`;
       }
-    } finally {
-      // 确保无论解析成功失败，都能解除过渡状态
-      isTransitioning.value = false;
-      // 过渡结束，可以安全清理流式块
-      streamBlocks.value = [];
+      return `<div class="vcp-markdown-block"><p>${escapeHtml(block.content || "")}</p></div>`;
+    
+    case "diary": {
+      const diaryContent = (block.nodes && block.nodes.length > 0)
+        ? renderMarkdownNodes(block.nodes, props.message.id)
+        : escapeHtml(block.content || "");
+      return `
+        <div class="vcp-diary-block">
+          <div class="vcp-diary-header">
+            <span class="vcp-diary-title">Maid's Diary</span>
+            ${block.date ? `<span class="vcp-diary-date">${escapeHtml(block.date)}</span>` : ''}
+          </div>
+          ${block.maid ? `
+            <div class="vcp-diary-maid-info">
+              <span class="diary-maid-label">Maid:</span>
+              <span class="vcp-diary-maid-name">${escapeHtml(block.maid)}</span>
+            </div>
+          ` : ''}
+          <div class="vcp-diary-content">${diaryContent}</div>
+        </div>
+      `;
     }
+    
+    case "role-divider":
+      const role = block.role || "unknown";
+      const roleDisplay = role.charAt(0).toUpperCase() + role.slice(1);
+      const actionText = block.is_end ? "[结束]" : "[起始]";
+      const roleClass = `role-${role.toLowerCase()}`;
+      const typeClass = block.is_end ? "type-end" : "type-start";
+      
+      return `
+        <div class="vcp-role-divider ${roleClass} ${typeClass}">
+          <span class="divider-text">角色分界: ${roleDisplay} ${actionText}</span>
+        </div>
+      `;
+
+    case "button-click":
+      return `
+        <div class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
+          ${escapeHtml(block.content || "")}
+        </div>
+      `;
+
+    default:
+      return "";
+  }
+}
+
+function getBlockKey(block: ContentBlock, index: number): string {
+  const content = block.content || '';
+  const hash = content.length > 0
+    ? content.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36)
+    : '';
+  return `${block.type}-${hash}-${index}`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// === Heavy Content Rendering (KaTeX inline math + Mermaid) ===
+const renderHeavyContent = async () => {
+  // 消息处于活跃流中时完全跳过重渲染（KaTeX/Mermaid/Emoticon），
+  // 与当前话题无关，确保多并发流式话题切换时行为一致
+  if (isMessageInActiveStream.value) return;
+  await nextTick();
+  if (!messageContentRef.value) return;
+
+  // 1. KaTeX math (inline + display mode, rendered inside markdown blocks via v-html)
+  const mathElements = messageContentRef.value.querySelectorAll('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]');
+  if (mathElements.length > 0) {
+    try {
+      const katexModule = await import('katex');
+      const katex = katexModule.default;
+      mathElements.forEach((el) => {
+        if (el.querySelector('.katex')) return; // already rendered
+        const latex = el.getAttribute('data-latex');
+        if (!latex) return;
+        const isDisplay = el.classList.contains('vcp-math-block');
+        katex.render(latex, el as HTMLElement, {
+          throwOnError: false,
+          strict: false,
+          displayMode: isDisplay,
+        });
+      });
+    } catch (e) {
+      console.error('[MessageRenderer] KaTeX render failed:', e);
+    }
+  }
+
+  // 2. Mermaid diagrams
+  const mermaidPlaceholders = messageContentRef.value.querySelectorAll('.mermaid-placeholder[data-code]');
+  if (mermaidPlaceholders.length > 0) {
+    try {
+      const mermaidModule = await import('mermaid');
+      const mermaid = mermaidModule.default;
+      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+      for (const el of Array.from(mermaidPlaceholders)) {
+        const placeholder = el as HTMLElement;
+        if (placeholder.querySelector('svg')) continue; // already rendered
+        const encoded = placeholder.dataset.code;
+        if (!encoded) continue;
+        // Skip if already being rendered by a concurrent call
+        if (renderingMermaids.has(encoded)) continue;
+        // Skip if Vue has replaced this element out of the DOM
+        if (!messageContentRef.value.contains(placeholder)) continue;
+        // Use cache to avoid re-rendering the same diagram
+        if (mermaidCache.has(encoded)) {
+          placeholder.innerHTML = mermaidCache.get(encoded)!;
+          placeholder.classList.remove('mermaid-placeholder');
+          placeholder.classList.add('mermaid');
+          continue;
+        }
+        renderingMermaids.add(encoded);
+        try {
+          const code = decodeURIComponent(escape(atob(encoded)));
+          placeholder.innerHTML = code;
+          placeholder.classList.remove('mermaid-placeholder');
+          placeholder.classList.add('mermaid');
+          await mermaid.run({ nodes: [placeholder] });
+          mermaidCache.set(encoded, placeholder.innerHTML);
+        } catch (e) {
+          console.error('[MessageRenderer] Mermaid render failed:', e);
+          placeholder.innerHTML = '<div class="text-red-500 text-[10px]">图表渲染失败</div>';
+        } finally {
+          renderingMermaids.delete(encoded);
+        }
+      }
+    } catch (e) {
+      console.error('[MessageRenderer] Mermaid load failed:', e);
+    }
+  }
+
+  // 3. Emoticons
+  if (messageContentRef.value) {
+    processEmoticonsInContainer(messageContentRef.value);
   }
 };
 
-// 监听文本变化或流状态变化，加入节流机制 (Throttle) 防止流式输出卡顿
+// Watch for content changes and trigger heavy rendering
+// Note: blocks array reference changes when Rust parser returns new AST,
+// so shallow watch is sufficient. Avoid deep watch to prevent O(n) traversal
+// on every streaming chunk across all rendered messages.
 watch(
-  [
-    () =>
-      props.message.processedContent ||
-      props.message.displayedContent ||
-      props.message.content ||
-      "",
-    () => isStreaming.value,
-  ],
-  async ([newText, streaming]) => {
-    if (isProcessing) {
-      // 如果正在处理，则将最新文本存入 pending
-      pendingText = (newText as string) || "";
-      return;
-    }
-
-    try {
-      isProcessing = true;
-      await updateContentBlocks((newText as string) || "");
-
-      // [优化] 流式状态时放宽到 33ms (约 30fps) 以减轻渲染主线程负担
-      // 如果是非流式（例如切换话题、历史加载），保持 50ms 响应性
-      const throttleTime = streaming ? 33 : 50;
-      await new Promise((resolve) => setTimeout(resolve, throttleTime));
-    } catch (e) {
-      console.error("[MessageRenderer] Watcher error:", e);
-    } finally {
-      // [关键修复] 必须在 finally 中释放锁，防止发生错误后永久死锁
-      isProcessing = false;
-
-      // 消费积压的文本
-      if (pendingText !== null) {
-        const textToProcess = pendingText;
-        pendingText = null;
-        updateContentBlocks(textToProcess);
-      }
-    }
+  () => props.message.blocks,
+  () => {
+    if (isMessageInActiveStream.value) return;
+    renderHeavyContent();
   },
-  { immediate: true },
+  { immediate: true }
 );
 
-// [重构] 流式模式 Rust AST 解析：监听 Aurora 稳定区/尾区变化，合并全文后调用 Rust 解析
-// 直接复用 Rust 后端的 parse_content，避免前端重复写正则
-let lastRustParseTime = 0;
-const RUST_PARSE_THROTTLE = 50; // ms，与 streamManager loop 周期对齐
-
+// 消息真正离开活跃流后统一执行一次重渲染，确保 KaTeX/Mermaid/Emoticon 正确渲染
 watch(
-  [() => props.message.stableContent, () => props.message.tailContent, () => isStreaming.value],
-  async ([stable, tail, streaming]) => {
-    // 如果不在流式状态，不要立即清空 streamBlocks，留给过渡状态使用
-    if (!streaming) {
-      return;
+  isMessageInActiveStream,
+  (inStream, wasInStream) => {
+    if (wasInStream && !inStream) {
+      renderHeavyContent();
     }
-    const fullText = (stable || '') + (tail || '');
-    if (!fullText) {
-      streamBlocks.value = [];
-      return;
-    }
-
-    const now = performance.now();
-    if (now - lastRustParseTime < RUST_PARSE_THROTTLE) {
-      return;
-    }
-    lastRustParseTime = now;
-
-    try {
-      const blocks = await invoke<ContentBlock[]>('process_message_content', { content: fullText });
-      streamBlocks.value = blocks;
-    } catch (e) {
-      console.error('[MessageRenderer] Rust AST parse failed in streaming mode:', e);
-      streamBlocks.value = [{ type: 'markdown', content: fullText } as ContentBlock];
-    }
-  },
-  // { immediate: true } removed: streamBlocks watcher should only react to actual
-  // content changes, not fire on mount for every history message.
+  }
 );
 
-// 计算气泡背景颜色
-const bubbleStyle = computed(() => {
-  if (isUser.value)
-    return {
-      backgroundColor: "var(--user-bubble-bg, rgba(145, 109, 51, 0.8))",
-      color: "var(--user-text, #e8e8e8)",
-      borderBottomRightRadius: "4px",
-    };
-
-  const color = agentConfig.value?.avatarCalculatedColor;
-  const baseStyle: any = {
-    backgroundColor: "var(--assistant-bubble-bg, rgba(44, 62, 74, 0.8))",
-    color: "var(--agent-text, #e8e8e8)",
-    borderBottomLeftRadius: "4px",
-    border: "1px solid rgba(255, 255, 255, 0.08)", // Even subtler border for better blending
-  };
-
-  if (color) {
-    baseStyle["--dynamic-color"] = color;
-    baseStyle.borderColor = `${color}30`; // Adjust to very subtle 18% opacity
-    baseStyle.boxShadow = `0 4px 12px ${color}15`;
-  }
-
-  return baseStyle;
-});
-
-// 计算名称颜色
-const nameStyle = computed(() => {
-  if (isUser.value) return { color: "var(--secondary-text)" };
-  const color = agentConfig.value?.avatarCalculatedColor;
-  return { color: color || "var(--highlight-text)" };
-});
-
-const displayName = computed(() => {
-  if (!props.message.name && !agentConfig.value?.name && !isUser.value)
-    return null;
-  return isUser.value
-    ? settingsStore.settings?.userName || "ME"
-    : props.message.name || agentConfig.value?.name;
-});
-
-const avatarFallbackText = computed(() => {
-  return isUser.value
-    ? settingsStore.settings?.userName || "ME"
-    : props.message.name || "AI";
-});
-
-const avatarFallbackColor = computed(() => {
-  if (isUser.value) {
-    return "rgb(226,54,56)";
-  }
-
-  return agentConfig.value?.avatarCalculatedColor || "#374151";
-});
-
-// 长按菜单触发逻辑
+// === Context Menu ===
 const showMessageContextMenu = async () => {
   const actions: any[] = [];
 
-  // 1. 如果正在流式生成，提供强制中止功能 (最高优先级)
-  if (isStreaming.value && !isUser.value) {
+  if (isStreaming.value && !shell.value?.isUser) {
     actions.push({
       label: "中止回复",
       icon: StopCircle,
       danger: true,
-      handler: () => {
-        streamStore.stopMessage(props.message.id);
-      },
+      handler: () => streamStore.stopMessage(props.message.id),
     });
   }
 
-  // 获取内容的统一方法，结合懒加载
   const getFullText = async () => {
-    const text = props.message.content ?? streamContent.value;
-    if (text === undefined || text === null || text === "") {
-      // 触发懒加载获取原文
-      return await historyStore.fetchRawContent(props.message.id);
-    }
-    return text;
+    if (props.message.content) return props.message.content;
+    return await historyStore.fetchRawContent(props.message.id);
   };
 
-  // 2. 复制文本 (所有状态可用，除了纯占位符)
-  // 为了不卡住菜单弹出，我们先在外部显示菜单，在 handler 中拉取内容
   actions.push({
     label: "复制内容",
     icon: Copy,
     handler: async () => {
-      try {
-        const fullText = await getFullText();
-        if (!fullText) return;
-        
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(fullText);
-        } else {
-          // Fallback for some old webviews
-          const textarea = document.createElement("textarea");
-          textarea.value = fullText;
-          document.body.appendChild(textarea);
-          textarea.select();
-          document.execCommand("copy");
-          document.body.removeChild(textarea);
-        }
-        notificationStore.addNotification({
-          type: "success",
-          title: "复制成功",
-          message: "内容已复制到剪贴板",
-          duration: 2000,
-        });
-      } catch (e) {
-        console.error("[MessageContextMenu] Copy failed:", e);
-      }
+      const fullText = await getFullText();
+      if (!fullText) return;
+      await navigator.clipboard.writeText(fullText);
+      notificationStore.addNotification({
+        type: "success",
+        title: "复制成功",
+        message: "内容已复制到剪贴板",
+      });
     },
   });
 
-  // 3. 编辑消息 (非流式状态下支持全屏编辑)
   if (!isStreaming.value) {
     actions.push({
       label: "编辑消息",
@@ -404,39 +292,29 @@ const showMessageContextMenu = async () => {
         const fullText = await getFullText();
         overlayStore.openEditor({
           initialValue: fullText || "",
-          onSave: (newContent: string) => handleSaveEdit(newContent),
+          onSave: (newContent: string) => historyStore.updateMessageContent(props.message.id, newContent),
         });
       },
     });
+
+    if (!shell.value?.isUser) {
+      actions.push({
+        label: "重新生成",
+        icon: RotateCcw,
+        handler: () => historyStore.regenerateResponse(props.message.id),
+      });
+    } else {
+      actions.push({
+        label: "编辑重发",
+        icon: Edit2,
+        handler: async () => {
+          historyStore.editMessageContent = (await getFullText()) || "";
+          historyStore.editingOriginalMessageId = props.message.id;
+        },
+      });
+    }
   }
 
-  // 4. 用户特权操作 (编辑重发)
-  if (isUser.value) {
-    actions.push({
-      label: "编辑重发",
-      icon: Edit2,
-      handler: async () => {
-        const fullText = await getFullText();
-        // 将内容填入全局编辑状态供 InputEnhancer 读取
-        historyStore.editMessageContent = fullText || "";
-        // 标记当前正在编辑重发的消息 ID
-        historyStore.editingOriginalMessageId = props.message.id;
-      },
-    });
-  }
-
-  // 5. AI 重新生成 (非流式状态下可用)
-  if (!isUser.value && !isStreaming.value) {
-    actions.push({
-      label: "重新生成",
-      icon: RotateCcw,
-      handler: () => {
-        historyStore.regenerateResponse(props.message.id);
-      },
-    });
-  }
-
-  // 6. 删除 (万能操作)
   actions.push({
     label: "删除消息",
     icon: Trash2,
@@ -448,110 +326,93 @@ const showMessageContextMenu = async () => {
     },
   });
 
-  overlayStore.openContextMenu(
-    actions,
-    isUser.value ? "User Message" : "Assistant Message",
-  );
+  overlayStore.openContextMenu(actions, shell.value?.isUser ? "User" : "Assistant");
 };
 
-const handleSaveEdit = async (newContent: string) => {
-  let currentContent = props.message.content;
-  if (currentContent === undefined || currentContent === null || currentContent === "") {
-    currentContent = await historyStore.fetchRawContent(props.message.id);
-    props.message.content = currentContent;
-  }
-  if (newContent !== currentContent) {
-    await historyStore.updateMessageContent(props.message.id, newContent);
-    // 立即重新触发渲染
-    await updateContentBlocks(newContent);
-  }
-};
+function formatTime(ts: number) {
+  return new Date(ts).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
 </script>
 
 <template>
   <div v-longpress="showMessageContextMenu"
     class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
+    
     <MessageHeader 
-      :is-user="isUser" 
-      :display-name="displayName" 
-      :name-style="nameStyle" 
-      :owner-type="avatarOwnerInfo?.type"
-      :owner-id="avatarOwnerInfo?.id"
-      :avatar-fallback-text="avatarFallbackText" 
-      :avatar-fallback-color="avatarFallbackColor" 
+      v-if="shell"
+      :is-user="shell.isUser" 
+      :display-name="shell.displayName" 
+      :name-style="{ color: shell.avatarColor }" 
+      :owner-type="shell.isUser ? 'user' : 'agent'"
+      :owner-id="message.agentId || agentId"
+      :avatar-fallback-text="shell.avatarFallbackText" 
+      :avatar-fallback-color="shell.avatarFallbackColor" 
     />
 
-    <ChatBubble :is-user="isUser" :is-streaming="isStreaming" :bubble-style="bubbleStyle">
-      <ThinkingIndicator v-if="isStreaming && streamBlocks.length === 0" />
+    <ChatBubble 
+      v-if="shell"
+      :is-user="shell.isUser" 
+      :is-streaming="isStreaming" 
+      :bubble-style="{
+        '--dynamic-color': shell.avatarColor,
+        'borderColor': shell.bubbleBorderColor,
+        'boxShadow': shell.bubbleBoxShadow
+      }"
+    >
+      <ThinkingIndicator v-if="isStreaming && (!message.blocks || message.blocks.length === 0)" />
 
-      <template v-if="!showStreamView">
-        <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
-          <template v-for="(block, index) in contentBlocks" :key="index">
-            <template v-if="block">
-              <MarkdownBlock v-if="block.type === 'markdown'" :content="block.content" :is-streaming="false" />
-              <MathBlock v-else-if="block.type === 'math'" :content="block.content" :block="block" />
-              <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
-                :block="block" />
-              <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />
-              <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
-              <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
-              <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
-                :message-id="message.id" />
-              <RoleDividerBlock v-else-if="block.type === 'role-divider'" :block="block" />
-              <div v-else-if="block.type === 'button-click'"
-                class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
-                {{ block.content }}
-              </div>
-            </template>
-          </template>
+      <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
+        <template v-for="(block, index) in message.blocks" :key="getBlockKey(block, index)">
+          <!-- 纯展示型：v-html 零组件开销 -->
+          <div 
+            v-if="isPlainBlock(block.type)" 
+            v-html="renderBlockHtml(block)" 
+          />
+
+          <!-- 交互型/特殊型：保留 Vue 组件 -->
+          <ToolBlock 
+            v-else-if="block.type === 'tool-use' || block.type === 'tool-result'" 
+            :type="block.type" 
+            :content="block.content"
+            :block="block" 
+          />
+
+          <ThoughtBlock
+            v-else-if="block.type === 'thought'"
+            :block="block"
+            :message-id="message.id"
+          />
+
+          <HtmlPreviewBlock 
+            v-else-if="block.type === 'html-preview'" 
+            :content="block.content || ''"
+            :message-id="message.id" 
+          />
+        </template>
+        
+        <!-- 流式尾部快速渲染 (Aurora 路径) -->
+        <div v-if="isStreaming && message.tailContent" class="opacity-70 italic animate-pulse">
+          {{ message.tailContent }}
         </div>
-      </template>
-      <template v-else>
-        <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
-          <template v-for="(block, index) in streamBlocks" :key="`${block?.type || 'null'}-${index}`">
-            <template v-if="block">
-              <MarkdownBlock
-                v-if="block.type === 'markdown'"
-                :content="block.content"
-                :is-streaming="index === streamBlocks.length - 1"
-              />
-              <MathBlock v-else-if="block.type === 'math'" :content="block.content" :block="block" />
-              <ToolBlock v-else-if="block.type === 'tool-use'" :type="block.type" :content="block.content"
-                :block="block" />
-              <ToolBlock v-else-if="block.type === 'tool-result'" :type="block.type" :block="block" />
-              <DiaryBlock v-else-if="block.type === 'diary'" :content="block.content" :block="block" />
-              <ThoughtBlock v-else-if="block.type === 'thought'" :content="block.content" :block="block" />
-              <HtmlPreviewBlock v-else-if="block.type === 'html-preview'" :content="block.content"
-                :message-id="message.id" />
-              <RoleDividerBlock v-else-if="block.type === 'role-divider'" :block="block" />
-              <div v-else-if="block.type === 'button-click'"
-                class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
-                {{ block.content }}
-              </div>
-            </template>
-          </template>
-        </div>
-      </template>
+      </div>
 
-      <AttachmentPreview v-if="message.attachments && message.attachments.length > 0" :attachments="message.attachments"
-        class="pt-3 border-t border-black/5 dark:border-white/5" />
+      <AttachmentPreview 
+        v-if="message.attachments && message.attachments.length > 0" 
+        :attachments="message.attachments"
+        class="pt-3 border-t border-black/5 dark:border-white/5" 
+      />
 
-      <StreamingTag v-if="isStreaming && streamBlocks.length > 0" />
+      <StreamingTag v-if="isStreaming" />
 
       <template #footer>
         <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
-          :class="isUser ? 'text-right' : 'text-left'" :style="isUser
-              ? { color: 'var(--secondary-text)' }
-              : { color: 'var(--secondary-text)' }
-            ">
-          {{
-            new Date(message.timestamp).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            })
-          }}
+          :class="shell.isUser ? 'text-right' : 'text-left'">
+          {{ formatTime(message.timestamp) }}
         </div>
       </template>
     </ChatBubble>
@@ -563,31 +424,8 @@ const handleSaveEdit = async (newContent: string) => {
   animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.aurora-container {
-  /* 布局隔离：防止内部变动影响全局 */
-  contain: layout;
-}
-
-.aurora-stable-layer {
-  /* 稳定区：启用浏览器原生墓碑优化 */
-  content-visibility: auto;
-  contain-intrinsic-size: 0 50px;
-}
-
-.aurora-tail-layer {
-  /* 活跃区：确保动画不被裁切 */
-  position: relative;
-}
-
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 </style>

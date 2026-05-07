@@ -8,7 +8,49 @@ use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::Topic;
 use serde_json::Value;
+use sqlx::Row;
+use std::collections::HashMap;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
+
+/// 批量获取所有 owner 的未读计数，替代前端的 N+1 查询
+#[tauri::command]
+pub async fn get_unread_counts(
+    db_state: State<'_, DbState>,
+) -> Result<HashMap<String, i32>, String> {
+    let pool = &db_state.pool;
+    let rows = sqlx::query(
+        "SELECT owner_id, 
+                CAST(COALESCE(SUM(unread_count), 0) AS INTEGER) as total_count,
+                MAX(CASE WHEN unread = 1 THEN 1 ELSE 0 END) as has_unread
+         FROM topics 
+         WHERE deleted_at IS NULL
+         GROUP BY owner_id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut result = HashMap::new();
+    for row in rows {
+        let owner_id: String = row.get("owner_id");
+        let total_count: i64 = row.get("total_count");
+        let has_unread: i32 = row.get("has_unread");
+
+        let value = if total_count > 0 {
+            total_count as i32
+        } else if has_unread != 0 {
+            -1
+        } else {
+            0
+        };
+
+        if value != 0 {
+            result.insert(owner_id, value);
+        }
+    }
+
+    Ok(result)
+}
 
 #[tauri::command]
 pub async fn get_topics(
@@ -338,6 +380,7 @@ pub async fn regenerate_topic_response(
         finish_reason: None,
         attachments: None, // 重新生成时，上下文组装会自动从数据库重新拉取附件
         blocks: None,
+        shell: None,
     };
 
     // 5. 获取配置并发起生成

@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
 import { ChevronDown, ChevronUp, Settings, Loader2 } from 'lucide-vue-next';
-import MarkdownBlock from './MarkdownBlock.vue';
-import type { ContentBlock } from '../../../core/composables/useContentProcessor';
+import type { ContentBlock } from '../../../core/types/chat';
 
 const props = defineProps<{
   type: 'tool-use' | 'tool-result';
@@ -48,7 +47,7 @@ const isImageValue = (key: string, value: string): boolean => {
 
 <template>
   <div ref="toolBlockRef" class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
-    type === 'tool-use' ? 'is-tool-use' : 'is-tool-result',
+    type === 'tool-use' ? 'is-tool-use' : 'is-tool-result tool-bubble',
     isExpanded ? 'shadow-md' : 'shadow-sm'
   ]">
     <!-- Header -->
@@ -95,11 +94,11 @@ const isImageValue = (key: string, value: string): boolean => {
                   <img :src="item.value" class="max-w-full rounded-lg" loading="lazy" alt="Generated Image" />
                 </a>
               </template>
-              <MarkdownBlock v-else :content="item.value || ''" class="compact-markdown" />
+              <div v-else class="text-xs opacity-90 whitespace-pre-wrap">{{ item.value || '' }}</div>
             </div>
           </div>
-          <div v-if="block.footer" class="mt-2 pt-2 border-t border-black/10 dark:border-white/10 text-xs opacity-70">
-            <MarkdownBlock :content="block.footer" class="compact-markdown" />
+          <div v-if="block.footer" class="mt-2 pt-2 border-t border-black/10 dark:border-white/10 text-xs opacity-70 whitespace-pre-wrap">
+            {{ block.footer }}
           </div>
         </div>
       </template>
@@ -231,8 +230,6 @@ const isImageValue = (key: string, value: string): boolean => {
 
 /* 修复：将亮色模式设为默认基础样式 */
 .vcp-tool-block.is-tool-result {
-  background: linear-gradient(145deg, #f4f6f8, #e8eaf0);
-  border: 1px solid rgba(0, 0, 0, 0.1);
   color: #333;
 }
 

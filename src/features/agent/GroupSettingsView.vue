@@ -64,7 +64,9 @@ const allAgents = ref<Agent[]>([]);
 const isSaving = ref(false);
 const saveSuccess = ref(false);
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-let isFirstLoad = true;
+
+// 原始配置快照，用于判断用户是否真正修改了内容
+const originalConfig = ref<GroupConfig | null>(null);
 
 onUnmounted(() => {
   if (saveTimeout) {
@@ -140,7 +142,7 @@ const fetchGroupConfig = async () => {
       ...config,
       memberTags: typeof memberTags === 'object' ? memberTags : {}
     };
-    isFirstLoad = true;
+    originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
   } catch (err) {
     console.error("Failed to load group config:", err);
   }
@@ -156,6 +158,8 @@ const autoSave = async () => {
     // Use assistantStore to save group config and get notification
     await assistantStore.saveGroup(groupConfig.value);
     saveSuccess.value = true;
+    // 保存成功后更新快照，避免重复保存相同内容
+    originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
     setTimeout(() => {
       saveSuccess.value = false;
     }, 2000);
@@ -169,8 +173,9 @@ const autoSave = async () => {
 watch(
   groupConfig,
   () => {
-    if (isFirstLoad) {
-      isFirstLoad = false;
+    if (!originalConfig.value) return;
+    // 只有与原始快照不同时才触发保存，避免无意义的后端调用
+    if (JSON.stringify(groupConfig.value) === JSON.stringify(originalConfig.value)) {
       return;
     }
     if (saveTimeout) {
@@ -424,7 +429,6 @@ const tagModeOptions = [
 <style scoped>
 .group-settings-view {
   background-color: color-mix(in srgb, var(--primary-bg) 85%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
 }
 
 .card-modern {
