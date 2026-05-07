@@ -269,21 +269,30 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         if (delta && delta.content) textChunk = delta.content;
       }
 
+      // 保留 content 累加作为 Aurora 未触发时的后备显示
       if (textChunk) {
         msg!.content = (msg!.content || "") + textChunk;
-        // 驱动 Aurora 渲染引擎
-        streamManager.appendChunk(actualMessageId, textChunk, (data) => {
-          msg!.stableContent = data.stable;
-          msg!.tailContent = data.tail;
-          msg!.displayedContent = data.stable + data.tail;
-        });
+        if (!msg!.tailContent) {
+          msg!.tailContent = msg!.content;
+        }
       }
+    } else if (type === "aurora") {
+      const aurora = event.aurora;
+      if (aurora) {
+        msg!.content = aurora.content;
+        msg!.stableContent = aurora.stable;
+        msg!.tailContent = aurora.tail;
+        msg!.displayedContent = aurora.stable + aurora.tail;
+      }
+      msg!.isThinking = false;
+      streamStore.addSessionStream(itemId, topicId, actualMessageId);
     } else if (type === "end" || type === "error") {
       const errorMsg = event.error;
       const finishReason = event.finishReason;
 
       streamManager.finalizeStream(actualMessageId, async () => {
         msg!.displayedContent = msg!.content;
+        msg!.tailContent = "";
         if (finishReason) msg!.finishReason = finishReason;
 
         streamStore.removeSessionStream(itemId, topicId, actualMessageId);
@@ -491,7 +500,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (!msg) return;
     msg.content = newContent;
     msg.blocks = undefined;
-    msg.processedContent = undefined;
     msg.displayedContent = "";
     if (sessionStore.currentSelectedItem?.id && sessionStore.currentTopicId) {
       await invoke("patch_single_message", {

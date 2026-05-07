@@ -22,10 +22,10 @@ const handleAction = (action: OverlayActionItem) => {
 
 <template>
   <Transition name="fade">
-    <div v-if="isOpen" class="fixed inset-0 bg-black/20 backdrop-blur-[1px] pointer-events-auto z-[100]"
+    <div v-if="isOpen" class="fixed inset-0 bg-black/20 pointer-events-auto z-[100]"
       @click="handleBackdropClick">
       <div
-        class="absolute left-1/2 bottom-6 -translate-x-1/2 w-[calc(100%-24px)] max-w-sm rounded-3xl border border-black/5 dark:border-white/10 bg-white/92 dark:bg-[#111827]/92 backdrop-blur-xl shadow-2xl overflow-hidden"
+        class="absolute left-1/2 bottom-6 -translate-x-1/2 w-[calc(100%-24px)] max-w-sm rounded-3xl border border-black/5 dark:border-white/10 bg-white/92 dark:bg-[#111827]/92 shadow-2xl overflow-hidden"
         @click.stop>
         <div v-if="title" class="px-5 pt-5 pb-3 border-b border-black/5 dark:border-white/10">
           <h3 class="text-sm font-black tracking-wide">{{ title }}</h3>

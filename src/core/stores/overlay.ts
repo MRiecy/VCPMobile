@@ -1,6 +1,8 @@
 ﻿import { defineStore } from 'pinia';
 import { ref, shallowRef, computed } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
+import { useSyncSessionStore } from './syncSession';
+import { useRebuildSessionStore } from './rebuildSession';
 import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
 
 interface PageStackItem {
@@ -24,6 +26,8 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'settings'));
   const isAgentSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'agentSettings'));
   const isGroupSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'groupSettings'));
+  const isSyncSessionOpen = computed(() => pageStack.value.some(p => p.type === 'syncSession'));
+  const isRebuildSessionOpen = computed(() => pageStack.value.some(p => p.type === 'rebuildSession'));
 
   const agentSettingsId = computed(() => {
     const page = pageStack.value.find(p => p.type === 'agentSettings');
@@ -68,6 +72,54 @@ export const useOverlayStore = defineStore('overlay', () => {
   const popToRoot = () => {
     while (pageStack.value.length > 0) {
       const top = pageStack.value[pageStack.value.length - 1];
+      unregisterModal(top.modalId);
+      pageStack.value.pop();
+    }
+  };
+
+  // --- Sync Session (managed separately due to its internal state machine) ---
+  const openSyncSession = () => {
+    if (isSyncSessionOpen.value) return;
+    const syncStore = useSyncSessionStore();
+    syncStore.open();
+    const modalId = 'Page:syncSession';
+    pageStack.value.push({ type: 'syncSession', id: undefined, modalId });
+    registerModal(modalId, () => {
+      syncStore.close();
+      popPageInternal();
+    });
+  };
+
+  const closeSyncSession = () => {
+    if (!isSyncSessionOpen.value) return;
+    const syncStore = useSyncSessionStore();
+    syncStore.close();
+    const top = pageStack.value[pageStack.value.length - 1];
+    if (top?.type === 'syncSession') {
+      unregisterModal(top.modalId);
+      pageStack.value.pop();
+    }
+  };
+
+  // --- Rebuild Session ---
+  const openRebuildSession = () => {
+    if (isRebuildSessionOpen.value) return;
+    const rebuildStore = useRebuildSessionStore();
+    rebuildStore.open();
+    const modalId = 'Page:rebuildSession';
+    pageStack.value.push({ type: 'rebuildSession', id: undefined, modalId });
+    registerModal(modalId, () => {
+      rebuildStore.close();
+      popPageInternal();
+    });
+  };
+
+  const closeRebuildSession = () => {
+    if (!isRebuildSessionOpen.value) return;
+    const rebuildStore = useRebuildSessionStore();
+    rebuildStore.close();
+    const top = pageStack.value[pageStack.value.length - 1];
+    if (top?.type === 'rebuildSession') {
       unregisterModal(top.modalId);
       pageStack.value.pop();
     }
@@ -152,6 +204,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     agentSettingsId,
     isGroupSettingsOpen,
     groupSettingsId,
+    isSyncSessionOpen,
+    isRebuildSessionOpen,
     // Legacy open/close (now backed by page stack)
     openSettings,
     closeSettings,
@@ -159,6 +213,10 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeAgentSettings,
     openGroupSettings,
     closeGroupSettings,
+    openSyncSession,
+    closeSyncSession,
+    openRebuildSession,
+    closeRebuildSession,
     // Modals
     promptConfig,
     contextMenuConfig,

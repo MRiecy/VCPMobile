@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { ChevronDown, ChevronUp, Loader2 } from 'lucide-vue-next';
-import MarkdownBlock from './MarkdownBlock.vue';
-import type { ContentBlock } from '../../../core/composables/useContentProcessor';
+import { ref } from "vue";
+import { ChevronDown, ChevronUp, Loader2 } from "lucide-vue-next";
+import { renderMarkdownNodes } from "../../../core/utils/astRenderer";
+import type { ContentBlock } from "../../../core/types/chat";
 
 defineProps<{
-  content: string;
   block: ContentBlock;
+  messageId: string;
 }>();
 
 const isExpanded = ref(false);
@@ -14,23 +14,37 @@ const isExpanded = ref(false);
 const toggleExpand = () => {
   isExpanded.value = !isExpanded.value;
 };
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 </script>
 
 <template>
   <div class="vcp-thought-block">
-    <div class="thought-header" @click="toggleExpand">
-      <span class="thought-icon">🧠</span>
-      <span class="thought-label flex items-center gap-1">
-        {{ block.theme || '元思考链' }}
+    <div class="vcp-thought-header" @click="toggleExpand">
+      <span class="vcp-thought-icon">🧠</span>
+      <span class="vcp-thought-label flex items-center gap-1">
+        {{ block.theme || "元思考链" }}
         <Loader2 v-if="!block.is_complete" :size="10" class="animate-spin" />
       </span>
       <component :is="isExpanded ? ChevronUp : ChevronDown" :size="14" class="opacity-40 ml-auto" />
     </div>
 
-    <div v-show="isExpanded" class="thought-content animate-slide-down">
-      <div class="thought-body">
-        <MarkdownBlock :content="content" />
-      </div>
+    <div v-show="isExpanded" class="vcp-thought-content animate-slide-down">
+      <div
+        class="thought-body"
+        v-html="
+          block.nodes && block.nodes.length > 0
+            ? renderMarkdownNodes(block.nodes, messageId)
+            : escapeHtml(block.content || '')
+        "
+      />
     </div>
   </div>
 </template>
@@ -54,7 +68,7 @@ html.dark .vcp-thought-block {
   border-color: rgba(120, 120, 128, 0.2);
 }
 
-.thought-header {
+.vcp-thought-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -65,21 +79,21 @@ html.dark .vcp-thought-block {
   padding: 10px 15px !important;
 }
 
-.thought-header:hover {
+.vcp-thought-header:hover {
   opacity: 1;
 }
 
-.thought-icon {
+.vcp-thought-icon {
   font-size: 1.1em;
   filter: grayscale(0.5);
 }
 
-.thought-label {
+.vcp-thought-label {
   font-weight: 600;
   font-size: 0.95em;
 }
 
-.thought-content {
+.vcp-thought-content {
   padding: 0 15px 10px 15px;
   border-top: 1px dashed rgba(120, 120, 128, 0.2);
   margin-top: 5px;

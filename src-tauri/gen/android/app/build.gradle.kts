@@ -48,6 +48,7 @@ android {
 
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
+        manifestPlaceholders["appName"] = "VCPMobile"
         applicationId = "com.vcp.avatar"
         minSdk = 24
         targetSdk = 36
@@ -57,6 +58,8 @@ android {
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
+            manifestPlaceholders["appName"] = "VCP-Debug"
+            versionNameSuffix = "-debug"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false

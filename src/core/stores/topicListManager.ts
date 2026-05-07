@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { useChatSessionStore } from "./chatSessionStore";
-import { useChatHistoryStore } from "./chatHistoryStore";
+
 import { useNotificationStore } from "./notification";
 
 /**
@@ -213,12 +213,11 @@ export const useTopicStore = defineStore("topic", () => {
       // 如果删除的是当前选中的话题，自动载入最新的一个
       if (sessionStore.currentTopicId === topicId) {
         const nextTopic = topics.value[0];
-        const historyStore = useChatHistoryStore();
         if (nextTopic) {
           await sessionStore.selectTopicById(ownerId, nextTopic.id);
         } else {
           sessionStore.currentTopicId = null;
-          historyStore.currentChatHistory = [];
+          // chatHistoryStore 监听 currentTopicId 变化，会自动清空历史
         }
       }
     } catch (e) {

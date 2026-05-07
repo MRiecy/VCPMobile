@@ -8,7 +8,7 @@
     <button
       v-if="showRemove"
       @click.stop="emit('remove', index)"
-      class="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800/90 backdrop-blur-md rounded-full flex items-center justify-center text-white shadow-lg active:scale-90 transition-transform border border-white/20 z-20"
+      class="absolute -top-1.5 -right-1.5 w-5 h-5 bg-gray-800/90 rounded-full flex items-center justify-center text-white shadow-lg active:scale-90 transition-transform border border-white/20 z-20"
     >
       <svg
         width="10"
@@ -28,7 +28,7 @@
     <!-- Loading Overlay -->
     <div
       v-if="isLoading"
-      class="absolute inset-0 bg-black/40 backdrop-blur-[1px] rounded-xl flex flex-col items-center justify-center z-10 gap-1"
+      class="absolute inset-0 bg-black/40 rounded-xl flex flex-col items-center justify-center z-10 gap-1"
     >
       <div
         class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"

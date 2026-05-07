@@ -77,7 +77,7 @@ onUnmounted(() => {
     <Transition name="fade">
       <div
         v-if="activeRequest"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       >
         <div
           class="bg-secondary-bg rounded-2xl p-6 mx-4 max-w-sm w-full shadow-2xl"

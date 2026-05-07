@@ -63,7 +63,7 @@ const openExternal = async (path: string) => {
       <button
         v-if="!att.type.startsWith('image/') && !att.type.startsWith('audio/') && !att.type.startsWith('video/')"
         @click.stop="openExternal(att.src)"
-        class="absolute top-1 right-1 p-1 bg-black/20 dark:bg-white/10 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-black/40 dark:hover:bg-white/20 transition-all z-10 backdrop-blur-sm"
+        class="absolute top-1 right-1 p-1 bg-black/20 dark:bg-white/10 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-black/40 dark:hover:bg-white/20 transition-all z-10"
       >
         <ExternalLink :size="12" class="text-white/70" />
       </button>

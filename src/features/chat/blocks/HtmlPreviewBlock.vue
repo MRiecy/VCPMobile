@@ -115,7 +115,7 @@ watch(fullScreenTab, (val) => {
 
 <template>
   <div class="html-preview-block mb-4 rounded-2xl border overflow-hidden transition-all duration-300"
-    :class="themeStore.isDarkResolved ? 'border-white/10 bg-[#0d1117]/80 backdrop-blur-md' : 'border-black/5 bg-white/90 backdrop-blur-sm'">
+    :class="themeStore.isDarkResolved ? 'border-white/10 bg-[#0d1117]/80' : 'border-black/5 bg-white/90'">
     
     <!-- 全屏页面 (Kimi 风格沙箱) -->
     <Teleport to="body">
@@ -127,7 +127,7 @@ watch(fullScreenTab, (val) => {
         leave-from-class="translate-y-0 opacity-100"
         leave-to-class="translate-y-10 opacity-0"
       >
-        <div v-if="isFullScreen" class="fixed inset-0 z-[10000] flex flex-col"
+        <div v-show="isFullScreen" class="fixed inset-0 z-[10000] flex flex-col"
           :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-[#f6f8fa] text-gray-900'">
           
           <!-- 全屏 Header -->

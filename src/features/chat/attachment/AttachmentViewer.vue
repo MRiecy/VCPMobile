@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, watch, ref } from "vue";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { X, ExternalLink, Download } from "lucide-vue-next";
-import MarkdownBlock from "../blocks/MarkdownBlock.vue";
+import { renderMarkdownNodes } from "../../../core/utils/astRenderer";
+import type { ContentBlock } from "../../../core/types/chat";
 
 interface Attachment {
   type: string;
@@ -23,16 +24,39 @@ const emit = defineEmits(["close", "open-external"]);
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = 'AttachmentViewer';
 
-watch(() => props.isOpen, (newVal) => {
+const astBlocks = ref<ContentBlock[]>([]);
+
+watch(() => props.isOpen, async (newVal) => {
   if (newVal) {
     registerModal(modalId, close);
+    // 如果是文本，尝试获取 AST
+    if (props.file?.extractedText) {
+      try {
+        astBlocks.value = await invoke<ContentBlock[]>('process_message_content', { content: props.file.extractedText });
+      } catch (e) {
+        console.error('[AttachmentViewer] Failed to parse content:', e);
+        astBlocks.value = [{ type: 'markdown', content: props.file.extractedText }];
+      }
+    }
   } else {
     unregisterModal(modalId);
+    astBlocks.value = [];
   }
 });
 
 const isImage = computed(() => props.file?.type.startsWith("image/"));
 const isText = computed(() => !!props.file?.extractedText);
+
+// 渲染 AST 块
+const renderedHtml = computed(() => {
+  return astBlocks.value.map(block => {
+    if (block.type === 'markdown' && block.nodes) {
+      return renderMarkdownNodes(block.nodes, 'attachment-viewer');
+    }
+    // Fallback or other block types
+    return `<div class="opacity-70">${block.content || ''}</div>`;
+  }).join('');
+});
 
 const renderSrc = computed(() => {
   if (!props.file?.src) return "";
@@ -55,25 +79,25 @@ const close = () => emit("close");
 <template>
   <Transition name="viewer-fade">
     <div
-      v-if="isOpen && file"
+      v-show="isOpen && file"
       class="vcp-attachment-viewer fixed inset-0 z-[1000] flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] pointer-events-auto"
       @click.self="close"
     >
       <!-- Toolbar -->
       <div
-        class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10"
+        class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10"
       >
         <div class="flex flex-col overflow-hidden mr-4 min-w-0">
           <span class="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{{
-            file.name
+            file?.name
           }}</span>
           <span class="text-[10px] text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{
-            file.type
+            file?.type
           }}</span>
         </div>
         <div class="flex items-center gap-1">
           <button
-            @click="$emit('open-external', file.src)"
+            @click="$emit('open-external', file?.src)"
             class="p-2 -mr-1 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5"
           >
             <ExternalLink :size="20" />
@@ -94,9 +118,9 @@ const close = () => emit("close");
         <!-- Text/Code/MD Viewer -->
         <div
           v-if="isText"
-          class="w-full px-5 py-6 text-[15px] leading-relaxed"
+          class="w-full px-5 py-6 text-[15px] leading-relaxed vcp-content-blocks"
+          v-html="renderedHtml"
         >
-          <MarkdownBlock :content="file.extractedText!" :is-streaming="false" />
         </div>
 
         <!-- Image Viewer -->

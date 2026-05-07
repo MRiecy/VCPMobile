@@ -110,7 +110,9 @@ const onModelSelect = (modelId: string) => {
 const isSaving = ref(false);
 const saveSuccess = ref(false);
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-let isFirstLoad = true;
+
+// 原始配置快照，用于判断用户是否真正修改了内容
+const originalConfig = ref<AgentConfig | null>(null);
 
 onUnmounted(() => {
   if (saveTimeout) {
@@ -127,7 +129,7 @@ const loadConfig = async () => {
         allowDefault: true,
       });
       agentConfig.value = config;
-      isFirstLoad = true; // Reset first load for autoSave watcher
+      originalConfig.value = JSON.parse(JSON.stringify(config));
     } catch (err) {
       console.error("Failed to load agent config:", err);
     }
@@ -144,6 +146,8 @@ const autoSave = async () => {
     // Use assistantStore to save config and get notification
     await assistantStore.saveAgent(agentConfig.value);
     saveSuccess.value = true;
+    // 保存成功后更新快照，避免重复保存相同内容
+    originalConfig.value = JSON.parse(JSON.stringify(agentConfig.value));
     setTimeout(() => {
       saveSuccess.value = false;
     }, 2000);
@@ -157,8 +161,9 @@ const autoSave = async () => {
 watch(
   agentConfig,
   () => {
-    if (isFirstLoad) {
-      isFirstLoad = false;
+    if (!originalConfig.value) return;
+    // 只有与原始快照不同时才触发保存，避免无意义的后端调用
+    if (JSON.stringify(agentConfig.value) === JSON.stringify(originalConfig.value)) {
       return;
     }
     if (saveTimeout) {
@@ -351,7 +356,6 @@ onMounted(async () => {
 <style scoped>
 .agent-settings-view {
   background-color: color-mix(in srgb, var(--primary-bg) 85%, transparent);
-  backdrop-filter: blur(20px) saturate(180%);
 }
 
 .card-modern {

@@ -1,0 +1,87 @@
+export const meta = {
+  fileName: 'themes-quiet-forest.css',
+  name: '静谧森岭',
+};
+
+export const variables = {
+  dark: {
+  "--chat-wallpaper-dark": "'leaf.jpg'",
+  "--primary-bg": "#1a201b",
+  "--secondary-bg": "#2a362f",
+  "--tertiary-bg": "#121513",
+  "--accent-bg": "#3c4a42",
+  "--border-color": "#3c4a42",
+  "--input-bg": "#222a25",
+  "--panel-bg-dark": "rgba(42, 54, 47, 0.8)",
+  "--primary-text": "#e8e8e3",
+  "--secondary-text": "#a8b0a9",
+  "--highlight-text": "#7fbf7f",
+  "--text-on-accent": "#ffffff",
+  "--placeholder-text": "#6a756e",
+  "--quoted-text": "#D4AC0D",
+  "--user-text": "#e8e8e3",
+  "--agent-text": "#e8e8e3",
+  "--user-bubble-bg": "rgba(127, 191, 127, 0.15)",
+  "--assistant-bubble-bg": "rgba(50, 60, 55, 0.12)",
+  "--button-bg": "#587465",
+  "--button-hover-bg": "#6a8a79",
+  "--danger-color": "#e57373",
+  "--danger-hover-bg": "#ef5350",
+  "--success-color": "#81C784",
+  "--notification-bg": "#2f3a33",
+  "--notification-header-bg": "#333f37",
+  "--notification-border": "#587465",
+  "--tool-bubble-bg": "rgba(60, 74, 66, 0.15)",
+  "--tool-bubble-border": "#7fbf7f",
+  "--scrollbar-track": "rgba(42, 54, 47, 0.5)",
+  "--scrollbar-thumb": "rgba(100, 120, 110, 0.7)",
+  "--scrollbar-thumb-hover": "rgba(120, 140, 130, 0.6)",
+  "--shimmer-color-transparent": "rgba(232, 232, 227, 0.4)",
+  "--shimmer-color-highlight": "rgba(232, 232, 227, 0.8)",
+  "--panel-text-shadow": "0 1px 2px rgba(0, 0, 0, 0.5)",
+  "--panel-bg": "var(--panel-bg-dark)"
+},
+  light: {
+  "--chat-wallpaper-light": "'mountain.jpg'",
+  "--primary-bg": "#f5f5f7",
+  "--secondary-bg": "#ffffff",
+  "--tertiary-bg": "#e8e9eb",
+  "--accent-bg": "#d8dde0",
+  "--border-color": "#e8e9eb",
+  "--input-bg": "#ffffff",
+  "--panel-bg-light": "rgba(255, 255, 255, 0.85)",
+  "--primary-text": "#3c444d",
+  "--secondary-text": "#5a6f80",
+  "--highlight-text": "#6e8598",
+  "--text-on-accent": "#ffffff",
+  "--placeholder-text": "#a0aab3",
+  "--quoted-text": "#007bff",
+  "--user-text": "#eef5fd",
+  "--agent-text": "#ebf1fe",
+  "--user-bubble-bg": "rgba(171, 184, 195, 0.258)",
+  "--assistant-bubble-bg": "rgba(191, 199, 213, 0.3)",
+  "--button-bg": "#6e8598",
+  "--button-hover-bg": "#5a6f80",
+  "--danger-color": "#e74c3c",
+  "--danger-hover-bg": "#c0392b",
+  "--success-color": "#4caf50",
+  "--notification-bg": "#e8f0f4",
+  "--notification-header-bg": "#f0f0f0",
+  "--notification-border": "#6e8598",
+  "--tool-bubble-bg": "rgba(224, 230, 235, 0.1)",
+  "--tool-bubble-border": "#6e8598",
+  "--scrollbar-track": "rgba(200, 200, 200, 0.7)",
+  "--scrollbar-thumb": "rgba(150, 150, 150, 0.8)",
+  "--scrollbar-thumb-hover": "rgba(120, 120, 120, 0.6)",
+  "--shimmer-color-transparent": "rgba(52, 58, 64, 0.04)",
+  "--shimmer-color-highlight": "rgba(52, 58, 64, 0.08)",
+  "--panel-bg": "var(--panel-bg-light)"
+},
+};
+
+export const extraCss = `
+.tool-bubble {
+    border: 1px solid var(--tool-bubble-border);
+    background: var(--tool-bubble-bg);
+}
+`;

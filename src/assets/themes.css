@@ -29,13 +29,6 @@ body {
   overscroll-behavior: none;
 }
 
-/* 统一毛玻璃效果 */
-.glass-panel {
-  backdrop-filter: blur(25px) saturate(160%);
-  -webkit-backdrop-filter: blur(25px) saturate(160%);
-  background: rgba(255, 255, 255, 0.03);
-}
-
 /* 抽屉层级修正 */
 .vcp-drawer {
   box-shadow: 0 0 40px rgba(0,0,0,0.5);
@@ -73,14 +66,49 @@ body {
 .vcp-scrollable::-webkit-scrollbar-thumb:hover {
   background: rgba(128, 128, 128, 0.5);
 }
+/* 增强型磨砂玻璃面板 — 深度集成主题变量与原生滤镜 */
+.glass-panel {
+  background-color: color-mix(in srgb, var(--secondary-bg) 90%, transparent);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.05'/%3E%3C/svg%3E");
 
-/* 适配暗色模式的滚动条（暗色模式下默认是 document 具有 dark 类，这里同时兼容系统的 prefers-color-scheme） */
-:root.dark .vcp-scrollable::-webkit-scrollbar-thumb,
-@media (prefers-color-scheme: dark) {
-  .vcp-scrollable::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
-  }
-  .vcp-scrollable::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.3);
-  }
+  /* 针对亮色模式的阴影优化 */
+  box-shadow: 
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 4px 15px -3px rgba(0, 0, 0, 0.1),
+    0 2px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+/* 选中态/高亮态面板 */
+.glass-panel-active {
+  background-color: color-mix(in srgb, var(--accent-bg) 25%, transparent);
+  border-color: color-mix(in srgb, var(--highlight-text) 40%, transparent);
+  box-shadow: 
+    inset 0 0 12px color-mix(in srgb, var(--highlight-text) 8%, transparent),
+    0 4px 20px -5px rgba(0, 0, 0, 0.15);
+}
+
+/* --- 消息气泡标准化管理 --- */
+.message-bubble {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid color-mix(in srgb, var(--border-color) 15%, transparent);
+}
+
+/* 用户气泡 */
+.vcp-bubble-user {
+  background-color: var(--user-bubble-bg) !important;
+  color: var(--user-text) !important;
+  border-bottom-right-radius: 4px !important;
+}
+
+/* AI 气泡 */
+.vcp-bubble-agent {
+  background-color: var(--assistant-bubble-bg) !important;
+  color: var(--agent-text) !important;
+  border-bottom-left-radius: 4px !important;
+}
+
+/* 动态色气泡（当 AI 具有代表色时） */
+.vcp-bubble-dynamic {
+  border-color: color-mix(in srgb, var(--dynamic-color) 30%, transparent) !important;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--dynamic-color) 12%, transparent) !important;
 }

@@ -56,7 +56,7 @@ const formatBytes = (bytes: number) => {
     <Transition name="fade">
       <div
         v-if="isOpen"
-        class="fixed inset-0 z-[300] flex items-start justify-center pt-[15vh] bg-black/40 backdrop-blur-sm"
+        class="fixed inset-0 z-[300] flex items-start justify-center pt-[15vh] bg-black/40"
         @click.self="handleDismiss"
       >
         <div

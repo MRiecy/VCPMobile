@@ -100,6 +100,21 @@ pub async fn load_chat_history_internal(
         }
     }
 
+    // 预计算外壳属性所需的全局数据
+    let agents =
+        crate::vcp_modules::agent_service::get_agents(_app_handle.clone(), _app_handle.state())
+            .await
+            .unwrap_or_default();
+    let settings = crate::vcp_modules::settings_manager::read_settings(
+        _app_handle.clone(),
+        _app_handle.state(),
+    )
+    .await
+    .ok();
+    let user_name = settings
+        .map(|s| s.user_name)
+        .unwrap_or_else(|| "User".to_string());
+
     let mut history = Vec::new();
     for row in rows {
         use sqlx::Row;
@@ -137,7 +152,7 @@ pub async fn load_chat_history_internal(
 
         let attachments = att_map.remove(&msg_id);
 
-        history.push(ChatMessage {
+        let mut message = ChatMessage {
             id: msg_id,
             role,
             name,
@@ -151,7 +166,13 @@ pub async fn load_chat_history_internal(
             finish_reason: row.get("finish_reason"),
             attachments,
             blocks,
-        });
+            shell: None,
+        };
+
+        message.shell = Some(crate::pre_renderer::precompute_shell(
+            &message, &agents, &user_name,
+        ));
+        history.push(message);
     }
 
     history.reverse();

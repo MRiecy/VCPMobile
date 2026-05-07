@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { onScopeDispose, ref, watch } from 'vue';
-import { listen } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -31,27 +31,35 @@ const LEGACY_THEME_MAP: Record<string, string> = {
   'themes夜樱猫语.css': 'themes-night-sakura-cat.css'
 };
 
-const THEME_DISPLAY_NAMES: Record<string, string> = {
-  'themes-ice-fire.css': '冰火魔歌',
-  'themes-porcelain-brocade.css': '瓷与锦',
-  'themes-crimson-sky.css': '绯红天穹',
-  'themes-simple-bw.css': '黑白简约',
-  'themes-quiet-forest.css': '静谧森岭',
-  'themes-cartethyia.css': '卡提西亚',
-  'themes-neon-coffee.css': '霓虹咖啡',
-  'themes-childhood-dream.css': '童趣梦境',
-  'themes-star-wolf.css': '星咏与狼嗥',
-  'themes-star-abyss.css': '星渊雪境',
-  'themes-bear-holiday.css': '熊熊假日',
-  'themes-snow-morning.css': '雪境晨昏',
-  'themes-night-sakura-cat.css': '夜樱猫语'
-};
+interface ThemeModule {
+  meta: { fileName: string; name: string };
+  variables: { dark: Record<string, string>; light: Record<string, string> };
+  extraCss?: string;
+}
 
-// Vite static asset imports
-// ?raw gets the exact source text (unprocessed) for parsing variables and names
-const rawThemes = import.meta.glob('../../assets/themes/*.css', { query: '?raw', import: 'default' }) as Record<string, () => Promise<string>>;
-// ?inline gets the Vite-processed CSS (with valid asset URLs)
-const inlineThemes = import.meta.glob('../../assets/themes/*.css', { query: '?inline', import: 'default' }) as Record<string, () => Promise<string>>;
+// Vite dynamic imports for TS theme modules (one per theme, lazy-loaded)
+const themeModules = import.meta.glob('../../assets/themes/*.ts') as Record<string, () => Promise<ThemeModule>>;
+
+const fileNameToLoader = new Map<string, () => Promise<ThemeModule>>();
+
+const findThemeLoader = (fileName: string): (() => Promise<ThemeModule>) | undefined => {
+  const tsFileName = fileName.replace('.css', '.ts');
+
+  // 1. Try cache first
+  const cached = fileNameToLoader.get(tsFileName);
+  if (cached) return cached;
+
+  // 2. Fall back to scanning themeModules keys (handle Windows backslashes)
+  for (const [path, loader] of Object.entries(themeModules)) {
+    const keyFileName = path.split(/[\\/]/).pop() || '';
+    if (keyFileName === tsFileName) {
+      fileNameToLoader.set(tsFileName, loader);
+      return loader;
+    }
+  }
+
+  return undefined;
+};
 
 export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>((localStorage.getItem('vcp-theme-mode') as ThemeMode) || 'dark');
@@ -67,44 +75,40 @@ export const useThemeStore = defineStore('theme', () => {
   const currentTheme = ref(initialTheme || DEFAULT_THEME);
 
   const availableThemes = ref<ThemeInfo[]>([]);
+  const currentThemeInfo = ref<ThemeInfo | null>(null);
+  const lastAppliedVarKeys = ref<string[]>([]);
+  let currentThemeModule: ThemeModule | null = null;
+
+  const injectVariables = (vars: Record<string, string>) => {
+    // Clear stale variables from previous theme to avoid mixed state
+    for (const key of lastAppliedVarKeys.value) {
+      document.documentElement.style.removeProperty(key);
+    }
+    for (const [key, value] of Object.entries(vars)) {
+      document.documentElement.style.setProperty(key, value);
+    }
+    lastAppliedVarKeys.value = Object.keys(vars);
+  };
 
   const fetchThemes = async () => {
-    // Parse themes purely on frontend
     const themes: ThemeInfo[] = [];
 
-    for (const [path, loadRaw] of Object.entries(rawThemes)) {
+    for (const [path, loadModule] of Object.entries(themeModules)) {
       try {
-        const content = await loadRaw();
-        const fileName = path.split('/').pop() || '';
+        const mod = await loadModule();
+        const fileName = path.split(/[\\/]/).pop() || '';
 
-        const name = THEME_DISPLAY_NAMES[fileName] || fileName.replace('.css', '').replace('themes-', '');
-
-        const extractVariables = (scopeRegex: RegExp) => {
-          const variables: Record<string, string> = {};
-          const scopeMatch = content.match(scopeRegex);
-          if (scopeMatch && scopeMatch[1]) {
-            const varRegex = /(--[\w-]+)\s*:\s*(.*?);/g;
-            let match;
-            while ((match = varRegex.exec(scopeMatch[1])) !== null) {
-              variables[match[1]] = match[2].trim();
-            }
-          }
-          return variables;
-        };
-
-        const rootScopeRegex = /:root\s*\{([\s\S]*?)\}/;
-        const lightThemeScopeRegex = /body\.light-theme\s*\{([\s\S]*?)\}/;
+        if (fileName) {
+          fileNameToLoader.set(fileName, loadModule);
+        }
 
         themes.push({
           fileName,
-          name,
-          variables: {
-            dark: extractVariables(rootScopeRegex),
-            light: extractVariables(lightThemeScopeRegex)
-          }
+          name: mod.meta.name,
+          variables: mod.variables,
         });
       } catch (e) {
-        console.error(`Failed to load theme raw: ${path}`, e);
+        console.error(`Failed to load theme module: ${path}`, e);
       }
     }
 
@@ -116,26 +120,32 @@ export const useThemeStore = defineStore('theme', () => {
       currentTheme.value = fileName;
       localStorage.setItem('vcp-theme-name', fileName);
 
-      const themePath = `../../assets/themes/${fileName}`;
-      const loadInline = inlineThemes[themePath];
+      const loadModule = findThemeLoader(fileName);
 
-      if (!loadInline) {
-        console.warn('Theme CSS loader not found:', fileName);
+      if (!loadModule) {
+        console.warn('Theme module not found:', fileName);
         return;
       }
 
-      const css = await loadInline();
+      const mod = await loadModule();
+      currentThemeModule = mod;
+      currentThemeInfo.value = {
+        fileName,
+        name: mod.meta.name,
+        variables: mod.variables,
+      };
 
+      const vars = isDarkResolved.value ? mod.variables.dark : mod.variables.light;
+      injectVariables(vars);
+
+      // Inject extra CSS rules (non-variable styles like .tool-bubble)
       let styleTag = document.getElementById('vcp-custom-theme');
       if (!styleTag) {
         styleTag = document.createElement('style');
         styleTag.id = 'vcp-custom-theme';
         document.head.appendChild(styleTag);
       }
-      styleTag.textContent = css;
-
-      // Re-apply current mode to the new CSS rules
-      applyTheme(mode.value);
+      styleTag.textContent = mod.extraCss || '';
     } catch (error) {
       console.error('Failed to apply theme file:', error);
     }
@@ -163,6 +173,12 @@ export const useThemeStore = defineStore('theme', () => {
     document.documentElement.classList.toggle('dark', isDark);
     document.body.classList.toggle('light-theme', !isDark);
     localStorage.setItem('vcp-theme-mode', newMode);
+
+    // Re-inject variables for the new mode if a theme is already loaded
+    if (currentThemeModule) {
+      const vars = isDark ? currentThemeModule.variables.dark : currentThemeModule.variables.light;
+      injectVariables(vars);
+    }
   };
 
   watch(mode, (newMode) => {
@@ -198,24 +214,35 @@ export const useThemeStore = defineStore('theme', () => {
     // even if the current mode is 'system'.
     setMode(isDarkResolved.value ? 'light' : 'dark');
   };
+
   // Listen for theme updates from backend
-  let unlistenTheme: (() => void) | null = null;
-  listen('onThemeUpdated', (event) => {
+  // Store the promise so onScopeDispose can clean up even if the listener
+  // hasn't resolved yet (avoids dangling listeners on hot reload / scope disposal)
+  const unlistenThemePromise = listen('onThemeUpdated', (event) => {
     const fileName = event.payload as string;
     if (fileName !== currentTheme.value) {
       applyThemeFile(fileName);
     }
-  }).then((fn) => { unlistenTheme = fn; });
+  });
 
   onScopeDispose(() => {
     mediaQuery.removeEventListener('change', handleMediaChange);
-    if (unlistenTheme) unlistenTheme();
+    unlistenThemePromise.then((fn: UnlistenFn) => fn()).catch(() => {});
   });
+
+  // Vite HMR: auto-reload theme when TS module is edited
+  if (import.meta.hot) {
+    import.meta.hot.accept(() => {
+      const savedTheme = localStorage.getItem('vcp-theme-name') || DEFAULT_THEME;
+      applyThemeFile(savedTheme);
+    });
+  }
 
   return {
     mode,
     isDarkResolved,
     currentTheme,
+    currentThemeInfo,
     availableThemes,
     fetchThemes,
     applyThemeFile,

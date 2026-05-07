@@ -1,0 +1,431 @@
+/* === VCP Message Blocks Styles === */
+
+/* --- Maid Diary Block --- */
+.vcp-diary-block {
+    background: #fdfaf6 !important;
+    border: 1px solid #eaddd0;
+    border-radius: 8px !important;
+    padding: 12px 14px 15px 36px !important;
+    color: #5d4037 !important;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
+    margin-top: 10px !important;
+    margin-bottom: 12px !important;
+    position: relative;
+    overflow: visible;
+    line-height: 1.7;
+    font-family: 'Georgia', 'Times New Roman', serif !important;
+}
+
+.vcp-diary-block::before {
+    content: "✒️";
+    position: absolute;
+    top: 14px;
+    left: 12px;
+    font-size: 18px;
+    opacity: 0.6;
+    z-index: 2;
+}
+
+.vcp-diary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 1px solid #d7ccc8;
+    padding-bottom: 6px;
+    margin-bottom: 10px;
+}
+
+.vcp-diary-title {
+    font-weight: bold;
+    font-size: 1.1em;
+    color: #6d4c41;
+}
+
+.vcp-diary-date {
+    font-size: 0.85em;
+    color: #a1887f;
+    font-style: italic;
+}
+
+.vcp-diary-maid-info {
+    margin-bottom: 12px;
+    font-size: 0.9em;
+    color: #8d6e63;
+}
+
+.vcp-diary-maid-name {
+    font-style: italic;
+    color: #a1887f;
+    background: rgba(161, 136, 127, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+}
+
+/* Dark Theme Overrides for Diary */
+html.dark .vcp-diary-block {
+    background: #2c2a3a !important;
+    border-color: #4a485f;
+    color: #d8d2c9 !important;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+
+html.dark .vcp-diary-header {
+    border-bottom-color: #4a485f;
+}
+
+html.dark .vcp-diary-title {
+    color: #ffb74d;
+}
+
+html.dark .vcp-diary-maid-name {
+    color: #ffcc80;
+    background: rgba(255, 183, 77, 0.1);
+}
+
+/* --- Role Divider Block --- */
+.vcp-role-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 15px 0;
+  font-size: 0.85em;
+  color: var(--primary-text);
+  opacity: 0.7;
+  user-select: none;
+  clear: both;
+}
+
+.vcp-role-divider::before,
+.vcp-role-divider::after {
+  content: "";
+  flex: 1;
+  border-bottom: 1px dashed var(--border-color, #ccc);
+  margin: 0 15px;
+}
+
+.vcp-role-divider.role-system { color: #e67e22; }
+.vcp-role-divider.role-assistant { color: #3498db; }
+.vcp-role-divider.role-user { color: #2ecc71; }
+.vcp-role-divider.type-end { opacity: 0.5; }
+
+.vcp-diary-content {
+  font-size: 0.875rem;
+  line-height: 1.7;
+}
+
+/* === Markdown Block Styles (restored from legacy MarkdownBlock.vue) === */
+
+.vcp-markdown-block {
+  word-break: break-word;
+  overflow-wrap: break-word;
+  min-width: 0;
+  max-width: 100%;
+  line-height: 1.7142857;
+  font-size: 0.875rem;
+}
+
+/* --- Headings (prose-sm scale) --- */
+.vcp-markdown-block h1 {
+  font-size: 1.5em;
+  margin-top: 0.8em;
+  margin-bottom: 0.4em;
+  font-weight: 600;
+  color: var(--highlight-text, #3498db);
+}
+.vcp-markdown-block h2 {
+  font-size: 1.25em;
+  margin-top: 0.8em;
+  margin-bottom: 0.4em;
+  font-weight: 600;
+  color: var(--highlight-text, #3498db);
+}
+.vcp-markdown-block h3 {
+  font-size: 1.125em;
+  margin-top: 0.6em;
+  margin-bottom: 0.3em;
+  font-weight: 600;
+  color: var(--highlight-text, #3498db);
+}
+.vcp-markdown-block h4 {
+  font-size: 1em;
+  margin-top: 0.6em;
+  margin-bottom: 0.3em;
+  font-weight: 600;
+  color: var(--highlight-text, #3498db);
+}
+.vcp-markdown-block h5 {
+  font-size: 0.875em;
+  margin-top: 0.5em;
+  margin-bottom: 0.2em;
+  font-weight: 600;
+  color: var(--highlight-text, #3498db);
+}
+.vcp-markdown-block h6 {
+  font-size: 0.85em;
+  margin-top: 0.5em;
+  margin-bottom: 0.2em;
+  font-weight: 600;
+  color: var(--highlight-text, #3498db);
+}
+
+/* --- Paragraphs --- */
+.vcp-markdown-block p {
+  margin-bottom: 0.5em;
+  margin-top: 0;
+}
+.vcp-markdown-block p:last-child {
+  margin-bottom: 0;
+}
+
+/* --- Lists (restore bullets/numbers after Tailwind reset) --- */
+.vcp-markdown-block ul {
+  list-style-type: disc;
+  padding-left: 1.2em;
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+.vcp-markdown-block ol {
+  list-style-type: decimal;
+  padding-left: 1.2em;
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+.vcp-markdown-block li {
+  margin: 0.25em 0;
+}
+.vcp-markdown-block li::marker {
+  color: var(--primary-text, #e0e0e0);
+  opacity: 0.6;
+}
+
+/* --- Blockquote --- */
+.vcp-markdown-block blockquote {
+  border-left: 3px solid var(--border-color, #3a3a3e);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--primary-text, #e0e0e0);
+  opacity: 0.75;
+}
+
+/* --- Thematic Break --- */
+.vcp-markdown-block hr {
+  border: none;
+  border-top: 1px solid var(--border-color, #3a3a3e);
+  margin: 12px 0;
+}
+
+/* --- Code Block Container --- */
+.vcp-markdown-block pre {
+  border-radius: 8px;
+  background: #2b303b;
+  padding: 12px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 8px 0;
+  max-width: 100%;
+  font-size: 0.85em;
+  line-height: 1.6;
+}
+
+/* Code typography */
+.vcp-markdown-block code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  word-break: break-word;
+}
+
+/* Inline Code */
+.vcp-markdown-block code:not(pre code) {
+  color: var(--danger-color, #c7254e);
+  background-color: rgba(199, 37, 78, 0.08);
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  border: none;
+}
+
+html.dark .vcp-markdown-block code:not(pre code) {
+  color: #ff8b8b;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* --- Tables --- */
+.vcp-markdown-block .vcp-table-wrapper,
+.vcp-markdown-block table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+  border-collapse: collapse;
+}
+
+.vcp-markdown-block table {
+  width: 100%;
+}
+
+.vcp-markdown-block thead {
+  border-bottom: 2px solid var(--border-color, #3a3a3e);
+}
+
+.vcp-markdown-block th,
+.vcp-markdown-block td {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.vcp-markdown-block th {
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.vcp-markdown-block tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* --- Images --- */
+.vcp-markdown-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+/* --- Links --- */
+.vcp-markdown-block a {
+  color: var(--highlight-text, #3498db);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.vcp-markdown-block a:hover {
+  opacity: 0.8;
+}
+
+/* --- VCP Magic Highlights (theme-aware) --- */
+.highlighted-quote {
+  color: var(--quoted-text, #ff7f50) !important;
+  display: inline !important;
+  word-break: break-all;
+}
+
+.highlighted-tag {
+  color: var(--highlight-text, #3498db) !important;
+  font-weight: 600;
+  display: inline !important;
+}
+
+.highlighted-alert-tag {
+  color: var(--danger-color, #e74c3c) !important;
+  font-weight: bold;
+  display: inline !important;
+}
+
+/* --- Math Containers --- */
+.vcp-math-inline {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  display: inline-block;
+  vertical-align: middle;
+  font-size: 1.0em;
+  opacity: 0.85;
+  overscroll-behavior-x: contain;
+  padding: 0.25em 0.15em;
+}
+
+.vcp-math-block {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 1em 0;
+  text-align: center;
+  font-size: 0.9em;
+  opacity: 0.85;
+  overscroll-behavior-x: contain;
+}
+
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 0.5em;
+  font-size: 0.8em;
+  overscroll-behavior-x: contain;
+}
+
+/* Formula scrollbar aesthetics */
+.vcp-math-block::-webkit-scrollbar,
+.katex-display::-webkit-scrollbar,
+.vcp-math-inline::-webkit-scrollbar {
+  height: 4px;
+}
+.vcp-math-block::-webkit-scrollbar-thumb,
+.katex-display::-webkit-scrollbar-thumb,
+.vcp-math-inline::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.3);
+  border-radius: 4px;
+}
+
+/* --- Font stack (restore from legacy MarkdownBlock.vue) --- */
+.vcp-markdown-block {
+  font-family: inherit;
+}
+.vcp-markdown-block,
+.vcp-markdown-block * {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
+
+/* --- Strong / Emphasis --- */
+.vcp-markdown-block strong {
+  font-weight: 700;
+}
+.vcp-markdown-block em {
+  font-style: italic;
+}
+
+/* --- Code before/after reset (Tailwind Prose fix) --- */
+.vcp-markdown-block code::before,
+.vcp-markdown-block code::after {
+  content: none !important;
+}
+
+/* --- Emoticons --- */
+.vcp-emoticon {
+  max-width: 110px;
+  max-height: 110px;
+  display: inline-block;
+  vertical-align: middle;
+  margin: 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+}
+.vcp-emoticon:hover {
+  transform: scale(1.05);
+  border-color: rgba(52, 152, 219, 0.3);
+}
+
+/* --- Mobile hardening --- */
+@media (max-width: 768px) {
+  .vcp-markdown-block [style*="width"] {
+    max-width: 100% !important;
+    min-width: 0 !important;
+  }
+  .vcp-markdown-block [style*="display: grid"],
+  .vcp-markdown-block [style*="display:grid"] {
+    grid-template-columns: 1fr !important;
+  }
+  .vcp-markdown-block [style*="display: flex"],
+  .vcp-markdown-block [style*="display:flex"] {
+    flex-wrap: wrap !important;
+  }
+  .vcp-markdown-block svg {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+  .vcp-markdown-block > div[style] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}

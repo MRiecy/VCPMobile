@@ -4,20 +4,24 @@
  *
  * 职责：作为所有全局业务 Feature 视图的统一挂载点。
  *
- * 为什么需要这个组件？
- * 1. 逻辑挂载：Vue 组件必须被实例化，其内部的 Teleport 逻辑才会运行。
- * 2. 架构解耦：App.vue 只需引用此组件，无需直接管理众多的业务视图。
- * 3. 状态持久：挂载在应用根部，确保 Feature 状态在 UI 切换时不会丢失。
+ * 架构说明：
+ * 1. Settings/Agent/Group 设置页保持常驻 DOM（isMounted），以保留组件本地状态（表单草稿等）
+ *    和确保 SlidePage 的 leave 动画正常完成。
+ * 2. SyncSessionView 使用 v-if 按需渲染，因其状态完全由 syncSessionStore 管理，
+ *    且已纳入 OverlayStore pageStack 统一管控。
  *
  * 注意：此组件内的视图通过 SlidePage 管理滑入/滑出动画，
  * 物理上它们会渲染在 GlobalOverlayManager 提供的容器中。
  */
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, defineAsyncComponent } from 'vue';
 import { useOverlayStore } from '../core/stores/overlay';
 import SettingsView from '../features/settings/SettingsView.vue';
 import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
 import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
-import SyncSessionView from '../features/sync/SyncSessionView.vue';
+
+// SyncSessionView / RebuildSessionView 按需异步加载，状态由 Store 完全托管
+const SyncSessionView = defineAsyncComponent(() => import('../features/sync/SyncSessionView.vue'));
+const RebuildSessionView = defineAsyncComponent(() => import('../features/settings/components/RebuildSessionView.vue'));
 
 const overlayStore = useOverlayStore();
 const isMounted = ref(false);
@@ -49,6 +53,7 @@ onMounted(() => {
       @close="overlayStore.closeGroupSettings()"
     />
 
-    <SyncSessionView />
+    <SyncSessionView v-if="overlayStore.isSyncSessionOpen" />
+    <RebuildSessionView v-if="overlayStore.isRebuildSessionOpen" />
   </div>
 </template>

@@ -2,11 +2,18 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::pre_renderer::MarkdownNode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "markdown")]
-    Markdown { content: String },
+    Markdown {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nodes: Option<Vec<MarkdownNode>>,
+    },
     #[serde(rename = "tool-use")]
     ToolUse {
         tool_name: String,
@@ -25,12 +32,16 @@ pub enum ContentBlock {
         maid: String,
         date: String,
         content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nodes: Option<Vec<MarkdownNode>>,
     },
     #[serde(rename = "thought")]
     Thought {
         theme: String,
         content: String,
         is_complete: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        nodes: Option<Vec<MarkdownNode>>,
     },
     #[serde(rename = "button-click")]
     ButtonClick { content: String },
@@ -40,8 +51,7 @@ pub enum ContentBlock {
     RoleDivider { role: String, is_end: bool },
     #[serde(rename = "style")]
     Style { content: String },
-    #[serde(rename = "math")]
-    Math { content: String, display_mode: bool },
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +72,6 @@ enum BlockType {
     Style,
     RoleDivider,
     CodeFence,
-    Math,
 }
 
 lazy_static! {
@@ -106,7 +115,6 @@ lazy_static! {
     static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
     static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*$").unwrap();
 
-    static ref MATH_BLOCK_START: Regex = Regex::new(r"(?im)^[ \t]*(\$\$|\\\[|\\begin\{([a-z]+\*?)\})").unwrap();
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?(div|p|img|span|a|h[1-6]|ul|ol|li|table|tr|td|th|section|article|header|footer|nav|aside|main|figure|figcaption|blockquote|pre|code|style|script|button|form|input|textarea|select|label|iframe|video|audio|canvas|svg)[\s>/]").unwrap();
@@ -179,7 +187,6 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             (HTML_DOC_START.find(remaining), BlockType::HtmlDoc),
             (ROLE_DIVIDER.find(remaining), BlockType::RoleDivider),
             (STYLE_TAG_START.find(remaining), BlockType::Style),
-            (MATH_BLOCK_START.find(remaining), BlockType::Math),
             (
                 GENERIC_CODE_FENCE_START.find(remaining),
                 BlockType::CodeFence,
@@ -256,32 +263,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
                         }),
-                    BlockType::Math => {
-                        let start_marker = &remaining[start_idx..end_idx];
-                        let trimmed = start_marker.trim();
-                        if trimmed.starts_with("\\begin") {
-                            MATH_BLOCK_START
-                                .captures(start_marker)
-                                .and_then(|c| c.get(2))
-                                .and_then(|m| {
-                                    let env_name = m.as_str();
-                                    let end_str = format!("\\end{{{}}}", env_name);
-                                    let end_len = end_str.len();
-                                    search_area
-                                        .find(&end_str)
-                                        .map(|pos| (Some(pos), Some(pos + end_len), true))
-                                })
-                                .unwrap_or((None, None, false))
-                        } else if trimmed.starts_with("$$") {
-                            search_area
-                                .find("$$")
-                                .map_or((None, None, false), |pos| (Some(pos), Some(pos + 2), true))
-                        } else {
-                            search_area
-                                .find("\\]")
-                                .map_or((None, None, false), |pos| (Some(pos), Some(pos + 2), true))
-                        }
-                    }
+
                 };
 
                 let inner_content = if let Some(end_start) = end_marker_start {
@@ -296,10 +278,12 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         let tool_name = extract_tool_name(inner_content);
                         if is_daily_note_create(inner_content) {
                             let (maid, date, content) = extract_diary_details(inner_content);
+                            let nodes = crate::pre_renderer::parse_markdown_to_ast(&content);
                             ContentBlock::Diary {
                                 maid,
                                 date,
                                 content,
+                                nodes: Some(nodes),
                             }
                         } else {
                             ContentBlock::ToolUse {
@@ -317,17 +301,23 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             .map(|m| m.as_str().trim().replace("\"", ""))
                             .unwrap_or_else(|| "元思考链".to_string());
 
+                        let nodes = crate::pre_renderer::parse_markdown_to_ast(inner_content);
                         ContentBlock::Thought {
                             theme,
                             content: inner_content.to_string(),
                             is_complete,
+                            nodes: Some(nodes),
                         }
                     }
-                    BlockType::Think => ContentBlock::Thought {
-                        theme: "思维链".to_string(),
-                        content: inner_content.to_string(),
-                        is_complete,
-                    },
+                    BlockType::Think => {
+                        let nodes = crate::pre_renderer::parse_markdown_to_ast(inner_content);
+                        ContentBlock::Thought {
+                            theme: "思维链".to_string(),
+                            content: inner_content.to_string(),
+                            is_complete,
+                            nodes: Some(nodes),
+                        }
+                    }
                     BlockType::ToolResult => {
                         let (tool_name, status, details, footer) = parse_tool_result(inner_content);
                         ContentBlock::ToolResult {
@@ -339,10 +329,12 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     }
                     BlockType::Diary => {
                         let (maid, date, content) = extract_diary_details(inner_content);
+                        let nodes = crate::pre_renderer::parse_markdown_to_ast(&content);
                         ContentBlock::Diary {
                             maid,
                             date,
                             content,
+                            nodes: Some(nodes),
                         }
                     }
                     BlockType::HtmlFence => ContentBlock::HtmlPreview {
@@ -370,7 +362,10 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             ContentBlock::RoleDivider { role, is_end }
                         } else {
                             ContentBlock::Markdown {
-                                content: marker_text.to_string(),
+                                content: None,
+                                nodes: Some(crate::pre_renderer::parse_markdown_to_ast(
+                                    marker_text,
+                                )),
                             }
                         }
                     }
@@ -387,29 +382,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             }
                         }
                         ContentBlock::Markdown {
-                            content: full_fence,
+                            content: None,
+                            nodes: Some(crate::pre_renderer::parse_markdown_to_ast(&full_fence)),
                         }
                     }
-                    BlockType::Math => {
-                        let start_marker = &remaining[start_idx..end_idx];
-                        let trimmed = start_marker.trim();
-                        if trimmed.starts_with("\\begin") {
-                            let math_content = if let Some(end_end) = end_marker_end {
-                                remaining[start_idx..content_start + end_end].to_string()
-                            } else {
-                                remaining[start_idx..].to_string()
-                            };
-                            ContentBlock::Math {
-                                content: math_content,
-                                display_mode: true,
-                            }
-                        } else {
-                            ContentBlock::Math {
-                                content: inner_content.trim().to_string(),
-                                display_mode: true,
-                            }
-                        }
-                    }
+
                 };
 
                 blocks.push(block);
@@ -445,7 +422,10 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
         };
         if m.start() > last_end {
             blocks.push(ContentBlock::Markdown {
-                content: text[last_end..m.start()].to_string(),
+                content: None,
+                nodes: Some(crate::pre_renderer::parse_markdown_to_ast(
+                    &text[last_end..m.start()],
+                )),
             });
         }
         blocks.push(ContentBlock::ButtonClick {
@@ -456,7 +436,10 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
 
     if last_end < text.len() {
         blocks.push(ContentBlock::Markdown {
-            content: text[last_end..].to_string(),
+            content: None,
+            nodes: Some(crate::pre_renderer::parse_markdown_to_ast(
+                &text[last_end..],
+            )),
         });
     }
 

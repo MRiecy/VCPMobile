@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../../core/stores/settings";
-import { useSyncSessionStore } from "../../../core/stores/syncSession";
+import { useOverlayStore } from "../../../core/stores/overlay";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
 import SettingsActionButton from "../../../components/settings/SettingsActionButton.vue";
 import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
@@ -12,7 +12,7 @@ defineProps<{
   settings: AppSettings;
 }>();
 
-const syncStore = useSyncSessionStore();
+const overlayStore = useOverlayStore();
 
 const emoticonStatus = ref<{
   type: "success" | "error" | "loading" | null;
@@ -20,7 +20,7 @@ const emoticonStatus = ref<{
 }>({ type: null, message: "" });
 
 const startManualSync = () => {
-  syncStore.open();
+  overlayStore.openSyncSession();
 };
 
 const rebuildEmoticonLibrary = async () => {

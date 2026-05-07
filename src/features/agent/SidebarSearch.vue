@@ -16,14 +16,14 @@ const placeholderText = computed(() => {
 </script>
 
 <template>
-  <div class="relative">
-    <svg class="absolute left-3 top-1/2 -translate-y-1/2 opacity-40 w-4 h-4 text-primary-text" viewBox="0 0 24 24"
+  <div class="relative group">
+    <svg class="absolute left-3 top-1/2 -translate-y-1/2 opacity-50 w-4 h-4 text-primary-text transition-opacity group-focus-within:opacity-100" viewBox="0 0 24 24"
       fill="none" stroke="currentColor" stroke-width="2">
       <circle cx="11" cy="11" r="8"></circle>
       <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
     </svg>
     <input :value="modelValue" @input="emit('update:modelValue', ($event.target as HTMLInputElement).value)" type="text"
       :placeholder="placeholderText"
-      class="w-full bg-black/5 dark:bg-black/20 text-primary-text text-sm rounded-xl py-2 pl-9 pr-4 outline-none border border-black/5 dark:border-white/5 focus:border-black/20 dark:focus:border-white/20 transition-colors" />
+      class="w-full bg-black/5 dark:bg-white/5 text-primary-text placeholder:text-secondary-text/50 text-sm rounded-xl py-2.5 pl-10 pr-4 outline-none border border-black/5 dark:border-white/10 focus:border-blue-500/50 dark:focus:border-blue-400/50 focus:bg-white/10 dark:focus:bg-white/10 transition-all shadow-inner" />
   </div>
 </template>

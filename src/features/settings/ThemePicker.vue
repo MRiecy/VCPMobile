@@ -73,7 +73,7 @@ const selectTheme = (theme: ThemeInfo) => {
       <div class="absolute inset-0 bg-black/20 group-hover:bg-black/10 transition-colors"></div>
 
       <!-- Theme Name Tag -->
-      <div class="absolute bottom-2 left-2 right-2 bg-black/40 backdrop-blur-md rounded-lg px-2 py-1">
+      <div class="absolute bottom-2 left-2 right-2 bg-black/40 rounded-lg px-2 py-1">
         <p class="text-[10px] text-white font-medium truncate text-center">{{ theme.name }}</p>
       </div>
 
