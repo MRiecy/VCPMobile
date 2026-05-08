@@ -38,7 +38,7 @@ fn preprocess_latex_math(text: &str) -> String {
         let seg2 = seg;
         let mut processed = String::new();
         let mut last = 0;
-        for cap in DISPLAY_RE.find_iter(&seg2) {
+        for cap in DISPLAY_RE.find_iter(seg2) {
             let m = cap.unwrap();
             processed.push_str(&seg2[last..m.start()]);
             if let Ok(Some(caps)) = DISPLAY_RE.captures(m.as_str()) {
@@ -64,9 +64,9 @@ fn preprocess_latex_math(text: &str) -> String {
             processed.push_str(&seg3[last..m.start()]);
             if let Ok(Some(caps)) = INLINE_RE.captures(m.as_str()) {
                 if let Some(inner) = caps.get(1) {
-                    processed.push_str("$");
+                    processed.push('$');
                     processed.push_str(inner.as_str());
-                    processed.push_str("$");
+                    processed.push('$');
                 } else {
                     processed.push_str(m.as_str());
                 }
@@ -171,7 +171,9 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
-                                nodes.push(MarkdownNode::Paragraph { children: vec![inline] });
+                                nodes.push(MarkdownNode::Paragraph {
+                                    children: vec![inline],
+                                });
                             }
                         }
                         PartialNode::Emphasis { children } => {
@@ -179,25 +181,47 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
-                                nodes.push(MarkdownNode::Paragraph { children: vec![inline] });
+                                nodes.push(MarkdownNode::Paragraph {
+                                    children: vec![inline],
+                                });
                             }
                         }
-                        PartialNode::Link { href, title, children } => {
-                            let needs_asset_conversion = href.starts_with("vcp-asset:") || href.starts_with("/");
-                            let inline = InlineNode::Link { href, title, children, needs_asset_conversion };
+                        PartialNode::Link {
+                            href,
+                            title,
+                            children,
+                        } => {
+                            let needs_asset_conversion =
+                                href.starts_with("vcp-asset:") || href.starts_with("/");
+                            let inline = InlineNode::Link {
+                                href,
+                                title,
+                                children,
+                                needs_asset_conversion,
+                            };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
-                                nodes.push(MarkdownNode::Paragraph { children: vec![inline] });
+                                nodes.push(MarkdownNode::Paragraph {
+                                    children: vec![inline],
+                                });
                             }
                         }
                         PartialNode::Image { src, alt, title } => {
-                            let needs_asset_conversion = src.starts_with("vcp-asset:") || src.starts_with("/");
-                            let inline = InlineNode::Image { src, alt, title, needs_asset_conversion };
+                            let needs_asset_conversion =
+                                src.starts_with("vcp-asset:") || src.starts_with("/");
+                            let inline = InlineNode::Image {
+                                src,
+                                alt,
+                                title,
+                                needs_asset_conversion,
+                            };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
-                                nodes.push(MarkdownNode::Paragraph { children: vec![inline] });
+                                nodes.push(MarkdownNode::Paragraph {
+                                    children: vec![inline],
+                                });
                             }
                         }
                         _ => {
@@ -388,10 +412,15 @@ impl PartialNode {
             PartialNode::Emphasis { children } => children.push(node),
             PartialNode::TableCell { children } => children.push(node),
             PartialNode::Item { children } => {
-                if let Some(MarkdownNode::Paragraph { children: para_children }) = children.last_mut() {
+                if let Some(MarkdownNode::Paragraph {
+                    children: para_children,
+                }) = children.last_mut()
+                {
                     para_children.push(node);
                 } else {
-                    children.push(MarkdownNode::Paragraph { children: vec![node] });
+                    children.push(MarkdownNode::Paragraph {
+                        children: vec![node],
+                    });
                 }
             }
             _ => {}
@@ -421,7 +450,10 @@ impl PartialNode {
             PartialNode::Emphasis { children } => children.append(&mut nodes),
             PartialNode::TableCell { children } => children.append(&mut nodes),
             PartialNode::Item { children } if !nodes.is_empty() => {
-                if let Some(MarkdownNode::Paragraph { children: para_children }) = children.last_mut() {
+                if let Some(MarkdownNode::Paragraph {
+                    children: para_children,
+                }) = children.last_mut()
+                {
                     para_children.append(&mut nodes);
                 } else {
                     children.push(MarkdownNode::Paragraph { children: nodes });

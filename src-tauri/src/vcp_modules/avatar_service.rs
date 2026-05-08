@@ -132,14 +132,12 @@ pub async fn compute_and_store_dominant_color(
 ) -> Result<String, String> {
     let pool = &db_state.pool;
 
-    let row = sqlx::query(
-        "SELECT image_data FROM avatars WHERE owner_type = ? AND owner_id = ?"
-    )
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let row = sqlx::query("SELECT image_data FROM avatars WHERE owner_type = ? AND owner_id = ?")
+        .bind(&owner_type)
+        .bind(&owner_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let image_data: Vec<u8> = match row {
         Some(r) => {
@@ -151,15 +149,13 @@ pub async fn compute_and_store_dominant_color(
 
     let color = extract_dominant_color_from_bytes(&image_data)?;
 
-    sqlx::query(
-        "UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?"
-    )
-    .bind(&color)
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    sqlx::query("UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?")
+        .bind(&color)
+        .bind(&owner_type)
+        .bind(&owner_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     log::info!(
         "[AvatarService] Computed and stored dominant_color for {} {}: {}",
@@ -279,9 +275,8 @@ pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> 
     let mut best_bin: Option<usize> = None;
     let mut best_count = 0u32;
 
-    for bin in 0..512 {
-        let count = histogram[bin];
-        if count == 0 {
+    for (bin, count) in histogram.iter().enumerate() {
+        if *count == 0 {
             continue;
         }
 
@@ -302,8 +297,8 @@ pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> 
             continue;
         }
 
-        if count > best_count {
-            best_count = count;
+        if *count > best_count {
+            best_count = *count;
             best_bin = Some(bin);
         }
     }
@@ -347,11 +342,11 @@ pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> 
             v_count += 1;
         }
 
-        if v_count > 0 {
+        if let Some(vr) = vr_total.checked_div(v_count) {
             (
-                (vr_total / v_count) as u8,
-                (vg_total / v_count) as u8,
-                (vb_total / v_count) as u8,
+                vr as u8,
+                vg_total.checked_div(v_count).unwrap_or(0) as u8,
+                vb_total.checked_div(v_count).unwrap_or(0) as u8,
             )
         } else {
             // bin 内全被过滤，回退到该 bin 原始平均

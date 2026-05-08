@@ -1,7 +1,7 @@
+use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use dashmap::{DashMap, DashSet};
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
-use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -41,12 +41,12 @@ pub struct VcpRequestPayload {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
-    pub r#type: String,         // 事件类型: "data", "aurora", "end", "error", "reconnecting"
-    pub chunk: Option<Value>,   // 数据块 (仅 type="data" 时有效)
-    pub message_id: String,     // 消息ID
+    pub r#type: String, // 事件类型: "data", "aurora", "end", "error", "reconnecting"
+    pub chunk: Option<Value>, // 数据块 (仅 type="data" 时有效)
+    pub message_id: String, // 消息ID
     pub context: Option<Value>, // 透传的上下文信息
     pub finish_reason: Option<String>, // 结束原因
-    pub error: Option<String>,  // 错误信息 (仅 type="error" 时有效)
+    pub error: Option<String>, // 错误信息 (仅 type="error" 时有效)
     pub aurora: Option<AuroraUpdate>, // Aurora 语义沉淀更新 (type="aurora" 时有效)
 }
 
@@ -189,12 +189,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     "png" | "jpg" | "jpeg" | "webp" | "gif" => {
                                         ("image", "image_url")
                                     }
-                                    "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus" | "wma" => {
-                                        ("audio", "input_audio")
-                                    }
-                                    "mp4" | "mkv" | "webm" | "avi" | "mov" | "flv" | "m4v" | "3gp" => {
-                                        ("video", "image_url")
-                                    }
+                                    "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
+                                    | "wma" => ("audio", "input_audio"),
+                                    "mp4" | "mkv" | "webm" | "avi" | "mov" | "flv" | "m4v"
+                                    | "3gp" => ("video", "image_url"),
                                     _ => ("application", "file_url"), // 非多模态文件回退
                                 };
 
@@ -214,10 +212,16 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             converted = true;
                                         }
                                         Ok(Err(e)) => {
-                                            println!("[VCPClient] Image conversion failed for {:?}: {}", path_buf, e);
+                                            println!(
+                                                "[VCPClient] Image conversion failed for {:?}: {}",
+                                                path_buf, e
+                                            );
                                         }
                                         Err(e) => {
-                                            println!("[VCPClient] Image conversion task panicked: {}", e);
+                                            println!(
+                                                "[VCPClient] Image conversion task panicked: {}",
+                                                e
+                                            );
                                         }
                                     }
                                 } else if mime == "video" {
@@ -434,21 +438,22 @@ pub async fn perform_vcp_request<R: Runtime>(
         let mut last_aurora_send = std::time::Instant::now();
 
         // 辅助闭包：发送 Aurora 更新事件
-        let send_aurora_update = |buffer: &AuroraBuffer, finish_reason: Option<String>, error: Option<String>| {
-            send_stream_event(StreamEvent {
-                r#type: "aurora".to_string(),
-                chunk: None,
-                message_id: message_id_inner.clone(),
-                context: context_inner.clone(),
-                finish_reason,
-                error,
-                aurora: Some(AuroraUpdate {
-                    stable: buffer.stable_content.clone(),
-                    tail: AuroraBuffer::balance_html_tags(&buffer.tail_content),
-                    content: buffer.full_text.clone(),
-                }),
-            });
-        };
+        let send_aurora_update =
+            |buffer: &AuroraBuffer, finish_reason: Option<String>, error: Option<String>| {
+                send_stream_event(StreamEvent {
+                    r#type: "aurora".to_string(),
+                    chunk: None,
+                    message_id: message_id_inner.clone(),
+                    context: context_inner.clone(),
+                    finish_reason,
+                    error,
+                    aurora: Some(AuroraUpdate {
+                        stable: buffer.stable_content.clone(),
+                        tail: AuroraBuffer::balance_html_tags(&buffer.tail_content),
+                        content: buffer.full_text.clone(),
+                    }),
+                });
+            };
 
         let res_future = client
             .post(&final_url)

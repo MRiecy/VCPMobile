@@ -821,7 +821,6 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
-
 /// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)
 pub fn clear_upload_cache(app_handle: &AppHandle) {
     if let Ok(mut temp_path) = app_handle.path().app_cache_dir() {

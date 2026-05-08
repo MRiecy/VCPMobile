@@ -1,4 +1,6 @@
-use super::ffmpeg_cli::{detect_scene_changes, extract_single_frame, get_video_duration, run_ffmpeg};
+use super::ffmpeg_cli::{
+    detect_scene_changes, extract_single_frame, get_video_duration, run_ffmpeg,
+};
 use base64::Engine as _;
 use image::DynamicImage;
 use std::path::Path;
@@ -91,8 +93,7 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
 
     // 7. 批量提取均匀帧到临时目录
     let temp_dir = std::env::temp_dir().join(format!("vcp_video_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_dir)
-        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
     let fps_str = if fps == 1.0 { "1" } else { "0.5" };
     run_ffmpeg(&[
@@ -102,13 +103,16 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
         &format!("fps={},scale='min(1280,iw)':-1", fps_str),
         "-q:v",
         "2",
-        temp_dir.join("frame_%04d.jpg").to_str().ok_or("Invalid temp path")?,
+        temp_dir
+            .join("frame_%04d.jpg")
+            .to_str()
+            .ok_or("Invalid temp path")?,
     ])?;
 
     // 8. 读取均匀帧：帧编号 → JPEG bytes
     let mut uniform_frames: Vec<(usize, Vec<u8>)> = Vec::new();
-    for entry in std::fs::read_dir(&temp_dir)
-        .map_err(|e| format!("Failed to read temp dir: {}", e))?
+    for entry in
+        std::fs::read_dir(&temp_dir).map_err(|e| format!("Failed to read temp dir: {}", e))?
     {
         let entry = entry.map_err(|e| e.to_string())?;
         let p = entry.path();
@@ -128,13 +132,13 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
         // ffmpeg frame_%04d 从 1 开始：frame_0001 → t=0, frame_0002 → t=1/fps, ...
         let expected_idx = (ts * fps).round() as usize + 1;
 
-        let jpeg_bytes = if let Some((_, bytes)) = uniform_frames.iter().find(|(idx, _)| *idx == expected_idx)
-        {
-            bytes.clone()
-        } else {
-            // 场景帧不在均匀采样中，单独提取
-            extract_single_frame(path, *ts)?
-        };
+        let jpeg_bytes =
+            if let Some((_, bytes)) = uniform_frames.iter().find(|(idx, _)| *idx == expected_idx) {
+                bytes.clone()
+            } else {
+                // 场景帧不在均匀采样中，单独提取
+                extract_single_frame(path, *ts)?
+            };
 
         results.push(frame_to_data_url(&jpeg_bytes)?);
     }

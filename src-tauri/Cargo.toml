@@ -39,23 +39,16 @@ regex = "1"
 lazy_static = "1.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
-scopeguard = "1.2"
 log = "0.4"
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio", "macros"] }
-notify = "6"
-notify-debouncer-full = "0.3"
 sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-walkdir = "2"
 semver = "1"
-thiserror = "1"
 image = { version = "0.25", features = ["jpeg", "png", "webp"] }
-md5 = "0.7"
 tauri-plugin-log = "2"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-mime_guess = "2"
 tauri-utils = "2"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"
@@ -64,7 +57,6 @@ percent-encoding = "2"
 urlencoding = "2"
 pulldown-cmark = "0.13.3"
 syntect = "5.3.0"
-html-escape = "0.2.13"
 memmap2 = "0.9"
 encoding_rs = "0.8"
 chardetng = "0.1"

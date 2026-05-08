@@ -333,21 +333,17 @@ async fn build_message_dtos<R: Runtime>(
             let dto = UserMessageSyncDTO::from(msg);
             serde_json::to_value(dto).ok()
         } else if owner_type == "group" {
-            let avatar_color = query_avatar_color(
-                &db.pool,
-                &msg.agent_id.clone().unwrap_or_default(),
-            )
-            .await
-            .unwrap_or("#6B7280".to_string());
+            let avatar_color =
+                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default())
+                    .await
+                    .unwrap_or("#6B7280".to_string());
             let dto = GroupMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         } else {
-            let avatar_color = query_avatar_color(
-                &db.pool,
-                &msg.agent_id.clone().unwrap_or_default(),
-            )
-            .await
-            .unwrap_or("#6B7280".to_string());
+            let avatar_color =
+                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default())
+                    .await
+                    .unwrap_or("#6B7280".to_string());
             let dto = AgentMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         };

@@ -116,7 +116,7 @@ pub async fn load_chat_history_internal(
         .unwrap_or_else(|| "User".to_string());
 
     let user_avatar_color: Option<String> = sqlx::query_scalar(
-        "SELECT dominant_color FROM avatars WHERE owner_type = 'user' AND owner_id = 'user_avatar'"
+        "SELECT dominant_color FROM avatars WHERE owner_type = 'user' AND owner_id = 'user_avatar'",
     )
     .fetch_optional(pool)
     .await
@@ -178,7 +178,10 @@ pub async fn load_chat_history_internal(
         };
 
         message.shell = Some(crate::vcp_modules::pre_renderer::precompute_shell(
-            &message, &agents, &user_name, user_avatar_color.as_deref(),
+            &message,
+            &agents,
+            &user_name,
+            user_avatar_color.as_deref(),
         ));
         history.push(message);
     }

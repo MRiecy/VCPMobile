@@ -44,9 +44,7 @@ pub enum MarkdownNode {
     RawHtml { content: String },
 
     #[serde(rename = "mermaid")]
-    MermaidPlaceholder {
-        code: String,
-    },
+    MermaidPlaceholder { code: String },
 }
 
 /// 行内元素

@@ -74,7 +74,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         .unwrap_or(4)
         .saturating_sub(2)
         .clamp(2, 6);
-    
+
     let mut offset = 0;
     let mut processed = 0;
 
@@ -115,7 +115,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         // 2. 批量写入 (Golden Rule: Prepared Statement + Transaction Loop)
         if !batch_data.is_empty() {
             let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-            
+
             // 预编译 SQL 模板
             let sql = "UPDATE messages SET render_content = ? WHERE msg_id = ?";
 

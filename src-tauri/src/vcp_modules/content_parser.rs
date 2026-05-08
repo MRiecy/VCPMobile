@@ -51,7 +51,6 @@ pub enum ContentBlock {
     RoleDivider { role: String, is_end: bool },
     #[serde(rename = "style")]
     Style { content: String },
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +262,6 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         .map_or((None, None, false), |m| {
                             (Some(m.start()), Some(m.end()), true)
                         }),
-
                 };
 
                 let inner_content = if let Some(end_start) = end_marker_start {
@@ -278,7 +276,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         let tool_name = extract_tool_name(inner_content);
                         if is_daily_note_create(inner_content) {
                             let (maid, date, content) = extract_diary_details(inner_content);
-                            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
+                            let nodes =
+                                crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
                             ContentBlock::Diary {
                                 maid,
                                 date,
@@ -301,7 +300,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             .map(|m| m.as_str().trim().replace("\"", ""))
                             .unwrap_or_else(|| "元思考链".to_string());
 
-                        let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
+                        let nodes =
+                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
                         ContentBlock::Thought {
                             theme,
                             content: inner_content.to_string(),
@@ -310,7 +310,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                     }
                     BlockType::Think => {
-                        let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
+                        let nodes =
+                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
                         ContentBlock::Thought {
                             theme: "思维链".to_string(),
                             content: inner_content.to_string(),
@@ -329,7 +330,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     }
                     BlockType::Diary => {
                         let (maid, date, content) = extract_diary_details(inner_content);
-                        let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
+                        let nodes =
+                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
                         ContentBlock::Diary {
                             maid,
                             date,
@@ -363,9 +365,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         } else {
                             ContentBlock::Markdown {
                                 content: None,
-                                nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
-                                    marker_text,
-                                )),
+                                nodes: Some(
+                                    crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                                        marker_text,
+                                    ),
+                                ),
                             }
                         }
                     }
@@ -383,10 +387,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                         ContentBlock::Markdown {
                             content: None,
-                            nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&full_fence)),
+                            nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                                &full_fence,
+                            )),
                         }
                     }
-
                 };
 
                 blocks.push(block);
