@@ -1,9 +1,9 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask};
+use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
-use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use tauri::{AppHandle, Manager, Runtime};
 
 /// 规范化桌面端返回的消息 JSON，修复常见字段类型不匹配
@@ -135,7 +135,7 @@ impl PullExecutor {
         }
 
         let results: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
-        
+
         let mut agent_topics = Vec::new();
         let mut group_topics = Vec::new();
 
@@ -189,10 +189,18 @@ impl PullExecutor {
         }
 
         if !agent_topics.is_empty() {
-            write_queue.submit(DbWriteTask::AgentTopicBatch { topics: agent_topics }).await;
+            write_queue
+                .submit(DbWriteTask::AgentTopicBatch {
+                    topics: agent_topics,
+                })
+                .await;
         }
         if !group_topics.is_empty() {
-            write_queue.submit(DbWriteTask::GroupTopicBatch { topics: group_topics }).await;
+            write_queue
+                .submit(DbWriteTask::GroupTopicBatch {
+                    topics: group_topics,
+                })
+                .await;
         }
 
         Ok(())
@@ -374,8 +382,11 @@ impl PullExecutor {
         let (_owner_id, _owner_type) = match topic_row {
             Some(r) => {
                 use sqlx::Row;
-                (r.get::<String, _>("owner_id"), r.get::<String, _>("owner_type"))
-            },
+                (
+                    r.get::<String, _>("owner_id"),
+                    r.get::<String, _>("owner_type"),
+                )
+            }
             None => {
                 // Topic 还未同步，使用占位值，后续 topic 同步时会更新
                 println!(
@@ -536,35 +547,40 @@ impl PullExecutor {
                 let content = msg.content.clone();
                 let topic_id_log = topic_id.to_string();
                 let msg_id_log = msg.id.clone();
-                
+
                 let result = std::panic::catch_unwind(|| {
-                    let blocks =
-                        MessageRenderCompiler::compile(
-                            &content,
-                        );
+                    let blocks = MessageRenderCompiler::compile(&content);
                     MessageRenderCompiler::serialize(&blocks)
                 });
-                
+
                 match result {
                     Ok(Ok(bytes)) => render_bytes_list.push(bytes),
                     Ok(Err(e)) => {
-                        println!("[PullExecutor] Serialize failed for msg {} (topic {}): {}", msg_id_log, topic_id_log, e);
+                        println!(
+                            "[PullExecutor] Serialize failed for msg {} (topic {}): {}",
+                            msg_id_log, topic_id_log, e
+                        );
                         render_bytes_list.push(Vec::new());
                     }
                     Err(_) => {
-                        println!("[PullExecutor] Compile panicked for msg {} (topic {})", msg_id_log, topic_id_log);
+                        println!(
+                            "[PullExecutor] Compile panicked for msg {} (topic {})",
+                            msg_id_log, topic_id_log
+                        );
                         render_bytes_list.push(Vec::new());
                     }
                 }
             }
 
             // 4. 提交到写入队列 (Batched Consumption on DB Worker)
-            write_queue.submit(DbWriteTask::TopicMessages {
-                topic_id: topic_id.to_string(),
-                messages: parsed_messages,
-                render_bytes: render_bytes_list,
-                skip_bubble,
-            }).await;
+            write_queue
+                .submit(DbWriteTask::TopicMessages {
+                    topic_id: topic_id.to_string(),
+                    messages: parsed_messages,
+                    render_bytes: render_bytes_list,
+                    skip_bubble,
+                })
+                .await;
         }
 
         Ok(())

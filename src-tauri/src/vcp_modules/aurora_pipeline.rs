@@ -66,8 +66,8 @@ impl AuroraBuffer {
 
                 // 严谨检测是否处于非稳定块内部
                 let is_in_code = !potential_stable.matches("```").count().is_multiple_of(2);
-                let is_in_think =
-                    potential_stable.matches("<think").count() > potential_stable.matches("</think").count();
+                let is_in_think = potential_stable.matches("<think").count()
+                    > potential_stable.matches("</think").count();
                 let is_in_vcp_think = potential_stable.matches("[--- VCP元思考链").count()
                     > potential_stable.matches("[--- 元思考链结束 ---]").count();
                 let is_in_tool = potential_stable.matches("<<<[TOOL_REQUEST]>>>").count()
@@ -99,12 +99,8 @@ impl AuroraBuffer {
         let tags = ["div", "pre", "code", "p", "span", "blockquote"];
         let mut balanced = html.to_string();
         for tag in tags {
-            let open_count = html
-                .matches(&format!("<{tag}>"))
-                .count()
-                + html
-                    .matches(&format!("<{tag} "))
-                    .count();
+            let open_count = html.matches(&format!("<{tag}>")).count()
+                + html.matches(&format!("<{tag} ")).count();
             let close_count = html.matches(&format!("</{tag}>")).count();
             if open_count > close_count {
                 balanced.push_str(&format!("</{tag}>").repeat(open_count - close_count));

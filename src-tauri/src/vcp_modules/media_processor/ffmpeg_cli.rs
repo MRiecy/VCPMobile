@@ -17,7 +17,9 @@ fn extract_android_binary(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
             "Embedded {} binary is empty or too small ({} bytes). \
              Please build the real ffmpeg binary for Android and place it at \
              src-tauri/src/vcp_modules/media_processor/assets/{}_aarch64",
-            name, bytes.len(), name
+            name,
+            bytes.len(),
+            name
         ));
     }
 
@@ -119,8 +121,7 @@ pub fn get_video_duration(path: &Path) -> Result<f64, String> {
         "-print_format",
         "json",
         "-show_format",
-        path.to_str()
-            .ok_or("Invalid video path")?,
+        path.to_str().ok_or("Invalid video path")?,
     ])?;
 
     let duration = json["format"]["duration"]
@@ -142,7 +143,7 @@ pub fn detect_scene_changes(path: &Path) -> Result<Vec<f64>, String> {
 
     let ffmpeg = get_ffmpeg_path()?;
     let output = Command::new(&ffmpeg)
-        .args(&[
+        .args([
             "-i",
             path.to_str().ok_or("Invalid video path")?,
             "-vf",

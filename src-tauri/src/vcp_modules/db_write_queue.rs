@@ -1,9 +1,9 @@
+use crate::vcp_modules::avatar_service::extract_dominant_color_from_bytes;
+use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
-use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::message_repository::MessageRepository;
-use crate::vcp_modules::avatar_service::extract_dominant_color_from_bytes;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
 use std::sync::{Arc, Mutex};
@@ -86,7 +86,7 @@ impl DbWriteQueue {
                 };
 
                 let mut tasks_in_this_tx = vec![first_task];
-                
+
                 // 贪婪模式：尽可能从 Channel 中吸纳更多任务合并提交
                 // 限制：最多攒 100 个任务或 2000 条数据变更（防止事务过大）
                 while tasks_in_this_tx.len() < 100 {
@@ -116,37 +116,66 @@ impl DbWriteQueue {
                             affected_owners.insert((id.clone(), "group".to_string()));
                             ("group", id, res)
                         }
-                        DbWriteTask::Avatar { owner_type, owner_id, bytes } => {
-                            let res = Self::upsert_avatar_in_tx(&mut tx, &owner_type, &owner_id, &bytes).await;
+                        DbWriteTask::Avatar {
+                            owner_type,
+                            owner_id,
+                            bytes,
+                        } => {
+                            let res =
+                                Self::upsert_avatar_in_tx(&mut tx, &owner_type, &owner_id, &bytes)
+                                    .await;
                             ("avatar", format!("{}:{}", owner_type, owner_id), res)
                         }
                         DbWriteTask::AgentTopic { topic_id, dto } => {
-                            let res = Self::upsert_agent_topic_in_tx(&mut tx, &topic_id, &dto).await;
+                            let res =
+                                Self::upsert_agent_topic_in_tx(&mut tx, &topic_id, &dto).await;
                             affected_owners.insert((dto.owner_id.clone(), "agent".to_string()));
                             ("agent_topic", topic_id, res)
                         }
                         DbWriteTask::AgentTopicBatch { topics } => {
                             let count = topics.len();
-                            for (_, dto) in &topics { affected_owners.insert((dto.owner_id.clone(), "agent".to_string())); }
+                            for (_, dto) in &topics {
+                                affected_owners.insert((dto.owner_id.clone(), "agent".to_string()));
+                            }
                             let res = Self::upsert_agent_topic_batch_in_tx(&mut tx, topics).await;
                             ("agent_topic_batch", format!("{} items", count), res)
                         }
                         DbWriteTask::GroupTopic { topic_id, dto } => {
-                            let res = Self::upsert_group_topic_in_tx(&mut tx, &topic_id, &dto).await;
+                            let res =
+                                Self::upsert_group_topic_in_tx(&mut tx, &topic_id, &dto).await;
                             affected_owners.insert((dto.owner_id.clone(), "group".to_string()));
                             ("group_topic", topic_id, res)
                         }
                         DbWriteTask::GroupTopicBatch { topics } => {
                             let count = topics.len();
-                            for (_, dto) in &topics { affected_owners.insert((dto.owner_id.clone(), "group".to_string())); }
+                            for (_, dto) in &topics {
+                                affected_owners.insert((dto.owner_id.clone(), "group".to_string()));
+                            }
                             let res = Self::upsert_group_topic_batch_in_tx(&mut tx, topics).await;
                             ("group_topic_batch", format!("{} items", count), res)
                         }
-                        DbWriteTask::TopicMessages { topic_id, messages, render_bytes, skip_bubble } => {
+                        DbWriteTask::TopicMessages {
+                            topic_id,
+                            messages,
+                            render_bytes,
+                            skip_bubble,
+                        } => {
                             let count = messages.len();
-                            if !skip_bubble { affected_topics.insert(topic_id.clone()); }
-                            let res = Self::upsert_topic_messages_in_tx(&mut tx, &topic_id, messages, render_bytes).await;
-                            ("topic_messages", format!("{} msgs in {}", count, topic_id), res)
+                            if !skip_bubble {
+                                affected_topics.insert(topic_id.clone());
+                            }
+                            let res = Self::upsert_topic_messages_in_tx(
+                                &mut tx,
+                                &topic_id,
+                                messages,
+                                render_bytes,
+                            )
+                            .await;
+                            (
+                                "topic_messages",
+                                format!("{} msgs in {}", count, topic_id),
+                                res,
+                            )
                         }
                         DbWriteTask::Flush { .. } => unreachable!(), // 已在 try_recv 过滤
                     };
@@ -164,10 +193,14 @@ impl DbWriteQueue {
                 for (owner_id, owner_type) in affected_owners {
                     if owner_type == "agent" {
                         let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM agents WHERE agent_id = ? AND deleted_at IS NULL").bind(&owner_id).fetch_one(&mut *tx).await.unwrap_or(false);
-                        if exists { let _ = HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await; }
+                        if exists {
+                            let _ = HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await;
+                        }
                     } else {
                         let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM groups WHERE group_id = ? AND deleted_at IS NULL").bind(&owner_id).fetch_one(&mut *tx).await.unwrap_or(false);
-                        if exists { let _ = HashAggregator::bubble_group_hash(&mut tx, &owner_id).await; }
+                        if exists {
+                            let _ = HashAggregator::bubble_group_hash(&mut tx, &owner_id).await;
+                        }
                     }
                 }
                 for topic_id in affected_topics {
@@ -473,7 +506,7 @@ impl DbWriteQueue {
         // 将消息和渲染字节对齐
         let items: Vec<(&ChatMessage, Vec<u8>)> = messages.iter().zip(render_bytes).collect();
         MessageRepository::upsert_messages_batch(tx, topic_id, &items).await?;
-        
+
         // 更新 topic 元数据
         let now = chrono::Utc::now().timestamp_millis();
         sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
