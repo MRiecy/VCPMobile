@@ -22,7 +22,7 @@ export const variables = {
   "--user-text": "#e8e8e8",
   "--agent-text": "#e8e8e8",
   "--user-bubble-bg": "rgba(145, 109, 51, 0.9)",
-  "--assistant-bubble-bg": "rgba(44, 62, 74, 0.95)",
+  "--assistant-bubble-bg": "rgba(44, 62, 74, 0.85)",
   "--button-bg": "#3a506b",
   "--button-hover-bg": "#4a657a",
   "--danger-color": "#e57373",

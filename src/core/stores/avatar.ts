@@ -20,6 +20,8 @@ export const useAvatarStore = defineStore("avatar", () => {
   
   // 用于追踪正在进行的请求，防止并发重复请求同一个 ID
   const pending = new Map<string, Promise<string>>();
+  // 用于追踪正在进行的 dominant_color 计算，防止重复触发
+  const inFlightCompute = new Set<string>();
 
   /**
    * 获取头像 URL (带自动缓存和版本检查)
@@ -52,6 +54,23 @@ export const useAvatarStore = defineStore("avatar", () => {
         });
 
         if (result && result.image_data) {
+          // 如果 dominant_color 缺失，异步触发后端计算（仅处理存量数据）
+          if (result.dominant_color === null) {
+            if (!inFlightCompute.has(key)) {
+              inFlightCompute.add(key);
+              invoke("compute_and_store_dominant_color", { ownerType, ownerId })
+                .then((color) => {
+                  console.log(`[AvatarStore] Computed dominant_color for ${key}: ${color}`);
+                })
+                .catch((err) => {
+                  console.error(`[AvatarStore] Failed to compute dominant_color for ${key}:`, err);
+                })
+                .finally(() => {
+                  inFlightCompute.delete(key);
+                });
+            }
+          }
+
           // 清理旧缓存的物理内存
           if (existing) {
             URL.revokeObjectURL(existing.blobUrl);

@@ -45,3 +45,4 @@ vector/
 
 # Cargo registry cache
 .cargo
+temp

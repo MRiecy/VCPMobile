@@ -1,5 +1,4 @@
 mod distributed;
-mod pre_renderer;
 mod vcp_modules;
 
 use tauri::Manager;
@@ -8,7 +7,7 @@ use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, read_agent_config, save_agent_config,
     update_agent_config,
 };
-use vcp_modules::avatar_service::{get_avatar, save_avatar_data};
+use vcp_modules::avatar_service::{compute_and_store_dominant_color, get_avatar, save_avatar_data};
 use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
@@ -22,7 +21,7 @@ use vcp_modules::emoticon_manager::{
 };
 use vcp_modules::file_manager::{
     append_chunk, cancel_chunked_upload, cleanup_orphaned_attachments, finish_chunked_upload,
-    get_attachment_real_path, init_chunked_upload, open_file, read_local_file_base64, store_file,
+    get_attachment_real_path, init_chunked_upload, open_file, store_file,
     UploadManagerState,
 };
 use vcp_modules::frontend_update_manager::{
@@ -37,7 +36,7 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
-use vcp_modules::message_render_compiler::{process_message_content, rebuild_all_pre_renders};
+use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::fetch_raw_message_content;
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
@@ -195,6 +194,7 @@ pub fn run() {
             update_agent_config,
             save_avatar_data,
             get_avatar,
+            compute_and_store_dominant_color,
             read_settings,
             write_settings,
             update_settings,
@@ -213,7 +213,6 @@ pub fn run() {
             cancel_chunked_upload,
             prepare_vcp_upload,
             fetch_raw_message_content,
-            read_local_file_base64,
             get_attachment_real_path,
             open_file,
             cleanup_orphaned_attachments,

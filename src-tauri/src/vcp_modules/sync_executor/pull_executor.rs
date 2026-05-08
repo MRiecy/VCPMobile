@@ -3,7 +3,7 @@ use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask};
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
-use sqlx::Row;
+use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use tauri::{AppHandle, Manager, Runtime};
 
 /// 规范化桌面端返回的消息 JSON，修复常见字段类型不匹配
@@ -135,6 +135,10 @@ impl PullExecutor {
         }
 
         let results: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
+        
+        let mut agent_topics = Vec::new();
+        let mut group_topics = Vec::new();
+
         for item in results {
             let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             let r#type = item
@@ -169,12 +173,7 @@ impl PullExecutor {
                         continue;
                     }
                     if let Ok(dto) = serde_json::from_value::<AgentTopicSyncDTO>(data) {
-                        write_queue
-                            .submit(DbWriteTask::AgentTopic {
-                                topic_id: id.to_string(),
-                                dto,
-                            })
-                            .await;
+                        agent_topics.push((id.to_string(), dto));
                     }
                 }
                 "group_topic" => {
@@ -182,16 +181,18 @@ impl PullExecutor {
                         continue;
                     }
                     if let Ok(dto) = serde_json::from_value::<GroupTopicSyncDTO>(data) {
-                        write_queue
-                            .submit(DbWriteTask::GroupTopic {
-                                topic_id: id.to_string(),
-                                dto,
-                            })
-                            .await;
+                        group_topics.push((id.to_string(), dto));
                     }
                 }
                 _ => {}
             }
+        }
+
+        if !agent_topics.is_empty() {
+            write_queue.submit(DbWriteTask::AgentTopicBatch { topics: agent_topics }).await;
+        }
+        if !group_topics.is_empty() {
+            write_queue.submit(DbWriteTask::GroupTopicBatch { topics: group_topics }).await;
         }
 
         Ok(())
@@ -358,6 +359,7 @@ impl PullExecutor {
         sync_token: &str,
         topic_id: &str,
         msg_ids: &[String],
+        write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
 
@@ -370,7 +372,10 @@ impl PullExecutor {
             .map_err(|e| e.to_string())?;
 
         let (_owner_id, _owner_type) = match topic_row {
-            Some(r) => (r.get("owner_id"), r.get("owner_type")),
+            Some(r) => {
+                use sqlx::Row;
+                (r.get::<String, _>("owner_id"), r.get::<String, _>("owner_type"))
+            },
             None => {
                 // Topic 还未同步，使用占位值，后续 topic 同步时会更新
                 println!(
@@ -431,6 +436,7 @@ impl PullExecutor {
                 q = q.bind(h);
             }
             if let Ok(rows) = q.fetch_all(&db.pool).await {
+                use sqlx::Row;
                 for row in rows {
                     if let (Ok(hash), Ok(path)) = (
                         row.try_get::<String, _>("hash"),
@@ -512,152 +518,55 @@ impl PullExecutor {
             println!("[PullExecutor] Topic {} message parse summary: total_requested={}, success={}, failed={}", topic_id, parsed_messages.len() + failed_count, parsed_messages.len(), failed_count);
         }
 
-        // 直接写入数据库，绕过 DbWriteQueue（带指数退避重试）
-        let db = app.state::<DbState>();
-        let pool = &db.pool;
-
+        // 判断是否需要冒泡更新（如果 topic 不存在则跳过）
         let topic_exists: bool = sqlx::query_scalar(
             "SELECT COUNT(*) > 0 FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
         )
         .bind(topic_id)
-        .fetch_one(pool)
+        .fetch_one(&db.pool)
         .await
         .unwrap_or(false);
 
         let skip_bubble = !topic_exists;
 
         if !parsed_messages.is_empty() {
-            let mut retries = 0;
-            let max_retries = 8;
-            let mut delay_ms = 100u64;
-            loop {
-                match try_upsert_messages(pool, topic_id, &parsed_messages, skip_bubble).await {
-                    Ok(()) => {
-                        if retries > 0 {
-                            println!(
-                                "[PullExecutor] Topic {}: DB write succeeded after {} retries",
-                                topic_id, retries
-                            );
-                        }
-                        break;
+            // 3. 并发预渲染 (Parallel Pre-render on CPU)
+            let mut render_bytes_list = Vec::with_capacity(parsed_messages.len());
+            for msg in &parsed_messages {
+                let content = msg.content.clone();
+                let topic_id_log = topic_id.to_string();
+                let msg_id_log = msg.id.clone();
+                
+                let result = std::panic::catch_unwind(|| {
+                    let blocks =
+                        MessageRenderCompiler::compile(
+                            &content,
+                        );
+                    MessageRenderCompiler::serialize(&blocks)
+                });
+                
+                match result {
+                    Ok(Ok(bytes)) => render_bytes_list.push(bytes),
+                    Ok(Err(e)) => {
+                        println!("[PullExecutor] Serialize failed for msg {} (topic {}): {}", msg_id_log, topic_id_log, e);
+                        render_bytes_list.push(Vec::new());
                     }
-                    Err(e) if retries < max_retries => {
-                        retries += 1;
-                        println!("[PullExecutor] Topic {}: DB write failed (retry {}/{}): {}. Waiting {}ms", topic_id, retries, max_retries, e, delay_ms);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                        delay_ms *= 2;
-                    }
-                    Err(e) => {
-                        return Err(format!(
-                            "DB write failed after {} retries for topic {}: {}",
-                            max_retries, topic_id, e
-                        ));
+                    Err(_) => {
+                        println!("[PullExecutor] Compile panicked for msg {} (topic {})", msg_id_log, topic_id_log);
+                        render_bytes_list.push(Vec::new());
                     }
                 }
             }
+
+            // 4. 提交到写入队列 (Batched Consumption on DB Worker)
+            write_queue.submit(DbWriteTask::TopicMessages {
+                topic_id: topic_id.to_string(),
+                messages: parsed_messages,
+                render_bytes: render_bytes_list,
+                skip_bubble,
+            }).await;
         }
 
         Ok(())
     }
-}
-
-async fn try_upsert_messages(
-    pool: &sqlx::SqlitePool,
-    topic_id: &str,
-    parsed_messages: &[crate::vcp_modules::chat_manager::ChatMessage],
-    _skip_bubble: bool,
-) -> Result<(), String> {
-    // 1. 串行编译 render_content，单条消息 panic 不拖垮整个 topic
-    let mut messages_with_render = Vec::new();
-    for msg in parsed_messages {
-        let content = msg.content.clone();
-        let result = std::panic::catch_unwind(|| {
-            let blocks =
-                crate::vcp_modules::message_render_compiler::MessageRenderCompiler::compile(
-                    &content,
-                );
-            crate::vcp_modules::message_render_compiler::MessageRenderCompiler::serialize(&blocks)
-        });
-        match result {
-            Ok(Ok(bytes)) => messages_with_render.push((msg, bytes)),
-            Ok(Err(e)) => {
-                println!(
-                    "[PullExecutor] Serialize failed for msg {} (topic {}): {}. Skipping pre-render.",
-                    msg.id, topic_id, e
-                );
-                messages_with_render.push((msg, Vec::new()));
-            }
-            Err(_) => {
-                println!(
-                    "[PullExecutor] Compile panicked for msg {} (topic {}). Content length: {}. Skipping pre-render.",
-                    msg.id, topic_id, msg.content.len()
-                );
-                messages_with_render.push((msg, Vec::new()));
-            }
-        }
-    }
-
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-
-    // 2. 批量 upsert messages（VALUES 批量插入，每批 50 条）
-    crate::vcp_modules::message_repository::MessageRepository::upsert_messages_batch(
-        &mut tx,
-        topic_id,
-        &messages_with_render,
-    )
-    .await?;
-
-    // 3. 更新 topic 元数据
-    let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
-        .bind(now)
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let topic_exists: bool = sqlx::query_scalar(
-        "SELECT COUNT(*) > 0 FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(topic_id)
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap_or(false);
-
-    if topic_exists {
-        let count: i32 = sqlx::query_scalar::<sqlx::Sqlite, i64>(
-            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(topic_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0) as i32;
-
-        sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-            .bind(count)
-            .bind(topic_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 在同一个 tx 内执行 hash bubble，避免第二个 tx 的锁竞争
-        if !_skip_bubble {
-            crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, topic_id)
-                .await?;
-        }
-
-        println!(
-            "[PullExecutor] Topic {}: batch upserted {} messages + bubble (direct tx), msg_count={}",
-            topic_id, parsed_messages.len(), count
-        );
-    } else {
-        println!(
-            "[PullExecutor] Messages for topic {} batch inserted ({} msgs, direct tx), but topic not yet available",
-            topic_id, parsed_messages.len()
-        );
-    }
-
-    tx.commit().await.map_err(|e| e.to_string())
 }

@@ -9,7 +9,6 @@ const props = defineProps<{
   fallbackName?: string;
   size?: string; // 如 'w-10 h-10'
   rounded?: string; // 如 'rounded-xl'
-  outerBorder?: boolean;
   dominantColor?: string | null;
 }>();
 
@@ -19,10 +18,10 @@ const imgExists = ref(false);
 
 // 处理主色调边框
 const borderStyle = computed(() => {
-  if (!props.outerBorder) return {};
-  const color = props.dominantColor || 'var(--primary)';
-  // 使用 color-mix 混合出 60% 不透明度的边框，使其更自然地融入背景
-  const mixedColor = `color-mix(in srgb, ${color} 60%, transparent)`;
+  const color = props.dominantColor;
+  if (!color) return {};
+  // 使用 color-mix 混合出 80% 不透明度的边框，使其更自然地融入背景
+  const mixedColor = `color-mix(in srgb, ${color} 80%, transparent)`;
   return {
     borderColor: mixedColor,
     boxShadow: `0 0 8px ${color}33` // 减弱发光
@@ -37,6 +36,7 @@ const initial = computed(() => {
 
 // 根据 ID 生成一个确定的背景色，防止所有 Fallback 都一个颜色
 const fallbackBg = computed(() => {
+  if (props.dominantColor) return props.dominantColor;
   const colors = [
     "rgb(226, 54, 56)", // VCP Red
     "rgb(59, 130, 246)", // Blue
@@ -88,14 +88,14 @@ const handleImgError = () => {
   <div :class="[
     size || 'w-10 h-10', 
     rounded || 'rounded-xl',
-    'relative overflow-hidden flex-shrink-0 flex items-center justify-center bg-black/5 dark:bg-white/5 border shadow-inner transition-all duration-500',
-    outerBorder ? 'border' : 'border-black/5 dark:border-white/10'
+    'relative overflow-hidden flex-shrink-0 flex items-center justify-center shadow-inner transition-all duration-500',
+    dominantColor ? 'border' : 'border border-black/15 dark:border-white/20'
   ]" :style="borderStyle">
     <!-- Fallback 占位 (底层) -->
     <div 
       class="absolute inset-0 flex items-center justify-center text-white font-bold select-none"
       :style="{ backgroundColor: fallbackBg }"
-      :class="[size?.includes('w-16') ? 'text-xl' : 'text-sm']"
+      :class="size?.includes('w-16') ? 'text-xl' : 'text-sm'"
     >
       {{ initial }}
     </div>
@@ -106,7 +106,6 @@ const handleImgError = () => {
       :src="avatarUrl" 
       @error="handleImgError" 
       class="relative w-full h-full object-cover transition-opacity duration-300"
-      :class="imgExists ? 'opacity-100' : 'opacity-0'"
     />
   </div>
 </template>

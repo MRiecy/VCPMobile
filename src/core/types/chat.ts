@@ -3,8 +3,6 @@ export interface MessageShell {
   bubbleBorderColor: string;
   bubbleBoxShadow: string;
   displayName: string;
-  avatarFallbackText: string;
-  avatarFallbackColor: string;
   isUser: boolean;
 }
 

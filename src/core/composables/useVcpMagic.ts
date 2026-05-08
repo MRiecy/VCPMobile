@@ -123,7 +123,33 @@ export function useVcpMagic() {
             // 防御性清理：防止 Map 无界增长
             if (trackedThreeInstances.size > MAX_TRACKED_THREE) {
               const first = trackedThreeInstances.keys().next().value;
-              if (first) trackedThreeInstances.delete(first);
+              if (first) {
+                const oldInstances = trackedThreeInstances.get(first);
+                if (oldInstances) {
+                  oldInstances.forEach(inst => {
+                    if (inst.renderer && !inst.renderer._disposed) {
+                      // 深度清理场景资源
+                      const scene = inst.getScene();
+                      if (scene) {
+                        scene.traverse((obj: any) => {
+                          if (obj.geometry) obj.geometry.dispose();
+                          if (obj.material) {
+                            if (Array.isArray(obj.material)) {
+                              obj.material.forEach((m: any) => m.dispose?.());
+                            } else {
+                              obj.material.dispose?.();
+                            }
+                          }
+                          if (obj.isTexture) obj.dispose();
+                        });
+                      }
+                      inst.renderer.dispose();
+                      inst.renderer._disposed = true;
+                    }
+                  });
+                }
+                trackedThreeInstances.delete(first);
+              }
             }
           }
           observer.disconnect();

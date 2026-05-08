@@ -84,7 +84,7 @@ function renderNode(node: MarkdownNode, messageId: string): string {
       return '<hr/>';
     
     case 'mermaid':
-      return `<div class="mermaid-placeholder" data-code="${node.encoded}">[Mermaid 图表解析中...]</div>`;
+      return `<div class="mermaid-placeholder">${escapeHtml(node.code || '')}</div>`;
     
     case 'raw_html':
       return node.content || '';

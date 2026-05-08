@@ -46,7 +46,6 @@ pub enum MarkdownNode {
     #[serde(rename = "mermaid")]
     MermaidPlaceholder {
         code: String,
-        encoded: String, // base64
     },
 }
 

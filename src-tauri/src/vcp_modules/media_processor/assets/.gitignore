@@ -1,0 +1,4 @@
+# README.md contains build instructions for regenerating these binaries
+# ffmpeg_aarch64 and ffprobe_aarch64 are intentionally tracked in git
+# to avoid ~30min CI cross-compilation time and environment complexity.
+# To rebuild: see README.md in this directory.

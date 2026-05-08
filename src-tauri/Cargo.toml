@@ -65,6 +65,9 @@ urlencoding = "2"
 pulldown-cmark = "0.13.3"
 syntect = "5.3.0"
 html-escape = "0.2.13"
+memmap2 = "0.9"
+encoding_rs = "0.8"
+chardetng = "0.1"
 
 [profile.release]
 opt-level = 3   # 最高级别的代码优化

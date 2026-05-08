@@ -1,6 +1,6 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
-use crate::vcp_modules::message_render_compiler::MessageRenderCompiler;
+use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::settings_manager;
 use sqlx::Row;
@@ -115,6 +115,14 @@ pub async fn load_chat_history_internal(
         .map(|s| s.user_name)
         .unwrap_or_else(|| "User".to_string());
 
+    let user_avatar_color: Option<String> = sqlx::query_scalar(
+        "SELECT dominant_color FROM avatars WHERE owner_type = 'user' AND owner_id = 'user_avatar'"
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+
     let mut history = Vec::new();
     for row in rows {
         use sqlx::Row;
@@ -169,8 +177,8 @@ pub async fn load_chat_history_internal(
             shell: None,
         };
 
-        message.shell = Some(crate::pre_renderer::precompute_shell(
-            &message, &agents, &user_name,
+        message.shell = Some(crate::vcp_modules::pre_renderer::precompute_shell(
+            &message, &agents, &user_name, user_avatar_color.as_deref(),
         ));
         history.push(message);
     }

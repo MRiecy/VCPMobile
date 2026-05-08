@@ -28,8 +28,6 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   let topObserver: IntersectionObserver | null = null;
   let bottomObserver: IntersectionObserver | null = null;
-  let scrollRafId: number | null = null;
-  let lastScrollHeight = 0;
 
   const scrollToBottom = (smooth = false) => {
     if (messageListRef.value) {
@@ -76,6 +74,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
     bottomObserver.observe(bottomSentinelRef.value);
   };
 
+  let mutationObserver: MutationObserver | null = null;
+
   // --- 消息新增时自动滚动 ---
   watch(messageCount, async () => {
     if (!showScrollToBottom.value) {
@@ -84,30 +84,34 @@ export function useChatScroll(options: UseChatScrollOptions) {
     }
   });
 
-  // --- RAF 轮询自动置底（流式期间） ---
+  // --- MutationObserver 被动置底（流式期间取代 RAF 轮询） ---
   const startAutoScroll = () => {
-    if (scrollRafId) return;
-    lastScrollHeight = messageListRef.value?.scrollHeight ?? 0;
+    if (mutationObserver || !messageListRef.value) return;
 
-    const tick = () => {
-      if (!messageListRef.value) return;
-      const sh = messageListRef.value.scrollHeight;
-
-      if (sh !== lastScrollHeight) {
-        if (!showScrollToBottom.value) {
-          scrollToBottom(false);
-        }
-        lastScrollHeight = sh;
+    mutationObserver = new MutationObserver(() => {
+      // 只有当用户原本就在底部时，才随新内容自动滚动
+      if (!showScrollToBottom.value) {
+        scrollToBottom(false);
       }
-      scrollRafId = requestAnimationFrame(tick);
-    };
-    scrollRafId = requestAnimationFrame(tick);
+    });
+
+    // 监听子元素增减、文本变动、子树变化（覆盖 Markdown 渲染过程）
+    mutationObserver.observe(messageListRef.value, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    
+    // 初始触发一次
+    if (!showScrollToBottom.value) {
+      scrollToBottom(false);
+    }
   };
 
   const stopAutoScroll = () => {
-    if (scrollRafId) {
-      cancelAnimationFrame(scrollRafId);
-      scrollRafId = null;
+    if (mutationObserver) {
+      mutationObserver.disconnect();
+      mutationObserver = null;
     }
   };
 

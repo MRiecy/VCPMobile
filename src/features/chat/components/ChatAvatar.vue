@@ -8,8 +8,7 @@ const props = defineProps<{
   imageUrl?: string | null; // 保持兼容，但优先使用上面的显式参数
   fallbackText: string;
   isUser: boolean;
-  borderColor?: string;
-  fallbackColor?: string;
+  dominantColor?: string;
 }>();
 
 const ownerInfo = computed(() => {
@@ -18,7 +17,7 @@ const ownerInfo = computed(() => {
     return { type: props.ownerType, id: props.ownerId };
   }
 
-  // 2. 其次尝试解析 imageUrl (兼容旧代码)
+  // 2. 尝试解析 imageUrl (兼容旧代码)
   if (props.imageUrl && props.imageUrl.startsWith('vcp-avatar://')) {
     const parts = props.imageUrl.replace('vcp-avatar://', '').split('/');
     if (parts.length >= 2) {
@@ -29,35 +28,29 @@ const ownerInfo = computed(() => {
     }
   }
 
-  // 3. 如果是用户且没有 ID，使用默认 user 标识
-  if (props.isUser) {
-    return { type: 'user' as const, id: 'user_avatar' };
-  }
-
   return null;
 });
 </script>
 
 <template>
   <div class="flex-shrink-0 w-9 h-9">
-    <VcpAvatar 
+    <VcpAvatar
       v-if="ownerInfo"
       :owner-type="ownerInfo.type"
       :owner-id="ownerInfo.id"
       :fallback-name="fallbackText"
-      size="w-9 h-9"
+      size="w-10 h-10"
       rounded="rounded-full"
-      :style="{ borderColor: borderColor || 'transparent' }"
-      class="border"
+      :dominant-color="dominantColor"
     />
-    <div v-else class="w-full h-full rounded-full overflow-hidden border transition-all duration-500 shadow-sm flex items-center justify-center text-xs font-bold text-white" 
+    <div v-else class="w-full h-full rounded-full overflow-hidden border transition-all duration-500 shadow-sm flex items-center justify-center text-xs font-bold text-white"
       :class="isUser ? 'bg-primary border-primary' : 'bg-white dark:bg-gray-800'"
       :style="[
-        !isUser ? { borderColor: borderColor || 'transparent' } : {},
+        !isUser && dominantColor ? { borderColor: dominantColor } : {},
         {
           backgroundColor: isUser
-            ? fallbackColor || 'var(--primary)'
-            : fallbackColor || '#374151',
+            ? 'var(--primary)'
+            : '#374151',
         }
       ]">
       {{ fallbackText.charAt(0).toUpperCase() }}

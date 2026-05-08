@@ -12,9 +12,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
-async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> String {
+async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> Option<String> {
     if agent_id.is_empty() {
-        return "rgb(128, 128, 128)".to_string();
+        return None;
     }
 
     sqlx::query_scalar::<sqlx::Sqlite, Option<String>>(
@@ -26,28 +26,6 @@ async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> String {
     .ok()
     .flatten()
     .flatten()
-    .unwrap_or_else(|| "rgb(128, 128, 128)".to_string())
-}
-
-async fn query_avatar_color_cached(
-    pool: &sqlx::SqlitePool,
-    cache: &dashmap::DashMap<String, String>,
-    agent_id: &str,
-) -> String {
-    if agent_id.is_empty() {
-        return "rgb(128, 128, 128)".to_string();
-    }
-    if let Some(cached) = cache.get(agent_id) {
-        return cached.clone();
-    }
-    let color = query_avatar_color(pool, agent_id).await;
-    // 防止缓存无界增长：超过 256 条目时清空
-    const AVATAR_COLOR_CACHE_MAX: usize = 256;
-    if cache.len() >= AVATAR_COLOR_CACHE_MAX {
-        cache.clear();
-    }
-    cache.insert(agent_id.to_string(), color.clone());
-    color
 }
 
 pub struct PushExecutor;
@@ -348,8 +326,6 @@ async fn build_message_dtos<R: Runtime>(
     owner_type: &str,
 ) -> Vec<serde_json::Value> {
     let db = app.state::<DbState>();
-    let sync_state = app.state::<crate::vcp_modules::sync_service::SyncState>();
-    let cache = &sync_state.avatar_color_cache;
     let mut results = Vec::new();
 
     for msg in history {
@@ -357,21 +333,21 @@ async fn build_message_dtos<R: Runtime>(
             let dto = UserMessageSyncDTO::from(msg);
             serde_json::to_value(dto).ok()
         } else if owner_type == "group" {
-            let avatar_color = query_avatar_color_cached(
+            let avatar_color = query_avatar_color(
                 &db.pool,
-                cache,
                 &msg.agent_id.clone().unwrap_or_default(),
             )
-            .await;
+            .await
+            .unwrap_or("#6B7280".to_string());
             let dto = GroupMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         } else {
-            let avatar_color = query_avatar_color_cached(
+            let avatar_color = query_avatar_color(
                 &db.pool,
-                cache,
                 &msg.agent_id.clone().unwrap_or_default(),
             )
-            .await;
+            .await
+            .unwrap_or("#6B7280".to_string());
             let dto = AgentMessageSyncDTO::from_message(msg, avatar_color);
             serde_json::to_value(dto).ok()
         };

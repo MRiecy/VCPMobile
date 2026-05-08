@@ -2,7 +2,28 @@ import { defineStore } from "pinia";
 import { ref, nextTick } from "vue";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { useDocumentProcessor } from "../composables/useDocumentProcessor";
+import { useNotificationStore } from "./notification";
 import type { Attachment } from "../types/chat";
+
+/**
+ * 前端辅助：异步读取图片原始分辨率（不依赖后端）
+ * 用于上传前拦截超限图片（>8K×8K）
+ */
+const checkImageDimensions = (file: File): Promise<{ width: number; height: number }> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("无法读取图片尺寸"));
+    };
+    img.src = url;
+  });
+};
 
 export const useAttachmentStore = defineStore("attachment", () => {
   // 暂存的附件列表，准备随下一条消息发送
@@ -60,7 +81,44 @@ export const useAttachmentStore = defineStore("attachment", () => {
             `[AttachmentStore] Selected file via HTML input: ${file.name}, type: ${file.type}, size: ${file.size}`,
           );
 
-          // 1. 生成稳定 ID 并使用 unshift 插入首位 (实现“最新附件最先看到”)
+          const ext = file.name.split('.').pop()?.toLowerCase() || '';
+          const isGif = ext === 'gif' || file.type === 'image/gif';
+          const isImage = file.type.startsWith('image/');
+          const notificationStore = useNotificationStore();
+
+          // 1. 大小拦截：非 GIF 图片 > 10MB 直接拒绝
+          if (isImage && !isGif && file.size > 10 * 1024 * 1024) {
+            notificationStore.addNotification({
+              type: "warning",
+              title: "图片过大",
+              message: "图片过大（>10MB），请压缩后重试。",
+              toastOnly: true,
+            });
+            resolve();
+            return;
+          }
+
+          // 2. 分辨率拦截：非 GIF 图片 > 8Kx8K 直接拒绝
+          if (isImage && !isGif) {
+            try {
+              const dims = await checkImageDimensions(file);
+              if (dims.width > 8192 || dims.height > 8192) {
+                notificationStore.addNotification({
+                  type: "warning",
+                  title: "分辨率过高",
+                  message: "图片分辨率过高（>8K），请压缩后重试。",
+                  toastOnly: true,
+                });
+                resolve();
+                return;
+              }
+            } catch (e) {
+              console.warn("[AttachmentStore] Failed to check image dimensions:", e);
+              // 尺寸检测失败不阻断上传，继续
+            }
+          }
+
+          // 3. 生成稳定 ID 并使用 unshift 插入首位 (实现"最新附件最先看到")
           const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
           const blobUrl = URL.createObjectURL(file);
 

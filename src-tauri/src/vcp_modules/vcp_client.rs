@@ -1,7 +1,7 @@
-use base64::{engine::general_purpose, Engine as _};
 use dashmap::{DashMap, DashSet};
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
+use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -189,20 +189,79 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     "png" | "jpg" | "jpeg" | "webp" | "gif" => {
                                         ("image", "image_url")
                                     }
-                                    "mp3" | "wav" | "ogg" => ("audio", "audio_url"),
-                                    "mp4" | "mkv" | "webm" => ("video", "video_url"),
+                                    "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus" | "wma" => {
+                                        ("audio", "input_audio")
+                                    }
+                                    "mp4" | "mkv" | "webm" | "avi" | "mov" | "flv" | "m4v" | "3gp" => {
+                                        ("video", "image_url")
+                                    }
                                     _ => ("application", "file_url"), // 非多模态文件回退
                                 };
 
-                                if let Ok(bytes) = std::fs::read(&path_buf) {
-                                    let b64 = general_purpose::STANDARD.encode(&bytes);
-                                    let data_url = format!("data:{}/{};base64,{}", mime, ext, b64);
-
-                                    new_parts.push(json!({
-                                        "type": part_type,
-                                        part_type: { "url": data_url }
-                                    }));
-                                    converted = true;
+                                if mime == "image" {
+                                    // 图片类型：长边 > 1120px 时缩放，避免多模态 payload 过大
+                                    let path_buf_clone = path_buf.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        convert_local_image_for_multimodal(&path_buf_clone)
+                                    })
+                                    .await
+                                    {
+                                        Ok(Ok(data_url)) => {
+                                            new_parts.push(json!({
+                                                "type": part_type,
+                                                part_type: { "url": data_url }
+                                            }));
+                                            converted = true;
+                                        }
+                                        Ok(Err(e)) => {
+                                            println!("[VCPClient] Image conversion failed for {:?}: {}", path_buf, e);
+                                        }
+                                        Err(e) => {
+                                            println!("[VCPClient] Image conversion task panicked: {}", e);
+                                        }
+                                    }
+                                } else if mime == "video" {
+                                    // 视频：抽帧 → 每张帧作为 image_url
+                                    let path_clone = path_buf.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        crate::vcp_modules::media_processor::process_video_for_multimodal(&path_clone)
+                                    }).await {
+                                        Ok(Ok(frames)) => {
+                                            for frame_url in frames {
+                                                new_parts.push(json!({
+                                                    "type": "image_url",
+                                                    "image_url": { "url": frame_url }
+                                                }));
+                                            }
+                                            converted = true;
+                                        }
+                                        Ok(Err(e)) => {
+                                            println!("[VCPClient] Video frame extraction failed for {:?}: {}", path_buf, e);
+                                        }
+                                        Err(e) => {
+                                            println!("[VCPClient] Video processing task panicked: {}", e);
+                                        }
+                                    }
+                                } else if mime == "audio" {
+                                    // 音频：提取为 WAV → input_audio
+                                    let path_clone = path_buf.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        crate::vcp_modules::media_processor::process_audio_for_multimodal(&path_clone)
+                                    }).await {
+                                        Ok(Ok(audio_url)) => {
+                                            new_parts.push(json!({
+                                                "type": "input_audio",
+                                                "input_audio": { "data": audio_url, "format": "wav" }
+                                            }));
+                                            converted = true;
+                                        }
+                                        Ok(Err(e)) => {
+                                            println!("[VCPClient] Audio extraction failed for {:?}: {}", path_buf, e);
+                                        }
+                                        Err(e) => {
+                                            println!("[VCPClient] Audio processing task panicked: {}", e);
+                                        }
+                                    }
                                 }
                             }
 

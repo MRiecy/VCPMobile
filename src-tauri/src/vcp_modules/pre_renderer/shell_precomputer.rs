@@ -7,11 +7,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct MessageShell {
     pub avatar_color: String,
-    pub bubble_border_color: String,
-    pub bubble_box_shadow: String,
     pub display_name: String,
-    pub avatar_fallback_text: String,
-    pub avatar_fallback_color: String,
     pub is_user: bool,
 }
 
@@ -20,17 +16,15 @@ pub fn precompute_shell(
     message: &ChatMessage,
     agents: &[AgentConfig],
     user_name: &str,
+    user_avatar_color: Option<&str>,
 ) -> MessageShell {
     let is_user = message.role == "user";
 
     if is_user {
+        let user_color = user_avatar_color.unwrap_or("rgb(226,54,56)");
         return MessageShell {
-            avatar_color: "rgb(226,54,56)".to_string(),
-            bubble_border_color: "transparent".to_string(),
-            bubble_box_shadow: "none".to_string(),
+            avatar_color: user_color.to_string(),
             display_name: user_name.to_string(),
-            avatar_fallback_text: user_name.chars().next().unwrap_or('U').to_string(),
-            avatar_fallback_color: "rgb(226,54,56)".to_string(),
             is_user: true,
         };
     }
@@ -49,7 +43,7 @@ pub fn precompute_shell(
 
     let color = agent
         .and_then(|a| a.avatar_calculated_color.clone())
-        .unwrap_or_else(|| "#374151".to_string());
+        .unwrap_or_default();
 
     let display_name = message
         .name
@@ -58,12 +52,8 @@ pub fn precompute_shell(
         .unwrap_or_else(|| "AI".to_string());
 
     MessageShell {
-        avatar_color: color.clone(),
-        bubble_border_color: format!("{}30", color), // 18% opacity approx in hex is 2E or 30
-        bubble_box_shadow: format!("0 4px 12px {}15", color), // 8% opacity approx in hex is 14 or 15
-        display_name: display_name.clone(),
-        avatar_fallback_text: display_name.chars().next().unwrap_or('A').to_string(),
-        avatar_fallback_color: color,
+        avatar_color: color,
+        display_name,
         is_user: false,
     }
 }

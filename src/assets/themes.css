@@ -106,9 +106,3 @@ body {
   color: var(--agent-text) !important;
   border-bottom-left-radius: 4px !important;
 }
-
-/* 动态色气泡（当 AI 具有代表色时） */
-.vcp-bubble-dynamic {
-  border-color: color-mix(in srgb, var(--dynamic-color) 30%, transparent) !important;
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--dynamic-color) 12%, transparent) !important;
-}

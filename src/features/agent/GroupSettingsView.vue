@@ -285,7 +285,6 @@ const tagModeOptions = [
               :fallback-name="groupConfig.name"
               size="w-24 h-24"
               rounded="rounded-full"
-              outer-border
               :dominant-color="groupConfig.avatarCalculatedColor"
               class="border-2 border-dashed border-black/10 dark:border-white/20 shadow-inner group-active:scale-95 transition-all"
             />
@@ -317,7 +316,6 @@ const tagModeOptions = [
                 :fallback-name="agent.name"
                 size="w-10 h-10"
                 rounded="rounded-full"
-                outer-border
                 dominant-color="var(--primary)"
               />
 

@@ -258,7 +258,7 @@ const filteredCombinedItems = computed(() => {
                 transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
               }">
             <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
-              rounded="rounded-full" outer-border :dominant-color="group.avatarCalculatedColor" />
+              rounded="rounded-full" dominant-color="var(--highlight-text)" />
             <div class="flex flex-col overflow-hidden flex-1">
               <span class="font-bold text-sm truncate text-primary-text">{{
                 group.name
@@ -320,15 +320,14 @@ const filteredCombinedItems = computed(() => {
             " class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
               style="background: #ff6b6b"></div>
 
-            <VcpAvatar 
-              owner-type="agent" 
-              :owner-id="agent.id" 
-              :fallback-name="agent.name" 
-              size="w-10 h-10" 
+            <VcpAvatar
+              owner-type="agent"
+              :owner-id="agent.id"
+              :fallback-name="agent.name"
+              size="w-10 h-10"
               rounded="rounded-full"
-              outer-border
               class="pointer-events-none"
-              :dominant-color="agent.avatarCalculatedColor"
+              dominant-color="var(--highlight-text)"
             />
             <div class="flex flex-col overflow-hidden flex-1 pointer-events-none">
               <span class="font-bold text-sm truncate text-primary-text">{{

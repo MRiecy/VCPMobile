@@ -2,7 +2,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::pre_renderer::MarkdownNode;
+use crate::vcp_modules::pre_renderer::MarkdownNode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -278,7 +278,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         let tool_name = extract_tool_name(inner_content);
                         if is_daily_note_create(inner_content) {
                             let (maid, date, content) = extract_diary_details(inner_content);
-                            let nodes = crate::pre_renderer::parse_markdown_to_ast(&content);
+                            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
                             ContentBlock::Diary {
                                 maid,
                                 date,
@@ -301,7 +301,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             .map(|m| m.as_str().trim().replace("\"", ""))
                             .unwrap_or_else(|| "元思考链".to_string());
 
-                        let nodes = crate::pre_renderer::parse_markdown_to_ast(inner_content);
+                        let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
                         ContentBlock::Thought {
                             theme,
                             content: inner_content.to_string(),
@@ -310,7 +310,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                     }
                     BlockType::Think => {
-                        let nodes = crate::pre_renderer::parse_markdown_to_ast(inner_content);
+                        let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
                         ContentBlock::Thought {
                             theme: "思维链".to_string(),
                             content: inner_content.to_string(),
@@ -329,7 +329,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     }
                     BlockType::Diary => {
                         let (maid, date, content) = extract_diary_details(inner_content);
-                        let nodes = crate::pre_renderer::parse_markdown_to_ast(&content);
+                        let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
                         ContentBlock::Diary {
                             maid,
                             date,
@@ -363,7 +363,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         } else {
                             ContentBlock::Markdown {
                                 content: None,
-                                nodes: Some(crate::pre_renderer::parse_markdown_to_ast(
+                                nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
                                     marker_text,
                                 )),
                             }
@@ -383,7 +383,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                         ContentBlock::Markdown {
                             content: None,
-                            nodes: Some(crate::pre_renderer::parse_markdown_to_ast(&full_fence)),
+                            nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&full_fence)),
                         }
                     }
 
@@ -423,7 +423,7 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
         if m.start() > last_end {
             blocks.push(ContentBlock::Markdown {
                 content: None,
-                nodes: Some(crate::pre_renderer::parse_markdown_to_ast(
+                nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
                     &text[last_end..m.start()],
                 )),
             });
@@ -437,7 +437,7 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
     if last_end < text.len() {
         blocks.push(ContentBlock::Markdown {
             content: None,
-            nodes: Some(crate::pre_renderer::parse_markdown_to_ast(
+            nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
                 &text[last_end..],
             )),
         });

@@ -152,7 +152,6 @@ onUnmounted(() => {
           :owner-id="sessionStore.currentSelectedItem.id" 
           :fallback-name="sessionStore.currentSelectedItem.name"
           :dominant-color="sessionStore.currentSelectedItem.avatarCalculatedColor"
-          :outer-border="true"
           size="w-10 h-10"
           rounded="rounded-full"
           class="shrink-0"

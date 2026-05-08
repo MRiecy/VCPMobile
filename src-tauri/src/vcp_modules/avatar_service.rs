@@ -26,7 +26,14 @@ pub async fn save_avatar_data<R: Runtime>(
 
     // 2. 预计算主色调 (Dominant Color)
     // 直接从内存中的二进制数据提取，避免写入临时文件
-    let dominant_color = extract_dominant_color_from_bytes(&image_data).ok();
+    // spawn_blocking 隔离 CPU 密集型图片解码与直方图计算
+    let image_data_for_color = image_data.clone();
+    let dominant_color = tokio::task::spawn_blocking(move || {
+        extract_dominant_color_from_bytes(&image_data_for_color).ok()
+    })
+    .await
+    .ok()
+    .flatten();
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -116,36 +123,253 @@ pub async fn get_avatar<R: Runtime>(
     }
 }
 
+/// Tauri IPC Command: 为已有头像计算并存储 dominant_color（处理存量数据）
+#[tauri::command]
+pub async fn compute_and_store_dominant_color(
+    db_state: tauri::State<'_, DbState>,
+    owner_type: String,
+    owner_id: String,
+) -> Result<String, String> {
+    let pool = &db_state.pool;
+
+    let row = sqlx::query(
+        "SELECT image_data FROM avatars WHERE owner_type = ? AND owner_id = ?"
+    )
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let image_data: Vec<u8> = match row {
+        Some(r) => {
+            use sqlx::Row;
+            r.get("image_data")
+        }
+        None => return Err("Avatar not found".to_string()),
+    };
+
+    let color = extract_dominant_color_from_bytes(&image_data)?;
+
+    sqlx::query(
+        "UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?"
+    )
+    .bind(&color)
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    log::info!(
+        "[AvatarService] Computed and stored dominant_color for {} {}: {}",
+        owner_type,
+        owner_id,
+        color
+    );
+
+    Ok(color)
+}
+
+fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let r = r / 255.0;
+    let g = g / 255.0;
+    let b = b / 255.0;
+    let mx = r.max(g).max(b);
+    let mn = r.min(g).min(b);
+    let df = mx - mn;
+
+    let h = if df == 0.0 {
+        0.0
+    } else if mx == r {
+        (60.0 * ((g - b) / df) + 360.0) % 360.0
+    } else if mx == g {
+        (60.0 * ((b - r) / df) + 120.0) % 360.0
+    } else {
+        (60.0 * ((r - g) / df) + 240.0) % 360.0
+    };
+
+    let s = if mx == 0.0 { 0.0 } else { df / mx };
+    let v = mx;
+
+    (h, s, v)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (r, g, b) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    (
+        ((r + m) * 255.0).round() as u8,
+        ((g + m) * 255.0).round() as u8,
+        ((b + m) * 255.0).round() as u8,
+    )
+}
+
 /// 从字节数组中提取主色调 (公开供协议层兜底使用)
+/// 策略：自适应分辨率（大图限128x128 Triangle，小图保持）+ 512-bin量化直方图峰值检测 + HSV饱和过滤
 pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> {
     let img = image::load_from_memory(data)
         .map_err(|e| format!("Failed to load image from memory: {}", e))?;
 
-    // 缩小到 50x50 进行快速采样
-    let thumbnail = img.resize_exact(50, 50, FilterType::Nearest);
+    // 自适应分辨率：大图缩小到 128x128（保持纵横比），小图保持原分辨率避免放大失真
+    let thumbnail = {
+        let (w, h) = img.dimensions();
+        if w > 128 || h > 128 {
+            img.resize(128, 128, FilterType::Triangle)
+        } else {
+            img
+        }
+    };
 
+    // 512-bin 直方图：每通道 3bit，bin 范围 0-7
+    let mut histogram = [0u32; 512];
+    let mut r_sums = [0u64; 512];
+    let mut g_sums = [0u64; 512];
+    let mut b_sums = [0u64; 512];
+
+    // 兜底累加器：全局算术平均（用于所有 bin 都被过滤的极端回退）
     let mut r_total: u64 = 0;
     let mut g_total: u64 = 0;
     let mut b_total: u64 = 0;
-    let mut count: u64 = 0;
+    let mut total_count: u64 = 0;
 
     for (_x, _y, pixel) in thumbnail.pixels() {
         if pixel[3] == 0 {
-            continue;
-        } // 跳过透明像素
-        r_total += pixel[0] as u64;
-        g_total += pixel[1] as u64;
-        b_total += pixel[2] as u64;
-        count += 1;
+            continue; // 跳过透明像素
+        }
+        let r = pixel[0];
+        let g = pixel[1];
+        let b = pixel[2];
+
+        // 全局累加（兜底回退用）
+        r_total += r as u64;
+        g_total += g as u64;
+        b_total += b as u64;
+        total_count += 1;
+
+        // 直方图分 bin
+        let bin = ((r / 32) as usize) * 64 + ((g / 32) as usize) * 8 + (b / 32) as usize;
+        histogram[bin] += 1;
+        r_sums[bin] += r as u64;
+        g_sums[bin] += g as u64;
+        b_sums[bin] += b as u64;
     }
 
-    if count == 0 {
+    if total_count == 0 {
         return Ok("#808080".to_string());
     }
 
-    let r = (r_total / count) as u8;
-    let g = (g_total / count) as u8;
-    let b = (b_total / count) as u8;
+    // 找最高频的非背景 bin
+    let mut best_bin: Option<usize> = None;
+    let mut best_count = 0u32;
+
+    for bin in 0..512 {
+        let count = histogram[bin];
+        if count == 0 {
+            continue;
+        }
+
+        // 排除纯黑 bin (0,0,0)
+        if bin == 0 {
+            continue;
+        }
+        // 排除纯白 bin (7,7,7)
+        if bin == 511 {
+            continue;
+        }
+
+        // 排除近灰 bin：r_bin/g_bin/b_bin 接近说明是灰度系
+        let r_bin = (bin / 64) as i16;
+        let g_bin = ((bin % 64) / 8) as i16;
+        let b_bin = (bin % 8) as i16;
+        if (r_bin - g_bin).abs() <= 1 && (g_bin - b_bin).abs() <= 1 {
+            continue;
+        }
+
+        if count > best_count {
+            best_count = count;
+            best_bin = Some(bin);
+        }
+    }
+
+    // 计算最终颜色
+    let (r, g, b) = if let Some(bin) = best_bin {
+        // 在最佳 bin 内做 HSV 饱和过滤 + 亮度压制
+        let mut vr_total: u64 = 0;
+        let mut vg_total: u64 = 0;
+        let mut vb_total: u64 = 0;
+        let mut v_count: u64 = 0;
+
+        for (_x, _y, pixel) in thumbnail.pixels() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let r = pixel[0];
+            let g = pixel[1];
+            let b = pixel[2];
+
+            let pixel_bin = ((r / 32) as usize) * 64 + ((g / 32) as usize) * 8 + (b / 32) as usize;
+            if pixel_bin != bin {
+                continue;
+            }
+
+            let (h, s, v) = rgb_to_hsv(r as f32, g as f32, b as f32);
+
+            // 过滤低饱和和过亮像素
+            if s < 0.15 || v > 0.88 {
+                continue;
+            }
+
+            // 亮度压制 -5%，饱和度提升 +15%
+            let v = (v * 0.95).min(1.0);
+            let s = (s * 1.15).min(1.0);
+
+            let (nr, ng, nb) = hsv_to_rgb(h, s, v);
+            vr_total += nr as u64;
+            vg_total += ng as u64;
+            vb_total += nb as u64;
+            v_count += 1;
+        }
+
+        if v_count > 0 {
+            (
+                (vr_total / v_count) as u8,
+                (vg_total / v_count) as u8,
+                (vb_total / v_count) as u8,
+            )
+        } else {
+            // bin 内全被过滤，回退到该 bin 原始平均
+            let count = histogram[bin] as u64;
+            (
+                (r_sums[bin] / count) as u8,
+                (g_sums[bin] / count) as u8,
+                (b_sums[bin] / count) as u8,
+            )
+        }
+    } else {
+        // 回退到全局算术平均
+        (
+            (r_total / total_count) as u8,
+            (g_total / total_count) as u8,
+            (b_total / total_count) as u8,
+        )
+    };
 
     Ok(format!("#{:02x}{:02x}{:02x}", r, g, b))
 }

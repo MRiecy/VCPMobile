@@ -109,7 +109,7 @@ html.dark .vcp-diary-maid-name {
 .vcp-role-divider.type-end { opacity: 0.5; }
 
 .vcp-diary-content {
-  font-size: 0.875rem;
+  font-size: 0.9375rem;
   line-height: 1.7;
 }
 
@@ -121,7 +121,7 @@ html.dark .vcp-diary-maid-name {
   min-width: 0;
   max-width: 100%;
   line-height: 1.7142857;
-  font-size: 0.875rem;
+  font-size: 0.9375rem;
 }
 
 /* --- Headings (prose-sm scale) --- */

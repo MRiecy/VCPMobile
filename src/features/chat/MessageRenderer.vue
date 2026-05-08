@@ -14,6 +14,7 @@ import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 const { processEmoticonsInContainer } = useEmoticonFixer();
 const mermaidCache = new Map<string, string>();
 const renderingMermaids = new Set<string>();
+let mermaidInitialized = false;
 
 // UI Components
 import ChatBubble from "./components/ChatBubble.vue";
@@ -180,41 +181,43 @@ const renderHeavyContent = async () => {
   }
 
   // 2. Mermaid diagrams
-  const mermaidPlaceholders = messageContentRef.value.querySelectorAll('.mermaid-placeholder[data-code]');
+  const mermaidPlaceholders = messageContentRef.value.querySelectorAll('.mermaid-placeholder');
   if (mermaidPlaceholders.length > 0) {
     try {
       const mermaidModule = await import('mermaid');
       const mermaid = mermaidModule.default;
-      mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+      if (!mermaidInitialized) {
+        mermaid.initialize({ startOnLoad: false, theme: 'dark' });
+        mermaidInitialized = true;
+      }
       for (const el of Array.from(mermaidPlaceholders)) {
         const placeholder = el as HTMLElement;
         if (placeholder.querySelector('svg')) continue; // already rendered
-        const encoded = placeholder.dataset.code;
-        if (!encoded) continue;
+        // Use innerHTML (HTML-escaped code) as stable cache key
+        const codeKey = placeholder.innerHTML;
         // Skip if already being rendered by a concurrent call
-        if (renderingMermaids.has(encoded)) continue;
+        if (renderingMermaids.has(codeKey)) continue;
         // Skip if Vue has replaced this element out of the DOM
         if (!messageContentRef.value.contains(placeholder)) continue;
         // Use cache to avoid re-rendering the same diagram
-        if (mermaidCache.has(encoded)) {
-          placeholder.innerHTML = mermaidCache.get(encoded)!;
+        if (mermaidCache.has(codeKey)) {
+          placeholder.innerHTML = mermaidCache.get(codeKey)!;
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
           continue;
         }
-        renderingMermaids.add(encoded);
+        renderingMermaids.add(codeKey);
         try {
-          const code = decodeURIComponent(escape(atob(encoded)));
-          placeholder.innerHTML = code;
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
           await mermaid.run({ nodes: [placeholder] });
-          mermaidCache.set(encoded, placeholder.innerHTML);
-        } catch (e) {
-          console.error('[MessageRenderer] Mermaid render failed:', e);
-          placeholder.innerHTML = '<div class="text-red-500 text-[10px]">图表渲染失败</div>';
+          mermaidCache.set(codeKey, placeholder.innerHTML);
+        } catch (e: any) {
+          const errorMsg = e?.str || e?.message || String(e);
+          console.error('[MessageRenderer] Mermaid render failed:', errorMsg, e);
+          placeholder.innerHTML = `<div class="text-red-500 text-[10px]">图表渲染失败: ${escapeHtml(errorMsg)}</div>`;
         } finally {
-          renderingMermaids.delete(encoded);
+          renderingMermaids.delete(codeKey);
         }
       }
     } catch (e) {
@@ -343,15 +346,14 @@ function formatTime(ts: number) {
     class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
     
-    <MessageHeader 
+    <MessageHeader
       v-if="shell"
-      :is-user="shell.isUser" 
-      :display-name="shell.displayName" 
-      :name-style="{ color: shell.avatarColor }" 
+      :is-user="shell.isUser"
+      :display-name="shell.displayName"
+      :name-style="{ color: shell.avatarColor }"
       :owner-type="shell.isUser ? 'user' : 'agent'"
-      :owner-id="message.agentId || agentId"
-      :avatar-fallback-text="shell.avatarFallbackText" 
-      :avatar-fallback-color="shell.avatarFallbackColor" 
+      :owner-id="shell.isUser ? 'user_avatar' : (message.agentId || agentId)"
+      :avatar-dominant-color="shell.avatarColor"
     />
 
     <ChatBubble 
@@ -360,8 +362,6 @@ function formatTime(ts: number) {
       :is-streaming="isStreaming" 
       :bubble-style="{
         '--dynamic-color': shell.avatarColor,
-        'borderColor': shell.bubbleBorderColor,
-        'boxShadow': shell.bubbleBoxShadow
       }"
     >
       <ThinkingIndicator v-if="isStreaming && (!message.blocks || message.blocks.length === 0)" />

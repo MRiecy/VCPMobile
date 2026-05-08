@@ -1,6 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
-use base64::{engine::general_purpose, Engine as _};
 use dashmap::DashMap;
+use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -225,15 +225,18 @@ pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String 
     initial_mime.to_string()
 }
 
-/// 内部辅助函数：生成图片缩略图
-pub fn generate_thumbnail<R: tauri::Runtime>(
+/// 内部辅助函数：生成图片缩略图（短边 200px 自适应，spawn_blocking 隔离）
+pub async fn generate_thumbnail<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     original_path: &std::path::Path,
     hash: &str,
 ) -> Option<String> {
     let thumb_path = match get_thumbnails_root_dir(app_handle) {
         Ok(p) => p,
-        Err(_) => return None,
+        Err(e) => {
+            log::warn!("[Thumbnail] Failed to get thumbnails dir: {}", e);
+            return None;
+        }
     };
 
     if !thumb_path.exists() {
@@ -247,14 +250,58 @@ pub fn generate_thumbnail<R: tauri::Runtime>(
         return Some(thumb_file_path.to_string_lossy().to_string());
     }
 
-    // 生成缩略图 (限制在 200px 左右)
-    if let Ok(img) = image::open(original_path) {
-        let thumbnail = img.thumbnail(200, 200);
-        if thumbnail.save(&thumb_file_path).is_ok() {
-            return Some(thumb_file_path.to_string_lossy().to_string());
+    let original_path = original_path.to_path_buf();
+    let thumb_file_path_clone = thumb_file_path.clone();
+
+    // spawn_blocking 中执行 CPU 密集型图片处理，避免阻塞 tokio worker
+    match tokio::task::spawn_blocking(move || {
+        let img = match image::open(&original_path) {
+            Ok(img) => img,
+            Err(e) => {
+                log::warn!(
+                    "[Thumbnail] Failed to open image {:?}: {}",
+                    original_path,
+                    e
+                );
+                return None;
+            }
+        };
+
+        let (w, h) = img.dimensions();
+
+        // 短边 200px 自适应比例
+        let (new_w, new_h) = if w >= h {
+            // 横图/正方形：高 = 200，宽按比例
+            let ratio = w as f32 / h as f32;
+            ((200.0 * ratio).round() as u32, 200u32)
+        } else {
+            // 竖图：宽 = 200，高按比例
+            let ratio = h as f32 / w as f32;
+            (200u32, (200.0 * ratio).round() as u32)
+        };
+
+        let thumbnail =
+            image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Triangle);
+
+        if let Err(e) = thumbnail.save(&thumb_file_path_clone) {
+            log::warn!(
+                "[Thumbnail] Failed to save thumbnail {:?}: {}",
+                thumb_file_path_clone,
+                e
+            );
+            return None;
+        }
+
+        Some(thumb_file_path_clone.to_string_lossy().to_string())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            log::warn!("[Thumbnail] spawn_blocking task panicked: {}", e);
+            None
         }
     }
-    None
 }
 
 /// 内部辅助函数：校验路径安全性，防止路径遍历攻击
@@ -307,6 +354,28 @@ pub fn resolve_attachment_path(
     } else {
         None
     }
+}
+
+/// 内存映射读取文件，自动检测编码并转换为 UTF-8
+/// 1. 优先 BOM 头检测（最可靠）
+/// 2. 无 BOM 时使用 chardetng 统计检测（Firefox 同款）
+fn read_text_with_mmap(path: &std::path::Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
+
+    // 1. BOM 检测
+    if let Some((encoding, _bom_len)) = encoding_rs::Encoding::for_bom(&mmap) {
+        let (text, _had_errors) = encoding.decode_with_bom_removal(&mmap);
+        return Some(text.into_owned());
+    }
+
+    // 2. 统计检测（无 BOM）
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(&mmap, true);
+    let encoding = detector.guess(None, true);
+
+    let (text, _had_errors) = encoding.decode_without_bom_handling(&mmap);
+    Some(text.into_owned())
 }
 
 /// 内部辅助函数：根据 MIME 类型或扩展名提取文本内容
@@ -374,20 +443,28 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         );
 
     if is_text_type {
-        // 2. 内存保护阈值：提升至 20MB (与 store_file 对齐)
-        // 只有确认为文本类型时，才检查大小，防止尝试将巨型二进制文件载入内存
+        // 硬上限：防止极端巨型文件载入内存导致 OOM（50MB 为安全阈值）
+        const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
         if let Ok(meta) = fs::metadata(path) {
-            if meta.len() > 20 * 1024 * 1024 {
+            if meta.len() > MAX_FILE_SIZE_BYTES {
                 return Some(format!(
-                    "[文本过大，已跳过自动提取以保护内存。文件大小: {:.2} MB]",
+                    "[文件过大（{:.2} MB），已跳过自动提取以保护内存]",
                     (meta.len() as f64) / 1024.0 / 1024.0
                 ));
             }
         }
-        // 使用 lossy 读取，防止因非 UTF-8 编码导致提取失败
-        return fs::read(path)
-            .ok()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+
+        // mmap + 自动编码检测 → UTF-8
+        let text = read_text_with_mmap(path)?;
+
+        // 按提取文本长度截断（对齐 2M 上下文模型，约 8-10M 字符）
+        const MAX_TEXT_CHARS: usize = 10_000_000;
+        if text.chars().count() > MAX_TEXT_CHARS {
+            let truncated: String = text.chars().take(MAX_TEXT_CHARS).collect();
+            return Some(format!("{}……（文本过长已截断）", truncated));
+        }
+
+        return Some(text);
     }
 
     // 3. 结构化文档 (PDF, Docx, etc.)
@@ -431,9 +508,9 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     // 2. 提取文本内容 (如果适用)
     let extracted_text = try_extract_text(&internal_file_path, &mime_type);
 
-    // 3. 生成缩略图 (如果适用)
+    // 3. 生成缩略图 (如果适用，spawn_blocking 隔离 CPU 密集型操作)
     let thumbnail_path = if mime_type.starts_with("image/") {
-        generate_thumbnail(app_handle, &internal_file_path, &hash)
+        generate_thumbnail(app_handle, &internal_file_path, &hash).await
     } else {
         None
     };
@@ -472,7 +549,8 @@ pub async fn store_file(
     file_bytes: Vec<u8>,
     mime_type: String,
 ) -> Result<AttachmentData, String> {
-    // 0. OOM 防御：限制 store_file 只能处理 20MB 以下的文件
+    // 0. 冗余兜底：前端已将 >2MB 文件分流至高速链路，此检查在正常情况下几乎不会触发。
+    //    保留作为深层防御，防止未来前端逻辑变更、异常调用或 IPC 绕过导致 OOM。
     if file_bytes.len() > 20 * 1024 * 1024 {
         return Err("文件过大，请使用高速链路上传 (Limit: 20MB)".to_string());
     }
@@ -676,46 +754,17 @@ pub async fn finish_chunked_upload(
     fs::rename(&session.temp_path, &internal_file_path)
         .map_err(|e| format!("移动文件失败: {}", e))?;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // 4. 入库记录
-    sqlx::query(
-        "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(hash) DO UPDATE SET internal_path = excluded.internal_path",
-    )
-    .bind(&hash)
-    .bind(&session.mime_type)
-    .bind(final_size as i64)
-    .bind(&internal_path_str)
-    .bind(now as i64)
-    .bind(now as i64)
-    .execute(&db_state.pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let extracted_text = try_extract_text(&internal_file_path, &session.mime_type);
-    let thumbnail_path = if session.mime_type.starts_with("image/") {
-        generate_thumbnail(&app_handle, &internal_file_path, &hash)
-    } else {
-        None
-    };
-
-    Ok(AttachmentData {
-        id: format!("attachment_{}", hash),
-        name: session.original_name.clone(),
-        internal_file_name,
-        internal_path: internal_path_str,
-        mime_type: session.mime_type.clone(),
-        size: final_size,
+    // 4. 复用统一的注册逻辑（入库、文本提取、缩略图生成）
+    register_attachment_internal(
+        &app_handle,
+        &db_state.pool,
         hash,
-        created_at: now,
-        extracted_text,
-        thumbnail_path,
-    })
+        session.original_name.clone(),
+        session.mime_type.clone(),
+        final_size,
+        internal_path_str,
+    )
+    .await
 }
 /// 移动端/桌面端原生文件选取与存储 (流式防 OOM 优化版)
 #[tauri::command]
@@ -772,48 +821,6 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
-/// 读取本地文件并转换为 Base64 字符串 (用于多模态 Payload)
-#[tauri::command]
-pub async fn read_local_file_base64(app_handle: AppHandle, path: String) -> Result<String, String> {
-    let clean_path = path.replace("file://", "");
-    let path_buf = std::path::PathBuf::from(&clean_path);
-
-    if !path_buf.exists() {
-        return Err(format!("File not found: {}", clean_path));
-    }
-
-    // 安全校验
-    ensure_safe_path(&app_handle, &path_buf)?;
-
-    // OOM 防御：禁止读取超过 50MB 的文件到内存进行 Base64 转换
-    let metadata = std::fs::metadata(&path_buf).map_err(|e| e.to_string())?;
-    if metadata.len() > 50 * 1024 * 1024 {
-        return Err("文件过大，无法进行多模态转换 (Limit: 50MB)".to_string());
-    }
-
-    let bytes = fs::read(&path_buf).map_err(|e| format!("Failed to read file: {}", e))?;
-    let base64_str = general_purpose::STANDARD.encode(&bytes);
-
-    let extension = path_buf
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let mime_type = match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "mp4" => "video/mp4",
-        _ => "application/octet-stream", // Fallback
-    };
-
-    Ok(format!("data:{};base64,{}", mime_type, base64_str))
-}
 
 /// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)
 pub fn clear_upload_cache(app_handle: &AppHandle) {

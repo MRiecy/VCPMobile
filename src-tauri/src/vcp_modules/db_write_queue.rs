@@ -1,9 +1,11 @@
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
+use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::message_repository::MessageRepository;
+use crate::vcp_modules::avatar_service::extract_dominant_color_from_bytes;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
-use crate::vcp_modules::sync_retry::{retry_on_db_locked, RetryConfig};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
@@ -26,9 +28,21 @@ pub enum DbWriteTask {
         topic_id: String,
         dto: AgentTopicSyncDTO,
     },
+    AgentTopicBatch {
+        topics: Vec<(String, AgentTopicSyncDTO)>,
+    },
     GroupTopic {
         topic_id: String,
         dto: GroupTopicSyncDTO,
+    },
+    GroupTopicBatch {
+        topics: Vec<(String, GroupTopicSyncDTO)>,
+    },
+    TopicMessages {
+        topic_id: String,
+        messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+        render_bytes: Vec<Vec<u8>>,
+        skip_bubble: bool,
     },
     Flush {
         tx: oneshot::Sender<()>,
@@ -56,52 +70,113 @@ impl DbWriteQueue {
         let (tx, mut rx) = mpsc::channel(256);
 
         let worker = tokio::spawn(async move {
-            println!("[DbWriteQueue] Worker started");
+            println!("[DbWriteQueue] Worker started (Greedy Transactional Mode)");
 
             let mut success_count = 0u32;
             let mut error_count = 0u32;
 
-            while let Some(task) = rx.recv().await {
-                let (task_type, id, result) = match task {
-                    DbWriteTask::Agent { id, dto } => {
-                        let result = Self::upsert_agent(&pool, &id, &dto).await;
-                        ("agent", id, result)
-                    }
-                    DbWriteTask::Group { id, dto } => {
-                        let result = Self::upsert_group(&pool, &id, &dto).await;
-                        ("group", id, result)
-                    }
-                    DbWriteTask::Avatar {
-                        owner_type,
-                        owner_id,
-                        bytes,
-                    } => {
-                        let result =
-                            Self::upsert_avatar(&pool, &owner_type, &owner_id, &bytes).await;
-                        ("avatar", format!("{}:{}", owner_type, owner_id), result)
-                    }
-                    DbWriteTask::AgentTopic { topic_id, dto } => {
-                        let result = Self::upsert_agent_topic(&pool, &topic_id, &dto).await;
-                        ("agent_topic", topic_id, result)
-                    }
-                    DbWriteTask::GroupTopic { topic_id, dto } => {
-                        let result = Self::upsert_group_topic(&pool, &topic_id, &dto).await;
-                        ("group_topic", topic_id, result)
-                    }
-                    DbWriteTask::Flush { tx } => {
-                        let _ = tx.send(());
+            while let Some(first_task) = rx.recv().await {
+                // 启动超级事务
+                let mut tx = match pool.begin().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        println!("[DbWriteQueue] Failed to start super transaction: {}", e);
                         continue;
                     }
                 };
 
-                match result {
-                    Ok(_) => {
-                        success_count += 1;
+                let mut tasks_in_this_tx = vec![first_task];
+                
+                // 贪婪模式：尽可能从 Channel 中吸纳更多任务合并提交
+                // 限制：最多攒 100 个任务或 2000 条数据变更（防止事务过大）
+                while tasks_in_this_tx.len() < 100 {
+                    match rx.try_recv() {
+                        Ok(DbWriteTask::Flush { tx: flush_tx }) => {
+                            // Flush 任务必须打断攒批，确保之前的写入立即落盘
+                            let _ = flush_tx.send(());
+                            break;
+                        }
+                        Ok(next_task) => tasks_in_this_tx.push(next_task),
+                        _ => break,
                     }
-                    Err(e) => {
-                        error_count += 1;
-                        println!("[DbWriteQueue] {} {} error: {}", task_type, id, e);
+                }
+
+                let mut affected_owners = std::collections::HashSet::new();
+                let mut affected_topics = std::collections::HashSet::new();
+
+                for task in tasks_in_this_tx {
+                    let (task_type, id, result) = match task {
+                        DbWriteTask::Agent { id, dto } => {
+                            let res = Self::upsert_agent_in_tx(&mut tx, &id, &dto).await;
+                            affected_owners.insert((id.clone(), "agent".to_string()));
+                            ("agent", id, res)
+                        }
+                        DbWriteTask::Group { id, dto } => {
+                            let res = Self::upsert_group_in_tx(&mut tx, &id, &dto).await;
+                            affected_owners.insert((id.clone(), "group".to_string()));
+                            ("group", id, res)
+                        }
+                        DbWriteTask::Avatar { owner_type, owner_id, bytes } => {
+                            let res = Self::upsert_avatar_in_tx(&mut tx, &owner_type, &owner_id, &bytes).await;
+                            ("avatar", format!("{}:{}", owner_type, owner_id), res)
+                        }
+                        DbWriteTask::AgentTopic { topic_id, dto } => {
+                            let res = Self::upsert_agent_topic_in_tx(&mut tx, &topic_id, &dto).await;
+                            affected_owners.insert((dto.owner_id.clone(), "agent".to_string()));
+                            ("agent_topic", topic_id, res)
+                        }
+                        DbWriteTask::AgentTopicBatch { topics } => {
+                            let count = topics.len();
+                            for (_, dto) in &topics { affected_owners.insert((dto.owner_id.clone(), "agent".to_string())); }
+                            let res = Self::upsert_agent_topic_batch_in_tx(&mut tx, topics).await;
+                            ("agent_topic_batch", format!("{} items", count), res)
+                        }
+                        DbWriteTask::GroupTopic { topic_id, dto } => {
+                            let res = Self::upsert_group_topic_in_tx(&mut tx, &topic_id, &dto).await;
+                            affected_owners.insert((dto.owner_id.clone(), "group".to_string()));
+                            ("group_topic", topic_id, res)
+                        }
+                        DbWriteTask::GroupTopicBatch { topics } => {
+                            let count = topics.len();
+                            for (_, dto) in &topics { affected_owners.insert((dto.owner_id.clone(), "group".to_string())); }
+                            let res = Self::upsert_group_topic_batch_in_tx(&mut tx, topics).await;
+                            ("group_topic_batch", format!("{} items", count), res)
+                        }
+                        DbWriteTask::TopicMessages { topic_id, messages, render_bytes, skip_bubble } => {
+                            let count = messages.len();
+                            if !skip_bubble { affected_topics.insert(topic_id.clone()); }
+                            let res = Self::upsert_topic_messages_in_tx(&mut tx, &topic_id, messages, render_bytes).await;
+                            ("topic_messages", format!("{} msgs in {}", count, topic_id), res)
+                        }
+                        DbWriteTask::Flush { .. } => unreachable!(), // 已在 try_recv 过滤
+                    };
+
+                    match result {
+                        Ok(_) => success_count += 1,
+                        Err(e) => {
+                            error_count += 1;
+                            println!("[DbWriteQueue] {} {} execution error: {}", task_type, id, e);
+                        }
                     }
+                }
+
+                // 在同一事务末尾统一执行 Hash 冒泡，确保原子性且最小化开销
+                for (owner_id, owner_type) in affected_owners {
+                    if owner_type == "agent" {
+                        let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM agents WHERE agent_id = ? AND deleted_at IS NULL").bind(&owner_id).fetch_one(&mut *tx).await.unwrap_or(false);
+                        if exists { let _ = HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await; }
+                    } else {
+                        let exists: bool = sqlx::query_scalar("SELECT COUNT(*) > 0 FROM groups WHERE group_id = ? AND deleted_at IS NULL").bind(&owner_id).fetch_one(&mut *tx).await.unwrap_or(false);
+                        if exists { let _ = HashAggregator::bubble_group_hash(&mut tx, &owner_id).await; }
+                    }
+                }
+                for topic_id in affected_topics {
+                    let _ = HashAggregator::bubble_from_topic(&mut tx, &topic_id).await;
+                }
+
+                // 统一提交
+                if let Err(e) = tx.commit().await {
+                    println!("[DbWriteQueue] Super transaction commit failed: {}", e);
                 }
             }
 
@@ -138,15 +213,15 @@ impl DbWriteQueue {
         println!("[DbWriteQueue] Flush completed");
     }
 
-    async fn upsert_agent(
-        pool: &sqlx::SqlitePool,
+    // --- 内部事务级 Upsert 方法 ---
+
+    async fn upsert_agent_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: &str,
         dto: &AgentSyncDTO,
     ) -> Result<(), String> {
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_agent_config_hash(dto);
-
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
         sqlx::query(
             "INSERT INTO agents (
@@ -175,28 +250,20 @@ impl DbWriteQueue {
         .bind(if dto.stream_output { 1 } else { 0 })
         .bind(&config_hash)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
-
-        tx.commit().await.map_err(|e| e.to_string())?;
-
-        let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-        HashAggregator::bubble_agent_hash(&mut bubble_tx, id).await?;
-        bubble_tx.commit().await.map_err(|e| e.to_string())?;
 
         Ok(())
     }
 
-    async fn upsert_group(
-        pool: &sqlx::SqlitePool,
+    async fn upsert_group_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         id: &str,
         dto: &GroupSyncDTO,
     ) -> Result<(), String> {
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_group_config_hash(dto);
-
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
         sqlx::query(
             "INSERT INTO groups (
@@ -227,13 +294,13 @@ impl DbWriteQueue {
         .bind(dto.created_at)
         .bind(&config_hash)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
         sqlx::query("DELETE FROM group_members WHERE group_id = ?")
             .bind(id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -250,147 +317,97 @@ impl DbWriteQueue {
             .bind(member)
             .bind(tag)
             .bind(now)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|e| e.to_string())?;
         }
 
-        tx.commit().await.map_err(|e| e.to_string())?;
-
-        let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-        HashAggregator::bubble_group_hash(&mut bubble_tx, id).await?;
-        bubble_tx.commit().await.map_err(|e| e.to_string())?;
-
         Ok(())
     }
 
-    async fn upsert_avatar(
-        pool: &sqlx::SqlitePool,
+    async fn upsert_avatar_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         owner_type: &str,
         owner_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
         let hash = HashAggregator::compute_avatar_hash(bytes);
+        let dominant_color = extract_dominant_color_from_bytes(bytes).ok();
         let now = chrono::Utc::now().timestamp_millis();
 
         sqlx::query(
-            "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, updated_at) 
-             VALUES (?, ?, ?, 'image/png', ?, ?) 
+            "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at) 
+             VALUES (?, ?, ?, 'image/png', ?, ?, ?) 
              ON CONFLICT(owner_type, owner_id) DO UPDATE SET 
-             avatar_hash=excluded.avatar_hash, image_data=excluded.image_data, updated_at=excluded.updated_at"
+             avatar_hash=excluded.avatar_hash, image_data=excluded.image_data, dominant_color=excluded.dominant_color, updated_at=excluded.updated_at"
         )
         .bind(owner_type)
         .bind(owner_id)
         .bind(&hash)
         .bind(bytes)
+        .bind(&dominant_color)
         .bind(now)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
         Ok(())
     }
 
-    async fn upsert_agent_topic(
-        pool: &sqlx::SqlitePool,
+    async fn upsert_agent_topic_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         topic_id: &str,
         dto: &AgentTopicSyncDTO,
     ) -> Result<(), String> {
-        let config = RetryConfig::default();
-        let operation_name = format!("upsert_agent_topic[{}]", topic_id);
+        let now = chrono::Utc::now().timestamp_millis();
 
-        retry_on_db_locked(&config, || {
-            let pool = pool.clone();
-            let topic_id = topic_id.to_string();
-            let dto = dto.clone();
-            let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
+            VALUES (?, ?, ?, 'agent', ?, ?, ?, ?)
+            ON CONFLICT(topic_id) DO UPDATE SET
+            title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at"
+        )
+        .bind(topic_id)
+        .bind(&dto.name)
+        .bind(&dto.owner_id)
+        .bind(dto.created_at)
+        .bind(if dto.locked { 1 } else { 0 })
+        .bind(if dto.unread { 1 } else { 0 })
+        .bind(now)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
-            async move {
-                // 先尝试写入 topic，如果 owner 不存在则跳过哈希更新
-                let result = sqlx::query(
-                    "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
-                    VALUES (?, ?, ?, 'agent', ?, ?, ?, ?)
-                    ON CONFLICT(topic_id) DO UPDATE SET
-                    title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at"
-                )
-                .bind(&topic_id)
-                .bind(&dto.name)
-                .bind(&dto.owner_id)
-                .bind(dto.created_at)
-                .bind(if dto.locked { 1 } else { 0 })
-                .bind(if dto.unread { 1 } else { 0 })
-                .bind(now)
-                .execute(&pool)
+        // 补偿：如果该 topic 已有消息，更新 msg_count
+        let actual_count: i32 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(topic_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0) as i32;
+
+        if actual_count > 0 {
+            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+                .bind(actual_count)
+                .bind(topic_id)
+                .execute(&mut **tx)
                 .await;
+        }
 
-                match result {
-                    Ok(_) => {
-                        // 只有当 owner 存在时才更新哈希
-                        let owner_exists: bool = sqlx::query_scalar(
-                            "SELECT COUNT(*) > 0 FROM agents WHERE agent_id = ? AND deleted_at IS NULL",
-                        )
-                        .bind(&dto.owner_id)
-                        .fetch_one(&pool)
-                        .await
-                        .unwrap_or(false);
-
-                        if owner_exists {
-                            let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-                            HashAggregator::bubble_agent_hash(&mut tx, &dto.owner_id).await?;
-                            tx.commit().await.map_err(|e| e.to_string())?;
-                        } else {
-                            println!(
-                                "[DbWriteQueue] AgentTopic {} inserted, but owner {} not yet available (will sync later)",
-                                topic_id, dto.owner_id
-                            );
-                        }
-
-                        // 补偿：如果该 topic 已有消息（因竞态先写入了消息），更新 msg_count
-                        let current_msg_count: i32 = sqlx::query_scalar("SELECT msg_count FROM topics WHERE topic_id = ?")
-                            .bind(&topic_id)
-                            .fetch_one(&pool)
-                            .await
-                            .unwrap_or(0);
-
-                        let actual_count: i32 = sqlx::query_scalar::<_, i64>(
-                            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-                        )
-                        .bind(&topic_id)
-                        .fetch_optional(&pool)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or(0) as i32;
-
-                        if actual_count > 0 && actual_count != current_msg_count {
-                            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                                .bind(actual_count)
-                                .bind(&topic_id)
-                                .execute(&pool)
-                                .await;
-                            println!(
-                                "[DbWriteQueue] Topic {} msg_count compensated to {}",
-                                topic_id, actual_count
-                            );
-                        }
-
-                        Ok(())
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-        }, &operation_name).await
+        Ok(())
     }
 
-    async fn upsert_group_topic(
-        pool: &sqlx::SqlitePool,
+    async fn upsert_group_topic_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         topic_id: &str,
         dto: &GroupTopicSyncDTO,
     ) -> Result<(), String> {
-        // 先尝试写入 topic，如果 owner 不存在则跳过哈希更新
         let now = chrono::Utc::now().timestamp_millis();
 
-        let result = sqlx::query(
+        sqlx::query(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
             VALUES (?, ?, ?, 'group', ?, 1, 0, ?)
             ON CONFLICT(topic_id) DO UPDATE SET
@@ -401,64 +418,88 @@ impl DbWriteQueue {
         .bind(&dto.owner_id)
         .bind(dto.created_at)
         .bind(now)
-        .execute(pool)
-        .await;
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
-        match result {
-            Ok(_) => {
-                // 只有当 owner 存在时才更新哈希
-                let owner_exists: bool = sqlx::query_scalar(
-                    "SELECT COUNT(*) > 0 FROM groups WHERE group_id = ? AND deleted_at IS NULL",
-                )
-                .bind(&dto.owner_id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or(false);
+        // 补偿
+        let actual_count: i32 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(topic_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0) as i32;
 
-                if owner_exists {
-                    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-                    HashAggregator::bubble_group_hash(&mut tx, &dto.owner_id).await?;
-                    tx.commit().await.map_err(|e| e.to_string())?;
-                } else {
-                    println!(
-                        "[DbWriteQueue] GroupTopic {} inserted, but owner {} not yet available (will sync later)",
-                        topic_id, dto.owner_id
-                    );
-                }
-
-                // 补偿：如果该 topic 已有消息（因竞态先写入了消息），更新 msg_count
-                let current_msg_count: i32 =
-                    sqlx::query_scalar("SELECT msg_count FROM topics WHERE topic_id = ?")
-                        .bind(topic_id)
-                        .fetch_one(pool)
-                        .await
-                        .unwrap_or(0);
-
-                let actual_count: i32 = sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-                )
+        if actual_count > 0 {
+            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+                .bind(actual_count)
                 .bind(topic_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or(0) as i32;
-
-                if actual_count > 0 && actual_count != current_msg_count {
-                    let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                        .bind(actual_count)
-                        .bind(topic_id)
-                        .execute(pool)
-                        .await;
-                    println!(
-                        "[DbWriteQueue] Topic {} msg_count compensated to {}",
-                        topic_id, actual_count
-                    );
-                }
-
-                Ok(())
-            }
-            Err(e) => Err(e.to_string()),
+                .execute(&mut **tx)
+                .await;
         }
+
+        Ok(())
+    }
+
+    async fn upsert_agent_topic_batch_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        topics: Vec<(String, AgentTopicSyncDTO)>,
+    ) -> Result<(), String> {
+        for (topic_id, dto) in &topics {
+            Self::upsert_agent_topic_in_tx(tx, topic_id, dto).await?;
+        }
+        Ok(())
+    }
+
+    async fn upsert_group_topic_batch_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        topics: Vec<(String, GroupTopicSyncDTO)>,
+    ) -> Result<(), String> {
+        for (topic_id, dto) in &topics {
+            Self::upsert_group_topic_in_tx(tx, topic_id, dto).await?;
+        }
+        Ok(())
+    }
+
+    async fn upsert_topic_messages_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        topic_id: &str,
+        messages: Vec<ChatMessage>,
+        render_bytes: Vec<Vec<u8>>,
+    ) -> Result<(), String> {
+        // 将消息和渲染字节对齐
+        let items: Vec<(&ChatMessage, Vec<u8>)> = messages.iter().zip(render_bytes).collect();
+        MessageRepository::upsert_messages_batch(tx, topic_id, &items).await?;
+        
+        // 更新 topic 元数据
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
+            .bind(now)
+            .bind(topic_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let count: i32 = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(topic_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0) as i32;
+
+        sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+            .bind(count)
+            .bind(topic_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
     }
 }

@@ -1,6 +1,5 @@
-use crate::pre_renderer::code_highlighter::highlight_code_block;
-use crate::pre_renderer::markdown_ast::{InlineNode, MarkdownNode};
-use base64::{engine::general_purpose, Engine as _};
+use crate::vcp_modules::pre_renderer::code_highlighter::highlight_code_block;
+use crate::vcp_modules::pre_renderer::markdown_ast::{InlineNode, MarkdownNode};
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -473,8 +472,7 @@ impl PartialNode {
             PartialNode::CodeBlock { lang, code } => {
                 let lang_str = lang.as_deref().unwrap_or("plaintext");
                 if lang_str == "mermaid" {
-                    let encoded = general_purpose::STANDARD.encode(&code);
-                    MarkdownNode::MermaidPlaceholder { code, encoded }
+                    MarkdownNode::MermaidPlaceholder { code }
                 } else {
                     let highlighted = highlight_code_block(&code, lang_str);
                     MarkdownNode::CodeBlock {
