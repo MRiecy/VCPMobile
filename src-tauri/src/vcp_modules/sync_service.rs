@@ -1,6 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
-use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
+use crate::vcp_modules::sync_executor::{BatchPullResult, PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_hash::{HashAggregator, HashInitializer};
 use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
@@ -60,13 +60,13 @@ impl Phase3Tracker {
 
             if !quiet {
                 let msg = format!("Topic {} completed ({}/{})", topic_id, done, total);
-                println!("[Sync] [message] {}", msg);
+                println!("[Sync] [messages] {}", msg);
 
                 // 发送前端日志事件
                 emit_sync_log(app_handle, "info", &msg);
 
                 if let Ok(mut logger) = logger.lock() {
-                    logger.log_operation("message", "topic", topic_id, true, None);
+                    logger.log_operation("messages", "topic", topic_id, true, None);
                 }
             }
 
@@ -74,7 +74,7 @@ impl Phase3Tracker {
             let _ = app_handle.emit(
                 "vcp-sync-progress",
                 json!({
-                    "phase": "message",
+                    "phase": "messages",
                     "total": total,
                     "completed": done,
                     "message": format!("Syncing Messages: {}/{}", done, total)
@@ -83,7 +83,7 @@ impl Phase3Tracker {
 
             if done == total {
                 if let Ok(mut logger) = logger.lock() {
-                    logger.complete_phase("message");
+                    logger.complete_phase("messages");
                 }
                 let _ = tx.send(SyncCommand::Finalize);
             }
@@ -100,8 +100,17 @@ pub struct NetworkAwareSemaphore {
 
 impl NetworkAwareSemaphore {
     pub fn new() -> Self {
+        // [Evolution] 动态并发控制：根据核心数动态调整
+        // 核心数 * 1.5 是 IO 密集型任务的平衡点，但在移动端需严格限制上限以保护 UI 响应
+        let cores = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(4);
+        
+        let concurrency = ((cores as f32) * 1.5).clamp(6.0, 12.0) as usize;
+        println!("[Sync] Auto-optimized concurrency set to {} (cores: {})", concurrency, cores);
+
         Self {
-            semaphore: Arc::new(Semaphore::new(30)),
+            semaphore: Arc::new(Semaphore::new(concurrency)),
         }
     }
 
@@ -117,9 +126,9 @@ pub enum SyncCommand {
         hash: String,
         ts: i64,
     },
-    StartTopicMeta,
-    StartTopicHash,
-    StartMessageDiff,
+    StartTopicMetadata,   // Phase 2 start
+    StartTopicValidation, // Phase 2.5 start
+    StartMessages,        // Phase 3 start
     Finalize,
     NotifyDelete {
         data_type: SyncDataType,
@@ -298,6 +307,8 @@ async fn run_sync_session(
         )
         .await;
 
+        let phase_gate: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+
         match connect_async(&ws_url).await {
             Ok((mut ws_stream, _)) => {
                 retry_count = 0;
@@ -372,9 +383,10 @@ async fn run_sync_session(
                 }
 
                 if let Ok(mut logger) = sync_logger_task.lock() {
-                    logger.start_phase("metadata", 0);
+                    logger.start_phase("owner_metadata", 0);
                 }
-                emit_sync_log(&handle_clone, "info", "=== Phase 1: Metadata ===");
+                emit_sync_log(&handle_clone, "info", "=== Phase 1: Owner Metadata ===");
+                let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "owner_metadata" }).to_string().into())).await;
                 publish_sync_status(
                     &handle_clone,
                     &connection_status_for_task,
@@ -402,7 +414,7 @@ async fn run_sync_session(
                     if let Ok(mut logger) = sync_logger_task.lock() {
                         logger.log(
                             LogLevel::Error,
-                            "metadata",
+                            "owner_metadata",
                             &format!("Failed to initialize agent hashes: {}", e),
                         );
                     }
@@ -429,7 +441,7 @@ async fn run_sync_session(
                     if let Ok(mut logger) = sync_logger_task.lock() {
                         logger.log(
                             LogLevel::Error,
-                            "metadata",
+                            "owner_metadata",
                             &format!("Hash init error: {}", e),
                         );
                     }
@@ -464,6 +476,10 @@ async fn run_sync_session(
                 let changed_topics: Arc<tokio::sync::Mutex<Vec<String>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
+                // V2: Phase 1 筛选出的内容有变动的 owner (Agent/Group) 列表
+                let changed_owners: Arc<tokio::sync::Mutex<HashSet<String>>> =
+                    Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+
                 // 用于跟踪 manifest diff 结果是否全部收到，防止 total_ops=0 时 Phase 1 卡住
                 let expected_manifest_count = Arc::new(AtomicU32::new(0));
                 let manifest_responses_received = Arc::new(AtomicU32::new(0));
@@ -474,40 +490,85 @@ async fn run_sync_session(
                     tokio::select! {
                         Some(cmd) = pipeline_rx.recv() => {
                             match cmd {
-                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicHash => {
-                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.start_phase("topic_hash", 0);
-                                        logger.log(LogLevel::Info, "topic_hash", "=== Phase 2: Topic Hash Validation ===");
+                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicMetadata => {
+                                    // Phase 2: 拉取缺失的 Topic Configs
+                                    let db = handle_clone.state::<DbState>();
+                                    let owners = {
+                                        let guard = changed_owners.lock().await;
+                                        guard.iter().cloned().collect::<Vec<String>>()
+                                    };
+
+                                    if owners.is_empty() {
+                                        let _ = tx_internal.send(SyncCommand::StartTopicValidation);
+                                    } else {
+                                        if let Ok(manifest) = Phase1Metadata::build_targeted_topic_manifest(&db.pool, &owners).await {
+                                            manifest_phase.store(2, Ordering::SeqCst);
+                                            expected_manifest_count.store(1, Ordering::SeqCst);
+                                            manifest_responses_received.store(0, Ordering::SeqCst);
+                                            pending_tasks_task.store(0, Ordering::SeqCst);
+                                            total_tasks_task.store(0, Ordering::SeqCst);
+
+                                            if let Ok(mut logger) = sync_logger_task.lock() {
+                                                logger.start_phase("topic_metadata", 1);
+                                                logger.log(LogLevel::Info, "topic_metadata", "=== Phase 2: Pulling Topic Metadata ===");
+                                            }
+                                            emit_sync_log(&handle_clone, "info", "=== Phase 2: Pulling Topic Metadata ===");
+                                            let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "topic_metadata" }).to_string().into())).await;
+
+                                            let msg = json!({ 
+                                                "type": "SYNC_MANIFEST", 
+                                                "data": manifest.items, 
+                                                "dataType": manifest.data_type, 
+                                                "phase": 2, // Use explicit Phase ID 2
+                                                "targetedOwners": owners 
+                                            });
+                                            let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
+                                        } else {
+                                            let _ = tx_internal.send(SyncCommand::StartTopicValidation);
+                                        }
                                     }
-                                    emit_sync_log(&handle_clone, "info", "=== Phase 2: Topic Hash Validation ===");
+                                },
+                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicValidation => {
+                                    // Phase 2.5: 双哈希批量比对
+                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                        logger.log(LogLevel::Info, "topic_metadata", "=== Phase 2.5: Validating Topic Hashes ===");
+                                    }
+                                    emit_sync_log(&handle_clone, "info", "=== Phase 2.5: Validating Topic Hashes ===");
 
                                     let db = handle_clone.state::<DbState>();
-                                    match Phase3Message::get_all_topic_content_hashes(&db.pool).await {
+                                    let owners = {
+                                        let guard = changed_owners.lock().await;
+                                        guard.iter().cloned().collect::<Vec<String>>()
+                                    };
+
+                                    match Phase3Message::get_targeted_topic_hashes(&db.pool, &owners).await {
                                         Ok(topic_hashes) => {
                                             let mut hash_map = serde_json::Map::new();
-                                            for (topic_id, hash) in topic_hashes {
-                                                hash_map.insert(topic_id, serde_json::Value::String(hash));
+                                            for (topic_id, (conf_h, cont_h)) in topic_hashes {
+                                                hash_map.insert(topic_id, json!({
+                                                    "configHash": conf_h,
+                                                    "contentHash": cont_h
+                                                }));
                                             }
                                             let msg = json!({
-                                                "type": "SYNC_TOPIC_HASH_BATCH",
+                                                "type": "SYNC_TOPIC_HASH_BATCH_V2",
                                                 "hashes": hash_map,
                                             });
                                             let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                         }
                                         Err(e) => {
-                                            println!("[SyncService] Failed to get topic content hashes: {}", e);
-                                            // 出错时回退到处理所有 topic
-                                            let _ = tx_internal.send(SyncCommand::StartMessageDiff);
+                                            println!("[SyncService] Failed to get targeted topic hashes: {}", e);
+                                            let _ = tx_internal.send(SyncCommand::StartMessages);
                                         }
                                     }
                                 },
-                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartMessageDiff => {
+                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartMessages => {
                                     if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.start_phase("message", 0);
-                                        logger.log(LogLevel::Info, "message", "=== Phase 3: Messages ===");
+                                        logger.start_phase("messages", 0);
+                                        logger.log(LogLevel::Info, "messages", "=== Phase 3: Messages ===");
                                     }
                                     emit_sync_log(&handle_clone, "info", "=== Phase 3: Messages ===");
-                                    let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "message" }).to_string().into())).await;
+                                    let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "messages" }).to_string().into())).await;
 
                                     let db = handle_clone.state::<DbState>();
                                     let changed_ids = {
@@ -517,7 +578,7 @@ async fn run_sync_session(
 
                                     if changed_ids.is_empty() {
                                         if let Ok(mut logger) = sync_logger_task.lock() {
-                                            logger.complete_phase("message");
+                                            logger.complete_phase("messages");
                                         }
                                         emit_sync_log(&handle_clone, "success", "Message phase skipped (no changed topics), proceeding to hash alignment");
                                         let _ = tx_internal.send(SyncCommand::Finalize);
@@ -536,10 +597,10 @@ async fn run_sync_session(
                                                     let mut pending = pending_diff_batches.lock().await;
                                                     pending.clear();
                                                 }
-                                                // 按消息数量分批，每批最多 3000 条消息，避免超大 WS payload
+                                                // 按消息数量分批，每批最多 10000 条消息，避免超大 WS payload
                                                 let batches = build_diff_batches(topic_states);
                                                 let batch_count = batches.len();
-                                                println!("[SyncService] Phase3 diff split into {} batches (max 3000 msgs/batch)", batch_count);
+                                                println!("[SyncService] Phase3 diff split into {} batches (max {} msgs/batch)", batch_count, MAX_MESSAGES_PER_BATCH);
 
                                                 let mut first_batch = None;
                                                 {
@@ -604,132 +665,110 @@ async fn run_sync_session(
                                     let msg = json!({ "type": "SYNC_ENTITY_UPDATE", "id": id, "dataType": data_type, "hash": hash, "ts": ts });
                                     let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                 },
-                                SyncCommand::StartTopicMeta => {
-                                    write_queue_task.flush().await;
-                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.log(LogLevel::Info, "metadata", "=== Phase 1.5: Topic Metadata ===");
-                                    }
-                                    emit_sync_log(&handle_clone, "info", "=== Phase 1.5: Topic Metadata ===");
-
-                                    manifest_phase.store(2, Ordering::SeqCst);
-                                    let db = handle_clone.state::<DbState>();
-                                    if let Ok(manifest) = Phase1Metadata::build_topic_manifest(&db.pool).await {
-                                        expected_manifest_count.store(1, Ordering::SeqCst);
-                                        manifest_responses_received.store(0, Ordering::SeqCst);
-
-                                        if let Ok(mut logger) = sync_logger_task.lock() {
-                                            logger.update_phase_expected("metadata", 1);
+                                SyncCommand::StartTopicMetadata => {
+                                    let should_flush = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("topic_metadata".to_string())
+                                        } else {
+                                            false
                                         }
+                                    };
+                                    if should_flush {
+                                        // 1. 通知桌面端前一相位已完成
+                                        let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "owner_metadata" }).to_string().into())).await;
+                                        
+                                        // 2. 强制落盘并触发 Pipeline 钩子
+                                        write_queue_task.flush().await;
+                                        let _ = pipeline_task.on_owner_metadata_done().await;
+                                    }
+                                },
+                                SyncCommand::StartTopicValidation => {
+                                    let should_flush = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("topic_validation".to_string())
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if should_flush {
+                                        // 通知桌面端前一相位已完成
+                                        let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "topic_metadata" }).to_string().into())).await;
 
-                                        let msg = json!({ "type": "SYNC_MANIFEST", "data": manifest.items, "dataType": manifest.data_type, "phase": "topic_metadata" });
-                                        let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
-                                    } else {
-                                        let _ = tx_internal.send(SyncCommand::StartTopicHash);
+                                        write_queue_task.flush().await;
+                                        let _ = pipeline_task.on_topic_metadata_pull_done().await;
                                     }
                                 },
-                                SyncCommand::StartTopicHash => {
-                                    write_queue_task.flush().await;
-                                    // 新同步会话开始，清空附件上传追踪器
-                                    {
-                                        let sync_state = handle_clone.state::<SyncState>();
-                                        let mut guard = sync_state.uploaded_hashes.write().await;
-                                        guard.clear();
-                                    }
-                                    if let Err(_e) = pipeline_task.on_phase1_completed().await {
-                                        let _ = handle_clone.emit(
-                                            "vcp-system-event",
-                                            json!({
-                                                "type": "vcp-log-message",
-                                                "data": {
-                                                    "id": "vcp_sync_connection_status",
-                                                    "status": "error",
-                                                    "tool_name": "同步阶段 1 失败",
-                                                    "content": "Topic 同步阶段失败",
-                                                    "source": "Sync"
-                                                }
-                                            }),
-                                        );
-                                    }
-                                },
-                                SyncCommand::StartMessageDiff => {
-                                    write_queue_task.flush().await;
-                                    if let Err(_e) = pipeline_task.on_phase2_completed().await {
-                                        let _ = handle_clone.emit(
-                                            "vcp-system-event",
-                                            json!({
-                                                "type": "vcp-log-message",
-                                                "data": {
-                                                    "id": "vcp_sync_connection_status",
-                                                    "status": "error",
-                                                    "tool_name": "同步阶段 2 失败",
-                                                    "content": "Message 同步阶段失败",
-                                                    "source": "Sync"
-                                                }
-                                            }),
-                                        );
+                                SyncCommand::StartMessages => {
+                                    let should_flush = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("messages".to_string())
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if should_flush {
+                                        write_queue_task.flush().await;
+                                        let _ = pipeline_task.on_topic_validation_done().await;
                                     }
                                 },
                                 SyncCommand::Finalize => {
-                                    write_queue_task.flush().await;
-
-                                    // 仅对实际发生 pull/push 的 topic 及其 parent 重算 hash
-                                    let db = handle_clone.state::<DbState>();
-                                    let modified_topics = {
-                                        let guard = pending_msg_topics_task.modified.lock().await;
-                                        guard.clone()
+                                    let should_flush = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("finalize".to_string())
+                                        } else {
+                                            false
+                                        }
                                     };
-                                    if !modified_topics.is_empty() {
-                                        if let Ok(mut tx) = db.pool.begin().await {
-                                            let mut affected_agents: HashSet<String> = HashSet::new();
-                                            let mut affected_groups: HashSet<String> = HashSet::new();
+                                    if should_flush {
+                                        // 通知桌面端消息相位已完成
+                                        let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "messages" }).to_string().into())).await;
 
-                                            for tid in &modified_topics {
-                                                if let Err(e) = HashAggregator::bubble_topic_hash(&mut tx, tid).await {
-                                                    println!("[SyncService] Phase3 bubble_topic_hash failed for {}: {}", tid, e);
-                                                }
-                                                // 收集涉及的 parent agent/group
-                                                if let Ok(row) = sqlx::query("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?")
-                                                    .bind(tid)
-                                                    .fetch_one(&mut *tx).await
-                                                {
-                                                    let owner_id: String = row.get("owner_id");
-                                                    let owner_type: String = row.get("owner_type");
-                                                    if owner_type == "agent" {
-                                                        affected_agents.insert(owner_id);
-                                                    } else if owner_type == "group" {
-                                                        affected_groups.insert(owner_id);
+                                        write_queue_task.flush().await;
+                                        
+                                        // 全局 Hash 冒泡
+                                        let db = handle_clone.state::<DbState>();
+                                        let modified_topics = {
+                                            let guard = pending_msg_topics_task.modified.lock().await;
+                                            guard.clone()
+                                        };
+                                        if !modified_topics.is_empty() {
+                                            println!("[SyncService] Finalizing {} modified topics (recalculating hashes)...", modified_topics.len());
+                                            emit_sync_log(&handle_clone, "info", &format!("正在校验 {} 个话题的一致性...", modified_topics.len()));
+
+                                            if let Ok(mut tx) = db.pool.begin().await {
+                                                // 1. [Batch Optimization] 一条 SQL 更新所有受影响话题的消息计数和时间戳
+                                                let placeholders = modified_topics.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                                                let sql = format!(
+                                                    "UPDATE topics SET 
+                                                        msg_count = (SELECT COUNT(*) FROM messages WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL),
+                                                        updated_at = ?
+                                                     WHERE topic_id IN ({})", placeholders
+                                                );
+                                                let mut query = sqlx::query(&sql).bind(chrono::Utc::now().timestamp_millis());
+                                                for tid in &modified_topics { query = query.bind(tid); }
+                                                let _ = query.execute(&mut *tx).await;
+
+                                                // 2. 逐话题计算指纹（涉及 MerkleRoot，必须逐个处理但现在已无其他 SQL 负担）
+                                                let mut affected_agents: HashSet<String> = HashSet::new();
+                                                let mut affected_groups: HashSet<String> = HashSet::new();
+
+                                                for tid in &modified_topics {
+                                                    if let Err(e) = HashAggregator::bubble_topic_hash(&mut tx, tid).await {
+                                                        println!("[SyncService] bubble_topic_hash failed for {}: {}", tid, e);
+                                                    }
+                                                    if let Ok(row) = sqlx::query("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?").bind(tid).fetch_one(&mut *tx).await {
+                                                        let owner_id: String = row.get("owner_id");
+                                                        let owner_type: String = row.get("owner_type");
+                                                        if owner_type == "agent" { affected_agents.insert(owner_id); }
+                                                        else if owner_type == "group" { affected_groups.insert(owner_id); }
                                                     }
                                                 }
+                                                for aid in affected_agents { let _ = HashAggregator::bubble_agent_hash(&mut tx, &aid).await; }
+                                                for gid in affected_groups { let _ = HashAggregator::bubble_group_hash(&mut tx, &gid).await; }
+                                                let _ = tx.commit().await;
                                             }
-
-                                            for aid in affected_agents {
-                                                if let Err(e) = HashAggregator::bubble_agent_hash(&mut tx, &aid).await {
-                                                    println!("[SyncService] Phase3 bubble_agent_hash failed for {}: {}", aid, e);
-                                                }
-                                            }
-                                            for gid in affected_groups {
-                                                if let Err(e) = HashAggregator::bubble_group_hash(&mut tx, &gid).await {
-                                                    println!("[SyncService] Phase3 bubble_group_hash failed for {}: {}", gid, e);
-                                                }
-                                            }
-                                            let _ = tx.commit().await;
                                         }
-                                    }
-
-                                    if let Err(_e) = pipeline_task.on_phase3_completed().await {
-                                        let _ = handle_clone.emit(
-                                            "vcp-system-event",
-                                            json!({
-                                                "type": "vcp-log-message",
-                                                "data": {
-                                                    "id": "vcp_sync_connection_status",
-                                                    "status": "error",
-                                                    "tool_name": "同步阶段 3 失败",
-                                                    "content": "同步结束阶段失败",
-                                                    "source": "Sync"
-                                                }
-                                            }),
-                                        );
+                                        let _ = pipeline_task.on_messages_done().await;
                                     }
                                 },
                                 SyncCommand::NotifyDelete { data_type, id } => {
@@ -745,16 +784,20 @@ async fn run_sync_session(
                                         manifest_responses_received.store(0, Ordering::SeqCst);
 
                                         if let Ok(mut logger) = sync_logger_task.lock() {
-                                            logger.set_phase_expected("metadata", count);
+                                            logger.set_phase_expected("owner_metadata", count);
                                         }
-
                                         for manifest in manifests {
-                                            let msg = json!({ "type": "SYNC_MANIFEST", "data": manifest.items, "dataType": manifest.data_type, "phase": "metadata" });
+                                            let msg = json!({ 
+                                                "type": "SYNC_MANIFEST", 
+                                                "data": manifest.items, 
+                                                "dataType": manifest.data_type, 
+                                                "phase": 1 // Explicit Phase ID
+                                            });
                                             let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                         }
                                     }
                                 },
-                                }
+                            }
                         },
                         Some(Ok(msg)) = ws_stream.next() => {
                             if let Message::Text(text) = msg {
@@ -808,6 +851,15 @@ async fn run_sync_session(
                                             }
                                         });
                                     },
+                                    Some("SYNC_ERROR") => {
+                                        let message = payload["message"].as_str().unwrap_or("Unknown desktop error");
+                                        let code = payload["code"].as_u64().unwrap_or(500);
+                                        let err_msg = format!("Desktop Error ({}): {}", code, message);
+                                        println!("[SyncService] {}", err_msg);
+                                        emit_sync_log(&handle_clone, "error", &err_msg);
+                                        publish_sync_status(&handle_clone, &connection_status_for_task, "error", &err_msg).await;
+                                        // 致命错误，建议断开或重试
+                                    },
                                     Some("SYNC_DIFF_RESULTS") => {
                                         if let Some(items) = payload["data"].as_array() {
                                             let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
@@ -820,13 +872,18 @@ async fn run_sync_session(
                                             let total_ops = pull_count + push_count + delete_count + push_delete_count;
 
                                             if total_ops > 0 {
+                                                let phase_tag = match data_type {
+                                                    SyncDataType::Agent | SyncDataType::Group | SyncDataType::Avatar => "owner_metadata",
+                                                    SyncDataType::Topic => "topic_metadata",
+                                                    SyncDataType::Message => "messages",
+                                                };
                                                 let msg = format!("[{}] Diff: pull={} push={} delete={} push_delete={}",
                                                     data_type, pull_count, push_count, delete_count, push_delete_count);
-                                                println!("[Sync] [metadata] {}", msg);
+                                                println!("[Sync] [{}] {}", phase_tag, msg);
                                                 emit_sync_log(&handle_clone, "info", &msg);
 
                                                 if let Ok(mut logger) = sync_logger_task.lock() {
-                                                    logger.log_operation("metadata", &data_type.to_string(), "manifest", true,
+                                                    logger.log_operation(phase_tag, &data_type.to_string(), "manifest", true,
                                                         Some(&format!("pull={} push={} delete={} push_delete={}", pull_count, push_count, delete_count, push_delete_count)));
                                                 }
                                             }
@@ -835,25 +892,76 @@ async fn run_sync_session(
 
                                             let received = manifest_responses_received.fetch_add(1, Ordering::SeqCst) + 1;
                                             let expected = expected_manifest_count.load(Ordering::SeqCst);
+                                            let current_phase = manifest_phase.load(Ordering::SeqCst);
 
-                                            if total_ops == 0 && received == expected {
+                                            // [Definitive Fix] 只有当消息的 phase 与当前 Phase 一致时才触发跳转
+                                            // 这里的 phase 字段由手机端发出时带入，原样返回
+                                            let msg_phase = payload["phase"].as_u64().unwrap_or(0) as u8;
+
+                                            if received == expected && (msg_phase == current_phase || msg_phase == 0) {
                                                 let current_pending = pending_tasks_task.load(Ordering::SeqCst);
+                                                println!("[SyncService] All manifests received for Phase {}: dataType={}, pending={}", 
+                                                    current_phase, data_type, current_pending);
+
                                                 if current_pending == 0 {
-                                                    let phase = manifest_phase.load(Ordering::SeqCst);
-                                                    if phase == 1 {
-                                                        let _ = tx_internal.send(SyncCommand::StartTopicMeta);
-                                                    } else {
-                                                        if let Ok(mut logger) = sync_logger_task.lock() {
-                                                            logger.complete_phase("metadata");
+                                                    if current_phase == 1 { let _ = tx_internal.send(SyncCommand::StartTopicMetadata); }
+                                                    else if current_phase == 2 { let _ = tx_internal.send(SyncCommand::StartTopicValidation); }
+                                                } else {
+                                                    // [Evolution] 活性监测看门狗：不再是固定 30s，而是检测"进度是否停滞"
+                                                    let tx_internal_wd = tx_internal.clone();
+                                                    let current_phase_wd = current_phase;
+                                                    let manifest_phase_wd = manifest_phase.clone();
+                                                    let pending_wd = pending_tasks_task.clone();
+                                                    
+                                                    tauri::async_runtime::spawn(async move {
+                                                        let mut last_pending = pending_wd.load(Ordering::SeqCst);
+                                                        let mut stuck_count = 0;
+                                                        
+                                                        loop {
+                                                            tokio::time::sleep(Duration::from_secs(10)).await;
+                                                            
+                                                            // 1. 如果相位变了，说明任务已通过正常逻辑完成，看门狗功成身退
+                                                            if manifest_phase_wd.load(Ordering::SeqCst) != current_phase_wd { break; }
+                                                            
+                                                            let current_pending = pending_wd.load(Ordering::SeqCst);
+                                                            if current_pending == 0 { break; } // 任务已清零，退出
+                                                            
+                                                            // 2. 检查是否有进度
+                                                            if current_pending == last_pending {
+                                                                stuck_count += 1;
+                                                                println!("[SyncService] WATCHDOG: Phase {} pending count stuck at {} ({} ticks)", 
+                                                                    current_phase_wd, current_pending, stuck_count);
+                                                            } else {
+                                                                stuck_count = 0; // 有进度，重置计数器
+                                                                last_pending = current_pending;
+                                                            }
+                                                            
+                                                            // 3. 只有连续 6 次检查（60秒）完全没动静，才判定为死锁
+                                                            if stuck_count >= 6 {
+                                                                println!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
+                                                                if current_phase_wd == 1 { let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata); }
+                                                                else if current_phase_wd == 2 { let _ = tx_internal_wd.send(SyncCommand::StartTopicValidation); }
+                                                                break;
+                                                            }
                                                         }
-                                                        emit_sync_log(&handle_clone, "success", "Metadata phase completed (no changes)");
-                                                        let _ = tx_internal.send(SyncCommand::StartTopicHash);
+                                                    });
+                                                }
+                                            } else if msg_phase != current_phase && msg_phase != 0 {
+                                                println!("[SyncService] WARN: Ignoring late manifest from Phase {} (Current: Phase {})", msg_phase, current_phase);
+                                            }
+
+                                            if data_type == SyncDataType::Agent || data_type == SyncDataType::Group {
+                                                let mut owners = changed_owners.lock().await;
+                                                for item in items_clone.iter() {
+                                                    let action = item["action"].as_str().unwrap_or_default();
+                                                    // 如果 action 是 PULL/PUSH，或者显式标记了内容不一致，则加入待扫描列表
+                                                    if action == "PULL" || action == "PUSH" || item["mismatchedContent"].as_bool() == Some(true) {
+                                                        owners.insert(item["id"].as_str().unwrap_or_default().to_string());
                                                     }
                                                 }
                                             }
 
-                                            let mut batch_pull_requests = Vec::new();
-                                            let mut other_items = Vec::new();
+                                            let mut batch_pull_requests = Vec::new();                                            let mut other_items = Vec::new();
 
                                             for item in items_clone {
                                                 let id = item["id"].as_str().unwrap_or_default().to_string();
@@ -906,47 +1014,47 @@ async fn run_sync_session(
                                                         match PullExecutor::pull_entities_batch(&h_in, &c_in, &b_in, &token, sub_batch, &wq_in).await {
                                                             Err(e) => {
                                                                 if let Ok(mut logger) = sync_logger_in.lock() {
-                                                                    logger.log_operation("metadata", &data_type_log, "batch_pull", false, Some(&format!("error: {}", e)));
+                                                                    logger.log_operation("owner_metadata", &data_type_log, "batch_pull", false, Some(&format!("error: {}", e)));
                                                                 }
                                                             },
                                                             _ => {
                                                                 if let Ok(mut logger) = sync_logger_in.lock() {
-                                                                    logger.log_operation("metadata", &data_type_log, "batch_pull", true, Some(&format!("pulled chunk of {} items", sub_count)));
+                                                                    logger.log_operation("owner_metadata", &data_type_log, "batch_pull", true, Some(&format!("pulled chunk of {} items", sub_count)));
                                                                 }
                                                             }
                                                         }
 
-                                                        let remaining = pending.fetch_sub(sub_count, Ordering::SeqCst);
+                                                        pending.fetch_sub(sub_count, Ordering::SeqCst);
+                                                        let current_pending = pending.load(Ordering::SeqCst);
+                                                        
                                                         let total = total_tasks_in.load(Ordering::SeqCst);
-                                                        let done = total.saturating_sub(remaining.saturating_sub(sub_count));
+                                                        let done = total.saturating_sub(current_pending);
 
                                                         let _ = h_in.emit("vcp-sync-progress", json!({
-                                                            "phase": "metadata",
+                                                            "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" },
                                                             "total": total,
                                                             "completed": done,
-                                                            "message": format!("Syncing Metadata: {}/{}", done, total)
+                                                            "message": format!("Syncing: {}/{}", done, total)
                                                         }));
 
-                                                        if remaining == sub_count {
+                                                        if current_pending == 0 {
                                                             let received = manifest_received_in.load(Ordering::SeqCst);
                                                             let expected = manifest_expected_in.load(Ordering::SeqCst);
+                                                            let phase = manifest_phase_in.load(Ordering::SeqCst);
+
+                                                            println!("[SyncService] Batch tasks completed: received={}, expected={}, phase={}", 
+                                                                received, expected, phase);
+
                                                             if received == expected {
-                                                                let phase = manifest_phase_in.load(Ordering::SeqCst);
-                                                                if phase == 1 {
-                                                                    let _ = tx_internal_in.send(SyncCommand::StartTopicMeta);
-                                                                } else {
-                                                                    if let Ok(mut logger) = sync_logger_in.lock() {
-                                                                        logger.complete_phase("metadata");
-                                                                    }
-                                                                    emit_sync_log(&h_in, "success", "Metadata phase completed");
-                                                                    let _ = tx_internal_in.send(SyncCommand::StartTopicHash);
-                                                                }
+                                                                if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
+                                                                else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
                                                             }
                                                         }
                                                     }
                                                 });
-                                                }                                            // 2. 串行/限流处理其他任务 (Avatar PULL, PUSH, DELETE)
-                                            // 使用 for_each_concurrent 替代原始循环 spawn，防止瞬时创建成百上千个任务导致 OOM
+                                            }
+
+                                            // 2. 串行/限流处理其他任务 (Avatar PULL, PUSH, DELETE)
                                             if !other_items.is_empty() {
                                                 let h_in = h.clone();
                                                 let c_in = c.clone();
@@ -963,6 +1071,8 @@ async fn run_sync_session(
                                                 let manifest_phase_in = manifest_phase.clone();
 
                                                 tauri::async_runtime::spawn(async move {
+                                                    // [Maintainability] 这里的并发 15 是针对 Avatar/PUSH/DELETE 等非批次任务的固定限制
+                                                    // 它独立于 NetworkAwareSemaphore，主要用于处理 Phase 1/2 的离散任务
                                                     futures_util::stream::iter(other_items).for_each_concurrent(15, |item| {
                                                         let id = item["id"].as_str().unwrap_or_default().to_string();
                                                         let action = item["action"].as_str().unwrap_or_default().to_string();
@@ -990,13 +1100,13 @@ async fn run_sync_session(
                                                                             match PullExecutor::pull_avatar(&h_task, &c_task, &b_task, &token_task, parts[0], parts[1], &wq_task).await {
                                                                                 Err(e) => {
                                                                                     if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                        logger.log_operation("metadata", "avatar", &id, false,
+                                                                                        logger.log_operation("owner_metadata", "avatar", &id, false,
                                                                                             Some(&format!("pull_avatar error: {}", e)));
                                                                                     }
                                                                                 },
                                                                                 _ => {
                                                                                     if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                        logger.log_operation("metadata", "avatar", &id, true, Some("pulled from server"));
+                                                                                        logger.log_operation("owner_metadata", "avatar", &id, true, Some("pulled from server"));
                                                                                     }
                                                                                 }
                                                                             }
@@ -1006,12 +1116,12 @@ async fn run_sync_session(
                                                                         match PullExecutor::pull_agent(&h_task, &c_task, &b_task, &token_task, &id, &wq_task).await {
                                                                             Err(e) => {
                                                                                 if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("metadata", "agent", &id, false, Some(&format!("pull_agent error: {}", e)));
+                                                                                    logger.log_operation("owner_metadata", "agent", &id, false, Some(&format!("pull_agent error: {}", e)));
                                                                                 }
                                                                             },
                                                                             _ => {
                                                                                 if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("metadata", "agent", &id, true, Some("pulled from server"));
+                                                                                    logger.log_operation("owner_metadata", "agent", &id, true, Some("pulled from server"));
                                                                                 }
                                                                             }
                                                                         }
@@ -1020,12 +1130,12 @@ async fn run_sync_session(
                                                                         match PullExecutor::pull_group(&h_task, &c_task, &b_task, &token_task, &id, &wq_task).await {
                                                                             Err(e) => {
                                                                                 if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("metadata", "group", &id, false, Some(&format!("pull_group error: {}", e)));
+                                                                                    logger.log_operation("owner_metadata", "group", &id, false, Some(&format!("pull_group error: {}", e)));
                                                                                 }
                                                                             },
                                                                             _ => {
                                                                                 if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("metadata", "group", &id, true, Some("pulled from server"));
+                                                                                    logger.log_operation("owner_metadata", "group", &id, true, Some("pulled from server"));
                                                                                 }
                                                                             }
                                                                         }
@@ -1088,32 +1198,31 @@ async fn run_sync_session(
                                                             }
 
                                                             if should_decrement {
-                                                                let remaining = pending_task.fetch_sub(1, Ordering::SeqCst);
+                                                                pending_task.fetch_sub(1, Ordering::SeqCst);
+                                                                let current_pending = pending_task.load(Ordering::SeqCst);
+                                                                
                                                                 let total = total_tasks_task.load(Ordering::SeqCst);
-                                                                let done = total.saturating_sub(remaining.saturating_sub(1));
+                                                                let done = total.saturating_sub(current_pending);
 
                                                                 // 发送进度
                                                                 let _ = h_task.emit("vcp-sync-progress", json!({
-                                                                    "phase": "metadata",
+                                                                    "phase": if manifest_phase_task.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" },
                                                                     "total": total,
                                                                     "completed": done,
-                                                                    "message": format!("Syncing Metadata: {}/{}", done, total)
+                                                                    "message": format!("Syncing: {}/{}", done, total)
                                                                 }));
 
-                                                                if remaining == 1 {
+                                                                if current_pending == 0 {
                                                                     let received = manifest_received_task.load(Ordering::SeqCst);
                                                                     let expected = manifest_expected_task.load(Ordering::SeqCst);
+                                                                    let phase = manifest_phase_task.load(Ordering::SeqCst);
+                                                                    
+                                                                    println!("[SyncService] All tasks completed: received={}, expected={}, phase={}", 
+                                                                        received, expected, phase);
+
                                                                     if received == expected {
-                                                                        let phase = manifest_phase_task.load(Ordering::SeqCst);
-                                                                        if phase == 1 {
-                                                                            let _ = tx_internal_task.send(SyncCommand::StartTopicMeta);
-                                                                        } else {
-                                                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                logger.complete_phase("metadata");
-                                                                            }
-                                                                            emit_sync_log(&h_task, "success", "Metadata phase completed");
-                                                                            let _ = tx_internal_task.send(SyncCommand::StartTopicHash);
-                                                                        }
+                                                                        if phase == 1 { let _ = tx_internal_task.send(SyncCommand::StartTopicMetadata); }
+                                                                        else if phase == 2 { let _ = tx_internal_task.send(SyncCommand::StartTopicValidation); }
                                                                     }
                                                                 }
                                                             }
@@ -1127,6 +1236,10 @@ async fn run_sync_session(
                                         if let Some(results) = payload["results"].as_object() {
                                             let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
 
+                                            // 分类 topics: push_only, push_pull, pull_only
+                                            let mut push_topic_ids: Vec<String> = Vec::new();
+                                            let mut pull_batch: Vec<(String, Vec<String>)> = Vec::new();
+
                                             for (topic_id, result) in results {
                                                 let to_pull_ids: Vec<String> = result["toPull"]
                                                     .as_array()
@@ -1134,79 +1247,113 @@ async fn run_sync_session(
                                                     .unwrap_or_default();
                                                 let to_push = result["toPush"].as_bool().unwrap_or(false);
 
-                                                let has_pull = !to_pull_ids.is_empty();
-                                                let has_push = to_push;
-
-                                                if let Ok(mut logger) = sync_logger_task.lock() {
-                                                    logger.log(LogLevel::Info, "message", &format!("Topic {} diff: pull={} push={}", topic_id, to_pull_ids.len(), if has_push { 1 } else { 0 }));
+                                                if !to_push && to_pull_ids.is_empty() {
+                                                    // 无需操作，直接标记完成
+                                                    pending_msg_topics_task.mark_completed(topic_id, &sync_logger_task, &tx_internal, &handle_clone, true).await;
+                                                    continue;
                                                 }
 
                                                 if to_push {
-                                                    let h_in = h.clone();
-                                                    let c_in = c.clone();
-                                                    let b_in = base.clone();
-                                                    let s_in = sem.clone();
-                                                    let token = settings.sync_token.clone();
-                                                    let tid = topic_id.clone();
-                                                    let sync_state = h.state::<SyncState>();
-                                                    let uploaded_hashes = sync_state.uploaded_hashes.clone();
-                                                    let tracker = pending_msg_topics_task.clone();
-                                                    let tx_internal_msg = tx_internal.clone();
-                                                    let sync_logger_msg = sync_logger_task.clone();
-                                                    tauri::async_runtime::spawn(async move {
-                                                        let _permit = s_in.acquire().await;
-                                                        match PushExecutor::push_messages(&h_in, &c_in, &b_in, &token, &tid, Some(uploaded_hashes)).await {
-                                                            Ok(_) => {
-                                                                let db = h_in.state::<DbState>();
-                                                                if let Ok(mut tx) = db.pool.begin().await {
-                                                                    let _ = HashAggregator::bubble_topic_hash(&mut tx, &tid).await;
-                                                                    let _ = tx.commit().await;
-                                                                }
-                                                                tracker.mark_modified(&tid).await;
-                                                            }
-                                                            Err(e) => {
-                                                                if let Ok(mut logger) = sync_logger_msg.lock() {
-                                                                    logger.log(LogLevel::Error, "message", &format!("push_messages failed for {}: {}", tid, e));
-                                                                }
-                                                            }
-                                                        }
-                                                        tracker.mark_completed(&tid, &sync_logger_msg, &tx_internal_msg, &h_in, false).await;
-                                                    });
+                                                    push_topic_ids.push(topic_id.clone());
                                                 }
+                                                if !to_pull_ids.is_empty() {
+                                                    pull_batch.push((topic_id.clone(), to_pull_ids));
+                                                } else if to_push && to_pull_ids.is_empty() {
+                                                    // push-only: 无需 pull，push 后直接标记完成
+                                                }
+                                            }
 
-                                                if has_pull {
-                                                    let h_in = h.clone();
-                                                    let c_in = c.clone();
-                                                    let b_in = base.clone();
-                                                    let s_in = sem.clone();
-                                                    let token = settings.sync_token.clone();
-                                                    let tid = topic_id.clone();
-                                                    let tracker = pending_msg_topics_task.clone();
-                                                    let tx_internal_msg = tx_internal.clone();
-                                                    let sync_logger_msg = sync_logger_task.clone();
-                                                    let wq_in = wq.clone();
-                                                    tauri::async_runtime::spawn(async move {
-                                                        let _permit = s_in.acquire().await;
-                                                        match PullExecutor::pull_messages(&h_in, &c_in, &b_in, &token, &tid, &to_pull_ids, &wq_in).await {
-                                                            Ok(_) => {
-                                                                tracker.mark_modified(&tid).await;
+                                            let has_push = !push_topic_ids.is_empty();
+                                            let has_pull = !pull_batch.is_empty();
+
+                                            if has_push || has_pull {
+                                                let h_in = h.clone();
+                                                let c_in = c.clone();
+                                                let b_in = base.clone();
+                                                let token = settings.sync_token.clone();
+                                                let tracker = pending_msg_topics_task.clone();
+                                                let tx_internal_msg = tx_internal.clone();
+                                                let sync_logger_msg = sync_logger_task.clone();
+                                                let wq_in = wq.clone();
+                                                let sync_state = h.state::<SyncState>();
+                                                let uploaded_hashes = sync_state.uploaded_hashes.clone();
+                                                // 收集所有涉及的 topic ID（去重）
+                                                let mut all_topic_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                                for tid in &push_topic_ids { all_topic_ids.insert(tid.clone()); }
+                                                for (tid, _) in &pull_batch { all_topic_ids.insert(tid.clone()); }
+
+                                                tauri::async_runtime::spawn(async move {
+                                                    // 1. Push 批量（先执行，确保 push_pull 的 topic 推送完再拉取）
+                                                    if has_push {
+                                                        match PushExecutor::push_messages_batch(
+                                                            &h_in, &c_in, &b_in, &token, &push_topic_ids, uploaded_hashes.clone(),
+                                                        ).await {
+                                                            Ok(results) => {
+                                                                for r in &results {
+                                                                    if r.success {
+                                                                        tracker.mark_modified(&r.topic_id).await;
+                                                                    } else {
+                                                                        let err = r.error.as_deref().unwrap_or("unknown");
+                                                                        if let Ok(mut logger) = sync_logger_msg.lock() {
+                                                                            logger.log_operation("messages", "topic", &r.topic_id, false, Some(err));
+                                                                        }
+                                                                        emit_sync_log(&h_in, "error", &format!("Push failed for {}: {}", r.topic_id, err));
+                                                                    }
+                                                                }
                                                             }
                                                             Err(e) => {
-                                                                let err_msg = format!("pull_messages failed for {}: {}", tid, e);
-                                                                println!("[Sync] [message] {}", err_msg);
+                                                                let err_msg = format!("Batch push messages failed: {}", e);
                                                                 if let Ok(mut logger) = sync_logger_msg.lock() {
-                                                                    logger.log_operation("message", "topic", &tid, false, Some(&err_msg));
+                                                                    logger.log(LogLevel::Error, "messages", &err_msg);
                                                                 }
                                                                 emit_sync_log(&h_in, "error", &err_msg);
                                                             }
                                                         }
-                                                        tracker.mark_completed(&tid, &sync_logger_msg, &tx_internal_msg, &h_in, false).await;
-                                                    });
-                                                }
+                                                    }
 
-                                                if !has_pull && !has_push {
-                                                    pending_msg_topics_task.mark_completed(topic_id, &sync_logger_task, &tx_internal, &handle_clone, true).await;
-                                                }
+                                                    // 2. Pull 批量（push 完成后再 pull，确保 push_pull 的 topic 数据已合并）
+                                                    if has_pull {
+                                                        match PullExecutor::pull_messages_batch(
+                                                            &h_in, &c_in, &b_in, &token, &pull_batch, &wq_in,
+                                                        ).await {
+                                                            Ok(results) => {
+                                                                let result_map: std::collections::HashMap<&str, &BatchPullResult> =
+                                                                    results.iter().map(|r| (r.topic_id.as_str(), r)).collect();
+                                                                for (tid, _) in &pull_batch {
+                                                                    if let Some(r) = result_map.get(tid.as_str()) {
+                                                                        if r.success {
+                                                                            tracker.mark_modified(tid).await;
+                                                                        } else {
+                                                                            let err = r.error.as_deref().unwrap_or("unknown");
+                                                                            if let Ok(mut logger) = sync_logger_msg.lock() {
+                                                                                logger.log_operation("messages", "topic", tid, false, Some(err));
+                                                                            }
+                                                                            emit_sync_log(&h_in, "error", &format!("Pull failed for {}: {}", tid, err));
+                                                                        }
+                                                                    } else {
+                                                                        if let Ok(mut logger) = sync_logger_msg.lock() {
+                                                                            logger.log_operation("messages", "topic", tid, false, Some("not in batch response"));
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                let err_msg = format!("Batch pull messages failed: {}", e);
+                                                                if let Ok(mut logger) = sync_logger_msg.lock() {
+                                                                    logger.log(LogLevel::Error, "messages", &err_msg);
+                                                                }
+                                                                emit_sync_log(&h_in, "error", &err_msg);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // 3. 所有 topic 标记完成
+                                                    for tid in &all_topic_ids {
+                                                        tracker.mark_completed(tid, &sync_logger_msg, &tx_internal_msg, &h_in, false).await;
+                                                    }
+
+                                                    println!("[SyncService] Phase 3 batch done: push={} pull={}", push_topic_ids.len(), pull_batch.len());
+                                                });
                                             }
 
                                             // 当前批次处理完毕，发送下一批（如果还有）
@@ -1222,26 +1369,15 @@ async fn run_sync_session(
                                         }
                                     },
                                     Some("SYNC_TOPIC_HASH_RESULTS") => {
+                                        manifest_phase.store(3, Ordering::SeqCst); // 进入 Phase 2.5+，旧 Phase 2 看门狗失效
                                         if let Some(changed) = payload["changedTopics"].as_array() {
-                                            let changed_ids: Vec<String> = changed.iter()
-                                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                                .collect();
-
-                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                logger.log(LogLevel::Info, "topic_hash", &format!("Changed topics: {} need message sync", changed_ids.len()));
-                                            }
-                                            println!("[Sync] [topic_hash] {} topics need message sync", changed_ids.len());
-
+                                            let changed_ids: Vec<String> = changed.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                                            println!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_ids.len());
                                             {
                                                 let mut guard = changed_topics.lock().await;
-                                                *guard = changed_ids.clone();
+                                                *guard = changed_ids;
                                             }
-
-                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                logger.complete_phase("topic_hash");
-                                            }
-                                            emit_sync_log(&handle_clone, "success", &format!("Topic hash validation completed: {} changed", changed_ids.len()));
-                                            let _ = tx_internal.send(SyncCommand::StartMessageDiff);
+                                            let _ = tx_internal.send(SyncCommand::StartMessages);
                                         }
                                     },
                                     Some("PHASE_MANIFESTS") => {
@@ -1249,6 +1385,7 @@ async fn run_sync_session(
                                         // 桌面端在 PHASE_START metadata/topic 时仍可能返回 PHASE_MANIFESTS，此处安全忽略。
                                     },
                                     Some("PHASE_COMPLETED") => {
+                                        manifest_phase.store(0, Ordering::SeqCst); // 同步完成，所有看门狗失效
                                         write_queue_task.flush().await;
 
                                         emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
@@ -1293,10 +1430,10 @@ async fn run_sync_session(
                                         };
                                         emit_sync_log(&handle_clone, "info", &msg);
                                     },
-                                    _ => {}
+                                        _ => {}
                                 }
                             }
-                        },
+                        }
                         else => break,
                     }
                 }
@@ -1325,8 +1462,9 @@ async fn run_sync_session(
     }
 }
 
-/// 每批最多包含的消息数，控制单次 WS payload 大小（约 3000 条消息 ≈ 400-500KB JSON）
-const MAX_MESSAGES_PER_BATCH: usize = 3000;
+
+/// 每批最多包含的消息数，控制单次 WS payload 大小（约 10000 条消息 ≈ 1.5-2MB JSON）
+const MAX_MESSAGES_PER_BATCH: usize = 10000;
 
 fn build_diff_batches(
     topic_states: std::collections::HashMap<
@@ -1370,6 +1508,7 @@ fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &s
     let _ = app_handle.emit(
         "vcp-log",
         json!({
+            "id": format!("{}_{}", level, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             "level": level,
             "category": "sync",
             "message": message,
@@ -1409,14 +1548,6 @@ pub async fn start_manual_sync(
     tx_cmd
         .send(SyncCommand::StartManualSync)
         .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_sync_session_log_path(
-    state: State<'_, SyncState>,
-) -> Result<Option<String>, String> {
-    let guard = state.current_log_path.read().await;
-    Ok(guard.clone())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1461,6 +1592,14 @@ pub async fn list_sync_log_files(app: AppHandle) -> Result<Vec<SyncLogFileInfo>,
 
     entries.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     Ok(entries)
+}
+
+#[tauri::command]
+pub async fn get_sync_session_log_path(
+    state: State<'_, SyncState>,
+) -> Result<Option<String>, String> {
+    let guard = state.current_log_path.read().await;
+    Ok(guard.clone())
 }
 
 #[tauri::command]
