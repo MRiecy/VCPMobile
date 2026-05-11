@@ -75,6 +75,7 @@ export const useThemeStore = defineStore('theme', () => {
   const currentTheme = ref(initialTheme || DEFAULT_THEME);
 
   const availableThemes = ref<ThemeInfo[]>([]);
+  const themeThumbnails = ref<Record<string, string>>({});
   const currentThemeInfo = ref<ThemeInfo | null>(null);
   const lastAppliedVarKeys = ref<string[]>([]);
   let currentThemeModule: ThemeModule | null = null;
@@ -113,6 +114,26 @@ export const useThemeStore = defineStore('theme', () => {
     }
 
     availableThemes.value = themes;
+
+    // Build thumbnail URL cache once after themes are loaded
+    const thumbs: Record<string, string> = {};
+    for (const theme of themes) {
+      const darkWp = theme.variables?.dark?.['--chat-wallpaper-dark'];
+      const lightWp = theme.variables?.light?.['--chat-wallpaper-light'];
+      let rawPath = darkWp || lightWp;
+      if (rawPath && rawPath !== 'none') {
+        try {
+          const match = rawPath.match(/url\(['"]?(.*?)['"]?\)/);
+          let filename = match ? match[1] : rawPath;
+          filename = filename.replace(/^.*[\\\/]/, '').replace(/['"]/g, '');
+          filename = filename.split('.')[0] + '.webp';
+          thumbs[theme.fileName] = `/wallpaper/${filename}`;
+        } catch (e) {
+          console.error('[themeStore] Failed to resolve thumbnail for', theme.fileName, e);
+        }
+      }
+    }
+    themeThumbnails.value = thumbs;
   };
 
   const applyThemeFile = async (fileName: string) => {
@@ -244,6 +265,7 @@ export const useThemeStore = defineStore('theme', () => {
     currentTheme,
     currentThemeInfo,
     availableThemes,
+    themeThumbnails,
     fetchThemes,
     applyThemeFile,
     initTheme,

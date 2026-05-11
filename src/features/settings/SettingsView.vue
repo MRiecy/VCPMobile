@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { ref, onMounted, watch, computed } from "vue";
+import { useModalHistory } from "../../core/composables/useModalHistory";
 import { useSettingsStore, type AppSettings } from "../../core/stores/settings";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
@@ -9,17 +10,15 @@ import SyncSettingsSection from "./components/SyncSettingsSection.vue";
 import VcpCoreSettingsSection from "./components/VcpCoreSettingsSection.vue";
 import TopicSummarySection from "./components/TopicSummarySection.vue";
 import MaintenanceSection from "./components/MaintenanceSection.vue";
-import UpdateSection from "./components/UpdateSection.vue";
+import AboutSection from "./components/AboutSection.vue";
 import ThemePicker from "./ThemePicker.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import DistributedSettingsSection from "../distributed/DistributedSettingsSection.vue";
-import ToolInteractionOverlay from "../distributed/ToolInteractionOverlay.vue";
-import SensorCollector from "../distributed/SensorCollector.vue";
 
 // 原子组件
 import SettingsCard from "../../components/settings/SettingsCard.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
-import SettingsActionButton from "../../components/settings/SettingsActionButton.vue";
+
 
 const props = withDefaults(
   defineProps<{
@@ -37,6 +36,8 @@ const emit = defineEmits<{
 }>();
 
 const settingsStore = useSettingsStore();
+const { registerModal, unregisterModal } = useModalHistory();
+const SUBPAGE_MODAL_ID = "SettingsSubPage";
 
 const settings = ref<AppSettings>({
   userName: "User",
@@ -127,6 +128,16 @@ watch(
     }
   },
 );
+
+watch(currentSubPage, (val) => {
+  if (val) {
+    registerModal(SUBPAGE_MODAL_ID, () => {
+      goBack();
+    });
+  } else {
+    unregisterModal(SUBPAGE_MODAL_ID);
+  }
+});
 </script>
 
 <template>
@@ -136,12 +147,13 @@ watch(
     >
       <!-- Header -->
       <header
-        class="p-4 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+20px)] pb-6 shrink-0"
+        v-if="currentSubPage !== 'about'"
+        class="px-4 py-3 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+12px)] pb-3 shrink-0"
       >
         <h2 class="text-xl font-bold">{{ currentSubPage ? subPageTitle : '全局设置' }}</h2>
         <button
           @click="currentSubPage ? goBack() : closeSettings()"
-          class="p-2.5 bg-white/10 rounded-full active:scale-90 transition-all flex items-center justify-center"
+          class="p-2.5 bg-white/10 border border-white/15 rounded-full active:scale-90 transition-all flex items-center justify-center"
         >
           <svg
             v-if="currentSubPage"
@@ -182,7 +194,7 @@ watch(
       </div>
       <div v-else class="flex-1 overflow-y-auto relative">
         <!-- 主页 -->
-        <div class="p-5 space-y-6 pb-safe">
+        <div class="px-3 py-15 space-y-6 pb-safe">
           <SettingsCard>
             <div class="divide-y divide-black/5 dark:divide-white/5">
               <SettingsRow
@@ -196,15 +208,6 @@ watch(
             </div>
           </SettingsCard>
 
-          <SettingsActionButton
-            variant="primary"
-            size="lg"
-            full-width
-            @click="saveSettings"
-          >
-            保存并应用变更
-          </SettingsActionButton>
-
           <div
             class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest"
           >
@@ -216,9 +219,14 @@ watch(
         <Transition name="slide-subpage">
           <div
             v-if="currentSubPage"
-            class="absolute inset-0 bg-secondary-bg flex flex-col z-10"
+            class="absolute inset-0 flex flex-col z-10 transition-colors duration-300"
+            :class="currentSubPage === 'about' ? 'bg-[#0f172a]' : 'bg-[var(--primary-bg)]'"
           >
-            <div class="flex-1 overflow-y-auto p-5 pb-safe space-y-6">
+
+            <div 
+              class="flex-1 pb-safe"
+              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pb-5 space-y-6'"
+            >
               <!-- 用户身份 -->
               <template v-if="currentSubPage === 'identity'">
                 <UserProfileSection :settings="settings" />
@@ -294,17 +302,14 @@ watch(
 
               <!-- 关于 -->
               <template v-if="currentSubPage === 'about'">
-                <SettingsCard>
-                  <UpdateSection />
-                </SettingsCard>
+                <AboutSection @back="currentSubPage = null" />
               </template>
             </div>
           </div>
         </Transition>
 
-        <ToolInteractionOverlay />
-        <SensorCollector />
         <ModelSelector
+          v-if="showSummaryModelSelector"
           :model-value="showSummaryModelSelector"
           @update:model-value="showSummaryModelSelector = $event"
           :current-model="settings.topicSummaryModel"

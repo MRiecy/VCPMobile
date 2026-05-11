@@ -73,7 +73,7 @@ class StreamKeepaliveService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "神经同步通道",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Agent 流式响应保活"
                 setShowBadge(false)
@@ -110,7 +110,7 @@ class StreamKeepaliveService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .setOngoing(true)
             .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentIntent(openPendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止生成", stopPendingIntent)
             .build()

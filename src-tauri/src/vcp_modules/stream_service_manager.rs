@@ -26,7 +26,10 @@ pub fn start_streaming_service(app: &AppHandle, agent_name: &str) -> Result<(), 
 
     if count == 0 {
         #[cfg(target_os = "android")]
-        start_android_service(app, agent_name)?;
+        if let Err(e) = start_android_service(app, agent_name) {
+            state.active_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
     }
 
     log::info!(
@@ -67,110 +70,193 @@ pub fn stop_streaming_service(app: &AppHandle) -> Result<(), String> {
 fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String> {
     use jni::objects::JValue;
 
-    app.run_on_android_context(|env, activity, _webview| {
-        let intent_cls = env
-            .find_class("android/content/Intent")
-            .map_err(|e| format!("Find Intent failed: {:?}", e))?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
+    let agent_name = agent_name.to_string();
 
-        let service_cls = env
-            .find_class("com/vcp/avatar/service/StreamKeepaliveService")
-            .map_err(|e| format!("Find service class failed: {:?}", e))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .as_ref()
+        .with_webview(move |webview| {
+            webview.jni_handle().exec(move |env, activity, _webview| {
+                let result = (|| -> Result<(), String> {
+                    let intent_cls = env
+                        .find_class("android/content/Intent")
+                        .map_err(|e| format!("Find Intent failed: {:?}", e))?;
 
-        let intent = env
-            .new_object(
-                &intent_cls,
-                "(Landroid/content/Context;Ljava/lang/Class;)V",
-                &[
-                    JValue::Object(activity),
-                    JValue::Object(&service_cls),
-                ],
-            )
-            .map_err(|e| format!("New Intent failed: {:?}", e))?;
+                    // 通过 Activity 的 ClassLoader 加载应用类，绕过 JNI FindClass 的 boot class loader 限制
+                    let activity_cls = env
+                        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])
+                        .map_err(|e| format!("getClass failed: {:?}", e))?
+                        .l()
+                        .map_err(|e| format!("getClass result is not an object: {:?}", e))?;
+                    let class_loader = env
+                        .call_method(
+                            &activity_cls,
+                            "getClassLoader",
+                            "()Ljava/lang/ClassLoader;",
+                            &[],
+                        )
+                        .map_err(|e| format!("getClassLoader failed: {:?}", e))?
+                        .l()
+                        .map_err(|e| format!("getClassLoader result is not an object: {:?}", e))?;
+                    let service_name = env
+                        .new_string("com.vcp.avatar.service.StreamKeepaliveService")
+                        .map_err(|e| format!("new_string failed: {:?}", e))?;
+                    let service_cls = env
+                        .call_method(
+                            &class_loader,
+                            "loadClass",
+                            "(Ljava/lang/String;)Ljava/lang/Class;",
+                            &[JValue::Object(&service_name)],
+                        )
+                        .map_err(|e| format!("loadClass failed: {:?}", e))?
+                        .l()
+                        .map_err(|e| format!("loadClass result is not an object: {:?}", e))?;
 
-        // putExtra("agent_name", agentName)
-        let key = env
-            .new_string("agent_name")
-            .map_err(|e| format!("New string key failed: {:?}", e))?;
-        let value = env
-            .new_string(agent_name)
-            .map_err(|e| format!("New string value failed: {:?}", e))?;
+                    let intent = env
+                        .new_object(
+                            &intent_cls,
+                            "(Landroid/content/Context;Ljava/lang/Class;)V",
+                            &[
+                                JValue::Object(activity),
+                                JValue::Object(&service_cls),
+                            ],
+                        )
+                        .map_err(|e| format!("New Intent failed: {:?}", e))?;
 
-        env.call_method(
-            &intent,
-            "putExtra",
-            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
-            &[JValue::Object(&key), JValue::Object(&value)],
-        )
-        .map_err(|e| format!("putExtra failed: {:?}", e))?;
+                    // putExtra("agent_name", agentName)
+                    let key = env
+                        .new_string("agent_name")
+                        .map_err(|e| format!("New string key failed: {:?}", e))?;
+                    let value = env
+                        .new_string(&agent_name)
+                        .map_err(|e| format!("New string value failed: {:?}", e))?;
 
-        // 判断 API 版本：26+ 使用 startForegroundService
-        let version_cls = env
-            .find_class("android/os/Build$VERSION")
-            .map_err(|e| format!("Find VERSION failed: {:?}", e))?;
-        let version = env
-            .get_static_field(&version_cls, "SDK_INT", "I")
-            .map_err(|e| format!("Get SDK_INT failed: {:?}", e))?
-            .i()
-            .unwrap_or(0);
+                    env.call_method(
+                        &intent,
+                        "putExtra",
+                        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+                        &[JValue::Object(&key), JValue::Object(&value)],
+                    )
+                    .map_err(|e| format!("putExtra failed: {:?}", e))?;
 
-        let (method_name, method_sig) = if version >= 26 {
-            (
-                "startForegroundService",
-                "(Landroid/content/Intent;)Landroid/content/ComponentName;",
-            )
-        } else {
-            (
-                "startService",
-                "(Landroid/content/Intent;)Landroid/content/ComponentName;",
-            )
-        };
+                    // 判断 API 版本：26+ 使用 startForegroundService
+                    let version_cls = env
+                        .find_class("android/os/Build$VERSION")
+                        .map_err(|e| format!("Find VERSION failed: {:?}", e))?;
+                    let version = env
+                        .get_static_field(&version_cls, "SDK_INT", "I")
+                        .map_err(|e| format!("Get SDK_INT failed: {:?}", e))?
+                        .i()
+                        .unwrap_or(0);
 
-        env.call_method(
-            activity,
-            method_name,
-            method_sig,
-            &[JValue::Object(&intent)],
-        )
-        .map_err(|e| format!("{} failed: {:?}", method_name, e))?;
+                    let (method_name, method_sig) = if version >= 26 {
+                        (
+                            "startForegroundService",
+                            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+                        )
+                    } else {
+                        (
+                            "startService",
+                            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+                        )
+                    };
 
-        Ok(())
-    })
-    .map_err(|e| format!("Android context error: {:?}", e))?
+                    env.call_method(
+                        activity,
+                        method_name,
+                        method_sig,
+                        &[JValue::Object(&intent)],
+                    )
+                    .map_err(|e| format!("{} failed: {:?}", method_name, e))?;
+
+                    Ok(())
+                })();
+                let _ = tx.send(result);
+            });
+        })
+        .map_err(|e| format!("with_webview failed: {:?}", e))?;
+
+    rx.recv()
+        .map_err(|_| "JNI execution channel closed".to_string())?
 }
 
 #[cfg(target_os = "android")]
 fn stop_android_service(app: &AppHandle) -> Result<(), String> {
     use jni::objects::JValue;
 
-    app.run_on_android_context(|env, activity, _webview| {
-        let intent_cls = env
-            .find_class("android/content/Intent")
-            .map_err(|e| format!("Find Intent failed: {:?}", e))?;
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
 
-        let service_cls = env
-            .find_class("com/vcp/avatar/service/StreamKeepaliveService")
-            .map_err(|e| format!("Find service class failed: {:?}", e))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    window
+        .as_ref()
+        .with_webview(move |webview| {
+            webview.jni_handle().exec(move |env, activity, _webview| {
+                let result = (|| -> Result<(), String> {
+                    let intent_cls = env
+                        .find_class("android/content/Intent")
+                        .map_err(|e| format!("Find Intent failed: {:?}", e))?;
 
-        let intent = env
-            .new_object(
-                &intent_cls,
-                "(Landroid/content/Context;Ljava/lang/Class;)V",
-                &[
-                    JValue::Object(activity),
-                    JValue::Object(&service_cls),
-                ],
-            )
-            .map_err(|e| format!("New Intent failed: {:?}", e))?;
+                    // 通过 Activity 的 ClassLoader 加载应用类，绕过 JNI FindClass 的 boot class loader 限制
+                    let activity_cls = env
+                        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])
+                        .map_err(|e| format!("getClass failed: {:?}", e))?
+                        .l()
+                        .map_err(|e| format!("getClass result is not an object: {:?}", e))?;
+                    let class_loader = env
+                        .call_method(
+                            &activity_cls,
+                            "getClassLoader",
+                            "()Ljava/lang/ClassLoader;",
+                            &[],
+                        )
+                        .map_err(|e| format!("getClassLoader failed: {:?}", e))?
+                        .l()
+                        .map_err(|e| format!("getClassLoader result is not an object: {:?}", e))?;
+                    let service_name = env
+                        .new_string("com.vcp.avatar.service.StreamKeepaliveService")
+                        .map_err(|e| format!("new_string failed: {:?}", e))?;
+                    let service_cls = env
+                        .call_method(
+                            &class_loader,
+                            "loadClass",
+                            "(Ljava/lang/String;)Ljava/lang/Class;",
+                            &[JValue::Object(&service_name)],
+                        )
+                        .map_err(|e| format!("loadClass failed: {:?}", e))?
+                        .l()
+                        .map_err(|e| format!("loadClass result is not an object: {:?}", e))?;
 
-        env.call_method(
-            activity,
-            "stopService",
-            "(Landroid/content/Intent;)Z",
-            &[JValue::Object(&intent)],
-        )
-        .map_err(|e| format!("stopService failed: {:?}", e))?;
+                    let intent = env
+                        .new_object(
+                            &intent_cls,
+                            "(Landroid/content/Context;Ljava/lang/Class;)V",
+                            &[
+                                JValue::Object(activity),
+                                JValue::Object(&service_cls),
+                            ],
+                        )
+                        .map_err(|e| format!("New Intent failed: {:?}", e))?;
 
-        Ok(())
-    })
-    .map_err(|e| format!("Android context error: {:?}", e))?
+                    env.call_method(
+                        activity,
+                        "stopService",
+                        "(Landroid/content/Intent;)Z",
+                        &[JValue::Object(&intent)],
+                    )
+                    .map_err(|e| format!("stopService failed: {:?}", e))?;
+
+                    Ok(())
+                })();
+                let _ = tx.send(result);
+            });
+        })
+        .map_err(|e| format!("with_webview failed: {:?}", e))?;
+
+    rx.recv()
+        .map_err(|_| "JNI execution channel closed".to_string())?
 }

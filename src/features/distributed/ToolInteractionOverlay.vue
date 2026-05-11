@@ -80,7 +80,7 @@ onUnmounted(() => {
         class="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       >
         <div
-          class="bg-secondary-bg rounded-2xl p-6 mx-4 max-w-sm w-full shadow-2xl"
+          class="bg-[var(--secondary-bg)] rounded-2xl p-6 mx-4 max-w-sm w-full shadow-2xl"
         >
           <div class="text-center space-y-3">
             <div class="text-lg font-bold text-primary-text">

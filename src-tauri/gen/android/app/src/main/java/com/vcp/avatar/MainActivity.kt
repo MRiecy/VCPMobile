@@ -1,7 +1,9 @@
 package com.vcp.avatar
 
+import android.content.Context
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.webkit.WebView
@@ -51,10 +53,12 @@ class MainActivity : TauriActivity() {
 
         // 注册流式中断广播接收器
         streamingActionReceiver = StreamingActionReceiver()
-        registerReceiver(
-            streamingActionReceiver,
-            IntentFilter(StreamingActionReceiver.STREAM_INTERRUPT_ACTION)
-        )
+        val filter = IntentFilter(StreamingActionReceiver.STREAM_INTERRUPT_ACTION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            registerReceiver(streamingActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(streamingActionReceiver, filter)
+        }
     }
 
     override fun onResume() {

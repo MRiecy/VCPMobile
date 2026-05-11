@@ -11,7 +11,7 @@ defineProps<{
     variant === 'danger' ? 'border-red-500/20 bg-red-500/5' : '',
     variant === 'warning' ? 'border-yellow-500/20 bg-yellow-500/5' : '',
     'border rounded-2xl shadow-sm',
-    noPadding ? '' : 'p-4'
+    noPadding ? '' : 'px-3 py-4'
   ]">
     <slot></slot>
   </div>

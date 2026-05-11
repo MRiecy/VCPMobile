@@ -18,6 +18,8 @@ import { useOverlayStore } from '../core/stores/overlay';
 import SettingsView from '../features/settings/SettingsView.vue';
 import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
 import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
+import SensorCollector from '../features/distributed/SensorCollector.vue';
+import ToolInteractionOverlay from '../features/distributed/ToolInteractionOverlay.vue';
 
 // SyncSessionView / RebuildSessionView 按需异步加载，状态由 Store 完全托管
 const SyncSessionView = defineAsyncComponent(() => import('../features/sync/SyncSessionView.vue'));
@@ -55,5 +57,8 @@ onMounted(() => {
 
     <SyncSessionView v-if="overlayStore.isSyncSessionOpen" />
     <RebuildSessionView v-if="overlayStore.isRebuildSessionOpen" />
+
+    <SensorCollector />
+    <ToolInteractionOverlay />
   </div>
 </template>

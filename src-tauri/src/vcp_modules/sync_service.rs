@@ -953,6 +953,15 @@ async fn run_sync_session(
                                                 let id = item["id"].as_str().unwrap_or_default().to_string();
                                                 let action = item["action"].as_str().unwrap_or_default().to_string();
 
+                                                // V2: Populate changed_owners for Phase 2 Topic Sync
+                                                if data_type == SyncDataType::Agent || data_type == SyncDataType::Group {
+                                                    let is_mismatched = item["mismatchedContent"].as_bool().unwrap_or(false);
+                                                    if action == "PUSH" || action == "PULL" || is_mismatched {
+                                                        let mut owners = changed_owners.lock().await;
+                                                        owners.insert(id.clone());
+                                                    }
+                                                }
+
                                                 if action == "PULL" && (data_type == SyncDataType::Topic || data_type == SyncDataType::Agent || data_type == SyncDataType::Group) {
                                                     let type_str = match data_type {
                                                         SyncDataType::Topic => if item["ownerType"] == "group" { "group_topic" } else { "agent_topic" },
@@ -972,7 +981,33 @@ async fn run_sync_session(
 
                                             // 派发任务
                                             if !batch_pull_requests.is_empty() {
-                                                // ... (unchanged logic)
+                                                let h_in = h.clone(); let c_in = c.clone(); let b_in = base.clone();
+                                                let token = settings.sync_token.clone(); let wq_in = wq.clone();
+                                                let pending = pending_tasks_task.clone(); let total_tasks_in = total_tasks_task.clone();
+                                                let tx_internal_in = tx_internal.clone();
+                                                let manifest_received_in = manifest_responses_received.clone();
+                                                let manifest_expected_in = expected_manifest_count.clone();
+                                                let manifest_phase_in = manifest_phase.clone();
+                                                let data_type_inner = data_type.clone();
+                                                
+                                                tauri::async_runtime::spawn(async move {
+                                                    let chunk_size = match data_type_inner { SyncDataType::Agent | SyncDataType::Group => 50, SyncDataType::Topic => 1000, _ => 100 };
+                                                    for chunk in batch_pull_requests.chunks(chunk_size) {
+                                                        let sub_batch = chunk.to_vec();
+                                                        let sub_count = sub_batch.len() as u32;
+                                                        let _ = PullExecutor::pull_entities_batch(&h_in, &c_in, &b_in, &token, sub_batch, &wq_in).await;
+                                                        pending.fetch_sub(sub_count, Ordering::SeqCst);
+                                                        let current_pending = pending.load(Ordering::SeqCst);
+                                                        let total = total_tasks_in.load(Ordering::SeqCst);
+                                                        let done = total.saturating_sub(current_pending);
+                                                        let _ = h_in.emit("vcp-sync-progress", json!({ "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" }, "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }));
+                                                        if current_pending == 0 && manifest_received_in.load(Ordering::SeqCst) == manifest_expected_in.load(Ordering::SeqCst) {
+                                                            let phase = manifest_phase_in.load(Ordering::SeqCst);
+                                                            if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
+                                                            else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
+                                                        }
+                                                    }
+                                                });
                                             }
 
                                             if !push_topics_to_fetch.is_empty() {
@@ -989,18 +1024,19 @@ async fn run_sync_session(
                                                     let mut batch_push_requests = Vec::new();
 
                                                     // 异步批量查询 Topic 元数据
-                                                    for (id, owner_id, owner_type) in push_topics_to_fetch {
-                                                        let row_res = sqlx::query("SELECT topic_id, title, created_at, locked, unread FROM topics WHERE topic_id = ?")
+                                                    for (id, _diff_owner_id, owner_type) in push_topics_to_fetch {
+                                                        let row_res = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?")
                                                             .bind(&id)
                                                             .fetch_optional(&db.pool)
                                                             .await;
 
                                                         if let Ok(Some(r)) = row_res {
+                                                            let db_owner_id: String = r.get("owner_id");
                                                             let type_str = if owner_type == "group" { "group_topic" } else { "agent_topic" };
                                                             let dto = if owner_type == "group" {
-                                                                json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": owner_id })
+                                                                json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": db_owner_id })
                                                             } else {
-                                                                json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": owner_id })
+                                                                json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": db_owner_id })
                                                             };
                                                             batch_push_requests.push(json!({ "id": id, "type": type_str, "data": dto }));
                                                         } else {

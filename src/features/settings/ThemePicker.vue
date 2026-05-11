@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, computed } from 'vue';
 import { useThemeStore, type ThemeInfo } from '../../core/stores/theme';
 
 // 为 layout 提供默认值，防止由于未传参导致的初始化失败
@@ -10,39 +10,11 @@ const props = withDefaults(defineProps<{
 });
 
 const themeStore = useThemeStore();
-const thumbnails = ref<Record<string, string>>({});
-
-const loadThumbnails = async () => {
-  if (!themeStore.availableThemes || themeStore.availableThemes.length === 0) return;
-
-  for (const theme of themeStore.availableThemes) {
-    const darkWallpaper = theme.variables?.dark?.['--chat-wallpaper-dark'];
-    const lightWallpaper = theme.variables?.light?.['--chat-wallpaper-light'];
-    let rawPath = darkWallpaper || lightWallpaper;
-
-    if (rawPath && rawPath !== 'none') {
-      try {
-        // extract filename from url('../assets/wallpaper/xxx.png') or url('xxx.png')
-        const match = rawPath.match(/url\(['"]?(.*?)['"]?\)/);
-        let filename = match ? match[1] : rawPath;
-
-        // Robust cleaning
-        filename = filename.replace(/^.*[\\\/]/, '').replace(/['"]/g, '');
-        filename = filename.split('.')[0] + '.webp';
-
-        thumbnails.value[theme.fileName] = `/wallpaper/${filename}`;
-      } catch (e) {
-        console.error('Failed to load thumbnail for', theme.fileName, e);
-      }
-    }
-  }
-};
+const thumbnails = computed(() => themeStore.themeThumbnails);
 
 onMounted(async () => {
   try {
-    // Note: themeStore.fetchThemes() is now synchronous since it reads from Vite glob
     await themeStore.fetchThemes();
-    await loadThumbnails();
   } catch (e) {
     console.error('[ThemePicker] Initialization failed:', e);
   }
