@@ -551,8 +551,8 @@ pub async fn store_file(
 ) -> Result<AttachmentData, String> {
     // 0. 冗余兜底：前端已将 >2MB 文件分流至高速链路，此检查在正常情况下几乎不会触发。
     //    保留作为深层防御，防止未来前端逻辑变更、异常调用或 IPC 绕过导致 OOM。
-    if file_bytes.len() > 20 * 1024 * 1024 {
-        return Err("文件过大，请使用高速链路上传 (Limit: 20MB)".to_string());
+    if file_bytes.len() > 100 * 1024 * 1024 {
+        return Err("文件过大，请使用高速链路上传 (Limit: 100MB)".to_string());
     }
 
     // 1. 计算 SHA256 哈希值

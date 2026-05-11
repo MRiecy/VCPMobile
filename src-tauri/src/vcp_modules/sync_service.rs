@@ -865,6 +865,8 @@ async fn run_sync_session(
                                             let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
                                             let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
                                             let items_clone: Vec<serde_json::Value> = items.clone();
+                                            
+                                            // 统计有效操作数（排除 SKIP）
                                             let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
                                             let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
                                             let delete_count = items_clone.iter().filter(|i| i["action"] == "DELETE").count() as u32;
@@ -893,9 +895,6 @@ async fn run_sync_session(
                                             let received = manifest_responses_received.fetch_add(1, Ordering::SeqCst) + 1;
                                             let expected = expected_manifest_count.load(Ordering::SeqCst);
                                             let current_phase = manifest_phase.load(Ordering::SeqCst);
-
-                                            // [Definitive Fix] 只有当消息的 phase 与当前 Phase 一致时才触发跳转
-                                            // 这里的 phase 字段由手机端发出时带入，原样返回
                                             let msg_phase = payload["phase"].as_u64().unwrap_or(0) as u8;
 
                                             if received == expected && (msg_phase == current_phase || msg_phase == 0) {
@@ -907,61 +906,58 @@ async fn run_sync_session(
                                                     if current_phase == 1 { let _ = tx_internal.send(SyncCommand::StartTopicMetadata); }
                                                     else if current_phase == 2 { let _ = tx_internal.send(SyncCommand::StartTopicValidation); }
                                                 } else {
-                                                    // [Evolution] 活性监测看门狗：不再是固定 30s，而是检测"进度是否停滞"
                                                     let tx_internal_wd = tx_internal.clone();
                                                     let current_phase_wd = current_phase;
                                                     let manifest_phase_wd = manifest_phase.clone();
                                                     let pending_wd = pending_tasks_task.clone();
+                                                    let handle_clone_wd = handle_clone.clone();
                                                     
                                                     tauri::async_runtime::spawn(async move {
                                                         let mut last_pending = pending_wd.load(Ordering::SeqCst);
                                                         let mut stuck_count = 0;
-                                                        
                                                         loop {
                                                             tokio::time::sleep(Duration::from_secs(10)).await;
-                                                            
-                                                            // 1. 如果相位变了，说明任务已通过正常逻辑完成，看门狗功成身退
                                                             if manifest_phase_wd.load(Ordering::SeqCst) != current_phase_wd { break; }
-                                                            
                                                             let current_pending = pending_wd.load(Ordering::SeqCst);
-                                                            if current_pending == 0 { break; } // 任务已清零，退出
+                                                            if current_pending == 0 { break; }
                                                             
-                                                            // 2. 检查是否有进度
                                                             if current_pending == last_pending {
                                                                 stuck_count += 1;
                                                                 println!("[SyncService] WATCHDOG: Phase {} pending count stuck at {} ({} ticks)", 
                                                                     current_phase_wd, current_pending, stuck_count);
                                                             } else {
-                                                                stuck_count = 0; // 有进度，重置计数器
+                                                                stuck_count = 0;
                                                                 last_pending = current_pending;
                                                             }
                                                             
-                                                            // 3. 只有连续 6 次检查（60秒）完全没动静，才判定为死锁
                                                             if stuck_count >= 6 {
                                                                 println!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
+                                                                emit_sync_log(&handle_clone_wd, "warn", &format!("检测到同步停滞 (Phase {})，正在尝试强制恢复...", current_phase_wd));
                                                                 if current_phase_wd == 1 { let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata); }
                                                                 else if current_phase_wd == 2 { let _ = tx_internal_wd.send(SyncCommand::StartTopicValidation); }
                                                                 break;
+                                                            } else if stuck_count >= 1 {
+                                                                emit_sync_log(&handle_clone_wd, "warn", &format!("同步进度缓慢 (Phase {})，剩余任务: {}...", current_phase_wd, current_pending));
                                                             }
                                                         }
                                                     });
                                                 }
-                                            } else if msg_phase != current_phase && msg_phase != 0 {
-                                                println!("[SyncService] WARN: Ignoring late manifest from Phase {} (Current: Phase {})", msg_phase, current_phase);
                                             }
+
+                                            // 归类任务
+                                            let mut batch_pull_requests = Vec::new();
+                                            let mut batch_push_requests = Vec::new();
+                                            let mut other_items = Vec::new();
 
                                             if data_type == SyncDataType::Agent || data_type == SyncDataType::Group {
                                                 let mut owners = changed_owners.lock().await;
                                                 for item in items_clone.iter() {
                                                     let action = item["action"].as_str().unwrap_or_default();
-                                                    // 如果 action 是 PULL/PUSH，或者显式标记了内容不一致，则加入待扫描列表
                                                     if action == "PULL" || action == "PUSH" || item["mismatchedContent"].as_bool() == Some(true) {
                                                         owners.insert(item["id"].as_str().unwrap_or_default().to_string());
                                                     }
                                                 }
                                             }
-
-                                            let mut batch_pull_requests = Vec::new();                                            let mut other_items = Vec::new();
 
                                             for item in items_clone {
                                                 let id = item["id"].as_str().unwrap_or_default().to_string();
@@ -975,117 +971,109 @@ async fn run_sync_session(
                                                         _ => unreachable!(),
                                                     };
                                                     batch_pull_requests.push(json!({ "id": id, "type": type_str }));
+                                                } else if action == "PUSH" && data_type == SyncDataType::Topic {
+                                                    let owner_id = item["ownerId"].as_str().unwrap_or_default().to_string();
+                                                    let owner_type = item["ownerType"].as_str().unwrap_or("agent").to_string();
+                                                    let db = h.state::<DbState>();
+                                                    let row_res = tauri::async_runtime::block_on(async {
+                                                        sqlx::query("SELECT topic_id, title, created_at, locked, unread FROM topics WHERE topic_id = ?")
+                                                            .bind(&id)
+                                                            .fetch_optional(&db.pool)
+                                                            .await
+                                                    });
+
+                                                    if let Ok(Some(r)) = row_res {
+                                                        let type_str = if owner_type == "group" { "group_topic" } else { "agent_topic" };
+                                                        let dto = if owner_type == "group" {
+                                                            json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": owner_id })
+                                                        } else {
+                                                            json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": owner_id })
+                                                        };
+                                                        batch_push_requests.push(json!({ "id": id, "type": type_str, "data": dto }));
+                                                    } else {
+                                                        pending_tasks_task.fetch_sub(1, Ordering::SeqCst);
+                                                    }
                                                 } else {
                                                     other_items.push(item);
                                                 }
                                             }
 
-                                            // 1. 派发批处理任务 (Agent/Group/Topic PULL)
+                                            // 派发任务
                                             if !batch_pull_requests.is_empty() {
-                                                let h_in = h.clone();
-                                                let c_in = c.clone();
-                                                let b_in = base.clone();
-                                                let token = settings.sync_token.clone();
-                                                let wq_in = wq.clone();
-                                                let pending = pending_tasks_task.clone();
-                                                let total_tasks_in = total_tasks_task.clone();
+                                                let h_in = h.clone(); let c_in = c.clone(); let b_in = base.clone();
+                                                let token = settings.sync_token.clone(); let wq_in = wq.clone();
+                                                let pending = pending_tasks_task.clone(); let total_tasks_in = total_tasks_task.clone();
                                                 let tx_internal_in = tx_internal.clone();
-                                                let sync_logger_in = sync_logger_task.clone();
                                                 let manifest_received_in = manifest_responses_received.clone();
                                                 let manifest_expected_in = expected_manifest_count.clone();
                                                 let manifest_phase_in = manifest_phase.clone();
-                                                let data_type_log = data_type.to_string();
                                                 let data_type_inner = data_type.clone();
-
+                                                
                                                 tauri::async_runtime::spawn(async move {
-                                                    // 二次切片限制：根据实体重量动态调整批次大小
-                                                    // Agent/Group 提示词多且重，小批次（50）拉取确保解析平稳
-                                                    // Topic 只有元数据，大批次（1000）拉取确保吞吐量
-                                                    let chunk_size = match data_type_inner {
-                                                        SyncDataType::Agent | SyncDataType::Group => 50,
-                                                        SyncDataType::Topic => 1000,
-                                                        _ => 100,
-                                                    };
-
+                                                    let chunk_size = match data_type_inner { SyncDataType::Agent | SyncDataType::Group => 50, SyncDataType::Topic => 1000, _ => 100 };
                                                     for chunk in batch_pull_requests.chunks(chunk_size) {
                                                         let sub_batch = chunk.to_vec();
                                                         let sub_count = sub_batch.len() as u32;
-
-                                                        match PullExecutor::pull_entities_batch(&h_in, &c_in, &b_in, &token, sub_batch, &wq_in).await {
-                                                            Err(e) => {
-                                                                if let Ok(mut logger) = sync_logger_in.lock() {
-                                                                    logger.log_operation("owner_metadata", &data_type_log, "batch_pull", false, Some(&format!("error: {}", e)));
-                                                                }
-                                                            },
-                                                            _ => {
-                                                                if let Ok(mut logger) = sync_logger_in.lock() {
-                                                                    logger.log_operation("owner_metadata", &data_type_log, "batch_pull", true, Some(&format!("pulled chunk of {} items", sub_count)));
-                                                                }
-                                                            }
-                                                        }
-
+                                                        let _ = PullExecutor::pull_entities_batch(&h_in, &c_in, &b_in, &token, sub_batch, &wq_in).await;
                                                         pending.fetch_sub(sub_count, Ordering::SeqCst);
                                                         let current_pending = pending.load(Ordering::SeqCst);
-                                                        
                                                         let total = total_tasks_in.load(Ordering::SeqCst);
                                                         let done = total.saturating_sub(current_pending);
-
-                                                        let _ = h_in.emit("vcp-sync-progress", json!({
-                                                            "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" },
-                                                            "total": total,
-                                                            "completed": done,
-                                                            "message": format!("Syncing: {}/{}", done, total)
-                                                        }));
-
-                                                        if current_pending == 0 {
-                                                            let received = manifest_received_in.load(Ordering::SeqCst);
-                                                            let expected = manifest_expected_in.load(Ordering::SeqCst);
+                                                        let _ = h_in.emit("vcp-sync-progress", json!({ "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" }, "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }));
+                                                        if current_pending == 0 && manifest_received_in.load(Ordering::SeqCst) == manifest_expected_in.load(Ordering::SeqCst) {
                                                             let phase = manifest_phase_in.load(Ordering::SeqCst);
-
-                                                            println!("[SyncService] Batch tasks completed: received={}, expected={}, phase={}", 
-                                                                received, expected, phase);
-
-                                                            if received == expected {
-                                                                if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
-                                                                else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
-                                                            }
+                                                            if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
+                                                            else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
                                                         }
                                                     }
                                                 });
                                             }
 
-                                            // 2. 串行/限流处理其他任务 (Avatar PULL, PUSH, DELETE)
-                                            if !other_items.is_empty() {
-                                                let h_in = h.clone();
-                                                let c_in = c.clone();
-                                                let b_in = base.clone();
-                                                let token = settings.sync_token.clone();
-                                                let data_type_base = data_type.clone();
-                                                let wq_in = wq.clone();
-                                                let pending = pending_tasks_task.clone();
-                                                let total_tasks_in = total_tasks_task.clone();
-                                                let tx_internal_in = tx_internal.clone();
-                                                let sync_logger_in = sync_logger_task.clone();
+                                            if !batch_push_requests.is_empty() {
+                                                let h_in = h.clone(); let c_in = c.clone();
+                                                let token = settings.sync_token.clone(); let pending = pending_tasks_task.clone();
+                                                let total_tasks_in = total_tasks_task.clone(); let tx_internal_in = tx_internal.clone();
                                                 let manifest_received_in = manifest_responses_received.clone();
                                                 let manifest_expected_in = expected_manifest_count.clone();
                                                 let manifest_phase_in = manifest_phase.clone();
+                                                let http_url = settings.vcp_server_url.clone();
+                                                tauri::async_runtime::spawn(async move {
+                                                    for chunk in batch_push_requests.chunks(1000) {
+                                                        let sub_batch = chunk.to_vec();
+                                                        let sub_count = sub_batch.len() as u32;
+                                                        let _ = PushExecutor::push_entities_batch(&h_in, &c_in, &http_url, &token, sub_batch).await;
+                                                        pending.fetch_sub(sub_count, Ordering::SeqCst);
+                                                        let current_pending = pending.load(Ordering::SeqCst);
+                                                        let total = total_tasks_in.load(Ordering::SeqCst);
+                                                        let done = total.saturating_sub(current_pending);
+                                                        let _ = h_in.emit("vcp-sync-progress", json!({ "phase": "topic_metadata", "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }));
+                                                        if current_pending == 0 && manifest_received_in.load(Ordering::SeqCst) == manifest_expected_in.load(Ordering::SeqCst) {
+                                                            let phase = manifest_phase_in.load(Ordering::SeqCst);
+                                                            if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
+                                                            else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
+                                                        }
+                                                    }
+                                                });
+                                            }
+
+                                            if !other_items.is_empty() {
+                                                let h_in = h.clone(); let c_in = c.clone(); let b_in = base.clone();
+                                                let token = settings.sync_token.clone(); let wq_in = wq.clone();
+                                                let pending = pending_tasks_task.clone(); let total_tasks_in = total_tasks_task.clone();
+                                                let tx_internal_in = tx_internal.clone();
+                                                let manifest_received_in = manifest_responses_received.clone();
+                                                let manifest_expected_in = expected_manifest_count.clone();
+                                                let manifest_phase_in = manifest_phase.clone();
+                                                let data_type_base = data_type.clone();
 
                                                 tauri::async_runtime::spawn(async move {
-                                                    // [Maintainability] 这里的并发 15 是针对 Avatar/PUSH/DELETE 等非批次任务的固定限制
-                                                    // 它独立于 NetworkAwareSemaphore，主要用于处理 Phase 1/2 的离散任务
                                                     futures_util::stream::iter(other_items).for_each_concurrent(15, |item| {
-                                                        let id = item["id"].as_str().unwrap_or_default().to_string();
                                                         let action = item["action"].as_str().unwrap_or_default().to_string();
-                                                        let h_task = h_in.clone();
-                                                        let c_task = c_in.clone();
-                                                        let b_task = b_in.clone();
-                                                        let token_task = token.clone();
-                                                        let data_type_task = data_type_base.clone();
-                                                        let wq_task = wq_in.clone();
-                                                        let pending_task = pending.clone();
-                                                        let total_tasks_task = total_tasks_in.clone();
-                                                        let tx_internal_task = tx_internal_in.clone();
-                                                        let sync_logger_task = sync_logger_in.clone();
+                                                        let id = item["id"].as_str().unwrap_or_default().to_string();
+                                                        let h_task = h_in.clone(); let c_task = c_in.clone(); let b_task = b_in.clone();
+                                                        let token_task = token.clone(); let data_type_task = data_type_base.clone();
+                                                        let wq_task = wq_in.clone(); let pending_task = pending.clone();
+                                                        let total_tasks_task = total_tasks_in.clone(); let tx_internal_task = tx_internal_in.clone();
                                                         let manifest_received_task = manifest_received_in.clone();
                                                         let manifest_expected_task = manifest_expected_in.clone();
                                                         let manifest_phase_task = manifest_phase_in.clone();
@@ -1093,137 +1081,39 @@ async fn run_sync_session(
                                                         async move {
                                                             let mut should_decrement = true;
                                                             if action == "PULL" {
-                                                                match data_type_task {
-                                                                    SyncDataType::Avatar => {
-                                                                        let parts: Vec<&str> = id.split(':').collect();
-                                                                        if parts.len() == 2 {
-                                                                            match PullExecutor::pull_avatar(&h_task, &c_task, &b_task, &token_task, parts[0], parts[1], &wq_task).await {
-                                                                                Err(e) => {
-                                                                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                        logger.log_operation("owner_metadata", "avatar", &id, false,
-                                                                                            Some(&format!("pull_avatar error: {}", e)));
-                                                                                    }
-                                                                                },
-                                                                                _ => {
-                                                                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                        logger.log_operation("owner_metadata", "avatar", &id, true, Some("pulled from server"));
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    },
-                                                                    SyncDataType::Agent => {
-                                                                        match PullExecutor::pull_agent(&h_task, &c_task, &b_task, &token_task, &id, &wq_task).await {
-                                                                            Err(e) => {
-                                                                                if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("owner_metadata", "agent", &id, false, Some(&format!("pull_agent error: {}", e)));
-                                                                                }
-                                                                            },
-                                                                            _ => {
-                                                                                if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("owner_metadata", "agent", &id, true, Some("pulled from server"));
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    },
-                                                                    SyncDataType::Group => {
-                                                                        match PullExecutor::pull_group(&h_task, &c_task, &b_task, &token_task, &id, &wq_task).await {
-                                                                            Err(e) => {
-                                                                                if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("owner_metadata", "group", &id, false, Some(&format!("pull_group error: {}", e)));
-                                                                                }
-                                                                            },
-                                                                            _ => {
-                                                                                if let Ok(mut logger) = sync_logger_task.lock() {
-                                                                                    logger.log_operation("owner_metadata", "group", &id, true, Some("pulled from server"));
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    },
-                                                                    _ => {
-                                                                        // Topic PULL 已在批处理中处理
-                                                                        should_decrement = false;
-                                                                    }
-                                                                }
+                                                                if data_type_task == SyncDataType::Avatar {
+                                                                    let parts: Vec<&str> = id.split(':').collect();
+                                                                    if parts.len() == 2 { let _ = PullExecutor::pull_avatar(&h_task, &c_task, &b_task, &token_task, parts[0], parts[1], &wq_task).await; }
+                                                                } else if data_type_task == SyncDataType::Agent { let _ = PullExecutor::pull_agent(&h_task, &c_task, &b_task, &token_task, &id, &wq_task).await; }
+                                                                else if data_type_task == SyncDataType::Group { let _ = PullExecutor::pull_group(&h_task, &c_task, &b_task, &token_task, &id, &wq_task).await; }
+                                                                else { should_decrement = false; }
                                                             } else if action == "PUSH" {
-                                                                match data_type_task {
-                                                                    SyncDataType::Agent => { let _ = PushExecutor::push_agent(&h_task, &c_task, &b_task, &token_task, &id).await; },
-                                                                    SyncDataType::Group => { let _ = PushExecutor::push_group(&h_task, &c_task, &b_task, &token_task, &id).await; },
-                                                                    SyncDataType::Avatar => {
-                                                                        let parts: Vec<&str> = id.split(':').collect();
-                                                                        if parts.len() == 2 { let _ = PushExecutor::push_avatar(&h_task, &c_task, &b_task, &token_task, parts[0], parts[1]).await; }
-                                                                    },
-                                                                    SyncDataType::Topic => {
-                                                                        let owner_type = item["ownerType"].as_str().unwrap_or("agent");
-                                                                        if owner_type == "group" {
-                                                                            let _ = PushExecutor::push_group_topic(&h_task, &c_task, &b_task, &token_task, &id).await;
-                                                                        } else {
-                                                                            let _ = PushExecutor::push_agent_topic(&h_task, &c_task, &b_task, &token_task, &id).await;
-                                                                        }
-                                                                    }
-                                                                    _ => {}
-                                                                }
-                                                            } else if action == "DELETE" {
+                                                                if data_type_task == SyncDataType::Agent { let _ = PushExecutor::push_agent(&h_task, &c_task, &b_task, &token_task, &id).await; }
+                                                                else if data_type_task == SyncDataType::Group { let _ = PushExecutor::push_group(&h_task, &c_task, &b_task, &token_task, &id).await; }
+                                                                else if data_type_task == SyncDataType::Avatar { let parts: Vec<&str> = id.split(':').collect(); if parts.len() == 2 { let _ = PushExecutor::push_avatar(&h_task, &c_task, &b_task, &token_task, parts[0], parts[1]).await; } }
+                                                                else { should_decrement = false; }
+                                                            } else if action == "DELETE" || action == "PUSH_DELETE" {
                                                                 use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
                                                                 match data_type_task {
                                                                     SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h_task, &id).await; },
                                                                     SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h_task, &id).await; },
-                                                                    SyncDataType::Avatar => {
-                                                                        let parts: Vec<&str> = id.split(':').collect();
-                                                                        if parts.len() == 2 {
-                                                                            let _ = DeleteExecutor::soft_delete_avatar(&h_task, parts[0], parts[1]).await;
-                                                                        }
-                                                                    },
+                                                                    SyncDataType::Avatar => { let parts: Vec<&str> = id.split(':').collect(); if parts.len() == 2 { let _ = DeleteExecutor::soft_delete_avatar(&h_task, parts[0], parts[1]).await; } },
                                                                     SyncDataType::Topic => { let _ = DeleteExecutor::soft_delete_topic(&h_task, &id).await; },
                                                                     _ => {}
                                                                 }
-                                                            } else if action == "PUSH_DELETE" {
-                                                                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                                                match data_type_task {
-                                                                    SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h_task, &id).await; },
-                                                                    SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h_task, &id).await; },
-                                                                    SyncDataType::Avatar => {
-                                                                        let parts: Vec<&str> = id.split(':').collect();
-                                                                        if parts.len() == 2 {
-                                                                            let _ = DeleteExecutor::soft_delete_avatar(&h_task, parts[0], parts[1]).await;
-                                                                        }
-                                                                    },
-                                                                    SyncDataType::Topic => { let _ = DeleteExecutor::soft_delete_topic(&h_task, &id).await; },
-                                                                    _ => {}
-                                                                }
-                                                                let _ = tx_internal_task.send(SyncCommand::NotifyDelete {
-                                                                    data_type: data_type_task,
-                                                                    id: id.clone()
-                                                                });
-                                                            }
+                                                                if action == "PUSH_DELETE" { let _ = tx_internal_task.send(SyncCommand::NotifyDelete { data_type: data_type_task, id: id.clone() }); }
+                                                            } else { should_decrement = false; }
 
                                                             if should_decrement {
                                                                 pending_task.fetch_sub(1, Ordering::SeqCst);
                                                                 let current_pending = pending_task.load(Ordering::SeqCst);
-                                                                
                                                                 let total = total_tasks_task.load(Ordering::SeqCst);
                                                                 let done = total.saturating_sub(current_pending);
-
-                                                                // 发送进度
-                                                                let _ = h_task.emit("vcp-sync-progress", json!({
-                                                                    "phase": if manifest_phase_task.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" },
-                                                                    "total": total,
-                                                                    "completed": done,
-                                                                    "message": format!("Syncing: {}/{}", done, total)
-                                                                }));
-
-                                                                if current_pending == 0 {
-                                                                    let received = manifest_received_task.load(Ordering::SeqCst);
-                                                                    let expected = manifest_expected_task.load(Ordering::SeqCst);
+                                                                let _ = h_task.emit("vcp-sync-progress", json!({ "phase": if manifest_phase_task.load(Ordering::SeqCst) == 1 { "owner_metadata" } else { "topic_metadata" }, "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }));
+                                                                if current_pending == 0 && manifest_received_task.load(Ordering::SeqCst) == manifest_expected_task.load(Ordering::SeqCst) {
                                                                     let phase = manifest_phase_task.load(Ordering::SeqCst);
-                                                                    
-                                                                    println!("[SyncService] All tasks completed: received={}, expected={}, phase={}", 
-                                                                        received, expected, phase);
-
-                                                                    if received == expected {
-                                                                        if phase == 1 { let _ = tx_internal_task.send(SyncCommand::StartTopicMetadata); }
-                                                                        else if phase == 2 { let _ = tx_internal_task.send(SyncCommand::StartTopicValidation); }
-                                                                    }
+                                                                    if phase == 1 { let _ = tx_internal_task.send(SyncCommand::StartTopicMetadata); }
+                                                                    else if phase == 2 { let _ = tx_internal_task.send(SyncCommand::StartTopicValidation); }
                                                                 }
                                                             }
                                                         }

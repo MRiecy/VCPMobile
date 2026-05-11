@@ -2,8 +2,8 @@ use crate::vcp_modules::agent_service;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
 use crate::vcp_modules::sync_dto::{
-    AgentMessageSyncDTO, AgentSyncDTO, AgentTopicSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
-    GroupTopicSyncDTO, UserMessageSyncDTO,
+    AgentMessageSyncDTO, AgentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
+    UserMessageSyncDTO,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -90,6 +90,29 @@ impl PushExecutor {
         Ok(())
     }
 
+    /// 批量 Push 实体 (Agent/Group/Topic)
+    pub async fn push_entities_batch<R: Runtime>(
+        _app: &AppHandle<R>,
+        client: &reqwest::Client,
+        http_url: &str,
+        sync_token: &str,
+        items: Vec<serde_json::Value>, // 预先构建好的 [{id, type, data}]
+    ) -> Result<(), String> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let url = format!("{}/api/mobile-sync/upload-entities-batch", http_url);
+        let _ = client
+            .post(&url)
+            .header("x-sync-token", sync_token)
+            .json(&serde_json::json!({ "items": items }))
+            .send()
+            .await;
+
+        Ok(())
+    }
+
     pub async fn push_avatar<R: Runtime>(
         app: &AppHandle<R>,
         client: &reqwest::Client,
@@ -122,86 +145,6 @@ impl PushExecutor {
                 .header("x-sync-token", sync_token)
                 .header("Content-Type", mime_type)
                 .body(image_data)
-                .send()
-                .await;
-        }
-
-        Ok(())
-    }
-
-    pub async fn push_agent_topic<R: Runtime>(
-        app: &AppHandle<R>,
-        client: &reqwest::Client,
-        http_url: &str,
-        sync_token: &str,
-        topic_id: &str,
-    ) -> Result<(), String> {
-        let db = app.state::<DbState>();
-
-        let row = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?")
-            .bind(topic_id)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if let Some(r) = row {
-            let dto = AgentTopicSyncDTO {
-                id: r.get("topic_id"),
-                name: r.get("title"),
-                created_at: r.get("created_at"),
-                locked: r.get::<i64, _>("locked") != 0,
-                unread: r.get::<i64, _>("unread") != 0,
-                owner_id: r.get("owner_id"),
-            };
-
-            let idempotency_key = generate_idempotency_key("push", "agent_topic", topic_id);
-            let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-
-            let _ = client
-                .post(&url)
-                .header("x-sync-token", sync_token)
-                .header("x-idempotency-key", idempotency_key)
-                .json(&serde_json::json!({ "id": topic_id, "type": "agent_topic", "data": dto }))
-                .send()
-                .await;
-        }
-
-        Ok(())
-    }
-
-    pub async fn push_group_topic<R: Runtime>(
-        app: &AppHandle<R>,
-        client: &reqwest::Client,
-        http_url: &str,
-        sync_token: &str,
-        topic_id: &str,
-    ) -> Result<(), String> {
-        let db = app.state::<DbState>();
-
-        let row = sqlx::query(
-            "SELECT topic_id, title, created_at, owner_id FROM topics WHERE topic_id = ?",
-        )
-        .bind(topic_id)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        if let Some(r) = row {
-            let dto = GroupTopicSyncDTO {
-                id: r.get("topic_id"),
-                name: r.get("title"),
-                created_at: r.get("created_at"),
-                owner_id: r.get("owner_id"),
-            };
-
-            let idempotency_key = generate_idempotency_key("push", "group_topic", topic_id);
-            let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-
-            let _ = client
-                .post(&url)
-                .header("x-sync-token", sync_token)
-                .header("x-idempotency-key", idempotency_key)
-                .json(&serde_json::json!({ "id": topic_id, "type": "group_topic", "data": dto }))
                 .send()
                 .await;
         }
@@ -256,16 +199,18 @@ impl PushExecutor {
         )
         .await?;
 
-        // 3. 构建批量上传请求
-        let mut requests = Vec::new();
+        // 3. 构建批量上传请求 (全流式 NDJSON)
+        let mut ndjson_body = String::new();
         for tid in topic_ids {
             let history = messages_by_topic.get(tid).cloned().unwrap_or_default();
             if let Some((_owner_id, owner_type)) = owner_map.get(tid) {
                 let dto_messages = build_message_dtos(app, &history, owner_type).await;
-                requests.push(serde_json::json!({
+                let line = serde_json::json!({
                     "topicId": tid,
                     "messages": dto_messages,
-                }));
+                });
+                ndjson_body.push_str(&line.to_string());
+                ndjson_body.push('\n');
             }
         }
 
@@ -273,7 +218,8 @@ impl PushExecutor {
         let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
-            .json(&serde_json::json!({ "requests": requests }))
+            .header("Content-Type", "application/x-ndjson")
+            .body(ndjson_body) // reqwest 接受 String 作为 Body
             .send()
             .await
             .map_err(|e| format!("Batch push request failed: {}", e))?;
