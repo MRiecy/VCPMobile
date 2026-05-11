@@ -1,5 +1,6 @@
 package com.vcp.avatar
 
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
@@ -8,6 +9,7 @@ import androidx.activity.enableEdgeToEdge
 import com.vcp.avatar.bridge.FrontendBridge
 import com.vcp.avatar.insets.KeyboardInsetsManager
 import com.vcp.avatar.lifecycle.AppLifecycleBridge
+import com.vcp.avatar.service.StreamingActionReceiver
 
 /**
  * VCP Mobile Android 主 Activity
@@ -23,6 +25,9 @@ class MainActivity : TauriActivity() {
     // --- 领域模块 ---
     private val keyboardInsetsManager = KeyboardInsetsManager(frontendBridge)
     private val appLifecycleBridge = AppLifecycleBridge(frontendBridge)
+
+    // --- 流式服务广播接收器 ---
+    private lateinit var streamingActionReceiver: StreamingActionReceiver
 
     // ======================================================================
     // WebView 回调（WryActivity 提供）
@@ -43,6 +48,13 @@ class MainActivity : TauriActivity() {
         Log.d("VCPKeyboard", "MainActivity.onCreate: NEW APK RUNNING, setPadding should be REMOVED")
         // 键盘 Insets 手动管理（Android 15+ Edge-to-Edge 必需）
         keyboardInsetsManager.attach(window.decorView.rootView)
+
+        // 注册流式中断广播接收器
+        streamingActionReceiver = StreamingActionReceiver()
+        registerReceiver(
+            streamingActionReceiver,
+            IntentFilter(StreamingActionReceiver.STREAM_INTERRUPT_ACTION)
+        )
     }
 
     override fun onResume() {

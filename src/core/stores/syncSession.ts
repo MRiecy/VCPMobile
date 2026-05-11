@@ -39,10 +39,12 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     status.value = 'connecting';
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
+    invoke('set_keep_screen_on').catch(() => {});
     invoke('start_manual_sync').catch((e: any) => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';
       canDismiss.value = true;
+      invoke('clear_keep_screen_on').catch(() => {});
     });
   };
 
@@ -51,6 +53,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     isOpen.value = false;
     activeTab.value = 'live';
     cleanupListeners();
+    invoke('clear_keep_screen_on').catch(() => {});
   };
 
   const copyLogs = async () => {
@@ -85,13 +88,14 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     listen('vcp-sync-status', (event: any) => {
       const s = event.payload.status;
       if (s === 'open') { status.value = 'connected'; canDismiss.value = false; }
-      if (s === 'error') { status.value = 'error'; canDismiss.value = true; }
+      if (s === 'error') { status.value = 'error'; canDismiss.value = true; invoke('clear_keep_screen_on').catch(() => {}); }
     }).then(fn => unlistenFns.push(fn));
 
     listen('vcp-sync-completed', () => {
       status.value = 'completed';
       canDismiss.value = true;
       needsReload.value = true;
+      invoke('clear_keep_screen_on').catch(() => {});
       pushLog('success', '同步已全部完成，点击关闭以刷新数据');
     }).then(fn => unlistenFns.push(fn));
   };
