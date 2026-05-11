@@ -66,6 +66,7 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(streamingActionReceiver)
         frontendBridge.detachWebView()
         super.onDestroy()
     }

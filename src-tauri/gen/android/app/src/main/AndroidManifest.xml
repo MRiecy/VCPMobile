@@ -32,6 +32,17 @@
             </intent-filter>
         </activity>
 
+        <service
+            android:name=".service.StreamKeepaliveService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging"
+            android:stopWithTask="false" />
+
+        <receiver
+            android:name=".service.StreamingActionReceiver"
+            android:exported="false" />
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"

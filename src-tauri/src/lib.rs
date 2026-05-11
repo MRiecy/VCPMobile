@@ -35,6 +35,7 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
+use vcp_modules::stream_service_manager::StreamingServiceState;
 use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::fetch_raw_message_content;
 use vcp_modules::model_manager::{
@@ -108,6 +109,7 @@ pub fn run() {
         .setup(|app| {
             // 2. 初始化核心状态
             app.manage(LifecycleState::new());
+            app.manage(StreamingServiceState::default());
             app.manage(ActiveRequests::default());
             app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());

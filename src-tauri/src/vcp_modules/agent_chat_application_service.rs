@@ -122,13 +122,23 @@ pub async fn internal_process_agent_chat_message(
         })),
     };
 
-    // 7. 发起请求
+    // 7. 启动前台服务保活
+    if let Err(e) = crate::vcp_modules::stream_service_manager::start_streaming_service(&app_handle, &agent_config.name) {
+        println!("[AgentChatAppService] Failed to start streaming service: {}", e);
+    }
+
+    // 8. 发起请求
     let result = perform_vcp_request(
         &app_handle,
         active_requests.0.clone(),
         request_payload,
         Some(stream_channel),
     ).await;
+
+    // 9. 停止前台服务
+    if let Err(e) = crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle) {
+        println!("[AgentChatAppService] Failed to stop streaming service: {}", e);
+    }
 
     // 8. 流式结束后（含中断），将最终内容预渲染并入库
     match result {

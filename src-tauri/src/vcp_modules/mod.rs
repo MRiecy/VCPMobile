@@ -40,5 +40,6 @@ pub mod pre_renderer;
 pub mod sync_executor;
 pub mod sync_hash;
 pub mod sync_manifest;
+pub mod stream_service_manager;
 pub mod sync_pipeline;
 pub mod update_manager;

@@ -205,6 +205,11 @@ pub async fn internal_process_group_chat_message(
             })),
         };
 
+        // 启动前台服务保活
+        if let Err(e) = crate::vcp_modules::stream_service_manager::start_streaming_service(&app_handle, &agent_name) {
+            println!("[GroupChatAppService] Failed to start streaming service: {}", e);
+        }
+
         // 执行请求 (串行等待)
         let res_result = perform_vcp_request(
             &app_handle,
@@ -213,6 +218,11 @@ pub async fn internal_process_group_chat_message(
             stream_channel.clone(),
         )
         .await;
+
+        // 停止前台服务
+        if let Err(e) = crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle) {
+            println!("[GroupChatAppService] Failed to stop streaming service: {}", e);
+        }
 
         if let Ok((res, is_aborted)) = res_result {
             if let Some(full_content) = res["fullContent"].as_str() {
