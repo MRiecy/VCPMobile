@@ -11,21 +11,36 @@ pub struct TopicLocalState {
 }
 
 impl Phase3Message {
-    /// 获取所有 topic 的 content_hash（轻量，用于 Phase 2 快速筛选）
-    pub async fn get_all_topic_content_hashes(
+    /// V2: 获取指定 owner 下所有 topic 的 config_hash 和 content_hash
+    pub async fn get_targeted_topic_hashes(
         pool: &SqlitePool,
-    ) -> Result<HashMap<String, String>, String> {
-        let rows =
-            sqlx::query("SELECT topic_id, content_hash FROM topics WHERE deleted_at IS NULL")
-                .fetch_all(pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        owners: &[String],
+    ) -> Result<HashMap<String, (String, String)>, String> {
+        if owners.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let placeholders = owners.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let query_str = format!(
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id IN ({}) AND deleted_at IS NULL",
+            placeholders
+        );
+
+        let mut q = sqlx::query(&query_str);
+        for owner_id in owners {
+            q = q.bind(owner_id);
+        }
+
+        let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
 
         let mut result = HashMap::new();
         for row in rows {
             result.insert(
                 row.get::<String, _>("topic_id"),
-                row.get::<String, _>("content_hash"),
+                (
+                    row.get::<String, _>("config_hash"),
+                    row.get::<String, _>("content_hash"),
+                ),
             );
         }
         Ok(result)

@@ -24,7 +24,7 @@ export type MarkdownNode = {
 };
 
 export type InlineNode = {
-  type: "text" | "strong" | "emphasis" | "code" | "link" | "image" | "line_break" | "soft_break" | "inline_math" | "quoted_text" | "highlight_tag" | "alert_tag" | "raw_html_inline";
+  type: "text" | "strong" | "emphasis" | "strikethrough" | "code" | "link" | "image" | "line_break" | "soft_break" | "inline_math" | "quoted_text" | "highlight_tag" | "alert_tag" | "raw_html_inline";
   value?: string;
   children?: InlineNode[];
   href?: string;
@@ -140,10 +140,31 @@ export interface TopicFingerprint {
 }
 
 /**
+ * 流式增量块定义，由 Rust 流式块解析器推送
+ * 与 ContentBlock 类似但精简，用于流式期间的增量渲染
+ */
+export interface StreamBlock {
+  type: "markdown" | "thought" | "tool-use" | "tool-result" | "diary" | "html-preview" | "role-divider" | "style" | "button-click";
+  content?: string;
+  nodes?: MarkdownNode[];
+  theme?: string;
+  is_complete?: boolean;
+  tool_name?: string;
+  status?: string;
+  details?: Array<{ key: string; value: string }>;
+  footer?: string;
+  maid?: string;
+  date?: string;
+  role?: string;
+  is_end?: boolean;
+}
+
+/**
  * Aurora 语义沉淀更新，由 Rust 流式管道推送
  */
 export interface AuroraUpdate {
   stable: string;
+  stable_blocks: StreamBlock[];
   tail: string;
   content: string;
 }

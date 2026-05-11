@@ -28,7 +28,7 @@ const loadThumbnails = async () => {
 
         // Robust cleaning
         filename = filename.replace(/^.*[\\\/]/, '').replace(/['"]/g, '');
-        filename = filename.split('.')[0] + '.jpg';
+        filename = filename.split('.')[0] + '.webp';
 
         thumbnails.value[theme.fileName] = `/wallpaper/${filename}`;
       } catch (e) {

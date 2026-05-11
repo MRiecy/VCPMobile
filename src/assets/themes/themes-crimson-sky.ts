@@ -5,7 +5,7 @@ export const meta = {
 
 export const variables = {
   dark: {
-  "--chat-wallpaper-dark": "'ComfyUI_004237_600107602399358_00017.jpg'",
+  "--chat-wallpaper-dark": "'ComfyUI_004237_600107602399358_00017.webp'",
   "--primary-bg": "#0D0F12",
   "--secondary-bg": "#1A1C20",
   "--tertiary-bg": "#050607",
@@ -42,7 +42,7 @@ export const variables = {
   "--panel-bg": "var(--panel-bg-dark)"
 },
   light: {
-  "--chat-wallpaper-light": "'ComfyUI_003700_242440569464029_00016.jpg'",
+  "--chat-wallpaper-light": "'ComfyUI_003700_242440569464029_00016.webp'",
   "--primary-bg": "#F7F9FF",
   "--secondary-bg": "#FFFFFF",
   "--tertiary-bg": "#F0F4FF",

@@ -94,7 +94,10 @@ pub enum InlineNode {
 
     // VCP 魔法标记
     #[serde(rename = "quoted_text")]
-    QuotedText { value: String }, // 「...」
+    QuotedText { children: Vec<InlineNode> },
+
+    #[serde(rename = "strikethrough")]
+    Strikethrough { children: Vec<InlineNode> },
 
     #[serde(rename = "highlight_tag")]
     HighlightTag { value: String }, // #标签

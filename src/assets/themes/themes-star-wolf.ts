@@ -5,7 +5,7 @@ export const meta = {
 
 export const variables = {
   dark: {
-  "--chat-wallpaper-dark": "'wolfgirl.jpg'",
+  "--chat-wallpaper-dark": "'wolfgirl.webp'",
   "--primary-bg": "#1a1a1d",
   "--secondary-bg": "#2c2f33",
   "--tertiary-bg": "#121212",
@@ -42,7 +42,7 @@ export const variables = {
   "--panel-bg": "var(--panel-bg-dark)"
 },
   light: {
-  "--chat-wallpaper-light": "'stargirl.jpg'",
+  "--chat-wallpaper-light": "'stargirl.webp'",
   "--primary-bg": "#0f172a",
   "--secondary-bg": "#1e293b",
   "--tertiary-bg": "#0b1120",

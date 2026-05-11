@@ -255,7 +255,7 @@ onUnmounted(() => {
     </Transition>
 
     <!-- 3. 输入增强区 (固定底部) -->
-    <footer class="px-4 py-1.5 bg-black/10 border-t border-white/5 shrink-0">
+    <footer class="vcp-input-footer px-4 py-1.5 bg-black/10 border-t border-white/5 shrink-0">
       <InputEnhancer :disabled="!sessionStore.currentTopicId" @send="historyStore.sendMessage" />
       <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))] no-swipe pointer-events-none"></div>
     </footer>
@@ -265,10 +265,17 @@ onUnmounted(() => {
 <style scoped>
 .vcp-header-fixed {
   /* 强制适配刘海屏，增加保底 padding */
-  padding-top: calc(var(--vcp-safe-top, 24px) + 8px);
+  padding-top: calc(var(--vcp-safe-top, 24px));
   padding-bottom: 12px;
   background-color: color-mix(in srgb, var(--secondary-bg) 80%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   border-bottom: 1px solid transparent;
+}
+
+.vcp-input-footer {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 /* 隐藏滚动条 */

@@ -23,6 +23,9 @@ export const useAvatarStore = defineStore("avatar", () => {
   // 用于追踪正在进行的 dominant_color 计算，防止重复触发
   const inFlightCompute = new Set<string>();
 
+  // dominant_color 同步缓存，供 computeShell 等同步场景使用
+  const dominantColors = reactive(new Map<string, string>());
+
   /**
    * 获取头像 URL (带自动缓存和版本检查)
    */
@@ -54,6 +57,10 @@ export const useAvatarStore = defineStore("avatar", () => {
         });
 
         if (result && result.image_data) {
+          // Cache dominant_color for synchronous access (e.g. computeShell)
+          if (result.dominant_color) {
+            dominantColors.set(key, result.dominant_color);
+          }
           // 如果 dominant_color 缺失，异步触发后端计算（仅处理存量数据）
           if (result.dominant_color === null) {
             if (!inFlightCompute.has(key)) {
@@ -119,11 +126,20 @@ export const useAvatarStore = defineStore("avatar", () => {
       URL.revokeObjectURL(existing.blobUrl);
       cache.delete(key);
     }
+    dominantColors.delete(key);
+  };
+
+  /**
+   * 同步获取已缓存的 dominant_color，未缓存时返回 undefined
+   */
+  const getDominantColor = (ownerType: string, ownerId: string): string | undefined => {
+    return dominantColors.get(`${ownerType}:${ownerId}`);
   };
 
   return {
     cache, // 暴露 cache 以供同步检查
     getAvatarUrl,
-    clearCache
+    clearCache,
+    getDominantColor,
   };
 });

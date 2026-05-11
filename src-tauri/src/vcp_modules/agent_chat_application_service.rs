@@ -123,13 +123,60 @@ pub async fn internal_process_agent_chat_message(
     };
 
     // 7. 发起请求
-    perform_vcp_request(
+    let result = perform_vcp_request(
         &app_handle,
         active_requests.0.clone(),
         request_payload,
         Some(stream_channel),
-    )
-    .await?;
+    ).await;
+
+    // 8. 流式结束后（含中断），将最终内容预渲染并入库
+    match result {
+        Ok((res, is_aborted)) => {
+            if let Some(full_content) = res["fullContent"].as_str() {
+                let finish_reason = if is_aborted {
+                    Some("cancelled_by_user".to_string())
+                } else {
+                    res["finishReason"].as_str().map(|s| s.to_string())
+                };
+
+                let final_msg = ChatMessage {
+                    id: thinking_id.clone(),
+                    role: "assistant".to_string(),
+                    name: Some(agent_config.name.clone()),
+                    content: full_content.to_string(),
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                    is_thinking: Some(false),
+                    agent_id: Some(agent_id.clone()),
+                    group_id: None,
+                    topic_id: Some(topic_id.clone()),
+                    is_group_message: Some(false),
+                    finish_reason,
+                    attachments: None,
+                    blocks: None,
+                    shell: None,
+                };
+
+                if let Err(e) = message_service::patch_single_message(
+                    app_handle.clone(),
+                    &db_state.pool,
+                    &agent_id,
+                    "agent",
+                    topic_id.clone(),
+                    final_msg,
+                    false,
+                ).await {
+                    println!("[AgentChatAppService] Failed to patch final message after stream: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            println!("[AgentChatAppService] perform_vcp_request failed: {}", e);
+        }
+    }
 
     Ok(json!({ "status": "sent", "messageId": thinking_id }))
 }

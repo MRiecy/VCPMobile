@@ -1,3 +1,4 @@
+use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::message_service;
 use serde::{Deserialize, Serialize};
 
@@ -160,7 +161,7 @@ pub async fn patch_single_message(
     owner_type: String,
     topic_id: String,
     message: ChatMessage,
-) -> Result<(), String> {
+) -> Result<Vec<ContentBlock>, String> {
     message_service::patch_single_message(
         app_handle,
         &db_state.pool,

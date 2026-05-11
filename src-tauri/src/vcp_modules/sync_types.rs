@@ -100,7 +100,14 @@ pub struct EntityState {
     /// 实体的唯一标识 (agent_id, group_id, 或 avatar 对应的 owner_id)
     pub id: String,
     /// 状态指纹 (SHA-256 Hash，代表内容的本质)
+    /// 在 V2 协议中，Agent/Group 优先使用 config_hash 和 content_hash
     pub hash: String,
+    /// 配置内容指纹 (V2 优化)
+    #[serde(rename = "configHash", skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+    /// 内容聚合指纹 (V2 优化，代表旗下话题/消息是否有变动)
+    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
     /// 绝对时间戳 / 逻辑时钟 (LWW 裁决标准)
     pub ts: i64,
     /// 软删除时间戳 (可选，用于双向删除同步)

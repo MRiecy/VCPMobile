@@ -76,6 +76,12 @@ impl DbWriteQueue {
             let mut error_count = 0u32;
 
             while let Some(first_task) = rx.recv().await {
+                // 如果第一个任务就是 Flush，无需启动事务，直接确认
+                if let DbWriteTask::Flush { tx } = first_task {
+                    let _ = tx.send(());
+                    continue;
+                }
+
                 // 启动超级事务
                 let mut tx = match pool.begin().await {
                     Ok(t) => t,
@@ -86,18 +92,23 @@ impl DbWriteQueue {
                 };
 
                 let mut tasks_in_this_tx = vec![first_task];
+                let mut flush_tx_opt: Option<oneshot::Sender<()>> = None;
 
-                // 贪婪模式：尽可能从 Channel 中吸纳更多任务合并提交
-                // 限制：最多攒 100 个任务或 2000 条数据变更（防止事务过大）
-                while tasks_in_this_tx.len() < 100 {
-                    match rx.try_recv() {
-                        Ok(DbWriteTask::Flush { tx: flush_tx }) => {
-                            // Flush 任务必须打断攒批，确保之前的写入立即落盘
-                            let _ = flush_tx.send(());
+                // [Optimization] 真正贪婪模式：如果批次不满，等待最多 50ms 抓取更多并发任务
+                // 这样能确保在 30 线程并发分发时，Worker 能一次性吃掉几十个话题的任务
+                while tasks_in_this_tx.len() < 500 {
+                    let next_res = tokio::time::timeout(
+                        std::time::Duration::from_millis(50),
+                        rx.recv()
+                    ).await;
+
+                    match next_res {
+                        Ok(Some(DbWriteTask::Flush { tx })) => {
+                            flush_tx_opt = Some(tx);
                             break;
                         }
-                        Ok(next_task) => tasks_in_this_tx.push(next_task),
-                        _ => break,
+                        Ok(Some(task)) => tasks_in_this_tx.push(task),
+                        _ => break, // 超时或 Channel 关闭，直接提交当前批次
                     }
                 }
 
@@ -106,6 +117,7 @@ impl DbWriteQueue {
 
                 for task in tasks_in_this_tx {
                     let (task_type, id, result) = match task {
+                        // ... (Agent/Group/Avatar cases remain same) ...
                         DbWriteTask::Agent { id, dto } => {
                             let res = Self::upsert_agent_in_tx(&mut tx, &id, &dto).await;
                             affected_owners.insert((id.clone(), "agent".to_string()));
@@ -134,8 +146,9 @@ impl DbWriteQueue {
                         }
                         DbWriteTask::AgentTopicBatch { topics } => {
                             let count = topics.len();
-                            for (_, dto) in &topics {
+                            for (tid, dto) in &topics {
                                 affected_owners.insert((dto.owner_id.clone(), "agent".to_string()));
+                                affected_topics.insert(tid.clone());
                             }
                             let res = Self::upsert_agent_topic_batch_in_tx(&mut tx, topics).await;
                             ("agent_topic_batch", format!("{} items", count), res)
@@ -144,12 +157,14 @@ impl DbWriteQueue {
                             let res =
                                 Self::upsert_group_topic_in_tx(&mut tx, &topic_id, &dto).await;
                             affected_owners.insert((dto.owner_id.clone(), "group".to_string()));
+                            affected_topics.insert(topic_id.clone());
                             ("group_topic", topic_id, res)
                         }
                         DbWriteTask::GroupTopicBatch { topics } => {
                             let count = topics.len();
-                            for (_, dto) in &topics {
+                            for (tid, dto) in &topics {
                                 affected_owners.insert((dto.owner_id.clone(), "group".to_string()));
+                                affected_topics.insert(tid.clone());
                             }
                             let res = Self::upsert_group_topic_batch_in_tx(&mut tx, topics).await;
                             ("group_topic_batch", format!("{} items", count), res)
@@ -169,6 +184,7 @@ impl DbWriteQueue {
                                 &topic_id,
                                 messages,
                                 render_bytes,
+                                skip_bubble, // 传递此参数
                             )
                             .await;
                             (
@@ -177,7 +193,7 @@ impl DbWriteQueue {
                                 res,
                             )
                         }
-                        DbWriteTask::Flush { .. } => unreachable!(), // 已在 try_recv 过滤
+                        DbWriteTask::Flush { .. } => unreachable!(),
                     };
 
                     match result {
@@ -188,6 +204,8 @@ impl DbWriteQueue {
                         }
                     }
                 }
+                
+                // ... (bubbling logic remains same) ...
 
                 // 在同一事务末尾统一执行 Hash 冒泡，确保原子性且最小化开销
                 for (owner_id, owner_type) in affected_owners {
@@ -210,6 +228,10 @@ impl DbWriteQueue {
                 // 统一提交
                 if let Err(e) = tx.commit().await {
                     println!("[DbWriteQueue] Super transaction commit failed: {}", e);
+                }
+                // Flush 确认必须在事务落盘之后
+                if let Some(tx) = flush_tx_opt {
+                    let _ = tx.send(());
                 }
             }
 
@@ -411,25 +433,6 @@ impl DbWriteQueue {
         .await
         .map_err(|e| e.to_string())?;
 
-        // 补偿：如果该 topic 已有消息，更新 msg_count
-        let actual_count: i32 = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(topic_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0) as i32;
-
-        if actual_count > 0 {
-            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                .bind(actual_count)
-                .bind(topic_id)
-                .execute(&mut **tx)
-                .await;
-        }
-
         Ok(())
     }
 
@@ -454,25 +457,6 @@ impl DbWriteQueue {
         .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
-
-        // 补偿
-        let actual_count: i32 = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(topic_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0) as i32;
-
-        if actual_count > 0 {
-            let _ = sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-                .bind(actual_count)
-                .bind(topic_id)
-                .execute(&mut **tx)
-                .await;
-        }
 
         Ok(())
     }
@@ -502,12 +486,18 @@ impl DbWriteQueue {
         topic_id: &str,
         messages: Vec<ChatMessage>,
         render_bytes: Vec<Vec<u8>>,
+        skip_metadata_update: bool,
     ) -> Result<(), String> {
         // 将消息和渲染字节对齐
         let items: Vec<(&ChatMessage, Vec<u8>)> = messages.iter().zip(render_bytes).collect();
         MessageRepository::upsert_messages_batch(tx, topic_id, &items).await?;
 
-        // 更新 topic 元数据
+        // 如果是同步期间，跳过这些昂贵的单话题 SQL 操作
+        if skip_metadata_update {
+            return Ok(());
+        }
+
+        // 更新 topic 元数据 (仅用于平时普通聊天消息落盘)
         let now = chrono::Utc::now().timestamp_millis();
         sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
             .bind(now)

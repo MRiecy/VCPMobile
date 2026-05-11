@@ -29,6 +29,7 @@ const currentTopics = computed<TopicViewModel[]>(() => {
 // 虚拟列表实现
 const { list, containerProps, wrapperProps } = useVirtualList(currentTopics, {
   itemHeight: 74, // 10(h-10) + padding/margins, 约 74px
+  overscan: 10,
 });
 
 // 拦截容器引用，用于数据变化时手动控制滚动位置
@@ -188,7 +189,7 @@ const selectTopic = async (
           item.data.name,
         )
         " v-longpress="() => showTopicContextMenu(item.data.id)">
-        <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer transition-all duration-300 z-10 w-full active:scale-[0.98] origin-center"
+        <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer transition-[background-color,border-color,transform,box-shadow] duration-300 z-10 w-full active:scale-[0.98] origin-center"
           :class="[
             sessionStore.currentTopicId === item.data.id
               ? 'glass-panel-active'

@@ -86,8 +86,8 @@ const backgroundStyle = computed(() => {
 
   // 1. Strip path
   filename = filename.replace(/^.*[\\\/]/, "").replace(/['"]/g, "");
-  // 2. Strip ANY existing extension and force .jpg (matching optimized public/wallpaper)
-  filename = filename.split(".")[0] + ".jpg";
+  // 2. Strip ANY existing extension and force .webp (matching optimized public/wallpaper)
+  filename = filename.split(".")[0] + ".webp";
 
   return { backgroundImage: `url("/wallpaper/${filename}")` };
 });

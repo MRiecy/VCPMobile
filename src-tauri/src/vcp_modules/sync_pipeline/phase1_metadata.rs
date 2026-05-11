@@ -9,7 +9,10 @@ impl Phase1Metadata {
         ManifestBuilder::build_phase1_manifests(pool).await
     }
 
-    pub async fn build_topic_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
-        ManifestBuilder::build_topic_manifest(pool).await
+    pub async fn build_targeted_topic_manifest(
+        pool: &SqlitePool,
+        owners: &[String],
+    ) -> Result<SyncManifest, String> {
+        ManifestBuilder::build_targeted_topic_manifest(pool, owners).await
     }
 }

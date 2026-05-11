@@ -28,6 +28,13 @@ async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> Option<S
     .flatten()
 }
 
+/// 批量 Push 单 topic 处理结果
+pub struct PushBatchResult {
+    pub topic_id: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 pub struct PushExecutor;
 
 impl PushExecutor {
@@ -202,111 +209,180 @@ impl PushExecutor {
         Ok(())
     }
 
-    pub async fn push_messages(
-        app: &AppHandle,
+    /// 批量 Push — 一次 HTTP 请求推送多个 topic 的消息
+    ///
+    /// 手机端批量加载消息 → POST /upload-messages-batch (NDJSON)
+    /// → 解析响应收集 neededAttachmentHashes → 去重上传附件
+    ///
+    /// 返回每个 topic 的处理结果。
+    pub async fn push_messages_batch<R: Runtime>(
+        app: &AppHandle<R>,
         client: &reqwest::Client,
         http_url: &str,
         sync_token: &str,
-        topic_id: &str,
-        uploaded_hashes: Option<Arc<RwLock<HashSet<String>>>>,
-    ) -> Result<(), String> {
+        topic_ids: &[String],
+        uploaded_hashes: Arc<RwLock<HashSet<String>>>,
+    ) -> Result<Vec<PushBatchResult>, String> {
+        if topic_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let db = app.state::<DbState>();
 
-        let topic_row = sqlx::query("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?")
-            .bind(topic_id)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        // 1. 批量查询 topic 的 owner 信息
+        let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let topic_query = format!(
+            "SELECT topic_id, owner_id, owner_type FROM topics WHERE topic_id IN ({})",
+            placeholders
+        );
+        let mut q = sqlx::query(&topic_query);
+        for id in topic_ids {
+            q = q.bind(id);
+        }
+        let topic_rows = q.fetch_all(&db.pool).await.map_err(|e| e.to_string())?;
 
-        if let Some(r) = topic_row {
-            let owner_id: String = r.get("owner_id");
-            let owner_type: String = r.get("owner_type");
+        let mut owner_map: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
+        for row in &topic_rows {
+            let tid: String = row.get("topic_id");
+            let oid: String = row.get("owner_id");
+            let otype: String = row.get("owner_type");
+            owner_map.insert(tid, (oid, otype));
+        }
 
-            // 推送时必须加载该 topic 的全部消息，否则会导致桌面端 hash 不一致
-            let msg_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
-            )
-            .bind(topic_id)
-            .fetch_one(&db.pool)
+        // 2. 批量加载所有 topic 的消息（一次 SQL）
+        let messages_by_topic = crate::vcp_modules::message_service::load_multi_topic_messages(
+            &db.pool, topic_ids,
+        )
+        .await?;
+
+        // 3. 构建批量上传请求
+        let mut requests = Vec::new();
+        for tid in topic_ids {
+            let history = messages_by_topic.get(tid).cloned().unwrap_or_default();
+            if let Some((_owner_id, owner_type)) = owner_map.get(tid) {
+                let dto_messages = build_message_dtos(app, &history, owner_type).await;
+                requests.push(serde_json::json!({
+                    "topicId": tid,
+                    "messages": dto_messages,
+                }));
+            }
+        }
+
+        let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
+        let response = client
+            .post(&url)
+            .header("x-sync-token", sync_token)
+            .json(&serde_json::json!({ "requests": requests }))
+            .send()
             .await
-            .unwrap_or(0);
-            if msg_count > 9999 {
-                println!("[PushExecutor] WARN: topic {} has {} messages, exceeding single-batch load limit. Consider incremental push protocol.", topic_id, msg_count);
+            .map_err(|e| format!("Batch push request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_body = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "Batch push messages failed: HTTP {} body={}",
+                status, err_body
+            ));
+        }
+
+        // 4. 解析 NDJSON 响应
+        let body = response.text().await.map_err(|e| e.to_string())?;
+        let mut results = Vec::new();
+        let mut all_needed_hashes: Vec<String> = Vec::new();
+
+        for line in body.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
             }
 
-            let history = crate::vcp_modules::message_service::load_chat_history_internal(
-                app,
-                &owner_id,
-                &owner_type,
-                topic_id,
-                None,
-                None,
-                true,
-            )
-            .await?;
+            let data: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "[PushExecutor] Batch push: NDJSON parse error on line: {:.100}... ({})",
+                        line, e
+                    );
+                    continue;
+                }
+            };
+            let tid = data["topicId"].as_str().unwrap_or("").to_string();
+            if tid.is_empty() {
+                eprintln!(
+                    "[PushExecutor] Batch push: NDJSON line missing topicId: {:.100}...",
+                    line
+                );
+                continue;
+            }
 
-            let dto_messages = build_message_dtos(app, &history, &owner_type).await;
+            let success = data["success"].as_bool().unwrap_or(false);
+            let error = data["error"].as_str().map(|s| s.to_string());
 
-            let url = format!("{}/api/mobile-sync/upload-messages", http_url);
-            let response = client
-                .post(&url)
-                .header("x-sync-token", sync_token)
-                .json(&serde_json::json!({ "topicId": topic_id, "messages": dto_messages }))
-                .send()
-                .await;
-
-            if let Ok(resp) = response {
-                if resp.status().is_success() {
-                    if let Ok(result) = resp.json::<serde_json::Value>().await {
-                        if let Some(needed_hashes) = result
-                            .get("neededAttachmentHashes")
-                            .and_then(|v| v.as_array())
-                        {
-                            // 1. 筛选出真正需要上传的附件 hash
-                            let mut hashes_to_upload = Vec::new();
-                            for hash_value in needed_hashes {
-                                if let Some(hash) = hash_value.as_str() {
-                                    let should_upload = if let Some(ref tracker) = uploaded_hashes {
-                                        let tracker_guard = tracker.read().await;
-                                        !tracker_guard.contains(hash)
-                                    } else {
-                                        true
-                                    };
-                                    if should_upload {
-                                        hashes_to_upload.push(hash.to_string());
-                                    } else {
-                                        println!("[PushExecutor] Skipping already uploaded attachment: {}", hash);
-                                    }
-                                }
-                            }
-
-                            // 2. 限流并发上传（最多 3 个并发）
-                            const MAX_CONCURRENT_UPLOADS: usize = 3;
-                            for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
-                                let futures: Vec<_> = chunk
-                                    .iter()
-                                    .map(|hash| {
-                                        upload_attachment(app, client, http_url, sync_token, hash)
-                                    })
-                                    .collect();
-                                let results = futures_util::future::join_all(futures).await;
-                                // 3. 批量标记已上传
-                                if let Some(ref tracker) = uploaded_hashes {
-                                    let mut tracker_guard = tracker.write().await;
-                                    for (hash, result) in chunk.iter().zip(results) {
-                                        if result.is_ok() {
-                                            tracker_guard.insert(hash.clone());
-                                        }
-                                    }
-                                }
-                            }
+            if success {
+                // 收集此 topic 需要的附件 hash
+                if let Some(needed) = data["neededAttachmentHashes"].as_array() {
+                    for h in needed {
+                        if let Some(hash) = h.as_str() {
+                            all_needed_hashes.push(hash.to_string());
                         }
+                    }
+                }
+            }
+
+            results.push(PushBatchResult {
+                topic_id: tid,
+                success,
+                error,
+            });
+        }
+
+        // 5. 去重后上传附件（复用现有 3 并发上传逻辑）
+        if !all_needed_hashes.is_empty() {
+            use std::collections::HashSet;
+            let unique_hashes: Vec<String> = {
+                let mut seen = HashSet::new();
+                all_needed_hashes
+                    .into_iter()
+                    .filter(|h| seen.insert(h.clone()))
+                    .collect()
+            };
+
+            // 筛选出尚未上传的 hash
+            let hashes_to_upload: Vec<String> = {
+                let tracker_guard = uploaded_hashes.read().await;
+                unique_hashes
+                    .into_iter()
+                    .filter(|h| !tracker_guard.contains(h))
+                    .collect()
+            };
+
+            const MAX_CONCURRENT_UPLOADS: usize = 3;
+            for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
+                let futures: Vec<_> = chunk
+                    .iter()
+                    .map(|hash| {
+                        upload_attachment(app, client, http_url, sync_token, hash)
+                    })
+                    .collect();
+                let upload_results = futures_util::future::join_all(futures).await;
+                let mut tracker_guard = uploaded_hashes.write().await;
+                for (hash, result) in chunk.iter().zip(upload_results) {
+                    if result.is_ok() {
+                        tracker_guard.insert(hash.clone());
                     }
                 }
             }
         }
 
-        Ok(())
+        let ok_count = results.iter().filter(|r| r.success).count();
+        println!(
+            "[PushExecutor] Batch push completed: {}/{} topics",
+            ok_count,
+            topic_ids.len()
+        );
+        Ok(results)
     }
 }
 

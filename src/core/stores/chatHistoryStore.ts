@@ -7,7 +7,8 @@ import { useAttachmentStore } from "./attachmentStore";
 import { useAssistantStore } from "./assistant";
 import { useSettingsStore } from "./settings";
 import { useTopicStore } from "./topicListManager";
-import { useStreamManagerStore } from "./streamManager";
+import { useAvatarStore } from "./avatar";
+import { clearMessageCache } from "../utils/astRenderer";
 import type { ChatMessage, HistoryChunk, ContentBlock } from "../types/chat";
 
 export const useChatHistoryStore = defineStore("chatHistory", () => {
@@ -30,10 +31,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
   const topicStore = useTopicStore();
-  const streamManager = useStreamManagerStore();
+  const avatarStore = useAvatarStore();
 
   /**
    * 尝试为话题生成 AI 总结标题
+   * 触发条件：消息数 >= 4 且标题仍为初始的 "新话题 HH:MM:SS" 格式
    */
   const summarizeTopic = async () => {
     if (!sessionStore.currentTopicId || !sessionStore.currentSelectedItem?.id) return;
@@ -43,17 +45,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const ownerType = sessionStore.currentSelectedItem.type;
 
     const topic = topicStore.topics.find((t) => t.id === topicId);
-    const isUnnamed =
-      !topic ||
-      topic.name.includes("新话题") ||
-      topic.name.includes("topic_") ||
-      topic.name.includes("group_topic_") ||
-      topic.name === "主要群聊";
+    const isDefaultName = topic && /^新话题 \d{2}:\d{2}:\d{2}$/.test(topic.name);
     const messageCount = currentChatHistory.value.filter(
       (m) => m.role !== "system",
     ).length;
 
-    if (isUnnamed && messageCount >= 4) {
+    if (isDefaultName && messageCount >= 4) {
       console.log(`[ChatHistoryStore] Triggering AI summary for topic: ${topicId}`);
       try {
         const agentName =
@@ -205,125 +202,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   /**
-   * 处理流式事件的核心逻辑 (会话隔离调度器)
-   */
-  const handleStreamEvent = (event: any) => {
-    const actualMessageId = event.messageId || event.message_id || "";
-    const { chunk, type, context } = event;
-    const ctx = context || {};
-    const topicId = ctx.topicId; // 获取该消息归属的话题 ID
-    const itemId = ctx.agentId || ctx.groupId || ctx.ownerId; // 获取该消息归属的 Owner ID
-
-    if (!actualMessageId || !topicId || !itemId) return;
-
-    // 1. [核心] 获取或创建全局响应式消息对象 (Single Source of Truth)
-    let msg = streamStore.activeStreamMessages.get(actualMessageId);
-    const isNewStream = !msg;
-
-    if (isNewStream) {
-      // 如果池子中没有，说明是后台静默启动的流，或者是前端刚刷新丢失了状态
-      msg = reactive<ChatMessage>({
-        id: actualMessageId,
-        role: "assistant",
-        name: ctx.agentName,
-        content: "",
-        timestamp: Date.now(),
-        isThinking: false,
-        agentId: ctx.agentId,
-        groupId: ctx.groupId,
-        isGroupMessage: !!ctx.isGroupMessage,
-      });
-      streamStore.activeStreamMessages.set(actualMessageId, msg!);
-      
-      // 更新后台计数
-      if (topicId !== sessionStore.currentTopicId) {
-        topicStore.incrementTopicMsgCount(topicId);
-        topicStore.incrementTopicUnreadCount(topicId);
-      }
-    }
-
-    // 2. 如果消息属于当前正在看的话题，确保它在 currentChatHistory 中
-    const isCurrentTopic = topicId === sessionStore.currentTopicId;
-    if (isCurrentTopic) {
-      const existsInView = currentChatHistory.value.some(m => m.id === actualMessageId);
-      if (!existsInView) {
-        currentChatHistory.value.push(msg!);
-        currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
-        // 如果是新创建且在当前视图中，增加计数
-        if (isNewStream) {
-            topicStore.incrementTopicMsgCount(topicId);
-        }
-      }
-    }
-
-    // 3. 维护流状态
-    if (type === "data") {
-      msg!.isThinking = false;
-      streamStore.addSessionStream(itemId, topicId, actualMessageId);
-
-      let textChunk = "";
-      if (typeof chunk === "string") {
-        textChunk = chunk;
-      } else if (chunk && chunk.choices && chunk.choices.length > 0) {
-        const delta = chunk.choices[0].delta;
-        if (delta && delta.content) textChunk = delta.content;
-      }
-
-      // 保留 content 累加作为 Aurora 未触发时的后备显示
-      if (textChunk) {
-        msg!.content = (msg!.content || "") + textChunk;
-        if (!msg!.tailContent) {
-          msg!.tailContent = msg!.content;
-        }
-      }
-    } else if (type === "aurora") {
-      const aurora = event.aurora;
-      if (aurora) {
-        msg!.content = aurora.content;
-        msg!.stableContent = aurora.stable;
-        msg!.tailContent = aurora.tail;
-        msg!.displayedContent = aurora.stable + aurora.tail;
-      }
-      msg!.isThinking = false;
-      streamStore.addSessionStream(itemId, topicId, actualMessageId);
-    } else if (type === "end" || type === "error") {
-      const errorMsg = event.error;
-      const finishReason = event.finishReason;
-
-      streamManager.finalizeStream(actualMessageId, async () => {
-        msg!.displayedContent = msg!.content;
-        msg!.tailContent = "";
-        if (finishReason) msg!.finishReason = finishReason;
-
-        streamStore.removeSessionStream(itemId, topicId, actualMessageId);
-        if (streamStore.streamingMessageId === actualMessageId) streamStore.streamingMessageId = null;
-
-        if (type === "error" && errorMsg && errorMsg !== "请求已中止") {
-          const errorText = `\n\n> VCP流式错误: ${errorMsg}`;
-          msg!.content += errorText;
-          msg!.displayedContent = msg!.content;
-          msg!.finishReason = "error";
-        }
-
-        // 持久化到数据库
-        if (msg) {
-            await invoke("patch_single_message", {
-              ownerId: itemId,
-              ownerType: ctx.isGroupMessage ? "group" : "agent",
-              topicId: topicId,
-              message: msg,
-            });
-
-            // 如果在当前视图，尝试生成总结标题
-            if (isCurrentTopic) {
-                await summarizeTopic();
-            }
-        }
-      });
-    }
-  };
-
-  /**
    * 触发 AI 生成逻辑
    */
   const triggerGeneration = async (userMsg: ChatMessage) => {
@@ -333,19 +211,21 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const topicId = sessionStore.currentTopicId;
     const now = Date.now();
     const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 7)}`;
-    
+    const assistantName = sessionStore.currentSelectedItem.type === "agent"
+      ? (assistantStore.agents.find((a) => a.id === agentId)?.name || "Assistant")
+      : undefined;
+
     const thinkingMsg = reactive<ChatMessage>({
       id: thinkingId,
       role: "assistant",
-      name: sessionStore.currentSelectedItem.type === "agent"
-          ? (assistantStore.agents.find((a) => a.id === agentId)?.name || "Assistant")
-          : undefined,
+      name: assistantName,
       content: "",
       timestamp: now + 1,
       isThinking: true,
       isGroupMessage: sessionStore.currentSelectedItem.type === "group",
       groupId: sessionStore.currentSelectedItem.type === "group" ? sessionStore.currentSelectedItem.id : undefined,
       agentId: sessionStore.currentSelectedItem.type === "agent" ? sessionStore.currentSelectedItem.id : undefined,
+      shell: streamStore.computeShell({ role: "assistant", agentId, name: assistantName }),
     });
 
     // 注册到全局流池和当前视图
@@ -374,7 +254,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (!settings) throw new Error("应用尚未完成初始化");
 
       const streamChannel = new Channel<any>();
-      streamChannel.onmessage = handleStreamEvent;
+      streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
+        onMessageCreated: (msg, tid) => {
+          if (tid === sessionStore.currentTopicId && !currentChatHistory.value.some(m => m.id === msg.id)) {
+            currentChatHistory.value.push(msg);
+            currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
+          }
+        },
+        onStreamFinished: (mid, tid) => {
+          if (tid === sessionStore.currentTopicId) {
+            summarizeTopic();
+          }
+        }
+      });
 
       if (sessionStore.currentSelectedItem.type === "group") {
         await invoke("handle_group_chat_message", { 
@@ -443,13 +335,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
 
     const now = Date.now();
+    const userName = settingsStore.settings?.userName || "User";
     const userMsg: ChatMessage = {
       id: `msg_${now}_user_${Math.random().toString(36).substring(2, 7)}`,
       role: "user",
-      name: settingsStore.settings?.userName || "User",
+      name: userName,
       content,
       timestamp: now,
       attachments: currentStaged.length > 0 ? currentStaged : undefined,
+      shell: streamStore.computeShell({ role: "user", name: userName }),
     };
 
     currentChatHistory.value.push(userMsg);
@@ -496,18 +390,37 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   const updateMessageContent = async (messageId: string, newContent: string) => {
-    const msg = currentChatHistory.value.find(m => m.id === messageId);
-    if (!msg) return;
-    msg.content = newContent;
-    msg.blocks = undefined;
-    msg.displayedContent = "";
+    clearMessageCache(messageId);
+    const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
+    if (targetIndex === -1) return;
+
+    const msg = currentChatHistory.value[targetIndex];
+    currentChatHistory.value[targetIndex] = {
+      ...msg,
+      content: newContent,
+      blocks: undefined,
+      displayedContent: "",
+    };
+
     if (sessionStore.currentSelectedItem?.id && sessionStore.currentTopicId) {
-      await invoke("patch_single_message", {
-        ownerId: sessionStore.currentSelectedItem.id,
-        ownerType: sessionStore.currentSelectedItem.type,
-        topicId: sessionStore.currentTopicId,
-        message: msg,
-      });
+      try {
+        const compiledBlocks = await invoke("patch_single_message", {
+          ownerId: sessionStore.currentSelectedItem.id,
+          ownerType: sessionStore.currentSelectedItem.type,
+          topicId: sessionStore.currentTopicId,
+          message: currentChatHistory.value[targetIndex],
+        });
+        currentChatHistory.value[targetIndex] = {
+          ...currentChatHistory.value[targetIndex],
+          blocks: compiledBlocks as any,
+        };
+      } catch (e) {
+        console.error("[updateMessageContent] patch_single_message failed:", e);
+        currentChatHistory.value[targetIndex] = {
+          ...currentChatHistory.value[targetIndex],
+          blocks: [{ type: "markdown" as const, content: newContent }],
+        };
+      }
     }
   };
 
@@ -541,18 +454,20 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     // 3. 构造思考占位消息 (并注册到全局池)
     const thinkingId = `msg_${Date.now()}_assistant_regen`;
+    const regenName = ownerType === "agent"
+        ? (assistantStore.agents.find((a) => a.id === ownerId)?.name || "Assistant")
+        : undefined;
     const thinkingMsg = reactive<ChatMessage>({
       id: thinkingId,
       role: "assistant",
-      name: ownerType === "agent"
-          ? (assistantStore.agents.find((a) => a.id === ownerId)?.name || "Assistant")
-          : undefined,
+      name: regenName,
       content: "",
       timestamp: Date.now(),
       isThinking: true,
       isGroupMessage: ownerType === "group",
       groupId: ownerType === "group" ? ownerId : undefined,
       agentId: ownerType === "agent" ? ownerId : undefined,
+      shell: streamStore.computeShell({ role: "assistant", agentId: ownerType === "agent" ? ownerId : undefined, name: regenName }),
     });
     
     streamStore.activeStreamMessages.set(thinkingId, thinkingMsg);
@@ -565,7 +480,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     // 4. 调用后端重构后的重生接口
     try {
       const streamChannel = new Channel<any>();
-      streamChannel.onmessage = handleStreamEvent;
+      streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
+        onMessageCreated: (msg, tid) => {
+          if (tid === sessionStore.currentTopicId && !currentChatHistory.value.some(m => m.id === msg.id)) {
+            currentChatHistory.value.push(msg);
+            currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
+          }
+        },
+        onStreamFinished: (mid, tid) => {
+          if (tid === sessionStore.currentTopicId) {
+            summarizeTopic();
+          }
+        }
+      });
 
       await invoke("regenerate_topic_response", {
         ownerId,
@@ -611,6 +538,26 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     } catch (e) {}
   };
 
+  /**
+   * 为指定消息向后端请求预渲染 blocks（用于无 blocks 的消息回退）
+   */
+  const compileMessageBlocks = async (messageId: string) => {
+    const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
+    if (targetIndex === -1) return;
+    const msg = currentChatHistory.value[targetIndex];
+    if (msg.blocks || !msg.content) return;
+
+    try {
+      const blocks = await invoke("process_message_content", { content: msg.content });
+      currentChatHistory.value[targetIndex] = {
+        ...msg,
+        blocks: blocks as any,
+      };
+    } catch (e) {
+      console.error("[ChatHistoryStore] compileMessageBlocks failed:", e);
+    }
+  };
+
   return {
     currentChatHistory,
     loading,
@@ -630,5 +577,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     regenerateResponse,
     fetchRawContent,
     persistMessageBlocks,
+    compileMessageBlocks,
   };
 });
