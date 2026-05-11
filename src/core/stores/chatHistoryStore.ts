@@ -7,7 +7,6 @@ import { useAttachmentStore } from "./attachmentStore";
 import { useAssistantStore } from "./assistant";
 import { useSettingsStore } from "./settings";
 import { useTopicStore } from "./topicListManager";
-import { useAvatarStore } from "./avatar";
 import { clearMessageCache } from "../utils/astRenderer";
 import type { ChatMessage, HistoryChunk, ContentBlock } from "../types/chat";
 
@@ -31,7 +30,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
   const topicStore = useTopicStore();
-  const avatarStore = useAvatarStore();
 
   /**
    * 尝试为话题生成 AI 总结标题
@@ -261,7 +259,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
           }
         },
-        onStreamFinished: (mid, tid) => {
+        onStreamFinished: (_mid, tid) => {
           if (tid === sessionStore.currentTopicId) {
             summarizeTopic();
           }
@@ -487,7 +485,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
           }
         },
-        onStreamFinished: (mid, tid) => {
+        onStreamFinished: (_mid, tid) => {
           if (tid === sessionStore.currentTopicId) {
             summarizeTopic();
           }
