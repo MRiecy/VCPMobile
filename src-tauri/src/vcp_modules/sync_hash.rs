@@ -98,34 +98,19 @@ impl HashAggregator {
         tx: &mut Transaction<'_, Sqlite>,
         agent_id: &str,
     ) -> Result<String, String> {
-        let agent_row = sqlx::query("SELECT config_hash FROM agents WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let config_hash = match agent_row {
-            Some(r) => r.get::<String, _>("config_hash"),
-            None => {
-                println!(
-                    "[HashAggregator] WARN: Agent {} metadata missing during root hash calc",
-                    agent_id
-                );
-                "EMPTY_CONFIG".to_string()
-            }
-        };
-
         let topic_rows = sqlx::query(
-            "SELECT content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(agent_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
-        let mut hashes = vec![config_hash];
+        let mut hashes = Vec::new();
         for r in topic_rows {
-            hashes.push(r.get("content_hash"));
+            // 将 topic 的元数据 hash 和内容 hash 同时作为叶子节点，确保任何一方变动都会向上冒泡
+            hashes.push(r.get::<String, _>("config_hash"));
+            hashes.push(r.get::<String, _>("content_hash"));
         }
 
         Ok(compute_merkle_root(hashes))
@@ -135,34 +120,18 @@ impl HashAggregator {
         tx: &mut Transaction<'_, Sqlite>,
         group_id: &str,
     ) -> Result<String, String> {
-        let group_row = sqlx::query("SELECT config_hash FROM groups WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let config_hash = match group_row {
-            Some(r) => r.get::<String, _>("config_hash"),
-            None => {
-                println!(
-                    "[HashAggregator] WARN: Group {} metadata missing during root hash calc",
-                    group_id
-                );
-                "EMPTY_CONFIG".to_string()
-            }
-        };
-
         let topic_rows = sqlx::query(
-            "SELECT content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(group_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
-        let mut hashes = vec![config_hash];
+        let mut hashes = Vec::new();
         for r in topic_rows {
-            hashes.push(r.get("content_hash"));
+            hashes.push(r.get::<String, _>("config_hash"));
+            hashes.push(r.get::<String, _>("content_hash"));
         }
 
         Ok(compute_merkle_root(hashes))
@@ -172,9 +141,28 @@ impl HashAggregator {
         tx: &mut Transaction<'_, Sqlite>,
         topic_id: &str,
     ) -> Result<(), String> {
+        // 1. 计算并更新 content_hash (消息聚合)
         let root_hash = Self::compute_topic_root_hash(tx, topic_id).await?;
-        sqlx::query("UPDATE topics SET content_hash = ? WHERE topic_id = ?")
+
+        // 2. 计算并更新 config_hash (元数据)
+        let row = sqlx::query("SELECT owner_type FROM topics WHERE topic_id = ?")
+            .bind(topic_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let owner_type: String = row.get("owner_type");
+        let config_hash = if owner_type == "agent" {
+            let dto = HashInitializer::load_agent_topic_dto(tx, topic_id).await?;
+            Self::compute_agent_topic_metadata_hash(&dto)
+        } else {
+            let dto = HashInitializer::load_group_topic_dto(tx, topic_id).await?;
+            Self::compute_group_topic_metadata_hash(&dto)
+        };
+
+        sqlx::query("UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ?")
             .bind(root_hash)
+            .bind(config_hash)
             .bind(topic_id)
             .execute(&mut **tx)
             .await
@@ -354,6 +342,48 @@ impl HashInitializer {
 
         println!("[HashInitializer] Ensured all Group hashes");
         Ok(())
+    }
+
+    pub async fn load_agent_topic_dto(
+        tx: &mut Transaction<'_, Sqlite>,
+        topic_id: &str,
+    ) -> Result<AgentTopicSyncDTO, String> {
+        let row = sqlx::query(
+            "SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?",
+        )
+        .bind(topic_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(AgentTopicSyncDTO {
+            id: row.get("topic_id"),
+            name: row.get("title"),
+            created_at: row.get("created_at"),
+            locked: row.get::<i64, _>("locked") != 0,
+            unread: row.get::<i64, _>("unread") != 0,
+            owner_id: row.get("owner_id"),
+        })
+    }
+
+    pub async fn load_group_topic_dto(
+        tx: &mut Transaction<'_, Sqlite>,
+        topic_id: &str,
+    ) -> Result<GroupTopicSyncDTO, String> {
+        let row = sqlx::query(
+            "SELECT topic_id, title, created_at, owner_id FROM topics WHERE topic_id = ?",
+        )
+        .bind(topic_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(GroupTopicSyncDTO {
+            id: row.get("topic_id"),
+            name: row.get("title"),
+            created_at: row.get("created_at"),
+            owner_id: row.get("owner_id"),
+        })
     }
 
     async fn load_agent_dto(

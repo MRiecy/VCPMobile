@@ -103,7 +103,7 @@ function renderBlockHtml(block: ContentBlock): string {
               <span class="vcp-diary-maid-name">${escapeHtml(block.maid)}</span>
             </div>
           ` : ''}
-          <div class="vcp-diary-content">${diaryContent}</div>
+          <div class="vcp-diary-content vcp-markdown-block">${diaryContent}</div>
         </div>
       `;
     }
@@ -135,8 +135,19 @@ function renderBlockHtml(block: ContentBlock): string {
 
 function getBlockKey(block: ContentBlock, index: number): string {
   const content = block.content || '';
-  const hash = content.length > 0
-    ? content.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36)
+  const nodesStr = block.nodes ? JSON.stringify(block.nodes) : '';
+  const stateStr = JSON.stringify({
+    s: block.status,
+    c: block.is_complete,
+    t: block.tool_name,
+    f: block.footer,
+    d: block.details,
+    r: block.role,
+    e: block.is_end,
+  });
+  const combined = content + nodesStr + stateStr;
+  const hash = combined.length > 0
+    ? combined.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36)
     : '';
   return `${block.type}-${hash}-${index}`;
 }
@@ -339,6 +350,20 @@ function formatTime(ts: number) {
     second: "2-digit",
   });
 }
+
+// === Block Compilation Fallback ===
+// 当消息无 blocks 且不在流式中时，向后端请求预渲染
+const blocksRequested = ref(false);
+watch(
+  () => props.message.blocks,
+  (blocks) => {
+    if (!blocks && props.message.content && !blocksRequested.value && !isStreaming.value) {
+      blocksRequested.value = true;
+      historyStore.compileMessageBlocks(props.message.id);
+    }
+  },
+  { immediate: true }
+);
 </script>
 
 <template>
@@ -368,31 +393,32 @@ function formatTime(ts: number) {
 
       <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
         <template v-for="(block, index) in message.blocks" :key="getBlockKey(block, index)">
-          <!-- 纯展示型：v-html 零组件开销 -->
-          <div 
-            v-if="isPlainBlock(block.type)" 
-            v-html="renderBlockHtml(block)" 
-          />
+          <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
+          <div v-memo="[getBlockKey(block, index)]">
+            <div
+              v-if="isPlainBlock(block.type)"
+              v-html="renderBlockHtml(block)"
+            />
 
-          <!-- 交互型/特殊型：保留 Vue 组件 -->
-          <ToolBlock 
-            v-else-if="block.type === 'tool-use' || block.type === 'tool-result'" 
-            :type="block.type" 
-            :content="block.content"
-            :block="block" 
-          />
+            <ToolBlock
+              v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
+              :type="block.type"
+              :content="block.content"
+              :block="block"
+            />
 
-          <ThoughtBlock
-            v-else-if="block.type === 'thought'"
-            :block="block"
-            :message-id="message.id"
-          />
+            <ThoughtBlock
+              v-else-if="block.type === 'thought'"
+              :block="block"
+              :message-id="message.id"
+            />
 
-          <HtmlPreviewBlock 
-            v-else-if="block.type === 'html-preview'" 
-            :content="block.content || ''"
-            :message-id="message.id" 
-          />
+            <HtmlPreviewBlock
+              v-else-if="block.type === 'html-preview'"
+              :content="block.content || ''"
+              :message-id="message.id"
+            />
+          </div>
         </template>
         
         <!-- 流式尾部快速渲染 (Aurora 路径) -->

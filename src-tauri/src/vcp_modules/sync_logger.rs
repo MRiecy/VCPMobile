@@ -135,12 +135,6 @@ impl SyncLogger {
         );
     }
 
-    pub fn update_phase_expected(&mut self, phase: &str, delta: u32) {
-        if let Some(metrics) = self.phases.get(phase) {
-            metrics.expected_count.fetch_add(delta, Ordering::SeqCst);
-        }
-    }
-
     pub fn set_phase_expected(&mut self, phase: &str, expected: u32) {
         if let Some(metrics) = self.phases.get(phase) {
             metrics.expected_count.store(expected, Ordering::SeqCst);

@@ -3,8 +3,9 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 pub enum PipelineCommand {
-    StartTopicHash,
-    StartMessageDiff,
+    StartTopicMetadata,   // Phase 2: Pull missing configs
+    StartTopicValidation, // Phase 2.5: Dual-hash check
+    StartMessages,        // Phase 3: Message diff
     Finalize,
 }
 
@@ -21,29 +22,39 @@ impl SyncPipeline {
         }
     }
 
-    pub async fn on_phase1_completed(&self) -> Result<(), String> {
+    /// 进入 Phase 2: Topic 元数据补全
+    pub async fn on_owner_metadata_done(&self) -> Result<(), String> {
         {
             let mut state = self.state.write().await;
-            *state = PipelinePhase::Phase2Topic {
+            *state = PipelinePhase::Phase2TopicMetadata {
                 progress: PhaseProgress::new(),
             };
         }
-        let _ = self.command_tx.send(PipelineCommand::StartTopicHash);
+        let _ = self.command_tx.send(PipelineCommand::StartTopicMetadata);
         Ok(())
     }
 
-    pub async fn on_phase2_completed(&self) -> Result<(), String> {
+    /// 进入 Phase 2.5: Topic 哈希比对
+    pub async fn on_topic_metadata_pull_done(&self) -> Result<(), String> {
+        // 哈希比对在 Phase2 逻辑内，不改变底层 PipelinePhase 枚举
+        let _ = self.command_tx.send(PipelineCommand::StartTopicValidation);
+        Ok(())
+    }
+
+    /// 进入 Phase 3: 消息同步
+    pub async fn on_topic_validation_done(&self) -> Result<(), String> {
         {
             let mut state = self.state.write().await;
-            *state = PipelinePhase::Phase3Message {
+            *state = PipelinePhase::Phase3Messages {
                 progress: PhaseProgress::new(),
             };
         }
-        let _ = self.command_tx.send(PipelineCommand::StartMessageDiff);
+        let _ = self.command_tx.send(PipelineCommand::StartMessages);
         Ok(())
     }
 
-    pub async fn on_phase3_completed(&self) -> Result<(), String> {
+    /// 同步结束
+    pub async fn on_messages_done(&self) -> Result<(), String> {
         {
             let mut state = self.state.write().await;
             *state = PipelinePhase::Completed;

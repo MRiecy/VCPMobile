@@ -23,6 +23,7 @@ pub mod message_service;
 pub mod model_manager;
 pub mod protocol_manager;
 pub mod settings_manager;
+pub mod stream_block_parser;
 pub mod sync_dto;
 pub mod sync_logger;
 pub mod sync_service;

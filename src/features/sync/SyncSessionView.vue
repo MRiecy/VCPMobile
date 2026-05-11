@@ -25,9 +25,9 @@ const progressPercent = computed(() => {
 const phaseLabel = computed(() => {
   const map: Record<string, string> = {
     'initialization': '初始化',
-    'metadata': '元数据比对',
-    'topic': '会话主题同步',
-    'message': '历史消息同步',
+    'owner_metadata': '元数据比对',
+    'topic_metadata': '会话主题同步',
+    'messages': '历史消息同步',
   };
   return map[store.progressData.phase] || store.progressData.phase;
 });
@@ -177,7 +177,7 @@ const handleClose = async () => {
                 等待连接...
               </div>
               <template v-else>
-                <div v-for="log in visibleLogs" :key="log.time + log.message"
+                <div v-for="log in visibleLogs" :key="log.id"
                      class="break-words mb-0.5"
                      :class="logColor(log.level)">
                   [{{ log.time }}] {{ log.message }}

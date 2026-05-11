@@ -24,10 +24,10 @@ pub enum PipelinePhase {
     Phase1Metadata {
         progress: PhaseProgress,
     },
-    Phase2Topic {
+    Phase2TopicMetadata {
         progress: PhaseProgress,
     },
-    Phase3Message {
+    Phase3Messages {
         progress: PhaseProgress,
     },
     Completed,

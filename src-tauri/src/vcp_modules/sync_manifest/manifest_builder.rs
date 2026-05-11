@@ -1,5 +1,3 @@
-use crate::vcp_modules::sync_dto::{AgentTopicSyncDTO, GroupTopicSyncDTO};
-use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_types::{EntityState, SyncDataType, SyncManifest};
 use sqlx::Row;
 use sqlx::SqlitePool;
@@ -18,10 +16,13 @@ impl ManifestBuilder {
 
         let mut items = Vec::new();
         for r in rows {
-            let h: String = r.get("config_hash");
+            let conf_h: String = r.get("config_hash");
+            let cont_h: String = r.get("content_hash");
             items.push(EntityState {
                 id: r.get("agent_id"),
-                hash: h,
+                hash: conf_h.clone(), // 兼容旧版，默认使用 config_hash
+                config_hash: Some(conf_h),
+                content_hash: Some(cont_h),
                 ts: r.get("updated_at"),
                 deleted_at: r.get("deleted_at"),
                 owner_type: None,
@@ -45,10 +46,13 @@ impl ManifestBuilder {
 
         let mut items = Vec::new();
         for r in rows {
-            let h: String = r.get("config_hash");
+            let conf_h: String = r.get("config_hash");
+            let cont_h: String = r.get("content_hash");
             items.push(EntityState {
                 id: r.get("group_id"),
-                hash: h,
+                hash: conf_h.clone(),
+                config_hash: Some(conf_h),
+                content_hash: Some(cont_h),
                 ts: r.get("updated_at"),
                 deleted_at: r.get("deleted_at"),
                 owner_type: None,
@@ -61,14 +65,30 @@ impl ManifestBuilder {
         })
     }
 
-    pub async fn build_topic_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
-        let rows = sqlx::query(
-            "SELECT topic_id, title, created_at, locked, unread, content_hash, updated_at, owner_id, owner_type, deleted_at 
-             FROM topics"
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    pub async fn build_targeted_topic_manifest(
+        pool: &SqlitePool,
+        owners: &[String],
+    ) -> Result<SyncManifest, String> {
+        if owners.is_empty() {
+            return Ok(SyncManifest {
+                data_type: SyncDataType::Topic,
+                items: Vec::new(),
+            });
+        }
+
+        let placeholders = owners.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let query_str = format!(
+            "SELECT topic_id, config_hash, content_hash, updated_at, owner_type, deleted_at 
+             FROM topics WHERE owner_id IN ({})",
+            placeholders
+        );
+
+        let mut q = sqlx::query(&query_str);
+        for owner_id in owners {
+            q = q.bind(owner_id);
+        }
+
+        let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
 
         let mut items = Vec::new();
         for r in rows {
@@ -76,34 +96,17 @@ impl ManifestBuilder {
             if id == "default" {
                 continue;
             }
-            let owner_type: String = r.get("owner_type");
-
-            let hash = if owner_type == "group" {
-                let dto = GroupTopicSyncDTO {
-                    id: id.clone(),
-                    name: r.get("title"),
-                    created_at: r.get("created_at"),
-                    owner_id: r.get("owner_id"),
-                };
-                HashAggregator::compute_group_topic_metadata_hash(&dto)
-            } else {
-                let dto = AgentTopicSyncDTO {
-                    id: id.clone(),
-                    name: r.get("title"),
-                    created_at: r.get("created_at"),
-                    locked: r.get::<i64, _>("locked") != 0,
-                    unread: r.get::<i64, _>("unread") != 0,
-                    owner_id: r.get("owner_id"),
-                };
-                HashAggregator::compute_agent_topic_metadata_hash(&dto)
-            };
+            let conf_h: String = r.get("config_hash");
+            let cont_h: String = r.get("content_hash");
 
             items.push(EntityState {
                 id,
-                hash,
+                hash: conf_h.clone(),
+                config_hash: Some(conf_h),
+                content_hash: Some(cont_h),
                 ts: r.get("updated_at"),
                 deleted_at: r.get("deleted_at"),
-                owner_type: Some(owner_type),
+                owner_type: r.get("owner_type"),
             });
         }
 
@@ -129,6 +132,8 @@ impl ManifestBuilder {
             items.push(EntityState {
                 id: format!("{}:{}", owner_type, owner_id),
                 hash: r.get("avatar_hash"),
+                config_hash: None,
+                content_hash: None,
                 ts: r.get("updated_at"),
                 deleted_at: None,
                 owner_type: None,

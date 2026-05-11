@@ -1,4 +1,5 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
+use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
@@ -8,9 +9,150 @@ use std::path::Path;
 use tauri::{AppHandle, Manager};
 use tokio::fs;
 
-/// =================================================================
-/// vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
-/// =================================================================
+// =================================================================
+// vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
+// =================================================================
+
+/// 批量加载多个 topic 的全量消息 — 一次性 SQL 查询，按 topic_id 分组
+/// 避免 push_messages_batch 场景下的 N+1 查询
+pub async fn load_multi_topic_messages(
+    pool: &sqlx::SqlitePool,
+    topic_ids: &[String],
+) -> Result<std::collections::HashMap<String, Vec<crate::vcp_modules::chat_manager::ChatMessage>>, String> {
+    use sqlx::Row;
+    let mut result: std::collections::HashMap<String, Vec<crate::vcp_modules::chat_manager::ChatMessage>> = topic_ids
+        .iter()
+        .map(|id| (id.clone(), Vec::new()))
+        .collect();
+
+    if topic_ids.is_empty() {
+        return Ok(result);
+    }
+
+    let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let query_str = format!(
+        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content, topic_id
+         FROM messages
+         WHERE topic_id IN ({}) AND deleted_at IS NULL
+         ORDER BY topic_id, timestamp ASC, msg_id ASC",
+        placeholders
+    );
+
+    let mut q = sqlx::query(&query_str);
+    for id in topic_ids {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
+
+    for row in rows {
+        let msg_id: String = row.get("msg_id");
+        let role: String = row.get("role");
+        let topic_id: String = row.get("topic_id");
+        let timestamp: i64 = row.get("timestamp");
+        let render_content: Option<Vec<u8>> = row.get("render_content");
+
+        let blocks = if let Some(bytes) = render_content {
+            serde_json::from_slice(&bytes).ok()
+                .and_then(|v: serde_json::Value| {
+                    if let Some(arr) = v.as_array() {
+                        let filtered: Vec<serde_json::Value> =
+                            arr.iter().filter(|e| !e.is_null()).cloned().collect();
+                        if filtered.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::Array(filtered))
+                        }
+                    } else {
+                        Some(v)
+                    }
+                })
+        } else {
+            None
+        };
+
+        let message = crate::vcp_modules::chat_manager::ChatMessage {
+            id: msg_id,
+            role,
+            name: row.get("name"),
+            content: row.get("content"),
+            timestamp: timestamp as u64,
+            is_thinking: Some(row.get::<i64, _>("is_thinking") != 0),
+            agent_id: row.get("agent_id"),
+            group_id: row.get("group_id"),
+            topic_id: Some(topic_id.clone()),
+            is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
+            finish_reason: row.get("finish_reason"),
+            attachments: None, // 批量 push 场景不需要附件回填
+            blocks,
+            shell: None, // 批量 push 场景不需要外壳预计算
+        };
+
+        result.entry(topic_id).or_default().push(message);
+    }
+
+    // 批量加载附件 — 收集所有 msg_id，一次 JOIN 查询
+    let all_msg_ids: Vec<String> = result
+        .values()
+        .flat_map(|msgs| msgs.iter().map(|m| m.id.clone()))
+        .collect();
+
+    if !all_msg_ids.is_empty() {
+        let att_placeholders = all_msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let att_query = format!(
+            "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
+                    ma.msg_id, ma.display_name, ma.src, ma.status
+             FROM message_attachments ma
+             JOIN attachments a ON ma.hash = a.hash
+             WHERE ma.msg_id IN ({})
+             ORDER BY ma.msg_id, ma.attachment_order ASC",
+            att_placeholders
+        );
+        let mut q = sqlx::query(&att_query);
+        for id in &all_msg_ids {
+            q = q.bind(id);
+        }
+        if let Ok(att_rows) = q.fetch_all(pool).await {
+            let mut att_map: std::collections::HashMap<String, Vec<Attachment>> =
+                std::collections::HashMap::new();
+            for ar in att_rows {
+                let msg_id: String = ar.get("msg_id");
+                let hash: String = ar.get("hash");
+                let mime_type: String = ar.get("mime_type");
+                let internal_path: String = ar.get("internal_path");
+                let display_name: String = ar.get("display_name");
+                let size_i64: i64 = ar.get("size");
+                let created_at_i64: i64 = ar.get("created_at");
+
+                att_map.entry(msg_id).or_default().push(Attachment {
+                    r#type: mime_type,
+                    src: ar.get("src"),
+                    name: display_name,
+                    size: size_i64 as u64,
+                    hash: Some(hash),
+                    status: Some(ar.get("status")),
+                    internal_path,
+                    extracted_text: ar.get("extracted_text"),
+                    image_frames: ar
+                        .get::<Option<String>, _>("image_frames")
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    thumbnail_path: ar.get("thumbnail_path"),
+                    created_at: Some(created_at_i64 as u64),
+                });
+            }
+            // 回填附件到消息
+            for (_tid, msgs) in result.iter_mut() {
+                for msg in msgs.iter_mut() {
+                    if let Some(atts) = att_map.remove(&msg.id) {
+                        msg.attachments = Some(atts);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 pub async fn load_chat_history_internal(
     _app_handle: &AppHandle,
     _owner_id: &str,
@@ -336,16 +478,16 @@ pub async fn patch_single_message(
     topic_id: String,
     mut message: ChatMessage,
     skip_bubble: bool,
-) -> Result<(), String> {
+) -> Result<Vec<ContentBlock>, String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    // 优先使用传入的 blocks，如果缺失则实时编译（支持前端预渲染兜底）
-    let render_bytes = if let Some(blocks_val) = &message.blocks {
-        serde_json::to_vec(blocks_val).map_err(|e| e.to_string())?
+    // 优先使用传入的 blocks，如果缺失则实时编译
+    let blocks: Vec<ContentBlock> = if let Some(blocks_val) = &message.blocks {
+        serde_json::from_value(blocks_val.clone()).map_err(|e| e.to_string())?
     } else {
-        let blocks = MessageRenderCompiler::compile(&message.content);
-        MessageRenderCompiler::serialize(&blocks)?
+        MessageRenderCompiler::compile(&message.content)
     };
+    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
@@ -360,7 +502,7 @@ pub async fn patch_single_message(
         .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(blocks)
 }
 
 #[allow(dead_code)]

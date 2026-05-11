@@ -449,6 +449,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                     error,
                     aurora: Some(AuroraUpdate {
                         stable: buffer.stable_content.clone(),
+                        stable_blocks: buffer.stable_blocks.clone(),
                         tail: AuroraBuffer::balance_html_tags(&buffer.tail_content),
                         content: buffer.full_text.clone(),
                     }),
@@ -514,6 +515,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             if line.starts_with("data: ") {
                                                 let data = line.trim_start_matches("data: ").trim();
                                                 if data == "[DONE]" {
+                                                    println!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
                                                     aurora_buffer.finalize();
                                                     send_aurora_update(&aurora_buffer, last_finish_reason.clone(), None);
                                                     send_stream_event(StreamEvent {

@@ -150,6 +150,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             unread INTEGER NOT NULL DEFAULT 0,
             unread_count INTEGER NOT NULL DEFAULT 0,
             msg_count INTEGER NOT NULL DEFAULT 0,
+            config_hash TEXT NOT NULL DEFAULT '',  -- 配置内容指纹 (Topic Meta Hash)
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Messages Root)
             deleted_at BIGINT
         )",
@@ -157,6 +158,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 确保字段存在 (用于存量 DB 升级)
+    let _ = sqlx::query("ALTER TABLE topics ADD COLUMN config_hash TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await;
 
     // 6. messages 表 (消息历史 - 已移除冗余 avatar_url 和 avatar_color)
     sqlx::query(

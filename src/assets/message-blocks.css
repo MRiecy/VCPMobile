@@ -1,87 +1,5 @@
 /* === VCP Message Blocks Styles === */
 
-/* --- Maid Diary Block --- */
-.vcp-diary-block {
-    background: #fdfaf6 !important;
-    border: 1px solid #eaddd0;
-    border-radius: 8px !important;
-    padding: 12px 14px 15px 36px !important;
-    color: #5d4037 !important;
-    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
-    margin-top: 10px !important;
-    margin-bottom: 12px !important;
-    position: relative;
-    overflow: visible;
-    line-height: 1.7;
-    font-family: 'Georgia', 'Times New Roman', serif !important;
-}
-
-.vcp-diary-block::before {
-    content: "✒️";
-    position: absolute;
-    top: 14px;
-    left: 12px;
-    font-size: 18px;
-    opacity: 0.6;
-    z-index: 2;
-}
-
-.vcp-diary-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    border-bottom: 1px solid #d7ccc8;
-    padding-bottom: 6px;
-    margin-bottom: 10px;
-}
-
-.vcp-diary-title {
-    font-weight: bold;
-    font-size: 1.1em;
-    color: #6d4c41;
-}
-
-.vcp-diary-date {
-    font-size: 0.85em;
-    color: #a1887f;
-    font-style: italic;
-}
-
-.vcp-diary-maid-info {
-    margin-bottom: 12px;
-    font-size: 0.9em;
-    color: #8d6e63;
-}
-
-.vcp-diary-maid-name {
-    font-style: italic;
-    color: #a1887f;
-    background: rgba(161, 136, 127, 0.08);
-    padding: 1px 5px;
-    border-radius: 4px;
-}
-
-/* Dark Theme Overrides for Diary */
-html.dark .vcp-diary-block {
-    background: #2c2a3a !important;
-    border-color: #4a485f;
-    color: #d8d2c9 !important;
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
-}
-
-html.dark .vcp-diary-header {
-    border-bottom-color: #4a485f;
-}
-
-html.dark .vcp-diary-title {
-    color: #ffb74d;
-}
-
-html.dark .vcp-diary-maid-name {
-    color: #ffcc80;
-    background: rgba(255, 183, 77, 0.1);
-}
-
 /* --- Role Divider Block --- */
 .vcp-role-divider {
   display: flex;
@@ -108,11 +26,6 @@ html.dark .vcp-diary-maid-name {
 .vcp-role-divider.role-user { color: #2ecc71; }
 .vcp-role-divider.type-end { opacity: 0.5; }
 
-.vcp-diary-content {
-  font-size: 0.9375rem;
-  line-height: 1.7;
-}
-
 /* === Markdown Block Styles (restored from legacy MarkdownBlock.vue) === */
 
 .vcp-markdown-block {
@@ -122,6 +35,21 @@ html.dark .vcp-diary-maid-name {
   max-width: 100%;
   line-height: 1.7142857;
   font-size: 0.9375rem;
+  opacity: 0.92;
+  font-family: -apple-system, BlinkMacSystemFont, Roboto, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
+
+/* --- Strong / Emphasis / Strikethrough --- */
+.vcp-markdown-block strong {
+  font-weight: 700;
+  opacity: 1;
+}
+.vcp-markdown-block em {
+  font-style: italic;
+}
+.vcp-markdown-block del {
+  text-decoration: line-through;
+  opacity: 0.7;
 }
 
 /* --- Headings (prose-sm scale) --- */
@@ -170,7 +98,7 @@ html.dark .vcp-diary-maid-name {
 
 /* --- Paragraphs --- */
 .vcp-markdown-block p {
-  margin-bottom: 0.5em;
+  margin-bottom: 0.65em;
   margin-top: 0;
 }
 .vcp-markdown-block p:last-child {
@@ -191,7 +119,7 @@ html.dark .vcp-diary-maid-name {
   margin-bottom: 0.5em;
 }
 .vcp-markdown-block li {
-  margin: 0.25em 0;
+  margin: 0.3em 0;
 }
 .vcp-markdown-block li::marker {
   color: var(--primary-text, #e0e0e0);
@@ -224,7 +152,7 @@ html.dark .vcp-diary-maid-name {
   border: 1px solid rgba(255, 255, 255, 0.08);
   margin: 8px 0;
   max-width: 100%;
-  font-size: 0.85em;
+  font-size: 0.8em;
   line-height: 1.6;
 }
 
@@ -326,8 +254,8 @@ html.dark .vcp-markdown-block code:not(pre code) {
   overflow-y: visible;
   display: inline-block;
   vertical-align: middle;
-  font-size: 1.0em;
-  opacity: 0.85;
+  font-size: 0.9375em;
+  opacity: 0.92;
   overscroll-behavior-x: contain;
   padding: 0.25em 0.15em;
 }
@@ -336,10 +264,9 @@ html.dark .vcp-markdown-block code:not(pre code) {
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
-  margin: 1em 0;
   text-align: center;
-  font-size: 0.9em;
-  opacity: 0.85;
+  font-size: 0.8em;
+  opacity: 0.95;
   overscroll-behavior-x: contain;
 }
 
@@ -348,8 +275,7 @@ html.dark .vcp-markdown-block code:not(pre code) {
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
-  padding-bottom: 0.5em;
-  font-size: 0.8em;
+  padding: 1em 0;
   overscroll-behavior-x: contain;
 }
 
@@ -366,27 +292,98 @@ html.dark .vcp-markdown-block code:not(pre code) {
   border-radius: 4px;
 }
 
-/* --- Font stack (restore from legacy MarkdownBlock.vue) --- */
-.vcp-markdown-block {
-  font-family: inherit;
-}
-.vcp-markdown-block,
-.vcp-markdown-block * {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
-}
-
-/* --- Strong / Emphasis --- */
-.vcp-markdown-block strong {
-  font-weight: 700;
-}
-.vcp-markdown-block em {
-  font-style: italic;
-}
-
 /* --- Code before/after reset (Tailwind Prose fix) --- */
 .vcp-markdown-block code::before,
 .vcp-markdown-block code::after {
   content: none !important;
+}
+
+/* --- Maid Diary Block --- */
+.vcp-diary-block {
+    background: #fdfaf6 !important;
+    border: 1px solid #eaddd0;
+    border-radius: 8px !important;
+    padding: 12px 14px 15px 36px !important;
+    color: #5d4037 !important;
+    box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
+    margin-top: 10px !important;
+    margin-bottom: 12px !important;
+    position: relative;
+    overflow: visible;
+    line-height: 1.7;
+    font-family: 'Georgia', 'Times New Roman', serif !important;
+}
+
+.vcp-diary-block::before {
+    content: "✒️";
+    position: absolute;
+    top: 14px;
+    left: 12px;
+    font-size: 18px;
+    opacity: 0.6;
+    z-index: 2;
+}
+
+.vcp-diary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    border-bottom: 1px solid #d7ccc8;
+    padding-bottom: 6px;
+    margin-bottom: 10px;
+}
+
+.vcp-diary-title {
+    font-weight: bold;
+    font-size: 1.1em;
+    color: #6d4c41;
+}
+
+.vcp-diary-date {
+    font-size: 0.85em;
+    color: #a1887f;
+    font-style: italic;
+}
+
+.vcp-diary-maid-info {
+    margin-bottom: 12px;
+    font-size: 0.9em;
+    color: #8d6e63;
+}
+
+.vcp-diary-maid-name {
+    font-style: italic;
+    color: #a1887f;
+    background: rgba(161, 136, 127, 0.08);
+    padding: 1px 5px;
+    border-radius: 4px;
+}
+
+/* Dark Theme Overrides for Diary */
+html.dark .vcp-diary-block {
+    background: #2c2a3a !important;
+    border-color: #4a485f;
+    color: #d8d2c9 !important;
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+}
+
+html.dark .vcp-diary-header {
+    border-bottom-color: #4a485f;
+}
+
+html.dark .vcp-diary-title {
+    color: #ffb74d;
+}
+
+html.dark .vcp-diary-maid-name {
+    color: #ffcc80;
+    background: rgba(255, 183, 77, 0.1);
+}
+
+/* --- Diary content overrides (placed after .vcp-markdown-block to win cascade) --- */
+.vcp-diary-content {
+  font-size: 0.875rem;
+  line-height: 1.7;
 }
 
 /* --- Emoticons --- */

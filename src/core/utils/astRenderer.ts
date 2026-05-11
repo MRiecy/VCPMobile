@@ -6,13 +6,22 @@ const htmlCache = new Map<string, string>();
 const MAX_CACHE_SIZE = 500;
 
 function getCacheKey(nodes: MarkdownNode[], messageId: string): string {
-  // 轻量内容指纹：JSON 前 200 字符 + 消息 ID
-  return `${messageId}:${JSON.stringify(nodes).slice(0, 200)}`;
+  const json = JSON.stringify(nodes);
+  const hash = json.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36);
+  return `${messageId}:${hash}`;
 }
 
 /** 清理 AST HTML 缓存，用于重建/同步后强制重新渲染 */
 export function clearHtmlCache(): void {
   htmlCache.clear();
+}
+
+/** 清理单条消息的 AST HTML 缓存，用于编辑后强制重新渲染 */
+export function clearMessageCache(messageId: string): void {
+  const prefix = `${messageId}:`;
+  for (const key of htmlCache.keys()) {
+    if (key.startsWith(prefix)) htmlCache.delete(key);
+  }
 }
 
 /**
@@ -105,6 +114,9 @@ function renderInline(node: InlineNode): string {
     case 'emphasis':
       return `<em>${(node.children || []).map(renderInline).join('')}</em>`;
     
+    case 'strikethrough':
+      return `<del>${(node.children || []).map(renderInline).join('')}</del>`;
+    
     case 'code':
       return `<code>${escapeHtml(node.value || '')}</code>`;
     
@@ -131,7 +143,7 @@ function renderInline(node: InlineNode): string {
     case 'inline_math': {
       const isDisplay = node.display_mode || false;
       const cls = isDisplay ? 'vcp-math-block no-swipe' : 'vcp-math-inline no-swipe';
-      const tag = isDisplay ? 'div' : 'span';
+      const tag = 'span';
       if (node.svg) {
         return `<${tag} class="${cls}">${node.svg}</${tag}>`;
       }
@@ -139,7 +151,8 @@ function renderInline(node: InlineNode): string {
     }
     
     case 'quoted_text':
-      return `<span class="highlighted-quote">${escapeHtml(node.value || '')}</span>`;
+      const innerQuote = (node.children || []).map(renderInline).join('');
+      return `<span class="highlighted-quote">${innerQuote}</span>`;
     
     case 'highlight_tag':
       return `<span class="highlighted-tag">${escapeHtml(node.value || '')}</span>`;

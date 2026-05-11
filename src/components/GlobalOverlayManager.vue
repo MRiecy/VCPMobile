@@ -14,9 +14,9 @@ const handlePromptConfirm = (val: string) => {
   overlayStore.closePrompt();
 };
 
-const handleEditorSave = (newContent: string) => {
+const handleEditorSave = async (newContent: string) => {
   if (overlayStore.editorConfig?.onSave) {
-    overlayStore.editorConfig.onSave(newContent);
+    await overlayStore.editorConfig.onSave(newContent);
   }
   overlayStore.closeEditor();
 };

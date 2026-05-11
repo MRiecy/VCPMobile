@@ -43,7 +43,6 @@ watch(keyboardHeight, () => {
 
 const handleSave = () => {
   emit('save', editorContent.value);
-  emit('update:isOpen', false);
 };
 
 const handleCancel = () => {

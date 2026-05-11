@@ -18,7 +18,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
   const needsReload = ref(false);
 
   // --- 日志与进度 ---
-  const logs = ref<{ level: string; message: string; time: string }[]>([]);
+  const logs = ref<{ id: string; level: string; message: string; time: string }[]>([]);
   const progressData = ref({ phase: 'initialization', total: 0, completed: 0, message: '' });
 
   // --- 监听器引用 ---
@@ -102,7 +102,8 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
   };
 
   const pushLog = (level: string, message: string) => {
-    logs.value.push({ level, message, time: new Date().toLocaleTimeString() });
+    const id = `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    logs.value.push({ id, level, message, time: new Date().toLocaleTimeString() });
     if (logs.value.length > 200) logs.value.shift();
   };
 
