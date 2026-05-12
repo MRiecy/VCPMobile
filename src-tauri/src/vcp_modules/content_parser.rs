@@ -116,7 +116,7 @@ lazy_static! {
 
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
-    static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?(div|p|img|span|a|h[1-6]|ul|ol|li|table|tr|td|th|section|article|header|footer|nav|aside|main|figure|figcaption|blockquote|pre|code|style|script|button|form|input|textarea|select|label|iframe|video|audio|canvas|svg)[\s>/]").unwrap();
+    static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?[a-zA-Z][a-zA-Z0-9]*[\s>/]").unwrap();
     static ref CHINESE_PARA_REGEX: Regex = Regex::new(r"^[\u4e00-\u9fa5]").unwrap();
     static ref VCP_SPECIAL_MARKER_REGEX: Regex = Regex::new(r"(?i)^(<<<|\[\[VCP|\[---|<think|</think)").unwrap();
 
@@ -264,6 +264,17 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             (Some(m.start()), Some(m.end()), true)
                         }),
                 };
+
+                // 未闭合的思维链/think 块：起始标记视为普通文本，跳过继续扫描
+                if !is_complete && matches!(block_type, BlockType::Thought | BlockType::Think) {
+                    let marker_text = &remaining[start_idx..end_idx];
+                    blocks.push(ContentBlock::Markdown {
+                        content: None,
+                        nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(marker_text)),
+                    });
+                    current_pos += end_idx;
+                    continue;
+                }
 
                 let inner_content = if let Some(end_start) = end_marker_start {
                     &search_area[..end_start]
