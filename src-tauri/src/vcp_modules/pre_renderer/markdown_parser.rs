@@ -12,6 +12,12 @@ lazy_static! {
     static ref INLINE_RE: Regex = Regex::new(r"(?s)\\\((.*?)\\\)").unwrap();
     static ref MAGIC_RE: Regex =
         Regex::new(r##"(?s)([\u{0022}\u{201C}\u{201D}](?:[^\u{0022}\u{201C}\u{201D}]|\\.)+?[\u{0022}\u{201C}\u{201D}])|(@![^\s@!]+)|(@[^\s@]+)"##).unwrap();
+
+    static ref HTML_CONTAINER_OPEN_RE: Regex =
+        Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
+
+    static ref HTML_CONTAINER_PLACEHOLDER_RE: Regex =
+        Regex::new(r"<!--VCP_HTML_CONTAINER:(\d+)-->").unwrap();
 }
 
 fn preprocess_latex_math(text: &str) -> String {
@@ -83,8 +89,152 @@ fn preprocess_latex_math(text: &str) -> String {
     result
 }
 
+/// 检查指定位置是否在代码围栏内部
+fn is_in_code_fence(text: &str, pos: usize) -> bool {
+    let mut in_fence = false;
+    let mut line_start = 0;
+    for (i, c) in text.char_indices() {
+        if c == '\n' {
+            let line = &text[line_start..i];
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+            }
+            if i >= pos {
+                return in_fence;
+            }
+            line_start = i + 1;
+        }
+    }
+    // 最后一行
+    if line_start < text.len() {
+        let line = &text[line_start..];
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        }
+    }
+    in_fence
+}
+
+/// 提取 HTML 容器块，将其替换为占位符，并递归解析内部 Markdown
+fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode>, String)>) {
+    let mut result = String::new();
+    let mut containers: Vec<(String, Vec<MarkdownNode>, String)> = Vec::new();
+    let mut last_pos = 0;
+
+    for cap in HTML_CONTAINER_OPEN_RE.captures_iter(text) {
+        let cap = match cap {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let m = match cap.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
+        let tag = match cap.get(1) {
+            Some(t) => t.as_str().to_lowercase(),
+            None => continue,
+        };
+
+        if m.start() < last_pos {
+            continue;
+        }
+
+        // 跳过代码围栏内部的匹配
+        if is_in_code_fence(text, m.start()) {
+            continue;
+        }
+
+        // 找到匹配的闭标签（考虑嵌套）
+        if let Some((close_start, close_end)) = find_matching_close_tag(text, m.end(), &tag) {
+            let open_tag = text[m.start()..m.end()].to_string();
+            let inner_text = text[m.end()..close_start].to_string();
+            let close_tag = text[close_start..close_end].to_string();
+
+            // 将之前的内容加入结果
+            result.push_str(&text[last_pos..m.start()]);
+
+            // 创建占位符
+            let placeholder = format!("<!--VCP_HTML_CONTAINER:{}-->", containers.len());
+            result.push_str(&placeholder);
+
+            // 递归解析内部内容
+            let inner_nodes = parse_markdown_to_ast(&inner_text);
+            containers.push((open_tag, inner_nodes, close_tag));
+
+            last_pos = close_end;
+        }
+    }
+
+    result.push_str(&text[last_pos..]);
+    (result, containers)
+}
+
+/// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
+fn find_matching_close_tag(text: &str, start_pos: usize, tag: &str) -> Option<(usize, usize)> {
+    let lower = text.to_lowercase();
+    let close_pat = format!("</{}>", tag);
+    let open_pat1 = format!("<{}>", tag);
+    let open_pat2 = format!("<{} ", tag);
+
+    let mut depth = 1;
+    let mut search_start = start_pos;
+
+    while let Some(close_pos) = lower[search_start..].find(&close_pat) {
+        let actual_close_start = search_start + close_pos;
+        let actual_close_end = actual_close_start + close_pat.len();
+
+        // 计算这段区间内开标签的数量
+        let segment = &lower[search_start..actual_close_start];
+        let open_count = segment.matches(&open_pat1).count() + segment.matches(&open_pat2).count();
+        depth += open_count;
+        depth -= 1;
+
+        if depth == 0 {
+            return Some((actual_close_start, actual_close_end));
+        }
+
+        search_start = actual_close_end;
+    }
+
+    None
+}
+
+/// 后处理：将 AST 中的占位符替换为开标签 + 子节点 + 闭标签
+fn replace_container_placeholders(
+    nodes: &mut Vec<MarkdownNode>,
+    containers: &[(String, Vec<MarkdownNode>, String)],
+) {
+    let mut i = 0;
+    while i < nodes.len() {
+        if let MarkdownNode::RawHtml { content } = &nodes[i] {
+            if let Ok(Some(caps)) = HTML_CONTAINER_PLACEHOLDER_RE.captures(content) {
+                if let Some(idx_match) = caps.get(1) {
+                    if let Ok(idx) = idx_match.as_str().parse::<usize>() {
+                        if idx < containers.len() {
+                            let (open_tag, children, close_tag) = &containers[idx];
+                            let mut replacement = Vec::new();
+                            replacement.push(MarkdownNode::RawHtml {
+                                content: open_tag.clone(),
+                            });
+                            replacement.extend(children.clone());
+                            replacement.push(MarkdownNode::RawHtml {
+                                content: close_tag.clone(),
+                            });
+                            nodes.splice(i..=i, replacement);
+                            i += children.len() + 2;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
 pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
     let text = preprocess_latex_math(text);
+    let (text, containers) = extract_html_containers(&text);
     let mut nodes = Vec::new();
     let parser = Parser::new_ext(&text, Options::ENABLE_MATH | Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH);
 
@@ -277,6 +427,9 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
             _ => {}
         }
     }
+
+    // 后处理：将 HTML 容器占位符替换为实际的开标签 + 解析后的子节点 + 闭标签
+    replace_container_placeholders(&mut nodes, &containers);
 
     nodes
 }

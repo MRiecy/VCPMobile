@@ -253,6 +253,7 @@ impl PullExecutor {
         let res = client
             .get(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -287,6 +288,7 @@ impl PullExecutor {
         let res = client
             .get(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -318,6 +320,7 @@ impl PullExecutor {
         let res = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .json(&serde_json::json!({ "requests": requests }))
             .send()
             .await
@@ -425,6 +428,7 @@ impl PullExecutor {
             match client
                 .get(&url)
                 .header("x-sync-token", sync_token)
+                .header("Authorization", format!("Bearer {}", sync_token))
                 .send()
                 .await
             {
@@ -494,6 +498,7 @@ impl PullExecutor {
         let res = client
             .get(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -533,6 +538,7 @@ impl PullExecutor {
         let res = client
             .get(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -589,6 +595,7 @@ impl PullExecutor {
         let res = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .json(&serde_json::json!({ "requests": req_body }))
             .send()
             .await

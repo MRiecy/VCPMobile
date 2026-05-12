@@ -1025,40 +1025,65 @@ async fn run_sync_session(
 
                                                     // 异步批量查询 Topic 元数据
                                                     for (id, _diff_owner_id, owner_type) in push_topics_to_fetch {
+                                                        println!("[SyncDebug] Fetching metadata for topic: {}", id);
                                                         let row_res = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?")
                                                             .bind(&id)
                                                             .fetch_optional(&db.pool)
                                                             .await;
 
-                                                        if let Ok(Some(r)) = row_res {
-                                                            let db_owner_id: String = r.get("owner_id");
-                                                            let type_str = if owner_type == "group" { "group_topic" } else { "agent_topic" };
-                                                            let dto = if owner_type == "group" {
-                                                                json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": db_owner_id })
-                                                            } else {
-                                                                json!({ "id": r.get::<String, _>("topic_id"), "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": db_owner_id })
-                                                            };
-                                                            batch_push_requests.push(json!({ "id": id, "type": type_str, "data": dto }));
-                                                        } else {
-                                                            pending.fetch_sub(1, Ordering::SeqCst);
+                                                        match row_res {
+                                                            Ok(Some(r)) => {
+                                                                let db_owner_id: String = r.get("owner_id");
+                                                                let tid: String = r.get("topic_id");
+                                                                println!("[SyncDebug] Found topic {} (owner: {})", tid, db_owner_id);
+                                                                
+                                                                let type_str = if owner_type == "group" { "group_topic" } else { "agent_topic" };
+                                                                let dto = if owner_type == "group" {
+                                                                    json!({ "id": tid, "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": db_owner_id })
+                                                                } else {
+                                                                    json!({ "id": tid, "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": db_owner_id })
+                                                                };
+                                                                batch_push_requests.push(json!({ "id": id, "type": type_str, "data": dto }));
+                                                            },
+                                                            Ok(None) => {
+                                                                println!("[SyncDebug] Topic NOT FOUND in database: {}", id);
+                                                                pending.fetch_sub(1, Ordering::SeqCst);
+                                                            },
+                                                            Err(e) => {
+                                                                println!("[SyncDebug] SQL ERROR fetching topic {}: {}", id, e);
+                                                                pending.fetch_sub(1, Ordering::SeqCst);
+                                                            }
                                                         }
                                                     }
+
+                                                    println!("[SyncDebug] Prepared {} metadata push requests", batch_push_requests.len());
 
                                                     // 分块发送
                                                     for chunk in batch_push_requests.chunks(1000) {
                                                         let sub_batch = chunk.to_vec();
                                                         let sub_count = sub_batch.len() as u32;
-                                                        let _ = PushExecutor::push_entities_batch(&h_in, &c_in, &http_url, &token, sub_batch).await;
+                                                        println!("[SyncDebug] Sending batch of {} topics to desktop", sub_count);
+                                                        
+                                                        let push_res = PushExecutor::push_entities_batch(&h_in, &c_in, &http_url, &token, sub_batch).await;
+                                                        match push_res {
+                                                            Ok(_) => println!("[SyncDebug] Successfully pushed metadata batch to desktop"),
+                                                            Err(e) => println!("[SyncDebug] FAILED to push metadata batch: {}", e),
+                                                        }
+
                                                         pending.fetch_sub(sub_count, Ordering::SeqCst);
+                                                        
                                                         let current_pending = pending.load(Ordering::SeqCst);
                                                         let total = total_tasks_in.load(Ordering::SeqCst);
                                                         let done = total.saturating_sub(current_pending);
                                                         let _ = h_in.emit("vcp-sync-progress", json!({ "phase": "topic_metadata", "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }));
-                                                        if current_pending == 0 && manifest_received_in.load(Ordering::SeqCst) == manifest_expected_in.load(Ordering::SeqCst) {
-                                                            let phase = manifest_phase_in.load(Ordering::SeqCst);
-                                                            if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
-                                                            else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
-                                                        }
+                                                    }
+
+                                                    // 信号外移：确保只要 pending 归零且 manifest 已收齐，就触发下一阶段
+                                                    let current_pending = pending.load(Ordering::SeqCst);
+                                                    if current_pending == 0 && manifest_received_in.load(Ordering::SeqCst) == manifest_expected_in.load(Ordering::SeqCst) {
+                                                        let phase = manifest_phase_in.load(Ordering::SeqCst);
+                                                        if phase == 1 { let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata); }
+                                                        else if phase == 2 { let _ = tx_internal_in.send(SyncCommand::StartTopicValidation); }
                                                     }
                                                 });
                                             }
