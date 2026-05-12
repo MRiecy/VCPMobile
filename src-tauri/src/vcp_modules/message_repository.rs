@@ -6,7 +6,6 @@ use serde::Serialize;
 use sha2::Digest;
 use sqlx::Row;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::task;
 
 pub struct MessageRenderCompiler;
 
@@ -95,11 +94,14 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
             let msg_id: String = row.get("msg_id");
             let content: String = row.get("content");
 
-            tasks.push(task::spawn(async move {
-                let blocks = MessageRenderCompiler::compile(&content);
-                let bytes = MessageRenderCompiler::serialize(&blocks).ok();
-                (msg_id, bytes)
-            }));
+            // [Fix] CPU 密集型任务必须走 spawn_blocking，避免阻塞 tokio 异步工作线程
+            tasks.push(async move {
+                tokio::task::spawn_blocking(move || {
+                    let blocks = MessageRenderCompiler::compile(&content);
+                    let bytes = MessageRenderCompiler::serialize(&blocks).ok();
+                    (msg_id, bytes)
+                }).await
+            });
         }
 
         // 1. 并发编译 (Parallel Production on CPU)
