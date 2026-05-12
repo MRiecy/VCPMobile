@@ -56,6 +56,7 @@ impl PushExecutor {
         let _ = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .header("x-idempotency-key", idempotency_key)
             .json(&serde_json::json!({ "id": agent_id, "type": "agent", "data": dto }))
             .send()
@@ -82,6 +83,7 @@ impl PushExecutor {
         let _ = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .header("x-idempotency-key", idempotency_key)
             .json(&serde_json::json!({ "id": group_id, "type": "group", "data": dto }))
             .send()
@@ -103,12 +105,20 @@ impl PushExecutor {
         }
 
         let url = format!("{}/api/mobile-sync/upload-entities-batch", http_url);
-        let _ = client
+        let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .json(&serde_json::json!({ "items": items }))
             .send()
-            .await;
+            .await
+            .map_err(|e| format!("Batch push request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_body = response.text().await.unwrap_or_default();
+            return Err(format!("Batch push entities failed: HTTP {} body={}", status, err_body));
+        }
 
         Ok(())
     }
@@ -143,6 +153,7 @@ impl PushExecutor {
             let _ = client
                 .post(&url)
                 .header("x-sync-token", sync_token)
+                .header("Authorization", format!("Bearer {}", sync_token))
                 .header("Content-Type", mime_type)
                 .body(image_data)
                 .send()
@@ -218,6 +229,7 @@ impl PushExecutor {
         let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .header("Content-Type", "application/x-ndjson")
             .body(ndjson_body) // reqwest 接受 String 作为 Body
             .send()
@@ -423,6 +435,7 @@ async fn upload_attachment<R: Runtime>(
         let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
             .header("Content-Type", "application/octet-stream")
             .body(file_data)
             .send()

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from "vue";
+import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { ChatMessage, ContentBlock } from "../../core/types/chat";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
@@ -9,6 +9,7 @@ import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { renderMarkdownNodes } from "../../core/utils/astRenderer";
+import { useContentProcessor } from "../../core/composables/useContentProcessor";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
@@ -127,6 +128,9 @@ function renderBlockHtml(block: ContentBlock): string {
           ${escapeHtml(block.content || "")}
         </div>
       `;
+
+    case "style":
+      return "";
 
     default:
       return "";
@@ -364,6 +368,26 @@ watch(
   },
   { immediate: true }
 );
+
+// === Style Block CSS Injection ===
+const { injectScopedCss, removeScopedCss } = useContentProcessor();
+
+watch(
+  () => props.message.blocks,
+  (blocks) => {
+    if (!blocks) return;
+    for (const block of blocks) {
+      if (block.type === "style" && block.content) {
+        injectScopedCss(block.content, props.message.id);
+      }
+    }
+  },
+  { immediate: true }
+);
+
+onUnmounted(() => {
+  removeScopedCss(props.message.id);
+});
 </script>
 
 <template>
