@@ -171,176 +171,126 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
     let mut current_pos = 0;
 
+    // 预编译主匹配正则（包含所有特种块起始标记，利用捕获组编号识别类型）
+    // 捕获组对应关系：
+    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_FENCE, 7: HTML_DOC, 8: ROLE_DIVIDER, 9: STYLE, 10: CODE_FENCE
+    lazy_static! {
+        static ref MASTER_START: Regex = Regex::new(concat!(
+            r"(?im)",
+            r"(^[ \t]*<<<\[TOOL_REQUEST\]>>>)|",                       // 1
+            r"(^[ \t]*\[--- VCP元思考链(?::\s*[^\]]*?)?\s*---\])|",    // 2
+            r"(<think(?:ing)?>)|",                                     // 3
+            r"(^[ \t]*\[\[VCP调用结果信息汇总:)|",                     // 4
+            r"(^[ \t]*<<<DailyNoteStart>>>)|",                         // 5
+            r"(^[ \t]*```html[ \t]*$)|",                               // 6
+            r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 7
+            r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 8
+            r"(<style\b[^>]*>)|",                                      // 9
+            r"(^[ \t]*```[a-zA-Z0-9-]*[ \t]*$)"                         // 10
+        )).unwrap();
+    }
+
     while current_pos < text.len() {
         let remaining = &text[current_pos..];
 
-        // 寻找最早出现的特种块起始标记
-        let mut earliest_match: Option<(usize, usize, BlockType)> = None;
+        if let Some(caps) = MASTER_START.captures(remaining) {
+            let m = caps.get(0).unwrap();
+            let start_idx = m.start();
+            let end_idx = m.end();
 
-        let checks = [
-            (TOOL_START.find(remaining), BlockType::Tool),
-            (THOUGHT_START.find(remaining), BlockType::Thought),
-            (THINK_START.find(remaining), BlockType::Think),
-            (TOOL_RESULT_START.find(remaining), BlockType::ToolResult),
-            (DIARY_START.find(remaining), BlockType::Diary),
-            (HTML_FENCE_START.find(remaining), BlockType::HtmlFence),
-            (HTML_DOC_START.find(remaining), BlockType::HtmlDoc),
-            (ROLE_DIVIDER.find(remaining), BlockType::RoleDivider),
-            (STYLE_TAG_START.find(remaining), BlockType::Style),
-            (
-                GENERIC_CODE_FENCE_START.find(remaining),
-                BlockType::CodeFence,
-            ),
-        ];
-
-        for (m_opt, b_type) in checks {
-            if let Some(m) = m_opt {
-                if earliest_match
-                    .as_ref()
-                    .is_none_or(|(start, _, _)| m.start() < *start)
-                {
-                    earliest_match = Some((m.start(), m.end(), b_type));
-                }
+            // 1. 将起始标记之前的文本作为 Markdown 块推入
+            if start_idx > 0 {
+                let md_text = &remaining[..start_idx];
+                blocks.extend(parse_inline_blocks(md_text));
             }
-        }
 
-        match earliest_match {
-            Some((start_idx, end_idx, block_type)) => {
-                // 1. 将起始标记之前的文本作为 Markdown 块推入
-                if start_idx > 0 {
-                    let md_text = &remaining[..start_idx];
-                    blocks.extend(parse_inline_blocks(md_text));
+            // 识别匹配到的块类型
+            let block_type = if caps.get(1).is_some() { BlockType::Tool }
+            else if caps.get(2).is_some() { BlockType::Thought }
+            else if caps.get(3).is_some() { BlockType::Think }
+            else if caps.get(4).is_some() { BlockType::ToolResult }
+            else if caps.get(5).is_some() { BlockType::Diary }
+            else if caps.get(6).is_some() { BlockType::HtmlFence }
+            else if caps.get(7).is_some() { BlockType::HtmlDoc }
+            else if caps.get(8).is_some() { BlockType::RoleDivider }
+            else if caps.get(9).is_some() { BlockType::Style }
+            else { BlockType::CodeFence };
+
+            // 2. 寻找对应的结束标记
+            let content_start = end_idx;
+            let search_area = &remaining[content_start..];
+
+            let (end_marker_start, end_marker_end, is_complete) = match block_type {
+                BlockType::Tool => {
+                    TOOL_END.find(search_area).map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    })
                 }
+                BlockType::Thought => THOUGHT_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::Think => THINK_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::ToolResult => TOOL_RESULT_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::Diary => DIARY_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::HtmlFence => HTML_FENCE_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::HtmlDoc => HTML_DOC_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::RoleDivider => (Some(0), Some(0), true),
+                BlockType::Style => STYLE_TAG_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::CodeFence => GENERIC_CODE_FENCE_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+            };
 
-                // 2. 寻找对应的结束标记
-                let content_start = end_idx;
-                let search_area = &remaining[content_start..];
+            // 容错处理：未闭合的块（流式中断）降级为普通 Markdown
+            if !is_complete && !matches!(block_type, BlockType::HtmlFence | BlockType::HtmlDoc | BlockType::CodeFence | BlockType::RoleDivider) {
+                let marker_text = &remaining[start_idx..end_idx];
+                blocks.push(ContentBlock::Markdown {
+                    content: None,
+                    nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(marker_text)),
+                });
+                current_pos += end_idx;
+                continue;
+            }
 
-                let (end_marker_start, end_marker_end, is_complete) = match block_type {
-                    BlockType::Tool => {
-                        TOOL_END.find(search_area).map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        })
-                    }
-                    BlockType::Thought => THOUGHT_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::Think => THINK_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::ToolResult => TOOL_RESULT_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::Diary => DIARY_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::HtmlFence => HTML_FENCE_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::HtmlDoc => HTML_DOC_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::RoleDivider => (Some(0), Some(0), true), // RoleDivider is a single line marker
-                    BlockType::Style => STYLE_TAG_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                    BlockType::CodeFence => GENERIC_CODE_FENCE_END
-                        .find(search_area)
-                        .map_or((None, None, false), |m| {
-                            (Some(m.start()), Some(m.end()), true)
-                        }),
-                };
+            let inner_content = if let Some(end_start) = end_marker_start {
+                &search_area[..end_start]
+            } else {
+                search_area
+            };
 
-                // 未闭合的思维链/think 块：起始标记视为普通文本，跳过继续扫描
-                if !is_complete && matches!(block_type, BlockType::Thought | BlockType::Think) {
-                    let marker_text = &remaining[start_idx..end_idx];
-                    blocks.push(ContentBlock::Markdown {
-                        content: None,
-                        nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(marker_text)),
-                    });
-                    current_pos += end_idx;
-                    continue;
-                }
-
-                let inner_content = if let Some(end_start) = end_marker_start {
-                    &search_area[..end_start]
-                } else {
-                    search_area
-                };
-
-                // 3. 解析具体的块内容
-                let block = match block_type {
-                    BlockType::Tool => {
-                        let tool_name = extract_tool_name(inner_content);
-                        if is_daily_note_create(inner_content) {
-                            let (maid, date, content) = extract_diary_details(inner_content);
-                            let nodes =
-                                crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                            ContentBlock::Diary {
-                                maid,
-                                date,
-                                content,
-                                nodes: Some(nodes),
-                            }
-                        } else {
-                            ContentBlock::ToolUse {
-                                tool_name,
-                                content: inner_content.to_string(),
-                                is_complete,
-                            }
-                        }
-                    }
-                    BlockType::Thought => {
-                        let start_marker_text = &remaining[start_idx..end_idx];
-                        let theme = THOUGHT_START
-                            .captures(start_marker_text)
-                            .and_then(|c| c.get(1))
-                            .map(|m| m.as_str().trim().replace("\"", ""))
-                            .unwrap_or_else(|| "元思考链".to_string());
-
-                        let nodes =
-                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
-                        ContentBlock::Thought {
-                            theme,
-                            content: inner_content.to_string(),
-                            is_complete,
-                            nodes: Some(nodes),
-                        }
-                    }
-                    BlockType::Think => {
-                        let nodes =
-                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
-                        ContentBlock::Thought {
-                            theme: "思维链".to_string(),
-                            content: inner_content.to_string(),
-                            is_complete,
-                            nodes: Some(nodes),
-                        }
-                    }
-                    BlockType::ToolResult => {
-                        let (tool_name, status, details, footer) = parse_tool_result(inner_content);
-                        ContentBlock::ToolResult {
-                            tool_name,
-                            status,
-                            details,
-                            footer,
-                        }
-                    }
-                    BlockType::Diary => {
+            // 3. 解析具体的块内容
+            let block = match block_type {
+                BlockType::Tool => {
+                    let tool_name = extract_tool_name(inner_content);
+                    if is_daily_note_create(inner_content) {
                         let (maid, date, content) = extract_diary_details(inner_content);
                         let nodes =
                             crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
@@ -350,77 +300,128 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             content,
                             nodes: Some(nodes),
                         }
+                    } else {
+                        ContentBlock::ToolUse {
+                            tool_name,
+                            content: inner_content.to_string(),
+                            is_complete,
+                        }
                     }
-                    BlockType::HtmlFence => ContentBlock::HtmlPreview {
+                }
+                BlockType::Thought => {
+                    let start_marker_text = &remaining[start_idx..end_idx];
+                    let theme = THOUGHT_START
+                        .captures(start_marker_text)
+                        .and_then(|c| c.get(1))
+                        .map(|m| m.as_str().trim().replace("\"", ""))
+                        .unwrap_or_else(|| "元思考链".to_string());
+
+                    let nodes =
+                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
+                    ContentBlock::Thought {
+                        theme,
                         content: inner_content.to_string(),
-                    },
-                    BlockType::HtmlDoc => {
-                        let mut full_html = String::new();
-                        full_html.push_str(&remaining[start_idx..end_idx]);
-                        full_html.push_str(inner_content);
-                        if is_complete {
-                            if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
-                                full_html.push_str(&search_area[s..e]);
-                            }
-                        }
-                        ContentBlock::HtmlPreview { content: full_html }
+                        is_complete,
+                        nodes: Some(nodes),
                     }
-                    BlockType::RoleDivider => {
-                        let marker_text = &remaining[start_idx..end_idx];
-                        if let Some(caps) = ROLE_DIVIDER.captures(marker_text) {
-                            let is_end = caps.get(1).is_some();
-                            let role = caps
-                                .get(2)
-                                .map(|m| m.as_str().to_lowercase())
-                                .unwrap_or_default();
-                            ContentBlock::RoleDivider { role, is_end }
-                        } else {
-                            ContentBlock::Markdown {
-                                content: None,
-                                nodes: Some(
-                                    crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
-                                        marker_text,
-                                    ),
-                                ),
-                            }
-                        }
-                    }
-                    BlockType::Style => ContentBlock::Style {
+                }
+                BlockType::Think => {
+                    let nodes =
+                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
+                    ContentBlock::Thought {
+                        theme: "思维链".to_string(),
                         content: inner_content.to_string(),
-                    },
-                    BlockType::CodeFence => {
-                        let mut full_fence = String::new();
-                        full_fence.push_str(&remaining[start_idx..end_idx]);
-                        full_fence.push_str(inner_content);
-                        if is_complete {
-                            if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
-                                full_fence.push_str(&search_area[s..e]);
-                            }
+                        is_complete,
+                        nodes: Some(nodes),
+                    }
+                }
+                BlockType::ToolResult => {
+                    let (tool_name, status, details, footer) = parse_tool_result(inner_content);
+                    ContentBlock::ToolResult {
+                        tool_name,
+                        status,
+                        details,
+                        footer,
+                    }
+                }
+                BlockType::Diary => {
+                    let (maid, date, content) = extract_diary_details(inner_content);
+                    let nodes =
+                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
+                    ContentBlock::Diary {
+                        maid,
+                        date,
+                        content,
+                        nodes: Some(nodes),
+                    }
+                }
+                BlockType::HtmlFence => ContentBlock::HtmlPreview {
+                    content: inner_content.to_string(),
+                },
+                BlockType::HtmlDoc => {
+                    let mut full_html = String::new();
+                    full_html.push_str(&remaining[start_idx..end_idx]);
+                    full_html.push_str(inner_content);
+                    if is_complete {
+                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
+                            full_html.push_str(&search_area[s..e]);
                         }
+                    }
+                    ContentBlock::HtmlPreview { content: full_html }
+                }
+                BlockType::RoleDivider => {
+                    let marker_text = &remaining[start_idx..end_idx];
+                    if let Some(caps) = ROLE_DIVIDER.captures(marker_text) {
+                        let is_end = caps.get(1).is_some();
+                        let role = caps
+                            .get(2)
+                            .map(|m| m.as_str().to_lowercase())
+                            .unwrap_or_default();
+                        ContentBlock::RoleDivider { role, is_end }
+                    } else {
                         ContentBlock::Markdown {
                             content: None,
-                            nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
-                                &full_fence,
-                            )),
+                            nodes: Some(
+                                crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                                    marker_text,
+                                ),
+                            ),
                         }
                     }
-                };
-
-                blocks.push(block);
-
-                // 4. 更新游标
-                if let Some(end_end) = end_marker_end {
-                    current_pos += content_start + end_end;
-                } else {
-                    // 如果是不完整的块（流式传输中），直接结束解析
-                    break;
                 }
-            }
-            None => {
-                // 没有找到任何特种块，剩余部分全部作为 Markdown 处理
-                blocks.extend(parse_inline_blocks(remaining));
+                BlockType::Style => ContentBlock::Style {
+                    content: inner_content.to_string(),
+                },
+                BlockType::CodeFence => {
+                    let mut full_fence = String::new();
+                    full_fence.push_str(&remaining[start_idx..end_idx]);
+                    full_fence.push_str(inner_content);
+                    if is_complete {
+                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
+                            full_fence.push_str(&search_area[s..e]);
+                        }
+                    }
+                    ContentBlock::Markdown {
+                        content: None,
+                        nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                            &full_fence,
+                        )),
+                    }
+                }
+            };
+
+            blocks.push(block);
+
+            // 4. 更新游标
+            if let Some(end_end) = end_marker_end {
+                current_pos += content_start + end_end;
+            } else {
                 break;
             }
+        } else {
+            // 没有找到任何特种块，剩余部分全部作为 Markdown 处理
+            blocks.extend(parse_inline_blocks(remaining));
+            break;
         }
     }
 

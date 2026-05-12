@@ -59,8 +59,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     // 1. 数据库初始化 (P0 - 绝对基础)
     let _pool = match init_db(&handle).await {
-        Ok(p) => {
-            handle.manage(DbState { pool: p.clone() });
+        Ok((p, path)) => {
+            handle.manage(DbState {
+                pool: p.clone(),
+                path,
+            });
             p
         }
         Err(e) => {

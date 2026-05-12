@@ -213,7 +213,7 @@ async fn run_sync_session(
     let mut retry_delay = Duration::from_millis(500);
 
     let db = app_handle.state::<DbState>();
-    let mut write_queue = DbWriteQueue::new(db.pool.clone());
+    let mut write_queue = DbWriteQueue::new(db.pool.clone(), db.path.clone());
     let sync_log_level = LogLevel::Info;
     let log_dir = app_handle
         .path()

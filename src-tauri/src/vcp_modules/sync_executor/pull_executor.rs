@@ -3,6 +3,7 @@ use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
+use crate::vcp_modules::sync_hash::HashAggregator;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
@@ -180,9 +181,27 @@ async fn process_topic_messages<R: Runtime>(
     let parsed_count = parsed_messages.len();
 
     if !parsed_messages.is_empty() {
-        // 3. 并发预渲染 (Parallel Pre-render on CPU)
+        // 3. 并发处理 (Parallel Processing on CPU): 预渲染 + 指纹计算
         let mut render_bytes_list = Vec::with_capacity(parsed_count);
+        let mut content_hashes = Vec::with_capacity(parsed_count);
+
         for msg in &parsed_messages {
+            // A. 计算指纹 (SHA-256 + JSON Serialization)
+            let attachment_hashes: Vec<String> = msg
+                .attachments
+                .as_ref()
+                .map(|atts| {
+                    atts.iter()
+                        .map(|a| a.hash.clone().unwrap_or_default())
+                        .filter(|h| !h.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let content_hash =
+                HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
+            content_hashes.push(content_hash);
+
+            // B. 并发预渲染
             let content = msg.content.clone();
             let topic_id_log = topic_id.to_string();
             let msg_id_log = msg.id.clone();
@@ -217,6 +236,7 @@ async fn process_topic_messages<R: Runtime>(
                 topic_id: topic_id.to_string(),
                 messages: parsed_messages,
                 render_bytes: render_bytes_list,
+                content_hashes,
                 skip_bubble,
             })
             .await;

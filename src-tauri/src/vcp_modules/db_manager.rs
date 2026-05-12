@@ -5,9 +5,10 @@ use tauri::Manager;
 
 pub struct DbState {
     pub pool: Pool<Sqlite>,
+    pub path: std::path::PathBuf,
 }
 
-pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
+pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path::PathBuf), String> {
     // 获取应用配置目录 (Android 下通常为 /data/user/0/com.vcp.avatar/files)
     let config_dir = app_handle
         .path()
@@ -35,6 +36,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
     // 性能优化：WAL 模式 + 30s busy_timeout，缓解高并发写入锁竞争
     connect_options = connect_options
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(30));
 
     let pool = SqlitePoolOptions::new()
@@ -46,7 +48,8 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<Pool<Sqlite>, String> {
     // 运行初始化建表
     setup_tables(&pool).await?;
 
-    Ok(pool)
+    // 挂载到 App State (注意：由于 init_db 返回 pool，我们需要在外部构建 DbState)
+    Ok((pool, db_path))
 }
 
 async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
