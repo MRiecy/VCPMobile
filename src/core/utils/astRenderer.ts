@@ -5,7 +5,11 @@ import type { MarkdownNode, InlineNode } from "../types/chat";
 const htmlCache = new Map<string, string>();
 const MAX_CACHE_SIZE = 500;
 
-function getCacheKey(nodes: MarkdownNode[], messageId: string): string {
+function getCacheKey(nodes: MarkdownNode[], messageId: string, blockHash?: string): string {
+  if (blockHash) {
+    return `${messageId}:${blockHash}`;
+  }
+  // Fallback for legacy data or manual calls
   const json = JSON.stringify(nodes);
   const hash = json.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36);
   return `${messageId}:${hash}`;
@@ -29,10 +33,11 @@ export function clearMessageCache(messageId: string): void {
  */
 export function renderMarkdownNodes(
   nodes: MarkdownNode[], 
-  messageId: string
+  messageId: string,
+  blockHash?: string
 ): string {
   if (!nodes || nodes.length === 0) return '';
-  const key = getCacheKey(nodes, messageId);
+  const key = getCacheKey(nodes, messageId, blockHash);
   const cached = htmlCache.get(key);
   if (cached !== undefined) return cached;
 

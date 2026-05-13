@@ -21,6 +21,7 @@ export type MarkdownNode = {
   wrapper_class?: string;
   content?: string;
   encoded?: string;
+  hash?: string;
 };
 
 export type InlineNode = {
@@ -35,6 +36,7 @@ export type InlineNode = {
   content?: string;
   svg?: string;
   display_mode?: boolean;
+  hash?: string;
 };
 
 export interface ContentBlock {
@@ -63,6 +65,7 @@ export interface ContentBlock {
   is_end?: boolean;
   display_mode?: boolean;
   svg?: string; // For type: "math"
+  hash?: string;
 }
 
 /**
@@ -105,9 +108,8 @@ export interface ChatMessage {
   attachments?: Attachment[];
 
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
-  displayedContent?: string; // Aurora 流式管道全量文本（TODO: 流式管道重构后移除）
-  stableContent?: string;    // Aurora: 稳定区 HTML/Markdown
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
+  tailBlock?: ContentBlock;
 }
 
 /**
@@ -157,14 +159,15 @@ export interface StreamBlock {
   date?: string;
   role?: string;
   is_end?: boolean;
+  hash?: string;
 }
 
 /**
  * Aurora 语义沉淀更新，由 Rust 流式管道推送
  */
 export interface AuroraUpdate {
-  stable: string;
   stable_blocks: StreamBlock[];
+  tail_block?: StreamBlock;
   tail: string;
   content: string;
 }

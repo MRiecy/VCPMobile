@@ -1,17 +1,18 @@
 use crate::vcp_modules::pre_renderer::code_highlighter::highlight_code_block;
 use crate::vcp_modules::pre_renderer::markdown_ast::{InlineNode, MarkdownNode};
-use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use regex::Regex;
 
 lazy_static! {
     static ref FENCE_RE: Regex =
         Regex::new(r"(?m)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
 
-    static ref DISPLAY_RE: Regex = Regex::new(r"(?s)\\\[(.*?)\\\]").unwrap();
-    static ref INLINE_RE: Regex = Regex::new(r"(?s)\\\((.*?)\\\)").unwrap();
+    // 合并 LaTeX 匹配：[ ... ] 和 ( ... )
+    static ref MATH_RE: Regex = Regex::new(r"(?s)\\\[(?P<display>.*?)\\\]|\\\((?P<inline>.*?)\\\)").unwrap();
+
     static ref MAGIC_RE: Regex =
-        Regex::new(r##"(?s)([\u{0022}\u{201C}\u{201D}](?:[^\u{0022}\u{201C}\u{201D}]|\\.)+?[\u{0022}\u{201C}\u{201D}])|(@![^\s@!]+)|(@[^\s@]+)"##).unwrap();
+        Regex::new(r##"(?s)(["“”](?:[^"“”]|\\.)+?["“”])|(@![^\s@!]+)|(@[^\s@]+)"##).unwrap();
 
     static ref HTML_CONTAINER_OPEN_RE: Regex =
         Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
@@ -21,126 +22,87 @@ lazy_static! {
 }
 
 fn preprocess_latex_math(text: &str) -> String {
-    let mut segments: Vec<(bool, &str)> = Vec::new();
+    let mut result = String::with_capacity(text.len());
     let mut last_end = 0;
     let mut in_fence = false;
 
-    for cap in FENCE_RE.find_iter(text) {
-        let m = cap.unwrap();
-        segments.push((!in_fence, &text[last_end..m.start()]));
-        segments.push((in_fence, m.as_str()));
+    // 1. 扫描代码围栏
+    for m in FENCE_RE.find_iter(text) {
+        let segment = &text[last_end..m.start()];
+        if !in_fence {
+            // 在围栏外：执行极速公式替换
+            push_math_replaced(&mut result, segment);
+        } else {
+            // 在围栏内：直接追加
+            result.push_str(segment);
+        }
+        result.push_str(m.as_str());
         last_end = m.end();
         in_fence = !in_fence;
     }
-    segments.push((!in_fence, &text[last_end..]));
 
-    let mut result = String::new();
-    for (is_outside, seg) in segments {
-        if !is_outside {
-            result.push_str(seg);
-            continue;
-        }
-
-        let seg2 = seg;
-        let mut processed = String::new();
-        let mut last = 0;
-        for cap in DISPLAY_RE.find_iter(seg2) {
-            let m = cap.unwrap();
-            processed.push_str(&seg2[last..m.start()]);
-            if let Ok(Some(caps)) = DISPLAY_RE.captures(m.as_str()) {
-                if let Some(inner) = caps.get(1) {
-                    processed.push_str("$$");
-                    processed.push_str(inner.as_str());
-                    processed.push_str("$$");
-                } else {
-                    processed.push_str(m.as_str());
-                }
-            } else {
-                processed.push_str(m.as_str());
-            }
-            last = m.end();
-        }
-        processed.push_str(&seg2[last..]);
-
-        let seg3 = processed;
-        let mut processed = String::new();
-        let mut last = 0;
-        for cap in INLINE_RE.find_iter(&seg3) {
-            let m = cap.unwrap();
-            processed.push_str(&seg3[last..m.start()]);
-            if let Ok(Some(caps)) = INLINE_RE.captures(m.as_str()) {
-                if let Some(inner) = caps.get(1) {
-                    processed.push('$');
-                    processed.push_str(inner.as_str());
-                    processed.push('$');
-                } else {
-                    processed.push_str(m.as_str());
-                }
-            } else {
-                processed.push_str(m.as_str());
-            }
-            last = m.end();
-        }
-        processed.push_str(&seg3[last..]);
-
-        result.push_str(&processed);
+    // 2. 处理尾部
+    let tail = &text[last_end..];
+    if !in_fence {
+        push_math_replaced(&mut result, tail);
+    } else {
+        result.push_str(tail);
     }
 
     result
 }
 
-/// 检查指定位置是否在代码围栏内部
-fn is_in_code_fence(text: &str, pos: usize) -> bool {
-    let mut in_fence = false;
-    let mut line_start = 0;
-    for (i, c) in text.char_indices() {
-        if c == '\n' {
-            let line = &text[line_start..i];
-            if line.trim_start().starts_with("```") {
-                in_fence = !in_fence;
-            }
-            if i >= pos {
-                return in_fence;
-            }
-            line_start = i + 1;
+/// 辅助函数：将含有 LaTeX 的片段高效推送到结果缓冲区，不产生中间 String
+fn push_math_replaced(dest: &mut String, segment: &str) {
+    let mut last_match_end = 0;
+    for caps in MATH_RE.captures_iter(segment) {
+        let full_match = caps.get(0).unwrap();
+        // 推送匹配项之前的普通文本
+        dest.push_str(&segment[last_match_end..full_match.start()]);
+
+        // 识别是哪种模式并直接推送
+        if let Some(display) = caps.name("display") {
+            dest.push_str("$$");
+            dest.push_str(display.as_str());
+            dest.push_str("$$");
+        } else if let Some(inline) = caps.name("inline") {
+            dest.push('$');
+            dest.push_str(inline.as_str());
+            dest.push('$');
         }
+        
+        last_match_end = full_match.end();
     }
-    // 最后一行
-    if line_start < text.len() {
-        let line = &text[line_start..];
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-        }
-    }
-    in_fence
+    // 推送剩余文本
+    dest.push_str(&segment[last_match_end..]);
 }
 
 /// 提取 HTML 容器块，将其替换为占位符，并递归解析内部 Markdown
 fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode>, String)>) {
-    let mut result = String::new();
+    let mut result = String::with_capacity(text.len());
     let mut containers: Vec<(String, Vec<MarkdownNode>, String)> = Vec::new();
     let mut last_pos = 0;
 
+    // 预先收集所有代码围栏的位置以供快速查询 (标准 regex find_iter)
+    let fences: Vec<regex::Match> = FENCE_RE.find_iter(text).collect();
+    let mut fence_cursor = 0;
+    let mut in_fence = false;
+
     for cap in HTML_CONTAINER_OPEN_RE.captures_iter(text) {
-        let cap = match cap {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let m = match cap.get(0) {
-            Some(m) => m,
-            None => continue,
-        };
-        let tag = match cap.get(1) {
-            Some(t) => t.as_str().to_lowercase(),
-            None => continue,
-        };
+        let m = cap.get(0).unwrap();
+        let tag = cap.get(1).unwrap().as_str().to_lowercase();
 
         if m.start() < last_pos {
             continue;
         }
 
-        // 跳过代码围栏内部的匹配
-        if is_in_code_fence(text, m.start()) {
+        // 高效同步围栏状态：跳过当前匹配位置之前的围栏切换
+        while fence_cursor < fences.len() && fences[fence_cursor].start() <= m.start() {
+            in_fence = !in_fence;
+            fence_cursor += 1;
+        }
+
+        if in_fence {
             continue;
         }
 
@@ -162,6 +124,12 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
             containers.push((open_tag, inner_nodes, close_tag));
 
             last_pos = close_end;
+
+            // 由于 last_pos 跳跃了，同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步
+            while fence_cursor < fences.len() && fences[fence_cursor].start() < last_pos {
+                in_fence = !in_fence;
+                fence_cursor += 1;
+            }
         }
     }
 
@@ -206,8 +174,8 @@ fn replace_container_placeholders(
 ) {
     let mut i = 0;
     while i < nodes.len() {
-        if let MarkdownNode::RawHtml { content } = &nodes[i] {
-            if let Ok(Some(caps)) = HTML_CONTAINER_PLACEHOLDER_RE.captures(content) {
+        if let MarkdownNode::RawHtml { content, .. } = &nodes[i] {
+            if let Some(caps) = HTML_CONTAINER_PLACEHOLDER_RE.captures(content) {
                 if let Some(idx_match) = caps.get(1) {
                     if let Ok(idx) = idx_match.as_str().parse::<usize>() {
                         if idx < containers.len() {
@@ -215,10 +183,12 @@ fn replace_container_placeholders(
                             let mut replacement = Vec::new();
                             replacement.push(MarkdownNode::RawHtml {
                                 content: open_tag.clone(),
+                                hash: None,
                             });
                             replacement.extend(children.clone());
                             replacement.push(MarkdownNode::RawHtml {
                                 content: close_tag.clone(),
+                                hash: None,
                             });
                             nodes.splice(i..=i, replacement);
                             i += children.len() + 2;
@@ -256,6 +226,7 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                 } else {
                     nodes.push(MarkdownNode::Paragraph {
                         children: inline_nodes,
+                        hash: None,
                     });
                 }
             }
@@ -272,6 +243,7 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                         content: math.to_string(),
                         svg: None,
                         display_mode: false,
+                        hash: None,
                     });
                 } else {
                     nodes.push(MarkdownNode::Paragraph {
@@ -279,7 +251,9 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                             content: math.to_string(),
                             svg: None,
                             display_mode: false,
+                            hash: None,
                         }],
+                        hash: None,
                     });
                 }
             }
@@ -288,12 +262,14 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                     content: math.to_string(),
                     svg: None,
                     display_mode: true,
+                    hash: None,
                 };
                 if let Some(parent) = stack.last_mut() {
                     parent.push_inline(inline_node);
                 } else {
                     nodes.push(MarkdownNode::Paragraph {
                         children: vec![inline_node],
+                        hash: None,
                     });
                 }
             }
@@ -321,32 +297,44 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                             }
                         }
                         PartialNode::Strong { children } => {
-                            let inline = InlineNode::Strong { children };
+                            let inline = InlineNode::Strong {
+                                children,
+                                hash: None,
+                            };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
                                 nodes.push(MarkdownNode::Paragraph {
                                     children: vec![inline],
+                                    hash: None,
                                 });
                             }
                         }
                         PartialNode::Emphasis { children } => {
-                            let inline = InlineNode::Emphasis { children };
+                            let inline = InlineNode::Emphasis {
+                                children,
+                                hash: None,
+                            };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
                                 nodes.push(MarkdownNode::Paragraph {
                                     children: vec![inline],
+                                    hash: None,
                                 });
                             }
                         }
                         PartialNode::Strikethrough { children } => {
-                            let inline = InlineNode::Strikethrough { children };
+                            let inline = InlineNode::Strikethrough {
+                                children,
+                                hash: None,
+                            };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
                                 nodes.push(MarkdownNode::Paragraph {
                                     children: vec![inline],
+                                    hash: None,
                                 });
                             }
                         }
@@ -362,12 +350,14 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                                 title,
                                 children,
                                 needs_asset_conversion,
+                                hash: None,
                             };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
                                 nodes.push(MarkdownNode::Paragraph {
                                     children: vec![inline],
+                                    hash: None,
                                 });
                             }
                         }
@@ -379,12 +369,14 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
                                 alt,
                                 title,
                                 needs_asset_conversion,
+                                hash: None,
                             };
                             if let Some(parent) = stack.last_mut() {
                                 parent.push_inline(inline);
                             } else {
                                 nodes.push(MarkdownNode::Paragraph {
                                     children: vec![inline],
+                                    hash: None,
                                 });
                             }
                         }
@@ -402,12 +394,14 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
             Event::Html(html) => {
                 nodes.push(MarkdownNode::RawHtml {
                     content: html.to_string(),
+                    hash: None,
                 });
             }
             Event::InlineHtml(html) => {
                 if let Some(top) = stack.last_mut() {
                     top.push_inline(InlineNode::RawHtmlInline {
                         content: html.to_string(),
+                        hash: None,
                     });
                 }
             }
@@ -585,15 +579,17 @@ impl PartialNode {
             PartialNode::Emphasis { children } => children.push(node),
             PartialNode::Strikethrough { children } => children.push(node),
             PartialNode::TableCell { children } => children.push(node),
-            PartialNode::Item { children } => {
+            PartialNode::Item { children } | PartialNode::Blockquote { children } => {
                 if let Some(MarkdownNode::Paragraph {
                     children: para_children,
+                    ..
                 }) = children.last_mut()
                 {
                     para_children.push(node);
                 } else {
                     children.push(MarkdownNode::Paragraph {
                         children: vec![node],
+                        hash: None,
                     });
                 }
             }
@@ -624,14 +620,18 @@ impl PartialNode {
             PartialNode::Emphasis { children } => children.append(&mut nodes),
             PartialNode::Strikethrough { children } => children.append(&mut nodes),
             PartialNode::TableCell { children } => children.append(&mut nodes),
-            PartialNode::Item { children } if !nodes.is_empty() => {
+            PartialNode::Item { children } | PartialNode::Blockquote { children } => {
                 if let Some(MarkdownNode::Paragraph {
                     children: para_children,
+                    ..
                 }) = children.last_mut()
                 {
                     para_children.append(&mut nodes);
                 } else {
-                    children.push(MarkdownNode::Paragraph { children: nodes });
+                    children.push(MarkdownNode::Paragraph {
+                        children: nodes,
+                        hash: None,
+                    });
                 }
             }
             _ => {}
@@ -674,12 +674,19 @@ impl PartialNode {
 
     fn finalize(self, _tag_end: TagEnd) -> MarkdownNode {
         match self {
-            PartialNode::Paragraph { children } => MarkdownNode::Paragraph { children },
-            PartialNode::Heading { level, children } => MarkdownNode::Heading { level, children },
+            PartialNode::Paragraph { children } => MarkdownNode::Paragraph {
+                children,
+                hash: None,
+            },
+            PartialNode::Heading { level, children } => MarkdownNode::Heading {
+                level,
+                children,
+                hash: None,
+            },
             PartialNode::CodeBlock { lang, code } => {
                 let lang_str = lang.as_deref().unwrap_or("plaintext");
                 if lang_str == "mermaid" {
-                    MarkdownNode::MermaidPlaceholder { code }
+                    MarkdownNode::MermaidPlaceholder { code, hash: None }
                 } else {
                     let highlighted = highlight_code_block(&code, lang_str);
                     MarkdownNode::CodeBlock {
@@ -687,15 +694,24 @@ impl PartialNode {
                         code,
                         highlighted_html: highlighted,
                         theme: None,
+                        hash: None,
                     }
                 }
             }
-            PartialNode::Blockquote { children } => MarkdownNode::Blockquote { children },
-            PartialNode::List { ordered, items } => MarkdownNode::List { ordered, items },
+            PartialNode::Blockquote { children } => MarkdownNode::Blockquote {
+                children,
+                hash: None,
+            },
+            PartialNode::List { ordered, items } => MarkdownNode::List {
+                ordered,
+                items,
+                hash: None,
+            },
             PartialNode::Table { header, rows } => MarkdownNode::Table {
                 header,
                 rows,
                 wrapper_class: Some("vcp-scrollable no-swipe".to_string()),
+                hash: None,
             },
             PartialNode::Link {
                 href,
@@ -710,7 +726,9 @@ impl PartialNode {
                         title,
                         children,
                         needs_asset_conversion,
+                        hash: None,
                     }],
+                    hash: None,
                 }
             }
             PartialNode::Image { src, alt, title } => {
@@ -721,20 +739,35 @@ impl PartialNode {
                         alt,
                         title,
                         needs_asset_conversion,
+                        hash: None,
                     }],
+                    hash: None,
                 }
             }
             PartialNode::Strong { children } => MarkdownNode::Paragraph {
-                children: vec![InlineNode::Strong { children }],
+                children: vec![InlineNode::Strong {
+                    children,
+                    hash: None,
+                }],
+                hash: None,
             },
             PartialNode::Emphasis { children } => MarkdownNode::Paragraph {
-                children: vec![InlineNode::Emphasis { children }],
+                children: vec![InlineNode::Emphasis {
+                    children,
+                    hash: None,
+                }],
+                hash: None,
             },
             PartialNode::Strikethrough { children } => MarkdownNode::Paragraph {
-                children: vec![InlineNode::Strikethrough { children }],
+                children: vec![InlineNode::Strikethrough {
+                    children,
+                    hash: None,
+                }],
+                hash: None,
             },
             _ => MarkdownNode::Paragraph {
                 children: Vec::new(),
+                hash: None,
             },
         }
     }
@@ -774,6 +807,7 @@ fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
                     content: math.to_string(),
                     svg: None,
                     display_mode: false,
+                    hash: None,
                 };
                 push_inline_to_context(&mut stack, &mut nodes, node);
             }
@@ -782,27 +816,37 @@ fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
                     content: math.to_string(),
                     svg: None,
                     display_mode: true,
+                    hash: None,
                 };
                 push_inline_to_context(&mut stack, &mut nodes, node);
             }
             Event::Start(Tag::Strong) => stack.push(PartialInlineNode::Strong { children: vec![] }),
             Event::End(TagEnd::Strong) => {
                 if let Some(PartialInlineNode::Strong { children }) = stack.pop() {
-                    let node = InlineNode::Strong { children };
+                    let node = InlineNode::Strong {
+                        children,
+                        hash: None,
+                    };
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
             Event::Start(Tag::Emphasis) => stack.push(PartialInlineNode::Emphasis { children: vec![] }),
             Event::End(TagEnd::Emphasis) => {
                 if let Some(PartialInlineNode::Emphasis { children }) = stack.pop() {
-                    let node = InlineNode::Emphasis { children };
+                    let node = InlineNode::Emphasis {
+                        children,
+                        hash: None,
+                    };
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
             Event::Start(Tag::Strikethrough) => stack.push(PartialInlineNode::Strikethrough { children: vec![] }),
             Event::End(TagEnd::Strikethrough) => {
                 if let Some(PartialInlineNode::Strikethrough { children }) = stack.pop() {
-                    let node = InlineNode::Strikethrough { children };
+                    let node = InlineNode::Strikethrough {
+                        children,
+                        hash: None,
+                    };
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
@@ -820,6 +864,7 @@ fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
                         title,
                         children,
                         needs_asset_conversion: false,
+                        hash: None,
                     };
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
@@ -838,6 +883,7 @@ fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
                         alt,
                         title,
                         needs_asset_conversion: false,
+                        hash: None,
                     };
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
@@ -889,7 +935,6 @@ fn process_vcp_magic(text: &str) -> Vec<InlineNode> {
     let mut last_end = 0;
 
     for cap in MAGIC_RE.captures_iter(text) {
-        let cap = cap.unwrap();
         let m = cap.get(0).unwrap();
         if m.start() > last_end {
             nodes.push(InlineNode::Text {
@@ -904,7 +949,10 @@ fn process_vcp_magic(text: &str) -> Vec<InlineNode> {
             } else {
                 parse_inline_standard(quote_text)
             };
-            nodes.push(InlineNode::QuotedText { children });
+            nodes.push(InlineNode::QuotedText {
+                children,
+                hash: None,
+            });
         } else if let Some(alert) = cap.get(2) {
             nodes.push(InlineNode::AlertTag {
                 value: alert.as_str().to_string(),

@@ -75,6 +75,14 @@ impl HashAggregator {
         format!("{:x}", hasher.finalize())
     }
 
+    pub fn compute_content_hash(content: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
+
     pub async fn compute_topic_root_hash(
         tx: &mut Transaction<'_, Sqlite>,
         topic_id: &str,
