@@ -192,10 +192,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       const aurora = event.aurora;
       if (aurora) {
         msg!.content = aurora.content;
-        msg!.stableContent = aurora.stable;
         msg!.tailContent = aurora.tail;
-        msg!.displayedContent = aurora.stable + aurora.tail;
         msg!.blocks = (aurora.stable_blocks || []) as any;
+        msg!.tailBlock = aurora.tail_block as any;
       }
       msg!.isThinking = false;
       addSessionStream(itemId, topicId, actualMessageId);
@@ -204,7 +203,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       const finishReason = event.finishReason;
 
       // 执行完成逻辑 (取代原 streamManager.finalizeStream)
-      msg!.displayedContent = msg!.content;
       msg!.tailContent = "";
       if (finishReason) msg!.finishReason = finishReason;
 
@@ -214,7 +212,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (type === "error" && errorMsg && errorMsg !== "请求已中止") {
         const errorText = `\n\n> VCP流式错误: ${errorMsg}`;
         msg!.content += errorText;
-        msg!.displayedContent = msg!.content;
         msg!.finishReason = "error";
       }
 

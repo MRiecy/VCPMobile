@@ -1,6 +1,18 @@
 use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
 
+fn default_group_name() -> String {
+    "Unnamed Group".to_string()
+}
+
+fn default_group_mode() -> String {
+    "sequential".to_string()
+}
+
+fn default_tag_match_mode() -> Option<String> {
+    Some("strict".to_string())
+}
+
 /// 群组完整配置结构 (对齐桌面端 config.json)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -8,7 +20,7 @@ pub struct GroupConfig {
     /// 群组 ID (通常是 ____123 格式)
     pub id: String,
     /// 群组名称
-    #[serde(default)]
+    #[serde(default = "default_group_name")]
     pub name: String,
     /// 自动提取的头像主色调 (从 avatars 表动态获取)
     #[serde(default)]
@@ -17,7 +29,7 @@ pub struct GroupConfig {
     #[serde(default)]
     pub members: Vec<String>,
     /// 发言模式 (sequential, naturerandom, invite_only)
-    #[serde(default)]
+    #[serde(default = "default_group_mode")]
     pub mode: String,
     /// 成员标签 (映射 agentId -> tags)
     #[serde(default)]
@@ -37,8 +49,8 @@ pub struct GroupConfig {
     /// 话题列表
     #[serde(default)]
     pub topics: Vec<Topic>,
-    /// 标签匹配模式 (strict, fuzzy)
-    #[serde(default)]
+    /// 标签匹配模式 (strict, natural)
+    #[serde(default = "default_tag_match_mode")]
     pub tag_match_mode: Option<String>,
     /// 创建时间戳
     #[serde(default)]

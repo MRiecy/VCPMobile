@@ -448,8 +448,8 @@ pub async fn perform_vcp_request<R: Runtime>(
                     finish_reason,
                     error,
                     aurora: Some(AuroraUpdate {
-                        stable: buffer.stable_content.clone(),
                         stable_blocks: buffer.stable_blocks.clone(),
+                        tail_block: buffer.tail_block.clone(),
                         tail: AuroraBuffer::balance_html_tags(&buffer.tail_content),
                         content: buffer.full_text.clone(),
                     }),

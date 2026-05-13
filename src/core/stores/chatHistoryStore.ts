@@ -295,7 +295,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       const errorText = `\n\n> VCP错误: ${e instanceof Error ? e.message : String(e)}`;
       thinkingMsg.isThinking = false;
       thinkingMsg.content += errorText;
-      thinkingMsg.displayedContent = (thinkingMsg.displayedContent || "") + errorText;
       streamStore.removeSessionStream(agentId, topicId, thinkingId);
     }
   };
@@ -397,7 +396,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       ...msg,
       content: newContent,
       blocks: undefined,
-      displayedContent: "",
     };
 
     if (sessionStore.currentSelectedItem?.id && sessionStore.currentTopicId) {
@@ -504,7 +502,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       console.error("[ChatHistoryStore] Regeneration failed:", e);
       thinkingMsg.isThinking = false;
       thinkingMsg.content += `\n\n> VCP错误: ${e}`;
-      thinkingMsg.displayedContent = (thinkingMsg.displayedContent || "") + `\n\n> VCP错误: ${e}`;
       streamStore.removeSessionStream(ownerId, topicId, thinkingId);
     }
   };

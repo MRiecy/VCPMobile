@@ -5,12 +5,18 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type")]
 pub enum MarkdownNode {
     #[serde(rename = "paragraph")]
-    Paragraph { children: Vec<InlineNode> },
+    Paragraph {
+        children: Vec<InlineNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "heading")]
     Heading {
         level: u8,
         children: Vec<InlineNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     #[serde(rename = "code_block")]
@@ -19,15 +25,23 @@ pub enum MarkdownNode {
         code: String,
         highlighted_html: Option<String>, // syntect 预渲染结果
         theme: Option<String>,            // "github-dark" | "github-light"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     #[serde(rename = "blockquote")]
-    Blockquote { children: Vec<MarkdownNode> },
+    Blockquote {
+        children: Vec<MarkdownNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "list")]
     List {
         ordered: bool,
         items: Vec<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     #[serde(rename = "table")]
@@ -35,16 +49,26 @@ pub enum MarkdownNode {
         header: Vec<Vec<InlineNode>>,
         rows: Vec<Vec<Vec<InlineNode>>>,
         wrapper_class: Option<String>, // "vcp-scrollable no-swipe"
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     #[serde(rename = "thematic_break")]
     ThematicBreak,
 
     #[serde(rename = "raw_html")]
-    RawHtml { content: String },
+    RawHtml {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "mermaid")]
-    MermaidPlaceholder { code: String },
+    MermaidPlaceholder {
+        code: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 }
 
 /// 行内元素
@@ -55,10 +79,18 @@ pub enum InlineNode {
     Text { value: String },
 
     #[serde(rename = "strong")]
-    Strong { children: Vec<InlineNode> },
+    Strong {
+        children: Vec<InlineNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "emphasis")]
-    Emphasis { children: Vec<InlineNode> },
+    Emphasis {
+        children: Vec<InlineNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "code")]
     Code { value: String },
@@ -69,6 +101,8 @@ pub enum InlineNode {
         title: Option<String>,
         children: Vec<InlineNode>,
         needs_asset_conversion: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     #[serde(rename = "image")]
@@ -77,6 +111,8 @@ pub enum InlineNode {
         alt: String,
         title: Option<String>,
         needs_asset_conversion: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     #[serde(rename = "line_break")]
@@ -90,14 +126,24 @@ pub enum InlineNode {
         content: String,
         svg: Option<String>,
         display_mode: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
 
     // VCP 魔法标记
     #[serde(rename = "quoted_text")]
-    QuotedText { children: Vec<InlineNode> },
+    QuotedText {
+        children: Vec<InlineNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "strikethrough")]
-    Strikethrough { children: Vec<InlineNode> },
+    Strikethrough {
+        children: Vec<InlineNode>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 
     #[serde(rename = "highlight_tag")]
     HighlightTag { value: String }, // #标签
@@ -106,5 +152,9 @@ pub enum InlineNode {
     AlertTag { value: String }, // !告警
 
     #[serde(rename = "raw_html_inline")]
-    RawHtmlInline { content: String },
+    RawHtmlInline {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 }

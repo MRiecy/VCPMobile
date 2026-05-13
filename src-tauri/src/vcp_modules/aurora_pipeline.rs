@@ -6,9 +6,10 @@ use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuroraUpdate {
-    pub stable: String,
-    /// 流式增量块：已确认闭合的语义块，前端增量渲染
+    /// 流式增量块：已确认闭合的语义块
     pub stable_blocks: Vec<StreamBlock>,
+    /// 推测块：当前正在增长的尾部，按 Markdown 预渲染
+    pub tail_block: Option<StreamBlock>,
     pub tail: String,
     pub content: String,
 }
@@ -17,9 +18,9 @@ pub struct AuroraUpdate {
 /// 职责：用轻量块解析器识别已闭合/未闭合块，前端增量接收
 pub struct AuroraBuffer {
     pub full_text: String,
-    pub stable_content: String,
     pub stable_blocks: Vec<StreamBlock>,
     pub tail_content: String,
+    pub tail_block: Option<StreamBlock>,
     parser: StreamBlockParser,
     is_finishing: bool,
 }
@@ -28,9 +29,9 @@ impl AuroraBuffer {
     pub fn new() -> Self {
         Self {
             full_text: String::new(),
-            stable_content: String::new(),
             stable_blocks: Vec::new(),
             tail_content: String::new(),
+            tail_block: None,
             parser: StreamBlockParser::new(),
             is_finishing: false,
         }
@@ -49,24 +50,31 @@ impl AuroraBuffer {
         }
 
         let prev_stable_count = self.stable_blocks.len();
-        let prev_stable_len = self.stable_content.len();
         let prev_tail = self.tail_content.clone();
 
-        // 增量解析全文，产出已闭合块 + 尾部纯文本
+        // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
         let (new_blocks, new_tail) = self.parser.process(&self.full_text);
 
-        self.stable_blocks = new_blocks;
+        if !new_blocks.is_empty() {
+            self.stable_blocks.extend(new_blocks);
+        }
+
         self.tail_content = new_tail;
 
-        // 从块数组重建 stable_content HTML（用于 displayedContent 后备）
-        let mut html = String::new();
-        for block in &self.stable_blocks {
-            html.push_str(&stream_block_to_html(block));
+        // 2. 推测渲染 (Speculative Rendering)：将 tail 视为一个临时 Markdown 块
+        if !self.tail_content.is_empty() {
+            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&self.tail_content);
+            let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(&self.tail_content);
+            self.tail_block = Some(StreamBlock::Markdown {
+                content: self.tail_content.clone(),
+                nodes: Some(nodes),
+                hash,
+            });
+        } else {
+            self.tail_block = None;
         }
-        self.stable_content = html;
 
-        let stable_changed = self.stable_blocks.len() != prev_stable_count
-            || self.stable_content.len() != prev_stable_len;
+        let stable_changed = self.stable_blocks.len() != prev_stable_count;
         let tail_changed = self.tail_content != prev_tail;
 
         (stable_changed, tail_changed)
@@ -74,17 +82,15 @@ impl AuroraBuffer {
 
     /// 结束流：强制完成剩余内容
     pub fn finalize(&mut self) {
-        self.is_finishing = true;
-        let final_blocks = self.parser.finalize(&self.full_text);
-        self.stable_blocks = final_blocks;
-
-        // 重建 stable_content
-        let mut html = String::new();
-        for block in &self.stable_blocks {
-            html.push_str(&stream_block_to_html(block));
+        if self.is_finishing {
+            return;
         }
-        self.stable_content = html;
+        self.is_finishing = true;
+        let final_new_blocks = self.parser.finalize(&self.full_text);
+
+        self.stable_blocks.extend(final_new_blocks);
         self.tail_content.clear();
+        self.tail_block = None;
     }
 
     /// 简单的 HTML 标签补全，防止流式输出截断导致 DOM 渲染异常
@@ -100,53 +106,5 @@ impl AuroraBuffer {
             }
         }
         balanced
-    }
-}
-
-/// 将 StreamBlock 转为纯文本（用于 stable_content 字符串）
-/// 注意：这里的 stable_content 仅作后备兼容，前端实际使用 stable_blocks 渲染
-fn stream_block_to_html(block: &StreamBlock) -> String {
-    match block {
-        StreamBlock::Markdown { content, .. } => {
-            format!("{}\n\n", content)
-        }
-        StreamBlock::Thought { content, .. } => {
-            format!("[思考]\n{}\n\n", content)
-        }
-        StreamBlock::Tool { tool_name, content } => {
-            format!("[工具: {}]\n{}\n\n", tool_name, content)
-        }
-        StreamBlock::ToolResult {
-            tool_name,
-            status,
-            details,
-            footer,
-        } => {
-            let mut s = format!("[工具结果: {} ({})]\n", tool_name, status);
-            for d in details {
-                s.push_str(&format!("  {}: {}\n", d.key, d.value));
-            }
-            if !footer.is_empty() {
-                s.push_str(&format!("{}\n", footer));
-            }
-            s.push('\n');
-            s
-        }
-        StreamBlock::Diary { maid, date, content, .. } => {
-            format!("[日记: {} @ {}]\n{}\n\n", maid, date, content)
-        }
-        StreamBlock::HtmlPreview { content } => {
-            format!("{}\n\n", content)
-        }
-        StreamBlock::RoleDivider { role, is_end } => {
-            let action = if *is_end { "结束" } else { "起始" };
-            format!("[角色分界: {} {}]\n\n", role, action)
-        }
-        StreamBlock::Style { content } => {
-            format!("<style>{}</style>\n\n", content)
-        }
-        StreamBlock::ButtonClick { content } => {
-            format!("[按钮: {}]\n\n", content)
-        }
     }
 }

@@ -84,13 +84,13 @@ function renderBlockHtml(block: ContentBlock): string {
   switch (block.type) {
     case "markdown":
       if (block.nodes && block.nodes.length > 0) {
-        return `<div class="vcp-markdown-block">${renderMarkdownNodes(block.nodes, props.message.id)}</div>`;
+        return `<div class="vcp-markdown-block">${renderMarkdownNodes(block.nodes, props.message.id, block.hash)}</div>`;
       }
       return `<div class="vcp-markdown-block"><p>${escapeHtml(block.content || "")}</p></div>`;
     
     case "diary": {
       const diaryContent = (block.nodes && block.nodes.length > 0)
-        ? renderMarkdownNodes(block.nodes, props.message.id)
+        ? renderMarkdownNodes(block.nodes, props.message.id, block.hash)
         : escapeHtml(block.content || "");
       return `
         <div class="vcp-diary-block">
@@ -138,6 +138,9 @@ function renderBlockHtml(block: ContentBlock): string {
 }
 
 function getBlockKey(block: ContentBlock, index: number): string {
+  if (block.hash) {
+    return `${block.type}-${block.hash}-${index}`;
+  }
   const content = block.content || '';
   const nodesStr = block.nodes ? JSON.stringify(block.nodes) : '';
   const stateStr = JSON.stringify({
@@ -445,8 +448,19 @@ onUnmounted(() => {
           </div>
         </template>
         
-        <!-- 流式尾部快速渲染 (Aurora 路径) -->
-        <div v-if="isStreaming && message.tailContent" class="opacity-70 italic animate-pulse">
+        <!-- 流式尾部高画质推测渲染 (Speculative Rendering) -->
+        <div v-if="isStreaming && message.tailBlock" class="streaming-tail opacity-90">
+          <div
+            v-if="isPlainBlock(message.tailBlock.type)"
+            v-html="renderBlockHtml(message.tailBlock)"
+          />
+          <ThoughtBlock
+            v-else-if="message.tailBlock.type === 'thought'"
+            :block="message.tailBlock"
+            :message-id="message.id"
+          />
+        </div>
+        <div v-else-if="isStreaming && message.tailContent" class="opacity-70 italic animate-pulse">
           {{ message.tailContent }}
         </div>
       </div>
