@@ -206,8 +206,14 @@ pub async fn internal_process_group_chat_message(
         };
 
         // 启动前台服务保活
-        if let Err(e) = crate::vcp_modules::stream_service_manager::start_streaming_service(&app_handle, &agent_name) {
-            println!("[GroupChatAppService] Failed to start streaming service: {}", e);
+        if let Err(e) = crate::vcp_modules::stream_service_manager::start_streaming_service(
+            &app_handle,
+            &agent_name,
+        ) {
+            println!(
+                "[GroupChatAppService] Failed to start streaming service: {}",
+                e
+            );
         }
 
         // 执行请求 (串行等待)
@@ -220,8 +226,13 @@ pub async fn internal_process_group_chat_message(
         .await;
 
         // 停止前台服务
-        if let Err(e) = crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle) {
-            println!("[GroupChatAppService] Failed to stop streaming service: {}", e);
+        if let Err(e) =
+            crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle)
+        {
+            println!(
+                "[GroupChatAppService] Failed to stop streaming service: {}",
+                e
+            );
         }
 
         if let Ok((res, is_aborted)) = res_result {
@@ -265,7 +276,10 @@ pub async fn internal_process_group_chat_message(
                 let end_blocks = match &append_result {
                     Ok(blocks) => Some(blocks.clone()),
                     Err(e) => {
-                        eprintln!("[GroupChatAppService] Failed to append final message: {}", e);
+                        eprintln!(
+                            "[GroupChatAppService] Failed to append final message: {}",
+                            e
+                        );
                         None
                     }
                 };

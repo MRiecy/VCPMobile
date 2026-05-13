@@ -18,9 +18,15 @@ use tokio::fs;
 pub async fn load_multi_topic_messages(
     pool: &sqlx::SqlitePool,
     topic_ids: &[String],
-) -> Result<std::collections::HashMap<String, Vec<crate::vcp_modules::chat_manager::ChatMessage>>, String> {
+) -> Result<
+    std::collections::HashMap<String, Vec<crate::vcp_modules::chat_manager::ChatMessage>>,
+    String,
+> {
     use sqlx::Row;
-    let mut result: std::collections::HashMap<String, Vec<crate::vcp_modules::chat_manager::ChatMessage>> = topic_ids
+    let mut result: std::collections::HashMap<
+        String,
+        Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+    > = topic_ids
         .iter()
         .map(|id| (id.clone(), Vec::new()))
         .collect();
@@ -79,7 +85,11 @@ pub async fn load_multi_topic_messages(
         .collect();
 
     if !all_msg_ids.is_empty() {
-        let att_placeholders = all_msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let att_placeholders = all_msg_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let att_query = format!(
             "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.msg_id, ma.display_name, ma.src, ma.status

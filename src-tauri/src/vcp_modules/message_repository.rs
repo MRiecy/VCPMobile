@@ -163,10 +163,8 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         }
 
         // 送入写入队列
-        if !batch_data.is_empty() {
-            if tx_writer.send(batch_data).await.is_err() {
-                break;
-            }
+        if !batch_data.is_empty() && tx_writer.send(batch_data).await.is_err() {
+            break;
         }
     }
 

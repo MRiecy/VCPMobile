@@ -64,7 +64,9 @@ impl AuroraBuffer {
         // 2. 推测渲染 (Speculative Rendering)：将 tail 视为一个临时 Markdown 块
         if !self.tail_content.is_empty() {
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&self.tail_content);
-            let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(&self.tail_content);
+            let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(
+                &self.tail_content,
+            );
             self.tail_block = Some(StreamBlock::markdown(
                 self.tail_content.clone(),
                 Some(nodes),

@@ -118,9 +118,9 @@ async fn process_topic_messages<R: Runtime>(
                                     att_obj
                                         .entry("internalPath".to_string())
                                         .or_insert(serde_json::json!(path));
-                                    att_obj.entry("src".to_string()).or_insert(
-                                        serde_json::json!(format!("file://{}", path)),
-                                    );
+                                    att_obj
+                                        .entry("src".to_string())
+                                        .or_insert(serde_json::json!(format!("file://{}", path)));
                                 } else {
                                     let default_path = format!("file://attachments/{}", hash);
                                     att_obj.entry("internalPath".to_string()).or_insert(
@@ -144,9 +144,8 @@ async fn process_topic_messages<R: Runtime>(
             obj.remove("avatarColor");
         }
 
-        match serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(
-            m_val.clone(),
-        ) {
+        match serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(m_val.clone())
+        {
             Ok(msg) => {
                 parsed_messages.push(msg);
             }
@@ -351,7 +350,10 @@ impl PullExecutor {
         }
 
         let results: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
-        println!("[PullExecutor] Received {} entities from server", results.len());
+        println!(
+            "[PullExecutor] Received {} entities from server",
+            results.len()
+        );
 
         let mut agent_topics = Vec::new();
         let mut group_topics = Vec::new();
@@ -406,7 +408,10 @@ impl PullExecutor {
         }
 
         if !agent_topics.is_empty() {
-            println!("[PullExecutor] Submitting {} agent topics to write queue", agent_topics.len());
+            println!(
+                "[PullExecutor] Submitting {} agent topics to write queue",
+                agent_topics.len()
+            );
             write_queue
                 .submit(DbWriteTask::AgentTopicBatch {
                     topics: agent_topics,
@@ -414,7 +419,10 @@ impl PullExecutor {
                 .await;
         }
         if !group_topics.is_empty() {
-            println!("[PullExecutor] Submitting {} group topics to write queue", group_topics.len());
+            println!(
+                "[PullExecutor] Submitting {} group topics to write queue",
+                group_topics.len()
+            );
             write_queue
                 .submit(DbWriteTask::GroupTopicBatch {
                     topics: group_topics,
@@ -607,9 +615,7 @@ impl PullExecutor {
         let url = format!("{}/api/mobile-sync/download-messages-stream", http_url);
         let req_body: Vec<serde_json::Value> = requests
             .iter()
-            .map(|(tid, ids)| {
-                serde_json::json!({ "topicId": tid, "msgIds": ids })
-            })
+            .map(|(tid, ids)| serde_json::json!({ "topicId": tid, "msgIds": ids }))
             .collect();
 
         let res = client
@@ -668,9 +674,12 @@ impl PullExecutor {
             let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
 
             // 检测流级错误帧
-            if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#) {
+            if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#)
+            {
                 if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&chunk) {
-                    let msg = val["_stream_error"].as_str().unwrap_or("unknown stream error");
+                    let msg = val["_stream_error"]
+                        .as_str()
+                        .unwrap_or("unknown stream error");
                     return Err(format!("Desktop stream error: {}", msg));
                 }
             }
@@ -687,10 +696,7 @@ impl PullExecutor {
                 let topic_data: serde_json::Value =
                     serde_json::from_slice(&line).unwrap_or(serde_json::Value::Null);
 
-                let topic_id = topic_data["topicId"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let topic_id = topic_data["topicId"].as_str().unwrap_or("").to_string();
 
                 if topic_id.is_empty() {
                     eprintln!("[PullExecutor] Batch pull: malformed NDJSON line, skipping");
@@ -726,7 +732,11 @@ impl PullExecutor {
                 }
 
                 // 并发处理：Semaphore 控制并发度，spawn 异步任务
-                let permit = sem.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+                let permit = sem
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| e.to_string())?;
                 let app_clone = app.clone();
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
@@ -773,7 +783,9 @@ impl PullExecutor {
                         let tx_clone = tx.clone();
                         let handle = tokio::spawn(async move {
                             let _permit = permit;
-                            match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone).await {
+                            match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone)
+                                .await
+                            {
                                 Ok((parsed, failed)) => {
                                     let _ = tx_clone.send(BatchPullResult {
                                         topic_id,
@@ -817,9 +829,7 @@ impl PullExecutor {
         let err_count = results.iter().filter(|r| !r.success).count();
         println!(
             "[PullExecutor] Batch pull completed: {}/{} topics processed, {} errors",
-            ok_count,
-            total,
-            err_count
+            ok_count, total, err_count
         );
         Ok(results)
     }

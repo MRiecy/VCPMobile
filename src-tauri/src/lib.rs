@@ -35,7 +35,6 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
-use vcp_modules::stream_service_manager::StreamingServiceState;
 use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::fetch_raw_message_content;
 use vcp_modules::model_manager::{
@@ -44,6 +43,7 @@ use vcp_modules::model_manager::{
 };
 use vcp_modules::protocol_manager::prepare_vcp_upload;
 use vcp_modules::screen_wake_manager::{clear_keep_screen_on, set_keep_screen_on};
+use vcp_modules::stream_service_manager::StreamingServiceState;
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
     read_sync_log_file, start_manual_sync,

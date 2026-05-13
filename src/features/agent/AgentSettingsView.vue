@@ -356,7 +356,7 @@ onMounted(async () => {
 
 <style scoped>
 .agent-settings-view {
-  background-color: color-mix(in srgb, var(--primary-bg) 85%, transparent);
+  background-color: color-mix(in srgb, var(--primary-bg) 100%, transparent);
 }
 
 .card-modern {
