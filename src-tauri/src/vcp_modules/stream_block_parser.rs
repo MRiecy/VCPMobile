@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::content_parser::{
-    BlockType, ToolResultDetail, BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END,
-    GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START, HTML_FENCE_START,
+    BlockType, ToolResultDetail, BUTTON_CLICK, /* extraction helpers */
+    CONTENT_REGEX, DATE_REGEX, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END,
+    GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START, HTML_FENCE_START, KV_REGEX, MAID_REGEX,
     ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
-    THOUGHT_START, TOOL_END, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
-    /* extraction helpers */
-    CONTENT_REGEX, DATE_REGEX, KV_REGEX, MAID_REGEX, TOOL_NAME,
+    THOUGHT_START, TOOL_END, TOOL_NAME, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -55,10 +54,7 @@ pub enum StreamBlock {
         hash: String,
     },
     #[serde(rename = "html-preview")]
-    HtmlPreview {
-        content: String,
-        hash: String,
-    },
+    HtmlPreview { content: String, hash: String },
     #[serde(rename = "role-divider")]
     RoleDivider {
         role: String,
@@ -66,15 +62,9 @@ pub enum StreamBlock {
         hash: String,
     },
     #[serde(rename = "style")]
-    Style {
-        content: String,
-        hash: String,
-    },
+    Style { content: String, hash: String },
     #[serde(rename = "button-click")]
-    ButtonClick {
-        content: String,
-        hash: String,
-    },
+    ButtonClick { content: String, hash: String },
 }
 
 impl StreamBlock {
@@ -147,11 +137,7 @@ impl StreamBlock {
     }
 
     pub fn role_divider(role: String, is_end: bool, hash: String) -> Self {
-        Self::RoleDivider {
-            role,
-            is_end,
-            hash,
-        }
+        Self::RoleDivider { role, is_end, hash }
     }
 
     pub fn style(content: String, hash: String) -> Self {
@@ -194,8 +180,7 @@ impl StreamBlockParser {
                     if !md_tail.is_empty() {
                         // 不完整的段落 + 后面的特种块 → 整体作为 tail
                         self.processed_len = pos;
-                        let tail =
-                            format!("{}{}", md_tail, &remaining[start..]);
+                        let tail = format!("{}{}", md_tail, &remaining[start..]);
                         return (blocks, tail);
                     }
                 }
@@ -204,17 +189,10 @@ impl StreamBlockParser {
                 let content_start = end;
                 let search_area = &remaining[content_start..];
 
-                if let Some((end_start, end_end)) =
-                    find_end_marker(search_area, &block_type)
-                {
+                if let Some((end_start, end_end)) = find_end_marker(search_area, &block_type) {
                     let inner_content = &search_area[..end_start];
-                    let block = build_stream_block(
-                        &block_type,
-                        inner_content,
-                        remaining,
-                        start,
-                        end,
-                    );
+                    let block =
+                        build_stream_block(&block_type, inner_content, remaining, start, end);
                     blocks.push(block);
                     pos += content_start + end_end;
                 } else {
@@ -247,7 +225,11 @@ impl StreamBlockParser {
         if !trimmed.is_empty() {
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
             let hash = HashAggregator::compute_content_hash(trimmed);
-            blocks.push(StreamBlock::markdown(trimmed.to_string(), Some(nodes), hash));
+            blocks.push(StreamBlock::markdown(
+                trimmed.to_string(),
+                Some(nodes),
+                hash,
+            ));
         }
         blocks
     }
@@ -280,10 +262,7 @@ fn find_earliest_start_marker(text: &str) -> Option<(usize, usize, BlockType)> {
     let mut earliest: Option<(usize, usize, BlockType)> = None;
     for (re, bt) in checks {
         if let Some(m) = re.find(text) {
-            if earliest
-                .as_ref()
-                .is_none_or(|(s, _, _)| m.start() < *s)
-            {
+            if earliest.as_ref().is_none_or(|(s, _, _)| m.start() < *s) {
                 earliest = Some((m.start(), m.end(), bt));
             }
         }
@@ -293,19 +272,14 @@ fn find_earliest_start_marker(text: &str) -> Option<(usize, usize, BlockType)> {
 
 /// 寻找对应块的结束标记
 /// 返回 (end_start_offset, end_end_offset) 在 search_area 内
-fn find_end_marker(
-    search_area: &str,
-    block_type: &BlockType,
-) -> Option<(usize, usize)> {
+fn find_end_marker(search_area: &str, block_type: &BlockType) -> Option<(usize, usize)> {
     let m = match block_type {
         BlockType::Tool => TOOL_END.find(search_area),
         BlockType::Thought => THOUGHT_END.find(search_area),
         BlockType::Think => THINK_END.find(search_area),
         BlockType::ToolResult => TOOL_RESULT_END.find(search_area),
         BlockType::Diary => DIARY_END.find(search_area),
-        BlockType::HtmlFence | BlockType::CodeFence => {
-            GENERIC_CODE_FENCE_END.find(search_area)
-        }
+        BlockType::HtmlFence | BlockType::CodeFence => GENERIC_CODE_FENCE_END.find(search_area),
         BlockType::HtmlDoc => HTML_DOC_END.find(search_area),
         BlockType::RoleDivider => {
             // RoleDivider 是单行标记，自闭合
@@ -330,14 +304,14 @@ fn build_stream_block(
             if is_daily_note_create(inner_content) {
                 let (maid, date, content) = extract_diary_details(inner_content);
                 let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                let hash = HashAggregator::compute_content_hash(&format!(
-                    "{}:{}:{}",
-                    maid, date, content
-                ));
+                let hash =
+                    HashAggregator::compute_content_hash(&format!("{}:{}:{}", maid, date, content));
                 StreamBlock::diary(maid, date, content, Some(nodes), hash)
             } else {
-                let hash =
-                    HashAggregator::compute_content_hash(&format!("{}:{}", tool_name, inner_content));
+                let hash = HashAggregator::compute_content_hash(&format!(
+                    "{}:{}",
+                    tool_name, inner_content
+                ));
                 StreamBlock::tool(tool_name, inner_content.to_string(), hash)
             }
         }
@@ -380,10 +354,8 @@ fn build_stream_block(
         BlockType::Diary => {
             let (maid, date, content) = extract_diary_details(inner_content);
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-            let hash = HashAggregator::compute_content_hash(&format!(
-                "{}:{}:{}",
-                maid, date, content
-            ));
+            let hash =
+                HashAggregator::compute_content_hash(&format!("{}:{}:{}", maid, date, content));
             StreamBlock::diary(maid, date, content, Some(nodes), hash)
         }
         BlockType::HtmlFence | BlockType::HtmlDoc => {
@@ -439,7 +411,11 @@ fn split_markdown_paragraphs(text: &str) -> (Vec<StreamBlock>, String) {
             // 对已闭合的 Markdown 段落进行 AST 预渲染
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
             let hash = HashAggregator::compute_content_hash(trimmed);
-            blocks.push(StreamBlock::markdown(trimmed.to_string(), Some(nodes), hash));
+            blocks.push(StreamBlock::markdown(
+                trimmed.to_string(),
+                Some(nodes),
+                hash,
+            ));
         }
         // 检查 inline button clicks
         let blocks = extract_inline_buttons(blocks);
@@ -463,7 +439,9 @@ fn extract_inline_buttons(mut blocks: Vec<StreamBlock>) -> Vec<StreamBlock> {
                 for cap in BUTTON_CLICK.captures_iter(&content) {
                     has_button = true;
                     let Some(m) = cap.get(0) else { continue };
-                    let Some(btn_content) = cap.get(1) else { continue };
+                    let Some(btn_content) = cap.get(1) else {
+                        continue;
+                    };
 
                     // 按钮前的文本作为 Markdown 块
                     if m.start() > last_end {
@@ -472,11 +450,7 @@ fn extract_inline_buttons(mut blocks: Vec<StreamBlock>) -> Vec<StreamBlock> {
                             let before_nodes =
                                 crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&before);
                             let hash = HashAggregator::compute_content_hash(&before);
-                            result.push(StreamBlock::markdown(
-                                before,
-                                Some(before_nodes),
-                                hash,
-                            ));
+                            result.push(StreamBlock::markdown(before, Some(before_nodes), hash));
                         }
                     }
 
@@ -494,11 +468,7 @@ fn extract_inline_buttons(mut blocks: Vec<StreamBlock>) -> Vec<StreamBlock> {
                             let after_nodes =
                                 crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&after);
                             let hash = HashAggregator::compute_content_hash(&after);
-                            result.push(StreamBlock::markdown(
-                                after,
-                                Some(after_nodes),
-                                hash,
-                            ));
+                            result.push(StreamBlock::markdown(after, Some(after_nodes), hash));
                         }
                     }
                 } else {

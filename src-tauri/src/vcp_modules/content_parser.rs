@@ -105,7 +105,12 @@ impl ContentBlock {
         }
     }
 
-    pub fn tool_result(tool_name: String, status: String, details: Vec<ToolResultDetail>, footer: String) -> Self {
+    pub fn tool_result(
+        tool_name: String,
+        status: String,
+        details: Vec<ToolResultDetail>,
+        footer: String,
+    ) -> Self {
         Self::ToolResult {
             tool_name,
             status,
@@ -115,7 +120,12 @@ impl ContentBlock {
         }
     }
 
-    pub fn diary(maid: String, date: String, content: String, nodes: Option<Vec<MarkdownNode>>) -> Self {
+    pub fn diary(
+        maid: String,
+        date: String,
+        content: String,
+        nodes: Option<Vec<MarkdownNode>>,
+    ) -> Self {
         Self::Diary {
             maid,
             date,
@@ -125,7 +135,12 @@ impl ContentBlock {
         }
     }
 
-    pub fn thought(theme: String, content: String, is_complete: bool, nodes: Option<Vec<MarkdownNode>>) -> Self {
+    pub fn thought(
+        theme: String,
+        content: String,
+        is_complete: bool,
+        nodes: Option<Vec<MarkdownNode>>,
+    ) -> Self {
         Self::Thought {
             theme,
             content,
@@ -333,27 +348,36 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             }
 
             // 识别匹配到的块类型
-            let block_type = if caps.get(1).is_some() { BlockType::Tool }
-            else if caps.get(2).is_some() { BlockType::Thought }
-            else if caps.get(3).is_some() { BlockType::Think }
-            else if caps.get(4).is_some() { BlockType::ToolResult }
-            else if caps.get(5).is_some() { BlockType::Diary }
-            else if caps.get(6).is_some() { BlockType::HtmlFence }
-            else if caps.get(7).is_some() { BlockType::HtmlDoc }
-            else if caps.get(8).is_some() { BlockType::RoleDivider }
-            else if caps.get(9).is_some() { BlockType::Style }
-            else { BlockType::CodeFence };
+            let block_type = if caps.get(1).is_some() {
+                BlockType::Tool
+            } else if caps.get(2).is_some() {
+                BlockType::Thought
+            } else if caps.get(3).is_some() {
+                BlockType::Think
+            } else if caps.get(4).is_some() {
+                BlockType::ToolResult
+            } else if caps.get(5).is_some() {
+                BlockType::Diary
+            } else if caps.get(6).is_some() {
+                BlockType::HtmlFence
+            } else if caps.get(7).is_some() {
+                BlockType::HtmlDoc
+            } else if caps.get(8).is_some() {
+                BlockType::RoleDivider
+            } else if caps.get(9).is_some() {
+                BlockType::Style
+            } else {
+                BlockType::CodeFence
+            };
 
             // 2. 寻找对应的结束标记
             let content_start = end_idx;
             let search_area = &remaining[content_start..];
 
             let (end_marker_start, end_marker_end, is_complete) = match block_type {
-                BlockType::Tool => {
-                    TOOL_END.find(search_area).map_or((None, None, false), |m| {
-                        (Some(m.start()), Some(m.end()), true)
-                    })
-                }
+                BlockType::Tool => TOOL_END.find(search_area).map_or((None, None, false), |m| {
+                    (Some(m.start()), Some(m.end()), true)
+                }),
                 BlockType::Thought => THOUGHT_END
                     .find(search_area)
                     .map_or((None, None, false), |m| {
@@ -398,7 +422,15 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             };
 
             // 容错处理：未闭合的块（流式中断）降级为普通 Markdown
-            if !is_complete && !matches!(block_type, BlockType::HtmlFence | BlockType::HtmlDoc | BlockType::CodeFence | BlockType::RoleDivider) {
+            if !is_complete
+                && !matches!(
+                    block_type,
+                    BlockType::HtmlFence
+                        | BlockType::HtmlDoc
+                        | BlockType::CodeFence
+                        | BlockType::RoleDivider
+                )
+            {
                 let marker_text = &remaining[start_idx..end_idx];
                 blocks.push(ContentBlock::markdown(
                     None,
@@ -439,7 +471,12 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
 
                     let nodes =
                         crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
-                    ContentBlock::thought(theme, inner_content.to_string(), is_complete, Some(nodes))
+                    ContentBlock::thought(
+                        theme,
+                        inner_content.to_string(),
+                        is_complete,
+                        Some(nodes),
+                    )
                 }
                 BlockType::Think => {
                     let nodes =
@@ -457,8 +494,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                 }
                 BlockType::Diary => {
                     let (maid, date, content) = extract_diary_details(inner_content);
-                    let nodes =
-                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
+                    let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
                     ContentBlock::diary(maid, date, content, Some(nodes))
                 }
                 BlockType::HtmlFence => ContentBlock::html_preview(inner_content.to_string()),

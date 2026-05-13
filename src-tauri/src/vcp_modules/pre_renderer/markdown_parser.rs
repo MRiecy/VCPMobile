@@ -70,7 +70,7 @@ fn push_math_replaced(dest: &mut String, segment: &str) {
             dest.push_str(inline.as_str());
             dest.push('$');
         }
-        
+
         last_match_end = full_match.end();
     }
     // 推送剩余文本
@@ -200,7 +200,10 @@ pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
     let text = preprocess_latex_math(text);
     let (text, containers) = extract_html_containers(&text);
     let mut nodes = Vec::new();
-    let parser = Parser::new_ext(&text, Options::ENABLE_MATH | Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(
+        &text,
+        Options::ENABLE_MATH | Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH,
+    );
 
     let mut stack: Vec<PartialNode> = Vec::new();
 
@@ -732,38 +735,59 @@ fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
-            Event::Start(Tag::Emphasis) => stack.push(PartialInlineNode::Emphasis { children: vec![] }),
+            Event::Start(Tag::Emphasis) => {
+                stack.push(PartialInlineNode::Emphasis { children: vec![] })
+            }
             Event::End(TagEnd::Emphasis) => {
                 if let Some(PartialInlineNode::Emphasis { children }) = stack.pop() {
                     let node = InlineNode::emphasis(children);
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
-            Event::Start(Tag::Strikethrough) => stack.push(PartialInlineNode::Strikethrough { children: vec![] }),
+            Event::Start(Tag::Strikethrough) => {
+                stack.push(PartialInlineNode::Strikethrough { children: vec![] })
+            }
             Event::End(TagEnd::Strikethrough) => {
                 if let Some(PartialInlineNode::Strikethrough { children }) = stack.pop() {
                     let node = InlineNode::strikethrough(children);
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
-            Event::Start(Tag::Link { dest_url, title, .. }) => {
+            Event::Start(Tag::Link {
+                dest_url, title, ..
+            }) => {
                 stack.push(PartialInlineNode::Link {
                     href: dest_url.to_string(),
-                    title: if title.is_empty() { None } else { Some(title.to_string()) },
+                    title: if title.is_empty() {
+                        None
+                    } else {
+                        Some(title.to_string())
+                    },
                     children: vec![],
                 });
             }
             Event::End(TagEnd::Link) => {
-                if let Some(PartialInlineNode::Link { href, title, children }) = stack.pop() {
+                if let Some(PartialInlineNode::Link {
+                    href,
+                    title,
+                    children,
+                }) = stack.pop()
+                {
                     let node = InlineNode::link(href, title, children);
                     push_inline_to_context(&mut stack, &mut nodes, node);
                 }
             }
-            Event::Start(Tag::Image { dest_url, title, .. }) => {
+            Event::Start(Tag::Image {
+                dest_url, title, ..
+            }) => {
                 stack.push(PartialInlineNode::Image {
                     src: dest_url.to_string(),
                     alt: String::new(),
-                    title: if title.is_empty() { None } else { Some(title.to_string()) },
+                    title: if title.is_empty() {
+                        None
+                    } else {
+                        Some(title.to_string())
+                    },
                 });
             }
             Event::End(TagEnd::Image) => {
@@ -788,15 +812,33 @@ fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
 }
 
 enum PartialInlineNode {
-    Strong { children: Vec<InlineNode> },
-    Emphasis { children: Vec<InlineNode> },
-    Strikethrough { children: Vec<InlineNode> },
-    Link { href: String, title: Option<String>, children: Vec<InlineNode> },
-    Image { src: String, alt: String, title: Option<String> },
+    Strong {
+        children: Vec<InlineNode>,
+    },
+    Emphasis {
+        children: Vec<InlineNode>,
+    },
+    Strikethrough {
+        children: Vec<InlineNode>,
+    },
+    Link {
+        href: String,
+        title: Option<String>,
+        children: Vec<InlineNode>,
+    },
+    Image {
+        src: String,
+        alt: String,
+        title: Option<String>,
+    },
 }
 
 #[allow(clippy::ptr_arg)]
-fn push_inline_to_context(stack: &mut Vec<PartialInlineNode>, nodes: &mut Vec<InlineNode>, node: InlineNode) {
+fn push_inline_to_context(
+    stack: &mut Vec<PartialInlineNode>,
+    nodes: &mut Vec<InlineNode>,
+    node: InlineNode,
+) {
     if let Some(top) = stack.last_mut() {
         match top {
             PartialInlineNode::Strong { children } => children.push(node),

@@ -222,10 +222,7 @@ impl MarkdownNode {
     }
 
     pub fn mermaid(code: String) -> Self {
-        Self::MermaidPlaceholder {
-            code,
-            hash: None,
-        }
+        Self::MermaidPlaceholder { code, hash: None }
     }
 
     pub fn compute_hash(&self) -> String {
@@ -272,9 +269,7 @@ impl MarkdownNode {
                     }
                 }
             }
-            MarkdownNode::Table {
-                header, rows, ..
-            } => {
+            MarkdownNode::Table { header, rows, .. } => {
                 for cell in header {
                     for node in cell {
                         node.compute_hashes_recursively();

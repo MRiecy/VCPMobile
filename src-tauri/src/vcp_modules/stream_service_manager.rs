@@ -119,10 +119,7 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
                         .new_object(
                             &intent_cls,
                             "(Landroid/content/Context;Ljava/lang/Class;)V",
-                            &[
-                                JValue::Object(activity),
-                                JValue::Object(&service_cls),
-                            ],
+                            &[JValue::Object(activity), JValue::Object(&service_cls)],
                         )
                         .map_err(|e| format!("New Intent failed: {:?}", e))?;
 
@@ -235,10 +232,7 @@ fn stop_android_service(app: &AppHandle) -> Result<(), String> {
                         .new_object(
                             &intent_cls,
                             "(Landroid/content/Context;Ljava/lang/Class;)V",
-                            &[
-                                JValue::Object(activity),
-                                JValue::Object(&service_cls),
-                            ],
+                            &[JValue::Object(activity), JValue::Object(&service_cls)],
                         )
                         .map_err(|e| format!("New Intent failed: {:?}", e))?;
 

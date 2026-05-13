@@ -97,9 +97,10 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     let _ = sqlx::query("ALTER TABLE agents ADD COLUMN current_topic_id TEXT")
         .execute(pool)
         .await;
-    let _ = sqlx::query("ALTER TABLE agents ADD COLUMN mobile_system_prompt TEXT NOT NULL DEFAULT ''")
-        .execute(pool)
-        .await;
+    let _ =
+        sqlx::query("ALTER TABLE agents ADD COLUMN mobile_system_prompt TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await;
 
     // 3. groups 表 (群组配置)
     sqlx::query(

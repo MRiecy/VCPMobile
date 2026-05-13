@@ -17,7 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-const EXPECTED_PLUGIN_VERSION: &str = "0.9.13";
+const EXPECTED_PLUGIN_VERSION: &str = "0.9.14";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct SyncState {
@@ -105,9 +105,12 @@ impl NetworkAwareSemaphore {
         let cores = std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(4);
-        
+
         let concurrency = ((cores as f32) * 1.5).clamp(6.0, 12.0) as usize;
-        println!("[Sync] Auto-optimized concurrency set to {} (cores: {})", concurrency, cores);
+        println!(
+            "[Sync] Auto-optimized concurrency set to {} (cores: {})",
+            concurrency, cores
+        );
 
         Self {
             semaphore: Arc::new(Semaphore::new(concurrency)),
@@ -386,7 +389,13 @@ async fn run_sync_session(
                     logger.start_phase("owner_metadata", 0);
                 }
                 emit_sync_log(&handle_clone, "info", "=== Phase 1: Owner Metadata ===");
-                let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "owner_metadata" }).to_string().into())).await;
+                let _ = ws_stream
+                    .send(Message::Text(
+                        json!({ "type": "PHASE_START", "phase": "owner_metadata" })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
                 publish_sync_status(
                     &handle_clone,
                     &connection_status_for_task,
@@ -515,12 +524,12 @@ async fn run_sync_session(
                                             emit_sync_log(&handle_clone, "info", "=== Phase 2: Pulling Topic Metadata ===");
                                             let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_START", "phase": "topic_metadata" }).to_string().into())).await;
 
-                                            let msg = json!({ 
-                                                "type": "SYNC_MANIFEST", 
-                                                "data": manifest.items, 
-                                                "dataType": manifest.data_type, 
+                                            let msg = json!({
+                                                "type": "SYNC_MANIFEST",
+                                                "data": manifest.items,
+                                                "dataType": manifest.data_type,
                                                 "phase": 2, // Use explicit Phase ID 2
-                                                "targetedOwners": owners 
+                                                "targetedOwners": owners
                                             });
                                             let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                         } else {
@@ -676,7 +685,7 @@ async fn run_sync_session(
                                     if should_flush {
                                         // 1. 通知桌面端前一相位已完成
                                         let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "owner_metadata" }).to_string().into())).await;
-                                        
+
                                         // 2. 强制落盘并触发 Pipeline 钩子
                                         write_queue_task.flush().await;
                                         let _ = pipeline_task.on_owner_metadata_done().await;
@@ -724,7 +733,7 @@ async fn run_sync_session(
                                         let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "messages" }).to_string().into())).await;
 
                                         write_queue_task.flush().await;
-                                        
+
                                         // 全局 Hash 冒泡
                                         let db = handle_clone.state::<DbState>();
                                         let modified_topics = {
@@ -739,7 +748,7 @@ async fn run_sync_session(
                                                 // 1. [Batch Optimization] 一条 SQL 更新所有受影响话题的消息计数和时间戳
                                                 let placeholders = modified_topics.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                                                 let sql = format!(
-                                                    "UPDATE topics SET 
+                                                    "UPDATE topics SET
                                                         msg_count = (SELECT COUNT(*) FROM messages WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL),
                                                         updated_at = ?
                                                      WHERE topic_id IN ({})", placeholders
@@ -787,10 +796,10 @@ async fn run_sync_session(
                                             logger.set_phase_expected("owner_metadata", count);
                                         }
                                         for manifest in manifests {
-                                            let msg = json!({ 
-                                                "type": "SYNC_MANIFEST", 
-                                                "data": manifest.items, 
-                                                "dataType": manifest.data_type, 
+                                            let msg = json!({
+                                                "type": "SYNC_MANIFEST",
+                                                "data": manifest.items,
+                                                "dataType": manifest.data_type,
                                                 "phase": 1 // Explicit Phase ID
                                             });
                                             let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
@@ -865,7 +874,7 @@ async fn run_sync_session(
                                             let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
                                             let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
                                             let items_clone: Vec<serde_json::Value> = items.clone();
-                                            
+
                                             // 统计有效操作数（排除 SKIP）
                                             let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
                                             let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
@@ -899,7 +908,7 @@ async fn run_sync_session(
 
                                             if received == expected && (msg_phase == current_phase || msg_phase == 0) {
                                                 let current_pending = pending_tasks_task.load(Ordering::SeqCst);
-                                                println!("[SyncService] All manifests received for Phase {}: dataType={}, pending={}", 
+                                                println!("[SyncService] All manifests received for Phase {}: dataType={}, pending={}",
                                                     current_phase, data_type, current_pending);
 
                                                 if current_pending == 0 {
@@ -911,7 +920,7 @@ async fn run_sync_session(
                                                     let manifest_phase_wd = manifest_phase.clone();
                                                     let pending_wd = pending_tasks_task.clone();
                                                     let handle_clone_wd = handle_clone.clone();
-                                                    
+
                                                     tauri::async_runtime::spawn(async move {
                                                         let mut last_pending = pending_wd.load(Ordering::SeqCst);
                                                         let mut stuck_count = 0;
@@ -920,16 +929,16 @@ async fn run_sync_session(
                                                             if manifest_phase_wd.load(Ordering::SeqCst) != current_phase_wd { break; }
                                                             let current_pending = pending_wd.load(Ordering::SeqCst);
                                                             if current_pending == 0 { break; }
-                                                            
+
                                                             if current_pending == last_pending {
                                                                 stuck_count += 1;
-                                                                println!("[SyncService] WATCHDOG: Phase {} pending count stuck at {} ({} ticks)", 
+                                                                println!("[SyncService] WATCHDOG: Phase {} pending count stuck at {} ({} ticks)",
                                                                     current_phase_wd, current_pending, stuck_count);
                                                             } else {
                                                                 stuck_count = 0;
                                                                 last_pending = current_pending;
                                                             }
-                                                            
+
                                                             if stuck_count >= 6 {
                                                                 println!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
                                                                 emit_sync_log(&handle_clone_wd, "warn", &format!("检测到同步停滞 (Phase {})，正在尝试强制恢复...", current_phase_wd));
@@ -989,7 +998,7 @@ async fn run_sync_session(
                                                 let manifest_expected_in = expected_manifest_count.clone();
                                                 let manifest_phase_in = manifest_phase.clone();
                                                 let data_type_inner = data_type.clone();
-                                                
+
                                                 tauri::async_runtime::spawn(async move {
                                                     let chunk_size = match data_type_inner { SyncDataType::Agent | SyncDataType::Group => 50, SyncDataType::Topic => 1000, _ => 100 };
                                                     for chunk in batch_pull_requests.chunks(chunk_size) {
@@ -1017,7 +1026,7 @@ async fn run_sync_session(
                                                 let manifest_received_in = manifest_responses_received.clone();
                                                 let manifest_expected_in = expected_manifest_count.clone();
                                                 let manifest_phase_in = manifest_phase.clone();
-                                                let http_url = settings.vcp_server_url.clone();
+                                                let http_url = settings.sync_http_url.clone();
 
                                                 tauri::async_runtime::spawn(async move {
                                                     let db = h_in.state::<DbState>();
@@ -1036,7 +1045,7 @@ async fn run_sync_session(
                                                                 let db_owner_id: String = r.get("owner_id");
                                                                 let tid: String = r.get("topic_id");
                                                                 println!("[SyncDebug] Found topic {} (owner: {})", tid, db_owner_id);
-                                                                
+
                                                                 let type_str = if owner_type == "group" { "group_topic" } else { "agent_topic" };
                                                                 let dto = if owner_type == "group" {
                                                                     json!({ "id": tid, "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": db_owner_id })
@@ -1063,7 +1072,7 @@ async fn run_sync_session(
                                                         let sub_batch = chunk.to_vec();
                                                         let sub_count = sub_batch.len() as u32;
                                                         println!("[SyncDebug] Sending batch of {} topics to desktop", sub_count);
-                                                        
+
                                                         let push_res = PushExecutor::push_entities_batch(&h_in, &c_in, &http_url, &token, sub_batch).await;
                                                         match push_res {
                                                             Ok(_) => println!("[SyncDebug] Successfully pushed metadata batch to desktop"),
@@ -1071,7 +1080,7 @@ async fn run_sync_session(
                                                         }
 
                                                         pending.fetch_sub(sub_count, Ordering::SeqCst);
-                                                        
+
                                                         let current_pending = pending.load(Ordering::SeqCst);
                                                         let total = total_tasks_in.load(Ordering::SeqCst);
                                                         let done = total.saturating_sub(current_pending);
@@ -1383,7 +1392,6 @@ async fn run_sync_session(
         }
     }
 }
-
 
 /// 每批最多包含的消息数，控制单次 WS payload 大小（约 10000 条消息 ≈ 1.5-2MB JSON）
 const MAX_MESSAGES_PER_BATCH: usize = 10000;

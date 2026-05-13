@@ -2,8 +2,7 @@ use crate::vcp_modules::agent_service;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
 use crate::vcp_modules::sync_dto::{
-    AgentMessageSyncDTO, AgentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
-    UserMessageSyncDTO,
+    AgentMessageSyncDTO, AgentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO, UserMessageSyncDTO,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -117,7 +116,10 @@ impl PushExecutor {
         if !response.status().is_success() {
             let status = response.status();
             let err_body = response.text().await.unwrap_or_default();
-            return Err(format!("Batch push entities failed: HTTP {} body={}", status, err_body));
+            return Err(format!(
+                "Batch push entities failed: HTTP {} body={}",
+                status, err_body
+            ));
         }
 
         Ok(())
@@ -205,10 +207,9 @@ impl PushExecutor {
         }
 
         // 2. 批量加载所有 topic 的消息（一次 SQL）
-        let messages_by_topic = crate::vcp_modules::message_service::load_multi_topic_messages(
-            &db.pool, topic_ids,
-        )
-        .await?;
+        let messages_by_topic =
+            crate::vcp_modules::message_service::load_multi_topic_messages(&db.pool, topic_ids)
+                .await?;
 
         // 3. 构建批量上传请求 (全流式 NDJSON)
         let mut ndjson_body = String::new();
@@ -320,9 +321,7 @@ impl PushExecutor {
             for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
                 let futures: Vec<_> = chunk
                     .iter()
-                    .map(|hash| {
-                        upload_attachment(app, client, http_url, sync_token, hash)
-                    })
+                    .map(|hash| upload_attachment(app, client, http_url, sync_token, hash))
                     .collect();
                 let upload_results = futures_util::future::join_all(futures).await;
                 let mut tracker_guard = uploaded_hashes.write().await;

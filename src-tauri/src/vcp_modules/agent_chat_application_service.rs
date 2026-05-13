@@ -3,7 +3,9 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::context_assembler_utils::assemble_history_for_vcp;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, StreamEvent, VcpRequestPayload};
+use crate::vcp_modules::vcp_client::{
+    perform_vcp_request, ActiveRequests, StreamEvent, VcpRequestPayload,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{ipc::Channel, AppHandle, State};
@@ -126,8 +128,14 @@ pub async fn internal_process_agent_chat_message(
     };
 
     // 7. 启动前台服务保活
-    if let Err(e) = crate::vcp_modules::stream_service_manager::start_streaming_service(&app_handle, &agent_config.name) {
-        println!("[AgentChatAppService] Failed to start streaming service: {}", e);
+    if let Err(e) = crate::vcp_modules::stream_service_manager::start_streaming_service(
+        &app_handle,
+        &agent_config.name,
+    ) {
+        println!(
+            "[AgentChatAppService] Failed to start streaming service: {}",
+            e
+        );
     }
 
     // 8. 发起请求
@@ -140,8 +148,12 @@ pub async fn internal_process_agent_chat_message(
     .await;
 
     // 9. 停止前台服务
-    if let Err(e) = crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle) {
-        println!("[AgentChatAppService] Failed to stop streaming service: {}", e);
+    if let Err(e) = crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle)
+    {
+        println!(
+            "[AgentChatAppService] Failed to stop streaming service: {}",
+            e
+        );
     }
 
     // 8. 流式结束后（含中断），将最终内容预渲染并入库
