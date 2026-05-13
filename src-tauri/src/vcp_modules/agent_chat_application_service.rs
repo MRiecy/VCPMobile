@@ -3,7 +3,7 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::context_assembler_utils::assemble_history_for_vcp;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, VcpRequestPayload};
+use crate::vcp_modules::vcp_client::{perform_vcp_request, ActiveRequests, StreamEvent, VcpRequestPayload};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{ipc::Channel, AppHandle, State};
@@ -86,11 +86,14 @@ pub async fn internal_process_agent_chat_message(
     // 4. 使用公共工具组装上下文
     let mut messages = assemble_history_for_vcp(&history);
 
-    // 5. 注入 System Prompt
-    if !agent_config.system_prompt.is_empty() {
-        let system_content = agent_config
-            .system_prompt
-            .replace("{{AgentName}}", &agent_config.name);
+    // 5. 注入 System Prompt (优先使用移动端专用提示词)
+    let effective_prompt = if !agent_config.mobile_system_prompt.is_empty() {
+        &agent_config.mobile_system_prompt
+    } else {
+        &agent_config.system_prompt
+    };
+    if !effective_prompt.is_empty() {
+        let system_content = effective_prompt.replace("{{AgentName}}", &agent_config.name);
         messages.insert(
             0,
             json!({
@@ -132,8 +135,9 @@ pub async fn internal_process_agent_chat_message(
         &app_handle,
         active_requests.0.clone(),
         request_payload,
-        Some(stream_channel),
-    ).await;
+        Some(stream_channel.clone()),
+    )
+    .await;
 
     // 9. 停止前台服务
     if let Err(e) = crate::vcp_modules::stream_service_manager::stop_streaming_service(&app_handle) {
@@ -164,13 +168,13 @@ pub async fn internal_process_agent_chat_message(
                     group_id: None,
                     topic_id: Some(topic_id.clone()),
                     is_group_message: Some(false),
-                    finish_reason,
+                    finish_reason: finish_reason.clone(),
                     attachments: None,
                     blocks: None,
                     shell: None,
                 };
 
-                if let Err(e) = message_service::patch_single_message(
+                let patch_result = message_service::patch_single_message(
                     app_handle.clone(),
                     &db_state.pool,
                     &agent_id,
@@ -178,9 +182,28 @@ pub async fn internal_process_agent_chat_message(
                     topic_id.clone(),
                     final_msg,
                     false,
-                ).await {
-                    println!("[AgentChatAppService] Failed to patch final message after stream: {}", e);
-                }
+                )
+                .await;
+                let end_blocks = match &patch_result {
+                    Ok(blocks) => Some(blocks.clone()),
+                    Err(e) => {
+                        println!(
+                            "[AgentChatAppService] Failed to patch final message after stream: {}",
+                            e
+                        );
+                        None
+                    }
+                };
+                let _ = stream_channel.send(StreamEvent::end(
+                    thinking_id.clone(),
+                    Some(json!({
+                        "agentId": agent_id,
+                        "topicId": topic_id,
+                        "agentName": agent_config.name
+                    })),
+                    finish_reason,
+                    end_blocks,
+                ));
             }
         }
         Err(e) => {

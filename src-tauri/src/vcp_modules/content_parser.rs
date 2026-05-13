@@ -1,10 +1,11 @@
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "markdown")]
@@ -13,12 +14,16 @@ pub enum ContentBlock {
         content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
     #[serde(rename = "tool-use")]
     ToolUse {
         tool_name: String,
         content: String,
         is_complete: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
     #[serde(rename = "tool-result")]
     ToolResult {
@@ -26,6 +31,8 @@ pub enum ContentBlock {
         status: String,
         details: Vec<ToolResultDetail>,
         footer: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
     #[serde(rename = "diary")]
     Diary {
@@ -34,6 +41,8 @@ pub enum ContentBlock {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
     #[serde(rename = "thought")]
     Thought {
@@ -42,21 +51,144 @@ pub enum ContentBlock {
         is_complete: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
     },
     #[serde(rename = "button-click")]
-    ButtonClick { content: String },
+    ButtonClick {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
     #[serde(rename = "html-preview")]
-    HtmlPreview { content: String },
+    HtmlPreview {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
     #[serde(rename = "role-divider")]
-    RoleDivider { role: String, is_end: bool },
+    RoleDivider {
+        role: String,
+        is_end: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
     #[serde(rename = "style")]
-    Style { content: String },
+    Style {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<String>,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct ToolResultDetail {
     pub key: String,
     pub value: String,
+}
+
+impl ContentBlock {
+    pub fn markdown(content: Option<String>, nodes: Option<Vec<MarkdownNode>>) -> Self {
+        Self::Markdown {
+            content,
+            nodes,
+            hash: None,
+        }
+    }
+
+    pub fn tool_use(tool_name: String, content: String, is_complete: bool) -> Self {
+        Self::ToolUse {
+            tool_name,
+            content,
+            is_complete,
+            hash: None,
+        }
+    }
+
+    pub fn tool_result(tool_name: String, status: String, details: Vec<ToolResultDetail>, footer: String) -> Self {
+        Self::ToolResult {
+            tool_name,
+            status,
+            details,
+            footer,
+            hash: None,
+        }
+    }
+
+    pub fn diary(maid: String, date: String, content: String, nodes: Option<Vec<MarkdownNode>>) -> Self {
+        Self::Diary {
+            maid,
+            date,
+            content,
+            nodes,
+            hash: None,
+        }
+    }
+
+    pub fn thought(theme: String, content: String, is_complete: bool, nodes: Option<Vec<MarkdownNode>>) -> Self {
+        Self::Thought {
+            theme,
+            content,
+            is_complete,
+            nodes,
+            hash: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn button_click(content: String) -> Self {
+        Self::ButtonClick {
+            content,
+            hash: None,
+        }
+    }
+
+    pub fn html_preview(content: String) -> Self {
+        Self::HtmlPreview {
+            content,
+            hash: None,
+        }
+    }
+
+    pub fn role_divider(role: String, is_end: bool) -> Self {
+        Self::RoleDivider {
+            role,
+            is_end,
+            hash: None,
+        }
+    }
+
+    pub fn style(content: String) -> Self {
+        Self::Style {
+            content,
+            hash: None,
+        }
+    }
+
+    pub fn compute_hash(&self) -> String {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    pub fn set_hash(&mut self, h: String) {
+        match self {
+            ContentBlock::Markdown { hash, .. } => *hash = Some(h),
+            ContentBlock::ToolUse { hash, .. } => *hash = Some(h),
+            ContentBlock::ToolResult { hash, .. } => *hash = Some(h),
+            ContentBlock::Diary { hash, .. } => *hash = Some(h),
+            ContentBlock::Thought { hash, .. } => *hash = Some(h),
+            ContentBlock::ButtonClick { hash, .. } => *hash = Some(h),
+            ContentBlock::HtmlPreview { hash, .. } => *hash = Some(h),
+            ContentBlock::RoleDivider { hash, .. } => *hash = Some(h),
+            ContentBlock::Style { hash, .. } => *hash = Some(h),
+        }
+    }
+
+    pub fn compute_hashes_recursively(&mut self) {
+        let h = self.compute_hash();
+        self.set_hash(h);
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -119,10 +251,6 @@ lazy_static! {
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?[a-zA-Z][a-zA-Z0-9]*[\s>/]").unwrap();
     static ref CHINESE_PARA_REGEX: Regex = Regex::new(r"^[\u4e00-\u9fa5]").unwrap();
     static ref VCP_SPECIAL_MARKER_REGEX: Regex = Regex::new(r"(?i)^(<<<|\[\[VCP|\[---|<think|</think)").unwrap();
-
-    static ref HTML_RE_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
-    static ref HTML_RE_END: Regex = Regex::new(r"(?i)</html>").unwrap();
-    static ref HTML_RE_FENCE: Regex = Regex::new(r"(?m)^[ \t]*```").unwrap();
 }
 
 pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
@@ -272,10 +400,12 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             // 容错处理：未闭合的块（流式中断）降级为普通 Markdown
             if !is_complete && !matches!(block_type, BlockType::HtmlFence | BlockType::HtmlDoc | BlockType::CodeFence | BlockType::RoleDivider) {
                 let marker_text = &remaining[start_idx..end_idx];
-                blocks.push(ContentBlock::Markdown {
-                    content: None,
-                    nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(marker_text)),
-                });
+                blocks.push(ContentBlock::markdown(
+                    None,
+                    Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                        marker_text,
+                    )),
+                ));
                 current_pos += end_idx;
                 continue;
             }
@@ -294,18 +424,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         let (maid, date, content) = extract_diary_details(inner_content);
                         let nodes =
                             crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                        ContentBlock::Diary {
-                            maid,
-                            date,
-                            content,
-                            nodes: Some(nodes),
-                        }
+                        ContentBlock::diary(maid, date, content, Some(nodes))
                     } else {
-                        ContentBlock::ToolUse {
-                            tool_name,
-                            content: inner_content.to_string(),
-                            is_complete,
-                        }
+                        ContentBlock::tool_use(tool_name, inner_content.to_string(), is_complete)
                     }
                 }
                 BlockType::Thought => {
@@ -318,46 +439,29 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
 
                     let nodes =
                         crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
-                    ContentBlock::Thought {
-                        theme,
-                        content: inner_content.to_string(),
-                        is_complete,
-                        nodes: Some(nodes),
-                    }
+                    ContentBlock::thought(theme, inner_content.to_string(), is_complete, Some(nodes))
                 }
                 BlockType::Think => {
                     let nodes =
                         crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
-                    ContentBlock::Thought {
-                        theme: "思维链".to_string(),
-                        content: inner_content.to_string(),
+                    ContentBlock::thought(
+                        "思维链".to_string(),
+                        inner_content.to_string(),
                         is_complete,
-                        nodes: Some(nodes),
-                    }
+                        Some(nodes),
+                    )
                 }
                 BlockType::ToolResult => {
                     let (tool_name, status, details, footer) = parse_tool_result(inner_content);
-                    ContentBlock::ToolResult {
-                        tool_name,
-                        status,
-                        details,
-                        footer,
-                    }
+                    ContentBlock::tool_result(tool_name, status, details, footer)
                 }
                 BlockType::Diary => {
                     let (maid, date, content) = extract_diary_details(inner_content);
                     let nodes =
                         crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                    ContentBlock::Diary {
-                        maid,
-                        date,
-                        content,
-                        nodes: Some(nodes),
-                    }
+                    ContentBlock::diary(maid, date, content, Some(nodes))
                 }
-                BlockType::HtmlFence => ContentBlock::HtmlPreview {
-                    content: inner_content.to_string(),
-                },
+                BlockType::HtmlFence => ContentBlock::html_preview(inner_content.to_string()),
                 BlockType::HtmlDoc => {
                     let mut full_html = String::new();
                     full_html.push_str(&remaining[start_idx..end_idx]);
@@ -367,7 +471,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             full_html.push_str(&search_area[s..e]);
                         }
                     }
-                    ContentBlock::HtmlPreview { content: full_html }
+                    ContentBlock::html_preview(full_html)
                 }
                 BlockType::RoleDivider => {
                     let marker_text = &remaining[start_idx..end_idx];
@@ -377,21 +481,17 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             .get(2)
                             .map(|m| m.as_str().to_lowercase())
                             .unwrap_or_default();
-                        ContentBlock::RoleDivider { role, is_end }
+                        ContentBlock::role_divider(role, is_end)
                     } else {
-                        ContentBlock::Markdown {
-                            content: None,
-                            nodes: Some(
-                                crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
-                                    marker_text,
-                                ),
-                            ),
-                        }
+                        ContentBlock::markdown(
+                            None,
+                            Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                                marker_text,
+                            )),
+                        )
                     }
                 }
-                BlockType::Style => ContentBlock::Style {
-                    content: inner_content.to_string(),
-                },
+                BlockType::Style => ContentBlock::style(inner_content.to_string()),
                 BlockType::CodeFence => {
                     let mut full_fence = String::new();
                     full_fence.push_str(&remaining[start_idx..end_idx]);
@@ -401,12 +501,12 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                             full_fence.push_str(&search_area[s..e]);
                         }
                     }
-                    ContentBlock::Markdown {
-                        content: None,
-                        nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                    ContentBlock::markdown(
+                        None,
+                        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
                             &full_fence,
                         )),
-                    }
+                    )
                 }
             };
 
@@ -425,6 +525,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
         }
     }
 
+    // 计算全量块的稳定哈希指纹
+    for block in &mut blocks {
+        block.compute_hashes_recursively();
+    }
+
     blocks
 }
 
@@ -439,26 +544,26 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
             continue;
         };
         if m.start() > last_end {
-            blocks.push(ContentBlock::Markdown {
-                content: None,
-                nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+            blocks.push(ContentBlock::markdown(
+                None,
+                Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
                     &text[last_end..m.start()],
                 )),
-            });
+            ));
         }
-        blocks.push(ContentBlock::ButtonClick {
-            content: button_content.as_str().trim().to_string(),
-        });
+        blocks.push(ContentBlock::button_click(
+            button_content.as_str().trim().to_string(),
+        ));
         last_end = m.end();
     }
 
     if last_end < text.len() {
-        blocks.push(ContentBlock::Markdown {
-            content: None,
-            nodes: Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+        blocks.push(ContentBlock::markdown(
+            None,
+            Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
                 &text[last_end..],
             )),
-        });
+        ));
     }
 
     blocks
@@ -553,44 +658,4 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
     }
 
     (tool_name, status, details, footer_lines.join("\n"))
-}
-
-/// 预处理：确保裸露的 HTML（包含 DOCTYPE 或完整的 html 标签）被 Markdown 代码块包裹
-pub fn ensure_html_fenced(text: &str) -> String {
-    let mut result = String::new();
-    let mut last_pos = 0;
-
-    // 寻找所有的 HTML 起始标记
-    for m_start in HTML_RE_START.find_iter(text) {
-        if m_start.start() < last_pos {
-            continue;
-        }
-
-        // 检查在该起始标记之前，处于未闭合状态的 ``` 数量
-        let prefix = &text[..m_start.start()];
-        let fence_count = HTML_RE_FENCE.find_iter(prefix).count();
-
-        // 如果 fence_count 是奇数，说明当前处于代码块内部，跳过
-        if !fence_count.is_multiple_of(2) {
-            continue;
-        }
-
-        // 寻找配对的结束标记
-        if let Some(m_end) = HTML_RE_END.find(&text[m_start.start()..]) {
-            let end_pos = m_start.start() + m_end.end();
-
-            // 将之前的文本加入结果
-            result.push_str(&text[last_pos..m_start.start()]);
-
-            // 包裹 HTML
-            result.push_str("\n```html\n");
-            result.push_str(&text[m_start.start()..end_pos]);
-            result.push_str("\n```\n");
-
-            last_pos = end_pos;
-        }
-    }
-
-    result.push_str(&text[last_pos..]);
-    result
 }

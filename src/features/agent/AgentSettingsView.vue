@@ -15,6 +15,7 @@ interface AgentConfig {
   avatarCalculatedColor?: string;
   // Prompt settings
   systemPrompt: string;
+  mobileSystemPrompt?: string;
   // Model settings
   model: string;
   temperature: number;
@@ -42,6 +43,7 @@ const agentConfig = ref<AgentConfig>({
   name: "",
   avatar: "",
   systemPrompt: "",
+  mobileSystemPrompt: "",
   model: "gemini-3-flash-preview",
   temperature: 1.0,
   contextTokenLimit: 1000000,
@@ -267,10 +269,10 @@ onMounted(async () => {
             </h3>
           </div>
           <div class="card-modern">
-            <textarea v-model="agentConfig.systemPrompt" placeholder="在这里输入助手的核心指令..."
+            <textarea v-model="agentConfig.mobileSystemPrompt" placeholder="在这里输入移动端专用提示词..."
               class="w-full bg-black/5 dark:bg-white/5 rounded-2xl p-4 text-sm outline-none min-h-[150px] resize-none focus:bg-black/10 transition-all leading-relaxed"></textarea>
             <p class="mt-3 text-[10px] opacity-30 px-1 leading-normal">
-              提示：系统提示词定义了助手的性格、知识范围和行为准则。
+              提示：此处编辑的提示词仅在本机生效，不会同步到桌面端。留空则使用桌面端同步的提示词。支持 <code v-pre>{{AgentName}}</code> 占位符。
             </p>
           </div>
         </section>

@@ -17,6 +17,7 @@ use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
+use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
 
@@ -38,7 +39,7 @@ pub struct VcpRequestPayload {
 }
 
 /// 流式事件结构体，用于向前端发送数据
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
     pub r#type: String, // 事件类型: "data", "aurora", "end", "error", "reconnecting"
@@ -48,6 +49,56 @@ pub struct StreamEvent {
     pub finish_reason: Option<String>, // 结束原因
     pub error: Option<String>, // 错误信息 (仅 type="error" 时有效)
     pub aurora: Option<AuroraUpdate>, // Aurora 语义沉淀更新 (type="aurora" 时有效)
+    pub blocks: Option<Vec<ContentBlock>>, // 持久化后的预渲染块 (仅 type="end" 时有效)
+}
+
+impl StreamEvent {
+    pub fn data(message_id: String, chunk: Value, context: Option<Value>) -> Self {
+        Self {
+            r#type: "data".into(),
+            chunk: Some(chunk),
+            message_id,
+            context,
+            ..Default::default()
+        }
+    }
+
+    pub fn aurora(message_id: String, aurora: AuroraUpdate, context: Option<Value>) -> Self {
+        Self {
+            r#type: "aurora".into(),
+            aurora: Some(aurora),
+            message_id,
+            context,
+            ..Default::default()
+        }
+    }
+
+    pub fn end(
+        message_id: String,
+        context: Option<Value>,
+        finish_reason: Option<String>,
+        blocks: Option<Vec<ContentBlock>>,
+    ) -> Self {
+        Self {
+            r#type: "end".into(),
+            message_id,
+            context,
+            finish_reason,
+            blocks,
+            ..Default::default()
+        }
+    }
+
+    pub fn error(message_id: String, context: Option<Value>, error: String) -> Self {
+        Self {
+            r#type: "error".into(),
+            message_id,
+            context,
+            finish_reason: Some("error".to_string()),
+            error: Some(error),
+            ..Default::default()
+        }
+    }
 }
 
 /// 全局活跃请求管理器，使用 DashMap 存储中止信号发送端
@@ -130,8 +181,28 @@ pub async fn sendToVCP<R: Runtime>(
     payload: VcpRequestPayload,
     stream_channel: Channel<StreamEvent>,
 ) -> Result<Value, String> {
-    let (res, _is_aborted) =
-        perform_vcp_request(&app, state.0.clone(), payload, Some(stream_channel)).await?;
+    let message_id = payload.message_id.clone();
+    let context = payload.context.clone();
+    let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
+
+    let (res, is_aborted) =
+        perform_vcp_request(&app, state.0.clone(), payload, Some(stream_channel.clone())).await?;
+
+    if is_stream {
+        let finish_reason = if is_aborted {
+            Some("cancelled_by_user".to_string())
+        } else {
+            res["finishReason"].as_str().map(|s| s.to_string())
+        };
+
+        let _ = stream_channel.send(StreamEvent::end(
+            message_id,
+            context,
+            Some(finish_reason.unwrap_or_else(|| "completed".to_string())),
+            None,
+        ));
+    }
+
     Ok(res)
 }
 
@@ -440,20 +511,19 @@ pub async fn perform_vcp_request<R: Runtime>(
         // 辅助闭包：发送 Aurora 更新事件
         let send_aurora_update =
             |buffer: &AuroraBuffer, finish_reason: Option<String>, error: Option<String>| {
-                send_stream_event(StreamEvent {
-                    r#type: "aurora".to_string(),
-                    chunk: None,
-                    message_id: message_id_inner.clone(),
-                    context: context_inner.clone(),
-                    finish_reason,
-                    error,
-                    aurora: Some(AuroraUpdate {
+                let mut event = StreamEvent::aurora(
+                    message_id_inner.clone(),
+                    AuroraUpdate {
                         stable_blocks: buffer.stable_blocks.clone(),
                         tail_block: buffer.tail_block.clone(),
                         tail: AuroraBuffer::balance_html_tags(&buffer.tail_content),
                         content: buffer.full_text.clone(),
-                    }),
-                });
+                    },
+                    context_inner.clone(),
+                );
+                event.finish_reason = finish_reason;
+                event.error = error;
+                send_stream_event(event);
             };
 
         let res_future = client
@@ -468,15 +538,6 @@ pub async fn perform_vcp_request<R: Runtime>(
                 println!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
                 aurora_buffer.finalize();
                 send_aurora_update(&aurora_buffer, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-                send_stream_event(StreamEvent {
-                    r#type: "end".to_string(),
-                    chunk: None,
-                    message_id: message_id_inner.clone(),
-                    context: context_inner.clone(),
-                    finish_reason: Some("cancelled_by_user".to_string()),
-                    error: Some("请求已中止".to_string()),
-                    aurora: None,
-                });
                 active_requests_inner.remove(&message_id_inner);
                 return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
             }
@@ -495,15 +556,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     println!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
                                     aurora_buffer.finalize();
                                     send_aurora_update(&aurora_buffer, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-                                    send_stream_event(StreamEvent {
-                                        r#type: "end".to_string(),
-                                        chunk: None,
-                                        message_id: message_id_inner.clone(),
-                                        context: context_inner.clone(),
-                                        finish_reason: Some("cancelled_by_user".to_string()),
-                                        error: Some("请求已中止".to_string()),
-                                        aurora: None,
-                                    });
+
                                     // 显式清理，防止 race
                                     active_requests_inner.remove(&message_id_inner);
                                     break;
@@ -518,15 +571,6 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                     println!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
                                                     aurora_buffer.finalize();
                                                     send_aurora_update(&aurora_buffer, last_finish_reason.clone(), None);
-                                                    send_stream_event(StreamEvent {
-                                                        r#type: "end".to_string(),
-                                                        chunk: None,
-                                                        message_id: message_id_inner.clone(),
-                                                        context: context_inner.clone(),
-                                                        finish_reason: last_finish_reason.clone(),
-                                                        error: None,
-                                                        aurora: None,
-                                                    });
                                                     break;
                                                 }
                                                 if let Ok(chunk) = serde_json::from_str::<Value>(data) {
@@ -554,15 +598,12 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                     }
 
                                                     // 保留原始 data 事件以保证兼容性
-                                                    send_stream_event(StreamEvent {
-                                                        r#type: "data".to_string(),
-                                                        chunk: Some(chunk),
-                                                        message_id: message_id_inner.clone(),
-                                                        context: context_inner.clone(),
-                                                        finish_reason: None,
-                                                        error: None,
-                                                        aurora: None,
-                                                    });
+                                                    send_stream_event(StreamEvent::data(
+                                                        message_id_inner.clone(),
+                                                        chunk,
+                                                        context_inner.clone(),
+                                                    ));
+
                                                 }
                                             }
                                         }
@@ -570,15 +611,12 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             println!("[VCPClient] Stream read error: {:?}", e);
                                             aurora_buffer.finalize();
                                             send_aurora_update(&aurora_buffer, Some("error".to_string()), Some(format!("流读取错误: {}", e)));
-                                            send_stream_event(StreamEvent {
-                                                r#type: "error".to_string(),
-                                                chunk: None,
-                                                message_id: message_id_inner.clone(),
-                                                context: context_inner.clone(),
-                                                finish_reason: Some("error".to_string()),
-                                                error: Some(format!("流读取错误: {}", e)),
-                                                aurora: None,
-                                            });
+                                            send_stream_event(StreamEvent::error(
+                                                message_id_inner.clone(),
+                                                context_inner.clone(),
+                                                format!("流读取错误: {}", e),
+                                            ));
+
                                             break;
                                         }
                                         None => {
@@ -587,27 +625,15 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             if !full_content.is_empty() || last_finish_reason.is_some() {
                                                 println!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
                                                 send_aurora_update(&aurora_buffer, last_finish_reason.clone(), None);
-                                                send_stream_event(StreamEvent {
-                                                    r#type: "end".to_string(),
-                                                    chunk: None,
-                                                    message_id: message_id_inner.clone(),
-                                                    context: context_inner.clone(),
-                                                    finish_reason: last_finish_reason.clone(),
-                                                    error: None,
-                                                    aurora: None,
-                                                });
                                             } else {
                                                 println!("[VCPClient] Stream ended unexpectedly (None)");
                                                 send_aurora_update(&aurora_buffer, Some("error".to_string()), Some("网络连接意外断开".to_string()));
-                                                send_stream_event(StreamEvent {
-                                                    r#type: "error".to_string(),
-                                                    chunk: None,
-                                                    message_id: message_id_inner.clone(),
-                                                    context: context_inner.clone(),
-                                                    finish_reason: Some("error".to_string()),
-                                                    error: Some("网络连接意外断开".to_string()),
-                                                    aurora: None,
-                                                });
+                                                send_stream_event(StreamEvent::error(
+                                                    message_id_inner.clone(),
+                                                    context_inner.clone(),
+                                                    "网络连接意外断开".to_string(),
+                                                ));
+
                                             }
                                             break;
                                         }
@@ -619,28 +645,22 @@ pub async fn perform_vcp_request<R: Runtime>(
                     Ok(resp) => {
                         let status = resp.status();
                         let text = resp.text().await.unwrap_or_default();
-                        send_stream_event(StreamEvent {
-                            r#type: "error".to_string(),
-                            chunk: None,
-                            message_id: message_id_inner.clone(),
-                            context: context_inner.clone(),
-                            finish_reason: Some("error".to_string()),
-                            error: Some(format!("VCP服务器错误: {} - {}", status, text)),
-                            aurora: None,
-                        });
+                        send_stream_event(StreamEvent::error(
+                            message_id_inner.clone(),
+                            context_inner.clone(),
+                            format!("VCP服务器错误: {} - {}", status, text),
+                        ));
+
                         active_requests_inner.remove(&message_id_inner);
                         return Err(format!("VCP Error: {}", status));
                     }
                     Err(e) => {
-                        send_stream_event(StreamEvent {
-                            r#type: "error".to_string(),
-                            chunk: None,
-                            message_id: message_id_inner.clone(),
-                            context: context_inner.clone(),
-                            finish_reason: Some("error".to_string()),
-                            error: Some(format!("网络请求异常: {}", e)),
-                            aurora: None,
-                        });
+                        send_stream_event(StreamEvent::error(
+                            message_id_inner.clone(),
+                            context_inner.clone(),
+                            format!("网络请求异常: {}", e),
+                        ));
+
                         active_requests_inner.remove(&message_id_inner);
                         return Err(e.to_string());
                     }

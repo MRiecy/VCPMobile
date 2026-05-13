@@ -184,4 +184,5 @@ export interface StreamEvent {
   finishReason?: string;
   error?: string;
   aurora?: AuroraUpdate;
+  blocks?: ContentBlock[];
 }

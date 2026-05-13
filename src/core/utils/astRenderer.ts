@@ -9,10 +9,9 @@ function getCacheKey(nodes: MarkdownNode[], messageId: string, blockHash?: strin
   if (blockHash) {
     return `${messageId}:${blockHash}`;
   }
-  // Fallback for legacy data or manual calls
-  const json = JSON.stringify(nodes);
-  const hash = json.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36);
-  return `${messageId}:${hash}`;
+  // Fallback: If no hash provided, use a simple pointer-based or length-based key
+  // since we now expect backend to provide hashes for all production data.
+  return `${messageId}:len-${nodes.length}`;
 }
 
 /** 清理 AST HTML 缓存，用于重建/同步后强制重新渲染 */

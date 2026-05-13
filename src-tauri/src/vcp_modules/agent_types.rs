@@ -18,6 +18,9 @@ pub struct AgentConfig {
     /// 系统提示词 (System Prompt)
     #[serde(default)]
     pub system_prompt: String,
+    /// 移动端专用系统提示词 (不同步，仅本机生效)
+    #[serde(default)]
+    pub mobile_system_prompt: String,
     /// 使用的模型 (如: "gemini-2.0-flash")
     #[serde(default = "default_model")]
     pub model: String,

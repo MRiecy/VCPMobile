@@ -76,6 +76,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             agent_id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             system_prompt TEXT NOT NULL DEFAULT '',
+            mobile_system_prompt TEXT NOT NULL DEFAULT '',
             model TEXT NOT NULL,
             temperature REAL NOT NULL DEFAULT 1,
             context_token_limit INTEGER NOT NULL DEFAULT 0,
@@ -94,6 +95,9 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
 
     // 确保字段存在 (用于存量 DB 升级)
     let _ = sqlx::query("ALTER TABLE agents ADD COLUMN current_topic_id TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE agents ADD COLUMN mobile_system_prompt TEXT NOT NULL DEFAULT ''")
         .execute(pool)
         .await;
 

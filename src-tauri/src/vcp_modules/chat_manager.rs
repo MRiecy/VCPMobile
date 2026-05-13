@@ -150,7 +150,8 @@ pub async fn append_single_message(
         topic_id,
         message,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 #[tauri::command]

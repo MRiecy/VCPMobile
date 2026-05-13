@@ -20,6 +20,7 @@ export interface AgentConfig {
   name: string;
   model: string;
   systemPrompt: string;
+  mobileSystemPrompt?: string;
   temperature: number;
   contextTokenLimit: number;
   maxOutputTokens: number;

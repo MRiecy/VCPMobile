@@ -10,7 +10,7 @@ use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{
-    perform_vcp_request, ActiveRequests, CancelledGroupTurns, VcpRequestPayload,
+    perform_vcp_request, ActiveRequests, CancelledGroupTurns, StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -95,7 +95,7 @@ pub async fn internal_process_group_chat_message(
     }
 
     // 为了给 AI 决策提供上下文，我们只读取最新的 20 条（或按需分配）
-    let current_history = message_service::load_chat_history_internal(
+    let recent_history_for_decision = message_service::load_chat_history_internal(
         &app_handle,
         &group_id,
         "group",
@@ -112,7 +112,7 @@ pub async fn internal_process_group_chat_message(
     } else if group_config.mode == "naturerandom" {
         determine_naturerandom_speakers(
             &active_member_configs,
-            &current_history,
+            &recent_history_for_decision,
             &group_config,
             &user_message,
         )
@@ -127,6 +127,18 @@ pub async fn internal_process_group_chat_message(
     if speakers.is_empty() {
         return Ok(json!({"status": "no_ai_response"}));
     }
+
+    // 提前加载全量历史记录作为接力上下文的基础
+    let mut full_history_for_context = message_service::load_chat_history_internal(
+        &app_handle,
+        &group_id,
+        "group",
+        &topic_id,
+        None, // 加载全部用于 VCP 上下文
+        None,
+        true,
+    )
+    .await?;
 
     // 5. 串行异步调度 (约束：群聊内部必须串行)
     let mut final_new_msgs = Vec::new();
@@ -148,18 +160,6 @@ pub async fn internal_process_group_chat_message(
         let topic_id = topic_id.clone();
         let vcp_url = vcp_url.clone();
         let vcp_api_key = vcp_api_key.clone();
-
-        // 每次循环重新加载历史，以包含前一个 Agent 的回复
-        let current_history_for_context = message_service::load_chat_history_internal(
-            &app_handle,
-            &group_id,
-            "group",
-            &topic_id,
-            None,
-            None,
-            true,
-        )
-        .await?;
 
         let group_config_inner = group_config.clone();
         let active_member_configs_inner = active_member_configs.clone();
@@ -187,7 +187,7 @@ pub async fn internal_process_group_chat_message(
             "stream": true
         });
 
-        let mut messages = assemble_history_for_vcp(&current_history_for_context);
+        let mut messages = assemble_history_for_vcp(&full_history_for_context);
         messages.insert(0, json!({"role": "system", "content": system_prompt}));
 
         let request_payload = VcpRequestPayload {
@@ -242,7 +242,7 @@ pub async fn internal_process_group_chat_message(
                         .unwrap()
                         .as_millis() as u64,
                     is_thinking: Some(false),
-                    agent_id: Some(agent_id),
+                    agent_id: Some(agent_id.clone()),
                     group_id: Some(group_id.clone()),
                     topic_id: Some(topic_id.clone()),
                     is_group_message: Some(true),
@@ -253,7 +253,7 @@ pub async fn internal_process_group_chat_message(
                 };
 
                 // 立即进行一次断点存盘 (针对单个 Agent)
-                let _ = message_service::append_single_message(
+                let append_result = message_service::append_single_message(
                     app_handle.clone(),
                     &db_pool,
                     &group_id,
@@ -262,6 +262,30 @@ pub async fn internal_process_group_chat_message(
                     ai_msg.clone(),
                 )
                 .await;
+                let end_blocks = match &append_result {
+                    Ok(blocks) => Some(blocks.clone()),
+                    Err(e) => {
+                        eprintln!("[GroupChatAppService] Failed to append final message: {}", e);
+                        None
+                    }
+                };
+                if let Some(chan) = &stream_channel {
+                    let _ = chan.send(StreamEvent::end(
+                        ai_msg.id.clone(),
+                        Some(json!({
+                            "groupId": group_id,
+                            "topicId": topic_id,
+                            "agentId": agent_id,
+                            "isGroupMessage": true,
+                            "agentName": ai_msg.name.clone()
+                        })),
+                        ai_msg.finish_reason.clone(),
+                        end_blocks,
+                    ));
+                }
+
+                // 关键优化：将新生成的回复追加到内存上下文，提供给接力赛的下一个 Agent
+                full_history_for_context.push(ai_msg.clone());
 
                 final_new_msgs.push(ai_msg);
             }

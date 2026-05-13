@@ -139,24 +139,10 @@ function renderBlockHtml(block: ContentBlock): string {
 
 function getBlockKey(block: ContentBlock, index: number): string {
   if (block.hash) {
-    return `${block.type}-${block.hash}-${index}`;
+    return `${block.type}-${block.hash}`;
   }
-  const content = block.content || '';
-  const nodesStr = block.nodes ? JSON.stringify(block.nodes) : '';
-  const stateStr = JSON.stringify({
-    s: block.status,
-    c: block.is_complete,
-    t: block.tool_name,
-    f: block.footer,
-    d: block.details,
-    r: block.role,
-    e: block.is_end,
-  });
-  const combined = content + nodesStr + stateStr;
-  const hash = combined.length > 0
-    ? combined.split('').reduce((h, c) => ((h << 5) - h) + c.charCodeAt(0), 0).toString(36)
-    : '';
-  return `${block.type}-${hash}-${index}`;
+  // Fallback for legacy data (index-based)
+  return `${block.type}-idx-${index}`;
 }
 
 function escapeHtml(text: string): string {

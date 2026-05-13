@@ -13,7 +13,11 @@ pub async fn assemble_group_context(
     } else {
         &agent_config.name
     };
-    let mut system_prompt = agent_config.system_prompt.clone();
+    let mut system_prompt = if !agent_config.mobile_system_prompt.is_empty() {
+        agent_config.mobile_system_prompt.clone()
+    } else {
+        agent_config.system_prompt.clone()
+    };
 
     // 注入群组全局设定
     if let Some(group_prompt) = &group_config.group_prompt {

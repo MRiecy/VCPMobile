@@ -77,6 +77,93 @@ pub enum StreamBlock {
     },
 }
 
+impl StreamBlock {
+    pub fn markdown(content: String, nodes: Option<Vec<MarkdownNode>>, hash: String) -> Self {
+        Self::Markdown {
+            content,
+            nodes,
+            hash,
+        }
+    }
+
+    pub fn thought(
+        theme: String,
+        content: String,
+        is_complete: bool,
+        nodes: Option<Vec<MarkdownNode>>,
+        hash: String,
+    ) -> Self {
+        Self::Thought {
+            theme,
+            content,
+            is_complete,
+            nodes,
+            hash,
+        }
+    }
+
+    pub fn tool(tool_name: String, content: String, hash: String) -> Self {
+        Self::Tool {
+            tool_name,
+            content,
+            hash,
+        }
+    }
+
+    pub fn tool_result(
+        tool_name: String,
+        status: String,
+        details: Vec<ToolResultDetail>,
+        footer: String,
+        hash: String,
+    ) -> Self {
+        Self::ToolResult {
+            tool_name,
+            status,
+            details,
+            footer,
+            hash,
+        }
+    }
+
+    pub fn diary(
+        maid: String,
+        date: String,
+        content: String,
+        nodes: Option<Vec<MarkdownNode>>,
+        hash: String,
+    ) -> Self {
+        Self::Diary {
+            maid,
+            date,
+            content,
+            nodes,
+            hash,
+        }
+    }
+
+    pub fn html_preview(content: String, hash: String) -> Self {
+        Self::HtmlPreview { content, hash }
+    }
+
+    pub fn role_divider(role: String, is_end: bool, hash: String) -> Self {
+        Self::RoleDivider {
+            role,
+            is_end,
+            hash,
+        }
+    }
+
+    pub fn style(content: String, hash: String) -> Self {
+        Self::Style { content, hash }
+    }
+
+    #[allow(dead_code)]
+    pub fn button_click(content: String, hash: String) -> Self {
+        Self::ButtonClick { content, hash }
+    }
+}
+
 /// 流式块解析器
 /// 增量扫描 full_text，识别已闭合的语义块和未闭合的尾部
 pub struct StreamBlockParser {
@@ -158,14 +245,9 @@ impl StreamBlockParser {
         let (mut blocks, tail) = self.process(full_text);
         let trimmed = tail.trim();
         if !trimmed.is_empty() {
-            let nodes =
-                crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
+            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
             let hash = HashAggregator::compute_content_hash(trimmed);
-            blocks.push(StreamBlock::Markdown {
-                content: trimmed.to_string(),
-                nodes: Some(nodes),
-                hash,
-            });
+            blocks.push(StreamBlock::markdown(trimmed.to_string(), Some(nodes), hash));
         }
         blocks
     }
@@ -248,21 +330,15 @@ fn build_stream_block(
             if is_daily_note_create(inner_content) {
                 let (maid, date, content) = extract_diary_details(inner_content);
                 let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                let hash = HashAggregator::compute_content_hash(&format!("{}:{}:{}", maid, date, content));
-                StreamBlock::Diary {
-                    maid,
-                    date,
-                    content,
-                    nodes: Some(nodes),
-                    hash,
-                }
+                let hash = HashAggregator::compute_content_hash(&format!(
+                    "{}:{}:{}",
+                    maid, date, content
+                ));
+                StreamBlock::diary(maid, date, content, Some(nodes), hash)
             } else {
-                let hash = HashAggregator::compute_content_hash(&format!("{}:{}", tool_name, inner_content));
-                StreamBlock::Tool {
-                    tool_name,
-                    content: inner_content.to_string(),
-                    hash,
-                }
+                let hash =
+                    HashAggregator::compute_content_hash(&format!("{}:{}", tool_name, inner_content));
+                StreamBlock::tool(tool_name, inner_content.to_string(), hash)
             }
         }
         BlockType::Thought => {
@@ -273,25 +349,20 @@ fn build_stream_block(
                 .map(|m| m.as_str().trim().replace("\"", ""))
                 .unwrap_or_else(|| "元思考链".to_string());
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
-            let hash = HashAggregator::compute_content_hash(&format!("{}:{}", theme, inner_content));
-            StreamBlock::Thought {
-                theme,
-                content: inner_content.to_string(),
-                is_complete: true,
-                nodes: Some(nodes),
-                hash,
-            }
+            let hash =
+                HashAggregator::compute_content_hash(&format!("{}:{}", theme, inner_content));
+            StreamBlock::thought(theme, inner_content.to_string(), true, Some(nodes), hash)
         }
         BlockType::Think => {
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(inner_content);
             let hash = HashAggregator::compute_content_hash(inner_content);
-            StreamBlock::Thought {
-                theme: "思维链".to_string(),
-                content: inner_content.to_string(),
-                is_complete: true,
-                nodes: Some(nodes),
+            StreamBlock::thought(
+                "思维链".to_string(),
+                inner_content.to_string(),
+                true,
+                Some(nodes),
                 hash,
-            }
+            )
         }
         BlockType::ToolResult => {
             let (tool_name, status, details, footer) = parse_tool_result(inner_content);
@@ -300,44 +371,31 @@ fn build_stream_block(
                 details_str.push_str(&d.key);
                 details_str.push_str(&d.value);
             }
-            let hash = HashAggregator::compute_content_hash(&format!("{}:{}:{}:{}", tool_name, status, details_str, footer));
-            StreamBlock::ToolResult {
-                tool_name,
-                status,
-                details,
-                footer,
-                hash,
-            }
+            let hash = HashAggregator::compute_content_hash(&format!(
+                "{}:{}:{}:{}",
+                tool_name, status, details_str, footer
+            ));
+            StreamBlock::tool_result(tool_name, status, details, footer, hash)
         }
         BlockType::Diary => {
             let (maid, date, content) = extract_diary_details(inner_content);
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-            let hash = HashAggregator::compute_content_hash(&format!("{}:{}:{}", maid, date, content));
-            StreamBlock::Diary {
-                maid,
-                date,
-                content,
-                nodes: Some(nodes),
-                hash,
-            }
+            let hash = HashAggregator::compute_content_hash(&format!(
+                "{}:{}:{}",
+                maid, date, content
+            ));
+            StreamBlock::diary(maid, date, content, Some(nodes), hash)
         }
         BlockType::HtmlFence | BlockType::HtmlDoc => {
             let hash = HashAggregator::compute_content_hash(inner_content);
-            StreamBlock::HtmlPreview {
-                content: inner_content.to_string(),
-                hash,
-            }
+            StreamBlock::html_preview(inner_content.to_string(), hash)
         }
         BlockType::CodeFence => {
             let fence = &remaining[start_idx..end_idx];
             let full_text = format!("{}\n{}\n```", fence, inner_content);
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&full_text);
             let hash = HashAggregator::compute_content_hash(&full_text);
-            StreamBlock::Markdown {
-                content: full_text,
-                nodes: Some(nodes),
-                hash,
-            }
+            StreamBlock::markdown(full_text, Some(nodes), hash)
         }
         BlockType::RoleDivider => {
             let marker_text = &remaining[start_idx..end_idx];
@@ -348,22 +406,15 @@ fn build_stream_block(
                     .map(|m| m.as_str().to_lowercase())
                     .unwrap_or_default();
                 let hash = HashAggregator::compute_content_hash(&format!("{}:{}", role, is_end));
-                StreamBlock::RoleDivider { role, is_end, hash }
+                StreamBlock::role_divider(role, is_end, hash)
             } else {
                 let hash = HashAggregator::compute_content_hash("unknown:false");
-                StreamBlock::RoleDivider {
-                    role: "unknown".to_string(),
-                    is_end: false,
-                    hash,
-                }
+                StreamBlock::role_divider("unknown".to_string(), false, hash)
             }
         }
         BlockType::Style => {
             let hash = HashAggregator::compute_content_hash(inner_content);
-            StreamBlock::Style {
-                content: inner_content.to_string(),
-                hash,
-            }
+            StreamBlock::style(inner_content.to_string(), hash)
         }
     }
 }
@@ -388,11 +439,7 @@ fn split_markdown_paragraphs(text: &str) -> (Vec<StreamBlock>, String) {
             // 对已闭合的 Markdown 段落进行 AST 预渲染
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
             let hash = HashAggregator::compute_content_hash(trimmed);
-            blocks.push(StreamBlock::Markdown {
-                content: trimmed.to_string(),
-                nodes: Some(nodes),
-                hash,
-            });
+            blocks.push(StreamBlock::markdown(trimmed.to_string(), Some(nodes), hash));
         }
         // 检查 inline button clicks
         let blocks = extract_inline_buttons(blocks);
@@ -425,20 +472,17 @@ fn extract_inline_buttons(mut blocks: Vec<StreamBlock>) -> Vec<StreamBlock> {
                             let before_nodes =
                                 crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&before);
                             let hash = HashAggregator::compute_content_hash(&before);
-                            result.push(StreamBlock::Markdown {
-                                content: before,
-                                nodes: Some(before_nodes),
+                            result.push(StreamBlock::markdown(
+                                before,
+                                Some(before_nodes),
                                 hash,
-                            });
+                            ));
                         }
                     }
 
                     let btn_text = btn_content.as_str().trim().to_string();
                     let hash = HashAggregator::compute_content_hash(&btn_text);
-                    result.push(StreamBlock::ButtonClick {
-                        content: btn_text,
-                        hash,
-                    });
+                    result.push(StreamBlock::button_click(btn_text, hash));
                     last_end = m.end();
                 }
 
@@ -450,20 +494,16 @@ fn extract_inline_buttons(mut blocks: Vec<StreamBlock>) -> Vec<StreamBlock> {
                             let after_nodes =
                                 crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&after);
                             let hash = HashAggregator::compute_content_hash(&after);
-                            result.push(StreamBlock::Markdown {
-                                content: after,
-                                nodes: Some(after_nodes),
+                            result.push(StreamBlock::markdown(
+                                after,
+                                Some(after_nodes),
                                 hash,
-                            });
+                            ));
                         }
                     }
                 } else {
                     let hash = HashAggregator::compute_content_hash(&content);
-                    result.push(StreamBlock::Markdown {
-                        content,
-                        nodes,
-                        hash,
-                    });
+                    result.push(StreamBlock::markdown(content, nodes, hash));
                 }
             }
             other => result.push(other),

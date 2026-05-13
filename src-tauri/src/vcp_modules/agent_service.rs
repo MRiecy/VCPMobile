@@ -44,6 +44,7 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
         id: agent_id.to_string(),
         name: "New Agent".to_string(),
         system_prompt: "".to_string(),
+        mobile_system_prompt: "".to_string(),
         model: "gemini-2.5-flash".to_string(),
         temperature: 1.0,
         context_token_limit: 1000000,
@@ -79,7 +80,7 @@ pub async fn read_agent_config_internal<R: Runtime>(
     let pool = &db_state.pool;
 
     let agent_row = sqlx::query(
-        "SELECT a.name, a.system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.current_topic_id, av.dominant_color 
+        "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.current_topic_id, av.dominant_color 
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
          WHERE a.agent_id = ? AND a.deleted_at IS NULL"
@@ -121,6 +122,7 @@ pub async fn read_agent_config_internal<R: Runtime>(
             id: agent_id.to_string(),
             name: row.get("name"),
             system_prompt: row.get("system_prompt"),
+            mobile_system_prompt: row.get("mobile_system_prompt"),
             model: row.get("model"),
             temperature: row.get("temperature"),
             context_token_limit: row.get("context_token_limit"),
@@ -271,13 +273,14 @@ async fn internal_write_agent_config<R: Runtime>(
 
     sqlx::query(
         "INSERT INTO agents (
-            agent_id, name, system_prompt, model, temperature, 
+            agent_id, name, system_prompt, mobile_system_prompt, model, temperature, 
             context_token_limit, max_output_tokens, 
             stream_output, config_hash, current_topic_id, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name, 
             system_prompt = excluded.system_prompt, 
+            mobile_system_prompt = excluded.mobile_system_prompt,
             model = excluded.model, 
             temperature = excluded.temperature, 
             context_token_limit = excluded.context_token_limit, 
@@ -290,6 +293,7 @@ async fn internal_write_agent_config<R: Runtime>(
     .bind(agent_id)
     .bind(&new_config.name)
     .bind(&new_config.system_prompt)
+    .bind(&new_config.mobile_system_prompt)
     .bind(&new_config.model)
     .bind(new_config.temperature)
     .bind(new_config.context_token_limit)
@@ -410,6 +414,7 @@ pub async fn create_agent(
             id: agent_id.clone(),
             name: name.clone(),
             system_prompt: format!("你是 {}。", name),
+            mobile_system_prompt: format!("你是 {}。", name),
             model: "gemini-2.5-flash".to_string(),
             temperature: 0.7,
             context_token_limit: 1000000,
@@ -439,12 +444,13 @@ pub async fn create_agent(
     let dto = AgentSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
     sqlx::query(
-        "INSERT INTO agents (agent_id, name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, current_topic_id, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (agent_id, name, system_prompt, mobile_system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, current_topic_id, updated_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&agent_id)
     .bind(&config.name)
     .bind(&config.system_prompt)
+    .bind(&config.mobile_system_prompt)
     .bind(&config.model)
     .bind(config.temperature)
     .bind(config.context_token_limit)

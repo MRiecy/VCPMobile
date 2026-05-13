@@ -217,10 +217,15 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       if (msg) {
         try {
-          const compiledBlocks = await invoke("process_message_content", {
-            content: msg!.content || "",
-          });
-          msg.blocks = compiledBlocks as any;
+          // 如果后端已经带回了预渲染好的 blocks，直接使用，跳过冗余解析
+          if (event.blocks) {
+            msg.blocks = event.blocks as any;
+          } else {
+            const compiledBlocks = await invoke("process_message_content", {
+              content: msg!.content || "",
+            });
+            msg.blocks = compiledBlocks as any;
+          }
         } catch (e) {
           console.error("[ChatStreamStore] process_message_content failed:", e);
         }

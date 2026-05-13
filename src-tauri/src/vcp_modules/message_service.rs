@@ -50,25 +50,7 @@ pub async fn load_multi_topic_messages(
         let topic_id: String = row.get("topic_id");
         let timestamp: i64 = row.get("timestamp");
         let render_content: Option<Vec<u8>> = row.get("render_content");
-
-        let blocks = if let Some(bytes) = render_content {
-            serde_json::from_slice(&bytes).ok()
-                .and_then(|v: serde_json::Value| {
-                    if let Some(arr) = v.as_array() {
-                        let filtered: Vec<serde_json::Value> =
-                            arr.iter().filter(|e| !e.is_null()).cloned().collect();
-                        if filtered.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::Value::Array(filtered))
-                        }
-                    } else {
-                        Some(v)
-                    }
-                })
-        } else {
-            None
-        };
+        let blocks = parse_render_bytes(render_content);
 
         let message = crate::vcp_modules::chat_manager::ChatMessage {
             id: msg_id,
@@ -280,25 +262,7 @@ pub async fn load_chat_history_internal(
         let is_thinking: Option<bool> = Some(row.get::<i64, _>("is_thinking") != 0);
 
         let render_content: Option<Vec<u8>> = row.get("render_content");
-        let blocks = if let Some(bytes) = render_content {
-            serde_json::from_slice(&bytes)
-                .ok()
-                .and_then(|v: serde_json::Value| {
-                    if let Some(arr) = v.as_array() {
-                        let filtered: Vec<serde_json::Value> =
-                            arr.iter().filter(|e| !e.is_null()).cloned().collect();
-                        if filtered.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::Value::Array(filtered))
-                        }
-                    } else {
-                        Some(v)
-                    }
-                })
-        } else {
-            None
-        };
+        let blocks = parse_render_bytes(render_content);
 
         let attachments = att_map.remove(&msg_id);
 
@@ -414,15 +378,15 @@ pub async fn append_single_message(
     _owner_type: &str,
     topic_id: String,
     mut message: ChatMessage,
-) -> Result<(), String> {
+) -> Result<Vec<ContentBlock>, String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    let render_bytes = if let Some(blocks_val) = &message.blocks {
-        serde_json::to_vec(blocks_val).map_err(|e| e.to_string())?
+    let blocks: Vec<ContentBlock> = if let Some(blocks_val) = &message.blocks {
+        serde_json::from_value(blocks_val.clone()).map_err(|e| e.to_string())?
     } else {
-        let blocks = MessageRenderCompiler::compile(&message.content);
-        MessageRenderCompiler::serialize(&blocks)?
+        MessageRenderCompiler::compile(&message.content)
     };
+    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, false).await?;
@@ -445,7 +409,7 @@ pub async fn append_single_message(
         .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(blocks)
 }
 
 #[tauri::command]
@@ -504,38 +468,6 @@ pub async fn patch_single_message(
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(blocks)
-}
-
-#[allow(dead_code)]
-pub async fn patch_single_message_no_app(
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _owner_id: &str,
-    _owner_type: &str,
-    topic_id: String,
-    message: ChatMessage,
-    skip_bubble: bool,
-) -> Result<(), String> {
-    let render_bytes = if let Some(blocks_val) = &message.blocks {
-        serde_json::to_vec(blocks_val).map_err(|e| e.to_string())?
-    } else {
-        let blocks = MessageRenderCompiler::compile(&message.content);
-        MessageRenderCompiler::serialize(&blocks)?
-    };
-
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
-        .await?;
-
-    let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
-        .bind(now)
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 pub async fn delete_messages(
@@ -612,4 +544,25 @@ pub async fn truncate_history_after_timestamp(
         .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Helper: Parses render_content bytes into a filtered JSON array of blocks
+fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Value> {
+    render_content.and_then(|bytes| {
+        serde_json::from_slice(&bytes)
+            .ok()
+            .and_then(|v: serde_json::Value| {
+                if let Some(arr) = v.as_array() {
+                    let filtered: Vec<serde_json::Value> =
+                        arr.iter().filter(|e| !e.is_null()).cloned().collect();
+                    if filtered.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::Value::Array(filtered))
+                    }
+                } else {
+                    Some(v)
+                }
+            })
+    })
 }
