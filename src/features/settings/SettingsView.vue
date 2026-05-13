@@ -192,7 +192,7 @@ watch(currentSubPage, (val) => {
       >
         正在加载设置...
       </div>
-      <div v-else class="flex-1 overflow-y-auto relative">
+      <div v-else class="flex-1 overflow-y-auto relative no-rubber-band">
         <!-- 主页 -->
         <div class="px-3 py-15 space-y-6 pb-safe">
           <SettingsCard>
@@ -225,7 +225,7 @@ watch(currentSubPage, (val) => {
 
             <div 
               class="flex-1 pb-safe"
-              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pb-5 space-y-6'"
+              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pb-5 space-y-6 no-rubber-band'"
             >
               <!-- 用户身份 -->
               <template v-if="currentSubPage === 'identity'">

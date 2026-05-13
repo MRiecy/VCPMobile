@@ -180,7 +180,7 @@ const selectTopic = async (
     <span class="text-xs">暂无话题，请先选择助手</span>
   </div>
 
-  <div v-else :ref="bindContainerRef" :style="containerProps.style" @scroll="containerProps.onScroll" class="h-full overflow-y-auto vcp-scrollable px-4 py-4">
+  <div v-else :ref="bindContainerRef" :style="containerProps.style" @scroll="containerProps.onScroll" class="h-full overflow-y-auto vcp-scrollable px-4 py-4 no-rubber-band">
     <div v-bind="wrapperProps" class="flex flex-col">
       <div v-for="item in list" :key="item.data.id" class="pb-2" @click="
         selectTopic(

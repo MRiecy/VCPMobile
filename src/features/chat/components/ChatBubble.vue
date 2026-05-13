@@ -33,7 +33,6 @@ const mergedStyle = computed(() => {
 .vcp-bubble-container {
   position: relative;
   word-break: break-word;
-  transform: translateZ(0);
 }
 
 .vcp-bubble-container::after {
@@ -41,7 +40,8 @@ const mergedStyle = computed(() => {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: 0 4px 15px -5px var(--dynamic-color, transparent);
+  /* 优化：减小阴影模糊半径，降低渲染复杂度 */
+  box-shadow: 0 2px 8px -4px var(--dynamic-color, transparent);
   opacity: 0.15;
   pointer-events: none;
 }
@@ -59,22 +59,23 @@ const mergedStyle = computed(() => {
 .streaming .vcp-bubble-container::before {
   content: "";
   position: absolute;
-  inset: -2px;
-  padding: 2px;
+  inset: -1px; /* 减薄边框 */
+  padding: 1px;
   border-radius: inherit;
+  /* 优化：使用更简单的渐变，减少插值计算 */
   background: linear-gradient(90deg,
-      transparent 0%,
+      transparent 25%,
       var(--highlight-text, #3b82f6) 50%,
-      transparent 100%);
+      transparent 75%);
   background-size: 200% 100%;
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
     linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  animation: vcp-border-flow 3s linear infinite;
+  animation: vcp-border-flow 4s linear infinite; /* 减慢动画速度 */
   pointer-events: none;
   z-index: 1;
-  opacity: 0.8;
+  opacity: 0.6; /* 降低透明度 */
 }
 </style>

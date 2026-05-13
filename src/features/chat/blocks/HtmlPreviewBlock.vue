@@ -172,6 +172,7 @@ watch(fullScreenTab, (val) => {
               v-show="fullScreenTab === 'preview'"
               class="vcp-fullscreen-iframe w-full h-full border-none"
               sandbox="allow-scripts allow-modals allow-forms allow-popups"
+              loading="lazy"
               :srcdoc="getSandboxHtml(content)"
             ></iframe>
           </div>
@@ -223,10 +224,11 @@ watch(fullScreenTab, (val) => {
         <pre class="w-full min-w-max"><code class="hljs" v-html="highlightedCode"></code></pre>
       </div>
 
-      <div v-show="isPreviewing" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
+      <div v-if="isPreviewing" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
         <iframe 
           class="vcp-inline-iframe w-full h-full border-none no-swipe"
           sandbox="allow-scripts allow-modals allow-forms"
+          loading="lazy"
           :srcdoc="getSandboxHtml(content)"
         ></iframe>
       </div>

@@ -72,7 +72,7 @@ const openSettings = () => {
     <!-- 内容区 -->
     <div class="flex-1 overflow-hidden">
       <template v-if="activeTab === 'agents'">
-        <div class="h-full overflow-y-auto px-4 py-4 space-y-2 vcp-scrollable">
+        <div class="h-full overflow-y-auto px-4 py-4 space-y-2 vcp-scrollable no-rubber-band">
           <AgentList :searchQuery="searchQuery" @select-agent="handleSelectItem" @select-group="handleSelectItem" />
         </div>
       </template>

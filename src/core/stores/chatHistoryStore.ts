@@ -86,8 +86,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     limit: number = 15,
     offset: number = 0
   ) => {
+    const loadType = offset === 0 ? "initial" : "pagination";
     console.log(
-      `[ChatHistoryStore] Streaming history for ${ownerId}, topic: ${topicId}`,
+      `[ChatHistoryStore] Loading history [${loadType}] for ${ownerId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`,
     );
     loading.value = true;
     isLoadingHistory.value = true;
@@ -152,13 +153,18 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (receivedCount === 0) {
         if (offset === 0) {
           currentChatHistory.value = [];
-          hasMoreHistory.value = false;
           historyOffset.value = 0;
         }
+        hasMoreHistory.value = false;
         (resolveComplete as (() => void) | null)?.();
       }
 
       await completePromise;
+
+      const loadedCount = offset === 0 ? receivedCount : buffer.length;
+      console.log(
+        `[ChatHistoryStore] Loaded ${loadedCount} messages [${loadType}] for ${ownerId}, topic: ${topicId}`,
+      );
 
       if (sessionStore.currentTopicId !== requestedTopicId && requestedTopicId !== null) {
         console.warn(`[ChatHistoryStore] Topic changed during load, discarding results.`);
@@ -184,7 +190,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     ownerType: string,
     topicId: string,
   ) => {
-    await loadHistory(ownerId, ownerType, topicId, 15, 0);
+    // 切换话题时强制重置分页状态，避免旧话题状态污染
+    historyOffset.value = 0;
+    hasMoreHistory.value = true;
+    await loadHistory(ownerId, ownerType, topicId, 5, 0);
   };
 
   const loadMoreHistory = async () => {
@@ -194,7 +203,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       sessionStore.currentSelectedItem.id,
       sessionStore.currentSelectedItem.type,
       sessionStore.currentTopicId,
-      15,
+      10,
       historyOffset.value,
     );
   };

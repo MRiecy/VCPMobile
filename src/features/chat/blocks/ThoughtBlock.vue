@@ -60,7 +60,7 @@ function escapeHtml(text: string): string {
   line-height: 1.6;
   width: fit-content;
   max-width: 98%;
-  transition: all 0.3s ease;
+  transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
 html.dark .vcp-thought-block {

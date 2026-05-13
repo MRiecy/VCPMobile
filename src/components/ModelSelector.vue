@@ -103,7 +103,7 @@ onMounted(() => {
         </div>
 
         <!-- 模型列表 (桌面端结构的单行列表) -->
-        <div class="flex-1 overflow-y-auto px-2 pb-4 space-y-1">
+        <div class="flex-1 overflow-y-auto px-2 pb-4 space-y-1 no-rubber-band">
           <div v-if="filteredModels.length === 0" class="py-20 text-center opacity-50">
             <Cpu :size="28" class="mx-auto mb-3 text-gray-400" />
             <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>

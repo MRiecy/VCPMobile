@@ -28,9 +28,9 @@ const { keyboardHeight, forceRecalculate } = useKeyboardInsets();
 const messageListRef = ref<HTMLElement | null>(null);
 const chatViewContainerRef = ref<HTMLElement | null>(null);
 
-// 哨兵元素 refs
-const topSentinelRef = ref<HTMLElement | null>(null);
-const bottomSentinelRef = ref<HTMLElement | null>(null);
+// 哨兵元素已废弃，新滚动架构不再需要
+// const topSentinelRef = ref<HTMLElement | null>(null);
+// const bottomSentinelRef = ref<HTMLElement | null>(null);
 
 // 流式状态
 const isStreamingActive = computed(() => streamStore.activeStreamingIds.size > 0);
@@ -39,10 +39,10 @@ const isStreamingActive = computed(() => streamStore.activeStreamingIds.size > 0
 const {
   showScrollToBottom,
   scrollToBottom,
-  setupObservers,
   startAutoScroll,
   stopAutoScroll,
   checkAndLoadMore,
+  reset: resetChatScroll,
   dispose: disposeChatScroll,
 } = useChatScroll({
   messageListRef,
@@ -57,6 +57,7 @@ watch(
   () => sessionStore.currentTopicId,
   (newTopicId) => {
     showScrollToBottom.value = false;
+    resetChatScroll();
     if (newTopicId && sessionStore.currentSelectedItem) {
       console.log(`[ChatView] Topic changed to ${newTopicId}, loading history...`);
       topicStore.markTopicAsRead(newTopicId);
@@ -74,6 +75,8 @@ watch(
 
 // --- 阻止非交互空白区域的 touchmove，防止 WebView viewport 被拖动 ---
 const handleContainerTouchMove = (e: TouchEvent) => {
+  // 系统滚动过程中事件不可取消，强行 preventDefault 会报错
+  if (!e.cancelable) return;
   if (e.target instanceof Element) {
     const scrollable = e.target.closest(
       ".overflow-y-auto, .overflow-x-auto, textarea, input, .vcp-scrollable, button, a",
@@ -126,7 +129,6 @@ onMounted(async () => {
     chatViewContainerRef.value.addEventListener("focusin", forceRecalculate);
   }
 
-  setupObservers(topSentinelRef, bottomSentinelRef);
   checkAndLoadMore();
 });
 
@@ -219,7 +221,7 @@ onUnmounted(() => {
     </header>
 
     <!-- 2. 消息展示区 (确保 flex-1 撑开) -->
-    <div ref="messageListRef" class="flex-1 overflow-y-auto py-4 space-y-2 relative" style="overscroll-behavior-y: contain;">
+    <div ref="messageListRef" class="flex-1 overflow-y-auto py-4 space-y-2 relative no-rubber-band">
       <!-- 零数据引导状态 -->
       <div v-if="historyStore.currentChatHistory.length === 0"
         class="absolute inset-0 flex flex-col items-center justify-center text-center px-10">
@@ -244,9 +246,6 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <!-- 顶部哨兵：IntersectionObserver 监听分页触发 -->
-      <div ref="topSentinelRef" class="h-0"></div>
-
       <MessageRenderer
         v-for="msg in historyStore.currentChatHistory"
         :key="msg.id"
@@ -254,8 +253,7 @@ onUnmounted(() => {
         :agent-id="sessionStore.currentSelectedItem?.id"
         :data-message-id="msg.id"
       />
-      <!-- 底部哨兵：IntersectionObserver 监听置底按钮状态 -->
-      <div ref="bottomSentinelRef" class="h-0"></div>
+      <!-- 底部留白，避免最后一条消息被输入框遮挡 -->
       <div class="h-20"></div>
     </div>
 
@@ -280,15 +278,12 @@ onUnmounted(() => {
   /* 强制适配刘海屏，增加保底 padding */
   padding-top: calc(var(--vcp-safe-top, 24px));
   padding-bottom: 12px;
-  background-color: color-mix(in srgb, var(--secondary-bg) 80%, transparent);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background-color: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
   border-bottom: 1px solid transparent;
 }
 
 .vcp-input-footer {
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background-color: color-mix(in srgb, var(--secondary-bg) 60%, transparent);
 }
 
 /* 隐藏滚动条 */
@@ -303,7 +298,7 @@ onUnmounted(() => {
 
 .fade-slide-up-enter-active,
 .fade-slide-up-leave-active {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .fade-slide-up-enter-from,

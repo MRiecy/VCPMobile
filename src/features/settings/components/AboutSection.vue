@@ -156,11 +156,11 @@ const showFeatures = () => {
 };
 
 const openGitHub = () => {
-  openUrl('https://github.com/VCPChat/VCPMobile');
+  openUrl('https://github.com/MRiecy/VCPMobile');
 };
 
 const openFeedback = () => {
-  openUrl('https://github.com/VCPChat/VCPMobile/issues');
+  openUrl('https://github.com/MRiecy/VCPMobile/issues');
 };
 </script>
 
@@ -239,6 +239,7 @@ const openFeedback = () => {
         <div class="divide-y divide-white/10">
           <SettingsRow 
             title="功能介绍" 
+            clickable
             description="了解 VCPMobile 的核心特性"
             class="py-3"
             @click="showFeatures"
@@ -250,6 +251,7 @@ const openFeedback = () => {
           
           <SettingsRow 
             title="项目主页" 
+            clickable
             description="GitHub 开源仓库"
             class="py-3"
             @click="openGitHub"
@@ -261,6 +263,7 @@ const openFeedback = () => {
           
           <SettingsRow 
             title="意见反馈" 
+            clickable
             description="报告 Bug 或提交建议"
             class="py-3"
             @click="openFeedback"

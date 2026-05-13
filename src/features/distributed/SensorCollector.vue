@@ -57,49 +57,71 @@ function startLocation() {
 }
 
 // ============================================================
-// Motion (Accelerometer / DeviceMotion)
+// Motion (Accelerometer / DeviceMotion) - Burst Sampling Refactor
 // ============================================================
 
 let motionHandler: ((e: DeviceMotionEvent) => void) | null = null;
-let lastMotionPush = 0;
-const MOTION_PUSH_INTERVAL = 30_000; // 30s
+let burstTimer: ReturnType<typeof setInterval> | null = null;
+const BURST_ACTIVE_DURATION = 2000; // 2s sampling
+const BURST_SLEEP_DURATION = 28000; // 28s sleep
+const MOTION_PROCESS_INTERVAL = 100; // 10Hz within burst
 
 function startMotion() {
-  // Accumulator for computing average acceleration
-  let accSamples: number[] = [];
+  const runBurst = () => {
+    let accSamples: number[] = [];
+    let lastProcess = 0;
 
-  motionHandler = (e: DeviceMotionEvent) => {
-    const acc = e.accelerationIncludingGravity;
-    if (acc && acc.x != null && acc.y != null && acc.z != null) {
-      const magnitude = Math.sqrt(acc.x ** 2 + acc.y ** 2 + acc.z ** 2);
-      accSamples.push(magnitude);
-    }
+    const handler = (e: DeviceMotionEvent) => {
+      const now = Date.now();
+      if (now - lastProcess < MOTION_PROCESS_INTERVAL) return;
+      lastProcess = now;
 
-    const now = Date.now();
-    if (now - lastMotionPush >= MOTION_PUSH_INTERVAL && accSamples.length > 0) {
-      lastMotionPush = now;
-      const avg = accSamples.reduce((a, b) => a + b, 0) / accSamples.length;
-      const max = Math.max(...accSamples);
+      const acc = e.accelerationIncludingGravity;
+      if (acc && acc.x != null && acc.y != null && acc.z != null) {
+        accSamples.push(Math.sqrt(acc.x ** 2 + acc.y ** 2 + acc.z ** 2));
+      }
+    };
 
-      // Simple motion state detection
-      let state = "静止";
-      if (avg > 12) state = "运动中";
-      else if (avg > 10.5) state = "步行中";
-      else if (avg > 9.5) state = "轻微移动";
+    // Step 1: Start listening
+    console.debug("[SensorCollector] Burst start");
+    window.addEventListener("devicemotion", handler);
+    motionHandler = handler;
 
-      const value = `状态: ${state} | 平均加速度: ${avg.toFixed(2)}m/s² | 峰值: ${max.toFixed(2)}m/s²`;
-      pushSensor("motion", value);
-      accSamples = [];
-    }
+    // Step 2: Stop listening after 2s and process
+    setTimeout(() => {
+      window.removeEventListener("devicemotion", handler);
+      motionHandler = null;
+      console.debug(`[SensorCollector] Burst end, samples: ${accSamples.length}`);
+
+      if (accSamples.length > 0) {
+        const avg = accSamples.reduce((a, b) => a + b, 0) / accSamples.length;
+        const max = Math.max(...accSamples);
+
+        let state = "静止";
+        if (avg > 12) state = "运动中";
+        else if (avg > 10.5) state = "步行中";
+        else if (avg > 9.5) state = "轻微移动";
+
+        const value = `状态: ${state} | 平均加速度: ${avg.toFixed(2)}m/s² | 峰值: ${max.toFixed(2)}m/s²`;
+        pushSensor("motion", value);
+      }
+    }, BURST_ACTIVE_DURATION);
   };
 
-  window.addEventListener("devicemotion", motionHandler);
+  // Initial burst
+  runBurst();
+  // Schedule repeated bursts
+  burstTimer = setInterval(runBurst, BURST_ACTIVE_DURATION + BURST_SLEEP_DURATION);
 }
 
 function stopMotion() {
   if (motionHandler) {
     window.removeEventListener("devicemotion", motionHandler);
     motionHandler = null;
+  }
+  if (burstTimer) {
+    clearInterval(burstTimer);
+    burstTimer = null;
   }
 }
 

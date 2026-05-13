@@ -228,7 +228,7 @@ onMounted(async () => {
       </header>
 
       <!-- Scrollable Form Area -->
-      <div class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe">
+      <div class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe no-rubber-band">
         <!-- 1. Identity Section -->
         <section class="card-modern">
           <div class="flex flex-col items-center gap-6">
