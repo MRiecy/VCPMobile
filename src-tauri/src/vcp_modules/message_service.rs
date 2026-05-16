@@ -556,23 +556,13 @@ pub async fn truncate_history_after_timestamp(
     Ok(())
 }
 
-/// Helper: Parses render_content bytes into a filtered JSON array of blocks
+/// Helper: Deserializes render_content bytes (postcard + zstd) into JSON blocks for frontend
 fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Value> {
     render_content.and_then(|bytes| {
-        serde_json::from_slice(&bytes)
+        crate::vcp_modules::message_repository::MessageRenderCompiler::deserialize(&bytes)
             .ok()
-            .and_then(|v: serde_json::Value| {
-                if let Some(arr) = v.as_array() {
-                    let filtered: Vec<serde_json::Value> =
-                        arr.iter().filter(|e| !e.is_null()).cloned().collect();
-                    if filtered.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::Array(filtered))
-                    }
-                } else {
-                    Some(v)
-                }
+            .and_then(|blocks: Vec<crate::vcp_modules::content_parser::ContentBlock>| {
+                serde_json::to_value(blocks).ok()
             })
     })
 }

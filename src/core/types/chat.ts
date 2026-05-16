@@ -21,7 +21,7 @@ export type MarkdownNode = {
   wrapper_class?: string;
   content?: string;
   encoded?: string;
-  hash?: string;
+  hash?: string | number;
 };
 
 export type InlineNode = {
@@ -34,9 +34,8 @@ export type InlineNode = {
   title?: string;
   needs_asset_conversion?: boolean;
   content?: string;
-  svg?: string;
   display_mode?: boolean;
-  hash?: string;
+  hash?: string | number;
 };
 
 export interface ContentBlock {
@@ -64,8 +63,7 @@ export interface ContentBlock {
   role?: string;
   is_end?: boolean;
   display_mode?: boolean;
-  svg?: string; // For type: "math"
-  hash?: string;
+  hash?: string | number;
 }
 
 /**

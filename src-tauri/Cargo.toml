@@ -59,6 +59,8 @@ urlencoding = "2"
 pulldown-cmark = "0.13.3"
 syntect = "5.3.0"
 memmap2 = "0.9"
+postcard = { version = "1", features = ["use-std"] }
+zstd = "0.13"
 encoding_rs = "0.8"
 chardetng = "0.1"
 

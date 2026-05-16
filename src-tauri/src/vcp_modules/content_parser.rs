@@ -15,7 +15,7 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "tool-use")]
     ToolUse {
@@ -23,7 +23,7 @@ pub enum ContentBlock {
         content: String,
         is_complete: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "tool-result")]
     ToolResult {
@@ -32,7 +32,7 @@ pub enum ContentBlock {
         details: Vec<ToolResultDetail>,
         footer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "diary")]
     Diary {
@@ -42,7 +42,7 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "thought")]
     Thought {
@@ -52,32 +52,32 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "button-click")]
     ButtonClick {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "html-preview")]
     HtmlPreview {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "role-divider")]
     RoleDivider {
         role: String,
         is_end: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
     #[serde(rename = "style")]
     Style {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 }
 
@@ -180,13 +180,13 @@ impl ContentBlock {
         }
     }
 
-    pub fn compute_hash(&self) -> String {
+    pub fn compute_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        hasher.finish()
     }
 
-    pub fn set_hash(&mut self, h: String) {
+    pub fn set_hash(&mut self, h: u64) {
         match self {
             ContentBlock::Markdown { hash, .. } => *hash = Some(h),
             ContentBlock::ToolUse { hash, .. } => *hash = Some(h),

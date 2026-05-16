@@ -5,9 +5,9 @@ import type { MarkdownNode, InlineNode } from "../types/chat";
 const htmlCache = new Map<string, string>();
 const MAX_CACHE_SIZE = 500;
 
-function getCacheKey(nodes: MarkdownNode[], messageId: string, blockHash?: string): string {
-  if (blockHash) {
-    return `${messageId}:${blockHash}`;
+function getCacheKey(nodes: MarkdownNode[], messageId: string, blockHash?: string | number): string {
+  if (blockHash !== undefined && blockHash !== null) {
+    return `${messageId}:${String(blockHash)}`;
   }
   // Fallback: If no hash provided, use a simple pointer-based or length-based key
   // since we now expect backend to provide hashes for all production data.
@@ -33,7 +33,7 @@ export function clearMessageCache(messageId: string): void {
 export function renderMarkdownNodes(
   nodes: MarkdownNode[], 
   messageId: string,
-  blockHash?: string
+  blockHash?: string | number
 ): string {
   if (!nodes || nodes.length === 0) return '';
   const key = getCacheKey(nodes, messageId, blockHash);
@@ -148,9 +148,6 @@ function renderInline(node: InlineNode): string {
       const isDisplay = node.display_mode || false;
       const cls = isDisplay ? 'vcp-math-block no-swipe' : 'vcp-math-inline no-swipe';
       const tag = 'span';
-      if (node.svg) {
-        return `<${tag} class="${cls}">${node.svg}</${tag}>`;
-      }
       return `<${tag} class="${cls}" data-latex="${escapeHtml(node.content || '')}">${escapeHtml(node.content || '')}</${tag}>`;
     }
     

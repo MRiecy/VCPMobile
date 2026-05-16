@@ -9,7 +9,7 @@ pub enum MarkdownNode {
     Paragraph {
         children: Vec<InlineNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "heading")]
@@ -17,7 +17,7 @@ pub enum MarkdownNode {
         level: u8,
         children: Vec<InlineNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "code_block")]
@@ -27,14 +27,14 @@ pub enum MarkdownNode {
         highlighted_html: Option<String>, // syntect 预渲染结果
         theme: Option<String>,            // "github-dark" | "github-light"
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "blockquote")]
     Blockquote {
         children: Vec<MarkdownNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "list")]
@@ -42,7 +42,7 @@ pub enum MarkdownNode {
         ordered: bool,
         items: Vec<Vec<MarkdownNode>>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "table")]
@@ -51,7 +51,7 @@ pub enum MarkdownNode {
         rows: Vec<Vec<Vec<InlineNode>>>,
         wrapper_class: Option<String>, // "vcp-scrollable no-swipe"
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "thematic_break")]
@@ -61,14 +61,14 @@ pub enum MarkdownNode {
     RawHtml {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "mermaid")]
     MermaidPlaceholder {
         code: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 }
 
@@ -83,14 +83,14 @@ pub enum InlineNode {
     Strong {
         children: Vec<InlineNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "emphasis")]
     Emphasis {
         children: Vec<InlineNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "code")]
@@ -103,7 +103,7 @@ pub enum InlineNode {
         children: Vec<InlineNode>,
         needs_asset_conversion: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "image")]
@@ -113,7 +113,7 @@ pub enum InlineNode {
         title: Option<String>,
         needs_asset_conversion: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "line_break")]
@@ -125,10 +125,9 @@ pub enum InlineNode {
     #[serde(rename = "inline_math")]
     InlineMath {
         content: String,
-        svg: Option<String>,
         display_mode: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     // VCP 魔法标记
@@ -136,14 +135,14 @@ pub enum InlineNode {
     QuotedText {
         children: Vec<InlineNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "strikethrough")]
     Strikethrough {
         children: Vec<InlineNode>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 
     #[serde(rename = "highlight_tag")]
@@ -156,7 +155,7 @@ pub enum InlineNode {
     RawHtmlInline {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        hash: Option<String>,
+        hash: Option<u64>,
     },
 }
 
@@ -225,13 +224,13 @@ impl MarkdownNode {
         Self::MermaidPlaceholder { code, hash: None }
     }
 
-    pub fn compute_hash(&self) -> String {
+    pub fn compute_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        hasher.finish()
     }
 
-    pub fn set_hash(&mut self, h: String) {
+    pub fn set_hash(&mut self, h: u64) {
         match self {
             MarkdownNode::Paragraph { hash, .. } => *hash = Some(h),
             MarkdownNode::Heading { hash, .. } => *hash = Some(h),
@@ -344,7 +343,6 @@ impl InlineNode {
     pub fn inline_math(content: String, display_mode: bool) -> Self {
         Self::InlineMath {
             content,
-            svg: None,
             display_mode,
             hash: None,
         }
@@ -379,13 +377,13 @@ impl InlineNode {
         }
     }
 
-    pub fn compute_hash(&self) -> String {
+    pub fn compute_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        hasher.finish()
     }
 
-    pub fn set_hash(&mut self, h: String) {
+    pub fn set_hash(&mut self, h: u64) {
         match self {
             InlineNode::Text { .. } => {}
             InlineNode::Strong { hash, .. } => *hash = Some(h),

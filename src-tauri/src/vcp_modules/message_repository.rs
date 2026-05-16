@@ -1,7 +1,6 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
 use crate::vcp_modules::sync_hash::HashAggregator;
-use futures_util::StreamExt;
 use serde::Serialize;
 use sha2::Digest;
 use sqlx::Row;
@@ -17,9 +16,22 @@ impl MessageRenderCompiler {
         parse_content(content)
     }
 
-    /// Serializes AST blocks to binary (currently just JSON for simplicity, but abstracted)
+    /// Serializes AST blocks to compressed binary (postcard + zstd)
     pub fn serialize(blocks: &[ContentBlock]) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(blocks).map_err(|e| e.to_string())
+        let postcard_bytes = postcard::to_allocvec(blocks)
+            .map_err(|e| format!("postcard serialize failed: {}", e))?;
+        let compressed = zstd::bulk::compress(&postcard_bytes, 3)
+            .map_err(|e| format!("zstd compress failed: {}", e))?;
+        Ok(compressed)
+    }
+
+    /// Deserializes compressed binary back to AST blocks (postcard + zstd)
+    pub fn deserialize(bytes: &[u8]) -> Result<Vec<ContentBlock>, String> {
+        // Use a generous upper bound for decompression; zstd will return exact size
+        let decompressed = zstd::bulk::decompress(bytes, 16 * 1024 * 1024)
+            .map_err(|e| format!("zstd decompress failed: {}", e))?;
+        postcard::from_bytes(&decompressed)
+            .map_err(|e| format!("postcard deserialize failed: {}", e))
     }
 }
 
@@ -52,23 +64,17 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         .await
         .map_err(|e| e.to_string())?;
 
-    let _ = app_handle.emit(
-        "render_rebuild_progress",
-        RebuildProgress {
-            current: 0,
-            total: total as usize,
-        },
-    );
-
     if total == 0 {
         return Ok(());
     }
 
-    // Stage 3: Synchronous Writer Worker (Rusqlite Turbo Mode)
-    let (tx_writer, mut rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(50);
-    let app_handle_clone = app_handle.clone();
-    let total_count = total as usize;
+    // --- Channel setup (Bounded for backpressure) ---
+    let (tx_compiler, rx_compiler) = mpsc::channel::<(String, String)>(1000);
+    let (tx_writer, mut rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(100);
 
+    // --- Stage 3: Synchronous Writer Worker (Rusqlite) ---
+    let app_handle_writer = app_handle.clone();
+    let total_count = total as usize;
     let writer_handle = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
 
@@ -78,6 +84,8 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         conn.execute("PRAGMA busy_timeout = 30000", []).ok();
 
         let mut processed = 0;
+        let mut last_emit_time = std::time::Instant::now();
+        let emit_interval = std::time::Duration::from_millis(32); // 限制 UI 更新频率约为 30FPS
 
         while let Some(batch) = rx_writer.blocking_recv() {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -93,91 +101,116 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
             }
             tx.commit().map_err(|e| e.to_string())?;
 
-            // 由 Writer 发送进度，确保 UI 看到的是真实写入后的状态
-            let _ = app_handle_clone.emit(
-                "render_rebuild_progress",
-                RebuildProgress {
-                    current: processed,
-                    total: total_count,
-                },
-            );
+            // 时间节流：避免后端写入过快导致前端重绘堆积
+            if last_emit_time.elapsed() >= emit_interval || processed == total_count {
+                let _ = app_handle_writer.emit(
+                    "render_rebuild_progress",
+                    RebuildProgress {
+                        current: processed,
+                        total: total_count,
+                    },
+                );
+                last_emit_time = std::time::Instant::now();
+            }
         }
         Ok(())
     });
 
-    // Stage 1 & 2: Cursor Reader & Parallel Compilers
-    const BATCH_SIZE: usize = 500;
+    // --- Stage 2: Parallel Compiler Workers (Dedicated Threads) ---
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .saturating_sub(2)
-        .clamp(2, 6);
+        .clamp(2, 12); // 根据核心数动态调整，最高 12 并发
 
-    let mut last_rowid = 0i64;
-    loop {
-        // 使用 rowid 游标分页，性能优于 LIMIT OFFSET (O(log N) vs O(N))
-        let rows = sqlx::query(
-            "SELECT rowid, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
-        )
-        .bind(last_rowid)
-        .bind(BATCH_SIZE as i64)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let rx_compiler = std::sync::Arc::new(tokio::sync::Mutex::new(rx_compiler));
+    let mut compiler_handles = Vec::new();
 
-        if rows.is_empty() {
-            break;
-        }
+    for _ in 0..concurrency {
+        let rx_clone = rx_compiler.clone();
+        let tx_writer_clone = tx_writer.clone();
 
-        // 更新最后一次看到的 rowid
-        if let Some(last) = rows.last() {
-            last_rowid = last.get::<i64, _>(0);
-        }
+        let handle = tokio::task::spawn_blocking(move || {
+            let mut batch = Vec::with_capacity(50);
+            loop {
+                let item = {
+                    let mut rx = rx_clone.blocking_lock();
+                    rx.blocking_recv()
+                };
 
-        let mut tasks = Vec::new();
-        for row in rows {
-            let msg_id: String = row.get("msg_id");
-            let content: String = row.get("content");
+                match item {
+                    Some((msg_id, content)) => {
+                        let blocks = MessageRenderCompiler::compile(&content);
+                        if let Ok(bytes) = MessageRenderCompiler::serialize(&blocks) {
+                            batch.push((msg_id, bytes));
+                        }
 
-            // 并行生产：编译任务分发到线程池
-            tasks.push(async move {
-                tokio::task::spawn_blocking(move || {
-                    let blocks = MessageRenderCompiler::compile(&content);
-                    let bytes = MessageRenderCompiler::serialize(&blocks).ok();
-                    (msg_id, bytes)
-                })
-                .await
-            });
-        }
-
-        let mut results = futures_util::stream::iter(tasks).buffer_unordered(concurrency);
-        let mut batch_data = Vec::new();
-
-        while let Some(res) = results.next().await {
-            match res {
-                Ok((msg_id, Some(bytes))) => {
-                    batch_data.push((msg_id, bytes));
+                        if batch.len() >= 50 {
+                            if tx_writer_clone.blocking_send(std::mem::take(&mut batch)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        // 频道已关闭且读空，发送剩余并退出
+                        if !batch.is_empty() {
+                            let _ = tx_writer_clone.blocking_send(batch);
+                        }
+                        break;
+                    }
                 }
-                _ => continue,
             }
-        }
-
-        // 送入写入队列
-        if !batch_data.is_empty() && tx_writer.send(batch_data).await.is_err() {
-            break;
-        }
+        });
+        compiler_handles.push(handle);
     }
 
-    // 释放发送端，等待 Writer 完成所有待处理任务
-    drop(tx_writer);
+    // --- Stage 1: Async Reader Task (Streaming Fetch) ---
+    let reader_handle = tokio::spawn(async move {
+        let mut last_rowid = 0i64;
+        const FETCH_SIZE: i64 = 500;
+
+        loop {
+            // 使用 rowid 游标分页，保证大表读取性能
+            let rows = sqlx::query(
+                "SELECT rowid, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            )
+            .bind(last_rowid)
+            .bind(FETCH_SIZE)
+            .fetch_all(&pool)
+            .await;
+
+            match rows {
+                Ok(rows) if !rows.is_empty() => {
+                    if let Some(last) = rows.last() {
+                        last_rowid = last.get::<i64, _>(0);
+                    }
+                    for row in rows {
+                        let msg_id: String = row.get("msg_id");
+                        let content: String = row.get("content");
+                        if tx_compiler.send((msg_id, content)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        // 显式丢弃 tx，通知 Compilers 读取已结束
+        drop(tx_compiler);
+    });
+
+    // ── 等待流水线逐步排空 ──
+    let _ = reader_handle.await;
+    let _ = futures_util::future::join_all(compiler_handles).await;
+    drop(tx_writer); // 通知 Writer 所有任务已处理完毕
+
     writer_handle.await.map_err(|e| e.to_string())??;
 
-    // 补偿可能的四舍五入或过滤导致的进度差
+    // 补偿 100% 进度显示
     let _ = app_handle.emit(
         "render_rebuild_progress",
         RebuildProgress {
-            current: total as usize,
-            total: total as usize,
+            current: total_count,
+            total: total_count,
         },
     );
     Ok(())

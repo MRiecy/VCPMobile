@@ -20,8 +20,8 @@ use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
-    append_chunk, cancel_chunked_upload, cleanup_orphaned_attachments, finish_chunked_upload,
-    get_attachment_real_path, init_chunked_upload, open_file, store_file, UploadManagerState,
+    append_chunk, cancel_chunked_upload, finish_chunked_upload, get_attachment_real_path,
+    init_chunked_upload, open_file, store_file, UploadManagerState,
 };
 use vcp_modules::frontend_update_manager::{
     apply_frontend_update, check_for_frontend_update, clear_frontend_updates,
@@ -35,6 +35,7 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
+use vcp_modules::maintenance_manager::{clear_webview_cache, cleanup_orphaned_attachments, init_automatic_maintenance};
 use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::fetch_raw_message_content;
 use vcp_modules::model_manager::{
@@ -126,7 +127,13 @@ pub fn run() {
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);
 
-            // 2. 异步引导核心服务
+            // 2. 自动系统维护 (WebView 缓存清理等)
+            let h_maintenance = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                init_automatic_maintenance(h_maintenance).await;
+            });
+
+            // 3. 异步引导核心服务
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(&handle).await {
                     eprintln!("[VCPCore] Bootstrap failed: {}", e);
@@ -217,6 +224,7 @@ pub fn run() {
             fetch_raw_message_content,
             get_attachment_real_path,
             open_file,
+            clear_webview_cache,
             cleanup_orphaned_attachments,
             get_cached_models,
             refresh_models,

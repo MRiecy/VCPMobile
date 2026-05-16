@@ -17,6 +17,7 @@ pub mod group_service;
 pub mod group_speaking_policy;
 pub mod group_types;
 pub mod lifecycle_manager;
+pub mod maintenance_manager;
 pub mod media_processor;
 pub mod message_repository;
 pub mod message_service;

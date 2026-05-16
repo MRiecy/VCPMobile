@@ -298,6 +298,8 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+
+
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_messages_topic_time
          ON messages(topic_id, timestamp DESC)",
