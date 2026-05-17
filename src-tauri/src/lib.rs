@@ -35,8 +35,8 @@ use vcp_modules::group_service::{
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
-use vcp_modules::maintenance_manager::{clear_webview_cache, cleanup_orphaned_attachments, init_automatic_maintenance};
-use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
+use vcp_modules::maintenance_manager::{clear_webview_cache, cleanup_orphaned_attachments, init_automatic_maintenance, upgrade_database_page_size};
+use vcp_modules::message_repository::{compress_all_contents, process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::fetch_raw_message_content;
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
@@ -186,6 +186,7 @@ pub fn run() {
             truncate_history_after_timestamp,
             process_message_content,
             rebuild_all_pre_renders,
+            compress_all_contents,
             get_topics,
             get_topics_streamed,
             get_unread_counts,
@@ -226,6 +227,7 @@ pub fn run() {
             open_file,
             clear_webview_cache,
             cleanup_orphaned_attachments,
+            upgrade_database_page_size,
             get_cached_models,
             refresh_models,
             get_hot_models,

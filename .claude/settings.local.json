@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(cargo check:*)",
-      "Bash(pnpm check:*)",
-      "Bash(cargo clippy:*)"
-    ]
-  }
-}

@@ -35,6 +35,24 @@ impl MessageRenderCompiler {
     }
 }
 
+/// Simple zstd compressor for raw text content.
+/// Text compresses very well (often 3-10x) with low overhead.
+pub struct ContentCompressor;
+
+impl ContentCompressor {
+    pub fn compress(text: &str) -> Result<Vec<u8>, String> {
+        zstd::bulk::compress(text.as_bytes(), 3)
+            .map_err(|e| format!("zstd compress content failed: {}", e))
+    }
+
+    pub fn decompress(bytes: &[u8]) -> Result<String, String> {
+        let decompressed = zstd::bulk::decompress(bytes, 16 * 1024 * 1024)
+            .map_err(|e| format!("zstd decompress content failed: {}", e))?;
+        String::from_utf8(decompressed)
+            .map_err(|e| format!("content decompression not valid utf-8: {}", e))
+    }
+}
+
 #[tauri::command]
 pub async fn process_message_content(
     _app_handle: AppHandle,
@@ -53,6 +71,106 @@ pub struct RebuildProgress {
     pub total: usize,
 }
 
+// =================================================================
+// 通用三段流水线基础设施（Reader → Processor → Writer）
+// =================================================================
+
+fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+    conn.execute("PRAGMA journal_mode = WAL", []).ok();
+    conn.execute("PRAGMA synchronous = NORMAL", []).ok();
+    conn.execute("PRAGMA busy_timeout = 30000", []).ok();
+    Ok(conn)
+}
+
+/// 分页流式读取所有消息的 (msg_id, content_bytes)，不做任何解压
+async fn stream_all_message_contents(
+    pool: &sqlx::SqlitePool,
+    tx: mpsc::Sender<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    let mut last_rowid = 0i64;
+    const FETCH_SIZE: i64 = 500;
+
+    loop {
+        let rows = sqlx::query(
+            "SELECT rowid, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
+        )
+        .bind(last_rowid)
+        .bind(FETCH_SIZE)
+        .fetch_all(pool)
+        .await;
+
+        match rows {
+            Ok(rows) if !rows.is_empty() => {
+                if let Some(last) = rows.last() {
+                    last_rowid = last.get::<i64, _>(0);
+                }
+                for row in rows {
+                    let msg_id: String = row.get("msg_id");
+                    let content_bytes: Vec<u8> = row.get("content");
+                    if tx.send((msg_id, content_bytes)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+/// 通用批量 UPDATE Writer，带进度发射
+fn run_batch_update_writer(
+    db_path: &std::path::Path,
+    mut rx: mpsc::Receiver<Vec<(String, Vec<u8>)>>,
+    update_sql: &str,
+    progress_event: &str,
+    app_handle: AppHandle,
+    total: usize,
+) -> tokio::task::JoinHandle<Result<(), String>> {
+    let update_sql = update_sql.to_string();
+    let progress_event = progress_event.to_string();
+    let db_path = db_path.to_path_buf();
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let mut conn = open_maintenance_rusqlite(&db_path)?;
+        let mut processed = 0;
+        let mut last_emit_time = std::time::Instant::now();
+        let emit_interval = std::time::Duration::from_millis(32);
+
+        while let Some(batch) = rx.blocking_recv() {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            {
+                let mut stmt = tx
+                    .prepare_cached(&update_sql)
+                    .map_err(|e| e.to_string())?;
+                for (msg_id, bytes) in batch {
+                    stmt.execute(rusqlite::params![bytes, msg_id])
+                        .map_err(|e| e.to_string())?;
+                    processed += 1;
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+
+            if last_emit_time.elapsed() >= emit_interval || processed == total {
+                let _ = app_handle.emit(
+                    &progress_event,
+                    RebuildProgress {
+                        current: processed,
+                        total,
+                    },
+                );
+                last_emit_time = std::time::Instant::now();
+            }
+        }
+        Ok(())
+    })
+}
+
+// =================================================================
+// 任务 1：全量预渲染重建
+// =================================================================
+
 #[tauri::command]
 pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String> {
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
@@ -68,59 +186,25 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         return Ok(());
     }
 
-    // --- Channel setup (Bounded for backpressure) ---
     let (tx_compiler, rx_compiler) = mpsc::channel::<(String, String)>(1000);
-    let (tx_writer, mut rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(100);
-
-    // --- Stage 3: Synchronous Writer Worker (Rusqlite) ---
-    let app_handle_writer = app_handle.clone();
+    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(100);
     let total_count = total as usize;
-    let writer_handle = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
 
-        // 配置高性能写入参数
-        conn.execute("PRAGMA journal_mode = WAL", []).ok();
-        conn.execute("PRAGMA synchronous = NORMAL", []).ok();
-        conn.execute("PRAGMA busy_timeout = 30000", []).ok();
+    // --- Stage 3: Writer ---
+    let writer_handle = run_batch_update_writer(
+        &db_path,
+        rx_writer,
+        "UPDATE messages SET render_content = ? WHERE msg_id = ?",
+        "render_rebuild_progress",
+        app_handle.clone(),
+        total_count,
+    );
 
-        let mut processed = 0;
-        let mut last_emit_time = std::time::Instant::now();
-        let emit_interval = std::time::Duration::from_millis(32); // 限制 UI 更新频率约为 30FPS
-
-        while let Some(batch) = rx_writer.blocking_recv() {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            {
-                let mut stmt = tx
-                    .prepare_cached("UPDATE messages SET render_content = ? WHERE msg_id = ?")
-                    .map_err(|e| e.to_string())?;
-                for (msg_id, bytes) in batch {
-                    stmt.execute(rusqlite::params![bytes, msg_id])
-                        .map_err(|e| e.to_string())?;
-                    processed += 1;
-                }
-            }
-            tx.commit().map_err(|e| e.to_string())?;
-
-            // 时间节流：避免后端写入过快导致前端重绘堆积
-            if last_emit_time.elapsed() >= emit_interval || processed == total_count {
-                let _ = app_handle_writer.emit(
-                    "render_rebuild_progress",
-                    RebuildProgress {
-                        current: processed,
-                        total: total_count,
-                    },
-                );
-                last_emit_time = std::time::Instant::now();
-            }
-        }
-        Ok(())
-    });
-
-    // --- Stage 2: Parallel Compiler Workers (Dedicated Threads) ---
+    // --- Stage 2: Parallel Compiler Workers ---
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .clamp(2, 12); // 根据核心数动态调整，最高 12 并发
+        .clamp(2, 12);
 
     let rx_compiler = std::sync::Arc::new(tokio::sync::Mutex::new(rx_compiler));
     let mut compiler_handles = Vec::new();
@@ -151,7 +235,6 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                         }
                     }
                     None => {
-                        // 频道已关闭且读空，发送剩余并退出
                         if !batch.is_empty() {
                             let _ = tx_writer_clone.blocking_send(batch);
                         }
@@ -163,51 +246,141 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         compiler_handles.push(handle);
     }
 
-    // --- Stage 1: Async Reader Task (Streaming Fetch) ---
+    // --- Stage 1: Reader ---
     let reader_handle = tokio::spawn(async move {
-        let mut last_rowid = 0i64;
-        const FETCH_SIZE: i64 = 500;
+        let (tx_inner, mut rx_inner) = mpsc::channel::<(String, Vec<u8>)>(1000);
 
-        loop {
-            // 使用 rowid 游标分页，保证大表读取性能
-            let rows = sqlx::query(
-                "SELECT rowid, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
-            )
-            .bind(last_rowid)
-            .bind(FETCH_SIZE)
-            .fetch_all(&pool)
-            .await;
+        let stream_handle = tokio::spawn(async move {
+            let _ = stream_all_message_contents(&pool, tx_inner).await;
+        });
 
-            match rows {
-                Ok(rows) if !rows.is_empty() => {
-                    if let Some(last) = rows.last() {
-                        last_rowid = last.get::<i64, _>(0);
-                    }
-                    for row in rows {
-                        let msg_id: String = row.get("msg_id");
-                        let content: String = row.get("content");
-                        if tx_compiler.send((msg_id, content)).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                _ => break,
+        while let Some((msg_id, content_bytes)) = rx_inner.recv().await {
+            let content = ContentCompressor::decompress(&content_bytes)
+                .unwrap_or_else(|_| String::from_utf8_lossy(&content_bytes).to_string());
+            if tx_compiler.send((msg_id, content)).await.is_err() {
+                break;
             }
         }
-        // 显式丢弃 tx，通知 Compilers 读取已结束
         drop(tx_compiler);
+        let _ = stream_handle.await;
     });
 
-    // ── 等待流水线逐步排空 ──
+    // 等待流水线排空
     let _ = reader_handle.await;
     let _ = futures_util::future::join_all(compiler_handles).await;
-    drop(tx_writer); // 通知 Writer 所有任务已处理完毕
+    drop(tx_writer);
 
     writer_handle.await.map_err(|e| e.to_string())??;
 
-    // 补偿 100% 进度显示
+    // 补偿 100% 进度
     let _ = app_handle.emit(
         "render_rebuild_progress",
+        RebuildProgress {
+            current: total_count,
+            total: total_count,
+        },
+    );
+    Ok(())
+}
+
+// =================================================================
+// 任务 2：全量消息内容压缩（智能识别明文）
+// =================================================================
+
+#[tauri::command]
+pub async fn compress_all_contents(app_handle: AppHandle) -> Result<(), String> {
+    let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
+    let pool = db_state.pool.clone();
+    let db_path = db_state.path.clone();
+
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if total == 0 {
+        return Ok(());
+    }
+
+    let (tx_compressor, rx_compressor) = mpsc::channel::<(String, Vec<u8>)>(1000);
+    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(100);
+    let total_count = total as usize;
+
+    // --- Stage 3: Writer ---
+    let writer_handle = run_batch_update_writer(
+        &db_path,
+        rx_writer,
+        "UPDATE messages SET content = ? WHERE msg_id = ?",
+        "content_compress_progress",
+        app_handle.clone(),
+        total_count,
+    );
+
+    // --- Stage 2: Parallel Compressor Workers ---
+    let concurrency = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(2, 12);
+
+    let rx_compressor = std::sync::Arc::new(tokio::sync::Mutex::new(rx_compressor));
+    let mut compressor_handles = Vec::new();
+
+    for _ in 0..concurrency {
+        let rx_clone = rx_compressor.clone();
+        let tx_writer_clone = tx_writer.clone();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            let mut batch = Vec::with_capacity(50);
+            loop {
+                let item = {
+                    let mut rx = rx_clone.blocking_lock();
+                    rx.blocking_recv()
+                };
+
+                match item {
+                    Some((msg_id, content_bytes)) => {
+                        // 智能识别：尝试解压，成功则跳过（已压缩）
+                        if ContentCompressor::decompress(&content_bytes).is_err() {
+                            // 解压失败 → 明文，需要压缩
+                            let text = String::from_utf8_lossy(&content_bytes);
+                            if let Ok(compressed) = ContentCompressor::compress(&text) {
+                                batch.push((msg_id, compressed));
+                            }
+                        }
+
+                        if batch.len() >= 50 {
+                            if tx_writer_clone.blocking_send(std::mem::take(&mut batch)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        if !batch.is_empty() {
+                            let _ = tx_writer_clone.blocking_send(batch);
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        compressor_handles.push(handle);
+    }
+
+    // --- Stage 1: Reader ---
+    let reader_handle = tokio::spawn(async move {
+        let _ = stream_all_message_contents(&pool, tx_compressor).await;
+    });
+
+    // 等待流水线排空
+    let _ = reader_handle.await;
+    let _ = futures_util::future::join_all(compressor_handles).await;
+    drop(tx_writer);
+
+    writer_handle.await.map_err(|e| e.to_string())??;
+
+    // 补偿 100% 进度
+    let _ = app_handle.emit(
+        "content_compress_progress",
         RebuildProgress {
             current: total_count,
             total: total_count,
@@ -270,7 +443,7 @@ impl MessageRepository {
         .bind(&message.role)
         .bind(&message.name)
         .bind(&message.agent_id)
-        .bind(&message.content)
+        .bind(ContentCompressor::compress(&message.content)?)
         .bind(message.timestamp as i64)
         .bind(message.is_thinking.unwrap_or(false))
         .bind(message.is_group_message.unwrap_or(false))

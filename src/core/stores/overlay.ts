@@ -102,10 +102,10 @@ export const useOverlayStore = defineStore('overlay', () => {
   };
 
   // --- Rebuild Session ---
-  const openRebuildSession = () => {
+  const openRebuildSession = (taskType: import('./rebuildSession').RebuildTaskType = 'preRender') => {
     if (isRebuildSessionOpen.value) return;
     const rebuildStore = useRebuildSessionStore();
-    rebuildStore.open();
+    rebuildStore.open(taskType);
     const modalId = 'Page:rebuildSession';
     pageStack.value.push({ type: 'rebuildSession', id: undefined, modalId });
     registerModal(modalId, () => {
