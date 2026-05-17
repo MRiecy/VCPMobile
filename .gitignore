@@ -26,7 +26,8 @@ dist-ssr
 # Security & Secrets
 *.keystore
 vcp-mobile.keystore
-build_android_release.ps1
+*.ps1
+*.tsbuildinfo
 
 # AI Knowledge Base & Docs
 plans_back.zip
@@ -46,3 +47,10 @@ vector/
 # Cargo registry cache
 .cargo
 temp
+
+.claude
+.kilo
+.kilocode
+
+# Tauri build output (copied from dist/ on each build)
+src-tauri/gen/android/app/src/main/assets/

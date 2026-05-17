@@ -124,18 +124,66 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
     let three_days_secs = 3 * 24 * 60 * 60;
 
     if now - last_clear > three_days_secs {
-        println!("[Maintenance] Triggering scheduled WebView cache clear...");
+        println!("[Maintenance] Triggering scheduled maintenance (WebView & SQLite)...");
         
-        // 执行清理
+        // 1. WebView 清理
         if let Some(webview) = app.get_webview_window("main") {
-            if webview.clear_all_browsing_data().is_ok() {
-                // 更新时间戳
-                let updates = serde_json::json!({
-                    "lastWebviewCacheClear": now
-                });
-                let _ = update_settings(app.clone(), settings_state, updates).await;
-                println!("[Maintenance] Scheduled clear successful.");
-            }
+            let _ = webview.clear_all_browsing_data();
         }
+
+        // 2. SQLite 物理空间回收 (增量 Vacuum)
+        // 每次清理 100 个 Page，避免单次清理导致长时间 IO 阻塞
+        let db_state = app.state::<DbState>();
+        let _ = sqlx::query("PRAGMA incremental_vacuum(100)")
+            .execute(&db_state.pool)
+            .await;
+            
+        // 3. SQLite 查询规划器优化
+        let _ = sqlx::query("PRAGMA optimize")
+            .execute(&db_state.pool)
+            .await;
+
+        // 更新时间戳
+        let updates = serde_json::json!({
+            "lastWebviewCacheClear": now
+        });
+        let _ = update_settings(app.clone(), settings_state, updates).await;
+        println!("[Maintenance] Scheduled maintenance complete.");
     }
+}
+
+/// 4. 数据库 page_size 优化升级
+/// 检查当前 page_size，若非 16KB 则执行 VACUUM 重建数据库文件
+#[tauri::command]
+pub async fn upgrade_database_page_size(
+    db_state: State<'_, DbState>,
+) -> Result<String, String> {
+    let current_page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(&db_state.pool)
+        .await
+        .map_err(|e| format!("读取 page_size 失败: {}", e))?;
+
+    if current_page_size == 16384 {
+        return Ok("当前数据库 page_size 已为 16KB，无需优化".to_string());
+    }
+
+    println!(
+        "[Maintenance] Optimizing page_size from {} to 16KB (Executing VACUUM)...",
+        current_page_size
+    );
+
+    sqlx::query("VACUUM")
+        .execute(&db_state.pool)
+        .await
+        .map_err(|e| format!("VACUUM 执行失败: {}", e))?;
+
+    let new_page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(&db_state.pool)
+        .await
+        .map_err(|e| format!("验证 page_size 失败: {}", e))?;
+
+    Ok(format!(
+        "数据库 page_size 已从 {}B 优化至 {}B",
+        current_page_size, new_page_size
+    ))
 }

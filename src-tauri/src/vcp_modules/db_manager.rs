@@ -33,11 +33,22 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .filename(&db_path)
         .create_if_missing(true);
 
-    // 性能优化：WAL 模式 + 30s busy_timeout，缓解高并发写入锁竞争
+    // 深度性能优化：
+    // 1. WAL 模式：允许读写并发，极大提升 UI 相应速度
+    // 2. Normal 同步：在 WAL 模式下兼顾安全性与速度
+    // 3. mmap_size: 开启内存映射 I/O (256MB)，将磁盘读取变为内存访问
+    // 4. temp_store: 将临时表、排序操作强制放在内存中
+    // 5. page_size: 提升至 16KB，优化现代闪存 I/O 效率
+    // 6. auto_vacuum: 开启增量清理逻辑，配合维护任务物理回收空间
     connect_options = connect_options
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
-        .busy_timeout(std::time::Duration::from_secs(30));
+        .busy_timeout(std::time::Duration::from_secs(30))
+        .pragma("mmap_size", "268435456")
+        .pragma("temp_store", "2")
+        .pragma("page_size", "16384")
+        .pragma("cache_size", "-8000")
+        .pragma("auto_vacuum", "2");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)

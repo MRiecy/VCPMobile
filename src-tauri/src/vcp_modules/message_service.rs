@@ -1,7 +1,7 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
-use crate::vcp_modules::message_repository::MessageRenderCompiler;
+use crate::vcp_modules::message_repository::{ContentCompressor, MessageRenderCompiler};
 use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::settings_manager;
 use sqlx::Row;
@@ -58,11 +58,14 @@ pub async fn load_multi_topic_messages(
         let render_content: Option<Vec<u8>> = row.get("render_content");
         let blocks = parse_render_bytes(render_content);
 
+        let content_bytes: Vec<u8> = row.get("content");
+        let content = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
+
         let message = crate::vcp_modules::chat_manager::ChatMessage {
             id: msg_id,
             role,
             name: row.get("name"),
-            content: row.get("content"),
+            content,
             timestamp: timestamp as u64,
             is_thinking: Some(row.get::<i64, _>("is_thinking") != 0),
             agent_id: row.get("agent_id"),
@@ -264,7 +267,8 @@ pub async fn load_chat_history_internal(
         let role: String = row.get("role");
         let name: Option<String> = row.get("name");
         let content: String = if include_content {
-            row.get("content")
+            let bytes: Vec<u8> = row.get("content");
+            ContentCompressor::decompress(&bytes).unwrap_or_default()
         } else {
             String::new()
         };
@@ -438,7 +442,9 @@ pub async fn fetch_raw_message_content(
 
     match row {
         Some(r) => {
-            let content: String = r.get(0);
+            let bytes: Vec<u8> = r.get(0);
+            let content = ContentCompressor::decompress(&bytes)
+                .map_err(|e| format!("Failed to decompress content for message {}: {}", message_id, e))?;
             Ok(content)
         }
         None => Err(format!("Message {} not found", message_id)),

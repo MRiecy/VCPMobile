@@ -490,7 +490,9 @@ impl DbWriteQueue {
                 params.push(Box::new(msg.role.clone()));
                 params.push(Box::new(msg.name.clone()));
                 params.push(Box::new(msg.agent_id.clone()));
-                params.push(Box::new(msg.content.clone()));
+                let content_compressed = crate::vcp_modules::message_repository::ContentCompressor::compress(&msg.content)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
+                params.push(Box::new(content_compressed));
                 params.push(Box::new(msg.timestamp as i64));
                 params.push(Box::new(msg.is_thinking.unwrap_or(false)));
                 params.push(Box::new(msg.is_group_message.unwrap_or(false)));
