@@ -80,7 +80,7 @@ const close = () => emit("close");
   <Transition name="viewer-fade">
     <div
       v-show="isOpen && file"
-      class="vcp-attachment-viewer fixed inset-0 z-[1000] flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] pointer-events-auto"
+      class="vcp-attachment-viewer fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] pointer-events-auto"
       @click.self="close"
     >
       <!-- Toolbar -->

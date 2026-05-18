@@ -55,8 +55,14 @@ onMounted(() => {
       @close="overlayStore.closeGroupSettings()"
     />
 
-    <SyncSessionView v-if="overlayStore.isSyncSessionOpen" />
-    <RebuildSessionView v-if="overlayStore.isRebuildSessionOpen" />
+    <SyncSessionView
+      v-if="overlayStore.isSyncSessionOpen"
+      :z-index="overlayStore.getPageZIndex('syncSession')"
+    />
+    <RebuildSessionView
+      v-if="overlayStore.isRebuildSessionOpen"
+      :z-index="overlayStore.getPageZIndex('rebuildSession')"
+    />
 
     <SensorCollector />
     <ToolInteractionOverlay />

@@ -1,6 +1,7 @@
 ﻿import { defineStore } from 'pinia';
 import { ref, shallowRef, computed } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
+import { LAYER_PAGE_BASE, LAYER_PAGE_MAX_OFFSET } from '../constants/layers';
 import { useSyncSessionStore } from './syncSession';
 import { useRebuildSessionStore } from './rebuildSession';
 import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
@@ -41,7 +42,8 @@ export const useOverlayStore = defineStore('overlay', () => {
 
   const getPageZIndex = (type: string) => {
     const index = pageStack.value.findIndex(p => p.type === type);
-    return index === -1 ? 50 : 50 + index;
+    if (index === -1) return LAYER_PAGE_BASE;
+    return LAYER_PAGE_BASE + Math.min(index, LAYER_PAGE_MAX_OFFSET);
   };
 
   const pushPage = (type: string, id?: string) => {

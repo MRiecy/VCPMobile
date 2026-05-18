@@ -124,7 +124,7 @@ const openSettings = () => {
   max-width: 340px;
   background-color: color-mix(in srgb, var(--secondary-bg) 95%, transparent);
   transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-  z-index: 60;
+  z-index: var(--layer-drawer);
 }
 
 .vcp-drawer-left {
@@ -143,7 +143,7 @@ const openSettings = () => {
     transform: translateX(0) !important;
     width: 280px;
     max-width: 280px;
-    z-index: 10;
+    z-index: var(--layer-local);
   }
 
   .vcp-drawer-left {

@@ -6,7 +6,7 @@ const store = useNotificationStore();
 </script>
 
 <template>
-  <div class="fixed top-safe left-0 right-0 z-[200] pointer-events-none px-4 pt-4 flex flex-col items-center gap-2.5">
+  <div class="fixed top-safe left-0 right-0 z-toast pointer-events-none px-4 pt-4 flex flex-col items-center gap-2.5">
     <TransitionGroup name="toast">
       <ToastItem v-for="toast in store.activeToasts" :key="toast.id" :toast="toast" />
     </TransitionGroup>
