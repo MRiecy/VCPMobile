@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSwipe } from "@vueuse/core";
 import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
@@ -95,6 +96,34 @@ const backgroundStyle = computed(() => {
 // 用于取消监听的清理函数
 let unlistenLog: (() => void) | null = null;
 
+// --- Root Exit Handler (Double-Tap to Exit with Toast) ---
+let lastExitRequestTime = 0;
+const EXIT_THRESHOLD = 2000; // 2 seconds
+
+const handleExitRequest = () => {
+  const currentTime = Date.now();
+
+  if (currentTime - lastExitRequestTime < EXIT_THRESHOLD) {
+    // Second tap within threshold -> Exit App
+    getCurrentWebviewWindow().close();
+  } else {
+    // First tap -> Show Toast and record timestamp
+    lastExitRequestTime = currentTime;
+    notificationStore.addNotification({
+      id: "vcp-exit-toast",
+      title: "再按一次退出应用",
+      message: "",
+      type: "info",
+      duration: EXIT_THRESHOLD,
+      toastOnly: true,
+    });
+    // Haptic feedback (Android WebView supports navigator.vibrate)
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      navigator.vibrate(50);
+    }
+  }
+};
+
 
 const handleVisibilityChange = () => {
   if (document.hidden) {
@@ -124,12 +153,16 @@ onMounted(async () => {
   await router.isReady();
   initRootHistory();
 
+  // Listen for root exit requests from the modal history stack
+  window.addEventListener("vcp-exit-requested", handleExitRequest);
+
   // 监听页面可见性，切到后台时暂停所有 CSS 动画以节省 GPU
   document.addEventListener("visibilitychange", handleVisibilityChange);
 });
 
 onUnmounted(() => {
   if (unlistenLog) unlistenLog();
+  window.removeEventListener("vcp-exit-requested", handleExitRequest);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
 });
 </script>

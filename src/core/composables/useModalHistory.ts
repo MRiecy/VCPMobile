@@ -1,10 +1,12 @@
 import { ref } from 'vue';
-import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
 /**
  * VCP Mobile Unified Modal History Stack 2.0 (Operation Aegis)
  * Ensures mobile back gestures (swipe/hardware button) close modals instead of exiting the app.
- * Provides "Double-Tap to Exit" protection when no modals are open.
+ *
+ * Root exit handling (double-tap to exit with toast) has been moved to App.vue via
+ * the `vcp-exit-requested` custom event, which is fired when the user reaches the
+ * bottom of the history stack. This keeps modal history logic decoupled from UI/toast.
  */
 
 interface ModalInstance {
@@ -20,11 +22,6 @@ const modalStack = ref<ModalInstance[]>([]);
 // POPSTATE_HANDLING: currently processing a browser popstate event (closing top modal)
 // INTERNAL_BACK: triggered an internal history.back() from unregisterModal
 let state: 'IDLE' | 'POPSTATE_HANDLING' | 'INTERNAL_BACK' = 'IDLE';
-
-// Double-tap to exit state
-export const showExitToast = ref(false);
-let lastBackPressTime = 0;
-const EXIT_THRESHOLD = 2000; // 2 seconds
 
 /**
  * Initialize root history state to intercept the final back gesture.
@@ -69,23 +66,13 @@ const handlePopState = (event: PopStateEvent) => {
     return;
   }
 
-  // 4. Handle Root Exit (Operation Dummy Root - Catch & Bounce)
+  // 4. Handle Root Exit — delegate to App.vue via custom event
   // If we hit a state that doesn't have vcpMain, it means we've popped our dummy state
   if (!event.state || !event.state.vcpMain) {
-    const currentTime = Date.now();
+    window.dispatchEvent(new CustomEvent('vcp-exit-requested'));
 
-    if (currentTime - lastBackPressTime < EXIT_THRESHOLD) {
-      // Second tap within threshold -> Exit App
-      getCurrentWebviewWindow().close();
-    } else {
-      // First tap -> Show Toast and BOUNCE back
-      lastBackPressTime = currentTime;
-      showExitToast.value = true;
-      setTimeout(() => { showExitToast.value = false; }, EXIT_THRESHOLD);
-
-      // THE BOUNCE: Immediately re-inject the dummy state to keep the user in the "fake" 2nd layer
-      window.history.pushState({ vcpRoot: true, vcpMain: true }, '');
-    }
+    // THE BOUNCE: Re-inject the dummy state so the next back gesture also triggers popstate
+    window.history.pushState({ vcpRoot: true, vcpMain: true }, '');
   }
 };
 
@@ -154,7 +141,6 @@ export function useModalHistory() {
     registerModal,
     unregisterModal,
     modalStackLength: () => modalStack.value.length,
-    showExitToast,
     initRootHistory
   };
 }
