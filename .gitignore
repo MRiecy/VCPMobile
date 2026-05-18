@@ -55,3 +55,7 @@ temp
 
 # Tauri build output (copied from dist/ on each build)
 src-tauri/gen/android/app/src/main/assets/
+# Android plugin build artifacts
+src-tauri/plugins/**/android/build/
+src-tauri/plugins/**/android/.tauri/
+

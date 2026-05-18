@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from "vue";
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
@@ -93,10 +92,8 @@ const handleVcpButtonClick = (e: any) => {
   }
 };
 
-let unlistenLifecycle: UnlistenFn | null = null;
-
-const handleLifecycle = (payload: any) => {
-  if (payload?.state === 'resume') {
+const handleLifecycle = (e: any) => {
+  if (e.detail?.state === 'resume') {
     const selected = sessionStore.currentSelectedItem;
     const topicId = sessionStore.currentTopicId;
     if (selected && topicId) {
@@ -126,7 +123,7 @@ watch(keyboardHeight, (height) => {
 
 onMounted(async () => {
   window.addEventListener("vcp-button-click", handleVcpButtonClick);
-  unlistenLifecycle = await listen('vcp-lifecycle', (event) => handleLifecycle(event.payload));
+  window.addEventListener("vcp-lifecycle", handleLifecycle);
 
   if (chatViewContainerRef.value) {
     chatViewContainerRef.value.addEventListener("focusin", forceRecalculate);
@@ -137,10 +134,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener("vcp-button-click", handleVcpButtonClick);
-  if (unlistenLifecycle) {
-    unlistenLifecycle();
-    unlistenLifecycle = null;
-  }
+  window.removeEventListener("vcp-lifecycle", handleLifecycle);
 
   if (chatViewContainerRef.value) {
     chatViewContainerRef.value.removeEventListener("focusin", forceRecalculate);

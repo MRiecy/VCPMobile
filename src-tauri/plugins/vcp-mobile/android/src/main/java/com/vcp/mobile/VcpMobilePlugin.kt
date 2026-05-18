@@ -6,6 +6,7 @@ import android.content.IntentFilter
 import android.content.res.Configuration
 import android.os.Build
 import android.webkit.WebView
+import androidx.appcompat.app.AppCompatActivity
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -18,9 +19,7 @@ import com.vcp.mobile.service.StreamingActionReceiver
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
-    private val lifecycleBridge = LifecycleBridge { event, payload ->
-        trigger(event, payload)
-    }
+    private val lifecycleBridge = LifecycleBridge()
     private lateinit var streamingActionReceiver: StreamingActionReceiver
 
     // ==================================================================
@@ -66,10 +65,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun load(webView: WebView) {
         super.load(webView)
 
-        keyboardInsetsManager.attach(webView) { event, payload ->
-            trigger(event, payload)
-        }
-        lifecycleBridge.attach(activity)
+        keyboardInsetsManager.attach(webView)
+        lifecycleBridge.attach(activity, webView)
 
         // 注册流式中断广播接收器
         streamingActionReceiver = StreamingActionReceiver()
@@ -81,9 +78,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    override fun onDestroy() {
+    override fun onDestroy(activity: AppCompatActivity) {
         activity.unregisterReceiver(streamingActionReceiver)
-        super.onDestroy()
+        super.onDestroy(activity)
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        lifecycleBridge.onConfigurationChanged(newConfig)
     }
 }
 

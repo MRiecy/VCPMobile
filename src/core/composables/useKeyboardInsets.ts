@@ -1,5 +1,4 @@
 import { ref, onMounted, onUnmounted, type Ref } from "vue";
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 interface KeyboardInsetDetail {
   height: number;
@@ -31,9 +30,8 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
   const safeAreaBottom = ref(0);
 
   // --- 策略 1：原生注入事件（最可靠） ---
-  let unlistenKeyboard: UnlistenFn | null = null;
-
-  const handleNativeInset = (detail: KeyboardInsetDetail) => {
+  const handleNativeInset = (e: Event) => {
+    const detail = (e as CustomEvent<KeyboardInsetDetail>).detail;
     if (detail && typeof detail.height === "number") {
       // Android WindowInsets 返回的是物理像素，需转换为 CSS 逻辑像素
       const dpr = window.devicePixelRatio || 1;
@@ -116,20 +114,15 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
     estimateFromScroll();
   };
 
-  onMounted(async () => {
-    unlistenKeyboard = await listen<KeyboardInsetDetail>('vcp-keyboard-inset', (event) => {
-      handleNativeInset(event.payload);
-    });
+  onMounted(() => {
+    window.addEventListener("vcp-keyboard-inset", handleNativeInset);
     setupVirtualKeyboard();
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
   });
 
   onUnmounted(() => {
-    if (unlistenKeyboard) {
-      unlistenKeyboard();
-      unlistenKeyboard = null;
-    }
+    window.removeEventListener("vcp-keyboard-inset", handleNativeInset);
     if (vkCleanup) vkCleanup();
     document.removeEventListener("focusin", handleFocusIn);
     document.removeEventListener("focusout", handleFocusOut);

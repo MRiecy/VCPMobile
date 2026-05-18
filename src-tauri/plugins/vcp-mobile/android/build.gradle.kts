@@ -22,6 +22,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":tauri-android"))
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-common:2.7.0")

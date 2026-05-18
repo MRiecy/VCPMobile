@@ -5645,6 +5645,7 @@ dependencies = [
 name = "tauri-plugin-vcp-mobile"
 version = "0.1.0"
 dependencies = [
+ "jni",
  "log",
  "serde",
  "tauri",

@@ -59,12 +59,6 @@ impl Phase3Tracker {
             let total = self.total.load(Ordering::SeqCst);
 
             if !quiet {
-                let msg = format!("Topic {} completed ({}/{})", topic_id, done, total);
-                println!("[Sync] [messages] {}", msg);
-
-                // 发送前端日志事件
-                emit_sync_log(app_handle, "info", &msg);
-
                 if let Ok(mut logger) = logger.lock() {
                     logger.log_operation("messages", "topic", topic_id, true, None);
                 }
