@@ -7,16 +7,12 @@ mod screen;
 pub mod stream;
 
 /// Plugin state shared across commands
-pub struct VcpMobileState {
+pub struct VcpMobileState<R: Runtime> {
     pub streaming_count: std::sync::atomic::AtomicU32,
-}
-
-impl Default for VcpMobileState {
-    fn default() -> Self {
-        Self {
-            streaming_count: std::sync::atomic::AtomicU32::new(0),
-        }
-    }
+    #[cfg(target_os = "android")]
+    pub plugin_handle: std::sync::Mutex<Option<tauri::plugin::PluginHandle<R>>>,
+    #[cfg(not(target_os = "android"))]
+    _marker: std::marker::PhantomData<fn() -> R>,
 }
 
 /// Initializes the VCP Mobile plugin.
@@ -29,12 +25,16 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             stream::stop_stream_service,
         ])
         .setup(|app, _api| {
-            app.manage(VcpMobileState::default());
-
             #[cfg(target_os = "android")]
-            {
-                _api.register_android_plugin("com.vcp.mobile", "VcpMobilePlugin")?;
-            }
+            let plugin_handle = _api.register_android_plugin("com.vcp.mobile", "VcpMobilePlugin")?;
+
+            app.manage(VcpMobileState::<R> {
+                streaming_count: std::sync::atomic::AtomicU32::new(0),
+                #[cfg(target_os = "android")]
+                plugin_handle: std::sync::Mutex::new(Some(plugin_handle)),
+                #[cfg(not(target_os = "android"))]
+                _marker: std::marker::PhantomData,
+            });
 
             Ok(())
         })

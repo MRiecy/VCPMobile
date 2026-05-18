@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 
 /**
@@ -18,10 +19,10 @@ import androidx.core.app.NotificationCompat
  * 当 Agent 正在流式生成回复时启动，通过持续通知向系统声明"用户感知的重要任务"，
  * 显著降低进程被 OEM 杀后台的概率。
  *
- * 设计原则：极简、低打扰、零持久状态
- * - 通知仅显示 Agent 名称 + "思考中……"
- * - 无声音、无振动、不弹出 Heads-up
- * - 流结束立即自毁，绝不常驻
+ * 设计原则：高可见性常驻保活
+ * - 通知使用 IMPORTANCE_HIGH 确保在所有 OEM（ColorOS/EMUI/HarmonyOS/MIUI）上显式显示
+ * - 服务运行期间通知常驻通知栏，不可滑动关闭
+ * - 流结束立即自毁，绝不空占
  */
 class StreamKeepaliveService : Service() {
 
@@ -30,6 +31,7 @@ class StreamKeepaliveService : Service() {
         const val NOTIFICATION_ID = 0x53545201 // "STR" + 01
         const val EXTRA_AGENT_NAME = "agent_name"
         const val ACTION_STOP_STREAMING = "com.vcp.avatar.action.STOP_STREAMING"
+        private const val TAG = "VcpMobileService"
 
         /**
          * 构造启动该服务的 Intent
@@ -44,23 +46,30 @@ class StreamKeepaliveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.i(TAG, "onCreate called")
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val agentName = intent?.getStringExtra(EXTRA_AGENT_NAME) ?: "Agent"
+        Log.i(TAG, "onStartCommand: agentName=$agentName, startId=$startId")
+
         val notification = buildNotification(agentName)
+        Log.i(TAG, "notification built, title=$agentName")
 
         // Android 14+ 必须声明前台服务类型
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            Log.i(TAG, "calling startForeground with REMOTE_MESSAGING type")
             startForeground(
                 NOTIFICATION_ID,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
             )
         } else {
+            Log.i(TAG, "calling startForeground")
             startForeground(NOTIFICATION_ID, notification)
         }
+        Log.i(TAG, "startForeground completed")
 
         return START_STICKY
     }
@@ -69,10 +78,11 @@ class StreamKeepaliveService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Log.i(TAG, "creating notification channel: $CHANNEL_ID")
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "神经同步通道",
-                NotificationManager.IMPORTANCE_DEFAULT
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Agent 流式响应保活"
                 setShowBadge(false)
@@ -81,6 +91,9 @@ class StreamKeepaliveService : Service() {
             }
             getSystemService(NotificationManager::class.java)
                 ?.createNotificationChannel(channel)
+            Log.i(TAG, "notification channel created")
+        } else {
+            Log.i(TAG, "skipping notification channel creation (pre-O)")
         }
     }
 
@@ -114,10 +127,8 @@ class StreamKeepaliveService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(agentName)
             .setContentText("思考中……")
-            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
-            .setSilent(true)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentIntent(openPendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止生成", stopPendingIntent)
             .build()
