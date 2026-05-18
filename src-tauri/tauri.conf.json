@@ -29,7 +29,8 @@
     "active": true,
     "targets": "all",
     "android": {
-      "minSdkVersion": 26
+      "minSdkVersion": 26,
+      "debugApplicationIdSuffix": ".debug"
     },
     "resources": [],
     "icon": [

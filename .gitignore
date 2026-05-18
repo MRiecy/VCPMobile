@@ -34,6 +34,7 @@ plans_back.zip
 .gemini_snapshot.json
 GEMINI.md
 *.md
+!docs/**/*.md
 !README.md
 VCPMobile.code-workspace
 

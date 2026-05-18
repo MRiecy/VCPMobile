@@ -16,22 +16,22 @@ impl MessageRenderCompiler {
         parse_content(content)
     }
 
-    /// Serializes AST blocks to compressed binary (postcard + zstd)
+    /// Serializes AST blocks to compressed binary (JSON + zstd)
     pub fn serialize(blocks: &[ContentBlock]) -> Result<Vec<u8>, String> {
-        let postcard_bytes = postcard::to_allocvec(blocks)
-            .map_err(|e| format!("postcard serialize failed: {}", e))?;
-        let compressed = zstd::bulk::compress(&postcard_bytes, 3)
+        let json_bytes = serde_json::to_vec(blocks)
+            .map_err(|e| format!("json serialize failed: {}", e))?;
+        let compressed = zstd::bulk::compress(&json_bytes, 3)
             .map_err(|e| format!("zstd compress failed: {}", e))?;
         Ok(compressed)
     }
 
-    /// Deserializes compressed binary back to AST blocks (postcard + zstd)
+    /// Deserializes compressed binary back to AST blocks (JSON + zstd)
     pub fn deserialize(bytes: &[u8]) -> Result<Vec<ContentBlock>, String> {
         // Use a generous upper bound for decompression; zstd will return exact size
         let decompressed = zstd::bulk::decompress(bytes, 16 * 1024 * 1024)
             .map_err(|e| format!("zstd decompress failed: {}", e))?;
-        postcard::from_bytes(&decompressed)
-            .map_err(|e| format!("postcard deserialize failed: {}", e))
+        serde_json::from_slice(&decompressed)
+            .map_err(|e| format!("json deserialize failed: {}", e))
     }
 }
 

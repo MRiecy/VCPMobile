@@ -113,7 +113,7 @@ const close = () => emit("close");
 
       <!-- Main Content -->
       <div
-        class="flex-1 overflow-auto vcp-scrollable pb-[env(safe-area-inset-bottom)]"
+        class="flex-1 overflow-auto vcp-scrollable no-rubber-band pb-[env(safe-area-inset-bottom)]"
       >
         <!-- Text/Code/MD Viewer -->
         <div

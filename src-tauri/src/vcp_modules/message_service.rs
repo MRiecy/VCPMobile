@@ -562,7 +562,7 @@ pub async fn truncate_history_after_timestamp(
     Ok(())
 }
 
-/// Helper: Deserializes render_content bytes (postcard + zstd) into JSON blocks for frontend
+/// Helper: Deserializes render_content bytes (JSON + zstd) into JSON blocks for frontend
 fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Value> {
     render_content.and_then(|bytes| {
         crate::vcp_modules::message_repository::MessageRenderCompiler::deserialize(&bytes)
