@@ -37,10 +37,11 @@ pub async fn load_multi_topic_messages(
 
     let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let query_str = format!(
-        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content, topic_id
-         FROM messages
-         WHERE topic_id IN ({}) AND deleted_at IS NULL
-         ORDER BY topic_id, timestamp ASC, msg_id ASC",
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.topic_id
+         FROM messages m
+         LEFT JOIN render_cache r ON m.msg_id = r.msg_id
+         WHERE m.topic_id IN ({}) AND m.deleted_at IS NULL
+         ORDER BY m.topic_id, m.timestamp ASC, m.msg_id ASC",
         placeholders
     );
 
@@ -163,16 +164,18 @@ pub async fn load_chat_history_internal(
     let offset = offset.unwrap_or(0);
 
     let query_str = if limit.is_some() {
-        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content 
-         FROM messages 
-         WHERE topic_id = ? AND deleted_at IS NULL 
-         ORDER BY timestamp DESC, rowid DESC 
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content 
+         FROM messages m
+         LEFT JOIN render_cache r ON m.msg_id = r.msg_id
+         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         ORDER BY m.timestamp DESC, m.rowid DESC 
          LIMIT ? OFFSET ?"
     } else {
-        "SELECT msg_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, render_content 
-         FROM messages 
-         WHERE topic_id = ? AND deleted_at IS NULL 
-         ORDER BY timestamp DESC, rowid DESC"
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content 
+         FROM messages m
+         LEFT JOIN render_cache r ON m.msg_id = r.msg_id
+         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         ORDER BY m.timestamp DESC, m.rowid DESC"
     };
 
     let mut q = sqlx::query(query_str).bind(topic_id);

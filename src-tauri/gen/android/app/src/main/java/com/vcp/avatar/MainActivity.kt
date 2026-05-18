@@ -23,6 +23,7 @@ class MainActivity : TauriActivity() {
 
     // --- 共享基础设施 ---
     private val frontendBridge = FrontendBridge()
+    private val backNavigationManager = BackNavigationManager()
 
     // --- 领域模块 ---
     private val keyboardInsetsManager = KeyboardInsetsManager(frontendBridge)
@@ -37,6 +38,7 @@ class MainActivity : TauriActivity() {
 
     override fun onWebViewCreate(webView: WebView) {
         frontendBridge.attachWebView(webView)
+        backNavigationManager.attachWebView(webView)
     }
 
     // ======================================================================
@@ -48,6 +50,10 @@ class MainActivity : TauriActivity() {
         super.onCreate(savedInstanceState)
 
         Log.d("VCPKeyboard", "MainActivity.onCreate: NEW APK RUNNING, setPadding should be REMOVED")
+
+        // 接管返回键，恢复 WebView goBack() → 前端 popstate 拦截链
+        backNavigationManager.attach(this)
+
         // 键盘 Insets 手动管理（Android 15+ Edge-to-Edge 必需）
         keyboardInsetsManager.attach(window.decorView.rootView)
 
@@ -83,6 +89,7 @@ class MainActivity : TauriActivity() {
 
     override fun onDestroy() {
         unregisterReceiver(streamingActionReceiver)
+        backNavigationManager.detachWebView()
         frontendBridge.detachWebView()
         super.onDestroy()
     }
