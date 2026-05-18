@@ -32,7 +32,7 @@ object TauriLifecycleObserver : DefaultLifecycleObserver {
 }
 
 abstract class TauriActivity : WryActivity() {
-  override val handleBackNavigation: Boolean = true
+  override val handleBackNavigation: Boolean = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
