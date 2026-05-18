@@ -1,4 +1,4 @@
-package com.vcp.avatar.service
+package com.vcp.mobile.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -11,7 +11,6 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.vcp.avatar.MainActivity
 
 /**
  * 流式响应前台保活服务
@@ -86,9 +85,17 @@ class StreamKeepaliveService : Service() {
     }
 
     private fun buildNotification(agentName: String): Notification {
-        // 点击通知：打开应用
-        val openIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        // 点击通知：打开应用（通过反射获取主 Activity，避免跨包编译依赖）
+        val openIntent = try {
+            val mainActivityClass = Class.forName("com.vcp.avatar.MainActivity")
+            Intent(this, mainActivityClass).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+        } catch (_: ClassNotFoundException) {
+            Intent(Intent.ACTION_MAIN).apply {
+                setPackage(packageName)
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
         }
         val openPendingIntent = PendingIntent.getActivity(
             this, 0, openIntent,

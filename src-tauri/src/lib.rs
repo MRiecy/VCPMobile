@@ -43,8 +43,7 @@ use vcp_modules::model_manager::{
     toggle_favorite_model,
 };
 use vcp_modules::protocol_manager::prepare_vcp_upload;
-use vcp_modules::screen_wake_manager::{clear_keep_screen_on, set_keep_screen_on};
-use vcp_modules::stream_service_manager::StreamingServiceState;
+
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
     read_sync_log_file, start_manual_sync,
@@ -111,7 +110,6 @@ pub fn run() {
         .setup(|app| {
             // 2. 初始化核心状态
             app.manage(LifecycleState::new());
-            app.manage(StreamingServiceState::default());
             app.manage(ActiveRequests::default());
             app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());
@@ -171,6 +169,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_vcp_mobile::init())
         .invoke_handler(tauri::generate_handler![
             greet,
             sendToVCP,
@@ -262,8 +261,6 @@ pub fn run() {
             get_active_frontend_version,
             clear_frontend_updates,
             confirm_frontend_boot,
-            set_keep_screen_on,
-            clear_keep_screen_on,
         ])
         .run(context)
         .expect("error while running tauri application");

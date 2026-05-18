@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { setKeepScreenOn, clearKeepScreenOn } from 'tauri-plugin-vcp-mobile';
 
 export const useSyncSessionStore = defineStore('syncSession', () => {
   // --- 视图状态 ---
@@ -39,12 +40,12 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     status.value = 'connecting';
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
-    invoke('set_keep_screen_on').catch(() => {});
+    setKeepScreenOn().catch(() => {});
     invoke('start_manual_sync').catch((e: any) => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';
       canDismiss.value = true;
-      invoke('clear_keep_screen_on').catch(() => {});
+      clearKeepScreenOn().catch(() => {});
     });
   };
 
@@ -95,7 +96,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       status.value = 'completed';
       canDismiss.value = true;
       needsReload.value = true;
-      invoke('clear_keep_screen_on').catch(() => {});
+      clearKeepScreenOn().catch(() => {});
       pushLog('success', '同步已全部完成，点击关闭以刷新数据');
     }).then(fn => unlistenFns.push(fn));
   };

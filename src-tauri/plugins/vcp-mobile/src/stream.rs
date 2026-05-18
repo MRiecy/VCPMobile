@@ -1,39 +1,30 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-use tauri::{AppHandle, Manager};
+use std::sync::atomic::Ordering;
+use tauri::{AppHandle, Manager, Runtime};
 
-/// 流式服务状态：追踪当前有多少个活跃 SSE 流
-///
-/// 通过 AtomicU32 计数器实现无锁计数，多个并发流式请求共享同一状态。
-pub struct StreamingServiceState {
-    pub active_count: AtomicU32,
-}
+use crate::VcpMobileState;
 
-impl Default for StreamingServiceState {
-    fn default() -> Self {
-        Self {
-            active_count: AtomicU32::new(0),
-        }
-    }
-}
+// =============================================================================
+// Public Rust API (for internal Rust callers)
+// =============================================================================
 
-/// 启动流式前台服务
-///
-/// 每有一个新的 SSE 流开始时调用。计数器从 0→1 时真正启动 Android 前台服务；
-/// 后续递增仅更新计数，避免通知闪烁。
-pub fn start_streaming_service(app: &AppHandle, agent_name: &str) -> Result<(), String> {
-    let state = app.state::<StreamingServiceState>();
-    let count = state.active_count.fetch_add(1, Ordering::SeqCst);
+/// Start the stream keepalive service.
+/// Counter 0→1 triggers actual Android foreground service start.
+pub fn start_stream_service_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    agent_name: &str,
+) -> Result<(), String> {
+    let state = app.state::<VcpMobileState>();
+    let count = state.streaming_count.fetch_add(1, Ordering::SeqCst);
 
     if count == 0 {
         #[cfg(target_os = "android")]
-        if let Err(e) = start_android_service(app, agent_name) {
-            state.active_count.fetch_sub(1, Ordering::SeqCst);
-            return Err(e);
+        {
+            start_android_service(app, agent_name)?;
         }
     }
 
     log::info!(
-        "[StreamingService] Started for '{}'. Active count: {}",
+        "[VcpMobilePlugin] Stream started for '{}'. Active count: {}",
         agent_name,
         count + 1
     );
@@ -41,33 +32,54 @@ pub fn start_streaming_service(app: &AppHandle, agent_name: &str) -> Result<(), 
     Ok(())
 }
 
-/// 停止流式前台服务
-///
-/// 每有一个 SSE 流结束时调用。计数器减到 0 时真正停止 Android 前台服务。
-pub fn stop_streaming_service(app: &AppHandle) -> Result<(), String> {
-    let state = app.state::<StreamingServiceState>();
-    let count = state.active_count.fetch_sub(1, Ordering::SeqCst);
+/// Stop the stream keepalive service.
+/// Counter reaches 0 triggers actual Android service stop.
+pub fn stop_stream_service_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let state = app.state::<VcpMobileState>();
+    let count = state.streaming_count.fetch_sub(1, Ordering::SeqCst);
 
     if count <= 1 {
-        state.active_count.store(0, Ordering::SeqCst);
+        state.streaming_count.store(0, Ordering::SeqCst);
         #[cfg(target_os = "android")]
-        stop_android_service(app)?;
+        {
+            stop_android_service(app)?;
+        }
     }
 
     log::info!(
-        "[StreamingService] Stopped. Active count: {}",
-        state.active_count.load(Ordering::SeqCst)
+        "[VcpMobilePlugin] Stream stopped. Active count: {}",
+        state.streaming_count.load(Ordering::SeqCst)
     );
 
     Ok(())
 }
 
 // =============================================================================
-// Android JNI 实现
+// Tauri Commands (for frontend invoke)
+// =============================================================================
+
+#[tauri::command]
+pub fn start_stream_service<R: Runtime>(
+    app: AppHandle<R>,
+    agent_name: String,
+) -> Result<(), String> {
+    start_stream_service_inner(&app, &agent_name)
+}
+
+#[tauri::command]
+pub fn stop_stream_service<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    stop_stream_service_inner(&app)
+}
+
+// =============================================================================
+// Android JNI implementation
 // =============================================================================
 
 #[cfg(target_os = "android")]
-fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String> {
+fn start_android_service<R: Runtime>(
+    app: &AppHandle<R>,
+    agent_name: &str,
+) -> Result<(), String> {
     use jni::objects::JValue;
 
     let window = app
@@ -75,7 +87,6 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
         .ok_or("main window not found")?;
     let agent_name = agent_name.to_string();
 
-    let (tx, rx) = std::sync::mpsc::channel();
     window
         .as_ref()
         .with_webview(move |webview| {
@@ -85,7 +96,6 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
                         .find_class("android/content/Intent")
                         .map_err(|e| format!("Find Intent failed: {:?}", e))?;
 
-                    // 通过 Activity 的 ClassLoader 加载应用类，绕过 JNI FindClass 的 boot class loader 限制
                     let activity_cls = env
                         .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])
                         .map_err(|e| format!("getClass failed: {:?}", e))?
@@ -102,7 +112,7 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
                         .l()
                         .map_err(|e| format!("getClassLoader result is not an object: {:?}", e))?;
                     let service_name = env
-                        .new_string("com.vcp.avatar.service.StreamKeepaliveService")
+                        .new_string("com.vcp.mobile.service.StreamKeepaliveService")
                         .map_err(|e| format!("new_string failed: {:?}", e))?;
                     let service_cls = env
                         .call_method(
@@ -123,7 +133,6 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
                         )
                         .map_err(|e| format!("New Intent failed: {:?}", e))?;
 
-                    // putExtra("agent_name", agentName)
                     let key = env
                         .new_string("agent_name")
                         .map_err(|e| format!("New string key failed: {:?}", e))?;
@@ -139,7 +148,6 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
                     )
                     .map_err(|e| format!("putExtra failed: {:?}", e))?;
 
-                    // 判断 API 版本：26+ 使用 startForegroundService
                     let version_cls = env
                         .find_class("android/os/Build$VERSION")
                         .map_err(|e| format!("Find VERSION failed: {:?}", e))?;
@@ -171,24 +179,25 @@ fn start_android_service(app: &AppHandle, agent_name: &str) -> Result<(), String
 
                     Ok(())
                 })();
-                let _ = tx.send(result);
+
+                if let Err(ref e) = result {
+                    log::error!("[VcpMobilePlugin] start_android_service failed: {}", e);
+                }
             });
         })
         .map_err(|e| format!("with_webview failed: {:?}", e))?;
 
-    rx.recv()
-        .map_err(|_| "JNI execution channel closed".to_string())?
+    Ok(())
 }
 
 #[cfg(target_os = "android")]
-fn stop_android_service(app: &AppHandle) -> Result<(), String> {
+fn stop_android_service<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     use jni::objects::JValue;
 
     let window = app
         .get_webview_window("main")
         .ok_or("main window not found")?;
 
-    let (tx, rx) = std::sync::mpsc::channel();
     window
         .as_ref()
         .with_webview(move |webview| {
@@ -198,7 +207,6 @@ fn stop_android_service(app: &AppHandle) -> Result<(), String> {
                         .find_class("android/content/Intent")
                         .map_err(|e| format!("Find Intent failed: {:?}", e))?;
 
-                    // 通过 Activity 的 ClassLoader 加载应用类，绕过 JNI FindClass 的 boot class loader 限制
                     let activity_cls = env
                         .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])
                         .map_err(|e| format!("getClass failed: {:?}", e))?
@@ -215,7 +223,7 @@ fn stop_android_service(app: &AppHandle) -> Result<(), String> {
                         .l()
                         .map_err(|e| format!("getClassLoader result is not an object: {:?}", e))?;
                     let service_name = env
-                        .new_string("com.vcp.avatar.service.StreamKeepaliveService")
+                        .new_string("com.vcp.mobile.service.StreamKeepaliveService")
                         .map_err(|e| format!("new_string failed: {:?}", e))?;
                     let service_cls = env
                         .call_method(
@@ -246,11 +254,13 @@ fn stop_android_service(app: &AppHandle) -> Result<(), String> {
 
                     Ok(())
                 })();
-                let _ = tx.send(result);
+
+                if let Err(ref e) = result {
+                    log::error!("[VcpMobilePlugin] stop_android_service failed: {}", e);
+                }
             });
         })
         .map_err(|e| format!("with_webview failed: {:?}", e))?;
 
-    rx.recv()
-        .map_err(|_| "JNI execution channel closed".to_string())?
+    Ok(())
 }

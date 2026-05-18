@@ -7,6 +7,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[workspace]
+members = [".", "plugins/vcp-mobile"]
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -48,6 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 semver = "1"
 image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 tauri-plugin-log = "2.8.0"
+tauri-plugin-vcp-mobile = { path = "./plugins/vcp-mobile" }
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-utils = "2.9.1"

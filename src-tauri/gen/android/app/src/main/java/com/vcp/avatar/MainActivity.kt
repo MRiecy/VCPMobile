@@ -1,96 +1,16 @@
 package com.vcp.avatar
 
-import android.content.Context
-import android.content.IntentFilter
-import android.content.res.Configuration
-import android.os.Build
 import android.os.Bundle
-import android.util.Log
-import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
-import com.vcp.avatar.bridge.FrontendBridge
-import com.vcp.avatar.insets.KeyboardInsetsManager
-import com.vcp.avatar.lifecycle.AppLifecycleBridge
-import com.vcp.avatar.service.StreamingActionReceiver
 
 /**
  * VCP Mobile Android 主 Activity
  *
- * 采用模块化编排：所有具体逻辑下沉到独立 Manager，MainActivity 仅负责
- * 生命周期调度与模块组装，便于后续频繁扩展底层能力。
+ * 精简为默认 Tauri Activity，所有自定义原生能力已迁移到 tauri-plugin-vcp-mobile。
  */
 class MainActivity : TauriActivity() {
-
-    // --- 共享基础设施 ---
-    private val frontendBridge = FrontendBridge()
-    private val backNavigationManager = BackNavigationManager()
-
-    // --- 领域模块 ---
-    private val keyboardInsetsManager = KeyboardInsetsManager(frontendBridge)
-    private val appLifecycleBridge = AppLifecycleBridge(frontendBridge)
-
-    // --- 流式服务广播接收器 ---
-    private lateinit var streamingActionReceiver: StreamingActionReceiver
-
-    // ======================================================================
-    // WebView 回调（WryActivity 提供）
-    // ======================================================================
-
-    override fun onWebViewCreate(webView: WebView) {
-        frontendBridge.attachWebView(webView)
-        backNavigationManager.attachWebView(webView)
-    }
-
-    // ======================================================================
-    // Activity 生命周期
-    // ======================================================================
-
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-
-        Log.d("VCPKeyboard", "MainActivity.onCreate: NEW APK RUNNING, setPadding should be REMOVED")
-
-        // 接管返回键，恢复 WebView goBack() → 前端 popstate 拦截链
-        backNavigationManager.attach(this)
-
-        // 键盘 Insets 手动管理（Android 15+ Edge-to-Edge 必需）
-        keyboardInsetsManager.attach(window.decorView.rootView)
-
-        // 注册流式中断广播接收器
-        streamingActionReceiver = StreamingActionReceiver()
-        val filter = IntentFilter(StreamingActionReceiver.STREAM_INTERRUPT_ACTION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            registerReceiver(streamingActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(streamingActionReceiver, filter)
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        appLifecycleBridge.notifyResume()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        appLifecycleBridge.notifyPause()
-    }
-
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        appLifecycleBridge.notifyConfigurationChanged(newConfig)
-    }
-
-    override fun onLowMemory() {
-        super.onLowMemory()
-        appLifecycleBridge.notifyLowMemory()
-    }
-
-    override fun onDestroy() {
-        unregisterReceiver(streamingActionReceiver)
-        backNavigationManager.detachWebView()
-        frontendBridge.detachWebView()
-        super.onDestroy()
     }
 }

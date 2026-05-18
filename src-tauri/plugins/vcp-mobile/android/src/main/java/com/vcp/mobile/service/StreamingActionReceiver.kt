@@ -1,4 +1,4 @@
-package com.vcp.avatar.service
+package com.vcp.mobile.service
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -20,7 +20,6 @@ class StreamingActionReceiver : BroadcastReceiver() {
         when (intent.action) {
             StreamKeepaliveService.ACTION_STOP_STREAMING -> {
                 // 向应用内部发送中断广播
-                // MainActivity 中注册了对该广播的监听，收到后会通过 FrontendBridge 通知前端
                 val interruptIntent = Intent(STREAM_INTERRUPT_ACTION).apply {
                     setPackage(context.packageName)
                 }

@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "default"
+description = "Default permission for VCP Mobile plugin"
+commands.allow = [
+    "set_keep_screen_on",
+    "clear_keep_screen_on",
+    "start_stream_service",
+    "stop_stream_service",
+]

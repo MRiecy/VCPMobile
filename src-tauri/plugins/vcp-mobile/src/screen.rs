@@ -1,16 +1,15 @@
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 #[cfg(target_os = "android")]
 const FLAG_KEEP_SCREEN_ON: i32 = 0x00000080;
 
-/// 设置屏幕常亮（同步期间防止息屏）
+/// Set screen to keep awake during sync / streaming.
 #[tauri::command]
 #[allow(unused_variables)]
-pub fn set_keep_screen_on(app: AppHandle) -> Result<(), String> {
+pub fn set_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         use jni::objects::JValue;
-        use tauri::Manager;
 
         let window = app
             .get_webview_window("main")
@@ -22,7 +21,7 @@ pub fn set_keep_screen_on(app: AppHandle) -> Result<(), String> {
                     let Ok(window) =
                         env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])
                     else {
-                        log::error!("[ScreenWake] getWindow failed");
+                        log::error!("[VcpMobilePlugin] getWindow failed");
                         return;
                     };
                     if let Err(e) = env.call_method(
@@ -31,7 +30,7 @@ pub fn set_keep_screen_on(app: AppHandle) -> Result<(), String> {
                         "(I)V",
                         &[JValue::Int(FLAG_KEEP_SCREEN_ON)],
                     ) {
-                        log::error!("[ScreenWake] addFlags failed: {:?}", e);
+                        log::error!("[VcpMobilePlugin] addFlags failed: {:?}", e);
                     }
                 });
             })
@@ -41,14 +40,13 @@ pub fn set_keep_screen_on(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 清除屏幕常亮
+/// Clear keep-screen-on flag.
 #[tauri::command]
 #[allow(unused_variables)]
-pub fn clear_keep_screen_on(app: AppHandle) -> Result<(), String> {
+pub fn clear_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         use jni::objects::JValue;
-        use tauri::Manager;
 
         let window = app
             .get_webview_window("main")
@@ -60,7 +58,7 @@ pub fn clear_keep_screen_on(app: AppHandle) -> Result<(), String> {
                     let Ok(window) =
                         env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])
                     else {
-                        log::error!("[ScreenWake] getWindow failed");
+                        log::error!("[VcpMobilePlugin] getWindow failed");
                         return;
                     };
                     if let Err(e) = env.call_method(
@@ -69,7 +67,7 @@ pub fn clear_keep_screen_on(app: AppHandle) -> Result<(), String> {
                         "(I)V",
                         &[JValue::Int(FLAG_KEEP_SCREEN_ON)],
                     ) {
-                        log::error!("[ScreenWake] clearFlags failed: {:?}", e);
+                        log::error!("[VcpMobilePlugin] clearFlags failed: {:?}", e);
                     }
                 });
             })

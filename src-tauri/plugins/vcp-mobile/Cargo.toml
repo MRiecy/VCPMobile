@@ -1,0 +1,17 @@
+[package]
+name = "tauri-plugin-vcp-mobile"
+version = "0.1.0"
+authors = ["MRiecy"]
+description = "VCP Mobile Android native capabilities plugin"
+edition = "2021"
+rust-version = "1.77.2"
+links = "tauri-plugin-vcp-mobile"
+
+[dependencies]
+tauri = { version = "2.11.1" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+log = "0.4"
+
+[build-dependencies]
+tauri-plugin = { version = "2.6.2" }

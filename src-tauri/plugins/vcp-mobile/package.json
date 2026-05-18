@@ -1,0 +1,21 @@
+{
+  "name": "tauri-plugin-vcp-mobile",
+  "version": "0.1.0",
+  "description": "VCP Mobile Android native capabilities plugin",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "types": "./guest-js/index.ts",
+  "main": "./guest-js/index.ts",
+  "module": "./guest-js/index.ts",
+  "exports": {
+    "types": "./guest-js/index.ts",
+    "import": "./guest-js/index.ts"
+  },
+  "files": [
+    "guest-js",
+    "README.md"
+  ],
+  "dependencies": {
+    "@tauri-apps/api": "2.11.0"
+  }
+}
