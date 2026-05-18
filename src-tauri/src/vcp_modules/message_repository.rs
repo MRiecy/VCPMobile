@@ -144,9 +144,17 @@ fn run_batch_update_writer(
                 let mut stmt = tx
                     .prepare_cached(&update_sql)
                     .map_err(|e| e.to_string())?;
+                let now = chrono::Utc::now().timestamp_millis();
                 for (msg_id, bytes) in batch {
-                    stmt.execute(rusqlite::params![bytes, msg_id])
-                        .map_err(|e| e.to_string())?;
+                    // 适配 render_cache 的 3 参数 SQL (bytes, msg_id, now) 
+                    // 或 content_compress 的 2 参数 SQL (bytes, msg_id)
+                    if update_sql.contains("render_cache") {
+                        stmt.execute(rusqlite::params![bytes, msg_id, now])
+                            .map_err(|e| e.to_string())?;
+                    } else {
+                        stmt.execute(rusqlite::params![bytes, msg_id])
+                            .map_err(|e| e.to_string())?;
+                    }
                     processed += 1;
                 }
             }
@@ -194,7 +202,8 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
     let writer_handle = run_batch_update_writer(
         &db_path,
         rx_writer,
-        "UPDATE messages SET render_content = ? WHERE msg_id = ?",
+        "INSERT INTO render_cache (render_content, msg_id, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT(msg_id) DO UPDATE SET render_content = excluded.render_content, updated_at = excluded.updated_at",
         "render_rebuild_progress",
         app_handle.clone(),
         total_count,
@@ -415,15 +424,14 @@ impl MessageRepository {
         let content_hash =
             HashAggregator::compute_message_fingerprint(&message.content, &attachment_hashes);
 
-        // 2. 插入或更新消息
+        // 2. 插入或更新消息 (不含 render_content)
         sqlx::query(
             "INSERT INTO messages (
                 msg_id, topic_id, role, name, agent_id, content, timestamp,
                 is_thinking, is_group_message, group_id, finish_reason,
-                render_content,
                 content_hash,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
@@ -433,7 +441,6 @@ impl MessageRepository {
                 is_group_message = excluded.is_group_message,
                 group_id = excluded.group_id,
                 finish_reason = excluded.finish_reason,
-                render_content = excluded.render_content,
                 content_hash = excluded.content_hash,
                 updated_at = excluded.updated_at,
                 deleted_at = NULL",
@@ -449,10 +456,24 @@ impl MessageRepository {
         .bind(message.is_group_message.unwrap_or(false))
         .bind(&message.group_id)
         .bind(&message.finish_reason)
-        .bind(render_content)
         .bind(&content_hash)
         .bind(message.timestamp as i64) // created_at
         .bind(message.timestamp as i64) // updated_at
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // 2.1 插入或更新渲染缓存 (独立表)
+        sqlx::query(
+            "INSERT INTO render_cache (msg_id, render_content, updated_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(msg_id) DO UPDATE SET
+                render_content = excluded.render_content,
+                updated_at = excluded.updated_at",
+        )
+        .bind(&message.id)
+        .bind(render_content)
+        .bind(message.timestamp as i64)
         .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;

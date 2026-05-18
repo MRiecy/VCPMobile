@@ -197,7 +197,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             is_group_message INTEGER NOT NULL DEFAULT 0,
             group_id TEXT,
             finish_reason TEXT,
-            render_content BLOB,
             content_hash TEXT NOT NULL DEFAULT '', -- 消息内容指纹
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
@@ -207,6 +206,44 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 6.1 render_cache 表 (预渲染内容缓存 - 独立表以防止 B-Tree 溢出)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS render_cache (
+            msg_id TEXT PRIMARY KEY,
+            render_content BLOB,
+            updated_at BIGINT NOT NULL,
+            FOREIGN KEY (msg_id) REFERENCES messages(msg_id) ON DELETE CASCADE
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 迁移：将 messages 表中的旧 render_content 移动到新表
+    let has_old_render_column: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'render_content'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+        > 0;
+
+    if has_old_render_column {
+        println!("[DBManager] Migrating render_content to render_cache...");
+        // 复制数据
+        let _ = sqlx::query(
+            "INSERT OR IGNORE INTO render_cache (msg_id, render_content, updated_at) 
+             SELECT msg_id, render_content, updated_at FROM messages WHERE render_content IS NOT NULL",
+        )
+        .execute(pool)
+        .await;
+
+        // 移除旧列 (需要 SQLite 3.35+)
+        let _ = sqlx::query("ALTER TABLE messages DROP COLUMN render_content")
+            .execute(pool)
+            .await;
+    }
 
     // 6. attachments 表 (物理文件真理之源)
     sqlx::query(

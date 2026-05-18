@@ -439,9 +439,11 @@ impl DbWriteQueue {
             return Ok(());
         }
 
+        let now = chrono::Utc::now().timestamp_millis();
+
         // Phase 3: Turbo Mode - Chunked Bulk Insert
         const MAX_PARAMS: usize = 999;
-        const PARAMS_PER_MSG: usize = 15;
+        const PARAMS_PER_MSG: usize = 14;
         let chunk_size = MAX_PARAMS / PARAMS_PER_MSG;
 
         for chunk_indices in messages
@@ -450,22 +452,23 @@ impl DbWriteQueue {
             .collect::<Vec<_>>()
             .chunks(chunk_size)
         {
-            let mut sql = String::from(
+            // 1. 批量插入 messages 表 (不含 render_content)
+            let mut sql_msgs = String::from(
                 "INSERT INTO messages (
                     msg_id, topic_id, role, name, agent_id, content, timestamp,
                     is_thinking, is_group_message, group_id, finish_reason,
-                    render_content, content_hash, created_at, updated_at
+                    content_hash, created_at, updated_at
                 ) VALUES ",
             );
 
             for i in 0..chunk_indices.len() {
                 if i > 0 {
-                    sql.push_str(", ");
+                    sql_msgs.push_str(", ");
                 }
-                sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                sql_msgs.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             }
 
-            sql.push_str(
+            sql_msgs.push_str(
                 " ON CONFLICT(msg_id) DO UPDATE SET
                     content = excluded.content,
                     role = excluded.role,
@@ -475,38 +478,67 @@ impl DbWriteQueue {
                     is_group_message = excluded.is_group_message,
                     group_id = excluded.group_id,
                     finish_reason = excluded.finish_reason,
-                    render_content = excluded.render_content,
                     content_hash = excluded.content_hash,
                     updated_at = excluded.updated_at,
                     deleted_at = NULL",
             );
 
-            let mut stmt = tx.prepare_cached(&sql)?;
-            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            let mut stmt_msgs = tx.prepare_cached(&sql_msgs)?;
+            let mut params_msgs: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
             for (idx, msg) in chunk_indices {
-                params.push(Box::new(msg.id.clone()));
-                params.push(Box::new(topic_id.to_string()));
-                params.push(Box::new(msg.role.clone()));
-                params.push(Box::new(msg.name.clone()));
-                params.push(Box::new(msg.agent_id.clone()));
+                params_msgs.push(Box::new(msg.id.clone()));
+                params_msgs.push(Box::new(topic_id.to_string()));
+                params_msgs.push(Box::new(msg.role.clone()));
+                params_msgs.push(Box::new(msg.name.clone()));
+                params_msgs.push(Box::new(msg.agent_id.clone()));
                 let content_compressed = crate::vcp_modules::message_repository::ContentCompressor::compress(&msg.content)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
-                params.push(Box::new(content_compressed));
-                params.push(Box::new(msg.timestamp as i64));
-                params.push(Box::new(msg.is_thinking.unwrap_or(false)));
-                params.push(Box::new(msg.is_group_message.unwrap_or(false)));
-                params.push(Box::new(msg.group_id.clone()));
-                params.push(Box::new(msg.finish_reason.clone()));
-                params.push(Box::new(render_bytes[*idx].clone()));
-                params.push(Box::new(content_hashes[*idx].clone()));
-                params.push(Box::new(msg.timestamp as i64));
-                params.push(Box::new(msg.timestamp as i64));
+                params_msgs.push(Box::new(content_compressed));
+                params_msgs.push(Box::new(msg.timestamp as i64));
+                params_msgs.push(Box::new(msg.is_thinking.unwrap_or(false)));
+                params_msgs.push(Box::new(msg.is_group_message.unwrap_or(false)));
+                params_msgs.push(Box::new(msg.group_id.clone()));
+                params_msgs.push(Box::new(msg.finish_reason.clone()));
+                params_msgs.push(Box::new(content_hashes[*idx].clone()));
+                params_msgs.push(Box::new(msg.timestamp as i64));
+                params_msgs.push(Box::new(msg.timestamp as i64));
             }
 
-            let params_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
-            stmt.execute(&*params_refs)?;
+            let refs_msgs: Vec<&dyn rusqlite::ToSql> =
+                params_msgs.iter().map(|p| p.as_ref()).collect();
+            stmt_msgs.execute(&*refs_msgs)?;
+
+            // 2. 批量插入 render_cache 表
+            let mut sql_render = String::from(
+                "INSERT INTO render_cache (msg_id, render_content, updated_at) VALUES ",
+            );
+
+            for i in 0..chunk_indices.len() {
+                if i > 0 {
+                    sql_render.push_str(", ");
+                }
+                sql_render.push_str("(?, ?, ?)");
+            }
+
+            sql_render.push_str(
+                " ON CONFLICT(msg_id) DO UPDATE SET
+                    render_content = excluded.render_content,
+                    updated_at = excluded.updated_at",
+            );
+
+            let mut stmt_render = tx.prepare_cached(&sql_render)?;
+            let mut params_render: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+            for (idx, msg) in chunk_indices {
+                params_render.push(Box::new(msg.id.clone()));
+                params_render.push(Box::new(render_bytes[*idx].clone()));
+                params_render.push(Box::new(now));
+            }
+
+            let refs_render: Vec<&dyn rusqlite::ToSql> =
+                params_render.iter().map(|p| p.as_ref()).collect();
+            stmt_render.execute(&*refs_render)?;
         }
 
         // Phase 4: Attachment Optimization
