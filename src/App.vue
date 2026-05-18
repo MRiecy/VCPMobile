@@ -156,7 +156,7 @@ onUnmounted(() => {
     <!-- 3. 抽屉遮罩层位于主内容之后、抽屉之前，点击空白即可关闭 -->
     <Transition name="fade">
       <div v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-        class="vcp-overlay fixed inset-0 bg-black/12 md:hidden" @click.self="
+        class="vcp-overlay fixed inset-0 z-drawer bg-black/12 md:hidden" @click.self="
           layoutStore.setLeftDrawer(false);
         layoutStore.setRightDrawer(false);
         "></div>

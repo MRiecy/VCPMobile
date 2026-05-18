@@ -1,11 +1,13 @@
 ﻿<script setup lang="ts">
+import { LAYER_PAGE_BASE } from '../../core/constants/layers';
+
 interface Props {
   isOpen: boolean;
   zIndex?: number;
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  zIndex: 50,
+  zIndex: LAYER_PAGE_BASE,
 });
 </script>
 

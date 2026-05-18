@@ -4,10 +4,26 @@
   --secondary-bg: #28282c;
   --primary-text: #e0e0e0;
   --border-color: #3a3a3e;
-  
+
   /* 移动端安全区 - 增加物理回退值 (24px 是安卓常见的刘海高度) */
   --vcp-safe-top: env(safe-area-inset-top, 24px);
   --vcp-safe-bottom: env(safe-area-inset-bottom, 20px);
+
+  /* === VCP 全局层级系统 ===
+   * 用途：统一管理 z-index，消除魔法数字
+   * 规范：每层间隔 10，预留插入空间
+   */
+  --layer-content: 0;
+  --layer-local: 10;
+  --layer-drawer: 20;
+  --layer-overlay: 30;
+  --layer-page: 40;
+  --layer-toast: 50;
+  --layer-dialog: 60;
+  --layer-sheet: 70;
+  --layer-viewer: 80;
+  --layer-editor: 90;
+  --layer-boot: 100;
 }
 
 html, body, #app {

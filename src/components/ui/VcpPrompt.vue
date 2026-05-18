@@ -57,7 +57,7 @@ onMounted(() => {
   <Teleport to="body">
     <Transition name="fade">
       <div v-if="isOpen"
-        class="fixed inset-0 z-[300] flex items-start justify-center pt-[15vh] bg-black/40"
+        class="fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] bg-black/40"
         @click.self="handleCancel">
         <div
           class="vcp-prompt-modal bg-white dark:bg-[#1a2a30] w-11/12 max-w-sm rounded-2xl shadow-2xl border border-black/10 dark:border-white/10 p-5 transform transition-all relative overflow-hidden">

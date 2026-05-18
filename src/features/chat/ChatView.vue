@@ -260,7 +260,7 @@ onUnmounted(() => {
     <!-- 一键置底按钮 -->
     <Transition name="fade-slide-up">
       <button v-if="showScrollToBottom" @click="scrollToBottom(true)"
-        class="absolute bottom-24 right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-50 active:scale-90 transition-all">
+        class="absolute bottom-24 right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-local active:scale-90 transition-all">
         <ArrowDown :size="20" />
       </button>
     </Transition>

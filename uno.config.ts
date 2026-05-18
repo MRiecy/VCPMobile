@@ -46,5 +46,18 @@ export default defineConfig({
       lg: '1024px',
       xl: '1280px',
     },
+    zIndex: {
+      content: '0',
+      local: '10',
+      drawer: '20',
+      overlay: '30',
+      page: '40',
+      toast: '50',
+      dialog: '60',
+      sheet: '70',
+      viewer: '80',
+      editor: '90',
+      boot: '100',
+    },
   },
 })

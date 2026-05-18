@@ -58,7 +58,7 @@ onMounted(() => {
   <Teleport to="body">
     <!-- 遮罩层 -->
     <Transition name="fade">
-      <div v-if="modelValue" class="fixed inset-0 bg-black/50 z-[999]" @click="close"
+      <div v-if="modelValue" class="fixed inset-0 bg-black/50 z-sheet" @click="close"
         @touchmove.prevent>
       </div>
     </Transition>
@@ -66,7 +66,7 @@ onMounted(() => {
     <!-- 抽屉内容 -->
     <Transition name="slide-up">
       <div v-if="modelValue"
-        class="fixed bottom-0 left-0 right-0 z-[1000] bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden"
+        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden"
         style="padding-bottom: env(safe-area-inset-bottom, 20px);">
 
         <!-- 顶部拉手条 -->

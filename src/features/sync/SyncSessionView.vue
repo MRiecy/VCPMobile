@@ -7,6 +7,12 @@ import { useSyncSessionStore } from '../../core/stores/syncSession';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useDataReload } from '../../core/composables/useDataReload';
 
+interface Props {
+  zIndex?: number;
+}
+
+const props = defineProps<Props>();
+
 const store = useSyncSessionStore();
 const overlayStore = useOverlayStore();
 const { performFullReload } = useDataReload();
@@ -86,7 +92,7 @@ const handleClose = async () => {
 </script>
 
 <template>
-  <SlidePage :is-open="store.isOpen" :z-index="100">
+  <SlidePage :is-open="store.isOpen" :z-index="props.zIndex">
     <div class="fixed inset-0 flex flex-col bg-[#0a0f14] text-white overflow-hidden"
          :class="{ 'pointer-events-none': !store.isOpen }">
 

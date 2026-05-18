@@ -73,7 +73,7 @@ watch(() => props.img, (newImg) => {
 
 <template>
   <Teleport to="#vcp-feature-overlays">
-    <div class="avatar-cropper-overlay fixed inset-0 z-[2000] flex flex-col bg-black text-white animate-in fade-in duration-300 pointer-events-auto">
+    <div class="avatar-cropper-overlay fixed inset-0 z-viewer flex flex-col bg-black text-white animate-in fade-in duration-300 pointer-events-auto">
       <header class="p-4 flex items-center justify-between border-b border-white/10 shrink-0 pt-[calc(var(--vcp-safe-top,24px)+10px)]">
         <button @click="emit('cancel')" class="px-4 py-2 text-sm font-bold text-white/60 active:scale-95 transition-all">
           取消

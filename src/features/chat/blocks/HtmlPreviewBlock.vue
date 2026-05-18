@@ -127,7 +127,7 @@ watch(fullScreenTab, (val) => {
         leave-from-class="translate-y-0 opacity-100"
         leave-to-class="translate-y-10 opacity-0"
       >
-        <div v-show="isFullScreen" class="fixed inset-0 z-[10000] flex flex-col"
+        <div v-show="isFullScreen" class="fixed inset-0 z-editor flex flex-col"
           :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-[#f6f8fa] text-gray-900'">
           
           <!-- 全屏 Header -->

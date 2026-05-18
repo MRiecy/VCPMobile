@@ -23,7 +23,7 @@ const handleStopAll = () => {
 <template>
   <Transition name="slide-fade">
     <div v-if="isVisible" 
-         class="absolute -top-12 left-1/2 -translate-x-1/2 z-50">
+         class="absolute -top-12 left-1/2 -translate-x-1/2 z-local">
       <button 
         @click="handleStopAll"
         class="flex items-center gap-2 px-4 py-2 bg-red-500/80 hover:bg-red-600 border border-white/20 rounded-full text-white text-xs font-bold shadow-lg shadow-red-500/20 active:scale-95 transition-all"
