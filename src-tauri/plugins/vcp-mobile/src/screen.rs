@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 #[cfg(target_os = "android")]
 const FLAG_KEEP_SCREEN_ON: i32 = 0x00000080;

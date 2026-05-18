@@ -13,5 +13,8 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 log = "0.4"
 
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 [build-dependencies]
 tauri-plugin = { version = "2.6.2" }

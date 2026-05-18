@@ -1,27 +1,27 @@
 package com.vcp.mobile
 
 import android.app.Activity
+import android.util.Log
 import android.webkit.WebView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import app.tauri.plugin.JSObject
 
 /**
  * 键盘 IME Insets 管理器
  *
  * 职责：
  * 1. 监听系统 WindowInsets 中 IME（键盘）区域的变化
- * 2. 将键盘高度与安全区域信息通过 Plugin.trigger() 实时推送到前端
+ * 2. 将键盘高度与安全区域信息通过 evaluateJavascript 实时推送到前端
+ *    （与 Plugin.trigger() 不同，evaluateJavascript 直接注入 window.CustomEvent，
+ *     前端通过 window.addEventListener 即可接收，无需 Tauri 事件通道注册）
  * 3. 不再通过 setPadding 干预 WebView 布局，完全交由前端 CSS 接管
  */
 class KeyboardInsetsManager(private val activity: Activity) {
 
     private var webViewRef: WebView? = null
-    private var emit: ((String, JSObject) -> Unit)? = null
 
-    fun attach(webView: WebView, emitFn: (String, JSObject) -> Unit) {
+    fun attach(webView: WebView) {
         webViewRef = webView
-        emit = emitFn
         val rootView = activity.window.decorView.rootView
 
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { _, insets ->
@@ -30,13 +30,16 @@ class KeyboardInsetsManager(private val activity: Activity) {
             val isKeyboardVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             val keyboardHeight = if (isKeyboardVisible) ime.bottom else 0
 
-            val payload = JSObject().apply {
-                put("height", keyboardHeight)
-                put("visible", isKeyboardVisible)
-                put("safeAreaBottom", systemBars.bottom)
-            }
+            Log.d("VCPKeyboard", "Native inset event: height=$keyboardHeight, visible=$isKeyboardVisible, safeArea=${systemBars.bottom}")
 
-            emit?.invoke("vcp-keyboard-inset", payload)
+            emit(
+                "vcp-keyboard-inset",
+                mapOf(
+                    "height" to keyboardHeight,
+                    "visible" to isKeyboardVisible,
+                    "safeAreaBottom" to systemBars.bottom
+                )
+            )
 
             insets
         }
@@ -51,6 +54,38 @@ class KeyboardInsetsManager(private val activity: Activity) {
             height = if (visible) ime.bottom else 0,
             visible = visible
         )
+    }
+
+    private fun emit(eventName: String, detail: Map<String, Any?>) {
+        val json = serializeValue(detail)
+        val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
+        webViewRef?.evaluateJavascript(script, null)
+    }
+
+    private fun serializeValue(value: Any?): String {
+        return when (value) {
+            null -> "null"
+            is String -> "\"${escapeJson(value)}\""
+            is Boolean -> value.toString()
+            is Number -> value.toString()
+            is Map<*, *> -> {
+                val entries = value.entries.joinToString(", ") { (k, v) ->
+                    "\"$k\": ${serializeValue(v)}"
+                }
+                "{ $entries }"
+            }
+            else -> "\"${escapeJson(value.toString())}\""
+        }
+    }
+
+    private fun escapeJson(s: String): String {
+        return s
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\b", "\\b")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
     }
 
     data class KeyboardState(val height: Int, val visible: Boolean)

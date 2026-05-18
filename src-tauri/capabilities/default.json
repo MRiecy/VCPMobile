@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "vcp-mobile:default",
     "core:window:allow-close"
   ],
   "protocols": {
