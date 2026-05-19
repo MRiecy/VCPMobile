@@ -46,30 +46,24 @@ class StreamKeepaliveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "onCreate called")
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val agentName = intent?.getStringExtra(EXTRA_AGENT_NAME) ?: "Agent"
-        Log.i(TAG, "onStartCommand: agentName=$agentName, startId=$startId")
 
         val notification = buildNotification(agentName)
-        Log.i(TAG, "notification built, title=$agentName")
 
         // Android 14+ 必须声明前台服务类型
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            Log.i(TAG, "calling startForeground with REMOTE_MESSAGING type")
             startForeground(
                 NOTIFICATION_ID,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
             )
         } else {
-            Log.i(TAG, "calling startForeground")
             startForeground(NOTIFICATION_ID, notification)
         }
-        Log.i(TAG, "startForeground completed")
 
         return START_STICKY
     }
@@ -78,7 +72,6 @@ class StreamKeepaliveService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Log.i(TAG, "creating notification channel: $CHANNEL_ID")
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "神经同步通道",
@@ -91,9 +84,6 @@ class StreamKeepaliveService : Service() {
             }
             getSystemService(NotificationManager::class.java)
                 ?.createNotificationChannel(channel)
-            Log.i(TAG, "notification channel created")
-        } else {
-            Log.i(TAG, "skipping notification channel creation (pre-O)")
         }
     }
 
