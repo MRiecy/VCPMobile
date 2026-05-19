@@ -32,8 +32,11 @@ fn process_small_image_with_image_crate(path: &Path) -> Result<String, String> {
             ((1120f32 * w as f32 / h as f32).round() as u32, 1120u32)
         };
 
+        // 强制转换为 RGB8，因为 JPEG 不支持 Alpha 通道 (RGBA8)
+        // 这也解决了 "The encoder or decoder for Jpeg does not support the color type Rgba8" 错误
+        let rgb_img = img.to_rgb8();
         let resized =
-            image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Lanczos3);
+            image::imageops::resize(&rgb_img, new_w, new_h, image::imageops::FilterType::Lanczos3);
 
         let mut buf = Vec::new();
         let encoder = JpegEncoder::new_with_quality(&mut buf, 85);
@@ -42,7 +45,7 @@ fn process_small_image_with_image_crate(path: &Path) -> Result<String, String> {
                 resized.as_raw(),
                 resized.width(),
                 resized.height(),
-                ExtendedColorType::Rgba8,
+                ExtendedColorType::Rgb8,
             )
             .map_err(|e| format!("JPEG encode failed: {}", e))?;
 

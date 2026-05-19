@@ -47,20 +47,25 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     @Command
     fun startStreamingService(invoke: Invoke) {
-        Log.i(TAG, "startStreamingService called")
         try {
+            // Android 13+ 必须动态请求 POST_NOTIFICATIONS 权限，否则通知渠道被系统禁用
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    activity.requestPermissions(
+                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001
+                    )
+                }
+            }
+
             val args = invoke.parseArgs(StartStreamArgs::class.java)
-            Log.i(TAG, "parsed args: agentName=${args.agentName}")
             val intent = StreamKeepaliveService.createIntent(activity, args.agentName)
-            Log.i(TAG, "intent created: $intent")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Log.i(TAG, "calling startForegroundService")
                 activity.startForegroundService(intent)
             } else {
-                Log.i(TAG, "calling startService")
                 activity.startService(intent)
             }
-            Log.i(TAG, "service start call completed")
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "startStreamingService failed", e)
@@ -70,11 +75,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun stopStreamingService(invoke: Invoke) {
-        Log.i(TAG, "stopStreamingService called")
         try {
             val intent = StreamKeepaliveService.createIntent(activity, "")
             activity.stopService(intent)
-            Log.i(TAG, "stopService completed")
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "stopStreamingService failed", e)
