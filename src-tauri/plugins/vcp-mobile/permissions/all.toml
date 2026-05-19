@@ -1,4 +1,7 @@
-const COMMANDS: &[&str] = &[
+[[permission]]
+identifier = "allow-all"
+description = "Allow all commands in vcp-mobile plugin"
+commands.allow = [
     "set_keep_screen_on",
     "clear_keep_screen_on",
     "start_stream_service",
@@ -6,10 +9,4 @@ const COMMANDS: &[&str] = &[
     "check_all_permissions",
     "request_android_permission",
     "move_task_to_back",
-];
-
-fn main() {
-    tauri_plugin::Builder::new(COMMANDS)
-        .android_path("android")
-        .build();
-}
+]

@@ -23,12 +23,13 @@ export const LAYER_LOCAL = 10;
 export const LAYER_DRAWER = 20;
 export const LAYER_OVERLAY = 30;
 export const LAYER_PAGE_BASE = 40;
-export const LAYER_TOAST = 50;
+export const LAYER_SHEET = 50;
 export const LAYER_DIALOG = 60;
-export const LAYER_SHEET = 70;
-export const LAYER_VIEWER = 80;
-export const LAYER_EDITOR = 90;
+export const LAYER_VIEWER = 70;
+export const LAYER_EDITOR = 80;
+export const LAYER_TOAST = 90;
 export const LAYER_BOOT = 100;
+export const LAYER_GATE = 110;
 
 /** 页面栈最多支持的层数（预留到 49，封顶） */
 export const LAYER_PAGE_MAX_OFFSET = 9;

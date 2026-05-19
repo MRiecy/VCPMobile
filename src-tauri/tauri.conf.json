@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "vcp-mobile",
         "width": 800,
         "height": 600

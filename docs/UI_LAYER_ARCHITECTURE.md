@@ -31,17 +31,18 @@
 | L2 | `drawer` | 20 | 侧边栏抽屉 + 遮罩 | `AgentSidebar`, `RightSidebar`, `App.vue` 遮罩 |
 | L3 | `overlay` | 30 | 全局覆盖容器 | `GlobalOverlayManager` |
 | L4 | `page` | 40–49 | 页面栈（SlidePage） | `SettingsView`, `AgentSettingsView`, `SyncSessionView`… |
-| L5 | `toast` | 50 | Toast 通知 | `ToastManager` |
+| L5 | `sheet` | 50 | 底部弹层 | `BottomSheet`, `ModelSelector` |
 | L6 | `dialog` | 60 | 对话框 / 提示 | `VcpPrompt`, `UpdatePrompt`, `ContextMenu` |
-| L7 | `sheet` | 70 | 底部弹层 | `BottomSheet`, `ModelSelector` |
-| L8 | `viewer` | 80 | 全屏查看器 / 编辑器 | `AttachmentViewer`, `FullScreenEditor`, `AvatarCropper` |
-| L9 | `editor` | 90 | 最高级全屏编辑器 | `HtmlPreviewBlock` (fullscreen) |
+| L7 | `viewer` | 70 | 全屏查看器 / 编辑器 | `AttachmentViewer`, `FullScreenEditor`, `AvatarCropper` |
+| L8 | `editor` | 80 | 最高级全屏编辑器 | `HtmlPreviewBlock` (fullscreen) |
+| L9 | `toast` | 90 | Toast 通知 | `ToastManager` |
 | L10 | `boot` | 100 | 启动屏 | `BootScreen` |
+| L11 | `gate` | 110 | 权限门禁页 | `PermissionGate` |
 
 **层叠秩序口诀**：
 
 ```
-内容 < 局部 < 抽屉 < 覆盖 < 页面 < Toast < 对话框 < 弹层 < 查看器 < 编辑器 < 启动
+内容 < 局部 < 抽屉 < 覆盖 < 页面 < 弹层 < 对话框 < 查看器 < 编辑器 < Toast < 启动 < 门禁
 ```
 
 ---
@@ -61,12 +62,13 @@
   --layer-drawer: 20;
   --layer-overlay: 30;
   --layer-page: 40;
-  --layer-toast: 50;
+  --layer-sheet: 50;
   --layer-dialog: 60;
-  --layer-sheet: 70;
-  --layer-viewer: 80;
-  --layer-editor: 90;
+  --layer-viewer: 70;
+  --layer-editor: 80;
+  --layer-toast: 90;
   --layer-boot: 100;
+  --layer-gate: 110;
 }
 ```
 
@@ -84,15 +86,17 @@ theme: {
     drawer: '20',
     overlay: '30',
     page: '40',
-    toast: '50',
+    sheet: '50',
     dialog: '60',
-    sheet: '70',
-    viewer: '80',
-    editor: '90',
+    viewer: '70',
+    editor: '80',
+    toast: '90',
     boot: '100',
-  },
-}
-```
+    gate: '110',
+    },
+    },
+    }
+
 
 适用场景：Vue Template 的 `class` 属性中直接使用，如 `class="fixed inset-0 z-dialog"`。
 
@@ -106,12 +110,13 @@ export const LAYER_LOCAL = 10;
 export const LAYER_DRAWER = 20;
 export const LAYER_OVERLAY = 30;
 export const LAYER_PAGE_BASE = 40;
-export const LAYER_TOAST = 50;
+export const LAYER_SHEET = 50;
 export const LAYER_DIALOG = 60;
-export const LAYER_SHEET = 70;
-export const LAYER_VIEWER = 80;
-export const LAYER_EDITOR = 90;
+export const LAYER_VIEWER = 70;
+export const LAYER_EDITOR = 80;
+export const LAYER_TOAST = 90;
 export const LAYER_BOOT = 100;
+export const LAYER_GATE = 110;
 
 export const getPageZIndex = (stackIndex: number): number => {
   const offset = Math.min(stackIndex, 9); // 封顶到 49
@@ -198,6 +203,7 @@ const zIndex = getPageZIndex(stackIndex); // 40 + min(index, 9)
 | 文件 | 原值 | 新值 | 备注 |
 |------|------|------|------|
 | `BootScreen.vue` | `z-[1000]` / `z-[1001]` | `z-boot` / `z-[101]` | 启动屏最高 |
+| `PermissionGate.vue` | 新增 | `z-gate` | 物理权限门禁 |
 | `HtmlPreviewBlock.vue` | `z-[10000]` | `z-editor` | 全屏HTML编辑器 |
 | `FullScreenEditor.vue` | `z-[2000]` | `z-viewer` | 全屏文本编辑器 |
 | `AvatarCropper.vue` | `z-[2000]` | `z-viewer` | 头像裁剪 |

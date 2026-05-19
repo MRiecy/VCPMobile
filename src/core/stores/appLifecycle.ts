@@ -6,7 +6,7 @@ import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
 import { useNotificationStore } from './notification';
 
-export type AppState = 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'INITIAL_SYNCING' | 'READY' | 'ERROR';
+export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'INITIAL_SYNCING' | 'READY' | 'ERROR';
 
 export interface CoreStatus {
   status: 'initializing' | 'ready' | 'error' | 'none';
@@ -39,6 +39,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
   const statusText = computed(() => {
     switch (state.value) {
+      case 'PERMISSIONS':
+        return '正在检查系统权限...';
       case 'BOOTING':
         return '正在初始化界面资源...';
       case 'CONNECTING':
@@ -276,8 +278,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     }
   };
 
-  const bootstrap = async () => {
-    if (bootstrapPromise) {
+  const bootstrap = async (force = false) => {
+    if (bootstrapPromise && !force) {
       console.log('[Lifecycle] Reusing existing bootstrap promise');
       return bootstrapPromise;
     }
@@ -287,6 +289,16 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         isBootstrapping.value = true;
         errorMsg.value = null;
         hasBootstrapped.value = false;
+
+        setState('PERMISSIONS', '检查系统权限完整性');
+        const pStatus = await invoke<{ notification: boolean; storage: boolean; battery: boolean }>('plugin:vcp-mobile|check_all_permissions');
+        if (!pStatus.notification || !pStatus.storage || !pStatus.battery) {
+          console.log('[Lifecycle] Missing permissions, waiting for user action');
+          // 清除 Promise，以便下次点击“进入应用”时能重新触发
+          bootstrapPromise = null;
+          isBootstrapping.value = false;
+          return;
+        }
 
         setState('BOOTING', '开始前端主线程启动编排');
         

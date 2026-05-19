@@ -5,10 +5,11 @@ use tauri::{
 
 mod screen;
 pub mod stream;
+mod system;
 
 /// Plugin state shared across commands
 pub struct VcpMobileState<R: Runtime> {
-    pub streaming_count: std::sync::atomic::AtomicU32,
+    pub active_streams: std::sync::Mutex<Vec<(String, u32)>>,
     #[cfg(target_os = "android")]
     pub plugin_handle: std::sync::Mutex<Option<tauri::plugin::PluginHandle<R>>>,
     #[cfg(not(target_os = "android"))]
@@ -23,13 +24,16 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             screen::clear_keep_screen_on,
             stream::start_stream_service,
             stream::stop_stream_service,
+            system::check_all_permissions,
+            system::request_android_permission,
+            system::move_task_to_back,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]
             let plugin_handle = _api.register_android_plugin("com.vcp.mobile", "VcpMobilePlugin")?;
 
             app.manage(VcpMobileState::<R> {
-                streaming_count: std::sync::atomic::AtomicU32::new(0),
+                active_streams: std::sync::Mutex::new(Vec::new()),
                 #[cfg(target_os = "android")]
                 plugin_handle: std::sync::Mutex::new(Some(plugin_handle)),
                 #[cfg(not(target_os = "android"))]

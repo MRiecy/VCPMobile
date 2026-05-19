@@ -1,74 +1,106 @@
-use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::VcpMobileState;
 
 /// Start the stream keepalive service.
-/// Counter 0→1 triggers actual Android foreground service start.
 pub fn start_stream_service_inner<R: Runtime>(
     app: &AppHandle<R>,
     agent_name: &str,
 ) -> Result<(), String> {
     let state = app.state::<VcpMobileState<R>>();
-    let count = state.streaming_count.fetch_add(1, Ordering::SeqCst);
-
-    if count == 0 {
-        #[cfg(target_os = "android")]
-        {
-            let handle = state
-                .plugin_handle
-                .lock()
-                .map_err(|e| e.to_string())?;
-            let plugin_handle = handle
-                .as_ref()
-                .ok_or("Plugin handle not initialized")?;
-            plugin_handle
-                .run_mobile_plugin::<serde_json::Value>(
-                    "startStreamingService",
-                    serde_json::json!({ "agentName": agent_name }),
-                )
-                .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    
+    let active_names = {
+        let mut streams = state.active_streams.lock().map_err(|e| e.to_string())?;
+        
+        // 更新计数或添加新 Agent
+        if let Some(pos) = streams.iter().position(|(name, _)| name == agent_name) {
+            streams[pos].1 += 1;
+        } else {
+            streams.push((agent_name.to_string(), 1));
         }
+
+        // 格式化名字列表：A、B、C...
+        let names: Vec<&str> = streams.iter().map(|(name, _)| name.as_str()).collect();
+        if names.len() > 3 {
+            format!("{}...", names[..3].join("、"))
+        } else {
+            names.join("、")
+        }
+    };
+
+    #[cfg(target_os = "android")]
+    {
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "startStreamingService",
+                serde_json::json!({ "agentName": active_names }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
     }
 
     log::info!(
-        "[VcpMobilePlugin] Stream started for '{}'. Active count: {}",
+        "[VcpMobilePlugin] Stream started for '{}'. Current notification: {}",
         agent_name,
-        count + 1
+        active_names
     );
 
     Ok(())
 }
 
 /// Stop the stream keepalive service.
-/// Counter reaches 0 triggers actual Android service stop.
-pub fn stop_stream_service_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+pub fn stop_stream_service_inner<R: Runtime>(app: &AppHandle<R>, agent_name: &str) -> Result<(), String> {
     let state = app.state::<VcpMobileState<R>>();
-    let count = state.streaming_count.fetch_sub(1, Ordering::SeqCst);
+    
+    let (_should_stop, active_names) = {
+        let mut streams = state.active_streams.lock().map_err(|e| e.to_string())?;
+        
+        if let Some(pos) = streams.iter().position(|(name, _)| name == agent_name) {
+            if streams[pos].1 > 1 {
+                streams[pos].1 -= 1;
+            } else {
+                streams.remove(pos);
+            }
+        }
 
-    if count <= 1 {
-        state.streaming_count.store(0, Ordering::SeqCst);
-        #[cfg(target_os = "android")]
-        {
-            let handle = state
-                .plugin_handle
-                .lock()
-                .map_err(|e| e.to_string())?;
-            let plugin_handle = handle
-                .as_ref()
-                .ok_or("Plugin handle not initialized")?;
+        let names: Vec<&str> = streams.iter().map(|(name, _)| name.as_str()).collect();
+        let formatted = if names.len() > 3 {
+            format!("{}...", names[..3].join("、"))
+        } else {
+            names.join("、")
+        };
+        
+        (streams.is_empty(), formatted)
+    };
+
+    #[cfg(target_os = "android")]
+    {
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        
+        if _should_stop {
             plugin_handle
                 .run_mobile_plugin::<serde_json::Value>(
                     "stopStreamingService",
                     serde_json::json!({}),
                 )
                 .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        } else {
+            // 更新通知内容为剩余的 Agent
+            plugin_handle
+                .run_mobile_plugin::<serde_json::Value>(
+                    "startStreamingService",
+                    serde_json::json!({ "agentName": active_names }),
+                )
+                .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
         }
     }
 
     log::info!(
-        "[VcpMobilePlugin] Stream stopped. Active count: {}",
-        state.streaming_count.load(Ordering::SeqCst)
+        "[VcpMobilePlugin] Stream stopped for '{}'. Current notification: {}",
+        agent_name,
+        active_names
     );
 
     Ok(())
@@ -83,6 +115,6 @@ pub fn start_stream_service<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn stop_stream_service<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    stop_stream_service_inner(&app)
+pub fn stop_stream_service<R: Runtime>(app: AppHandle<R>, agent_name: String) -> Result<(), String> {
+    stop_stream_service_inner(&app, &agent_name)
 }

@@ -11,10 +11,17 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Plugin
+import android.content.Intent
 import android.util.Log
+import android.os.PowerManager
+import android.net.Uri
+import android.provider.Settings
+import android.content.pm.PackageManager
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import app.tauri.plugin.JSObject
 import app.tauri.plugin.Invoke
 import com.vcp.mobile.service.StreamKeepaliveService
-import com.vcp.mobile.service.StreamingActionReceiver
 
 @TauriPlugin
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
@@ -25,7 +32,77 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
-    private lateinit var streamingActionReceiver: StreamingActionReceiver
+
+    // ==================================================================
+    // Permissions & App Control
+    // ==================================================================
+    @Command
+    fun checkAllPermissions(invoke: Invoke) {
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+        
+        val notificationGranted = if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        val storageGranted = if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+
+        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+
+        val result = JSObject()
+        result.put("notification", notificationGranted)
+        result.put("storage", storageGranted)
+        result.put("battery", batteryOptimizationIgnored)
+        
+        invoke.resolve(result)
+    }
+
+    @Command
+    fun requestAndroidPermission(invoke: Invoke) {
+        val args = invoke.parseArgs(RequestPermissionArgs::class.java)
+        when (args.type) {
+            "notification" -> {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    ActivityCompat.requestPermissions(activity, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+                }
+            }
+            "storage" -> {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    ActivityCompat.requestPermissions(activity, arrayOf(android.Manifest.permission.READ_MEDIA_IMAGES), 1002)
+                } else {
+                    ActivityCompat.requestPermissions(
+                        activity,
+                        arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                        1002
+                    )
+                }
+            }
+            "battery" -> {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:${activity.packageName}")
+                    }
+                    activity.startActivity(intent)
+                } catch (e: Exception) {
+                    // Fallback to general battery optimization settings if specific intent fails
+                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    activity.startActivity(intent)
+                }
+            }
+        }
+        invoke.resolve()
+    }
+
+    @Command
+    fun moveTaskToBack(invoke: Invoke) {
+        activity.moveTaskToBack(true)
+        invoke.resolve()
+    }
 
     // ==================================================================
     // Screen
@@ -48,17 +125,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun startStreamingService(invoke: Invoke) {
         try {
-            // Android 13+ 必须动态请求 POST_NOTIFICATIONS 权限，否则通知渠道被系统禁用
-            if (Build.VERSION.SDK_INT >= 33) {
-                if (activity.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
-                    != android.content.pm.PackageManager.PERMISSION_GRANTED
-                ) {
-                    activity.requestPermissions(
-                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001
-                    )
-                }
-            }
-
             val args = invoke.parseArgs(StartStreamArgs::class.java)
             val intent = StreamKeepaliveService.createIntent(activity, args.agentName)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -93,19 +159,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         keyboardInsetsManager.attach(webView)
         lifecycleBridge.attach(activity, webView)
-
-        // 注册流式中断广播接收器
-        streamingActionReceiver = StreamingActionReceiver()
-        val filter = IntentFilter(StreamingActionReceiver.STREAM_INTERRUPT_ACTION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            activity.registerReceiver(streamingActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            activity.registerReceiver(streamingActionReceiver, filter)
-        }
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
-        activity.unregisterReceiver(streamingActionReceiver)
         super.onDestroy(activity)
     }
 
@@ -118,4 +174,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 @InvokeArg
 class StartStreamArgs {
     lateinit var agentName: String
+}
+
+@InvokeArg
+class RequestPermissionArgs {
+    lateinit var type: String
 }

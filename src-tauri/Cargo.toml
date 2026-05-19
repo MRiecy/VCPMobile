@@ -77,3 +77,4 @@ lto = true      # 启用链接时优化
 codegen-units = 1   # 限制并行编译单元来提供更多的全局优化机会
 panic = "abort" # 移除异常展开代码，减小体积
 strip = true    # 移除符号信息，显著减小安装包大小
+

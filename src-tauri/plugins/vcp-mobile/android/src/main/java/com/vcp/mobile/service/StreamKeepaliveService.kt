@@ -30,7 +30,6 @@ class StreamKeepaliveService : Service() {
         const val CHANNEL_ID = "vcp_stream_keepalive"
         const val NOTIFICATION_ID = 0x53545201 // "STR" + 01
         const val EXTRA_AGENT_NAME = "agent_name"
-        const val ACTION_STOP_STREAMING = "com.vcp.avatar.action.STOP_STREAMING"
         private const val TAG = "VcpMobileService"
 
         /**
@@ -105,22 +104,12 @@ class StreamKeepaliveService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 停止生成按钮：发送广播
-        val stopIntent = Intent(this, StreamingActionReceiver::class.java).apply {
-            action = ACTION_STOP_STREAMING
-        }
-        val stopPendingIntent = PendingIntent.getBroadcast(
-            this, 0, stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(agentName)
             .setContentText("思考中……")
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
             .setContentIntent(openPendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止生成", stopPendingIntent)
             .build()
     }
 }

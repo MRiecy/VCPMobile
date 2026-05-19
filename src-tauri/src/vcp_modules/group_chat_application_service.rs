@@ -227,7 +227,7 @@ pub async fn internal_process_group_chat_message(
 
         // 停止前台服务
         if let Err(e) =
-            tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(&app_handle)
+            tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(&app_handle, &agent_name)
         {
             println!(
                 "[GroupChatAppService] Failed to stop streaming service: {}",

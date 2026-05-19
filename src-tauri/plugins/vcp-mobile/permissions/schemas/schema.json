@@ -295,6 +295,24 @@
       "type": "string",
       "oneOf": [
         {
+          "description": "Allow all commands in vcp-mobile plugin",
+          "type": "string",
+          "const": "allow-all",
+          "markdownDescription": "Allow all commands in vcp-mobile plugin"
+        },
+        {
+          "description": "Enables the check_all_permissions command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-all-permissions",
+          "markdownDescription": "Enables the check_all_permissions command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_all_permissions command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-all-permissions",
+          "markdownDescription": "Denies the check_all_permissions command without any pre-configured scope."
+        },
+        {
           "description": "Enables the clear_keep_screen_on command without any pre-configured scope.",
           "type": "string",
           "const": "allow-clear-keep-screen-on",
@@ -305,6 +323,30 @@
           "type": "string",
           "const": "deny-clear-keep-screen-on",
           "markdownDescription": "Denies the clear_keep_screen_on command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the move_task_to_back command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-move-task-to-back",
+          "markdownDescription": "Enables the move_task_to_back command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the move_task_to_back command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-move-task-to-back",
+          "markdownDescription": "Denies the move_task_to_back command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_android_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-android-permission",
+          "markdownDescription": "Enables the request_android_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_android_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-android-permission",
+          "markdownDescription": "Denies the request_android_permission command without any pre-configured scope."
         },
         {
           "description": "Enables the set_keep_screen_on command without any pre-configured scope.",

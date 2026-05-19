@@ -193,8 +193,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (aurora) {
         msg!.content = aurora.content;
         msg!.tailContent = aurora.tail;
-        msg!.blocks = (aurora.stable_blocks || []) as any;
-        msg!.tailBlock = aurora.tail_block as any;
+        msg!.blocks = (aurora.stableBlocks || []) as any;
+        msg!.tailBlock = aurora.tailBlock as any;
       }
       msg!.isThinking = false;
       addSessionStream(itemId, topicId, actualMessageId);

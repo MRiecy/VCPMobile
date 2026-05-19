@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-check-all-permissions"
+description = "Enables the check_all_permissions command without any pre-configured scope."
+commands.allow = ["check_all_permissions"]
+
+[[permission]]
+identifier = "deny-check-all-permissions"
+description = "Denies the check_all_permissions command without any pre-configured scope."
+commands.deny = ["check_all_permissions"]

@@ -1,12 +1,8 @@
 package com.vcp.avatar
 
-import android.content.Context
-import android.content.IntentFilter
-import android.os.Build
 import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
-import com.vcp.mobile.service.StreamingActionReceiver
 
 /**
  * VCP Mobile Android 主 Activity
@@ -17,20 +13,9 @@ import com.vcp.mobile.service.StreamingActionReceiver
  */
 class MainActivity : TauriActivity() {
 
-    private lateinit var streamingActionReceiver: StreamingActionReceiver
-
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-
-        // 注册流式中断广播接收器（插件中也会注册，双重注册无害）
-        streamingActionReceiver = StreamingActionReceiver()
-        val filter = IntentFilter(StreamingActionReceiver.STREAM_INTERRUPT_ACTION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            registerReceiver(streamingActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(streamingActionReceiver, filter)
-        }
     }
 
     override fun onWebViewCreate(webView: WebView) {
@@ -51,10 +36,5 @@ class MainActivity : TauriActivity() {
                 }
             }
         )
-    }
-
-    override fun onDestroy() {
-        unregisterReceiver(streamingActionReceiver)
-        super.onDestroy()
     }
 }

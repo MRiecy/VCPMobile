@@ -4,7 +4,7 @@ import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useAttachmentStore } from '../../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../../core/stores/notification';
 
-const LONG_TEXT_THRESHOLD = 1200;
+const LONG_TEXT_THRESHOLD = 1000;
 
 export function useLongTextPaste(input: Ref<string>) {
   const sessionStore = useChatSessionStore();

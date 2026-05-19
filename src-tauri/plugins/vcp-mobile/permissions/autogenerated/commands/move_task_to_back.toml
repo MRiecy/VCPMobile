@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-move-task-to-back"
+description = "Enables the move_task_to_back command without any pre-configured scope."
+commands.allow = ["move_task_to_back"]
+
+[[permission]]
+identifier = "deny-move-task-to-back"
+description = "Denies the move_task_to_back command without any pre-configured scope."
+commands.deny = ["move_task_to_back"]

@@ -120,7 +120,8 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
             result.push_str(&placeholder);
 
             // 递归解析内部内容
-            let inner_nodes = parse_markdown_to_ast(&inner_text);
+            let deindented_inner = trim_common_leading_indent(&inner_text);
+            let inner_nodes = parse_markdown_to_ast(&deindented_inner);
             containers.push((open_tag, inner_nodes, close_tag));
 
             last_pos = close_end;
@@ -135,6 +136,37 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
 
     result.push_str(&text[last_pos..]);
     (result, containers)
+}
+
+/// 去除文本中所有非空行的公共前导缩进（空格/制表符）。
+/// 用于 HTML 容器内部文本：去除嵌套带来的绝对缩进，保留相对结构，
+/// 防止 pulldown-cmark 将缩进内容误识别为 Indented Code Block。
+fn trim_common_leading_indent(text: &str) -> String {
+    let mut min_indent = usize::MAX;
+
+    for line in text.split('\n') {
+        if !line.chars().all(|c| c.is_whitespace()) {
+            let indent = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+            if indent < min_indent {
+                min_indent = indent;
+            }
+        }
+    }
+
+    if min_indent == usize::MAX || min_indent == 0 {
+        return text.to_string();
+    }
+
+    text.split('\n')
+        .map(|line| {
+            if line.chars().all(|c| c.is_whitespace()) {
+                String::new()
+            } else {
+                line.chars().skip(min_indent).collect::<String>()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
