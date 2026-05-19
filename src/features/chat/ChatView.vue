@@ -266,7 +266,7 @@ onUnmounted(() => {
     </Transition>
 
     <!-- 3. 输入增强区 (固定底部) -->
-    <footer class="vcp-input-footer px-4 py-1.5 bg-black/10 border-t border-white/5 shrink-0">
+    <footer class="vcp-input-footer px-4 py-1.5 border-t border-white/5 shrink-0">
       <InputEnhancer :disabled="!sessionStore.currentTopicId" @send="historyStore.sendMessage" />
       <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))] no-swipe pointer-events-none"></div>
     </footer>
@@ -283,7 +283,7 @@ onUnmounted(() => {
 }
 
 .vcp-input-footer {
-  background-color: color-mix(in srgb, var(--secondary-bg) 60%, transparent);
+  background-color: color-mix(in srgb, var(--secondary-bg) 90%, transparent);
 }
 
 /* 隐藏滚动条 */

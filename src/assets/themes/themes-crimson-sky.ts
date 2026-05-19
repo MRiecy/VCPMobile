@@ -21,7 +21,7 @@ export const variables = {
   "--quoted-text": "#00E5FF",
   "--user-text": "#F0F1F5",
   "--agent-text": "#EAEBEE",
-  "--user-bubble-bg": "rgba(255, 7, 57, 0.9)",
+  "--user-bubble-bg": "rgba(168, 22, 51, 0.93)",
   "--assistant-bubble-bg": "rgba(40, 42, 47, 0.95)",
   "--button-bg": "#FF073A",
   "--button-hover-bg": "#FF3D67",

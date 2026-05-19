@@ -60,13 +60,21 @@ export const useAttachmentStore = defineStore("attachment", () => {
   /**
    * 触发文件选择器并暂存附件 (使用标准 HTML Input 完美解决 Android content:// 协议名和类型丢失问题)
    */
-  const handleAttachment = async () => {
+  const handleAttachment = async (mode: 'camera' | 'gallery' | 'file' = 'file') => {
     return new Promise<void>((resolve, reject) => {
       const input = document.createElement("input");
       input.type = "file";
       input.multiple = false;
-      // 允许所有类型
-      input.accept = "*/*";
+      
+      // 根据模式设置 accept 和 capture
+      if (mode === 'camera') {
+        input.accept = "image/*";
+        input.setAttribute("capture", "environment");
+      } else if (mode === 'gallery') {
+        input.accept = "image/*";
+      } else {
+        input.accept = "*/*";
+      }
 
       input.onchange = async (e: Event) => {
         try {

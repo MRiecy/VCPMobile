@@ -17,6 +17,7 @@ const emit = defineEmits<{
 }>();
 
 const input = ref('');
+const showAttachMenu = ref(false);
 const historyStore = useChatHistoryStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
@@ -37,8 +38,11 @@ watch(input, () => {
   });
 });
 
-// 是否正在生成中 (修正：回归纯净逻辑，只要当前话题有活跃的网络流，即视为生成中)
+// 是否正在生成中
 const isGenerating = computed(() => streamStore.activeStreamingIds.size > 0);
+
+// 是否有内容可发送
+const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.stagedAttachments.length > 0);
 
 // 监听并接收外部注入的“编辑消息”内容
 watch(() => historyStore.editMessageContent, async (newContent) => {
@@ -49,23 +53,22 @@ watch(() => historyStore.editMessageContent, async (newContent) => {
     await nextTick();
     if (textareaRef.value) {
       textareaRef.value.focus();
-      // 触发 autoResize 逻辑(如果存在)
+      // 触发 autoResize 逻辑
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
   }
 });
 
 const handleSend = () => {
-  // 允许纯附件消息发送（即 input 为空但有暂存附件）
-  if ((input.value.trim() || attachmentStore.stagedAttachments.length > 0) && !props.disabled) {
+  if (hasContent.value && !props.disabled) {
     emit('send', input.value);
     input.value = '';
+    showAttachMenu.value = false;
   }
 };
 
 const handleAction = () => {
   if (isGenerating.value) {
-    // 停止当前所有活跃的生成流 (单聊只有一个，群聊则为当前并行或串行的 Agent)
     const activeIds = Array.from(streamStore.activeStreamingIds);
     activeIds.forEach(id => streamStore.stopMessage(id as string));
   } else {
@@ -80,10 +83,11 @@ const handleKeydown = (e: KeyboardEvent) => {
   }
 };
 
-const triggerFilePick = async () => {
+const triggerFilePick = async (mode: 'camera' | 'gallery' | 'file') => {
   if (props.disabled) return;
+  showAttachMenu.value = false;
   emit('attach');
-  await attachmentStore.handleAttachment();
+  await attachmentStore.handleAttachment(mode);
 };
 
 const { handlePaste, handleBeforeInput } = useLongTextPaste(input);
@@ -97,9 +101,29 @@ const removeStagedAttachment = (index: number) => {
 </script>
 
 <template>
-  <div class="px-3 py-1 w-full transition-opacity duration-300 no-swipe relative" :class="{ 'opacity-70 pointer-events-none': disabled }">
-    <!-- 全局群组停止按钮 (悬浮在输入框上方) -->
+  <div class="px-1 py-1 w-full transition-opacity duration-300 no-swipe relative" :class="{ 'opacity-70 pointer-events-none': disabled }">
+    <!-- 全局群组停止按钮 -->
     <GroupStopAllButton />
+
+    <!-- 附件选择菜单 (浮层) -->
+    <Transition name="fade-scale">
+      <div v-if="showAttachMenu" 
+        class="absolute bottom-16 right-4 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl shadow-2xl p-2 z-50 flex flex-col gap-1 min-w-[120px] backdrop-blur-md"
+      >
+        <button @click="triggerFilePick('camera')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
+          <div class="i-heroicons-camera text-lg text-blue-500"></div>
+          <span class="text-sm font-medium text-[var(--primary-text)]">拍摄</span>
+        </button>
+        <button @click="triggerFilePick('gallery')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
+          <div class="i-heroicons-photo text-lg text-purple-500"></div>
+          <span class="text-sm font-medium text-[var(--primary-text)]">相册</span>
+        </button>
+        <button @click="triggerFilePick('file')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
+          <div class="i-heroicons-document-text text-lg text-orange-500"></div>
+          <span class="text-sm font-medium text-[var(--primary-text)]">文件</span>
+        </button>
+      </div>
+    </Transition>
 
     <!-- 暂存附件预览区 -->
     <div v-if="attachmentStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
@@ -115,19 +139,11 @@ const removeStagedAttachment = (index: number) => {
     </div>
 
     <div class="flex items-end gap-2 px-1">
-      <div
-        class="flex-1 flex items-end gap-2 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-[1.75rem] px-2 py-1 shadow-sm relative overflow-hidden">
+      <div class="flex-1 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible">
         
-        <!-- 附件按钮 (归位到 Pill 内部) -->
-        <button @click="triggerFilePick"
-          class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-60 hover:opacity-100 active:scale-90 transition-all"
-          :disabled="disabled">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-            stroke-linecap="round" stroke-linejoin="round">
-            <path
-              d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48">
-            </path>
-          </svg>
+        <!-- 左侧：语音按钮 -->
+        <button class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-60 hover:opacity-100 active:scale-90 transition-all">
+          <div class="i-heroicons-microphone text-xl"></div>
         </button>
 
         <!-- 核心输入区 -->
@@ -140,27 +156,30 @@ const removeStagedAttachment = (index: number) => {
           <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-gradient-to-b from-[var(--secondary-bg)] to-transparent opacity-90"></div>
         </div>
 
-        <!-- 发送/中止按钮 -->
-        <button @click="handleAction"
-          class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full shadow-md active:scale-90 transition-all"
-          :class="[
-            isGenerating ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-blue-500 text-white',
-            {
-              'opacity-30 scale-90': !isGenerating && !input.trim() && attachmentStore.stagedAttachments.length === 0,
-              'hover:bg-blue-600': !isGenerating && (input.trim() || attachmentStore.stagedAttachments.length > 0)
-            }
-          ]" :disabled="!isGenerating && !input.trim() && attachmentStore.stagedAttachments.length === 0">
-          <!-- 停止图标 -->
-          <svg v-if="isGenerating" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none">
-            <rect x="6" y="6" width="12" height="12" rx="1.5"></rect>
-          </svg>
-          <!-- 发送图标 -->
-          <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round" class="-ml-0.5">
-            <line x1="22" y1="2" x2="11" y2="13"></line>
-            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-          </svg>
-        </button>
+        <!-- 右侧动态操作区 -->
+        <div class="flex items-center shrink-0 mb-0.5 relative gap-1">
+          <!-- 展开附件按钮 -->
+          <button
+            @click="showAttachMenu = !showAttachMenu"
+            class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-60 hover:opacity-100 active:scale-90 transition-all"
+          >
+            <div class="i-heroicons-plus-circle text-2xl"></div>
+          </button>
+
+          <Transition name="pop-slide">
+            <!-- 发送/中止按钮 -->
+            <button v-if="hasContent || isGenerating"
+              @click="handleAction"
+              class="w-9 h-9 flex items-center justify-center rounded-full shadow-md active:scale-90 transition-all"
+              :class="[
+                isGenerating ? 'bg-red-500 text-white' : 'bg-blue-500 text-white',
+              ]"
+            >
+              <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-lg"></div>
+              <div v-else class="i-heroicons-paper-airplane text-lg -rotate-45 -ml-0.5"></div>
+            </button>
+          </Transition>
+        </div>
       </div>
     </div>
   </div>
@@ -190,5 +209,36 @@ const removeStagedAttachment = (index: number) => {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   cursor: text;
+}
+
+/* 气泡弹出/切换动画 (模仿从最右侧冒泡挤开效果) */
+.pop-slide-enter-active,
+.pop-slide-leave-active {
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.pop-slide-enter-from {
+  opacity: 0;
+  transform: scale(0.4) translateX(30px);
+  width: 0;
+  margin-left: -4px;
+}
+
+.pop-slide-leave-to {
+  opacity: 0;
+  transform: scale(0.8) translateX(10px);
+  width: 0;
+  margin-left: -4px;
+}
+
+/* 附件菜单淡入淡出缩放 */
+.fade-scale-enter-active,
+.fade-scale-leave-active {
+  transition: all 0.2s ease-out;
+}
+.fade-scale-enter-from,
+.fade-scale-leave-to {
+  opacity: 0;
+  transform: scale(0.9) translateY(10px);
 }
 </style>

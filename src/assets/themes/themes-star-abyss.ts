@@ -21,8 +21,8 @@ export const variables = {
   "--quoted-text": "#5D9CEC",
   "--user-text": "#ffffff",
   "--agent-text": "#e0e0e0",
-  "--user-bubble-bg": "rgba(255, 183, 77, 0.15)",
-  "--assistant-bubble-bg": "rgba(255, 255, 255, 0.08)",
+  "--user-bubble-bg": "rgba(159, 111, 38, 0.9)",
+  "--assistant-bubble-bg": "rgba(62, 62, 62, 0.69)",
   "--button-bg": "#FFB74D",
   "--button-hover-bg": "#ffaa33",
   "--danger-color": "#e57373",
@@ -54,7 +54,7 @@ export const variables = {
   "--quoted-text": "#007bff",
   "--user-text": "#2c3e50",
   "--agent-text": "#2c3e50",
-  "--user-bubble-bg": "rgba(93, 156, 236, 0.1)",
+  "--user-bubble-bg": "rgba(156, 196, 250, 0.8)",
   "--assistant-bubble-bg": "rgba(255, 255, 255, 0.8)",
   "--button-bg": "#5D9CEC",
   "--button-hover-bg": "#4a89dc",
@@ -72,5 +72,8 @@ export const variables = {
 };
 
 export const extraCss = `
-.tool-bubble {    border: 1px solid var(--tool-bubble-border);    background: var(--tool-bubble-bg);}
+.tool-bubble {
+    border: 1px solid var(--tool-bubble-border);
+    background: var(--tool-bubble-bg);
+}
 `;

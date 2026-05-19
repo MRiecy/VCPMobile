@@ -1,4 +1,4 @@
-import { defineStore } from 'pinia';
+import { defineStore, acceptHMRUpdate } from 'pinia';
 import { onScopeDispose, ref, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
@@ -45,11 +45,12 @@ const fileNameToLoader = new Map<string, () => Promise<ThemeModule>>();
 const findThemeLoader = (fileName: string): (() => Promise<ThemeModule>) | undefined => {
   const tsFileName = fileName.replace('.css', '.ts');
 
-  // 1. Try cache first
-  const cached = fileNameToLoader.get(tsFileName);
-  if (cached) return cached;
+  // Dev mode: always scan fresh — Vite may have swapped the loader under the hood
+  if (!import.meta.hot) {
+    const cached = fileNameToLoader.get(tsFileName);
+    if (cached) return cached;
+  }
 
-  // 2. Fall back to scanning themeModules keys (handle Windows backslashes)
   for (const [path, loader] of Object.entries(themeModules)) {
     const keyFileName = path.split(/[\\/]/).pop() || '';
     if (keyFileName === tsFileName) {
@@ -142,13 +143,14 @@ export const useThemeStore = defineStore('theme', () => {
       localStorage.setItem('vcp-theme-name', fileName);
 
       const loadModule = findThemeLoader(fileName);
-
       if (!loadModule) {
         console.warn('Theme module not found:', fileName);
         return;
       }
 
       const mod = await loadModule();
+      console.log('[themeStore] Loaded module for', fileName, mod.meta.name);
+
       currentThemeModule = mod;
       currentThemeInfo.value = {
         fileName,
@@ -157,6 +159,7 @@ export const useThemeStore = defineStore('theme', () => {
       };
 
       const vars = isDarkResolved.value ? mod.variables.dark : mod.variables.light;
+      console.log('[themeStore] Injecting variables keys count:', Object.keys(vars).length);
       injectVariables(vars);
 
       // Inject extra CSS rules (non-variable styles like .tool-bubble)
@@ -251,12 +254,15 @@ export const useThemeStore = defineStore('theme', () => {
     unlistenThemePromise.then((fn: UnlistenFn) => fn()).catch(() => {});
   });
 
-  // Vite HMR: auto-reload theme when TS module is edited
+  // Vite HMR: 当主题 TS 文件修改时，Vite 会热更新该模块并冒泡到 theme.ts。
+  // 我们通过拦截更新并重新执行 applyThemeFile 来实现样式的实时无刷新生效。
   if (import.meta.hot) {
-    import.meta.hot.accept(() => {
-      const savedTheme = localStorage.getItem('vcp-theme-name') || DEFAULT_THEME;
-      applyThemeFile(savedTheme);
-    });
+    setTimeout(() => {
+      console.log('[themeStore] HMR reload triggered, re-applying theme:', currentTheme.value);
+      if (currentTheme.value) {
+        applyThemeFile(currentTheme.value);
+      }
+    }, 100);
   }
 
   return {
@@ -273,3 +279,7 @@ export const useThemeStore = defineStore('theme', () => {
     setMode,
   };
 });
+
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useThemeStore, import.meta.hot));
+}
