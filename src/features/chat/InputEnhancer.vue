@@ -176,16 +176,14 @@ const removeStagedAttachment = (index: number) => {
           </button>
 
           <Transition name="pop-slide">
-            <!-- 发送/中止按钮 (仿照目标风格：黑色实心圆 + 向上箭头) -->
+            <!-- 发送/中止按钮 (浅蓝色背景，w-8h-8，精准居中) -->
             <button v-if="hasContent || isGenerating"
               @click="handleAction"
-              class="w-10 h-10 flex items-center justify-center rounded-full shadow-lg active:scale-95 transition-all"
-              :class="[
-                isGenerating ? 'bg-red-500 text-white' : 'bg-black dark:bg-white text-white dark:text-black',
-              ]"
+              class="w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 transition-all bg-blue-500 text-white"
+              :class="{ 'bg-red-500': isGenerating }"
             >
-              <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-xl"></div>
-              <div v-else class="i-heroicons-arrow-up-16-solid text-2xl"></div>
+              <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-lg"></div>
+              <div v-else class="i-heroicons-paper-airplane text-[15px] -rotate-45 translate-x-0.2 -translate-y-0.2"></div>
             </button>
           </Transition>
         </div>

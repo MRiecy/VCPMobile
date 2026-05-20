@@ -46,18 +46,25 @@ const exitApp = async () => {
 
 let checkTimer: any = null;
 
+const onPermissionChange = (e: Event) => {
+  status.value = (e as CustomEvent).detail;
+};
+
 onMounted(() => {
   check();
   // 当应用从后台切回前台时重检（用户在设置页操作后返回）
   window.addEventListener('visibilitychange', () => {
     if (!document.hidden) check();
   });
-  // 轮询重检，以防某些权限授权后不立即触发 visibilitychange
-  checkTimer = setInterval(check, 2000);
+  // Kotlin 侧主动推送的权限变更事件
+  window.addEventListener('vcp-permission-change', onPermissionChange);
+  // 低频兜底轮询，防止极端情况下事件丢失
+  checkTimer = setInterval(check, 10000);
 });
 
 onUnmounted(() => {
   if (checkTimer) clearInterval(checkTimer);
+  window.removeEventListener('vcp-permission-change', onPermissionChange);
 });
 </script>
 
