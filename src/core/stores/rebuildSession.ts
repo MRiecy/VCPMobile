@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { withScreenKeep } from '../composables/useScreenKeeper';
 
 export type RebuildTaskType = 'preRender' | 'contentCompress' | 'dbPageSizeUpgrade';
 
@@ -48,13 +49,13 @@ export const useRebuildSessionStore = defineStore('rebuildSession', () => {
 
     try {
       if (taskType.value === 'preRender') {
-        await invoke('rebuild_all_pre_renders');
+        await withScreenKeep(() => invoke('rebuild_all_pre_renders'));
         needsReload.value = true;
       } else if (taskType.value === 'contentCompress') {
-        await invoke('compress_all_contents');
+        await withScreenKeep(() => invoke('compress_all_contents'));
         needsReload.value = true;
       } else if (taskType.value === 'dbPageSizeUpgrade') {
-        await invoke('upgrade_database_page_size');
+        await withScreenKeep(() => invoke('upgrade_database_page_size'));
         needsReload.value = false;
       }
       status.value = 'completed';

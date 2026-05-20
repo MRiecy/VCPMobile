@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed, reactive } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { releaseScreenKeep } from "../composables/useScreenKeeper";
 import { useChatSessionStore } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
@@ -110,14 +111,19 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   ) => {
     const key = `${ownerId}:${topicId}`;
     const streams = sessionActiveStreams.value[key];
+    let didRemove = false;
     if (streams) {
       const index = streams.indexOf(messageId);
       if (index !== -1) {
         streams.splice(index, 1);
+        didRemove = true;
       }
       if (streams.length === 0) {
         delete sessionActiveStreams.value[key];
       }
+    }
+    if (didRemove && Object.keys(sessionActiveStreams.value).length === 0) {
+      releaseScreenKeep();
     }
     // 同时从全局池中移除 (延迟移除，确保 finalizeStream 能拿到对象)
     setTimeout(() => {

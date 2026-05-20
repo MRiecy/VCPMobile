@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { setKeepScreenOn, clearKeepScreenOn } from 'tauri-plugin-vcp-mobile';
+import { acquireScreenKeep, releaseScreenKeep } from '../composables/useScreenKeeper';
 
 export const useSyncSessionStore = defineStore('syncSession', () => {
   // --- 视图状态 ---
@@ -40,12 +40,12 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     status.value = 'connecting';
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
-    setKeepScreenOn().catch(() => {});
+    acquireScreenKeep();
     invoke('start_manual_sync').catch((e: any) => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';
       canDismiss.value = true;
-      clearKeepScreenOn().catch(() => {});
+      releaseScreenKeep();
     });
   };
 
@@ -54,7 +54,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     isOpen.value = false;
     activeTab.value = 'live';
     cleanupListeners();
-    invoke('clear_keep_screen_on').catch(() => {});
+    releaseScreenKeep();
   };
 
   const copyLogs = async () => {
@@ -96,7 +96,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       status.value = 'completed';
       canDismiss.value = true;
       needsReload.value = true;
-      clearKeepScreenOn().catch(() => {});
+      releaseScreenKeep();
       pushLog('success', '同步已全部完成，点击关闭以刷新数据');
     }).then(fn => unlistenFns.push(fn));
   };

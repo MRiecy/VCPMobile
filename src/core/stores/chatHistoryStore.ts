@@ -8,6 +8,7 @@ import { useAssistantStore } from "./assistant";
 import { useSettingsStore } from "./settings";
 import { useTopicStore } from "./topicListManager";
 import { clearMessageCache } from "../utils/astRenderer";
+import { acquireScreenKeep } from "../composables/useScreenKeeper";
 import type { ChatMessage, HistoryChunk, ContentBlock } from "../types/chat";
 
 export const useChatHistoryStore = defineStore("chatHistory", () => {
@@ -242,6 +243,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     streamStore.streamingMessageId = thinkingId;
     streamStore.addSessionStream(agentId, topicId, thinkingId);
+    acquireScreenKeep();
 
     try {
       await invoke("append_single_message", {
@@ -481,6 +483,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     streamStore.streamingMessageId = thinkingId;
     streamStore.addSessionStream(ownerId, topicId, thinkingId);
+    acquireScreenKeep();
 
     // 4. 调用后端重构后的重生接口
     try {

@@ -218,24 +218,25 @@ const removeStagedAttachment = (index: number) => {
   cursor: text;
 }
 
-/* 气泡弹出/切换动画 (模仿从最右侧冒泡挤开效果) */
+/* 气泡弹出/切换动画 (优化宽度塌陷，确保 + 按钮平滑跟随) */
 .pop-slide-enter-active,
 .pop-slide-leave-active {
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .pop-slide-enter-from {
   opacity: 0;
-  transform: scale(0.4) translateX(30px);
+  transform: scale(0.4) translateX(20px);
   width: 0;
-  margin-left: -4px;
 }
 
 .pop-slide-leave-to {
   opacity: 0;
-  transform: scale(0.8) translateX(10px);
+  transform: scale(0.4) translateX(10px);
   width: 0;
-  margin-left: -4px;
+  margin-left: -6px; /* 抵消 gap-1.5 (6px)，让 + 按钮平滑吸附 */
 }
 
 /* 附件菜单淡入淡出缩放 */

@@ -3,6 +3,7 @@ import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import SettingsActionWithStatus from '../../../components/settings/SettingsActionWithStatus.vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
+import { withScreenKeep } from '../../../core/composables/useScreenKeeper';
 
 const overlayStore = useOverlayStore();
 
@@ -12,7 +13,7 @@ const cacheStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message:
 const cleanupAttachments = async () => {
   gcStatus.value = { type: 'loading', message: '正在深度扫描孤儿附件...' };
   try {
-    const result = await invoke<string>('cleanup_orphaned_attachments');
+    const result = await withScreenKeep(() => invoke<string>('cleanup_orphaned_attachments'));
     gcStatus.value = { type: 'success', message: result };
     setTimeout(() => { gcStatus.value = { type: null, message: '' }; }, 5000);
   } catch (e: any) {
@@ -25,7 +26,7 @@ const cleanupAttachments = async () => {
 const clearSystemCache = async () => {
   cacheStatus.value = { type: 'loading', message: '正在清理系统与 WebView 缓存...' };
   try {
-    const result = await invoke<string>('clear_webview_cache');
+    const result = await withScreenKeep(() => invoke<string>('clear_webview_cache'));
     cacheStatus.value = { type: 'success', message: result };
     setTimeout(() => { cacheStatus.value = { type: null, message: '' }; }, 5000);
   } catch (e: any) {
