@@ -65,6 +65,8 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
 
   // --- 策略 3：focus + scrollHeight 估算 ---
   let focusTimeout: ReturnType<typeof setTimeout> | null = null;
+  let focusInDelayTimeout: ReturnType<typeof setTimeout> | null = null;
+  let focusOutDelayTimeout: ReturnType<typeof setTimeout> | null = null;
 
   const estimateFromScroll = () => {
     // 延迟等待键盘动画完成
@@ -81,7 +83,8 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
   const handleFocusIn = () => {
     // 若已有原生事件在 200ms 内到达，则跳过 fallback
     const pending = true;
-    setTimeout(() => {
+    if (focusInDelayTimeout) clearTimeout(focusInDelayTimeout);
+    focusInDelayTimeout = setTimeout(() => {
       if (pending && !isKeyboardOpen.value) {
         estimateFromScroll();
       }
@@ -95,7 +98,8 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
     }
     // 延迟 150ms 检查：若 focus 只是从一个 input 切到另一个 input，
     // 则不应立即重置键盘高度，避免 footer 闪烁
-    setTimeout(() => {
+    if (focusOutDelayTimeout) clearTimeout(focusOutDelayTimeout);
+    focusOutDelayTimeout = setTimeout(() => {
       const active = document.activeElement;
       const stillEditing =
         active instanceof HTMLInputElement ||
@@ -127,6 +131,8 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
     document.removeEventListener("focusin", handleFocusIn);
     document.removeEventListener("focusout", handleFocusOut);
     if (focusTimeout) clearTimeout(focusTimeout);
+    if (focusInDelayTimeout) clearTimeout(focusInDelayTimeout);
+    if (focusOutDelayTimeout) clearTimeout(focusOutDelayTimeout);
   });
 
   return {

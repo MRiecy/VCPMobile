@@ -58,12 +58,14 @@ const onPermissionChange = (e: Event) => {
   status.value = (e as CustomEvent).detail;
 };
 
+const onVisibilityChange = () => {
+  if (!document.hidden) check();
+};
+
 onMounted(() => {
   check();
   // 当应用从后台切回前台时重检（用户在设置页操作后返回）
-  window.addEventListener('visibilitychange', () => {
-    if (!document.hidden) check();
-  });
+  window.addEventListener('visibilitychange', onVisibilityChange);
   // Kotlin 侧主动推送的权限变更事件
   window.addEventListener('vcp-permission-change', onPermissionChange);
   // 低频兜底轮询，防止极端情况下事件丢失
@@ -72,6 +74,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (checkTimer) clearInterval(checkTimer);
+  window.removeEventListener('visibilitychange', onVisibilityChange);
   window.removeEventListener('vcp-permission-change', onPermissionChange);
 });
 </script>

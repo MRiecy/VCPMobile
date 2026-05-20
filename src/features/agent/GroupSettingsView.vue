@@ -64,6 +64,7 @@ const allAgents = ref<Agent[]>([]);
 const isSaving = ref(false);
 const saveSuccess = ref(false);
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 原始配置快照，用于判断用户是否真正修改了内容
 const originalConfig = ref<GroupConfig | null>(null);
@@ -72,6 +73,10 @@ onUnmounted(() => {
   if (saveTimeout) {
     clearTimeout(saveTimeout);
     saveTimeout = null;
+  }
+  if (saveSuccessTimer) {
+    clearTimeout(saveSuccessTimer);
+    saveSuccessTimer = null;
   }
 });
 
@@ -160,7 +165,8 @@ const autoSave = async () => {
     saveSuccess.value = true;
     // 保存成功后更新快照，避免重复保存相同内容
     originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
-    setTimeout(() => {
+    if (saveSuccessTimer) clearTimeout(saveSuccessTimer);
+    saveSuccessTimer = setTimeout(() => {
       saveSuccess.value = false;
     }, 2000);
   } catch (err) {
@@ -426,7 +432,7 @@ const tagModeOptions = [
 
 <style scoped>
 .group-settings-view {
-  background-color: color-mix(in srgb, var(--primary-bg) 85%, transparent);
+  background-color: color-mix(in srgb, var(--primary-bg) 100%, transparent);
 }
 
 .card-modern {
