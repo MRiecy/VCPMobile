@@ -9,7 +9,11 @@ import android.webkit.WebView
 import androidx.appcompat.app.AppCompatActivity
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.TauriPlugin
+import androidx.activity.result.ActivityResult
 import app.tauri.plugin.Plugin
 import android.content.Intent
 import android.util.Log
@@ -23,13 +27,18 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Invoke
 import com.vcp.mobile.service.StreamKeepaliveService
 
-@TauriPlugin
+@TauriPlugin(permissions = [
+    Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
+    Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
+    Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE"], alias = "storageLegacy")
+])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private companion object {
         const val TAG = "VcpMobilePlugin"
     }
 
+    private var webViewRef: WebView? = null
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
 
@@ -68,18 +77,17 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         when (args.type) {
             "notification" -> {
                 if (Build.VERSION.SDK_INT >= 33) {
-                    ActivityCompat.requestPermissions(activity, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+                    requestPermissionForAlias("notification", invoke, "onPermissionResult")
+                } else {
+                    emitPermissionsToWebView()
+                    invoke.resolve()
                 }
             }
             "storage" -> {
                 if (Build.VERSION.SDK_INT >= 33) {
-                    ActivityCompat.requestPermissions(activity, arrayOf(android.Manifest.permission.READ_MEDIA_IMAGES), 1002)
+                    requestPermissionForAlias("storage", invoke, "onPermissionResult")
                 } else {
-                    ActivityCompat.requestPermissions(
-                        activity,
-                        arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE),
-                        1002
-                    )
+                    requestPermissionForAlias("storageLegacy", invoke, "onPermissionResult")
                 }
             }
             "battery" -> {
@@ -87,21 +95,56 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                         data = Uri.parse("package:${activity.packageName}")
                     }
-                    activity.startActivity(intent)
+                    startActivityForResult(invoke, intent, "onBatteryOptimizationResult")
                 } catch (e: Exception) {
-                    // Fallback to general battery optimization settings if specific intent fails
                     val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                    activity.startActivity(intent)
+                    startActivityForResult(invoke, intent, "onBatteryOptimizationResult")
                 }
             }
         }
-        invoke.resolve()
     }
 
     @Command
     fun moveTaskToBack(invoke: Invoke) {
         activity.moveTaskToBack(true)
         invoke.resolve()
+    }
+
+    // ==================================================================
+    // Permission Result Callbacks
+    // ==================================================================
+    @PermissionCallback
+    fun onPermissionResult(invoke: Invoke) {
+        emitPermissionsToWebView()
+        invoke.resolve()
+    }
+
+    @ActivityCallback
+    fun onBatteryOptimizationResult(invoke: Invoke, result: ActivityResult) {
+        emitPermissionsToWebView()
+        invoke.resolve()
+    }
+
+    private fun emitPermissionsToWebView() {
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+
+        val notificationGranted = if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        val storageGranted = if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+
+        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+
+        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"battery":$batteryOptimizationIgnored}"""
+        val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
+        webViewRef?.evaluateJavascript(script, null)
     }
 
     // ==================================================================
@@ -156,6 +199,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     override fun load(webView: WebView) {
         super.load(webView)
+        webViewRef = webView
 
         keyboardInsetsManager.attach(webView)
         lifecycleBridge.attach(activity, webView)
