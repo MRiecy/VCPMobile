@@ -11,7 +11,8 @@
     "io:write": "node scripts/nova_utils.cjs write",
     "io:append": "node scripts/nova_utils.cjs append",
     "memory:refresh": "node scripts/refresh_manifest.cjs",
-    "check": "vue-tsc --noEmit && cd src-tauri && cargo check"
+    "check": "vue-tsc --noEmit && cd src-tauri && cargo check",
+    "dev:android": "node scripts/tauri_android_dev.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.0",
