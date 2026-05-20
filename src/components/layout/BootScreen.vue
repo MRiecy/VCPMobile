@@ -31,7 +31,7 @@ const reloadApp = () => {
   <!-- 0.5 全局错误看板 -->
   <Transition name="fade">
     <div v-if="lifecycleStore.state === 'ERROR'"
-      class="fixed inset-0 z-[101] bg-white/98 dark:bg-gray-950/98 flex flex-col items-center justify-center p-8 text-center">
+      class="fixed inset-0 z-boot bg-white/98 dark:bg-gray-950/98 flex flex-col items-center justify-center p-8 text-center">
       <div
         class="w-full max-w-md rounded-3xl border border-red-500/20 bg-white/80 dark:bg-white/5 shadow-2xl shadow-red-500/10 px-6 py-8 flex flex-col items-center">
         <div class="w-16 h-16 bg-red-500/10 text-red-500 rounded-2xl flex items-center justify-center mb-6">

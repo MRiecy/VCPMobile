@@ -55,7 +55,8 @@ export type LayerName =
   | 'sheet'
   | 'viewer'
   | 'editor'
-  | 'boot';
+  | 'boot'
+  | 'gate';
 
 /** 层级名称到数值的映射 */
 export const LAYER_MAP: Record<LayerName, number> = {
@@ -70,4 +71,5 @@ export const LAYER_MAP: Record<LayerName, number> = {
   viewer: LAYER_VIEWER,
   editor: LAYER_EDITOR,
   boot: LAYER_BOOT,
+  gate: LAYER_GATE,
 };
