@@ -469,7 +469,7 @@ impl DbWriteQueue {
             }
 
             sql_msgs.push_str(
-                " ON CONFLICT(msg_id) DO UPDATE SET
+                " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                     content = excluded.content,
                     role = excluded.role,
                     name = excluded.name,
@@ -511,18 +511,18 @@ impl DbWriteQueue {
 
             // 2. 批量插入 render_cache 表
             let mut sql_render = String::from(
-                "INSERT INTO render_cache (msg_id, render_content, updated_at) VALUES ",
+                "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES ",
             );
 
             for i in 0..chunk_indices.len() {
                 if i > 0 {
                     sql_render.push_str(", ");
                 }
-                sql_render.push_str("(?, ?, ?)");
+                sql_render.push_str("(?, ?, ?, ?)");
             }
 
             sql_render.push_str(
-                " ON CONFLICT(msg_id) DO UPDATE SET
+                " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                     render_content = excluded.render_content,
                     updated_at = excluded.updated_at",
             );
@@ -531,6 +531,7 @@ impl DbWriteQueue {
             let mut params_render: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
             for (idx, msg) in chunk_indices {
+                params_render.push(Box::new(topic_id.to_string()));
                 params_render.push(Box::new(msg.id.clone()));
                 params_render.push(Box::new(render_bytes[*idx].clone()));
                 params_render.push(Box::new(now));
@@ -574,34 +575,40 @@ impl DbWriteQueue {
         for chunk in msg_ids.chunks(999) {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
             let sql = format!(
-                "DELETE FROM message_attachments WHERE msg_id IN ({})",
+                "DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN ({})",
                 placeholders
             );
             let mut stmt = tx.prepare_cached(&sql)?;
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            params.push(Box::new(topic_id.to_string()));
+            for id in chunk {
+                params.push(Box::new(id.clone()));
+            }
             let params_refs: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                params.iter().map(|p| p.as_ref()).collect();
             stmt.execute(&*params_refs)?;
         }
 
         // Chunked Relation Insert
         if !all_relations.is_empty() {
-            const PARAMS_PER_REL: usize = 7;
+            const PARAMS_PER_REL: usize = 8;
             let rel_chunk_size = MAX_PARAMS / PARAMS_PER_REL;
             for chunk in all_relations.chunks(rel_chunk_size) {
                 let mut sql = String::from(
                     "INSERT INTO message_attachments (
-                    msg_id, hash, attachment_order, display_name, src, status, created_at
+                    topic_id, msg_id, hash, attachment_order, display_name, src, status, created_at
                 ) VALUES ",
                 );
                 for i in 0..chunk.len() {
                     if i > 0 {
                         sql.push_str(", ");
                     }
-                    sql.push_str("(?, ?, ?, ?, ?, ?, ?)");
+                    sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?)");
                 }
                 let mut stmt = tx.prepare_cached(&sql)?;
                 let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
                 for rel in chunk {
+                    params.push(Box::new(topic_id.to_string()));
                     params.push(Box::new(rel.0.clone()));
                     params.push(Box::new(rel.1.clone()));
                     params.push(Box::new(rel.2));

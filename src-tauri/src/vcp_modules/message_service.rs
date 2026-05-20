@@ -39,7 +39,7 @@ pub async fn load_multi_topic_messages(
     let query_str = format!(
         "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.topic_id
          FROM messages m
-         LEFT JOIN render_cache r ON m.msg_id = r.msg_id
+         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id IN ({}) AND m.deleted_at IS NULL
          ORDER BY m.topic_id, m.timestamp ASC, m.msg_id ASC",
         placeholders
@@ -82,36 +82,38 @@ pub async fn load_multi_topic_messages(
         result.entry(topic_id).or_default().push(message);
     }
 
-    // 批量加载附件 — 收集所有 msg_id，一次 JOIN 查询
-    let all_msg_ids: Vec<String> = result
-        .values()
-        .flat_map(|msgs| msgs.iter().map(|m| m.id.clone()))
-        .collect();
+    // 批量加载附件 — 收集所有 (topic_id, msg_id)，一次 JOIN 查询
+    let mut all_msg_refs: Vec<(String, String)> = Vec::new();
+    for (tid, msgs) in result.iter() {
+        for m in msgs {
+            all_msg_refs.push((tid.clone(), m.id.clone()));
+        }
+    }
 
-    if !all_msg_ids.is_empty() {
-        let att_placeholders = all_msg_ids
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
+    if !all_msg_refs.is_empty() {
+        let mut att_placeholders = Vec::new();
+        for _ in 0..all_msg_refs.len() {
+            att_placeholders.push("(?, ?)");
+        }
         let att_query = format!(
             "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
-                    ma.msg_id, ma.display_name, ma.src, ma.status
+                    ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE ma.msg_id IN ({})
-             ORDER BY ma.msg_id, ma.attachment_order ASC",
-            att_placeholders
+             WHERE (ma.topic_id, ma.msg_id) IN ({})
+             ORDER BY ma.topic_id, ma.msg_id, ma.attachment_order ASC",
+            att_placeholders.join(",")
         );
         let mut q = sqlx::query(&att_query);
-        for id in &all_msg_ids {
-            q = q.bind(id);
+        for (tid, mid) in &all_msg_refs {
+            q = q.bind(tid).bind(mid);
         }
         if let Ok(att_rows) = q.fetch_all(pool).await {
-            let mut att_map: std::collections::HashMap<String, Vec<Attachment>> =
+            let mut att_map: std::collections::HashMap<(String, String), Vec<Attachment>> =
                 std::collections::HashMap::new();
             for ar in att_rows {
-                let msg_id: String = ar.get("msg_id");
+                let tid: String = ar.get("topic_id");
+                let mid: String = ar.get("msg_id");
                 let hash: String = ar.get("hash");
                 let mime_type: String = ar.get("mime_type");
                 let internal_path: String = ar.get("internal_path");
@@ -119,7 +121,7 @@ pub async fn load_multi_topic_messages(
                 let size_i64: i64 = ar.get("size");
                 let created_at_i64: i64 = ar.get("created_at");
 
-                att_map.entry(msg_id).or_default().push(Attachment {
+                att_map.entry((tid, mid)).or_default().push(Attachment {
                     r#type: mime_type,
                     src: ar.get("src"),
                     name: display_name,
@@ -136,9 +138,9 @@ pub async fn load_multi_topic_messages(
                 });
             }
             // 回填附件到消息
-            for (_tid, msgs) in result.iter_mut() {
+            for (tid, msgs) in result.iter_mut() {
                 for msg in msgs.iter_mut() {
-                    if let Some(atts) = att_map.remove(&msg.id) {
+                    if let Some(atts) = att_map.remove(&(tid.clone(), msg.id.clone())) {
                         msg.attachments = Some(atts);
                     }
                 }
@@ -166,14 +168,14 @@ pub async fn load_chat_history_internal(
     let query_str = if limit.is_some() {
         "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content 
          FROM messages m
-         LEFT JOIN render_cache r ON m.msg_id = r.msg_id
+         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC 
          LIMIT ? OFFSET ?"
     } else {
         "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content 
          FROM messages m
-         LEFT JOIN render_cache r ON m.msg_id = r.msg_id
+         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC"
     };
@@ -203,11 +205,11 @@ pub async fn load_chat_history_internal(
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE ma.msg_id IN ({}) 
+             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) 
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             placeholders
         );
-        let mut q = sqlx::query(&att_query);
+        let mut q = sqlx::query(&att_query).bind(topic_id);
         for id in &msg_ids {
             q = q.bind(id);
         }

@@ -184,43 +184,187 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
         .await;
 
     // 6. messages 表 (消息历史 - 已移除冗余 avatar_url 和 avatar_color)
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS messages (
-            msg_id TEXT PRIMARY KEY,
-            topic_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            name TEXT,
-            agent_id TEXT,
-            content TEXT NOT NULL,
-            timestamp BIGINT NOT NULL,
-            is_thinking INTEGER NOT NULL DEFAULT 0,
-            is_group_message INTEGER NOT NULL DEFAULT 0,
-            group_id TEXT,
-            finish_reason TEXT,
-            content_hash TEXT NOT NULL DEFAULT '', -- 消息内容指纹
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL,
-            deleted_at BIGINT
-        )",
+    // 迁移：由于主键变更 (msg_id -> topic_id, msg_id)，需要重建表
+    let is_composite_pk: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE pk > 1",
     )
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .map_err(|e| e.to_string())?;
+    .unwrap_or(0)
+        > 0;
 
-    // 6.1 render_cache 表 (预渲染内容缓存 - 独立表以防止 B-Tree 溢出)
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS render_cache (
-            msg_id TEXT PRIMARY KEY,
-            render_content BLOB,
-            updated_at BIGINT NOT NULL,
-            FOREIGN KEY (msg_id) REFERENCES messages(msg_id) ON DELETE CASCADE
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    if !is_composite_pk {
+        println!("[DBManager] Migrating messages schema to composite primary key...");
+        
+        // 开启事务进行迁移
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 迁移：将 messages 表中的旧 render_content 移动到新表
+        // 1. 重命名旧表
+        sqlx::query("ALTER TABLE messages RENAME TO messages_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        sqlx::query("ALTER TABLE render_cache RENAME TO render_cache_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            
+        sqlx::query("ALTER TABLE message_attachments RENAME TO message_attachments_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 2. 创建新表
+        sqlx::query(
+            "CREATE TABLE messages (
+                msg_id TEXT NOT NULL,
+                topic_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                name TEXT,
+                agent_id TEXT,
+                content TEXT NOT NULL,
+                timestamp BIGINT NOT NULL,
+                is_thinking INTEGER NOT NULL DEFAULT 0,
+                is_group_message INTEGER NOT NULL DEFAULT 0,
+                group_id TEXT,
+                finish_reason TEXT,
+                content_hash TEXT NOT NULL DEFAULT '',
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                deleted_at BIGINT,
+                PRIMARY KEY (topic_id, msg_id)
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "CREATE TABLE render_cache (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                render_content BLOB,
+                updated_at BIGINT NOT NULL,
+                PRIMARY KEY (topic_id, msg_id),
+                FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "CREATE TABLE message_attachments (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                attachment_order INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                src TEXT,
+                status TEXT,
+                created_at BIGINT NOT NULL,
+                PRIMARY KEY (topic_id, msg_id, attachment_order),
+                FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // 3. 迁移数据
+        sqlx::query("INSERT INTO messages SELECT * FROM messages_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at)
+             SELECT m.topic_id, r.msg_id, r.render_content, r.updated_at
+             FROM render_cache_old r
+             JOIN messages_old m ON r.msg_id = m.msg_id",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "INSERT INTO message_attachments (topic_id, msg_id, hash, attachment_order, display_name, src, status, created_at)
+             SELECT m.topic_id, a.msg_id, a.hash, a.attachment_order, a.display_name, a.src, a.status, a.created_at
+             FROM message_attachments_old a
+             JOIN messages_old m ON a.msg_id = m.msg_id",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        // 4. 删除旧表
+        sqlx::query("DROP TABLE messages_old").execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        sqlx::query("DROP TABLE render_cache_old").execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        sqlx::query("DROP TABLE message_attachments_old").execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        println!("[DBManager] Messages schema migration completed successfully.");
+    } else {
+        // 确保表存在 (对于新安装)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS messages (
+                msg_id TEXT NOT NULL,
+                topic_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                name TEXT,
+                agent_id TEXT,
+                content TEXT NOT NULL,
+                timestamp BIGINT NOT NULL,
+                is_thinking INTEGER NOT NULL DEFAULT 0,
+                is_group_message INTEGER NOT NULL DEFAULT 0,
+                group_id TEXT,
+                finish_reason TEXT,
+                content_hash TEXT NOT NULL DEFAULT '',
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                deleted_at BIGINT,
+                PRIMARY KEY (topic_id, msg_id)
+            )",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS render_cache (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                render_content BLOB,
+                updated_at BIGINT NOT NULL,
+                PRIMARY KEY (topic_id, msg_id),
+                FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
+            )",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS message_attachments (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                attachment_order INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                src TEXT,
+                status TEXT,
+                created_at BIGINT NOT NULL,
+                PRIMARY KEY (topic_id, msg_id, attachment_order),
+                FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
+            )",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    // 迁移：将 messages 表中的旧 render_content 移动到新表 (如果还存在)
     let has_old_render_column: bool = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'render_content'",
     )
@@ -230,11 +374,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
         > 0;
 
     if has_old_render_column {
-        println!("[DBManager] Migrating render_content to render_cache...");
+        println!("[DBManager] Migrating legacy render_content to render_cache...");
         // 复制数据
         let _ = sqlx::query(
-            "INSERT OR IGNORE INTO render_cache (msg_id, render_content, updated_at) 
-             SELECT msg_id, render_content, updated_at FROM messages WHERE render_content IS NOT NULL",
+            "INSERT OR IGNORE INTO render_cache (topic_id, msg_id, render_content, updated_at) 
+             SELECT topic_id, msg_id, render_content, updated_at FROM messages WHERE render_content IS NOT NULL",
         )
         .execute(pool)
         .await;
@@ -257,23 +401,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             thumbnail_path TEXT,              -- 缩略图路径
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // 7. message_attachments 表 (逻辑引用上下文)
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_attachments (
-            msg_id TEXT NOT NULL,
-            hash TEXT NOT NULL,               -- 指向 attachments.hash
-            attachment_order INTEGER NOT NULL, -- 排序
-            display_name TEXT NOT NULL,       -- 原始文件名
-            src TEXT,                         -- 来源 URL
-            status TEXT,                      -- 状态 (如 'removed')
-            created_at BIGINT NOT NULL,
-            PRIMARY KEY (msg_id, attachment_order)
         )",
     )
     .execute(pool)
@@ -375,6 +502,22 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_message_attachments_hash
          ON message_attachments(hash)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_message_attachments_msg
+         ON message_attachments(topic_id, msg_id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_render_cache_msg
+         ON render_cache(topic_id, msg_id)",
     )
     .execute(pool)
     .await

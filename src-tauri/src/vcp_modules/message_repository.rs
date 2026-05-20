@@ -83,17 +83,17 @@ fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Conn
     Ok(conn)
 }
 
-/// 分页流式读取所有消息的 (msg_id, content_bytes)，不做任何解压
+/// 分页流式读取所有消息的 (topic_id, msg_id, content_bytes)，不做任何解压
 async fn stream_all_message_contents(
     pool: &sqlx::SqlitePool,
-    tx: mpsc::Sender<(String, Vec<u8>)>,
+    tx: mpsc::Sender<(String, String, Vec<u8>)>,
 ) -> Result<(), String> {
     let mut last_rowid = 0i64;
     const FETCH_SIZE: i64 = 500;
 
     loop {
         let rows = sqlx::query(
-            "SELECT rowid, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            "SELECT rowid, topic_id, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
         )
         .bind(last_rowid)
         .bind(FETCH_SIZE)
@@ -106,9 +106,10 @@ async fn stream_all_message_contents(
                     last_rowid = last.get::<i64, _>(0);
                 }
                 for row in rows {
+                    let topic_id: String = row.get("topic_id");
                     let msg_id: String = row.get("msg_id");
                     let content_bytes: Vec<u8> = row.get("content");
-                    if tx.send((msg_id, content_bytes)).await.is_err() {
+                    if tx.send((topic_id, msg_id, content_bytes)).await.is_err() {
                         return Ok(());
                     }
                 }
@@ -122,7 +123,7 @@ async fn stream_all_message_contents(
 /// 通用批量 UPDATE Writer，带进度发射
 fn run_batch_update_writer(
     db_path: &std::path::Path,
-    mut rx: mpsc::Receiver<Vec<(String, Vec<u8>)>>,
+    mut rx: mpsc::Receiver<Vec<(String, String, Vec<u8>)>>,
     update_sql: &str,
     progress_event: &str,
     app_handle: AppHandle,
@@ -145,14 +146,14 @@ fn run_batch_update_writer(
                     .prepare_cached(&update_sql)
                     .map_err(|e| e.to_string())?;
                 let now = chrono::Utc::now().timestamp_millis();
-                for (msg_id, bytes) in batch {
-                    // 适配 render_cache 的 3 参数 SQL (bytes, msg_id, now) 
-                    // 或 content_compress 的 2 参数 SQL (bytes, msg_id)
+                for (topic_id, msg_id, bytes) in batch {
+                    // 适配 render_cache 的 4 参数 SQL (topic_id, msg_id, bytes, now) 
+                    // 或 content_compress 的 3 参数 SQL (bytes, topic_id, msg_id)
                     if update_sql.contains("render_cache") {
-                        stmt.execute(rusqlite::params![bytes, msg_id, now])
+                        stmt.execute(rusqlite::params![topic_id, msg_id, bytes, now])
                             .map_err(|e| e.to_string())?;
                     } else {
-                        stmt.execute(rusqlite::params![bytes, msg_id])
+                        stmt.execute(rusqlite::params![bytes, topic_id, msg_id])
                             .map_err(|e| e.to_string())?;
                     }
                     processed += 1;
@@ -194,16 +195,16 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         return Ok(());
     }
 
-    let (tx_compiler, rx_compiler) = mpsc::channel::<(String, String)>(1000);
-    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(100);
+    let (tx_compiler, rx_compiler) = mpsc::channel::<(String, String, String)>(1000);
+    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, String, Vec<u8>)>>(100);
     let total_count = total as usize;
 
     // --- Stage 3: Writer ---
     let writer_handle = run_batch_update_writer(
         &db_path,
         rx_writer,
-        "INSERT INTO render_cache (render_content, msg_id, updated_at) VALUES (?, ?, ?) \
-         ON CONFLICT(msg_id) DO UPDATE SET render_content = excluded.render_content, updated_at = excluded.updated_at",
+        "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES (?, ?, ?, ?) \
+         ON CONFLICT(topic_id, msg_id) DO UPDATE SET render_content = excluded.render_content, updated_at = excluded.updated_at",
         "render_rebuild_progress",
         app_handle.clone(),
         total_count,
@@ -231,10 +232,10 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                 };
 
                 match item {
-                    Some((msg_id, content)) => {
+                    Some((topic_id, msg_id, content)) => {
                         let blocks = MessageRenderCompiler::compile(&content);
                         if let Ok(bytes) = MessageRenderCompiler::serialize(&blocks) {
-                            batch.push((msg_id, bytes));
+                            batch.push((topic_id, msg_id, bytes));
                         }
 
                         if batch.len() >= 50 {
@@ -257,16 +258,16 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 
     // --- Stage 1: Reader ---
     let reader_handle = tokio::spawn(async move {
-        let (tx_inner, mut rx_inner) = mpsc::channel::<(String, Vec<u8>)>(1000);
+        let (tx_inner, mut rx_inner) = mpsc::channel::<(String, String, Vec<u8>)>(1000);
 
         let stream_handle = tokio::spawn(async move {
             let _ = stream_all_message_contents(&pool, tx_inner).await;
         });
 
-        while let Some((msg_id, content_bytes)) = rx_inner.recv().await {
+        while let Some((topic_id, msg_id, content_bytes)) = rx_inner.recv().await {
             let content = ContentCompressor::decompress(&content_bytes)
                 .unwrap_or_else(|_| String::from_utf8_lossy(&content_bytes).to_string());
-            if tx_compiler.send((msg_id, content)).await.is_err() {
+            if tx_compiler.send((topic_id, msg_id, content)).await.is_err() {
                 break;
             }
         }
@@ -311,15 +312,15 @@ pub async fn compress_all_contents(app_handle: AppHandle) -> Result<(), String> 
         return Ok(());
     }
 
-    let (tx_compressor, rx_compressor) = mpsc::channel::<(String, Vec<u8>)>(1000);
-    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, Vec<u8>)>>(100);
+    let (tx_compressor, rx_compressor) = mpsc::channel::<(String, String, Vec<u8>)>(1000);
+    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, String, Vec<u8>)>>(100);
     let total_count = total as usize;
 
     // --- Stage 3: Writer ---
     let writer_handle = run_batch_update_writer(
         &db_path,
         rx_writer,
-        "UPDATE messages SET content = ? WHERE msg_id = ?",
+        "UPDATE messages SET content = ? WHERE topic_id = ? AND msg_id = ?",
         "content_compress_progress",
         app_handle.clone(),
         total_count,
@@ -347,13 +348,13 @@ pub async fn compress_all_contents(app_handle: AppHandle) -> Result<(), String> 
                 };
 
                 match item {
-                    Some((msg_id, content_bytes)) => {
+                    Some((topic_id, msg_id, content_bytes)) => {
                         // 智能识别：尝试解压，成功则跳过（已压缩）
                         if ContentCompressor::decompress(&content_bytes).is_err() {
                             // 解压失败 → 明文，需要压缩
                             let text = String::from_utf8_lossy(&content_bytes);
                             if let Ok(compressed) = ContentCompressor::compress(&text) {
-                                batch.push((msg_id, compressed));
+                                batch.push((topic_id, msg_id, compressed));
                             }
                         }
 
@@ -432,7 +433,7 @@ impl MessageRepository {
                 content_hash,
                 created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(msg_id) DO UPDATE SET
+             ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
                 name = excluded.name,
@@ -465,12 +466,13 @@ impl MessageRepository {
 
         // 2.1 插入或更新渲染缓存 (独立表)
         sqlx::query(
-            "INSERT INTO render_cache (msg_id, render_content, updated_at)
-             VALUES (?, ?, ?)
-             ON CONFLICT(msg_id) DO UPDATE SET
+            "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                 render_content = excluded.render_content,
                 updated_at = excluded.updated_at",
         )
+        .bind(topic_id)
         .bind(&message.id)
         .bind(render_content)
         .bind(message.timestamp as i64)
@@ -482,13 +484,15 @@ impl MessageRepository {
         if let Some(ref attachments) = message.attachments {
             Self::upsert_attachments_for_message(
                 tx,
+                topic_id,
                 &message.id,
                 message.timestamp as i64,
                 attachments,
             )
             .await?;
         } else {
-            sqlx::query("DELETE FROM message_attachments WHERE msg_id = ?")
+            sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id = ?")
+                .bind(topic_id)
                 .bind(&message.id)
                 .execute(&mut **tx)
                 .await
@@ -505,11 +509,13 @@ impl MessageRepository {
 
     async fn upsert_attachments_for_message(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        topic_id: &str,
         msg_id: &str,
         timestamp: i64,
         attachments: &[crate::vcp_modules::chat_manager::Attachment],
     ) -> Result<(), String> {
-        sqlx::query("DELETE FROM message_attachments WHERE msg_id = ?")
+        sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id = ?")
+            .bind(topic_id)
             .bind(msg_id)
             .execute(&mut **tx)
             .await
@@ -556,9 +562,10 @@ impl MessageRepository {
 
             sqlx::query(
                 "INSERT INTO message_attachments (
-                    msg_id, hash, attachment_order, display_name, src, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    topic_id, msg_id, hash, attachment_order, display_name, src, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
+            .bind(topic_id)
             .bind(msg_id)
             .bind(&hash)
             .bind(i as i32)

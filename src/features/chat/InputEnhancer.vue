@@ -141,9 +141,18 @@ const removeStagedAttachment = (index: number) => {
     <div class="flex items-end gap-2 px-1">
       <div class="flex-1 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible">
         
-        <!-- 左侧：语音按钮 -->
-        <button class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-60 hover:opacity-100 active:scale-90 transition-all">
-          <div class="i-heroicons-microphone text-xl"></div>
+        <!-- 左侧：语音按钮 (使用用户提供的精准 SVG) -->
+        <button class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-90 active:scale-90 transition-all">
+          <svg width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" class="shrink-0">
+            <!-- 外圆环 -->
+            <circle cx="24" cy="24" r="19.5" stroke="currentColor" stroke-width="3.5" fill="none"/>
+            <!-- 声源点 -->
+            <circle cx="17.5" cy="24" r="3" fill="currentColor"/>
+            <!-- 内侧声波 -->
+            <path d="M 21.5 18 A 6.5 6.5 0 0 1 21.5 30" stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none"/>
+            <!-- 外侧声波 -->
+            <path d="M 26 13.5 A 12 12 0 0 1 26 34.5" stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none"/>
+          </svg>
         </button>
 
         <!-- 核心输入区 -->
@@ -157,26 +166,26 @@ const removeStagedAttachment = (index: number) => {
         </div>
 
         <!-- 右侧动态操作区 -->
-        <div class="flex items-center shrink-0 mb-0.5 relative gap-1">
-          <!-- 展开附件按钮 -->
+        <div class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
+          <!-- 展开附件按钮 (带旋转动画) -->
           <button
             @click="showAttachMenu = !showAttachMenu"
-            class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-60 hover:opacity-100 active:scale-90 transition-all"
+            class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all"
           >
-            <div class="i-heroicons-plus-circle text-2xl"></div>
+            <div class="i-heroicons-plus-circle text-2xl transition-transform duration-300 ease-out" :class="{ 'rotate-45': showAttachMenu }"></div>
           </button>
 
           <Transition name="pop-slide">
-            <!-- 发送/中止按钮 -->
+            <!-- 发送/中止按钮 (仿照目标风格：黑色实心圆 + 向上箭头) -->
             <button v-if="hasContent || isGenerating"
               @click="handleAction"
-              class="w-9 h-9 flex items-center justify-center rounded-full shadow-md active:scale-90 transition-all"
+              class="w-10 h-10 flex items-center justify-center rounded-full shadow-lg active:scale-95 transition-all"
               :class="[
-                isGenerating ? 'bg-red-500 text-white' : 'bg-blue-500 text-white',
+                isGenerating ? 'bg-red-500 text-white' : 'bg-black dark:bg-white text-white dark:text-black',
               ]"
             >
-              <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-lg"></div>
-              <div v-else class="i-heroicons-paper-airplane text-lg -rotate-45 -ml-0.5"></div>
+              <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-xl"></div>
+              <div v-else class="i-heroicons-arrow-up-16-solid text-2xl"></div>
             </button>
           </Transition>
         </div>
