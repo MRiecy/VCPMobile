@@ -5,12 +5,10 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::RwLock;
 
-use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{
     internal_load_library, refresh_emoticon_library_internal, EmoticonManagerState,
 };
-use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::sync_service::init_sync_service;
@@ -85,12 +83,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         }
     };
 
-    // 2. 基础状态管理注册
-    handle.manage(AgentConfigState::new());
-    handle.manage(GroupManagerState::new());
-    handle.manage(SettingsState::new());
-    handle.manage(ModelManagerState::new());
-    handle.manage(EmoticonManagerState::default());
+    // 2. 基础状态管理注册已在 lib.rs 中的 setup 阶段提前同步完成，此处无需重复注册以避免覆盖已有缓存。
 
     // 3. 配置预加载 (P1 - 前端强依赖)
     // 将配置读取前置，确保前端 Ready 后 fetchSettings 必然成功

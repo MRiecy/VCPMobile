@@ -116,6 +116,13 @@ pub fn run() {
             app.manage(UploadManagerState::new());
             app.manage(distributed::DistributedState::new());
 
+            // 提前注册纯内存状态，防范前端在 bootstrap 完成前调用 command 导致 state() panic
+            app.manage(vcp_modules::agent_service::AgentConfigState::new());
+            app.manage(vcp_modules::group_service::GroupManagerState::new());
+            app.manage(vcp_modules::settings_manager::SettingsState::new());
+            app.manage(vcp_modules::model_manager::ModelManagerState::new());
+            app.manage(vcp_modules::emoticon_manager::EmoticonManagerState::default());
+
             let handle = app.handle().clone();
 
             // 0. 前端 OTA：APK 升级清理 & 损坏版本回滚
