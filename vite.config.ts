@@ -22,7 +22,11 @@ function getPhysicalIps() {
       lowerName.includes("vbox") ||
       lowerName.includes("vmware") ||
       lowerName.includes("loopback") ||
-      lowerName.includes("pseudo")
+      lowerName.includes("pseudo") ||
+      lowerName.includes("vethernet") ||
+      lowerName.includes("wsl") ||
+      lowerName.includes("hyper-v") ||
+      lowerName.includes("host-only")
     ) {
       continue;
     }
