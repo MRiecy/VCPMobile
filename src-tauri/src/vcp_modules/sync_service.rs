@@ -488,6 +488,7 @@ async fn run_sync_session(
                 let manifest_responses_received = Arc::new(AtomicU32::new(0));
                 // 1: 基础 Metadata (agent, group, avatar), 2: Topic Metadata
                 let manifest_phase = Arc::new(AtomicU8::new(1));
+                let mut sync_success = false;
 
                 loop {
                     tokio::select! {
@@ -656,6 +657,7 @@ async fn run_sync_session(
                                         json!({ "status": "completed", "message": "同步完成", "source": "Sync" }),
                                     );
 
+                                    sync_success = true;
                                     let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED" }).to_string().into())).await;
                                     let _ = ws_stream.close(None).await;
                                     break;
@@ -802,8 +804,10 @@ async fn run_sync_session(
                                 },
                             }
                         },
-                        Some(Ok(msg)) = ws_stream.next() => {
-                            if let Message::Text(text) = msg {
+                        res = ws_stream.next() => {
+                            match res {
+                                Some(Ok(msg)) => {
+                                    if let Message::Text(text) = msg {
                                 let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
                                 if payload.is_null() { continue; }
 
@@ -1358,11 +1362,53 @@ async fn run_sync_session(
                                         _ => {}
                                 }
                             }
+                                }
+                                Some(Err(e)) => {
+                                    let err_msg = format!("WebSocket 接收发生错误: {}", e);
+                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                        logger.log(LogLevel::Error, "network", &err_msg);
+                                    }
+                                    emit_sync_log(&handle_clone, "error", &err_msg);
+                                    break;
+                                }
+                                None => {
+                                    let err_msg = "WebSocket 连接意外断开 (服务器关闭连接)";
+                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                        logger.log(LogLevel::Error, "network", err_msg);
+                                    }
+                                    emit_sync_log(&handle_clone, "error", err_msg);
+                                    break;
+                                }
+                            }
                         }
                         else => break,
                     }
                 }
-                break; // 同步完成或异常，退出外层 loop
+                if sync_success {
+                    break; // 同步完成，退出外层 loop
+                } else {
+                    // 同步未成功完成，但内层循环已跳出（说明中途断网）
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        let err_msg = "同步中途异常断开，已达到最大重试次数";
+                        publish_sync_status(
+                            &handle_clone,
+                            &connection_status_for_task,
+                            "error",
+                            err_msg,
+                        )
+                        .await;
+                        break;
+                    }
+                    let backoff = retry_delay * 2u32.pow(retry_count - 1);
+                    let err_msg = format!(
+                        "同步中途异常断开，{:?} 后尝试重新连接... (次数: {}/{})",
+                        backoff, retry_count, MAX_RETRIES
+                    );
+                    emit_sync_log(&handle_clone, "warn", &err_msg);
+                    tokio::time::sleep(backoff).await;
+                    continue; // 重新尝试连接
+                }
             }
             Err(e) => {
                 let err_detail = e.to_string();
