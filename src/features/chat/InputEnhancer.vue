@@ -108,7 +108,7 @@ const removeStagedAttachment = (index: number) => {
     <!-- 附件选择菜单 (浮层) -->
     <Transition name="fade-scale">
       <div v-if="showAttachMenu" 
-        class="absolute bottom-16 right-4 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl shadow-2xl p-2 z-50 flex flex-col gap-1 min-w-[120px] backdrop-blur-md"
+        class="absolute bottom-16 right-4 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl shadow-2xl p-2 z-local flex flex-col gap-1 min-w-[120px] backdrop-blur-md"
       >
         <button @click="triggerFilePick('camera')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
           <div class="i-heroicons-camera text-lg text-blue-500"></div>

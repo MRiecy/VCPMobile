@@ -66,7 +66,7 @@ const categories = [
   { id: "connection", title: "服务器连接", description: "VCP Server API 与数据同步" },
   { id: "theme", title: "主题切换", description: "视觉风格与壁纸" },
   { id: "advanced", title: "高级功能", description: "话题总结、分布式节点与数据维护" },
-  { id: "power", title: "后台保活", description: "电池白名单与进程锁定设置" },
+  { id: "power", title: "电池优化", description: "电池白名单与进程锁定设置" },
   { id: "about", title: "关于", description: "版本与更新" },
 ];
 
