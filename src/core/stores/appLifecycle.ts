@@ -228,22 +228,35 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     updatePhaseLabel('等待核心就绪...');
 
     await new Promise<void>((resolve, reject) => {
-      // 仅作为极端挂死的兜底
-      const timeoutId = setTimeout(() => {
+      let settled = false;
+      let timeoutId: ReturnType<typeof setTimeout>;
+      let unwatch: (() => void);
+
+      const cleanup = () => {
+        clearTimeout(timeoutId);
         unwatch();
-        reject(new Error(`等待核心引擎就绪超时（${CONNECT_TIMEOUT_MS}ms）`));
+      };
+
+      // 仅作为极端挂死的兜底
+      timeoutId = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`等待核心引擎就绪超时（${CONNECT_TIMEOUT_MS}ms）`));
+        }
       }, CONNECT_TIMEOUT_MS);
 
-      const unwatch = watch(
+      unwatch = watch(
         () => notificationStore.vcpCoreStatus.status,
         (newStatus) => {
+          if (settled) return;
           if (newStatus === 'ready') {
-            clearTimeout(timeoutId);
-            unwatch();
+            settled = true;
+            cleanup();
             resolve();
           } else if (newStatus === 'error') {
-            clearTimeout(timeoutId);
-            unwatch();
+            settled = true;
+            cleanup();
             reject(new Error(notificationStore.vcpCoreStatus.message || '核心引擎启动失败'));
           }
         },

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, onUnmounted } from 'vue';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js';
 import { useThemeStore } from '../../../core/stores/theme';
@@ -87,6 +87,8 @@ const openFullScreen = () => {
   fullScreenTab.value = isPreviewing.value ? 'preview' : 'code';
 };
 
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
 const refreshPreview = () => {
   const iframe = isFullScreen.value 
     ? document.querySelector('.vcp-fullscreen-iframe') as HTMLIFrameElement
@@ -95,7 +97,8 @@ const refreshPreview = () => {
   if (iframe) {
     const currentSrc = iframe.srcdoc;
     iframe.srcdoc = '';
-    setTimeout(() => {
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
       iframe.srcdoc = currentSrc;
     }, 50);
   }
@@ -110,6 +113,10 @@ watch(isPreviewing, (val) => {
 
 watch(fullScreenTab, (val) => {
   isPreviewing.value = val === 'preview';
+});
+
+onUnmounted(() => {
+  if (refreshTimer) clearTimeout(refreshTimer);
 });
 </script>
 

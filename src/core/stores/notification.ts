@@ -49,6 +49,8 @@ export const useNotificationStore = defineStore('notification', () => {
     vcpCoreStatus.value = payload;
   };
 
+  const toastTimers = new Set<ReturnType<typeof setTimeout>>();
+
   const addNotification = (payload: Partial<VcpNotification>) => {
     if (payload.silent) return;
 
@@ -67,9 +69,10 @@ export const useNotificationStore = defineStore('notification', () => {
         activeToasts.value[existingIndex] = updated;
 
         if (updated.duration !== 0) {
-          setTimeout(() => {
+          const timer = setTimeout(() => {
             activeToasts.value = activeToasts.value.filter(t => t.id !== updated.id);
           }, updated.duration || 3000);
+          toastTimers.add(timer);
         }
         return;
       }
@@ -117,9 +120,10 @@ export const useNotificationStore = defineStore('notification', () => {
 
       // 3. 自动移除逻辑 (如果 duration 为 0 则不自动消失)
       if (notification.duration !== 0) {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
           activeToasts.value = activeToasts.value.filter(t => t.id !== id);
         }, notification.duration || 3000);
+        toastTimers.add(timer);
       }
     }
   };
@@ -187,6 +191,8 @@ export const useNotificationStore = defineStore('notification', () => {
 
   onScopeDispose(() => {
     clearInterval(ghostCleanupInterval);
+    toastTimers.forEach(clearTimeout);
+    toastTimers.clear();
   });
 
   return {

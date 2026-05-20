@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed, reactive } from "vue";
+import { ref, computed, reactive, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { releaseScreenKeep } from "../composables/useScreenKeeper";
 import { useChatSessionStore } from "./chatSessionStore";
@@ -18,6 +18,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // 全局活跃流消息池：存储所有正在生成的响应对象 (messageId -> Reactive<ChatMessage>)
   // 无论是在前台还是后台，流式消息都从此池中获取，保证响应式链路不断裂
   const activeStreamMessages = reactive<Map<string, ChatMessage>>(new Map());
+  const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const sessionStore = useChatSessionStore();
   const assistantStore = useAssistantStore();
@@ -126,11 +127,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       releaseScreenKeep();
     }
     // 同时从全局池中移除 (延迟移除，确保 finalizeStream 能拿到对象)
-    setTimeout(() => {
+    const cleanupTimer = setTimeout(() => {
         if (!activeStreamingIds.value.has(messageId)) {
             activeStreamMessages.delete(messageId);
         }
     }, 1000);
+    cleanupTimers.add(cleanupTimer);
   };
 
   /**
@@ -298,6 +300,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       console.error("[ChatStreamStore] Failed to stop group turn:", e);
     }
   };
+
+  onScopeDispose(() => {
+    cleanupTimers.forEach(clearTimeout);
+    cleanupTimers.clear();
+  });
 
   return {
     streamingMessageId,
