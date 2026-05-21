@@ -3,8 +3,7 @@ use dashmap::DashMap;
 use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
@@ -258,7 +257,7 @@ pub fn get_refined_mime_type(path: &std::path::Path, original_name: &str, initia
             "wmv" => return "video/x-ms-wmv".to_string(),
             "flv" => return "video/x-flv".to_string(),
             "3gp" | "3g2" => return "video/3gpp".to_string(),
-            "ts" | "mts" | "m2ts" => return "video/mp2t".to_string(),
+            "mts" | "m2ts" => return "video/mp2t".to_string(),
             // 所有代码/文本类文件统一为 text/plain 以触发提取逻辑
             "js" | "mjs" | "bat" | "sh" | "py" | "java" | "c" | "cpp" | "h" | "hpp" | "cs"
             | "go" | "rb" | "php" | "swift" | "kt" | "kts" | "ts" | "tsx" | "jsx" | "vue"
@@ -677,34 +676,38 @@ pub async fn init_chunked_upload(
         fs::create_dir_all(&temp_path).map_err(|e| e.to_string())?;
     }
 
-    // 清理超过 24 小时的废弃上传临时文件
-    const ORPHAN_TTL_SECS: u64 = 86400;
-    let now = SystemTime::now();
-    if let Ok(entries) = fs::read_dir(&temp_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                let should_remove = if let Ok(metadata) = entry.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        now.duration_since(modified)
-                            .map(|d| d.as_secs() > ORPHAN_TTL_SECS)
-                            .unwrap_or(false)
+    // 异步化僵尸文件清理流程，完全避免阻塞当前请求
+    let temp_path_clone = temp_path.clone();
+    let sessions_clone = state.sessions.clone();
+    tokio::task::spawn(async move {
+        const ORPHAN_TTL_SECS: u64 = 86400;
+        let now = SystemTime::now();
+        if let Ok(entries) = std::fs::read_dir(&temp_path_clone) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    let should_remove = if let Ok(metadata) = entry.metadata() {
+                        if let Ok(modified) = metadata.modified() {
+                            now.duration_since(modified)
+                                .map(|d| d.as_secs() > ORPHAN_TTL_SECS)
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        }
                     } else {
                         false
+                    };
+                    if should_remove {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            sessions_clone.remove(stem);
+                        }
+                        let _ = std::fs::remove_file(&path);
+                        log::info!("[FileManager] Removed orphan upload temp file: {:?}", path);
                     }
-                } else {
-                    false
-                };
-                if should_remove {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        state.sessions.remove(stem);
-                    }
-                    let _ = fs::remove_file(&path);
-                    log::info!("[FileManager] Removed orphan upload temp file: {:?}", path);
                 }
             }
         }
-    }
+    });
 
     temp_path.push(format!("{}.tmp", session_id));
 
@@ -730,6 +733,8 @@ pub async fn append_chunk(
     session_id: String,
     chunk_bytes: Vec<u8>,
 ) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
     let session = state.sessions.get(&session_id).ok_or("无效的上传会话")?;
 
     // 1. 同步更新哈希 (边搬砖边记账)
@@ -744,13 +749,15 @@ pub async fn append_chunk(
         *size += chunk_bytes.len() as u64;
     }
 
-    // 3. 写入磁盘
-    let mut file = OpenOptions::new()
+    // 3. 异步写入磁盘
+    let mut file = tokio::fs::OpenOptions::new()
         .append(true)
         .open(&session.temp_path)
+        .await
         .map_err(|e| format!("无法打开临时文件: {}", e))?;
 
     file.write_all(&chunk_bytes)
+        .await
         .map_err(|e| format!("追加分片失败: {}", e))?;
 
     Ok(())

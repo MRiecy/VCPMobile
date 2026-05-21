@@ -4,7 +4,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_manager::{get_attachments_root_dir, get_thumbnails_root_dir};
 use crate::vcp_modules::settings_manager::{read_settings, update_settings, SettingsState};
-use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
 
@@ -64,10 +63,10 @@ pub async fn cleanup_orphaned_attachments(
         if !used_hashes.contains(&hash) {
             let path = std::path::Path::new(&local_path);
             if path.exists() {
-                if let Ok(meta) = fs::metadata(path) {
+                if let Ok(meta) = tokio::fs::metadata(path).await {
                     freed_size += meta.len();
                 }
-                let _ = fs::remove_file(path);
+                let _ = tokio::fs::remove_file(path).await;
 
                 // 同时删除可能的缩略图
                 let thumb_path = match get_thumbnails_root_dir(&app_handle) {
@@ -79,7 +78,7 @@ pub async fn cleanup_orphaned_attachments(
                         .join(format!("{}_thumb.webp", hash)),
                 };
                 if thumb_path.exists() {
-                    let _ = fs::remove_file(thumb_path);
+                    let _ = tokio::fs::remove_file(thumb_path).await;
                 }
 
                 deleted_count += 1;
