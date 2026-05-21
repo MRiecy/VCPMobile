@@ -370,11 +370,17 @@ fn ensure_safe_path(app_handle: &AppHandle, path: &std::path::Path) -> Result<()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
 
-    // 允许访问 App 配置目录 (内部) 或 附件目录 (可能在外部)
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?;
+
+    // 允许访问 App 配置目录 (内部)、缓存目录 (临时)、附件目录 (可能在外部) 或 缩略图目录
     let attachments_dir = get_attachments_root_dir(app_handle)?;
     let thumbnails_dir = get_thumbnails_root_dir(app_handle)?;
 
     if path.starts_with(&config_dir)
+        || path.starts_with(&cache_dir)
         || path.starts_with(&attachments_dir)
         || path.starts_with(&thumbnails_dir)
     {
@@ -836,6 +842,147 @@ pub async fn finish_chunked_upload(
     )
     .await
 }
+
+/// 注册本地已有的文件（例如 Android Kotlin 端沙盒临时复制的大文件/硬解缩略图）
+/// 彻底实现“前端零拷贝物理路径传输”
+#[tauri::command]
+pub async fn register_local_file(
+    app_handle: AppHandle,
+    db_state: State<'_, DbState>,
+    local_path: String,
+    original_name: String,
+    mime_type: Option<String>,
+    thumbnail_path: Option<String>,
+) -> Result<AttachmentData, String> {
+    use tokio::io::AsyncReadExt;
+
+    let source_path = std::path::PathBuf::from(&local_path);
+    if !source_path.exists() {
+        return Err(format!("本地源文件不存在: {}", local_path));
+    }
+
+    // 1. 安全性检查，防止路径遍历攻击
+    ensure_safe_path(&app_handle, &source_path)?;
+
+    // 2. 异步读取元数据 (获取文件物理大小)
+    let meta = tokio::fs::metadata(&source_path)
+        .await
+        .map_err(|e| format!("无法读取源文件元数据: {}", e))?;
+    let size = meta.len();
+
+    // 3. 流式异步读取并计算 SHA-256 (彻底避免大文件一次性载入内存)
+    let mut file = tokio::fs::File::open(&source_path)
+        .await
+        .map_err(|e| format!("无法打开源文件: {}", e))?;
+    
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536]; // 64KB 缓冲
+    loop {
+        let n = file.read(&mut buffer)
+            .await
+            .map_err(|e| format!("读取源文件失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    let hash = hex::encode(hasher.finalize());
+
+    // 4. 计算目标路径
+    let file_extension = std::path::Path::new(&original_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let internal_file_name = if file_extension.is_empty() {
+        hash.clone()
+    } else {
+        format!("{}.{}", hash, file_extension)
+    };
+
+    let attachments_dir = get_attachments_root_dir(&app_handle)?;
+    if !attachments_dir.exists() {
+        tokio::fs::create_dir_all(&attachments_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let dest_path = attachments_dir.join(&internal_file_name);
+    let dest_path_str = dest_path.to_str().ok_or("无效的目标路径字符")?.to_string();
+
+    // 如果目标文件已存在（内容寻址去重去冗余），则直接删除源临时文件
+    if dest_path.exists() {
+        let _ = tokio::fs::remove_file(&source_path).await;
+        log::info!("[FileManager] Duplicated local file found. Removed source path: {}", local_path);
+    } else {
+        // 先尝试 rename 极速移动，失败时 fallback 复制 + 删除
+        if tokio::fs::rename(&source_path, &dest_path).await.is_err() {
+            tokio::fs::copy(&source_path, &dest_path)
+                .await
+                .map_err(|e| format!("复制文件到正式目录失败: {}", e))?;
+            let _ = tokio::fs::remove_file(&source_path).await;
+        }
+    }
+
+    // 5. 修正 MIME 类型
+    let initial_mime = mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
+    let refined_mime = get_refined_mime_type(&dest_path, &original_name, &initial_mime);
+
+    // 6. 调用统一的附件注册逻辑
+    let mut attachment_data = register_attachment_internal(
+        &app_handle,
+        &db_state.pool,
+        hash.clone(),
+        original_name,
+        refined_mime,
+        size,
+        dest_path_str,
+    )
+    .await?;
+
+    // 7. 处理前端传入的已有缩略图 (如 Kotlin 侧硬件加速生成的缩略图)
+    let mut final_thumbnail_path = attachment_data.thumbnail_path.clone();
+
+    if let Some(ref tp) = thumbnail_path {
+        let source_thumb = std::path::PathBuf::from(tp);
+        if source_thumb.exists() {
+            let thumbs_dir = get_thumbnails_root_dir(&app_handle)?;
+            if !thumbs_dir.exists() {
+                tokio::fs::create_dir_all(&thumbs_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            let dest_thumb_path = thumbs_dir.join(format!("{}_thumb.webp", hash));
+            let dest_thumb_path_str = dest_thumb_path.to_str().unwrap().to_string();
+
+            if dest_thumb_path.exists() {
+                let _ = tokio::fs::remove_file(&source_thumb).await;
+            } else {
+                if tokio::fs::rename(&source_thumb, &dest_thumb_path).await.is_err() {
+                    if tokio::fs::copy(&source_thumb, &dest_thumb_path).await.is_ok() {
+                        let _ = tokio::fs::remove_file(&source_thumb).await;
+                    }
+                }
+            }
+
+            // 更新 SQLite 中的 thumbnail_path，使其指向正式保存的缩略图
+            sqlx::query(
+                "UPDATE attachments SET thumbnail_path = ?, updated_at = ? WHERE hash = ?"
+            )
+            .bind(&dest_thumb_path_str)
+            .bind(attachment_data.created_at as i64)
+            .bind(&hash)
+            .execute(&db_state.pool)
+            .await
+            .ok();
+
+            final_thumbnail_path = Some(dest_thumb_path_str);
+        }
+    }
+
+    attachment_data.thumbnail_path = final_thumbnail_path;
+    Ok(attachment_data)
+}
+
 /// 移动端/桌面端原生文件选取与存储 (流式防 OOM 优化版)
 #[tauri::command]
 pub async fn get_attachment_real_path(

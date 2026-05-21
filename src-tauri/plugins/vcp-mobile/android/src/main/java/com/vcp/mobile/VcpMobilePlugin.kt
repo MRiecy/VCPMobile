@@ -213,6 +213,179 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         super.onConfigurationChanged(newConfig)
         lifecycleBridge.onConfigurationChanged(newConfig)
     }
+
+    // ==================================================================
+    // Scoped Storage File Picker & Native Thumbnail Generation (Scheme B)
+    // ==================================================================
+    @Command
+    fun pickFile(invoke: Invoke) {
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+        }
+        startActivityForResult(invoke, intent, "onPickFileResult")
+    }
+
+    @app.tauri.annotation.ActivityCallback
+    fun onPickFileResult(invoke: Invoke, result: ActivityResult) {
+        if (result.resultCode != Activity.RESULT_OK) {
+            invoke.reject("Cancelled")
+            return
+        }
+
+        val uri = result.data?.data
+        if (uri == null) {
+            invoke.reject("No file selected")
+            return
+        }
+
+        Thread {
+            try {
+                val context = activity
+                val contentResolver = context.contentResolver
+
+                // 1. 获取文件名和大小
+                var originalName = "unknown"
+                var size = 0L
+                contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    val sizeIndex = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                    if (cursor.moveToFirst()) {
+                        if (nameIndex != -1) originalName = cursor.getString(nameIndex)
+                        if (sizeIndex != -1) size = cursor.getLong(sizeIndex)
+                    }
+                }
+
+                // 2. 获取 MIME 类型
+                val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+
+                // 3. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
+                val tempFile = java.io.File(context.cacheDir, "pick_${System.currentTimeMillis()}_temp")
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                
+                contentResolver.openInputStream(uri).use { inputStream ->
+                    if (inputStream == null) {
+                        activity.runOnUiThread { invoke.reject("Could not open input stream") }
+                        return@Thread
+                    }
+                    java.io.FileOutputStream(tempFile).use { outputStream ->
+                        val buffer = ByteArray(65536)
+                        var bytesRead: Int
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            digest.update(buffer, 0, bytesRead)
+                        }
+                    }
+                }
+
+                val hashBytes = digest.digest()
+                val hash = hashBytes.joinToString("") { "%02x".format(it) }
+
+                // 内容寻址哈希命名重命名去重
+                val fileExtension = java.io.File(originalName).extension.let { 
+                    if (it.isEmpty()) "" else ".$it" 
+                }
+                val finalTempFile = java.io.File(context.cacheDir, "$hash$fileExtension")
+                
+                if (finalTempFile.exists()) {
+                    tempFile.delete() // 缓存去重，复用已有文件
+                } else {
+                    tempFile.renameTo(finalTempFile)
+                }
+
+                val finalSize = if (size > 0) size else finalTempFile.length()
+
+                // 4. 图片资源触发 Native 硬件加速缩略图硬解
+                var thumbnailPath: String? = null
+                if (mimeType.startsWith("image/")) {
+                    thumbnailPath = generateNativeThumbnail(context, finalTempFile, hash)
+                }
+
+                // 5. 组装结果物理路径并回传给 Rust 桥接
+                val resultObject = JSObject()
+                resultObject.put("path", finalTempFile.absolutePath)
+                resultObject.put("name", originalName)
+                resultObject.put("mime", mimeType)
+                resultObject.put("size", finalSize)
+                resultObject.put("hash", hash)
+                if (thumbnailPath != null) {
+                    resultObject.put("thumbnailPath", thumbnailPath)
+                }
+
+                activity.runOnUiThread {
+                    invoke.resolve(resultObject)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "File pick handling failed", e)
+                activity.runOnUiThread {
+                    invoke.reject("Handling picked file failed: ${e.message}")
+                }
+            }
+        }.start()
+    }
+
+    private fun generateNativeThumbnail(context: Context, originalFile: java.io.File, hash: String): String? {
+        val thumbDir = java.io.File(context.cacheDir, "thumbnails").apply { mkdirs() }
+        val thumbFile = java.io.File(thumbDir, "${hash}_thumb.webp")
+        if (thumbFile.exists()) return thumbFile.absolutePath
+
+        try {
+            val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Q以上享用系统硬件级图片自适应缩放加速
+                android.media.ThumbnailUtils.createImageThumbnail(originalFile, android.util.Size(200, 200), null)
+            } else {
+                // 兼容低版本并防止大图软解 OOM 的智能预采样
+                val options = android.graphics.BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                android.graphics.BitmapFactory.decodeFile(originalFile.absolutePath, options)
+                val width = options.outWidth
+                val height = options.outHeight
+                
+                var inSampleSize = 1
+                if (width > 200 || height > 200) {
+                    val halfHeight = height / 2
+                    val halfWidth = width / 2
+                    while (halfHeight / inSampleSize >= 200 && halfWidth / inSampleSize >= 200) {
+                        inSampleSize *= 2
+                    }
+                }
+                
+                options.inJustDecodeBounds = false
+                options.inSampleSize = inSampleSize
+                val rawBitmap = android.graphics.BitmapFactory.decodeFile(originalFile.absolutePath, options) ?: return null
+                
+                val w = rawBitmap.width
+                val h = rawBitmap.height
+                val (newW, newH) = if (w >= h) {
+                    val ratio = w.toFloat() / h.toFloat()
+                    ((200f * ratio).toInt() to 200)
+                } else {
+                    val ratio = h.toFloat() / w.toFloat()
+                    (200 to (200f * ratio).toInt())
+                }
+                val scaled = android.graphics.Bitmap.createScaledBitmap(rawBitmap, newW, newH, true)
+                if (scaled != rawBitmap) {
+                    rawBitmap.recycle()
+                }
+                scaled
+            }
+
+            java.io.FileOutputStream(thumbFile).use { out ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.WEBP_LOSSY, 80, out)
+                } else {
+                    @Suppress("DEPRECATION")
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.WEBP, 80, out)
+                }
+            }
+            bitmap.recycle() // 显式释放 Native 物理内存，防范溢出
+            return thumbFile.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "Native thumbnail generation failed", e)
+            return null
+        }
+    }
 }
 
 @InvokeArg

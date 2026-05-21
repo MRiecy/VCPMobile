@@ -21,7 +21,7 @@ use vcp_modules::emoticon_manager::{
 };
 use vcp_modules::file_manager::{
     append_chunk, cancel_chunked_upload, finish_chunked_upload, get_attachment_real_path,
-    init_chunked_upload, open_file, store_file, UploadManagerState,
+    init_chunked_upload, open_file, register_local_file, store_file, UploadManagerState,
 };
 use vcp_modules::frontend_update_manager::{
     apply_frontend_update, check_for_frontend_update, clear_frontend_updates,
@@ -228,6 +228,7 @@ pub fn run() {
             delete_agent,
             set_theme,
             store_file,
+            register_local_file,
             init_chunked_upload,
             append_chunk,
             finish_chunked_upload,
