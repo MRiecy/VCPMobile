@@ -92,16 +92,6 @@ const handleVcpButtonClick = (e: any) => {
   }
 };
 
-const handleLifecycle = (e: any) => {
-  if (e.detail?.state === 'resume') {
-    const selected = sessionStore.currentSelectedItem;
-    const topicId = sessionStore.currentTopicId;
-    if (selected && topicId) {
-      console.log('[ChatView] App resumed, refreshing history...');
-      historyStore.loadHistoryPaginated(selected.id, selected.type, topicId);
-    }
-  }
-};
 
 watch(isStreamingActive, (active) => {
   active ? startAutoScroll() : stopAutoScroll();
@@ -123,7 +113,6 @@ watch(keyboardHeight, (height) => {
 
 onMounted(async () => {
   window.addEventListener("vcp-button-click", handleVcpButtonClick);
-  window.addEventListener("vcp-lifecycle", handleLifecycle);
 
   if (chatViewContainerRef.value) {
     chatViewContainerRef.value.addEventListener("focusin", forceRecalculate);
@@ -134,7 +123,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener("vcp-button-click", handleVcpButtonClick);
-  window.removeEventListener("vcp-lifecycle", handleLifecycle);
 
   if (chatViewContainerRef.value) {
     chatViewContainerRef.value.removeEventListener("focusin", forceRecalculate);

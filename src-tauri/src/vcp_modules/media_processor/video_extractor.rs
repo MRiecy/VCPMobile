@@ -109,38 +109,35 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
             .ok_or("Invalid temp path")?,
     ])?;
 
-    // 8. 读取均匀帧：帧编号 → JPEG bytes
-    let mut uniform_frames: Vec<(usize, Vec<u8>)> = Vec::new();
-    for entry in
-        std::fs::read_dir(&temp_dir).map_err(|e| format!("Failed to read temp dir: {}", e))?
-    {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let p = entry.path();
-        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-            if let Ok(idx) = stem.parse::<usize>() {
-                let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
-                uniform_frames.push((idx, bytes));
-            }
-        }
-    }
-    uniform_frames.sort_by_key(|(idx, _)| *idx);
+    // 8. 移除原有的全量预加载逻辑，改为在循环中按需读取以节省内存
 
     // 9. 为每个需要的时间戳匹配最接近的均匀帧，缺失则单独提取
-    let mut results = Vec::with_capacity(deduped.len());
+    // 增加累加器，当 Base64 总大小超过 18MB 时停止，确保请求体在 20MB 以内
+    let mut results = Vec::new();
+    let mut total_b64_size = 0;
+    const SIZE_LIMIT: usize = 18_000_000; // 18MB 字符上限
 
     for ts in &deduped {
         // ffmpeg frame_%04d 从 1 开始：frame_0001 → t=0, frame_0002 → t=1/fps, ...
         let expected_idx = (ts * fps).round() as usize + 1;
+        let frame_path = temp_dir.join(format!("frame_{:04}.jpg", expected_idx));
 
-        let jpeg_bytes =
-            if let Some((_, bytes)) = uniform_frames.iter().find(|(idx, _)| *idx == expected_idx) {
-                bytes.clone()
-            } else {
-                // 场景帧不在均匀采样中，单独提取
-                extract_single_frame(path, *ts)?
-            };
+        let jpeg_bytes = if frame_path.exists() {
+            std::fs::read(&frame_path).map_err(|e| format!("Failed to read frame {}: {}", expected_idx, e))?
+        } else {
+            // 场景帧可能不在均匀采样网格中，单独提取
+            extract_single_frame(path, *ts)?
+        };
 
-        results.push(frame_to_data_url(&jpeg_bytes)?);
+        let data_url = frame_to_data_url(&jpeg_bytes)?;
+        total_b64_size += data_url.len();
+        
+        results.push(data_url);
+
+        if total_b64_size >= SIZE_LIMIT {
+            // 触碰 20MB 边界，硬截断后续帧
+            break;
+        }
     }
 
     // 10. 清理临时目录

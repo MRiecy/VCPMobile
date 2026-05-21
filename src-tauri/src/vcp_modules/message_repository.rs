@@ -18,8 +18,8 @@ impl MessageRenderCompiler {
 
     /// Serializes AST blocks to compressed binary (JSON + zstd)
     pub fn serialize(blocks: &[ContentBlock]) -> Result<Vec<u8>, String> {
-        let json_bytes = serde_json::to_vec(blocks)
-            .map_err(|e| format!("json serialize failed: {}", e))?;
+        let json_bytes =
+            serde_json::to_vec(blocks).map_err(|e| format!("json serialize failed: {}", e))?;
         let compressed = zstd::bulk::compress(&json_bytes, 3)
             .map_err(|e| format!("zstd compress failed: {}", e))?;
         Ok(compressed)
@@ -30,8 +30,7 @@ impl MessageRenderCompiler {
         // Use a generous upper bound for decompression; zstd will return exact size
         let decompressed = zstd::bulk::decompress(bytes, 16 * 1024 * 1024)
             .map_err(|e| format!("zstd decompress failed: {}", e))?;
-        serde_json::from_slice(&decompressed)
-            .map_err(|e| format!("json deserialize failed: {}", e))
+        serde_json::from_slice(&decompressed).map_err(|e| format!("json deserialize failed: {}", e))
     }
 }
 
@@ -142,12 +141,10 @@ fn run_batch_update_writer(
         while let Some(batch) = rx.blocking_recv() {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             {
-                let mut stmt = tx
-                    .prepare_cached(&update_sql)
-                    .map_err(|e| e.to_string())?;
+                let mut stmt = tx.prepare_cached(&update_sql).map_err(|e| e.to_string())?;
                 let now = chrono::Utc::now().timestamp_millis();
                 for (topic_id, msg_id, bytes) in batch {
-                    // 适配 render_cache 的 4 参数 SQL (topic_id, msg_id, bytes, now) 
+                    // 适配 render_cache 的 4 参数 SQL (topic_id, msg_id, bytes, now)
                     // 或 content_compress 的 3 参数 SQL (bytes, topic_id, msg_id)
                     if update_sql.contains("render_cache") {
                         stmt.execute(rusqlite::params![topic_id, msg_id, bytes, now])
@@ -238,10 +235,12 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                             batch.push((topic_id, msg_id, bytes));
                         }
 
-                        if batch.len() >= 50 {
-                            if tx_writer_clone.blocking_send(std::mem::take(&mut batch)).is_err() {
-                                break;
-                            }
+                        if batch.len() >= 50
+                            && tx_writer_clone
+                                .blocking_send(std::mem::take(&mut batch))
+                                .is_err()
+                        {
+                            break;
                         }
                     }
                     None => {
@@ -358,10 +357,12 @@ pub async fn compress_all_contents(app_handle: AppHandle) -> Result<(), String> 
                             }
                         }
 
-                        if batch.len() >= 50 {
-                            if tx_writer_clone.blocking_send(std::mem::take(&mut batch)).is_err() {
-                                break;
-                            }
+                        if batch.len() >= 50
+                            && tx_writer_clone
+                                .blocking_send(std::mem::take(&mut batch))
+                                .is_err()
+                        {
+                            break;
                         }
                     }
                     None => {

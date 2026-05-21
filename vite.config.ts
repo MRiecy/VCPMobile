@@ -54,10 +54,13 @@ const physicalIps = getPhysicalIps();
 // @ts-expect-error process is a nodejs global
 const detectedHost = process.env.TAURI_DEV_HOST;
 
-// 如果 Tauri 自动识别的 host 不在真实的物理 IP 列表中（被 TUN 网卡劫持），则强制纠正为物理局域网 IP
-const host = (detectedHost && physicalIps.includes(detectedHost))
+// USB 模式（localhost）直接信任；WiFi 模式校验是否在物理 IP 列表中，防止 TUN 劫持
+const isLocalhost = detectedHost === "localhost" || (detectedHost && detectedHost.startsWith("127."));
+const host = isLocalhost
   ? detectedHost
-  : (physicalIps[0] || "0.0.0.0");
+  : (detectedHost && physicalIps.includes(detectedHost))
+    ? detectedHost
+    : (physicalIps[0] || "0.0.0.0");
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({

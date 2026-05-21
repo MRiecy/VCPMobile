@@ -185,17 +185,16 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
 
     // 6. messages 表 (消息历史 - 已移除冗余 avatar_url 和 avatar_color)
     // 迁移：由于主键变更 (msg_id -> topic_id, msg_id)，需要重建表
-    let is_composite_pk: bool = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE pk > 1",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0)
-        > 0;
+    let is_composite_pk: bool =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE pk > 1")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0)
+            > 0;
 
     if !is_composite_pk {
         println!("[DBManager] Migrating messages schema to composite primary key...");
-        
+
         // 开启事务进行迁移
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
@@ -204,12 +203,12 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-        
+
         sqlx::query("ALTER TABLE render_cache RENAME TO render_cache_old")
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-            
+
         sqlx::query("ALTER TABLE message_attachments RENAME TO message_attachments_old")
             .execute(&mut *tx)
             .await
@@ -299,9 +298,18 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
         // 4. 删除旧表
-        sqlx::query("DROP TABLE messages_old").execute(&mut *tx).await.map_err(|e| e.to_string())?;
-        sqlx::query("DROP TABLE render_cache_old").execute(&mut *tx).await.map_err(|e| e.to_string())?;
-        sqlx::query("DROP TABLE message_attachments_old").execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        sqlx::query("DROP TABLE messages_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query("DROP TABLE render_cache_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query("DROP TABLE message_attachments_old")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
         println!("[DBManager] Messages schema migration completed successfully.");
@@ -472,8 +480,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-
-
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_messages_topic_time

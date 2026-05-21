@@ -206,10 +206,9 @@ pub async fn internal_process_group_chat_message(
         };
 
         // 启动前台服务保活
-        if let Err(e) = tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
-            &app_handle,
-            &agent_name,
-        ) {
+        if let Err(e) =
+            tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_name)
+        {
             println!(
                 "[GroupChatAppService] Failed to start streaming service: {}",
                 e

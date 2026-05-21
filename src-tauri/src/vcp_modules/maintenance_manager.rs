@@ -101,10 +101,10 @@ pub async fn cleanup_orphaned_attachments(
 }
 
 /// 3. 初始化自动维护逻辑 (在 App 启动时调用)
-/// 如果距离上次清理超过 3 天，则自动触发一次 WebView 缓存清理
+///    如果距离上次清理超过 3 天，则自动触发一次 WebView 缓存清理
 pub async fn init_automatic_maintenance(app: AppHandle) {
     let settings_state = app.state::<SettingsState>();
-    
+
     // 获取当前设置
     let settings = match read_settings(app.clone(), settings_state.clone()).await {
         Ok(s) => s,
@@ -112,7 +112,9 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
     };
 
     // 从 extra 中提取上次清理时间
-    let last_clear = settings.extra.get("lastWebviewCacheClear")
+    let last_clear = settings
+        .extra
+        .get("lastWebviewCacheClear")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
@@ -125,7 +127,7 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 
     if now - last_clear > three_days_secs {
         println!("[Maintenance] Triggering scheduled maintenance (WebView & SQLite)...");
-        
+
         // 1. WebView 清理
         if let Some(webview) = app.get_webview_window("main") {
             let _ = webview.clear_all_browsing_data();
@@ -137,11 +139,9 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         let _ = sqlx::query("PRAGMA incremental_vacuum(100)")
             .execute(&db_state.pool)
             .await;
-            
+
         // 3. SQLite 查询规划器优化
-        let _ = sqlx::query("PRAGMA optimize")
-            .execute(&db_state.pool)
-            .await;
+        let _ = sqlx::query("PRAGMA optimize").execute(&db_state.pool).await;
 
         // 更新时间戳
         let updates = serde_json::json!({
@@ -155,9 +155,7 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 /// 4. 数据库 page_size 优化升级
 /// 检查当前 page_size，若非 16KB 则执行 VACUUM 重建数据库文件
 #[tauri::command]
-pub async fn upgrade_database_page_size(
-    db_state: State<'_, DbState>,
-) -> Result<String, String> {
+pub async fn upgrade_database_page_size(db_state: State<'_, DbState>) -> Result<String, String> {
     let current_page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
         .fetch_one(&db_state.pool)
         .await

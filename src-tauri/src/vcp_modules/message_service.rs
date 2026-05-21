@@ -1,8 +1,8 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
-use crate::vcp_modules::message_repository::{ContentCompressor, MessageRenderCompiler};
 use crate::vcp_modules::message_repository::MessageRepository;
+use crate::vcp_modules::message_repository::{ContentCompressor, MessageRenderCompiler};
 use crate::vcp_modules::settings_manager;
 use sqlx::Row;
 use std::path::Path;
@@ -92,9 +92,7 @@ pub async fn load_multi_topic_messages(
 
     if !all_msg_refs.is_empty() {
         let mut att_placeholders = Vec::new();
-        for _ in 0..all_msg_refs.len() {
-            att_placeholders.push("(?, ?)");
-        }
+        att_placeholders.extend(std::iter::repeat_n("(?, ?)", all_msg_refs.len()));
         let att_query = format!(
             "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
@@ -448,8 +446,12 @@ pub async fn fetch_raw_message_content(
     match row {
         Some(r) => {
             let bytes: Vec<u8> = r.get(0);
-            let content = ContentCompressor::decompress(&bytes)
-                .map_err(|e| format!("Failed to decompress content for message {}: {}", message_id, e))?;
+            let content = ContentCompressor::decompress(&bytes).map_err(|e| {
+                format!(
+                    "Failed to decompress content for message {}: {}",
+                    message_id, e
+                )
+            })?;
             Ok(content)
         }
         None => Err(format!("Message {} not found", message_id)),
@@ -572,8 +574,10 @@ fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Val
     render_content.and_then(|bytes| {
         crate::vcp_modules::message_repository::MessageRenderCompiler::deserialize(&bytes)
             .ok()
-            .and_then(|blocks: Vec<crate::vcp_modules::content_parser::ContentBlock>| {
-                serde_json::to_value(blocks).ok()
-            })
+            .and_then(
+                |blocks: Vec<crate::vcp_modules::content_parser::ContentBlock>| {
+                    serde_json::to_value(blocks).ok()
+                },
+            )
     })
 }

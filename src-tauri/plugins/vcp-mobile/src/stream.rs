@@ -8,10 +8,10 @@ pub fn start_stream_service_inner<R: Runtime>(
     agent_name: &str,
 ) -> Result<(), String> {
     let state = app.state::<VcpMobileState<R>>();
-    
+
     let active_names = {
         let mut streams = state.active_streams.lock().map_err(|e| e.to_string())?;
-        
+
         // 更新计数或添加新 Agent
         if let Some(pos) = streams.iter().position(|(name, _)| name == agent_name) {
             streams[pos].1 += 1;
@@ -50,12 +50,15 @@ pub fn start_stream_service_inner<R: Runtime>(
 }
 
 /// Stop the stream keepalive service.
-pub fn stop_stream_service_inner<R: Runtime>(app: &AppHandle<R>, agent_name: &str) -> Result<(), String> {
+pub fn stop_stream_service_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    agent_name: &str,
+) -> Result<(), String> {
     let state = app.state::<VcpMobileState<R>>();
-    
+
     let (_should_stop, active_names) = {
         let mut streams = state.active_streams.lock().map_err(|e| e.to_string())?;
-        
+
         if let Some(pos) = streams.iter().position(|(name, _)| name == agent_name) {
             if streams[pos].1 > 1 {
                 streams[pos].1 -= 1;
@@ -70,7 +73,7 @@ pub fn stop_stream_service_inner<R: Runtime>(app: &AppHandle<R>, agent_name: &st
         } else {
             names.join("、")
         };
-        
+
         (streams.is_empty(), formatted)
     };
 
@@ -78,7 +81,7 @@ pub fn stop_stream_service_inner<R: Runtime>(app: &AppHandle<R>, agent_name: &st
     {
         let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
-        
+
         if _should_stop {
             plugin_handle
                 .run_mobile_plugin::<serde_json::Value>(
@@ -115,6 +118,9 @@ pub fn start_stream_service<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn stop_stream_service<R: Runtime>(app: AppHandle<R>, agent_name: String) -> Result<(), String> {
+pub fn stop_stream_service<R: Runtime>(
+    app: AppHandle<R>,
+    agent_name: String,
+) -> Result<(), String> {
     stop_stream_service_inner(&app, &agent_name)
 }

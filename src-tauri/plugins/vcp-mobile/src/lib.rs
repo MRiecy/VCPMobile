@@ -30,7 +30,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]
-            let plugin_handle = _api.register_android_plugin("com.vcp.mobile", "VcpMobilePlugin")?;
+            let plugin_handle =
+                _api.register_android_plugin("com.vcp.mobile", "VcpMobilePlugin")?;
 
             app.manage(VcpMobileState::<R> {
                 active_streams: std::sync::Mutex::new(Vec::new()),

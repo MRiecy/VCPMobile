@@ -163,8 +163,37 @@ pub struct AttachmentData {
     pub thumbnail_path: Option<String>,
 }
 
+/// 内部辅助函数：智能启发式检测文件是否可能为纯文本
+/// 读取前 1024 字节，如果不包含 NULL 字节 (0x00)，则极大概率是文本或代码
+fn is_likely_text_file(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut buffer = [0u8; 1024];
+    let n = match file.read(&mut buffer) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+
+    if n == 0 {
+        return false;
+    }
+
+    // 检查已读取的部分是否含有 NULL 字节
+    for &b in &buffer[..n] {
+        if b == 0 {
+            return false;
+        }
+    }
+    true
+}
+
 /// 内部辅助函数：精细化 MIME 类型判定 (对齐桌面端 fileManager.js)
-pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String {
+/// 增加了魔数检测 (infer) 和 文本启发式检测 (no-NULL sniffing) 
+pub fn get_refined_mime_type(path: &std::path::Path, original_name: &str, initial_mime: &str) -> String {
     let ext = std::path::Path::new(original_name)
         .extension()
         .and_then(|e| e.to_str())
@@ -176,8 +205,10 @@ pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String 
         return "audio/mpeg".to_string();
     }
 
-    // 2. 如果初始值无效，则根据扩展名路由
-    if initial_mime.is_empty() || initial_mime == "application/octet-stream" {
+    // 2. 如果初始值无效，或者是一个通用后缀，则尝试根据扩展名路由
+    let current_mime = initial_mime.to_string();
+
+    if current_mime.is_empty() || current_mime == "application/octet-stream" {
         match ext.as_str() {
             "txt" => return "text/plain".to_string(),
             "json" => return "application/json".to_string(),
@@ -204,25 +235,54 @@ pub fn get_refined_mime_type(original_name: &str, initial_mime: &str) -> String 
             "jpg" | "jpeg" => return "image/jpeg".to_string(),
             "png" => return "image/png".to_string(),
             "gif" => return "image/gif".to_string(),
+            "webp" => return "image/webp".to_string(),
             "svg" => return "image/svg+xml".to_string(),
+            "bmp" => return "image/bmp".to_string(),
+            "ico" => return "image/x-icon".to_string(),
+            "tiff" | "tif" => return "image/tiff".to_string(),
+            "heic" | "heif" => return "image/heic".to_string(),
+            "avif" => return "image/avif".to_string(),
             "wav" => return "audio/wav".to_string(),
-            "ogg" => return "audio/ogg".to_string(),
+            "ogg" | "ogv" => return "audio/ogg".to_string(),
             "flac" => return "audio/flac".to_string(),
             "aac" => return "audio/aac".to_string(),
-            "aiff" => return "audio/aiff".to_string(),
-            "mp4" => return "video/mp4".to_string(),
+            "aiff" | "aif" => return "audio/aiff".to_string(),
+            "m4a" => return "audio/mp4".to_string(),
+            "opus" => return "audio/opus".to_string(),
+            "amr" => return "audio/amr".to_string(),
+            "mp4" | "m4v" => return "video/mp4".to_string(),
             "webm" => return "video/webm".to_string(),
+            "mov" | "qt" => return "video/quicktime".to_string(),
+            "avi" => return "video/x-msvideo".to_string(),
+            "mkv" => return "video/x-matroska".to_string(),
+            "wmv" => return "video/x-ms-wmv".to_string(),
+            "flv" => return "video/x-flv".to_string(),
+            "3gp" | "3g2" => return "video/3gpp".to_string(),
+            "ts" | "mts" | "m2ts" => return "video/mp2t".to_string(),
             // 所有代码/文本类文件统一为 text/plain 以触发提取逻辑
             "js" | "mjs" | "bat" | "sh" | "py" | "java" | "c" | "cpp" | "h" | "hpp" | "cs"
             | "go" | "rb" | "php" | "swift" | "kt" | "kts" | "ts" | "tsx" | "jsx" | "vue"
             | "yml" | "yaml" | "toml" | "ini" | "log" | "sql" | "jsonc" | "rs" | "dart" | "lua"
             | "r" | "pl" | "ex" | "exs" | "zig" | "hs" | "scala" | "groovy" | "d" | "nim"
             | "cr" => return "text/plain".to_string(),
-            _ => {}
+            _ => {
+                // 3. 终极兜底：物理层嗅探
+                if path.exists() {
+                    // 3a. 魔数匹配 (用于识别被改了后缀的二进制文件)
+                    if let Ok(Some(kind)) = infer::get_from_path(path) {
+                        return kind.mime_type().to_string();
+                    }
+                    
+                    // 3b. 文本启发式 (用于识别未知的文本/代码格式，如 .pub, .env, .log)
+                    if is_likely_text_file(path) {
+                        return "text/plain".to_string();
+                    }
+                }
+            }
         }
     }
 
-    initial_mime.to_string()
+    current_mime
 }
 
 /// 内部辅助函数：生成图片缩略图（短边 200px 自适应，spawn_blocking 隔离）
@@ -585,7 +645,7 @@ pub async fn store_file(
     }
 
     // 3. 注册并返回元数据
-    let refined_mime = get_refined_mime_type(&original_name, &mime_type);
+    let refined_mime = get_refined_mime_type(&internal_file_path, &original_name, &mime_type);
     register_attachment_internal(
         &app_handle,
         &db_state.pool,
@@ -651,7 +711,7 @@ pub async fn init_chunked_upload(
     // 创建空文件
     fs::File::create(&temp_path).map_err(|e| e.to_string())?;
 
-    let refined_mime = get_refined_mime_type(&original_name, &mime_type);
+    let refined_mime = get_refined_mime_type(&temp_path, &original_name, &mime_type);
     let session = UploadSession {
         temp_path,
         original_name,
@@ -754,13 +814,16 @@ pub async fn finish_chunked_upload(
     fs::rename(&session.temp_path, &internal_file_path)
         .map_err(|e| format!("移动文件失败: {}", e))?;
 
-    // 4. 复用统一的注册逻辑（入库、文本提取、缩略图生成）
+    // 4. 对完整文件进行最终的 MIME 嗅探精修 (此时文件已完整，嗅探结果最准确)
+    let final_refined_mime = get_refined_mime_type(&internal_file_path, &session.original_name, &session.mime_type);
+
+    // 5. 复用统一的注册逻辑（入库、文本提取、缩略图生成）
     register_attachment_internal(
         &app_handle,
         &db_state.pool,
         hash,
         session.original_name.clone(),
-        session.mime_type.clone(),
+        final_refined_mime,
         final_size,
         internal_path_str,
     )
@@ -832,4 +895,3 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
         }
     }
 }
-

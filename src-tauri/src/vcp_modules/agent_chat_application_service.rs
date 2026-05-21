@@ -128,10 +128,9 @@ pub async fn internal_process_agent_chat_message(
     };
 
     // 7. 启动前台服务保活
-    if let Err(e) = tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
-        &app_handle,
-        &agent_config.name,
-    ) {
+    if let Err(e) =
+        tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_config.name)
+    {
         println!(
             "[AgentChatAppService] Failed to start streaming service: {}",
             e
@@ -148,10 +147,9 @@ pub async fn internal_process_agent_chat_message(
     .await;
 
     // 9. 停止前台服务
-    if let Err(e) = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
-        &app_handle,
-        &agent_config.name,
-    ) {
+    if let Err(e) =
+        tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(&app_handle, &agent_config.name)
+    {
         println!(
             "[AgentChatAppService] Failed to stop streaming service: {}",
             e

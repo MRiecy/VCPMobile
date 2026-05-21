@@ -257,13 +257,14 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     .unwrap_or("")
                                     .to_lowercase();
                                 let (mime, part_type) = match ext.as_str() {
-                                    "png" | "jpg" | "jpeg" | "webp" | "gif" => {
-                                        ("image", "image_url")
-                                    }
+                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "tif"
+                                    | "heic" | "heif" | "avif" | "ico" => ("image", "image_url"),
                                     "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
-                                    | "wma" => ("audio", "input_audio"),
+                                    | "wma" | "amr" | "aiff" | "aif" => ("audio", "input_audio"),
                                     "mp4" | "mkv" | "webm" | "avi" | "mov" | "flv" | "m4v"
-                                    | "3gp" => ("video", "image_url"),
+                                    | "3gp" | "3g2" | "wmv" | "ts" | "mts" | "m2ts" | "qt" => {
+                                        ("video", "image_url")
+                                    }
                                     _ => ("application", "file_url"), // 非多模态文件回退
                                 };
 
@@ -318,7 +319,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         }
                                     }
                                 } else if mime == "audio" {
-                                    // 音频：提取为 WAV → input_audio
+                                    // 音频：提取为 MP3 (32kbps) -> input_audio
                                     let path_clone = path_buf.clone();
                                     match tokio::task::spawn_blocking(move || {
                                         crate::vcp_modules::media_processor::process_audio_for_multimodal(&path_clone)
@@ -326,7 +327,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         Ok(Ok(audio_url)) => {
                                             new_parts.push(json!({
                                                 "type": "input_audio",
-                                                "input_audio": { "data": audio_url, "format": "wav" }
+                                                "input_audio": { 
+                                                    "data": audio_url, 
+                                                    "format": "mp3" // 修正为 mp3
+                                                }
                                             }));
                                             converted = true;
                                         }
