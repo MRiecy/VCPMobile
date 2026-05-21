@@ -27,6 +27,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::check_all_permissions,
             system::request_android_permission,
             system::move_task_to_back,
+            system::pick_file,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

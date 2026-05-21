@@ -23,3 +23,20 @@ export function startStreamService(agentName: string): Promise<void> {
 export function stopStreamService(): Promise<void> {
   return invoke('plugin:vcp-mobile|stop_stream_service');
 }
+
+// ==================================================================
+// Native File Picker
+// ==================================================================
+
+export interface PickedFile {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  hash: string;
+  thumbnailPath?: string;
+}
+
+export function pickFile(): Promise<PickedFile> {
+  return invoke<PickedFile>('plugin:vcp-mobile|pick_file');
+}

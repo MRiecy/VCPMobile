@@ -80,3 +80,34 @@ pub fn move_task_to_back<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedFileInfo {
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub hash: String,
+    pub thumbnail_path: Option<String>,
+}
+
+#[tauri::command]
+pub fn pick_file<R: Runtime>(app: AppHandle<R>) -> Result<PickedFileInfo, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let file_info = plugin_handle
+            .run_mobile_plugin::<PickedFileInfo>("pickFile", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(file_info)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("该接口仅在 Android 物理端可用".to_string())
+    }
+}
