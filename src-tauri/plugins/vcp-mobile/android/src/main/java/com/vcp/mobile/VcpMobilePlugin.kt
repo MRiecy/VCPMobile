@@ -268,9 +268,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 Log.i(TAG, "[onPickFileResult] Processing picked file: $originalName (size=$size, mime=$mimeType)")
 
                 // 3. 发送预准备事件给前端，让前端立即创建进度卡片
-                val metaJson = """{"name":"${originalName.replace("\"", "\\\"")}","size":$size,"mime":"$mimeType"}"""
+                val startDetail = JSObject().apply {
+                    put("name", originalName)
+                    put("size", size)
+                    put("mime", mimeType)
+                }
                 activity.runOnUiThread {
-                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: $metaJson }))", null)
+                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: $startDetail }))", null)
                 }
 
                 // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
@@ -298,7 +302,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                             if (now - lastReportTime > 200) {
                                 lastReportTime = now
                                 val progress = if (size > 0) ((totalRead.toDouble() / size) * 100).toInt() else 0
-                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: { loaded: $totalRead, total: $size, progress: $progress, name: '${originalName.replace("'", "\\'")}', mime: '$mimeType' } }))"
+                                val progressDetail = JSObject().apply {
+                                    put("loaded", totalRead)
+                                    put("total", size)
+                                    put("progress", progress)
+                                    put("name", originalName)
+                                    put("mime", mimeType)
+                                }
+                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: $progressDetail }))"
                                 activity.runOnUiThread {
                                     webViewRef?.evaluateJavascript(progressScript, null)
                                 }
@@ -344,9 +355,19 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 Log.i(TAG, "[onPickFileResult] File copy & process complete: path=${finalTempFile.absolutePath}, hash=$hash")
                 
                 // 双轨通信：主动推送最终结果给前端，穿透 JNI 断裂层
-                val thumbStr = if (thumbnailPath != null) "\"${thumbnailPath.replace("\\", "\\\\")}\"" else "null"
-                val jsonPayload = """{"path":"${finalTempFile.absolutePath.replace("\\", "\\\\")}","name":"${originalName.replace("\"", "\\\"")}","mime":"$mimeType","size":$finalSize,"hash":"$hash","thumbnailPath":$thumbStr}"""
-                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: $jsonPayload }))"
+                val pickedDetail = JSObject().apply {
+                    put("path", finalTempFile.absolutePath)
+                    put("name", originalName)
+                    put("mime", mimeType)
+                    put("size", finalSize)
+                    put("hash", hash)
+                    if (thumbnailPath != null) {
+                        put("thumbnailPath", thumbnailPath)
+                    } else {
+                        put("thumbnailPath", org.json.JSONObject.NULL)
+                    }
+                }
+                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: $pickedDetail }))"
                 activity.runOnUiThread {
                     webViewRef?.evaluateJavascript(pickedScript, null)
                 }

@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use std::sync::Mutex;
 
@@ -782,6 +782,8 @@ pub async fn register_local_file(
     original_name: String,
     mime_type: Option<String>,
     thumbnail_path: Option<String>,
+    stable_id: Option<String>,
+    expected_hash: Option<String>,
 ) -> Result<AttachmentData, String> {
     use tokio::io::AsyncReadExt;
 
@@ -799,23 +801,47 @@ pub async fn register_local_file(
         .map_err(|e| format!("无法读取源文件元数据: {}", e))?;
     let size = meta.len();
 
-    // 3. 流式异步读取并计算 SHA-256 (彻底避免大文件一次性载入内存)
-    let mut file = tokio::fs::File::open(&source_path)
-        .await
-        .map_err(|e| format!("无法打开源文件: {}", e))?;
-    
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536]; // 64KB 缓冲
-    loop {
-        let n = file.read(&mut buffer)
-            .await
-            .map_err(|e| format!("读取源文件失败: {}", e))?;
-        if n == 0 {
-            break;
+    // 3. 流式异步读取并计算 SHA-256 (若传入 expected_hash 则直接使用，免除二次哈希)
+    let hash = match expected_hash {
+        Some(h) => {
+            log::info!("[FileManager] Reusing expected hash from native side: {}", h);
+            h
         }
-        hasher.update(&buffer[..n]);
-    }
-    let hash = hex::encode(hasher.finalize());
+        None => {
+            let mut file = tokio::fs::File::open(&source_path)
+                .await
+                .map_err(|e| format!("无法打开源文件: {}", e))?;
+            
+            let mut hasher = Sha256::new();
+            let mut buffer = [0u8; 65536]; // 64KB 缓冲
+            let mut hashed_bytes = 0u64;
+            let mut last_emit_time = std::time::Instant::now();
+            loop {
+                let n = file.read(&mut buffer)
+                    .await
+                    .map_err(|e| format!("读取源文件失败: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..n]);
+                hashed_bytes += n as u64;
+
+                if let Some(ref sid) = stable_id {
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_emit_time).as_millis() > 200 {
+                        last_emit_time = now;
+                        let pct = if size > 0 { (hashed_bytes as f64 / size as f64 * 100.0) as u32 } else { 0 };
+                        let scaled_pct = 50 + (pct * 40 / 100); // 50% 到 90%
+                        app_handle.emit("vcp-file-register-progress", serde_json::json!({
+                            "progress": scaled_pct,
+                            "stableId": sid,
+                        })).ok();
+                    }
+                }
+            }
+            hex::encode(hasher.finalize())
+        }
+    };
 
     // 4. 计算目标路径
     let file_extension = std::path::Path::new(&original_name)
@@ -842,13 +868,31 @@ pub async fn register_local_file(
     if dest_path.exists() {
         let _ = tokio::fs::remove_file(&source_path).await;
         log::info!("[FileManager] Duplicated local file found. Removed source path: {}", local_path);
+        if let Some(ref sid) = stable_id {
+            app_handle.emit("vcp-file-register-progress", serde_json::json!({
+                "progress": 99,
+                "stableId": sid,
+            })).ok();
+        }
     } else {
         // 先尝试 rename 极速移动，失败时 fallback 复制 + 删除
+        if let Some(ref sid) = stable_id {
+            app_handle.emit("vcp-file-register-progress", serde_json::json!({
+                "progress": 90,
+                "stableId": sid,
+            })).ok();
+        }
         if tokio::fs::rename(&source_path, &dest_path).await.is_err() {
             tokio::fs::copy(&source_path, &dest_path)
                 .await
                 .map_err(|e| format!("复制文件到正式目录失败: {}", e))?;
             let _ = tokio::fs::remove_file(&source_path).await;
+        }
+        if let Some(ref sid) = stable_id {
+            app_handle.emit("vcp-file-register-progress", serde_json::json!({
+                "progress": 99,
+                "stableId": sid,
+            })).ok();
         }
     }
 

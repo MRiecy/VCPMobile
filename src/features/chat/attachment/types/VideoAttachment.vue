@@ -7,21 +7,22 @@
     @remove="emit('remove', index)"
   >
     <div class="flex items-center gap-2.5 px-2.5 py-2 min-w-[120px] max-w-[160px]">
-      <!-- Video Thumbnail (smaller) -->
-      <div class="relative w-7 h-7 shrink-0 rounded overflow-hidden bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10">
-        <img 
-          v-if="thumbnailSrc"
-          :src="thumbnailSrc" 
-          class="w-full h-full object-cover opacity-60"
-        />
-        <!-- Video Play Icon Overlay -->
-        <div class="absolute inset-0 flex items-center justify-center">
-          <div class="w-4 h-4 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/30">
-            <svg width="6" height="6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-blue-500 translate-x-[0.5px]">
-              <polygon points="5 3 19 12 5 21 5 3"></polygon>
-            </svg>
-          </div>
-        </div>
+      <!-- Video Icon (clean and neat indigo/blue design) -->
+      <div class="relative w-7 h-7 shrink-0 rounded flex items-center justify-center bg-blue-500/10 dark:bg-blue-400/10 border border-blue-500/20 dark:border-blue-400/20">
+        <svg 
+          width="14" 
+          height="14" 
+          viewBox="0 0 24 24" 
+          fill="none" 
+          stroke="currentColor" 
+          stroke-width="2" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" 
+          class="text-blue-500 dark:text-blue-400"
+        >
+          <polygon points="23 7 16 12 23 17 23 7"></polygon>
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+        </svg>
       </div>
 
       <!-- File Info -->
@@ -39,7 +40,6 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
 import { truncateFileName } from "../utils/truncateFileName";
 import type { Attachment } from "../../../../core/types/chat";
@@ -55,13 +55,6 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
 
 const displayName = computed(() => truncateFileName(props.file.name || 'Video'));
-
-const thumbnailSrc = computed(() => {
-  const src = props.file.thumbnailPath || props.file.src;
-  if (!src) return "";
-  if (src.startsWith("http") || src.startsWith("data:") || src.startsWith("blob:")) return src;
-  try { return convertFileSrc(src.replace("file://", "")); } catch (e) { return ""; }
-});
 
 const formatSize = (bytes: number) => {
   if (!bytes) return '0 B';
