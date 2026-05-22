@@ -24,17 +24,21 @@ const sidebarRef = ref<HTMLElement | null>(null);
 const { direction, lengthX, lengthY } = useSwipe(sidebarRef, {
   threshold: 15,
   onSwipeEnd: (e: TouchEvent | MouseEvent) => {
-    // 排除特定不响应滑动的区域
-    if (e.target instanceof Element && e.target.closest(".no-swipe, .vcp-scrollable")) return;
-
     const absX = Math.abs(lengthX.value);
     const absY = Math.abs(lengthY.value);
 
-    // 如果是向左滑，且位移足够大，且角度符合水平滑动特征
-    if (direction.value === 'left' && absX > 50) {
-      if (absY / absX < 0.577) {
-        layoutStore.setLeftDrawer(false);
-      }
+    // 水平手势判定：位移大于 50px，且角度在 30 度以内 (tan(30deg) ≈ 0.577)
+    if (absX <= 50 || absY / absX >= 0.577) return;
+
+    // 1. 向左滑 -> 关闭侧边栏 (需排查 no-swipe/列表纵向滑动区以防冲突)
+    if (direction.value === 'left') {
+      if (e.target instanceof Element && e.target.closest(".no-swipe, .vcp-scrollable")) return;
+      layoutStore.setLeftDrawer(false);
+    }
+
+    // 2. 向右滑 -> 若当前是话题列表(topics)，则无感、敏捷地切回助手列表(agents)
+    if (direction.value === 'right' && activeTab.value === 'topics') {
+      activeTab.value = 'agents';
     }
   }
 });

@@ -13,6 +13,7 @@ import { useNotificationStore } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
+import { useChatSessionStore } from "./core/stores/chatSessionStore";
 
 // Layout Components
 import PermissionGate from "./components/layout/PermissionGate.vue";
@@ -27,6 +28,7 @@ const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
+const sessionStore = useChatSessionStore();
 const { processPayload } = useNotificationProcessor();
 const { initGlobalFixer } = useEmoticonFixer();
 const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
@@ -99,30 +101,44 @@ const backgroundStyle = computed(() => {
 let unlistenLog: (() => void) | null = null;
 
 // --- Root Exit Handler (Double-Tap to Exit with Toast) ---
-let lastExitRequestTime = 0;
-const EXIT_THRESHOLD = 2000; // 2 seconds
+let exitTimer: number | null = null;
+const isWaitingExit = ref(false);
 
 const handleExitRequest = () => {
-  const currentTime = Date.now();
+  // 第一级：若当前在 Agent 聊天中，按返回键先退回到初始零数据引导欢迎页
+  if (sessionStore.currentSelectedItem !== null) {
+    sessionStore.currentSelectedItem = null;
+    sessionStore.currentTopicId = null;
+    return;
+  }
 
-  if (currentTime - lastExitRequestTime < EXIT_THRESHOLD) {
-    // Second tap within threshold -> Exit App
+  // 第二级：已在初始页，触发高精度双击物理退出
+  if (isWaitingExit.value) {
+    if (exitTimer) {
+      clearTimeout(exitTimer);
+      exitTimer = null;
+    }
+    isWaitingExit.value = false;
     getCurrentWebviewWindow().close();
   } else {
-    // First tap -> Show Toast and record timestamp
-    lastExitRequestTime = currentTime;
+    isWaitingExit.value = true;
     notificationStore.addNotification({
       id: "vcp-exit-toast",
       title: "再按一次退出应用",
       message: "",
       type: "info",
-      duration: EXIT_THRESHOLD,
+      duration: 2000,
       toastOnly: true,
     });
-    // Haptic feedback (Android WebView supports navigator.vibrate)
+
     if (typeof navigator !== "undefined" && navigator.vibrate) {
       navigator.vibrate(50);
     }
+
+    exitTimer = window.setTimeout(() => {
+      isWaitingExit.value = false;
+      exitTimer = null;
+    }, 2000);
   }
 };
 

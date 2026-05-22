@@ -6,6 +6,7 @@ import { useAssistantStore } from "./assistant";
 export const useChatSessionStore = defineStore("chatSession", () => {
   const currentSelectedItem = ref<any>(null);
   const currentTopicId = ref<string | null>(null);
+  const lastActiveTopicMap = ref<Record<string, string>>({});
 
   const assistantStore = useAssistantStore();
 
@@ -20,6 +21,9 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   ) => {
     // 立即更新 currentTopicId，确保话题列表高亮实时响应
     currentTopicId.value = topicId;
+    
+    // 记录在该 itemId 下最后一次选中的活跃话题 ID
+    lastActiveTopicMap.value[itemId] = topicId;
 
     const ownerType = assistantStore.agents.some((a) => a.id === itemId)
       ? "agent"
@@ -56,10 +60,10 @@ export const useChatSessionStore = defineStore("chatSession", () => {
       return;
     }
 
-    // 1. 获取目标项的最新配置（含 currentTopicId）
-    let targetTopicId = item.currentTopicId;
+    // 1. 优先从 Pinia 持久化的 lastActiveTopicMap 中获取最后一次打开的话题 ID
+    let targetTopicId = lastActiveTopicMap.value[ownerId];
 
-    // 2. 如果没有记录的话题，或者记录的话题已失效，则尝试获取该 Owner 下最新的话题
+    // 2. 如果 Pinia 中没有记录，则尝试获取该 Owner 下最新的话题
     if (!targetTopicId) {
       try {
         const topics = await invoke<any[]>("get_topics", {
@@ -88,11 +92,12 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   return {
     currentSelectedItem,
     currentTopicId,
+    lastActiveTopicMap,
     selectTopicById,
     selectItem,
   };
 }, {
   persist: {
-    pick: ['currentSelectedItem', 'currentTopicId'],
+    pick: ['currentSelectedItem', 'currentTopicId', 'lastActiveTopicMap'],
   },
 });
