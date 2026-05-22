@@ -1,13 +1,13 @@
----
+﻿---
 title: 开发指南与FAQ
 scope: 双端
 related_files:
-  - src-tauri/src/vcp_modules/sync_service.rs
-  - src-tauri/src/vcp_modules/sync_pipeline/*.rs
-  - src-tauri/src/vcp_modules/sync_executor/*.rs
-  - src-tauri/src/vcp_modules/sync_hash.rs
-  - src-tauri/src/vcp_modules/sync_types.rs
-  - src-tauri/src/vcp_modules/sync_dto.rs
+  - src-tauri/src/vcp_modules/sync/sync_service.rs
+  - src-tauri/src/vcp_modules/sync/sync_pipeline/*.rs
+  - src-tauri/src/vcp_modules/sync/sync_executor/*.rs
+  - src-tauri/src/vcp_modules/sync/sync_hash.rs
+  - src-tauri/src/vcp_modules/sync/sync_types.rs
+  - src-tauri/src/vcp_modules/sync/sync_dto.rs
   - VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/index.js
   - VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/*.js
   - VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/transport/*.js

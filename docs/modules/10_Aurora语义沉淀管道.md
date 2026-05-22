@@ -13,7 +13,7 @@ related: [vcp_client.rs, stream_block_parser.rs, pre_renderer, sync_hash.rs]
 
 ### 1.1 模块定位
 
-`aurora_pipeline.rs` 是 VCP Mobile 对话渲染 pipeline 中的**语义沉淀层（Semantic Precipitation Layer）**，位于 `src-tauri/src/vcp_modules/aurora_pipeline.rs`（112 行）。该模块运行在 Rust 后端，在 SSE（Server-Sent Events）流式传输过程中，对持续累积的响应文本进行**增量块解析**，产出「已确认闭合的语义块（Stable Blocks）」和「当前正在增长的尾部（Tail）」，通过 `StreamEvent::aurora` 推送到前端，实现增量式 UI 更新。
+`aurora_pipeline.rs` 是 VCP Mobile 对话渲染 pipeline 中的**语义沉淀层（Semantic Precipitation Layer）**，位于 `src-tauri/src/vcp_modules/chat/aurora_pipeline.rs`（112 行）。该模块运行在 Rust 后端，在 SSE（Server-Sent Events）流式传输过程中，对持续累积的响应文本进行**增量块解析**，产出「已确认闭合的语义块（Stable Blocks）」和「当前正在增长的尾部（Tail）」，通过 `StreamEvent::aurora` 推送到前端，实现增量式 UI 更新。
 
 名称"Aurora"寓意：流式文本如极光般持续涌现，语义块如光带般逐渐凝固沉淀。
 

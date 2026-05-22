@@ -13,7 +13,7 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 ### 1.1 模块定位
 
-`vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/vcp_client.rs`（851 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
+`vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（851 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
 
 其核心职责包括：
 - 将前端传入的 `VcpRequestPayload` 转换为标准化 HTTP 请求

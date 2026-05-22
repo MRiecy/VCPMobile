@@ -1,4 +1,4 @@
----
+﻿---
 title: 附录D - 同步场景流程图集
 scope: 双端
 version: 0.9.13
@@ -72,8 +72,8 @@ Mobile                              Desktop
 
 ### 涉及代码文件
 
-- `src-tauri/src/vcp_modules/sync_pipeline/phase1_metadata.rs` — 构建空 Manifest
-- `src-tauri/src/vcp_modules/sync_executor/pull_executor.rs` — 执行 Agent 拉取
+- `src-tauri/src/vcp_modules/sync/sync_pipeline/phase1_metadata.rs` — 构建空 Manifest
+- `src-tauri/src/vcp_modules/sync/sync_executor/pull_executor.rs` — 执行 Agent 拉取
 - `VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/manifest.js` — 桌面端 Diff 计算
 
 ### 扩展说明：批量拉取优化
@@ -156,7 +156,7 @@ Mobile                              Desktop
 
 - `VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/manifest.js` — LWW 时间戳比较
 - `VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/entity.js` — `applyAgentDTO` 局部合并
-- `src-tauri/src/vcp_modules/sync_executor/push_executor.rs` — 幂等键生成与 HTTP 推送
+- `src-tauri/src/vcp_modules/sync/sync_executor/push_executor.rs` — 幂等键生成与 HTTP 推送
 
 ### 扩展说明：V2 双哈希的防护作用
 
@@ -245,7 +245,7 @@ Mobile                              Desktop
 ### 涉及代码文件
 
 - `VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/manifest.js` — 时间戳比较与 `else` 分支兜底
-- `src-tauri/src/vcp_modules/sync_executor/pull_executor.rs` — 实体拉取与写入
+- `src-tauri/src/vcp_modules/sync/sync_executor/pull_executor.rs` — 实体拉取与写入
 
 ### 扩展说明：为什么不是 Hash 字典序仲裁
 
@@ -339,8 +339,8 @@ Mobile                              Desktop
 
 ### 涉及代码文件
 
-- `src-tauri/src/vcp_modules/sync_service.rs` — `PUSH_DELETE` 处理与 `NotifyDelete` 发送
-- `src-tauri/src/vcp_modules/sync_executor/delete_executor.rs` — `soft_delete_agent` 与 Hash 冒泡
+- `src-tauri/src/vcp_modules/sync/sync_service.rs` — `PUSH_DELETE` 处理与 `NotifyDelete` 发送
+- `src-tauri/src/vcp_modules/sync/sync_executor/delete_executor.rs` — `soft_delete_agent` 与 Hash 冒泡
 - `VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/manifest.js` — 删除判定分支
 
 ### 扩展说明：DELETE 与 PUSH_DELETE 的区别
@@ -452,8 +452,8 @@ Mobile                              Desktop
 
 ### 涉及代码文件
 
-- `src-tauri/src/vcp_modules/sync_service.rs` — Phase 3 分批 Diff 与 `SYNC_DIFF_RESULTS_BATCH` 处理
-- `src-tauri/src/vcp_modules/sync_executor/pull_executor.rs` — `pull_messages_batch` 与 `process_topic_messages`
+- `src-tauri/src/vcp_modules/sync/sync_service.rs` — Phase 3 分批 Diff 与 `SYNC_DIFF_RESULTS_BATCH` 处理
+- `src-tauri/src/vcp_modules/sync/sync_executor/pull_executor.rs` — `pull_messages_batch` 与 `process_topic_messages`
 - `VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/sync/diff.js` — 消息差异比对
 
 ### 扩展说明：先写消息、后补附件策略
