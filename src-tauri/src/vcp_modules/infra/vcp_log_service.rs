@@ -10,13 +10,27 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
+static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15000);
+
 lazy_static::lazy_static! {
 static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
 // 关键修复：保持 Sender 和一个 Receiver 都在生命周期内，防止通道因无接收者而被视为关闭
 static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
 static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
+static ref HEARTBEAT_RESET_TX: Arc<tokio::sync::Mutex<Option<mpsc::Sender<()>>>> = Arc::new(tokio::sync::Mutex::new(None));
 }
+
+#[tauri::command]
+pub async fn set_vcp_log_heartbeat(interval_ms: u64) -> Result<(), String> {
+    HEARTBEAT_INTERVAL_MS.store(interval_ms, Ordering::SeqCst);
+    let tx_lock = HEARTBEAT_RESET_TX.lock().await;
+    if let Some(tx) = tx_lock.as_ref() {
+        let _ = tx.send(()).await;
+    }
+    Ok(())
+}
+
 
 pub async fn get_vcp_log_status_internal() -> String {
     CURRENT_LOG_STATUS.read().await.clone()
@@ -249,12 +263,36 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         }),
                     );
 
+                    let (reset_tx, mut reset_rx) = mpsc::channel::<()>(8);
+                    {
+                        let mut tx_lock = HEARTBEAT_RESET_TX.lock().await;
+                        *tx_lock = Some(reset_tx);
+                    }
+
+                    let initial_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
+                    let mut heartbeat_timer = Box::pin(sleep(Duration::from_millis(initial_ms)));
+
                     loop {
                         tokio::select! {
                             // 监听 URL 变更
                             _ = url_rx.changed() => {
                                 log::info!("[VCPLog] URL changed, closing current connection.");
                                 break;
+                            }
+                            // 监听心跳重置信号
+                            Some(_) = reset_rx.recv() => {
+                                let current_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
+                                log::info!("[VCPLog] Heartbeat interval updated to {}ms, resetting timer.", current_ms);
+                                heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_ms));
+                            }
+                            // 心跳周期触发
+                            _ = &mut heartbeat_timer => {
+                                if let Err(e) = ws_write.send(Message::Ping(vec![].into())).await {
+                                    log::error!("[VCPLog] Failed to send Ping: {}", e);
+                                    break;
+                                }
+                                let current_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
+                                heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_ms));
                             }
                             // 处理接收到的消息
                             msg_result = ws_read.next() => {
@@ -299,6 +337,11 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                                 }
                             }
                         }
+                    }
+
+                    {
+                        let mut tx_lock = HEARTBEAT_RESET_TX.lock().await;
+                        *tx_lock = None;
                     }
 
                     log::info!("[VCPLog] Disconnected from {}.", ws_url);

@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSwipe } from "@vueuse/core";
 import { useThemeStore } from "./core/stores/theme";
@@ -134,6 +135,27 @@ const handleVisibilityChange = () => {
   }
 };
 
+const handleVcpLifecycle = async (e: Event) => {
+  const detail = (e as CustomEvent).detail;
+  const state = detail?.state;
+  
+  if (state === "stop" || state === "pause") {
+    console.log("[Lifecycle] App moved to background, tuning heartbeat to 120s...");
+    try {
+      await invoke("set_vcp_log_heartbeat", { intervalMs: 120000 });
+    } catch (err) {
+      console.error("[Lifecycle] Failed to set background heartbeat:", err);
+    }
+  } else if (state === "resume") {
+    console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
+    try {
+      await invoke("set_vcp_log_heartbeat", { intervalMs: 15000 });
+    } catch (err) {
+      console.error("[Lifecycle] Failed to restore foreground heartbeat:", err);
+    }
+  }
+};
+
 onMounted(async () => {
   // 初始化全局表情包修复器
   initGlobalFixer();
@@ -159,12 +181,16 @@ onMounted(async () => {
 
   // 监听页面可见性，切到后台时暂停所有 CSS 动画以节省 GPU
   document.addEventListener("visibilitychange", handleVisibilityChange);
+
+  // 监听物理生命周期事件实现自适应心跳
+  window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
 });
 
 onUnmounted(() => {
   if (unlistenLog) unlistenLog();
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
+  window.removeEventListener("vcp-lifecycle", handleVcpLifecycle);
 });
 </script>
 

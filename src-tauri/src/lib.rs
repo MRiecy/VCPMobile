@@ -63,7 +63,7 @@ use vcp_modules::vcp_client::{
     interruptGroupTurn, interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests,
     CancelledGroupTurns,
 };
-use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
+use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -250,6 +250,7 @@ pub fn run() {
             summarize_topic,
             init_vcp_log_connection,
             send_vcp_log_message,
+            set_vcp_log_heartbeat,
             get_system_snapshot,
             get_emoticon_library,
             regenerate_emoticon_library,
