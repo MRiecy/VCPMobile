@@ -146,13 +146,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     const { chunk, type, context } = event;
     const ctx = context || {};
     const topicId = ctx.topicId;
-    const itemId = ctx.agentId || ctx.groupId || ctx.ownerId;
-
+    const isGroup = !!ctx.isGroupMessage || !!ctx.groupId;
+    const itemId = isGroup ? ctx.groupId : (ctx.agentId || ctx.ownerId);
+ 
     if (!actualMessageId || !topicId || !itemId) return;
-
+ 
     let msg = activeStreamMessages.get(actualMessageId);
     const isNewStream = !msg;
-
+ 
     if (isNewStream) {
       msg = reactive<ChatMessage>({
         id: actualMessageId,
@@ -177,6 +178,29 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (callbacks?.onMessageCreated) {
         callbacks.onMessageCreated(msg!, topicId);
       }
+
+      // [关键修复] 异步持久化骨架消息到 SQLite 数据库
+      // 使得用户即便中途切换会话，重新加载历史时也存在此消息占位，从而触发 Object Hydration 完美接续流式动画
+      invoke("append_single_message", {
+        ownerId: itemId,
+        ownerType: isGroup ? "group" : "agent",
+        topicId,
+        message: {
+          id: actualMessageId,
+          role: "assistant",
+          name: ctx.agentName || null,
+          content: "",
+          timestamp: msg!.timestamp,
+          isThinking: msg!.isThinking,
+          is_thinking: msg!.isThinking,
+          agentId: ctx.agentId || null,
+          groupId: ctx.groupId || null,
+          topicId,
+          isGroupMessage: isGroup,
+        }
+      }).catch(e => {
+        console.error("[ChatStreamStore] Failed to persist initial thinking skeleton:", e);
+      });
     }
 
     // 维护流状态

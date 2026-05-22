@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, nextTick } from "vue";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useDocumentProcessor } from "../composables/useDocumentProcessor";
 import { useNotificationStore } from "./notification";
 import type { Attachment } from "../types/chat";
@@ -28,6 +29,21 @@ const checkImageDimensions = (file: File): Promise<{ width: number; height: numb
 export const useAttachmentStore = defineStore("attachment", () => {
   // 暂存的附件列表，准备随下一条消息发送
   const stagedAttachments = ref<Attachment[]>([]);
+
+  // 全局监听 Rust 端发出的注册进度，用于大文件哈希/移动等Phase 2流程
+  listen<any>("vcp-file-register-progress", (event) => {
+    const { progress, stableId } = event.payload;
+    if (stableId) {
+      const idx = stagedAttachments.value.findIndex((a) => a.id === stableId);
+      if (idx !== -1 && stagedAttachments.value[idx].status === "loading") {
+        const currentProgress = stagedAttachments.value[idx].progress || 0;
+        // 防抖/防回退：仅在进度增加时更新
+        if (progress > currentProgress) {
+          stagedAttachments.value[idx].progress = progress;
+        }
+      }
+    }
+  });
 
   /**
    * 处理消息中的本地资源路径 (仅附件)，使用 Tauri 原生 asset:// 协议绕过 WebView 限制
@@ -92,8 +108,9 @@ export const useAttachmentStore = defineStore("attachment", () => {
             if (resolved) return;
             const { progress, name, mime, total } = e.detail;
             const idx = stagedAttachments.value.findIndex(a => a.id === stableId);
+            const scaledProgress = Math.round(progress * 0.9); // Kotlin 沙盒拷贝与哈希阶段占 90%
             if (idx !== -1) {
-              stagedAttachments.value[idx].progress = progress;
+              stagedAttachments.value[idx].progress = scaledProgress;
             } else if (name) {
               // 自我修复：如果 WebView 错过了 vcp-mobile-file-start 事件，在这里补建卡片
               stagedAttachments.value.unshift({
@@ -102,7 +119,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
                 src: "",
                 name: name,
                 size: total || 0,
-                progress: progress,
+                progress: scaledProgress,
                 status: "loading",
               });
             }
@@ -169,11 +186,11 @@ export const useAttachmentStore = defineStore("attachment", () => {
             src: "",
             name: picked.name || "文件",
             size: picked.size || 0,
-            progress: 100,
+            progress: 90,
             status: "loading",
           });
         } else {
-          stagedAttachments.value[existingIdx].progress = 100;
+          stagedAttachments.value[existingIdx].progress = 90;
         }
 
         // 缩略图展示策略：若有 native thumbnail 物理路径则通过 convertFileSrc 转换，否则如果为图片，转换 path 自身
@@ -200,6 +217,8 @@ export const useAttachmentStore = defineStore("attachment", () => {
           originalName: picked.name,
           mimeType: picked.mime || "application/octet-stream",
           thumbnailPath: picked.thumbnailPath || null,
+          stableId: stableId,
+          expectedHash: picked.hash || null,
         });
 
         if (finalData) {
@@ -213,6 +232,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
               size: finalData.size,
               hash: finalData.hash,
               status: "done",
+              progress: undefined,
             };
           }
         }
