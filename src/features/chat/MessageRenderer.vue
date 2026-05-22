@@ -57,7 +57,12 @@ const isMessageInActiveStream = computed(() => {
 // UI 层面：消息是否在当前视口中显示流式状态
 const isStreaming = computed(() => {
   if (shell.value?.isUser) return false;
-  const itemId = props.message.agentId || props.agentId;
+
+  const isGroup = !!props.message.isGroupMessage || !!props.message.groupId || sessionStore.currentSelectedItem?.type === "group";
+  const itemId = isGroup
+    ? (props.message.groupId || sessionStore.currentSelectedItem?.id)
+    : (props.message.agentId || props.agentId);
+
   const topicId = sessionStore.currentTopicId;
   if (!itemId || !topicId) return false;
 
