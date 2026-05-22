@@ -167,12 +167,13 @@ pub async fn internal_process_group_chat_message(
         let agent_id = speaker.id.clone();
         let agent_name = speaker.name.clone();
         let message_id = format!(
-            "msg_{}_assistant_{}",
+            "msg_group_{}_{}_{}",
+            user_message.id,
+            agent_id,
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_millis(),
-            agent_id
+                .as_millis()
         );
 
         // 组装上下文

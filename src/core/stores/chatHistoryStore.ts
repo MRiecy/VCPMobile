@@ -218,7 +218,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const agentId = sessionStore.currentSelectedItem.id;
     const topicId = sessionStore.currentTopicId;
     const now = Date.now();
-    const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 7)}`;
+    const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 9)}`;
     const assistantName = sessionStore.currentSelectedItem.type === "agent"
       ? (assistantStore.agents.find((a) => a.id === agentId)?.name || "Assistant")
       : undefined;
@@ -345,7 +345,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const now = Date.now();
     const userName = settingsStore.settings?.userName || "User";
     const userMsg: ChatMessage = {
-      id: `msg_${now}_user_${Math.random().toString(36).substring(2, 7)}`,
+      id: `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
       role: "user",
       name: userName,
       content,
@@ -460,7 +460,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     topicStore.decrementTopicMsgCount(topicId, countToDelete);
 
     // 3. 构造思考占位消息 (并注册到全局池)
-    const thinkingId = `msg_${Date.now()}_assistant_regen`;
+    const thinkingId = `msg_${Date.now()}_assistant_${Math.random().toString(36).substring(2, 9)}`;
     const regenName = ownerType === "agent"
         ? (assistantStore.agents.find((a) => a.id === ownerId)?.name || "Assistant")
         : undefined;
