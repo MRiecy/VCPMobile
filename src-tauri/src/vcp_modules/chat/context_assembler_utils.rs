@@ -11,20 +11,20 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
         .iter()
         .filter(|msg| !msg.is_thinking.unwrap_or(false))
         .map(|msg| {
-            // 推导发言人名字以构造双保险前缀
-            let speaker_name = if let Some(name) = &msg.name {
-                if !name.is_empty() {
-                    name.clone()
-                } else if msg.role == "user" {
-                    "User".to_string()
-                } else {
-                    "AI".to_string()
-                }
-            } else if msg.role == "user" {
-                "User".to_string()
-            } else {
-                "AI".to_string()
-            };
+            // 提取发言人名字以构造前缀，若为空则安全降级到角色默认称谓以兼容历史脏数据
+            let speaker_name = msg
+                .name
+                .as_ref()
+                .filter(|name| !name.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    if msg.role == "user" {
+                        "User".to_string()
+                    } else {
+                        "AI".to_string()
+                    }
+                });
+
 
             let mut combined_text = format!("[{}的发言]: \n{}", speaker_name, msg.content);
             let mut content_parts = Vec::new();
