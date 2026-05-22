@@ -27,7 +27,6 @@ export interface AgentConfig {
   streamOutput: boolean;
   avatarCalculatedColor?: string;
   topics?: Topic[];
-  currentTopicId?: string | null;
 }
 
 export interface GroupConfig {
@@ -43,7 +42,6 @@ export interface GroupConfig {
   unifiedModel?: string;
   tagMatchMode?: string;
   topics?: Topic[];
-  currentTopicId?: string | null;
   createdAt?: number;
 }
 
