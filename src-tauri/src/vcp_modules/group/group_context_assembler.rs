@@ -8,11 +8,6 @@ pub async fn assemble_group_context(
     group_config: &GroupConfig,
     active_members: &[AgentConfig],
 ) -> String {
-    let agent_name = if agent_config.name.is_empty() {
-        &agent_config.id
-    } else {
-        &agent_config.name
-    };
     let mut system_prompt = if !agent_config.mobile_system_prompt.is_empty() {
         agent_config.mobile_system_prompt.clone()
     } else {
@@ -41,12 +36,6 @@ pub async fn assemble_group_context(
         }
 
         system_prompt = format!("{}\n\n[群聊设定]:\n{}", system_prompt, final_group_prompt);
-    }
-
-    // 注入邀请发言逻辑
-    if let Some(invite_prompt) = &group_config.invite_prompt {
-        let processed_invite = invite_prompt.replace("{{VCPChatAgentName}}", agent_name);
-        system_prompt = format!("{}\n\n[指令]:\n{}", system_prompt, processed_invite);
     }
 
     system_prompt

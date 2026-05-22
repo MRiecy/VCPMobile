@@ -189,6 +189,13 @@ pub async fn internal_process_group_chat_message(
         });
 
         let mut messages = assemble_history_for_vcp(&full_history_for_context);
+        if let Some(invite_prompt) = &group_config_inner.invite_prompt {
+            let processed_invite = invite_prompt.replace("{{VCPChatAgentName}}", &agent_name);
+            messages.push(json!({
+                "role": "user",
+                "content": processed_invite
+            }));
+        }
         messages.insert(0, json!({"role": "system", "content": system_prompt}));
 
         let context = Some(json!({

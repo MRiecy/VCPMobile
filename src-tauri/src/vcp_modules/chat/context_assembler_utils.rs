@@ -11,7 +11,22 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
         .iter()
         .filter(|msg| !msg.is_thinking.unwrap_or(false))
         .map(|msg| {
-            let mut combined_text = msg.content.clone();
+            // 推导发言人名字以构造双保险前缀
+            let speaker_name = if let Some(name) = &msg.name {
+                if !name.is_empty() {
+                    name.clone()
+                } else if msg.role == "user" {
+                    "User".to_string()
+                } else {
+                    "AI".to_string()
+                }
+            } else if msg.role == "user" {
+                "User".to_string()
+            } else {
+                "AI".to_string()
+            };
+
+            let mut combined_text = format!("[{}的发言]: \n{}", speaker_name, msg.content);
             let mut content_parts = Vec::new();
 
             if let Some(attachments) = &msg.attachments {

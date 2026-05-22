@@ -486,7 +486,7 @@ pub async fn perform_vcp_request<R: Runtime>(
     let mut request_body = payload.model_config.clone();
     if let Some(obj) = request_body.as_object_mut() {
         obj.insert("messages".to_string(), json!(messages));
-        obj.insert("requestId".to_string(), json!(payload.message_id));
+        obj.insert("messageId".to_string(), json!(payload.message_id));
         obj.insert("stream".to_string(), json!(is_stream));
     }
 
