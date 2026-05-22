@@ -192,6 +192,11 @@ onMounted(async () => {
   await router.isReady();
   initRootHistory();
 
+  // 路由后置守护：在任何路由切换（包括重定向、刷新）完成后，自动校准防护盾，100% 确保栈顶处于防护状态
+  router.afterEach(() => {
+    initRootHistory();
+  });
+
   // Listen for root exit requests from the modal history stack
   window.addEventListener("vcp-exit-requested", handleExitRequest);
 

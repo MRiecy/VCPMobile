@@ -30,9 +30,9 @@ let state: 'IDLE' | 'POPSTATE_HANDLING' | 'INTERNAL_BACK' = 'IDLE';
 export const initRootHistory = () => {
   if (typeof window === 'undefined') return;
 
-  // If we are at the very beginning (length 1 or 2), push our dummy state
-  // We don't use replaceState here because we WANT to be at depth > 1
-  if (window.history.length <= 2) {
+  const state = window.history.state;
+  // 自校准状态检测：只要当前栈顶没有 vcpMain 标记，就压入 dummy state，确保防护盾始终有效
+  if (!state || !state.vcpMain) {
     window.history.pushState({ vcpRoot: true, vcpMain: true }, '');
   }
 };

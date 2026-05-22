@@ -30,9 +30,9 @@ const { direction, lengthX, lengthY } = useSwipe(sidebarRef, {
     // 水平手势判定：位移大于 50px，且角度在 30 度以内 (tan(30deg) ≈ 0.577)
     if (absX <= 50 || absY / absX >= 0.577) return;
 
-    // 1. 向左滑 -> 关闭侧边栏 (需排查 no-swipe/列表纵向滑动区以防冲突)
+    // 1. 向左滑 -> 关闭侧边栏 (放开滚动区限制，仅拦截特定 no-swipe 区域)
     if (direction.value === 'left') {
-      if (e.target instanceof Element && e.target.closest(".no-swipe, .vcp-scrollable")) return;
+      if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
       layoutStore.setLeftDrawer(false);
     }
 

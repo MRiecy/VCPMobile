@@ -100,9 +100,10 @@ const activeSwipeId = ref<string | null>(null);
 const currentSwipeX = ref(0);
 let startX = 0;
 let startY = 0;
-let isDragging = false;
+const isDragging = ref(false);
 let isVerticalScroll = false;
 let hasDeterminedDirection = false;
+let isStartedAsSwiped = false;
 const SWIPE_THRESHOLD = 50;
 const MAX_SWIPE = 80;
 
@@ -113,13 +114,26 @@ const onTouchStart = (e: TouchEvent, id: string) => {
   }
   startX = e.touches[0].clientX;
   startY = e.touches[0].clientY;
-  isDragging = true;
+  isDragging.value = true;
   isVerticalScroll = false;
-  hasDeterminedDirection = false;
+  
+  isStartedAsSwiped = activeSwipeId.value === id;
+  
+  if (!isStartedAsSwiped) {
+    // 核心修复：如果是从折叠状态开始滑动，必须强制把 currentSwipeX 重置为 0，防止残留历史滑动值！
+    currentSwipeX.value = 0;
+  }
+  
+  if (isStartedAsSwiped) {
+    // 核心修复：如果是已展开的卡片被二次触摸，我们强制锁定水平手势，绝不进入垂直滚动，保证能顺滑收回折叠
+    hasDeterminedDirection = true;
+  } else {
+    hasDeterminedDirection = false;
+  }
 };
 
 const onTouchMove = (e: TouchEvent, id: string) => {
-  if (!isDragging || isVerticalScroll) return;
+  if (!isDragging.value || isVerticalScroll) return;
 
   const currentX = e.touches[0].clientX;
   const currentY = e.touches[0].clientY;
@@ -136,7 +150,7 @@ const onTouchMove = (e: TouchEvent, id: string) => {
       // If slope is greater than tan(30deg) (~0.577), it's vertical
       if (absY / absX > 0.577) {
         isVerticalScroll = true;
-        isDragging = false;
+        isDragging.value = false;
         return;
       }
     } else {
@@ -144,24 +158,58 @@ const onTouchMove = (e: TouchEvent, id: string) => {
     }
   }
 
-  // Only allow rightward swipe (deltaX > 0)
-  if (deltaX > 0) {
-    activeSwipeId.value = id;
-    currentSwipeX.value = Math.min(deltaX, MAX_SWIPE + 20); // Elastic resistance
-  } else if (activeSwipeId.value === id) {
-    currentSwipeX.value = 0;
+  // 核心手势状态分流与防穿透逻辑：使用整个手势周期内固定不变的 isStartedAsSwiped 状态
+  if (!isStartedAsSwiped) {
+    // 1. 卡片初始状态处于折叠时：
+    if (deltaX < 0) {
+      // 向左滑：用户试图左滑关闭侧边栏。
+      // 我们不响应卡片滑动，不阻止默认滚动（允许侧边栏滑动），不阻止冒泡
+      // 让 touch 事件流完整传给外层侧边栏以收起侧边栏
+      isDragging.value = false;
+      return;
+    } else {
+      // 向右滑：用户意图展开卡片。
+      // 我们响应卡片滑动，阻止默认行为（防垂直滚动震颤）并阻止冒泡防止外层触发其他手势
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      e.stopPropagation();
+      activeSwipeId.value = id;
+      currentSwipeX.value = Math.min(deltaX, MAX_SWIPE + 20); // 弹性阻尼展开
+    }
+  } else {
+    // 2. 卡片初始状态处于已展开时：
+    // 无论左滑还是右滑，都是用户在此卡片上的精细调节操作
+    // 必须阻止默认行为防止垂直滚动震颤，并阻止事件冒泡以防误触发侧边栏关闭
+    if (e.cancelable) {
+      e.preventDefault();
+    }
+    e.stopPropagation();
+
+    if (deltaX < 0) {
+      // 向左滑：让卡片位移跟随手指做“阻尼平滑缩回渐变”（MAX_SWIPE 加上负的 deltaX，拒绝生硬跳变与震颤！）
+      currentSwipeX.value = Math.max(0, MAX_SWIPE + deltaX);
+    } else {
+      // 向右滑：在 MAX_SWIPE 之上做微阻尼延伸
+      currentSwipeX.value = MAX_SWIPE + Math.min(deltaX, 20);
+    }
   }
 };
 
-const onTouchEnd = (id: string) => {
-  if (!isDragging) return;
-  isDragging = false;
+const onTouchEnd = (e: TouchEvent, id: string) => {
+  if (!isDragging.value) return;
+  isDragging.value = false;
 
-  if (activeSwipeId.value === id && currentSwipeX.value > SWIPE_THRESHOLD) {
+  const wasSwiped = activeSwipeId.value === id;
+  const shouldKeepOpen = wasSwiped && currentSwipeX.value > SWIPE_THRESHOLD;
+
+  if (shouldKeepOpen) {
     currentSwipeX.value = MAX_SWIPE; // Snap open
+    e.stopPropagation(); // 仅当成功展开或保持展开时，才阻止冒泡以防触发侧边栏手势
   } else {
     activeSwipeId.value = null;
     currentSwipeX.value = 0; // Snap closed
+    // 如果没有展开（折叠回去，或者本来就是折叠的），不阻止冒泡，让 touch 事件顺利传递，保证能左滑关闭侧边栏
   }
 };
 
@@ -247,13 +295,13 @@ const filteredCombinedItems = computed(() => {
 
           <!-- 滑动与玻璃层 -->
           <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, group.id)"
-            @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd(group.id)"
+            @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd($event, group.id)"
             class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center transition-all duration-300"
             :class="[
                 sessionStore.currentSelectedItem?.id === group.id
                   ? 'glass-panel-active'
                   : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-                activeSwipeId === group.id ? 'transition-none' : '',
+                (activeSwipeId === group.id && isDragging) ? 'transition-none' : '',
               ]" :style="{
                 transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
               }">
@@ -304,13 +352,13 @@ const filteredCombinedItems = computed(() => {
 
           <!-- 滑动与玻璃层 -->
           <div @click="selectAgent(agent.id)" @touchstart="onTouchStart($event, agent.id)"
-            @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd(agent.id)"
+            @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd($event, agent.id)"
             class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center transition-all duration-300"
             :class="[
               sessionStore.currentSelectedItem?.id === agent.id
                 ? 'glass-panel-active'
                 : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-              activeSwipeId === agent.id ? 'transition-none' : '',
+              (activeSwipeId === agent.id && isDragging) ? 'transition-none' : '',
             ]" :style="{
             transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)`,
           }">
