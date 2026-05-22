@@ -332,12 +332,11 @@ pub async fn regenerate_topic_response(
     owner_type: String,
     topic_id: String,
     target_user_msg_id: String,
-    thinking_id: Option<String>,
     stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
     println!(
-        "[TopicService] Regenerating response for topic: {}, target msg: {}, thinking_id: {:?}",
-        topic_id, target_user_msg_id, thinking_id
+        "[TopicService] Regenerating response for topic: {}, target msg: {}",
+        topic_id, target_user_msg_id
     );
 
     // 1. 获取目标用户消息，确保内容完整
@@ -393,12 +392,6 @@ pub async fn regenerate_topic_response(
             .await?;
 
     if owner_type == "agent" {
-        let final_thinking_id = thinking_id.unwrap_or_else(|| {
-            format!(
-                "msg_{}_assistant_regen",
-                chrono::Utc::now().timestamp_millis()
-            )
-        });
         crate::vcp_modules::agent_chat_application_service::internal_process_agent_chat_message(
             app_handle,
             agent_state,
@@ -410,7 +403,6 @@ pub async fn regenerate_topic_response(
                 user_message: chat_msg,
                 vcp_url: settings.vcp_server_url,
                 vcp_api_key: settings.vcp_api_key,
-                thinking_message_id: final_thinking_id,
             },
             stream_channel,
             false, // skip append_user_msg

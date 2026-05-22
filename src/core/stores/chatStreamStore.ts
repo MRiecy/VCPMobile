@@ -160,7 +160,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         name: ctx.agentName,
         content: "",
         timestamp: Date.now(),
-        isThinking: false,
+        isThinking: type === "thinking",
         agentId: ctx.agentId,
         groupId: ctx.groupId,
         isGroupMessage: !!ctx.isGroupMessage,
@@ -168,8 +168,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       });
       activeStreamMessages.set(actualMessageId, msg!);
       
+      topicStore.incrementTopicMsgCount(topicId);
       if (topicId !== sessionStore.currentTopicId) {
-        topicStore.incrementTopicMsgCount(topicId);
         topicStore.incrementTopicUnreadCount(topicId);
       }
 
@@ -180,7 +180,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
 
     // 维护流状态
-    if (type === "data") {
+    if (type === "thinking") {
+      msg!.isThinking = true;
+      addSessionStream(itemId, topicId, actualMessageId);
+      if (!streamingMessageId.value) {
+        streamingMessageId.value = actualMessageId;
+      }
+    } else if (type === "data") {
       msg!.isThinking = false;
       addSessionStream(itemId, topicId, actualMessageId);
 
@@ -224,6 +230,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
 
       if (msg) {
+        msg!.isThinking = false;
         try {
           // 如果后端已经带回了预渲染好的 blocks，直接使用，跳过冗余解析
           if (event.blocks) {

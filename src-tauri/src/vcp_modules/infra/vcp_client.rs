@@ -63,6 +63,15 @@ impl StreamEvent {
         }
     }
 
+    pub fn thinking(message_id: String, context: Option<Value>) -> Self {
+        Self {
+            r#type: "thinking".into(),
+            message_id,
+            context,
+            ..Default::default()
+        }
+    }
+
     pub fn aurora(message_id: String, aurora: AuroraUpdate, context: Option<Value>) -> Self {
         Self {
             r#type: "aurora".into(),

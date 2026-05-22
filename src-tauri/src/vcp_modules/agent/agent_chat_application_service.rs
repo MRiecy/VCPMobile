@@ -18,7 +18,6 @@ pub struct AgentChatPayload {
     pub user_message: ChatMessage,
     pub vcp_url: String,
     pub vcp_api_key: String,
-    pub thinking_message_id: String,
 }
 
 #[tauri::command]
@@ -54,7 +53,12 @@ pub async fn internal_process_agent_chat_message(
     let agent_id = payload.agent_id;
     let topic_id = payload.topic_id;
     let user_message = payload.user_message;
-    let thinking_id = payload.thinking_message_id;
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let thinking_id = format!("msg_{}_{}", agent_id, timestamp);
 
     // 1. 读取 Agent 配置
     let agent_config =
@@ -114,18 +118,26 @@ pub async fn internal_process_agent_chat_message(
         "stream": true
     });
 
+    let context = Some(json!({
+        "agentId": agent_id,
+        "topicId": topic_id,
+        "agentName": agent_config.name
+    }));
+
     let request_payload = VcpRequestPayload {
         vcp_url: payload.vcp_url,
         vcp_api_key: payload.vcp_api_key,
         messages,
         model_config,
         message_id: thinking_id.clone(),
-        context: Some(json!({
-            "agentId": agent_id,
-            "topicId": topic_id,
-            "agentName": agent_config.name
-        })),
+        context: context.clone(),
     };
+
+    // 在发起 VCP 请求前，向前端发射 thinking 事件以初始化气泡
+    let _ = stream_channel.send(StreamEvent::thinking(
+        thinking_id.clone(),
+        context,
+    ));
 
     // 7. 启动前台服务保活
     if let Err(e) =

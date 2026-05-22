@@ -191,20 +191,30 @@ pub async fn internal_process_group_chat_message(
         let mut messages = assemble_history_for_vcp(&full_history_for_context);
         messages.insert(0, json!({"role": "system", "content": system_prompt}));
 
+        let context = Some(json!({
+            "groupId": group_id,
+            "topicId": topic_id,
+            "agentId": agent_id,
+            "isGroupMessage": true,
+            "agentName": agent_name
+        }));
+
         let request_payload = VcpRequestPayload {
             vcp_url,
             vcp_api_key,
             messages,
             model_config,
             message_id: message_id.clone(),
-            context: Some(json!({
-                "groupId": group_id,
-                "topicId": topic_id,
-                "agentId": agent_id,
-                "isGroupMessage": true,
-                "agentName": agent_name
-            })),
+            context: context.clone(),
         };
+
+        // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
+        if let Some(chan) = &stream_channel {
+            let _ = chan.send(StreamEvent::thinking(
+                message_id.clone(),
+                context,
+            ));
+        }
 
         // 启动前台服务保活
         if let Err(e) =

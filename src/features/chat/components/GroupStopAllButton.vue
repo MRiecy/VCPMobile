@@ -26,10 +26,11 @@ const handleStopAll = () => {
          class="absolute -top-12 left-1/2 -translate-x-1/2 z-local">
       <button 
         @click="handleStopAll"
-        class="flex items-center gap-2 px-4 py-2 bg-red-500/80 hover:bg-red-600 border border-white/20 rounded-full text-white text-xs font-bold shadow-lg shadow-red-500/20 active:scale-95 transition-all"
+        class="flex items-center gap-2 px-3.5 py-1.5 bg-black/75 backdrop-blur-md border border-red-500/30 rounded text-red-400 text-xs font-semibold tracking-wide shadow-[0_0_15px_rgba(239,68,68,0.12)] active:scale-[0.97] transition-all duration-200"
       >
-        <Octagon :size="14" class="animate-pulse" />
-        <span>停止整个群组发言 ({{ activeCount }})</span>
+        <Octagon :size="12" class="animate-pulse text-red-500" />
+        <span class="uppercase tracking-wider font-medium">停止群组发言</span>
+        <span class="px-1.5 py-0.5 rounded bg-red-950/60 text-[10px] font-mono border border-red-900/50 text-red-300 leading-none">{{ activeCount }}</span>
       </button>
     </div>
   </Transition>
@@ -43,7 +44,7 @@ const handleStopAll = () => {
 
 .slide-fade-enter-from,
 .slide-fade-leave-to {
-  transform: translate(-50%, 20px) scale(0.9);
+  transform: translate(-50%, 15px) scale(0.95);
   opacity: 0;
 }
 </style>

@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, reactive } from "vue";
+import { ref } from "vue";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { useChatSessionStore } from "./chatSessionStore";
 import { useChatStreamStore } from "./chatStreamStore";
@@ -217,46 +217,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     const agentId = sessionStore.currentSelectedItem.id;
     const topicId = sessionStore.currentTopicId;
-    const now = Date.now();
-    const thinkingId = `msg_${now}_assistant_${Math.random().toString(36).substring(2, 9)}`;
-    const assistantName = sessionStore.currentSelectedItem.type === "agent"
-      ? (assistantStore.agents.find((a) => a.id === agentId)?.name || "Assistant")
-      : undefined;
-
-    const thinkingMsg = reactive<ChatMessage>({
-      id: thinkingId,
-      role: "assistant",
-      name: assistantName,
-      content: "",
-      timestamp: now + 1,
-      isThinking: true,
-      isGroupMessage: sessionStore.currentSelectedItem.type === "group",
-      groupId: sessionStore.currentSelectedItem.type === "group" ? sessionStore.currentSelectedItem.id : undefined,
-      agentId: sessionStore.currentSelectedItem.type === "agent" ? sessionStore.currentSelectedItem.id : undefined,
-      shell: streamStore.computeShell({ role: "assistant", agentId, name: assistantName }),
-    });
-
-    // 注册到全局流池和当前视图
-    streamStore.activeStreamMessages.set(thinkingId, thinkingMsg);
-    currentChatHistory.value.push(thinkingMsg);
-    topicStore.incrementTopicMsgCount(topicId);
-
-    streamStore.streamingMessageId = thinkingId;
-    streamStore.addSessionStream(agentId, topicId, thinkingId);
     acquireScreenKeep();
 
     try {
       await invoke("append_single_message", {
         ownerId: sessionStore.currentSelectedItem.id,
         ownerType: sessionStore.currentSelectedItem.type,
-        topicId: sessionStore.currentTopicId,
+        topicId,
         message: userMsg,
-      });
-      await invoke("append_single_message", {
-        ownerId: sessionStore.currentSelectedItem.id,
-        ownerType: sessionStore.currentSelectedItem.type,
-        topicId: sessionStore.currentTopicId,
-        message: thinkingMsg,
       });
 
       const settings = settingsStore.settings;
@@ -281,7 +249,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         await invoke("handle_group_chat_message", { 
           payload: {
             groupId: sessionStore.currentSelectedItem.id,
-            topicId: sessionStore.currentTopicId,
+            topicId,
             userMessage: userMsg,
             vcpUrl: settings.vcpServerUrl || "",
             vcpApiKey: settings.vcpApiKey || "",
@@ -292,21 +260,16 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         await invoke("handle_agent_chat_message", { 
           payload: {
             agentId,
-            topicId: sessionStore.currentTopicId,
+            topicId,
             userMessage: userMsg,
             vcpUrl: settings.vcpServerUrl || "",
             vcpApiKey: settings.vcpApiKey || "",
-            thinkingMessageId: thinkingId,
           }, 
           streamChannel 
         });
       }
     } catch (e) {
       console.error("[ChatHistoryStore] Generation failed:", e);
-      const errorText = `\n\n> VCP错误: ${e instanceof Error ? e.message : String(e)}`;
-      thinkingMsg.isThinking = false;
-      thinkingMsg.content += errorText;
-      streamStore.removeSessionStream(agentId, topicId, thinkingId);
     }
   };
 
@@ -459,33 +422,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     currentChatHistory.value = currentChatHistory.value.slice(0, lastUserMsgIndex + 1);
     topicStore.decrementTopicMsgCount(topicId, countToDelete);
 
-    // 3. 构造思考占位消息 (并注册到全局池)
-    const thinkingId = `msg_${Date.now()}_assistant_${Math.random().toString(36).substring(2, 9)}`;
-    const regenName = ownerType === "agent"
-        ? (assistantStore.agents.find((a) => a.id === ownerId)?.name || "Assistant")
-        : undefined;
-    const thinkingMsg = reactive<ChatMessage>({
-      id: thinkingId,
-      role: "assistant",
-      name: regenName,
-      content: "",
-      timestamp: Date.now(),
-      isThinking: true,
-      isGroupMessage: ownerType === "group",
-      groupId: ownerType === "group" ? ownerId : undefined,
-      agentId: ownerType === "agent" ? ownerId : undefined,
-      shell: streamStore.computeShell({ role: "assistant", agentId: ownerType === "agent" ? ownerId : undefined, name: regenName }),
-    });
-    
-    streamStore.activeStreamMessages.set(thinkingId, thinkingMsg);
-    currentChatHistory.value.push(thinkingMsg);
-    topicStore.incrementTopicMsgCount(topicId);
-
-    streamStore.streamingMessageId = thinkingId;
-    streamStore.addSessionStream(ownerId, topicId, thinkingId);
     acquireScreenKeep();
 
-    // 4. 调用后端重构后的重生接口
+    // 3. 调用后端重构后的重生接口
     try {
       const streamChannel = new Channel<any>();
       streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
@@ -507,14 +446,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         ownerType,
         topicId,
         targetUserMsgId: lastUserMsg.id,
-        thinkingId: thinkingId,
         streamChannel
       });
     } catch (e) {
       console.error("[ChatHistoryStore] Regeneration failed:", e);
-      thinkingMsg.isThinking = false;
-      thinkingMsg.content += `\n\n> VCP错误: ${e}`;
-      streamStore.removeSessionStream(ownerId, topicId, thinkingId);
     }
   };
 
