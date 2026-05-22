@@ -68,18 +68,103 @@ export const useAttachmentStore = defineStore("attachment", () => {
       const notificationStore = useNotificationStore();
       
       try {
-        // 1. 调用物理端原生 File Picker (无入参，使用通用插件接口)
-        const picked = await invoke<any>("plugin:vcp-mobile|pick_file");
-        console.log(`[AttachmentStore] Native picker returned:`, picked);
+        // 1. 调用物理端原生 File Picker (双轨事件监听 + 5分钟熔断)
+        const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        
+        const picked = await new Promise<any>((resolve, reject) => {
+          let resolved = false;
+
+          const handleStart = (e: any) => {
+            if (resolved) return;
+            const { name, size, mime } = e.detail;
+            stagedAttachments.value.unshift({
+              id: stableId,
+              type: mime || "application/octet-stream",
+              src: "",
+              name: name || "文件",
+              size: size || 0,
+              progress: 0,
+              status: "loading",
+            });
+          };
+
+          const handleProgress = (e: any) => {
+            if (resolved) return;
+            const { progress } = e.detail;
+            const idx = stagedAttachments.value.findIndex(a => a.id === stableId);
+            if (idx !== -1) {
+              stagedAttachments.value[idx].progress = progress;
+            }
+          };
+
+          const handlePicked = (e: any) => {
+            if (resolved) return;
+            resolved = true;
+            cleanup();
+            console.log("[AttachmentStore] Native picker returned via EventBus:", e.detail);
+            resolve(e.detail);
+          };
+
+          const cleanup = () => {
+            window.removeEventListener('vcp-mobile-file-start', handleStart);
+            window.removeEventListener('vcp-mobile-file-progress', handleProgress);
+            window.removeEventListener('vcp-mobile-file-picked', handlePicked);
+            clearTimeout(timer);
+          };
+
+          window.addEventListener('vcp-mobile-file-start', handleStart);
+          window.addEventListener('vcp-mobile-file-progress', handleProgress);
+          window.addEventListener('vcp-mobile-file-picked', handlePicked);
+
+          const timer = setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              reject(new Error("Native file picker timed out (5 mins) without reporting"));
+            }
+          }, 300000);
+
+          invoke<any>("plugin:vcp-mobile|pick_file").then((res) => {
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              console.log("[AttachmentStore] Native picker returned via Invoke:", res);
+              resolve(res);
+            }
+          }).catch((err) => {
+             if (!resolved) {
+               resolved = true;
+               cleanup();
+               reject(err);
+             }
+          });
+        });
         
         if (!picked || !picked.path) {
           console.log("[AttachmentStore] Pick cancelled or returned empty path.");
+          const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
+          if (existingIdx !== -1) {
+            stagedAttachments.value.splice(existingIdx, 1);
+          }
           return;
         }
 
-        // 2. 生成稳定 ID 并暂存 (loading 状态)
-        const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        
+        // 兜底：如果卡片还没插入，补插一张
+        const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
+        if (existingIdx === -1) {
+          stagedAttachments.value.unshift({
+            id: stableId,
+            type: picked.mime || "application/octet-stream",
+            src: "",
+            name: picked.name || "文件",
+            size: picked.size || 0,
+            progress: 100,
+            status: "loading",
+          });
+        } else {
+          stagedAttachments.value[existingIdx].progress = 100;
+        }
+
         // 缩略图展示策略：若有 native thumbnail 物理路径则通过 convertFileSrc 转换，否则如果为图片，转换 path 自身
         let displaySrc = "";
         if (picked.thumbnailPath) {
@@ -88,14 +173,12 @@ export const useAttachmentStore = defineStore("attachment", () => {
           displaySrc = convertFileSrc(picked.path);
         }
 
-        stagedAttachments.value.unshift({
-          id: stableId,
-          type: picked.mime || "application/octet-stream",
-          src: displaySrc,
-          name: picked.name,
-          size: picked.size,
-          status: "loading",
-        });
+        if (displaySrc) {
+          const finalIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
+          if (finalIdx !== -1) {
+            stagedAttachments.value[finalIdx].src = displaySrc;
+          }
+        }
 
         await nextTick();
         window.dispatchEvent(new Event("resize"));
@@ -127,7 +210,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
         notificationStore.addNotification({
           type: "warning",
           title: "选取附件失败",
-          message: err.message || String(err),
+          message: `❌ 异常捕获: ${err.message || String(err)}`,
           toastOnly: true,
         });
       }

@@ -219,22 +219,29 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     @Command
     fun pickFile(invoke: Invoke) {
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "*/*"
-            addCategory(Intent.CATEGORY_OPENABLE)
+        try {
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                type = "*/*"
+                addCategory(Intent.CATEGORY_OPENABLE)
+            }
+            startActivityForResult(invoke, intent, "onPickFileResult")
+        } catch (e: Throwable) {
+            Log.e(TAG, "[pickFile] Failed to start activity for result", e)
+            invoke.reject("Failed to start native file picker: ${e.message}")
         }
-        startActivityForResult(invoke, intent, "onPickFileResult")
     }
 
-    @app.tauri.annotation.ActivityCallback
+    @ActivityCallback
     fun onPickFileResult(invoke: Invoke, result: ActivityResult) {
         if (result.resultCode != Activity.RESULT_OK) {
+            Log.w(TAG, "[onPickFileResult] Pick cancelled or failed")
             invoke.reject("Cancelled")
             return
         }
 
         val uri = result.data?.data
         if (uri == null) {
+            Log.w(TAG, "[onPickFileResult] Selected URI is null")
             invoke.reject("No file selected")
             return
         }
@@ -258,22 +265,44 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
                 // 2. 获取 MIME 类型
                 val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+                Log.i(TAG, "[onPickFileResult] Processing picked file: $originalName (size=$size, mime=$mimeType)")
 
-                // 3. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
+                // 3. 发送预准备事件给前端，让前端立即创建进度卡片
+                val metaJson = """{"name":"${originalName.replace("\"", "\\\"")}","size":$size,"mime":"$mimeType"}"""
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: $metaJson }))", null)
+                }
+
+                // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
                 val tempFile = java.io.File(context.cacheDir, "pick_${System.currentTimeMillis()}_temp")
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
                 
                 contentResolver.openInputStream(uri).use { inputStream ->
                     if (inputStream == null) {
-                        activity.runOnUiThread { invoke.reject("Could not open input stream") }
+                        Log.e(TAG, "[onPickFileResult] openInputStream returned null")
+                        invoke.reject("Could not open input stream")
                         return@Thread
                     }
                     java.io.FileOutputStream(tempFile).use { outputStream ->
                         val buffer = ByteArray(65536)
                         var bytesRead: Int
+                        var totalRead = 0L
+                        var lastReportTime = System.currentTimeMillis()
+                        
                         while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                             outputStream.write(buffer, 0, bytesRead)
                             digest.update(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            
+                            val now = System.currentTimeMillis()
+                            if (now - lastReportTime > 200) {
+                                lastReportTime = now
+                                val progress = if (size > 0) ((totalRead.toDouble() / size) * 100).toInt() else 0
+                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: { loaded: $totalRead, total: $size, progress: $progress } }))"
+                                activity.runOnUiThread {
+                                    webViewRef?.evaluateJavascript(progressScript, null)
+                                }
+                            }
                         }
                     }
                 }
@@ -312,14 +341,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     resultObject.put("thumbnailPath", thumbnailPath)
                 }
 
+                Log.i(TAG, "[onPickFileResult] File copy & process complete: path=${finalTempFile.absolutePath}, hash=$hash")
+                
+                // 双轨通信：主动推送最终结果给前端，穿透 JNI 断裂层
+                val thumbStr = if (thumbnailPath != null) "\"${thumbnailPath.replace("\\", "\\\\")}\"" else "null"
+                val jsonPayload = """{"path":"${finalTempFile.absolutePath.replace("\\", "\\\\")}","name":"${originalName.replace("\"", "\\\"")}","mime":"$mimeType","size":$finalSize,"hash":"$hash","thumbnailPath":$thumbStr}"""
+                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: $jsonPayload }))"
                 activity.runOnUiThread {
-                    invoke.resolve(resultObject)
+                    webViewRef?.evaluateJavascript(pickedScript, null)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "File pick handling failed", e)
-                activity.runOnUiThread {
-                    invoke.reject("Handling picked file failed: ${e.message}")
-                }
+                
+                invoke.resolve(resultObject)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[onPickFileResult] File pick handling failed", e)
+                invoke.reject("Handling picked file failed: ${e.message}")
             }
         }.start()
     }
