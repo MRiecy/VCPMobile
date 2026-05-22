@@ -1,7 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use image::{imageops::FilterType, GenericImageView};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime};
@@ -218,20 +217,15 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
 }
 
 /// 从字节数组中提取主色调 (公开供协议层兜底使用)
-/// 策略：自适应分辨率（大图限128x128 Triangle，小图保持）+ 512-bin量化直方图峰值检测 + HSV饱和过滤
+/// 策略：自适应分辨率（FFmpeg内存解码降采样，大图限128x128，小图保持原样）+ 512-bin量化直方图峰值检测 + HSV饱和过滤
 pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> {
-    let img = image::load_from_memory(data)
-        .map_err(|e| format!("Failed to load image from memory: {}", e))?;
+    // 1. 调用 FFmpeg 自适应降采样得到 Raw RGBA 字节流
+    let rgba_data = crate::vcp_modules::media_processor::ffmpeg_cli::decode_avatar_to_rgba(data)
+        .map_err(|e| format!("FFmpeg decode failed: {}", e))?;
 
-    // 自适应分辨率：大图缩小到 128x128（保持纵横比），小图保持原分辨率避免放大失真
-    let thumbnail = {
-        let (w, h) = img.dimensions();
-        if w > 128 || h > 128 {
-            img.resize(128, 128, FilterType::Triangle)
-        } else {
-            img
-        }
-    };
+    if rgba_data.is_empty() || rgba_data.len() % 4 != 0 {
+        return Ok("#808080".to_string());
+    }
 
     // 512-bin 直方图：每通道 3bit，bin 范围 0-7
     let mut histogram = [0u32; 512];
@@ -245,13 +239,15 @@ pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> 
     let mut b_total: u64 = 0;
     let mut total_count: u64 = 0;
 
-    for (_x, _y, pixel) in thumbnail.pixels() {
-        if pixel[3] == 0 {
+    for i in (0..rgba_data.len()).step_by(4) {
+        let r = rgba_data[i];
+        let g = rgba_data[i + 1];
+        let b = rgba_data[i + 2];
+        let a = rgba_data[i + 3];
+
+        if a == 0 {
             continue; // 跳过透明像素
         }
-        let r = pixel[0];
-        let g = pixel[1];
-        let b = pixel[2];
 
         // 全局累加（兜底回退用）
         r_total += r as u64;
@@ -311,13 +307,15 @@ pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> 
         let mut vb_total: u64 = 0;
         let mut v_count: u64 = 0;
 
-        for (_x, _y, pixel) in thumbnail.pixels() {
-            if pixel[3] == 0 {
+        for i in (0..rgba_data.len()).step_by(4) {
+            let r = rgba_data[i];
+            let g = rgba_data[i + 1];
+            let b = rgba_data[i + 2];
+            let a = rgba_data[i + 3];
+
+            if a == 0 {
                 continue;
             }
-            let r = pixel[0];
-            let g = pixel[1];
-            let b = pixel[2];
 
             let pixel_bin = ((r / 32) as usize) * 64 + ((g / 32) as usize) * 8 + (b / 32) as usize;
             if pixel_bin != bin {
@@ -368,3 +366,71 @@ pub fn extract_dominant_color_from_bytes(data: &[u8]) -> Result<String, String> 
 
     Ok(format!("#{:02x}{:02x}{:02x}", r, g, b))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rgb_to_hsv_pure_colors() {
+        // 纯红
+        let (h, s, v) = rgb_to_hsv(255.0, 0.0, 0.0);
+        assert!((h - 0.0).abs() < 1e-4);
+        assert!((s - 1.0).abs() < 1e-4);
+        assert!((v - 1.0).abs() < 1e-4);
+
+        // 纯绿
+        let (h, s, v) = rgb_to_hsv(0.0, 255.0, 0.0);
+        assert!((h - 120.0).abs() < 1e-4);
+        assert!((s - 1.0).abs() < 1e-4);
+        assert!((v - 1.0).abs() < 1e-4);
+
+        // 纯蓝
+        let (h, s, v) = rgb_to_hsv(0.0, 0.0, 255.0);
+        assert!((h - 240.0).abs() < 1e-4);
+        assert!((s - 1.0).abs() < 1e-4);
+        assert!((v - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_hsv_to_rgb_pure_colors() {
+        // 纯红
+        let (r, g, b) = hsv_to_rgb(0.0, 1.0, 1.0);
+        assert_eq!(r, 255);
+        assert_eq!(g, 0);
+        assert_eq!(b, 0);
+
+        // 纯绿
+        let (r, g, b) = hsv_to_rgb(120.0, 1.0, 1.0);
+        assert_eq!(r, 0);
+        assert_eq!(g, 255);
+        assert_eq!(b, 0);
+
+        // 纯蓝
+        let (r, g, b) = hsv_to_rgb(240.0, 1.0, 1.0);
+        assert_eq!(r, 0);
+        assert_eq!(g, 0);
+        assert_eq!(b, 255);
+    }
+
+    #[test]
+    fn test_rgb_hsv_roundtrip() {
+        let colors = vec![
+            (255.0, 255.0, 255.0), // 纯白
+            (0.0, 0.0, 0.0),       // 纯黑
+            (128.0, 128.0, 128.0), // 灰色
+            (100.0, 150.0, 200.0), // 任意颜色
+        ];
+
+        for (r_in, g_in, b_in) in colors {
+            let (h, s, v) = rgb_to_hsv(r_in, g_in, b_in);
+            let (r_out, g_out, b_out) = hsv_to_rgb(h, s, v);
+            
+            // 允许有少量舍入误差
+            assert!((r_in - r_out as f32).abs() <= 1.0);
+            assert!((g_in - g_out as f32).abs() <= 1.0);
+            assert!((b_in - b_out as f32).abs() <= 1.0);
+        }
+    }
+}
+

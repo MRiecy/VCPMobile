@@ -337,6 +337,18 @@
           "markdownDescription": "Denies the move_task_to_back command without any pre-configured scope."
         },
         {
+          "description": "Enables the pick_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pick-file",
+          "markdownDescription": "Enables the pick_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pick_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pick-file",
+          "markdownDescription": "Denies the pick_file command without any pre-configured scope."
+        },
+        {
           "description": "Enables the request_android_permission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-request-android-permission",

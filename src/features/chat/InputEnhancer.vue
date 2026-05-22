@@ -93,7 +93,7 @@ const triggerFilePick = async (mode: 'camera' | 'gallery' | 'file') => {
 const { handlePaste, handleBeforeInput } = useLongTextPaste(input);
 
 const removeStagedAttachment = (index: number) => {
-  attachmentStore.stagedAttachments.splice(index, 1);
+  attachmentStore.removeStaged(index);
 };
 
 // 注意：textarea 上的 touch 拦截已移除，交由 WebView 原生处理 focus 与滚动。

@@ -6,6 +6,7 @@ const COMMANDS: &[&str] = &[
     "check_all_permissions",
     "request_android_permission",
     "move_task_to_back",
+    "pick_file",
 ];
 
 fn main() {
@@ -13,3 +14,4 @@ fn main() {
         .android_path("android")
         .build();
 }
+

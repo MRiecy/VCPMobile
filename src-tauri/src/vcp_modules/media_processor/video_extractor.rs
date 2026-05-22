@@ -2,7 +2,6 @@ use super::ffmpeg_cli::{
     detect_scene_changes, extract_single_frame, get_video_duration, run_ffmpeg,
 };
 use base64::Engine as _;
-use image::DynamicImage;
 use std::path::Path;
 
 /// 内部软上限：防止极端长视频导致 OOM 或 API 超时
@@ -11,37 +10,9 @@ const MAX_FRAMES: usize = 300;
 /// 去重阈值：时间戳差小于此值（秒）的帧视为重复
 const DEDUP_THRESHOLD_SECS: f64 = 1.5;
 
-/// 缩放到 720p 边界框内（最大 1280×720，保持比例）
-fn scale_to_720p(img: &DynamicImage) -> DynamicImage {
-    let (w, h) = (img.width(), img.height());
-    let max_w = 1280u32;
-    let max_h = 720u32;
-
-    if w <= max_w && h <= max_h {
-        return img.clone();
-    }
-
-    let scale = (max_w as f32 / w as f32).min(max_h as f32 / h as f32);
-    let new_w = (w as f32 * scale) as u32;
-    let new_h = (h as f32 * scale) as u32;
-
-    img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
-}
-
-/// JPEG bytes → 缩放 → base64 data URL
+/// JPEG bytes → base64 data URL，已由 FFmpeg 在提取时完成等比例缩放限制，无需再在 Rust 侧软解
 fn frame_to_data_url(jpeg_bytes: &[u8]) -> Result<String, String> {
-    let img = image::load_from_memory(jpeg_bytes).map_err(|e| e.to_string())?;
-    let scaled = scale_to_720p(&img);
-
-    let mut buf = Vec::new();
-    {
-        let mut cursor = std::io::Cursor::new(&mut buf);
-        scaled
-            .write_to(&mut cursor, image::ImageFormat::Jpeg)
-            .map_err(|e| e.to_string())?;
-    }
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(jpeg_bytes);
     Ok(format!("data:image/jpeg;base64,{}", b64))
 }
 
@@ -100,7 +71,7 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
         "-i",
         path.to_str().ok_or("Invalid video path")?,
         "-vf",
-        &format!("fps={},scale='min(1280,iw)':-1", fps_str),
+        &format!("fps={},scale='if(gt(iw/ih,1.777778),min(1280,iw),-1)':'if(gt(iw/ih,1.777778),-1,min(720,ih))'", fps_str),
         "-q:v",
         "2",
         temp_dir

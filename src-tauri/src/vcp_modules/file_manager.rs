@@ -1,6 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
 use dashmap::DashMap;
-use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -284,83 +283,13 @@ pub fn get_refined_mime_type(path: &std::path::Path, original_name: &str, initia
     current_mime
 }
 
-/// 内部辅助函数：生成图片缩略图（短边 200px 自适应，spawn_blocking 隔离）
+/// 内部辅助函数：生成图片缩略图（短边 200px 自适应，已下沉到 Android Kotlin 侧，此处直接返回 None）
 pub async fn generate_thumbnail<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    original_path: &std::path::Path,
-    hash: &str,
+    _app_handle: &tauri::AppHandle<R>,
+    _original_path: &std::path::Path,
+    _hash: &str,
 ) -> Option<String> {
-    let thumb_path = match get_thumbnails_root_dir(app_handle) {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("[Thumbnail] Failed to get thumbnails dir: {}", e);
-            return None;
-        }
-    };
-
-    if !thumb_path.exists() {
-        let _ = fs::create_dir_all(&thumb_path);
-    }
-
-    let thumb_file_path = thumb_path.join(format!("{}_thumb.webp", hash));
-
-    // 如果缩略图已存在，直接返回
-    if thumb_file_path.exists() {
-        return Some(thumb_file_path.to_string_lossy().to_string());
-    }
-
-    let original_path = original_path.to_path_buf();
-    let thumb_file_path_clone = thumb_file_path.clone();
-
-    // spawn_blocking 中执行 CPU 密集型图片处理，避免阻塞 tokio worker
-    match tokio::task::spawn_blocking(move || {
-        let img = match image::open(&original_path) {
-            Ok(img) => img,
-            Err(e) => {
-                log::warn!(
-                    "[Thumbnail] Failed to open image {:?}: {}",
-                    original_path,
-                    e
-                );
-                return None;
-            }
-        };
-
-        let (w, h) = img.dimensions();
-
-        // 短边 200px 自适应比例
-        let (new_w, new_h) = if w >= h {
-            // 横图/正方形：高 = 200，宽按比例
-            let ratio = w as f32 / h as f32;
-            ((200.0 * ratio).round() as u32, 200u32)
-        } else {
-            // 竖图：宽 = 200，高按比例
-            let ratio = h as f32 / w as f32;
-            (200u32, (200.0 * ratio).round() as u32)
-        };
-
-        let thumbnail =
-            image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Triangle);
-
-        if let Err(e) = thumbnail.save(&thumb_file_path_clone) {
-            log::warn!(
-                "[Thumbnail] Failed to save thumbnail {:?}: {}",
-                thumb_file_path_clone,
-                e
-            );
-            return None;
-        }
-
-        Some(thumb_file_path_clone.to_string_lossy().to_string())
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            log::warn!("[Thumbnail] spawn_blocking task panicked: {}", e);
-            None
-        }
-    }
+    None
 }
 
 /// 内部辅助函数：校验路径安全性，防止路径遍历攻击

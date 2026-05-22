@@ -58,9 +58,83 @@ export const useAttachmentStore = defineStore("attachment", () => {
   };
 
   /**
-   * 触发文件选择器并暂存附件 (使用标准 HTML Input 完美解决 Android content:// 协议名和类型丢失问题)
+   * 触发文件选择器并暂存附件 (Android 物理端使用原生选择拦截直传，其他端使用标准 HTML Input 完美支持)
    */
   const handleAttachment = async (mode: 'camera' | 'gallery' | 'file' = 'file') => {
+    const isAndroid = navigator.userAgent.toLowerCase().includes("android");
+    
+    if (isAndroid) {
+      console.log(`[AttachmentStore] Android environment detected. Intercepting via native picker. Mode: ${mode}`);
+      const notificationStore = useNotificationStore();
+      
+      try {
+        // 1. 调用物理端原生 File Picker (无入参，使用通用插件接口)
+        const picked = await invoke<any>("plugin:vcp-mobile|pick_file");
+        console.log(`[AttachmentStore] Native picker returned:`, picked);
+        
+        if (!picked || !picked.path) {
+          console.log("[AttachmentStore] Pick cancelled or returned empty path.");
+          return;
+        }
+
+        // 2. 生成稳定 ID 并暂存 (loading 状态)
+        const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        
+        // 缩略图展示策略：若有 native thumbnail 物理路径则通过 convertFileSrc 转换，否则如果为图片，转换 path 自身
+        let displaySrc = "";
+        if (picked.thumbnailPath) {
+          displaySrc = convertFileSrc(picked.thumbnailPath);
+        } else if (picked.mime?.startsWith("image/")) {
+          displaySrc = convertFileSrc(picked.path);
+        }
+
+        stagedAttachments.value.unshift({
+          id: stableId,
+          type: picked.mime || "application/octet-stream",
+          src: displaySrc,
+          name: picked.name,
+          size: picked.size,
+          status: "loading",
+        });
+
+        await nextTick();
+        window.dispatchEvent(new Event("resize"));
+
+        // 3. 后端零拷贝直传与注册 (会触发 rename 移动，缩略图生成，文本提取)
+        const finalData = await invoke<any>("register_local_file", {
+          localPath: picked.path,
+          originalName: picked.name,
+          mimeType: picked.mime || "application/octet-stream",
+          thumbnailPath: picked.thumbnailPath || null,
+        });
+
+        if (finalData) {
+          const index = stagedAttachments.value.findIndex((a) => a.id === stableId);
+          if (index !== -1) {
+            stagedAttachments.value[index] = {
+              ...stagedAttachments.value[index],
+              type: finalData.type,
+              src: finalData.internalPath,
+              name: finalData.name,
+              size: finalData.size,
+              hash: finalData.hash,
+              status: "done",
+            };
+          }
+        }
+      } catch (err: any) {
+        console.error("[AttachmentStore] Native file pick & registration failed:", err);
+        notificationStore.addNotification({
+          type: "warning",
+          title: "选取附件失败",
+          message: err.message || String(err),
+          toastOnly: true,
+        });
+      }
+      return;
+    }
+
+    // 非 Android 端的标准 HTML `<input>` 流程
     return new Promise<void>((resolve, reject) => {
       const input = document.createElement("input");
       input.type = "file";
@@ -292,8 +366,28 @@ export const useAttachmentStore = defineStore("attachment", () => {
     }
   };
 
+  /**
+   * 移除特定位置的暂存附件并触发后台 GC 物理清理
+   */
+  const removeStaged = (index: number) => {
+    if (index >= 0 && index < stagedAttachments.value.length) {
+      stagedAttachments.value.splice(index, 1);
+      // 异步触发后台孤儿附件物理清理 (GC)
+      invoke("cleanup_orphaned_attachments").catch((err) => {
+        console.warn("[AttachmentStore] Background GC triggered on attachment removal failed:", err);
+      });
+    }
+  };
+
+  /**
+   * 清空暂存附件并触发后台 GC 物理清理
+   */
   const clearStaged = () => {
     stagedAttachments.value = [];
+    // 异步触发后台孤儿附件物理清理 (GC)
+    invoke("cleanup_orphaned_attachments").catch((err) => {
+      console.warn("[AttachmentStore] Background GC triggered on staged clear failed:", err);
+    });
   };
 
   return {
@@ -301,6 +395,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
     handleAttachment,
     resolveMessageAssets,
     preProcessDocuments,
+    removeStaged,
     clearStaged,
   };
 });

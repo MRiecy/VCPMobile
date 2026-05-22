@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 // =============================================================================
 // Android: embed ffmpeg/ffprobe binaries at compile time
@@ -168,13 +169,15 @@ pub fn detect_scene_changes(path: &Path) -> Result<Vec<f64>, String> {
     Ok(timestamps)
 }
 
-/// 在指定时间戳提取单帧，返回 JPEG bytes
+/// 在指定时间戳提取单帧，返回 JPEG bytes，并在 FFmpeg 层缩放到 1280x720 比例框内
 pub fn extract_single_frame(path: &Path, timestamp_secs: f64) -> Result<Vec<u8>, String> {
     run_ffmpeg(&[
         "-ss",
         &format!("{:.3}", timestamp_secs),
         "-i",
         path.to_str().ok_or("Invalid video path")?,
+        "-vf",
+        "scale='if(gt(iw/ih,1.777778),min(1280,iw),-1)':'if(gt(iw/ih,1.777778),-1,min(720,ih))'",
         "-vframes",
         "1",
         "-q:v",
@@ -185,4 +188,35 @@ pub fn extract_single_frame(path: &Path, timestamp_secs: f64) -> Result<Vec<u8>,
         "mjpeg",
         "pipe:1",
     ])
+}
+
+/// 利用 FFmpeg 内存管道将任意格式的头像字节流解码并等比例缩放到 128x128（大图降采样，小图保持原样），输出 Raw RGBA 像素流
+pub fn decode_avatar_to_rgba(image_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let ffmpeg = get_ffmpeg_path()?;
+    let mut child = Command::new(&ffmpeg)
+        .args([
+            "-i", "pipe:0",
+            "-vf", "scale='if(gt(max(iw,ih),128),if(gt(iw,ih),128,-1),iw)':'if(gt(max(iw,ih),128),if(gt(iw,ih),-1,128),ih)'",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgba",
+            "pipe:1"
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
+
+    // 在另一个线程异步写入 stdin，彻底防止由于 pipe 写满导致的死锁
+    let mut stdin = child.stdin.take().ok_or("Failed to open FFmpeg stdin")?;
+    let bytes_to_write = image_bytes.to_vec();
+    std::thread::spawn(move || {
+        let _ = stdin.write_all(&bytes_to_write);
+    });
+
+    let output = child.wait_with_output().map_err(|e| format!("Failed to wait for FFmpeg: {}", e))?;
+    if !output.status.success() {
+        return Err("FFmpeg raw image decode failed".to_string());
+    }
+    Ok(output.stdout)
 }

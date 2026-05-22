@@ -49,7 +49,6 @@ sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 semver = "1"
-image = { version = "0.25", features = ["jpeg", "png", "webp"] }
 infer = "0.15"
 tauri-plugin-log = "2.8.0"
 tauri-plugin-vcp-mobile = { path = "./plugins/vcp-mobile" }

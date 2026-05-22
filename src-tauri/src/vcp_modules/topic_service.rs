@@ -152,7 +152,11 @@ pub async fn create_topic(
         .unwrap()
         .as_millis() as i64;
 
-    let id = format!("topic_{}", now);
+    let id = if owner_type == "group" {
+        format!("group_topic_{}", now)
+    } else {
+        format!("topic_{}", now)
+    };
 
     let topic = Topic {
         id: id.clone(),

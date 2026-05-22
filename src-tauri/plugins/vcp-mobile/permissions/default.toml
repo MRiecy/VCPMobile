@@ -9,4 +9,6 @@ commands.allow = [
     "check_all_permissions",
     "request_android_permission",
     "move_task_to_back",
+    "pick_file",
 ]
+
