@@ -145,7 +145,7 @@ const onTouchMove = (e: TouchEvent, id: string) => {
     const absX = Math.abs(deltaX);
     const absY = Math.abs(deltaY);
 
-    if (absX > 5 || absY > 5) {
+    if (absX > 3 || absY > 3) {
       hasDeterminedDirection = true;
       // If slope is greater than tan(30deg) (~0.577), it's vertical
       if (absY / absX > 0.577) {
@@ -296,15 +296,15 @@ const filteredCombinedItems = computed(() => {
           <!-- 滑动与玻璃层 -->
           <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, group.id)"
             @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd($event, group.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center transition-all duration-300"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center"
             :class="[
-                sessionStore.currentSelectedItem?.id === group.id
-                  ? 'glass-panel-active'
-                  : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-                (activeSwipeId === group.id && isDragging) ? 'transition-none' : '',
-              ]" :style="{
-                transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
-              }">
+                 sessionStore.currentSelectedItem?.id === group.id
+                   ? 'glass-panel-active'
+                   : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
+                 isDragging ? 'transition-none' : 'transition-transform duration-300 ease-out',
+               ]" :style="{
+                 transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
+               }">
             <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
               rounded="rounded-full" dominant-color="var(--highlight-text)" />
             <div class="flex flex-col overflow-hidden flex-1">
@@ -353,12 +353,12 @@ const filteredCombinedItems = computed(() => {
           <!-- 滑动与玻璃层 -->
           <div @click="selectAgent(agent.id)" @touchstart="onTouchStart($event, agent.id)"
             @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd($event, agent.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center transition-all duration-300"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center"
             :class="[
               sessionStore.currentSelectedItem?.id === agent.id
                 ? 'glass-panel-active'
                 : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-              (activeSwipeId === agent.id && isDragging) ? 'transition-none' : '',
+              isDragging ? 'transition-none' : 'transition-transform duration-300 ease-out',
             ]" :style="{
             transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)`,
           }">
