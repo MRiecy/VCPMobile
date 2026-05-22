@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { useNotificationStore } from './notification';
 
 export interface ModelInfo {
   id: string;
@@ -16,6 +17,8 @@ export const useModelStore = defineStore('model', () => {
   const favorites = ref<string[]>([]);
   const isLoading = ref(false);
   const lastRefreshed = ref(0);
+  
+  const notificationStore = useNotificationStore();
 
   // --- Getters ---
   const sortedModels = computed(() => {
@@ -39,10 +42,13 @@ export const useModelStore = defineStore('model', () => {
 
   // --- Actions ---
   const fetchModels = async (force = false) => {
+    if (isLoading.value) return; // 锁频防护，防止并发刷请求
+
     if (!force && models.value.length > 0 && Date.now() - lastRefreshed.value < 1000 * 60 * 10) {
       return;
     }
 
+    const startTime = Date.now();
     isLoading.value = true;
     try {
       // 先尝试获取缓存
@@ -54,15 +60,40 @@ export const useModelStore = defineStore('model', () => {
       if (force || models.value.length === 0) {
         models.value = await invoke<ModelInfo[]>('refresh_models');
         lastRefreshed.value = Date.now();
+
+        if (force) {
+          notificationStore.addNotification({
+            type: 'success',
+            title: '模型同步成功',
+            message: `已成功同步最新模型列表，共 ${models.value.length} 个可用模型`,
+            toastOnly: true,
+          });
+        }
       }
 
       await Promise.all([
         fetchHotModels(),
         fetchFavorites(),
       ]);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to fetch models:', error);
+      if (force) {
+        notificationStore.addNotification({
+          type: 'error',
+          title: '模型同步失败',
+          message: error?.toString() || '请检查网络连接、API 服务器或 API 密钥配置',
+          toastOnly: true,
+        });
+      }
     } finally {
+      // 转圈动画平滑停止延迟机制
+      if (force) {
+        const elapsed = Date.now() - startTime;
+        const minDuration = 800; // 最低转圈时长保证 800ms
+        if (elapsed < minDuration) {
+          await new Promise((resolve) => setTimeout(resolve, minDuration - elapsed));
+        }
+      }
       isLoading.value = false;
     }
   };

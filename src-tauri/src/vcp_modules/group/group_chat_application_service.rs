@@ -181,9 +181,24 @@ pub async fn internal_process_group_chat_message(
             assemble_group_context(&speaker, &group_config_inner, &active_member_configs_inner)
                 .await;
 
+        // 动态路由决策：是否使用群组统一模型
+        let model_to_use = if group_config_inner.use_unified_model {
+            if let Some(ref unified) = group_config_inner.unified_model {
+                if !unified.is_empty() {
+                    unified.clone()
+                } else {
+                    speaker.model.clone()
+                }
+            } else {
+                speaker.model.clone()
+            }
+        } else {
+            speaker.model.clone()
+        };
+
         // 构造请求载荷
         let model_config = json!({
-            "model": speaker.model,
+            "model": model_to_use,
             "temperature": speaker.temperature,
             "stream": true
         });

@@ -67,7 +67,7 @@ onMounted(() => {
     <Transition name="slide-up">
       <div v-if="modelValue"
         class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden"
-        style="padding-bottom: env(safe-area-inset-bottom, 20px);">
+        style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);">
 
         <!-- 顶部拉手条 -->
         <div class="w-12 h-1.5 bg-black/10 dark:bg-white/20 rounded-full mx-auto mt-4 mb-1"></div>
@@ -104,12 +104,19 @@ onMounted(() => {
 
         <!-- 模型列表 (桌面端结构的单行列表) -->
         <div class="flex-1 overflow-y-auto px-2 pb-4 space-y-1 no-rubber-band">
-          <div v-if="filteredModels.length === 0" class="py-20 text-center opacity-50">
+          <!-- 骨架屏：正在加载状态 -->
+          <div v-if="modelStore.isLoading && filteredModels.length === 0" class="py-20 text-center">
+            <RefreshCw :size="28" class="mx-auto mb-3 text-blue-500 animate-spin opacity-80" />
+            <p class="text-xs font-semibold text-gray-400 dark:text-zinc-500 tracking-wider">正在拉取可用模型列表...</p>
+          </div>
+
+          <!-- 兜底屏：未找到匹配模型 -->
+          <div v-else-if="filteredModels.length === 0" class="py-20 text-center opacity-50">
             <Cpu :size="28" class="mx-auto mb-3 text-gray-400" />
             <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>
           </div>
 
-          <div v-for="model in filteredModels" :key="model.id" @click="selectModel(model.id)"
+          <div v-else v-for="model in filteredModels" :key="model.id" @click="selectModel(model.id)"
             class="relative group px-4 py-3.5 flex items-center gap-3 rounded-2xl active:bg-black/5 dark:active:bg-white/5 transition-colors cursor-pointer"
             :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === model.id }">
 
