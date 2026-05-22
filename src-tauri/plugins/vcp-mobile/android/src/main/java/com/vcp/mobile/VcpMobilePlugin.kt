@@ -298,7 +298,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                             if (now - lastReportTime > 200) {
                                 lastReportTime = now
                                 val progress = if (size > 0) ((totalRead.toDouble() / size) * 100).toInt() else 0
-                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: { loaded: $totalRead, total: $size, progress: $progress } }))"
+                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: { loaded: $totalRead, total: $size, progress: $progress, name: '${originalName.replace("'", "\\'")}', mime: '$mimeType' } }))"
                                 activity.runOnUiThread {
                                     webViewRef?.evaluateJavascript(progressScript, null)
                                 }

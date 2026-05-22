@@ -36,7 +36,7 @@ pub async fn cleanup_orphaned_attachments(
 
     // 1. 获取数据库中记录的所有哈希
     let all_indexed_hashes: Vec<(String, String)> =
-        sqlx::query_as("SELECT hash, local_path FROM attachments")
+        sqlx::query_as("SELECT hash, internal_path FROM attachments")
             .fetch_all(&db_state.pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -97,6 +97,63 @@ pub async fn cleanup_orphaned_attachments(
         deleted_count,
         (freed_size as f64) / 1024.0 / 1024.0
     ))
+}
+
+/// 2.5 精准清理单个孤儿附件 (供前端取消暂存时调用)
+/// 检查特定 hash 是否被引用，若未引用则物理删除以防脏数据
+#[tauri::command]
+pub async fn cleanup_single_orphaned_attachment(
+    app_handle: AppHandle,
+    db_state: State<'_, DbState>,
+    hash: String,
+) -> Result<String, String> {
+    // 1. 查 message_attachments 确定该 hash 是否被历史消息引用
+    let is_used: bool = sqlx::query_scalar::<_, i32>(
+        "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE hash = ?)"
+    )
+    .bind(&hash)
+    .fetch_one(&db_state.pool)
+    .await
+    .map_err(|e| e.to_string())? != 0;
+
+    if is_used {
+        return Ok("附件已被其他消息引用，跳过清理".to_string());
+    }
+
+    // 2. 获取记录的物理路径
+    let internal_path: Option<String> = sqlx::query_scalar(
+        "SELECT internal_path FROM attachments WHERE hash = ?"
+    )
+    .bind(&hash)
+    .fetch_optional(&db_state.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Some(path_str) = internal_path {
+        let path = std::path::Path::new(&path_str);
+        if path.exists() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+
+        // 删除可能的缩略图
+        let thumb_path = match get_thumbnails_root_dir(&app_handle) {
+            Ok(p) => p.join(format!("{}_thumb.webp", hash)),
+            Err(_) => path.parent().unwrap().join("thumbnails").join(format!("{}_thumb.webp", hash)),
+        };
+        if thumb_path.exists() {
+            let _ = tokio::fs::remove_file(thumb_path).await;
+        }
+
+        // 从数据库中移除
+        let _ = sqlx::query("DELETE FROM attachments WHERE hash = ?")
+            .bind(&hash)
+            .execute(&db_state.pool)
+            .await;
+            
+        Ok("成功清理未引用的暂存附件".to_string())
+    } else {
+        Ok("数据库中未找到该附件记录".to_string())
+    }
 }
 
 /// 3. 初始化自动维护逻辑 (在 App 启动时调用)

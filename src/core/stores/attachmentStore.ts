@@ -90,10 +90,21 @@ export const useAttachmentStore = defineStore("attachment", () => {
 
           const handleProgress = (e: any) => {
             if (resolved) return;
-            const { progress } = e.detail;
+            const { progress, name, mime, total } = e.detail;
             const idx = stagedAttachments.value.findIndex(a => a.id === stableId);
             if (idx !== -1) {
               stagedAttachments.value[idx].progress = progress;
+            } else if (name) {
+              // 自我修复：如果 WebView 错过了 vcp-mobile-file-start 事件，在这里补建卡片
+              stagedAttachments.value.unshift({
+                id: stableId,
+                type: mime || "application/octet-stream",
+                src: "",
+                name: name,
+                size: total || 0,
+                progress: progress,
+                status: "loading",
+              });
             }
           };
 
@@ -450,26 +461,31 @@ export const useAttachmentStore = defineStore("attachment", () => {
   };
 
   /**
-   * 移除特定位置的暂存附件并触发后台 GC 物理清理
+   * 移除特定位置的暂存附件
    */
   const removeStaged = (index: number) => {
     if (index >= 0 && index < stagedAttachments.value.length) {
-      stagedAttachments.value.splice(index, 1);
-      // 异步触发后台孤儿附件物理清理 (GC)
-      invoke("cleanup_orphaned_attachments").catch((err) => {
-        console.warn("[AttachmentStore] Background GC triggered on attachment removal failed:", err);
-      });
+      const removed = stagedAttachments.value.splice(index, 1)[0];
+      if (removed.hash) {
+        invoke("cleanup_single_orphaned_attachment", { hash: removed.hash }).catch((err) => {
+          console.warn(`[AttachmentStore] Targeted GC failed for ${removed.name}:`, err);
+        });
+      }
     }
   };
 
   /**
-   * 清空暂存附件并触发后台 GC 物理清理
+   * 清空暂存附件
    */
   const clearStaged = () => {
+    const toClear = [...stagedAttachments.value];
     stagedAttachments.value = [];
-    // 异步触发后台孤儿附件物理清理 (GC)
-    invoke("cleanup_orphaned_attachments").catch((err) => {
-      console.warn("[AttachmentStore] Background GC triggered on staged clear failed:", err);
+    toClear.forEach(att => {
+      if (att.hash) {
+        invoke("cleanup_single_orphaned_attachment", { hash: att.hash }).catch((err) => {
+          console.warn(`[AttachmentStore] Targeted GC failed for ${att.name}:`, err);
+        });
+      }
     });
   };
 

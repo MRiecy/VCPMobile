@@ -34,7 +34,7 @@
         class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"
       ></div>
       <span
-        v-if="file.progress"
+        v-if="file.progress !== undefined"
         class="text-[9px] text-white font-bold tabular-nums"
       >{{ file.progress }}%</span>
     </div>

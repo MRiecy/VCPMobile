@@ -6,8 +6,9 @@
     size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[180px]">
-      <div class="relative w-9 h-9 shrink-0 rounded-lg overflow-hidden bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10">
+    <div class="flex items-center gap-2.5 px-2.5 py-2 min-w-[120px] max-w-[160px]">
+      <!-- Video Thumbnail (smaller) -->
+      <div class="relative w-7 h-7 shrink-0 rounded overflow-hidden bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10">
         <img 
           v-if="thumbnailSrc"
           :src="thumbnailSrc" 
@@ -15,8 +16,8 @@
         />
         <!-- Video Play Icon Overlay -->
         <div class="absolute inset-0 flex items-center justify-center">
-          <div class="w-5 h-5 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/30">
-            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-blue-500 translate-x-[0.5px]">
+          <div class="w-4 h-4 rounded-full bg-blue-500/20 flex items-center justify-center border border-blue-500/30">
+            <svg width="6" height="6" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-blue-500 translate-x-[0.5px]">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>
           </div>
@@ -25,11 +26,11 @@
 
       <!-- File Info -->
       <div class="flex flex-col min-w-0">
-        <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
+        <div class="text-[12px] font-medium truncate text-[var(--primary-text)] leading-tight mb-0.5">
           {{ displayName }}
         </div>
-        <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
-          {{ formatSize(file.size) }} • VIDEO
+        <div class="text-[10px] opacity-50 truncate leading-none">
+          VIDEO • {{ formatSize(file.size) }}
         </div>
       </div>
     </div>

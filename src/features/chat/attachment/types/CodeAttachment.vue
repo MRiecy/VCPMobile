@@ -6,32 +6,30 @@
     size="auto"
     @remove="emit('remove', index)"
   >
-    <div class="flex items-center gap-3 px-3 py-2 min-w-[140px] max-w-[180px]">
-      <!-- Code Icon -->
-      <div class="w-9 h-9 shrink-0 rounded-lg bg-green-500/10 flex items-center justify-center border border-green-500/20">
-        <svg
-          width="18"
-          height="18"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="text-green-500"
-        >
-          <polyline points="16 18 22 12 16 6"></polyline>
-          <polyline points="8 6 2 12 8 18"></polyline>
-        </svg>
-      </div>
+    <div class="flex items-center gap-2.5 px-2.5 py-2 min-w-[120px] max-w-[160px]">
+      <!-- Pure SVG Icon -->
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        class="text-green-500 shrink-0"
+      >
+        <polyline points="16 18 22 12 16 6"></polyline>
+        <polyline points="8 6 2 12 8 18"></polyline>
+      </svg>
 
       <!-- File Info -->
       <div class="flex flex-col min-w-0">
-        <div class="text-[11px] font-bold truncate text-[var(--primary-text)] mb-0.5">
+        <div class="text-[12px] font-medium truncate text-[var(--primary-text)] leading-tight mb-0.5">
           {{ displayName }}
         </div>
-        <div class="text-[9px] opacity-40 font-mono tracking-tighter uppercase">
-          {{ formatSize(file.size) }} • {{ extension }}
+        <div class="text-[10px] opacity-50 truncate leading-none">
+          {{ extension }} • {{ formatSize(file.size) }}
         </div>
       </div>
     </div>

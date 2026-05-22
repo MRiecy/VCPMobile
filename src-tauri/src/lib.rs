@@ -36,7 +36,7 @@ use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
-    cleanup_orphaned_attachments, clear_webview_cache, init_automatic_maintenance,
+    cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache, init_automatic_maintenance,
     upgrade_database_page_size,
 };
 use vcp_modules::message_repository::{
@@ -239,6 +239,7 @@ pub fn run() {
             open_file,
             clear_webview_cache,
             cleanup_orphaned_attachments,
+            cleanup_single_orphaned_attachment,
             upgrade_database_page_size,
             get_cached_models,
             refresh_models,
