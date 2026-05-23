@@ -59,6 +59,14 @@ const orderedAgents = computed(() => {
   return sorted;
 });
 
+// --- Shared Swipe State ---
+const isSorting = ref(false);
+const activeSwipeId = ref<string | null>(null);
+const currentSwipeX = ref(0);
+let startX = 0;
+let startY = 0;
+const isDragging = ref(false);
+
 const initSortable = () => {
   if (groupListRef.value) {
     Sortable.create(groupListRef.value, {
@@ -66,7 +74,25 @@ const initSortable = () => {
       handle: ".drag-handle",
       delay: 200,
       delayOnTouchOnly: true,
+      touchStartThreshold: 3,
+      direction: "vertical",
+      forceFallback: true,
+      fallbackOnBody: true,
+      ghostClass: "opacity-50",
+      onChoose: () => {
+        isSorting.value = true;
+        isDragging.value = false;
+        activeSwipeId.value = null;
+        currentSwipeX.value = 0;
+      },
+      onUnchoose: () => {
+        isSorting.value = false;
+      },
+      onStart: () => {
+        isSorting.value = true;
+      },
       onEnd: (evt) => {
+        isSorting.value = false;
         const newOrder = orderedGroups.value.map((g) => g.id);
         const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
         newOrder.splice(evt.newIndex!, 0, movedItem);
@@ -81,7 +107,25 @@ const initSortable = () => {
       handle: ".drag-handle",
       delay: 200, // Important for mobile: delay so swipe isn't blocked by sort
       delayOnTouchOnly: true,
+      touchStartThreshold: 3,
+      direction: "vertical",
+      forceFallback: true,
+      fallbackOnBody: true,
+      ghostClass: "opacity-50",
+      onChoose: () => {
+        isSorting.value = true;
+        isDragging.value = false;
+        activeSwipeId.value = null;
+        currentSwipeX.value = 0;
+      },
+      onUnchoose: () => {
+        isSorting.value = false;
+      },
+      onStart: () => {
+        isSorting.value = true;
+      },
       onEnd: (evt) => {
+        isSorting.value = false;
         const newOrder = orderedAgents.value.map((a) => a.id);
         const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
         newOrder.splice(evt.newIndex!, 0, movedItem);
@@ -96,11 +140,6 @@ onMounted(() => {
 });
 
 // --- Swipe Action Logic (Right Swipe) ---
-const activeSwipeId = ref<string | null>(null);
-const currentSwipeX = ref(0);
-let startX = 0;
-let startY = 0;
-const isDragging = ref(false);
 let isVerticalScroll = false;
 let hasDeterminedDirection = false;
 let isStartedAsSwiped = false;
@@ -108,6 +147,7 @@ const SWIPE_THRESHOLD = 50;
 const MAX_SWIPE = 80;
 
 const onTouchStart = (e: TouchEvent, id: string) => {
+  if (isSorting.value) return;
   if (activeSwipeId.value && activeSwipeId.value !== id) {
     activeSwipeId.value = null;
     currentSwipeX.value = 0;
@@ -133,6 +173,11 @@ const onTouchStart = (e: TouchEvent, id: string) => {
 };
 
 const onTouchMove = (e: TouchEvent, id: string) => {
+  if (isSorting.value) {
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation(); // 绝对防止排序期间由于手指滑动误触侧边栏动作或外层容器抖动
+    return;
+  }
   if (!isDragging.value || isVerticalScroll) return;
 
   const currentX = e.touches[0].clientX;
@@ -197,6 +242,7 @@ const onTouchMove = (e: TouchEvent, id: string) => {
 };
 
 const onTouchEnd = (e: TouchEvent, id: string) => {
+  if (isSorting.value) return;
   if (!isDragging.value) return;
   isDragging.value = false;
 
@@ -296,15 +342,15 @@ const filteredCombinedItems = computed(() => {
           <!-- 滑动与玻璃层 -->
           <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, group.id)"
             @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd($event, group.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:opacity-75 origin-center transition-all duration-300"
             :class="[
-                 sessionStore.currentSelectedItem?.id === group.id
-                   ? 'glass-panel-active'
-                   : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-                 isDragging ? 'transition-none' : 'transition-transform duration-300 ease-out',
-               ]" :style="{
-                 transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
-               }">
+                sessionStore.currentSelectedItem?.id === group.id
+                  ? 'glass-panel-active'
+                  : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
+                (activeSwipeId === group.id && isDragging) ? 'transition-none' : '',
+              ]" :style="{
+                transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
+              }">
             <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
               rounded="rounded-full" dominant-color="var(--highlight-text)" />
             <div class="flex flex-col overflow-hidden flex-1">
@@ -353,12 +399,12 @@ const filteredCombinedItems = computed(() => {
           <!-- 滑动与玻璃层 -->
           <div @click="selectAgent(agent.id)" @touchstart="onTouchStart($event, agent.id)"
             @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd($event, agent.id)"
-            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:scale-[0.98] origin-center"
+            class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:opacity-75 origin-center transition-all duration-300"
             :class="[
               sessionStore.currentSelectedItem?.id === agent.id
                 ? 'glass-panel-active'
                 : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-              isDragging ? 'transition-none' : 'transition-transform duration-300 ease-out',
+              (activeSwipeId === agent.id && isDragging) ? 'transition-none' : '',
             ]" :style="{
             transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)`,
           }">
