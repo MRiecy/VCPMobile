@@ -266,8 +266,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     .unwrap_or("")
                                     .to_lowercase();
                                 let (mime, part_type) = match ext.as_str() {
-                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "tif"
-                                    | "heic" | "heif" | "avif" | "ico" => ("image", "image_url"),
+                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff"
+                                    | "tif" | "heic" | "heif" | "avif" | "ico" => {
+                                        ("image", "image_url")
+                                    }
                                     "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
                                     | "wma" | "amr" | "aiff" | "aif" => ("audio", "input_audio"),
                                     "mp4" | "mkv" | "webm" | "avi" | "mov" | "flv" | "m4v"

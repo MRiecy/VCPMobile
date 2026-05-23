@@ -1,10 +1,10 @@
 // 1. 声明 7 大物理子领域
 pub mod agent;
-pub mod group;
 pub mod chat;
-pub mod sync;
-pub mod persistence;
+pub mod group;
 pub mod infra;
+pub mod persistence;
+pub mod sync;
 pub mod updater;
 
 // 2. 扁平化外观代理导出 (Façade Re-exporting)

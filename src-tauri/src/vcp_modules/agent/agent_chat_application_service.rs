@@ -134,10 +134,7 @@ pub async fn internal_process_agent_chat_message(
     };
 
     // 在发起 VCP 请求前，向前端发射 thinking 事件以初始化气泡
-    let _ = stream_channel.send(StreamEvent::thinking(
-        thinking_id.clone(),
-        context,
-    ));
+    let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context));
 
     // 7. 启动前台服务保活
     if let Err(e) =

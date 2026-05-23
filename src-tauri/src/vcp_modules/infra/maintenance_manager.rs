@@ -109,25 +109,25 @@ pub async fn cleanup_single_orphaned_attachment(
 ) -> Result<String, String> {
     // 1. 查 message_attachments 确定该 hash 是否被历史消息引用
     let is_used: bool = sqlx::query_scalar::<_, i32>(
-        "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE hash = ?)"
+        "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE hash = ?)",
     )
     .bind(&hash)
     .fetch_one(&db_state.pool)
     .await
-    .map_err(|e| e.to_string())? != 0;
+    .map_err(|e| e.to_string())?
+        != 0;
 
     if is_used {
         return Ok("附件已被其他消息引用，跳过清理".to_string());
     }
 
     // 2. 获取记录的物理路径
-    let internal_path: Option<String> = sqlx::query_scalar(
-        "SELECT internal_path FROM attachments WHERE hash = ?"
-    )
-    .bind(&hash)
-    .fetch_optional(&db_state.pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    let internal_path: Option<String> =
+        sqlx::query_scalar("SELECT internal_path FROM attachments WHERE hash = ?")
+            .bind(&hash)
+            .fetch_optional(&db_state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
     if let Some(path_str) = internal_path {
         let path = std::path::Path::new(&path_str);
@@ -138,7 +138,11 @@ pub async fn cleanup_single_orphaned_attachment(
         // 删除可能的缩略图
         let thumb_path = match get_thumbnails_root_dir(&app_handle) {
             Ok(p) => p.join(format!("{}_thumb.webp", hash)),
-            Err(_) => path.parent().unwrap().join("thumbnails").join(format!("{}_thumb.webp", hash)),
+            Err(_) => path
+                .parent()
+                .unwrap()
+                .join("thumbnails")
+                .join(format!("{}_thumb.webp", hash)),
         };
         if thumb_path.exists() {
             let _ = tokio::fs::remove_file(thumb_path).await;
@@ -149,7 +153,7 @@ pub async fn cleanup_single_orphaned_attachment(
             .bind(&hash)
             .execute(&db_state.pool)
             .await;
-            
+
         Ok("成功清理未引用的暂存附件".to_string())
     } else {
         Ok("数据库中未找到该附件记录".to_string())

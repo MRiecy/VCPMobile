@@ -425,7 +425,7 @@ mod tests {
         for (r_in, g_in, b_in) in colors {
             let (h, s, v) = rgb_to_hsv(r_in, g_in, b_in);
             let (r_out, g_out, b_out) = hsv_to_rgb(h, s, v);
-            
+
             // 允许有少量舍入误差
             assert!((r_in - r_out as f32).abs() <= 1.0);
             assert!((g_in - g_out as f32).abs() <= 1.0);
@@ -433,4 +433,3 @@ mod tests {
         }
     }
 }
-

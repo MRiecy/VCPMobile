@@ -44,8 +44,6 @@ pub struct AgentConfig {
     /// 话题列表
     #[serde(default)]
     pub topics: Vec<Topic>,
-
-
 }
 
 fn default_agent_name() -> String {

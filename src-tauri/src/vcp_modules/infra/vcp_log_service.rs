@@ -10,7 +10,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
-static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(15000);
+static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(15000);
 
 lazy_static::lazy_static! {
 static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -30,7 +31,6 @@ pub async fn set_vcp_log_heartbeat(interval_ms: u64) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 pub async fn get_vcp_log_status_internal() -> String {
     CURRENT_LOG_STATUS.read().await.clone()

@@ -232,10 +232,7 @@ pub async fn internal_process_group_chat_message(
 
         // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
         if let Some(chan) = &stream_channel {
-            let _ = chan.send(StreamEvent::thinking(
-                message_id.clone(),
-                context,
-            ));
+            let _ = chan.send(StreamEvent::thinking(message_id.clone(), context));
         }
 
         // 启动前台服务保活

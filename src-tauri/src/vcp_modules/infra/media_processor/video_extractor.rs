@@ -94,7 +94,8 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
         let frame_path = temp_dir.join(format!("frame_{:04}.jpg", expected_idx));
 
         let jpeg_bytes = if frame_path.exists() {
-            std::fs::read(&frame_path).map_err(|e| format!("Failed to read frame {}: {}", expected_idx, e))?
+            std::fs::read(&frame_path)
+                .map_err(|e| format!("Failed to read frame {}: {}", expected_idx, e))?
         } else {
             // 场景帧可能不在均匀采样网格中，单独提取
             extract_single_frame(path, *ts)?
@@ -102,7 +103,7 @@ pub fn process_video_for_multimodal(path: &Path) -> Result<Vec<String>, String> 
 
         let data_url = frame_to_data_url(&jpeg_bytes)?;
         total_b64_size += data_url.len();
-        
+
         results.push(data_url);
 
         if total_b64_size >= SIZE_LIMIT {

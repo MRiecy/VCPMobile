@@ -26,7 +26,7 @@ pub fn process_audio_for_multimodal(path: &Path) -> Result<String, String> {
 
     // 优化 Base64 拼接：预分配内存并直接编码到 String
     let prefix = "data:audio/mpeg;base64,";
-    let b64_len = (mp3_bytes.len() * 4 + 2) / 3;
+    let b64_len = (mp3_bytes.len() * 4).div_ceil(3);
     let mut result = String::with_capacity(prefix.len() + b64_len);
     result.push_str(prefix);
     base64::engine::general_purpose::STANDARD.encode_string(&mp3_bytes, &mut result);

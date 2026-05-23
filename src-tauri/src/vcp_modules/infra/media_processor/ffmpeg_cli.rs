@@ -214,7 +214,9 @@ pub fn decode_avatar_to_rgba(image_bytes: &[u8]) -> Result<Vec<u8>, String> {
         let _ = stdin.write_all(&bytes_to_write);
     });
 
-    let output = child.wait_with_output().map_err(|e| format!("Failed to wait for FFmpeg: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait for FFmpeg: {}", e))?;
     if !output.status.success() {
         return Err("FFmpeg raw image decode failed".to_string());
     }

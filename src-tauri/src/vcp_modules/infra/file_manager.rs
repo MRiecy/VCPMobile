@@ -190,8 +190,12 @@ fn is_likely_text_file(path: &std::path::Path) -> bool {
 }
 
 /// 内部辅助函数：精细化 MIME 类型判定 (对齐桌面端 fileManager.js)
-/// 增加了魔数检测 (infer) 和 文本启发式检测 (no-NULL sniffing) 
-pub fn get_refined_mime_type(path: &std::path::Path, original_name: &str, initial_mime: &str) -> String {
+/// 增加了魔数检测 (infer) 和 文本启发式检测 (no-NULL sniffing)
+pub fn get_refined_mime_type(
+    path: &std::path::Path,
+    original_name: &str,
+    initial_mime: &str,
+) -> String {
     let ext = std::path::Path::new(original_name)
         .extension()
         .and_then(|e| e.to_str())
@@ -270,7 +274,7 @@ pub fn get_refined_mime_type(path: &std::path::Path, original_name: &str, initia
                     if let Ok(Some(kind)) = infer::get_from_path(path) {
                         return kind.mime_type().to_string();
                     }
-                    
+
                     // 3b. 文本启发式 (用于识别未知的文本/代码格式，如 .pub, .env, .log)
                     if is_likely_text_file(path) {
                         return "text/plain".to_string();
@@ -757,7 +761,11 @@ pub async fn finish_chunked_upload(
         .map_err(|e| format!("移动文件失败: {}", e))?;
 
     // 4. 对完整文件进行最终的 MIME 嗅探精修 (此时文件已完整，嗅探结果最准确)
-    let final_refined_mime = get_refined_mime_type(&internal_file_path, &session.original_name, &session.mime_type);
+    let final_refined_mime = get_refined_mime_type(
+        &internal_file_path,
+        &session.original_name,
+        &session.mime_type,
+    );
 
     // 5. 复用统一的注册逻辑（入库、文本提取、缩略图生成）
     register_attachment_internal(
@@ -775,6 +783,7 @@ pub async fn finish_chunked_upload(
 /// 注册本地已有的文件（例如 Android Kotlin 端沙盒临时复制的大文件/硬解缩略图）
 /// 彻底实现“前端零拷贝物理路径传输”
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn register_local_file(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
@@ -804,20 +813,24 @@ pub async fn register_local_file(
     // 3. 流式异步读取并计算 SHA-256 (若传入 expected_hash 则直接使用，免除二次哈希)
     let hash = match expected_hash {
         Some(h) => {
-            log::info!("[FileManager] Reusing expected hash from native side: {}", h);
+            log::info!(
+                "[FileManager] Reusing expected hash from native side: {}",
+                h
+            );
             h
         }
         None => {
             let mut file = tokio::fs::File::open(&source_path)
                 .await
                 .map_err(|e| format!("无法打开源文件: {}", e))?;
-            
+
             let mut hasher = Sha256::new();
             let mut buffer = [0u8; 65536]; // 64KB 缓冲
             let mut hashed_bytes = 0u64;
             let mut last_emit_time = std::time::Instant::now();
             loop {
-                let n = file.read(&mut buffer)
+                let n = file
+                    .read(&mut buffer)
                     .await
                     .map_err(|e| format!("读取源文件失败: {}", e))?;
                 if n == 0 {
@@ -830,12 +843,21 @@ pub async fn register_local_file(
                     let now = std::time::Instant::now();
                     if now.duration_since(last_emit_time).as_millis() > 200 {
                         last_emit_time = now;
-                        let pct = if size > 0 { (hashed_bytes as f64 / size as f64 * 100.0) as u32 } else { 0 };
+                        let pct = if size > 0 {
+                            (hashed_bytes as f64 / size as f64 * 100.0) as u32
+                        } else {
+                            0
+                        };
                         let scaled_pct = 50 + (pct * 40 / 100); // 50% 到 90%
-                        app_handle.emit("vcp-file-register-progress", serde_json::json!({
-                            "progress": scaled_pct,
-                            "stableId": sid,
-                        })).ok();
+                        app_handle
+                            .emit(
+                                "vcp-file-register-progress",
+                                serde_json::json!({
+                                    "progress": scaled_pct,
+                                    "stableId": sid,
+                                }),
+                            )
+                            .ok();
                     }
                 }
             }
@@ -867,20 +889,33 @@ pub async fn register_local_file(
     // 如果目标文件已存在（内容寻址去重去冗余），则直接删除源临时文件
     if dest_path.exists() {
         let _ = tokio::fs::remove_file(&source_path).await;
-        log::info!("[FileManager] Duplicated local file found. Removed source path: {}", local_path);
+        log::info!(
+            "[FileManager] Duplicated local file found. Removed source path: {}",
+            local_path
+        );
         if let Some(ref sid) = stable_id {
-            app_handle.emit("vcp-file-register-progress", serde_json::json!({
-                "progress": 99,
-                "stableId": sid,
-            })).ok();
+            app_handle
+                .emit(
+                    "vcp-file-register-progress",
+                    serde_json::json!({
+                        "progress": 99,
+                        "stableId": sid,
+                    }),
+                )
+                .ok();
         }
     } else {
         // 先尝试 rename 极速移动，失败时 fallback 复制 + 删除
         if let Some(ref sid) = stable_id {
-            app_handle.emit("vcp-file-register-progress", serde_json::json!({
-                "progress": 90,
-                "stableId": sid,
-            })).ok();
+            app_handle
+                .emit(
+                    "vcp-file-register-progress",
+                    serde_json::json!({
+                        "progress": 90,
+                        "stableId": sid,
+                    }),
+                )
+                .ok();
         }
         if tokio::fs::rename(&source_path, &dest_path).await.is_err() {
             tokio::fs::copy(&source_path, &dest_path)
@@ -889,10 +924,15 @@ pub async fn register_local_file(
             let _ = tokio::fs::remove_file(&source_path).await;
         }
         if let Some(ref sid) = stable_id {
-            app_handle.emit("vcp-file-register-progress", serde_json::json!({
-                "progress": 99,
-                "stableId": sid,
-            })).ok();
+            app_handle
+                .emit(
+                    "vcp-file-register-progress",
+                    serde_json::json!({
+                        "progress": 99,
+                        "stableId": sid,
+                    }),
+                )
+                .ok();
         }
     }
 
@@ -927,26 +967,25 @@ pub async fn register_local_file(
             let dest_thumb_path = thumbs_dir.join(format!("{}_thumb.webp", hash));
             let dest_thumb_path_str = dest_thumb_path.to_str().unwrap().to_string();
 
-            if dest_thumb_path.exists() {
+            if dest_thumb_path.exists()
+                || (tokio::fs::rename(&source_thumb, &dest_thumb_path)
+                    .await
+                    .is_err()
+                    && tokio::fs::copy(&source_thumb, &dest_thumb_path)
+                        .await
+                        .is_ok())
+            {
                 let _ = tokio::fs::remove_file(&source_thumb).await;
-            } else {
-                if tokio::fs::rename(&source_thumb, &dest_thumb_path).await.is_err() {
-                    if tokio::fs::copy(&source_thumb, &dest_thumb_path).await.is_ok() {
-                        let _ = tokio::fs::remove_file(&source_thumb).await;
-                    }
-                }
             }
 
             // 更新 SQLite 中的 thumbnail_path，使其指向正式保存的缩略图
-            sqlx::query(
-                "UPDATE attachments SET thumbnail_path = ?, updated_at = ? WHERE hash = ?"
-            )
-            .bind(&dest_thumb_path_str)
-            .bind(attachment_data.created_at as i64)
-            .bind(&hash)
-            .execute(&db_state.pool)
-            .await
-            .ok();
+            sqlx::query("UPDATE attachments SET thumbnail_path = ?, updated_at = ? WHERE hash = ?")
+                .bind(&dest_thumb_path_str)
+                .bind(attachment_data.created_at as i64)
+                .bind(&hash)
+                .execute(&db_state.pool)
+                .await
+                .ok();
 
             final_thumbnail_path = Some(dest_thumb_path_str);
         }

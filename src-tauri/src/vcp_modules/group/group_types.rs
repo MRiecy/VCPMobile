@@ -55,5 +55,4 @@ pub struct GroupConfig {
     /// 创建时间戳
     #[serde(default)]
     pub created_at: i64,
-
 }

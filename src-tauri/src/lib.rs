@@ -36,8 +36,8 @@ use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
-    cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache, init_automatic_maintenance,
-    upgrade_database_page_size,
+    cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
+    init_automatic_maintenance, upgrade_database_page_size,
 };
 use vcp_modules::message_repository::{
     compress_all_contents, process_message_content, rebuild_all_pre_renders,
@@ -63,7 +63,9 @@ use vcp_modules::vcp_client::{
     interruptGroupTurn, interruptRequest, sendToVCP, test_vcp_connection, ActiveRequests,
     CancelledGroupTurns,
 };
-use vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat};
+use vcp_modules::vcp_log_service::{
+    init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
+};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]

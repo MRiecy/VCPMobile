@@ -25,7 +25,6 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
                     }
                 });
 
-
             let mut combined_text = format!("[{}的发言]: \n{}", speaker_name, msg.content);
             let mut content_parts = Vec::new();
 
