@@ -132,9 +132,10 @@ pub fn run() {
 
             let handle = app.handle().clone();
 
-            // 0. 前端 OTA：APK 升级清理 & 损坏版本回滚
+            // 0. 前端 OTA：APK 升级清理 & 损坏版本回滚 & 安全期冗余垃圾清理
             vcp_modules::frontend_update_manager::clear_on_apk_upgrade(&handle);
             vcp_modules::frontend_update_manager::rollback_if_needed(&handle);
+            vcp_modules::frontend_update_manager::safe_cleanup_old_versions(&handle);
 
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);

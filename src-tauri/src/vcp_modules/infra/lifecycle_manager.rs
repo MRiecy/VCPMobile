@@ -152,9 +152,13 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     {
         let h = handle.clone();
         tokio::spawn(async move {
+            // 启动延时 10 秒后执行首航清理，完美避开冷启动黄金 IO 密集期
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+            let _ = DeleteExecutor::cleanup_old_deleted_records(&h, 30).await;
+
             loop {
                 tokio::time::sleep(Duration::from_secs(86400)).await;
-                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
                 let _ = DeleteExecutor::cleanup_old_deleted_records(&h, 30).await;
             }
         });

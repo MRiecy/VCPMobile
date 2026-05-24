@@ -398,14 +398,22 @@ pub async fn apply_frontend_update(
     let active_version_path = get_active_version_path(&app)?;
     std::fs::write(&active_version_path, &version).map_err(|e| e.to_string())?;
 
-    // 清理旧版本（保留最近 2 个）
-    let _ = cleanup_old_versions(&updates_dir, 2);
+    // 注意：已移除运行期即时物理垃圾清理，以防当前在用资源被删除引发 chunk 加载失败
+    // 垃圾物理清理已安全后置到冷启动 setup 阶段执行
 
-    // 删除下载的 zip
+    // 删除下载 of zip
     let _ = tokio::fs::remove_file(&zip_path).await;
 
     log::info!("[FrontendUpdate] Applied version {} successfully", version);
     Ok(())
+}
+
+/// 安全的旧前端 OTA 版本垃圾物理回收封装
+/// 专用于在应用冷启动的安全真空中静默清理
+pub fn safe_cleanup_old_versions(app: &AppHandle) {
+    if let Ok(updates_dir) = get_frontend_updates_dir(app) {
+        let _ = cleanup_old_versions(&updates_dir, 2);
+    }
 }
 
 #[tauri::command]
