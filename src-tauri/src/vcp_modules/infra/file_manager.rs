@@ -48,79 +48,20 @@ pub fn get_thumbnails_root_dir<R: tauri::Runtime>(
     Ok(path)
 }
 
-/// 迁移逻辑：将旧的内部存储附件迁移到新的外部存储目录 (仅限 Android)
-pub fn migrate_legacy_attachments(_app_handle: &AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        let app_handle = _app_handle;
-        let mut old_dir = app_handle
-            .path()
-            .app_config_dir()
-            .map_err(|e| e.to_string())?;
-        old_dir.push("data");
-        old_dir.push("attachments");
+/// 物理安全的文件重命名工具，能够跨越物理挂载分区 (EXDEV) 降级进行物理拷贝+删除
+pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(from: P, to: Q) -> std::io::Result<()> {
+    let from = from.as_ref();
+    let to = to.as_ref();
 
-        let new_dir = get_attachments_root_dir(app_handle)?;
-
-        if old_dir.exists() && old_dir != new_dir {
-            if !new_dir.exists() {
-                fs::create_dir_all(&new_dir).map_err(|e| e.to_string())?;
-            }
-
-            log::info!(
-                "[FileManager] Migrating attachments from {:?} to {:?}",
-                old_dir,
-                new_dir
-            );
-
-            if let Ok(entries) = fs::read_dir(&old_dir) {
-                for entry in entries.flatten() {
-                    let old_path = entry.path();
-                    if old_path.is_file() {
-                        let file_name = old_path.file_name().unwrap();
-                        let new_path = new_dir.join(file_name);
-                        if !new_path.exists() {
-                            let _ = fs::rename(&old_path, &new_path);
-                        } else {
-                            let _ = fs::remove_file(&old_path);
-                        }
-                    }
-                }
-            }
-
-            // 迁移缩略图
-            let mut old_thumb_dir = old_dir.clone();
-            old_thumb_dir.pop();
-            old_thumb_dir.push("thumbnails");
-
-            let new_thumb_dir = get_thumbnails_root_dir(app_handle)?;
-            if old_thumb_dir.exists() {
-                if !new_thumb_dir.exists() {
-                    let _ = fs::create_dir_all(&new_thumb_dir);
-                }
-                if let Ok(entries) = fs::read_dir(&old_thumb_dir) {
-                    for entry in entries.flatten() {
-                        let old_path = entry.path();
-                        if old_path.is_file() {
-                            let file_name = old_path.file_name().unwrap();
-                            let new_path = new_thumb_dir.join(file_name);
-                            if !new_path.exists() {
-                                let _ = fs::rename(&old_path, &new_path);
-                            } else {
-                                let _ = fs::remove_file(&old_path);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 清理旧目录
-            let _ = fs::remove_dir_all(&old_dir);
-            let _ = fs::remove_dir_all(&old_thumb_dir);
-        }
+    if std::fs::rename(from, to).is_err() {
+        // 如果是跨物理分区移动，执行物理复制 + 物理删除源文件以兜底
+        std::fs::copy(from, to)?;
+        let _ = std::fs::remove_file(from);
     }
     Ok(())
 }
+
+
 
 pub struct UploadSession {
     pub temp_path: std::path::PathBuf,
@@ -676,8 +617,8 @@ pub async fn finish_chunked_upload(
     let internal_file_path = attachments_dir.join(&internal_file_name);
     let internal_path_str = internal_file_path.to_str().unwrap().to_string();
 
-    // 3. 移动临时文件到正式目录 (Rename 是毫秒级的)
-    fs::rename(&session.temp_path, &internal_file_path)
+    // 3. 移动临时文件到正式目录 (物理安全跨挂载点重命名)
+    safe_rename(&session.temp_path, &internal_file_path)
         .map_err(|e| format!("移动文件失败: {}", e))?;
 
     // 4. 对完整文件进行最终的 MIME 嗅探精修 (此时文件已完整，嗅探结果最准确)
