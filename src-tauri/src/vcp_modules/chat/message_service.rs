@@ -94,7 +94,7 @@ pub async fn load_multi_topic_messages(
         let mut att_placeholders = Vec::new();
         att_placeholders.extend(std::iter::repeat_n("(?, ?)", all_msg_refs.len()));
         let att_query = format!(
-            "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
+            "SELECT a.hash, a.mime_type, a.size, a.internal_path, NULL as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
@@ -199,7 +199,7 @@ pub async fn load_chat_history_internal(
     if !msg_ids.is_empty() {
         let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let att_query = format!(
-            "SELECT a.hash, a.mime_type, a.size, a.internal_path, a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
+            "SELECT a.hash, a.mime_type, a.size, a.internal_path, NULL as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash

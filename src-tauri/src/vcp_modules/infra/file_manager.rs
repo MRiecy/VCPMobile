@@ -465,9 +465,128 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         return Some(text);
     }
 
-    // 3. 结构化文档 (PDF, Docx, etc.)
-    // 后端目前不具备解析能力，直接返回 None，由前端 JIT 处理器或专门的插件负责处理
+    // 3. 结构化文档 (PDF, Docx, Xlsx, Pptx)
+    let doc_text = match ext.as_str() {
+        "docx" => extract_docx_text(path),
+        "pptx" => extract_pptx_text(path),
+        "xlsx" => extract_xlsx_text(path),
+        "pdf" => extract_pdf_text(path),
+        _ => None,
+    };
+
+    if let Some(text) = doc_text {
+        const MAX_TEXT_CHARS: usize = 10_000_000;
+        if text.chars().count() > MAX_TEXT_CHARS {
+            let truncated: String = text.chars().take(MAX_TEXT_CHARS).collect();
+            return Some(format!("{}……（文本过长已截断）", truncated));
+        }
+        return Some(text);
+    }
+
     None
+}
+
+fn simple_xml_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+     .replace("&lt;", "<")
+     .replace("&gt;", ">")
+     .replace("&quot;", "\"")
+     .replace("&apos;", "'")
+}
+
+fn extract_docx_text(path: &std::path::Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut doc_file = archive.by_name("word/document.xml").ok()?;
+    
+    use std::io::Read;
+    let mut content = String::new();
+    doc_file.read_to_string(&mut content).ok()?;
+    
+    let re = fancy_regex::Regex::new(r"<w:t[^>]*>(.*?)</w:t>").ok()?;
+    let mut text = String::new();
+    for cap in re.captures_iter(&content).flatten() {
+        if let Some(m) = cap.get(1) {
+            text.push_str(&simple_xml_unescape(m.as_str()));
+        }
+    }
+    
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut text = String::new();
+    
+    use std::io::Read;
+    let re = fancy_regex::Regex::new(r"<a:t[^>]*>(.*?)</a:t>").ok()?;
+    
+    let mut slide_names: Vec<String> = archive.file_names()
+        .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+        .map(|name| name.to_string())
+        .collect();
+    
+    slide_names.sort_by_key(|name| {
+        let num_str: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
+        num_str.parse::<usize>().unwrap_or(0)
+    });
+    
+    for name in slide_names {
+        if let Ok(mut slide_file) = archive.by_name(&name) {
+            let mut content = String::new();
+            if slide_file.read_to_string(&mut content).is_ok() {
+                for cap in re.captures_iter(&content).flatten() {
+                    if let Some(m) = cap.get(1) {
+                        text.push_str(&simple_xml_unescape(m.as_str()));
+                        text.push(' ');
+                    }
+                }
+                text.push('\n');
+            }
+        }
+    }
+    
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut shared_strings_file = archive.by_name("xl/sharedStrings.xml").ok()?;
+    
+    use std::io::Read;
+    let mut content = String::new();
+    shared_strings_file.read_to_string(&mut content).ok()?;
+    
+    let re = fancy_regex::Regex::new(r"<t[^>]*>(.*?)</t>").ok()?;
+    let mut text = String::new();
+    for cap in re.captures_iter(&content).flatten() {
+        if let Some(m) = cap.get(1) {
+            text.push_str(&simple_xml_unescape(m.as_str()));
+            text.push('\n');
+        }
+    }
+    
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
+    let doc = lopdf::Document::load(path).ok()?;
+    let mut text = String::new();
+    
+    let pages = doc.get_pages();
+    let mut page_numbers: Vec<u32> = pages.keys().cloned().collect();
+    page_numbers.sort();
+    
+    for page_id in page_numbers {
+        if let Ok(page_text) = doc.extract_text(&[page_id]) {
+            text.push_str(&page_text);
+            text.push('\n');
+        }
+    }
+    
+    if text.is_empty() { None } else { Some(text) }
 }
 
 /// 将文件元数据注册到数据库并触发后处理 (缩略图、文本提取)
@@ -513,6 +632,23 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         None
     };
 
+    // 核心安全优化：在后端即时且闭环地将耗时提取出的重资产数据持久化写入数据库
+    // 杜绝大文本数据在前端 WebView 绕一圈所导致的数据丢失或内存积压泄漏！
+    if extracted_text.is_some() || thumbnail_path.is_some() {
+        sqlx::query(
+            "UPDATE attachments 
+             SET extracted_text = ?, thumbnail_path = ?, updated_at = ? 
+             WHERE hash = ?"
+        )
+        .bind(&extracted_text)
+        .bind(&thumbnail_path)
+        .bind(now as i64)
+        .bind(&hash)
+        .execute(pool)
+        .await
+        .ok();
+    }
+
     let ext = std::path::Path::new(&original_name)
         .extension()
         .and_then(|e| e.to_str())
@@ -532,7 +668,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         size,
         hash,
         created_at: now,
-        extracted_text,
+        extracted_text: None, // 掐断大文本在前端的冗余中转传输，前端预览直接 fetch 物理路径
         thumbnail_path,
     })
 }

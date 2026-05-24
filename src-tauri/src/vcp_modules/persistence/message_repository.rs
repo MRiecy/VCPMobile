@@ -543,9 +543,9 @@ impl MessageRepository {
                     mime_type = excluded.mime_type,
                     size = excluded.size,
                     internal_path = excluded.internal_path,
-                    extracted_text = excluded.extracted_text,
-                    image_frames = excluded.image_frames,
-                    thumbnail_path = excluded.thumbnail_path,
+                    extracted_text = COALESCE(attachments.extracted_text, excluded.extracted_text),
+                    image_frames = COALESCE(attachments.image_frames, excluded.image_frames),
+                    thumbnail_path = COALESCE(attachments.thumbnail_path, excluded.thumbnail_path),
                     updated_at = excluded.updated_at"
             )
             .bind(&hash)

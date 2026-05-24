@@ -29,9 +29,34 @@ defineProps<{
 const isViewerOpen = ref(false);
 const activeFile = ref<Attachment | null>(null);
 
+const isPreviewableText = (att: Attachment): boolean => {
+  const type = (att.type || "").toLowerCase();
+  if (
+    type.startsWith("text/") ||
+    type === "application/json" ||
+    type === "application/javascript" ||
+    type === "application/x-javascript"
+  ) {
+    return true;
+  }
+  const ext = att.name.split(".").pop()?.toLowerCase() || "";
+  const textExtensions = [
+    "txt", "md", "csv", "json", "js", "ts", "py", "rs", "java", "c", "cpp",
+    "h", "go", "rb", "php", "swift", "kt", "html", "css", "xml", "yaml",
+    "yml", "toml", "ini", "log", "sql", "vue", "jsx", "tsx"
+  ];
+  return textExtensions.includes(ext);
+};
+
 const openViewer = (att: Attachment) => {
-  activeFile.value = att;
-  isViewerOpen.value = true;
+  const isImage = (att.type || "").startsWith("image/");
+  if (isImage || isPreviewableText(att)) {
+    activeFile.value = att;
+    isViewerOpen.value = true;
+  } else {
+    // PDF/Office/音视频其它文件直接物理端打开，无须应用内弹窗
+    openExternal(att.internalPath || att.src);
+  }
 };
 
 const openExternal = async (path: string) => {
