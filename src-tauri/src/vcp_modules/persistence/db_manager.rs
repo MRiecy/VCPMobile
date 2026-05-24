@@ -184,13 +184,23 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
         .await;
 
     // 6. messages 表 (消息历史 - 已移除冗余 avatar_url 和 avatar_color)
-    // 迁移：由于主键变更 (msg_id -> topic_id, msg_id)，需要重建表
-    let is_composite_pk: bool =
+    // 检查 messages 表是否存在
+    let messages_table_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    let is_composite_pk: bool = if messages_table_exists {
         sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE pk > 1")
             .fetch_one(pool)
             .await
             .unwrap_or(0)
-            > 0;
+            > 0
+    } else {
+        true
+    };
 
     if !is_composite_pk {
         println!("[DBManager] Migrating messages schema to composite primary key...");

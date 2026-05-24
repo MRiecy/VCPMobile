@@ -139,16 +139,16 @@ pub fn run() {
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);
 
-            // 2. 自动系统维护 (WebView 缓存清理等)
-            let h_maintenance = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                init_automatic_maintenance(h_maintenance).await;
-            });
-
-            // 3. 异步引导核心服务
+            // 2. 异步引导核心服务与系统维护
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(&handle).await {
                     eprintln!("[VCPCore] Bootstrap failed: {}", e);
+                } else {
+                    // 在核心引导成功后，安全地执行自动系统维护 (此时 DbState 保证已由 handle.manage 托管)
+                    let h_maintenance = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        init_automatic_maintenance(h_maintenance).await;
+                    });
                 }
             });
 
