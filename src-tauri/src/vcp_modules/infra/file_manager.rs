@@ -298,24 +298,38 @@ pub async fn generate_thumbnail<R: tauri::Runtime>(
 
 /// 内部辅助函数：校验路径安全性，防止路径遍历攻击
 fn ensure_safe_path(app_handle: &AppHandle, path: &std::path::Path) -> Result<(), String> {
+    // 物理展开目标路径的所有相对路径分量 (..)，杜绝字符级前缀欺骗的沙盒逃逸
+    let canonical_path = if path.exists() {
+        std::fs::canonicalize(path).map_err(|e| format!("路径规范化失败: {}", e))?
+    } else {
+        // 如果文件甚至不存在，安全起见直接阻断，因为在 register_local_file 中已校验 exists()，
+        // open_file 也同样应阻断不存在的文件访问以防信息探测
+        return Err("非法路径访问：目标文件不存在".to_string());
+    };
+
     let config_dir = app_handle
         .path()
         .app_config_dir()
         .map_err(|e| e.to_string())?;
+    let canonical_config = std::fs::canonicalize(&config_dir).unwrap_or(config_dir);
 
     let cache_dir = app_handle
         .path()
         .app_cache_dir()
         .map_err(|e| e.to_string())?;
+    let canonical_cache = std::fs::canonicalize(&cache_dir).unwrap_or(cache_dir);
 
     // 允许访问 App 配置目录 (内部)、缓存目录 (临时)、附件目录 (可能在外部) 或 缩略图目录
     let attachments_dir = get_attachments_root_dir(app_handle)?;
-    let thumbnails_dir = get_thumbnails_root_dir(app_handle)?;
+    let canonical_attachments = std::fs::canonicalize(&attachments_dir).unwrap_or(attachments_dir);
 
-    if path.starts_with(&config_dir)
-        || path.starts_with(&cache_dir)
-        || path.starts_with(&attachments_dir)
-        || path.starts_with(&thumbnails_dir)
+    let thumbnails_dir = get_thumbnails_root_dir(app_handle)?;
+    let canonical_thumbnails = std::fs::canonicalize(&thumbnails_dir).unwrap_or(thumbnails_dir);
+
+    if canonical_path.starts_with(&canonical_config)
+        || canonical_path.starts_with(&canonical_cache)
+        || canonical_path.starts_with(&canonical_attachments)
+        || canonical_path.starts_with(&canonical_thumbnails)
     {
         Ok(())
     } else {
