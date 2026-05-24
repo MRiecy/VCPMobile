@@ -1,3 +1,4 @@
+pub mod file_extractor;
 pub mod file_manager;
 pub mod lifecycle_manager;
 pub mod maintenance_manager;
@@ -7,3 +8,4 @@ pub mod protocol_manager;
 pub mod settings_manager;
 pub mod vcp_client;
 pub mod vcp_log_service;
+
