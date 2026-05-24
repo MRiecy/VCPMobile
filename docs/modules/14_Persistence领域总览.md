@@ -168,8 +168,8 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 
 **关键迁移逻辑 3：字段级增量添加**（L108–L114, L140–L142, L182–L184）
 
-- `agents` 表追加 `current_topic_id`、`mobile_system_prompt`。
-- `groups` 表追加 `current_topic_id`。
+- `agents` 表追加 `current_topic_id`、`mobile_system_prompt`。（注：`current_topic_id` 已在业务逻辑中弃用，保留仅作历史兼容）
+- `groups` 表追加 `current_topic_id`。（同上，已弃用）
 - `topics` 表追加 `config_hash`。
 - 所有 `ALTER TABLE ... ADD COLUMN` 均使用 `let _ = ...` 忽略已存在错误，实现幂等迁移。这种设计允许旧版本应用平滑升级到新 Schema，无需版本号比对。
 
@@ -446,7 +446,7 @@ fn rusqlite_upsert_agent(
 - 计算 `config_hash = HashAggregator::compute_agent_config_hash(dto)`。
 - `INSERT ... ON CONFLICT(agent_id) DO UPDATE SET ...`。
 - 更新字段：name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, updated_at。
-- 注意：不更新 `mobile_system_prompt` 和 `current_topic_id`，这些字段由本地用户操作维护，不应被同步覆盖。
+- 注意：不更新 `mobile_system_prompt` 和 `current_topic_id`。`current_topic_id` 已在业务逻辑中弃用（由前端 `sessionStore` 运行时状态接管），保留仅作历史兼容。
 
 #### Group 写入（`rusqlite_upsert_group`，L312–L367）
 

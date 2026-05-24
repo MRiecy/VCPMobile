@@ -1,7 +1,7 @@
 ---
 id: MOD-VCP-CLI-009
 version: "1.0"
-date: 2026-05-21
+date: 2026-05-24
 module: vcp_client.rs
 scope: src-tauri/src/vcp_modules/
 related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs]
@@ -90,7 +90,7 @@ pub struct VcpRequestPayload {
 #[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
-    pub r#type: String,                    // "data" | "aurora" | "end" | "error"
+    pub r#type: String,                    // "data" | "aurora" | "thinking" | "end" | "error" | "reconnecting"
     pub chunk: Option<Value>,              // 原始 SSE chunk（仅 data）
     pub message_id: String,
     pub context: Option<Value>,
@@ -107,6 +107,7 @@ pub struct StreamEvent {
 |--------|---------|---------|
 | `data` | 每收到一个 SSE `data:` 行 | 兼容旧版渲染，直接追加原始文本 |
 | `aurora` | AuroraBuffer 的 stable/tail 发生变化，或 50ms 节流到期 | 增量更新已闭合块列表 + 尾部推测渲染 |
+| `thinking` | 后端在流式请求开始前主动发射 | 创建 thinking 占位消息骨架（is_thinking = true） |
 | `end` | 流正常结束或被中止后 | 隐藏"输入中"状态，显示最终 finish_reason |
 | `error` | HTTP 错误、流读取异常、连接断开 | 显示错误提示，终止渲染 |
 
@@ -180,7 +181,7 @@ pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
            │
            ▼
     ┌──────────────┐
-    │ 3. 组装请求体 │ ← 注入 messages / requestId / stream
+    │ 3. 组装请求体 │ ← 注入 messages / messageId / stream
     └──────┬───────┘
            │
            ▼
@@ -294,6 +295,43 @@ let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 10
   1. `stable_changed`（新增已闭合块）
   2. `tail_changed`（尾部内容变化）
   3. 距离上次发送超过 **50ms**（时间节流，避免前端过度重渲染）
+
+### 3.4.1 Backend-Driven SSE Thinking 事件
+
+新增 `StreamEvent` 类型：`thinking`（由 `StreamEvent::thinking(message_id, context)` 构造）。该事件是 Backend-Driven Streaming 架构的核心：由后端在流式请求开始前主动创建消息骨架，前端仅负责接收并 hydrate，无需在调用 `sendToVCP` 前预创建 thinking 消息。
+
+**数据流**：
+
+```
+agent_chat_application_service.rs
+    group_chat_application_service.rs
+           │
+           ▼ StreamEvent::thinking(message_id, context)
+    前端 chatHistoryStore
+           │
+           ▼ 创建 thinking 占位消息（is_thinking = true）
+vcp_client.rs SSE 循环
+           │
+           ▼ StreamEvent::data / StreamEvent::aurora
+    前端
+           │
+           ▼ hydrate 增量内容到已有占位消息
+    StreamEvent::end
+           │
+           ▼ 标记 is_thinking = false，显示最终内容
+```
+
+**触发位置**：
+
+| 场景 | 发射时机 | 源码位置 |
+|------|---------|---------|
+| 单聊 | 发起 `perform_vcp_request` 前 | `agent_chat_application_service.rs` |
+| 群聊接力赛 | 每个 Agent 轮次开始前 | `group_chat_application_service.rs` |
+
+**设计收益**：
+- 前端 `chatHistoryStore.ts` 不再预创建 thinking 消息，避免消息 ID 不一致与重复创建问题
+- 后端完全掌控消息生命周期：从骨架创建 → 增量填充 → 结束标记
+- 群聊接力赛中，每个 Agent 的 thinking 占位可独立渲染，用户体验与单聊一致
 
 ### 3.5 非流式处理模式（阶段 7）
 
@@ -490,8 +528,54 @@ async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf
 - **→ aurora_pipeline.rs**：调用期依赖。`vcp_client.rs` 在流式循环中驱动 `AuroraBuffer`，将 `AuroraUpdate` 包装为 `StreamEvent::aurora` 推送到前端。详见 [10_Aurora语义沉淀管道](10_Aurora语义沉淀管道.md)。
 - **→ content_parser.rs**：类型依赖。`StreamEvent.blocks` 字段类型为 `Option<Vec<ContentBlock>>`。`ContentBlock` 的 9 种变体定义了前端渲染的原子单元。详见 [02_流式响应解析器](02_流式响应解析器.md) §1.2 中的对比表。
 - **→ settings_manager.rs / db_manager.rs**：设置读取依赖。通过 `load_app_settings` 查询 SQLite。
-- **← agent_chat_application_service.rs / group_chat_application_service.rs**：内部调用者。直接调用 `perform_vcp_request` 而非走 Tauri IPC，以实现 Rust 层编排逻辑。
+- **← agent_chat_application_service.rs / group_chat_application_service.rs**：内部调用者。直接调用 `perform_vcp_request` 而非走 Tauri IPC，以实现 Rust 层编排逻辑。同时，这两个模块也是 `StreamEvent::thinking` 的发射源（详见 §3.4.1）。
 
 ---
 
-*最后更新：2026-05-21 | VCP Mobile v0.9.14*
+## 9. 动态心跳优化（vcp_log_service）
+
+`vcp_log_service.rs` 与 `vcp_client.rs` 同属 `infra/` 领域，负责 WebSocket 日志通道的生命周期管理。近期新增了可配置心跳机制，以适配移动端前后台切换场景。
+
+### 9.1 运行时心跳配置
+
+新增 Tauri Command：
+
+```rust
+#[tauri::command]
+pub async fn set_vcp_log_heartbeat(interval_ms: u64) -> Result<(), String>
+```
+
+- **默认值**：`HEARTBEAT_INTERVAL_MS = 15000`（AtomicU64，单位毫秒）
+- **动态生效**：调用后立即通过 `HEARTBEAT_RESET_TX` mpsc 通道向 WebSocket 监听循环发送重置信号
+- 监听循环内通过 `tokio::select!` 捕获 `reset_rx.recv()`，读取最新原子值后重新校准 `heartbeat_timer`（`tokio::time::Sleep::reset`），无需断开重连
+
+### 9.2 前后台自适应
+
+`App.vue` 监听 Android 生命周期事件 `vcp-lifecycle`（由 `LifecycleBridge.kt` 通过 `evaluateJavascript` 注入 `CustomEvent`）：
+
+| 生命周期状态 | 心跳间隔 | 设计意图 |
+|-------------|---------|---------|
+| `resume`（前台） | 15000 ms | 保持连接活性，确保日志与系统通知实时到达 |
+| `stop` / `pause`（后台） | 120000 ms | 降低功耗与网络占用，减少 OEM 杀后台概率 |
+
+```typescript
+// App.vue 中的监听逻辑
+const handleVcpLifecycle = async (e: Event) => {
+  const state = (e as CustomEvent).detail?.state;
+  if (state === "stop" || state === "pause") {
+    await invoke("set_vcp_log_heartbeat", { intervalMs: 120000 });
+  } else if (state === "resume") {
+    await invoke("set_vcp_log_heartbeat", { intervalMs: 15000 });
+  }
+};
+```
+
+### 9.3 性能与稳定性收益
+
+- **后台降频**：120s 心跳使 WebSocket 在后台维持最低限度的 NAT/防火墙保活，避免高频 Ping 唤醒 CPU 与射频模块
+- **快速恢复**：前台切回时 15s 间隔立即恢复，日志通道无需重新握手
+- **与 StreamKeepaliveService 协同**：前台保活服务（`START_STICKY` + `IMPORTANCE_HIGH`）维持进程存活，而自适应心跳则在进程内部降低网络层消耗
+
+---
+
+*最后更新：2026-05-24 | VCP Mobile v0.9.14*
