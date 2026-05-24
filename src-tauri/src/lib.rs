@@ -20,8 +20,7 @@ use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
-    append_chunk, cancel_chunked_upload, finish_chunked_upload, get_attachment_real_path,
-    init_chunked_upload, open_file, register_local_file, store_file, UploadManagerState,
+    get_attachment_real_path, open_file, register_local_file, store_file,
 };
 use vcp_modules::frontend_update_manager::{
     apply_frontend_update, check_for_frontend_update, clear_frontend_updates,
@@ -120,7 +119,6 @@ pub fn run() {
             app.manage(ActiveRequests::default());
             app.manage(CancelledGroupTurns::default());
             app.manage(ContextSanitizer::default());
-            app.manage(UploadManagerState::new());
             app.manage(distributed::DistributedState::new());
 
             // 提前注册纯内存状态，防范前端在 bootstrap 完成前调用 command 导致 state() panic
@@ -234,10 +232,6 @@ pub fn run() {
             set_theme,
             store_file,
             register_local_file,
-            init_chunked_upload,
-            append_chunk,
-            finish_chunked_upload,
-            cancel_chunked_upload,
             prepare_vcp_upload,
             fetch_raw_message_content,
             get_attachment_real_path,

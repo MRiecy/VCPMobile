@@ -1,13 +1,9 @@
 use crate::vcp_modules::db_manager::DbState;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
-
-use std::sync::Mutex;
 
 /// =================================================================
 /// vcp_modules/file_manager.rs - 附件物理存储与分片上传管理
@@ -63,26 +59,7 @@ pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(from: P
 
 
 
-pub struct UploadSession {
-    pub temp_path: std::path::PathBuf,
-    pub original_name: String,
-    pub mime_type: String,
-    pub hasher: Mutex<Sha256>,
-    pub current_size: Mutex<u64>,
-}
 
-pub struct UploadManagerState {
-    // 正在进行中的分片上传任务
-    pub sessions: DashMap<String, Arc<UploadSession>>,
-}
-
-impl UploadManagerState {
-    pub fn new() -> Self {
-        Self {
-            sessions: DashMap::new(),
-        }
-    }
-}
 
 /// 附件元数据结构
 /// 对齐 @/plans/Rust文件数据管理重构详细规划.md 中的 2.1 节
@@ -457,189 +434,7 @@ pub async fn store_file(
     .await
 }
 
-// --- 分片上传系列指令 ---
 
-#[tauri::command]
-pub async fn init_chunked_upload(
-    app_handle: AppHandle,
-    state: State<'_, UploadManagerState>,
-    original_name: String,
-    mime_type: String,
-) -> Result<String, String> {
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let mut temp_path = app_handle
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?;
-    temp_path.push("uploads");
-    if !temp_path.exists() {
-        fs::create_dir_all(&temp_path).map_err(|e| e.to_string())?;
-    }
-
-    // 异步化僵尸文件清理流程，完全避免阻塞当前请求
-    let temp_path_clone = temp_path.clone();
-    let sessions_clone = state.sessions.clone();
-    tokio::task::spawn(async move {
-        const ORPHAN_TTL_SECS: u64 = 86400;
-        let now = SystemTime::now();
-        if let Ok(entries) = std::fs::read_dir(&temp_path_clone) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                    let should_remove = if let Ok(metadata) = entry.metadata() {
-                        if let Ok(modified) = metadata.modified() {
-                            now.duration_since(modified)
-                                .map(|d| d.as_secs() > ORPHAN_TTL_SECS)
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if should_remove {
-                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                            sessions_clone.remove(stem);
-                        }
-                        let _ = std::fs::remove_file(&path);
-                        log::info!("[FileManager] Removed orphan upload temp file: {:?}", path);
-                    }
-                }
-            }
-        }
-    });
-
-    temp_path.push(format!("{}.tmp", session_id));
-
-    // 创建空文件
-    fs::File::create(&temp_path).map_err(|e| e.to_string())?;
-
-    let refined_mime = get_refined_mime_type(&temp_path, &original_name, &mime_type);
-    let session = UploadSession {
-        temp_path,
-        original_name,
-        mime_type: refined_mime,
-        hasher: Mutex::new(Sha256::new()),
-        current_size: Mutex::new(0),
-    };
-
-    state.sessions.insert(session_id.clone(), Arc::new(session));
-    Ok(session_id)
-}
-
-#[tauri::command]
-pub async fn append_chunk(
-    state: State<'_, UploadManagerState>,
-    session_id: String,
-    chunk_bytes: Vec<u8>,
-) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
-    let session = state.sessions.get(&session_id).ok_or("无效的上传会话")?;
-
-    // 1. 同步更新哈希 (边搬砖边记账)
-    {
-        let mut hasher = session.hasher.lock().unwrap();
-        hasher.update(&chunk_bytes);
-    }
-
-    // 2. 更新当前大小
-    {
-        let mut size = session.current_size.lock().unwrap();
-        *size += chunk_bytes.len() as u64;
-    }
-
-    // 3. 异步写入磁盘
-    let mut file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .open(&session.temp_path)
-        .await
-        .map_err(|e| format!("无法打开临时文件: {}", e))?;
-
-    file.write_all(&chunk_bytes)
-        .await
-        .map_err(|e| format!("追加分片失败: {}", e))?;
-
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn cancel_chunked_upload(
-    _app_handle: AppHandle,
-    state: State<'_, UploadManagerState>,
-    session_id: String,
-) -> Result<(), String> {
-    if let Some((_, session)) = state.sessions.remove(&session_id) {
-        if session.temp_path.exists() {
-            let _ = fs::remove_file(&session.temp_path);
-        }
-        log::info!(
-            "[FileManager] Cancelled and cleaned up upload session: {}",
-            session_id
-        );
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn finish_chunked_upload(
-    app_handle: AppHandle,
-    db_state: State<'_, DbState>,
-    state: State<'_, UploadManagerState>,
-    session_id: String,
-) -> Result<AttachmentData, String> {
-    let (_, session) = state
-        .sessions
-        .remove(&session_id)
-        .ok_or("上传会话已超时或不存在")?;
-
-    // 1. 获取已经算好的哈希值 (0 内存读取开销！)
-    let hasher = session.hasher.lock().unwrap().clone();
-    let hash = hex::encode(hasher.finalize());
-    let final_size = *session.current_size.lock().unwrap();
-
-    // 2. 准备物理存储
-    let ext = std::path::Path::new(&session.original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let internal_file_name = if ext.is_empty() {
-        hash.clone()
-    } else {
-        format!("{}.{}", hash, ext)
-    };
-
-    let attachments_dir = get_attachments_root_dir(&app_handle)?;
-    if !attachments_dir.exists() {
-        fs::create_dir_all(&attachments_dir).ok();
-    }
-
-    let internal_file_path = attachments_dir.join(&internal_file_name);
-    let internal_path_str = internal_file_path.to_str().unwrap().to_string();
-
-    // 3. 移动临时文件到正式目录 (物理安全跨挂载点重命名)
-    safe_rename(&session.temp_path, &internal_file_path)
-        .map_err(|e| format!("移动文件失败: {}", e))?;
-
-    // 4. 对完整文件进行最终的 MIME 嗅探精修 (此时文件已完整，嗅探结果最准确)
-    let final_refined_mime = get_refined_mime_type(
-        &internal_file_path,
-        &session.original_name,
-        &session.mime_type,
-    );
-
-    // 5. 复用统一的注册逻辑（入库、文本提取、缩略图生成）
-    register_attachment_internal(
-        &app_handle,
-        &db_state.pool,
-        hash,
-        session.original_name.clone(),
-        final_refined_mime,
-        final_size,
-        internal_path_str,
-    )
-    .await
-}
 
 /// 注册本地已有的文件（例如 Android Kotlin 端沙盒临时复制的大文件/硬解缩略图）
 /// 彻底实现“前端零拷贝物理路径传输”
