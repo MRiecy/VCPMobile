@@ -46,7 +46,7 @@ use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     toggle_favorite_model,
 };
-use vcp_modules::protocol_manager::prepare_vcp_upload;
+use vcp_modules::high_speed_channel::prepare_vcp_upload;
 
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
