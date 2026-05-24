@@ -96,9 +96,15 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const runSequentialTask = async (task: PreloadTask) => {
     updatePhaseLabel(`预加载 ${task.label}...`);
     console.log(`[Lifecycle] [Sequential] START ${task.label}`);
+    const startTime = Date.now();
     try {
       await task.run();
       console.log(`[Lifecycle] [Sequential] DONE ${task.label}`);
+      // 视觉防抖机制：若载入过快，则进行毫秒级视觉补白
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 150) {
+        await new Promise(resolve => setTimeout(resolve, 150 - elapsed));
+      }
     } catch (error) {
       console.error(`[Lifecycle] [Sequential] FAILED ${task.label}:`, error);
       throw error;
@@ -114,18 +120,19 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
     // 为并发任务添加硬超时保护 (20秒)
     const PRELOAD_TIMEOUT = 20000;
+    const startTime = Date.now();
     
     try {
       await Promise.race([
         Promise.all(tasks.map(async (task) => {
           console.log(`[Lifecycle] [Parallel] -> ${task.label} (Starting)`);
-          const startTime = Date.now();
+          const taskStartTime = Date.now();
           try {
             await task.run();
-            const duration = Date.now() - startTime;
+            const duration = Date.now() - taskStartTime;
             console.log(`[Lifecycle] [Parallel] <- ${task.label} (Success in ${duration}ms)`);
           } catch (error) {
-            const duration = Date.now() - startTime;
+            const duration = Date.now() - taskStartTime;
             console.error(`[Lifecycle] [Parallel] !! ${task.label} (Failed after ${duration}ms):`, error);
             throw error;
           }
@@ -135,6 +142,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         )
       ]);
       console.log('[Lifecycle] [Parallel] ALL DONE');
+      
+      // 视觉防抖机制：确保并发组整体停留至少 150ms
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 150) {
+        await new Promise(resolve => setTimeout(resolve, 150 - elapsed));
+      }
     } catch (error) {
       console.error('[Lifecycle] [Parallel] One or more tasks failed or timed out');
       throw error;

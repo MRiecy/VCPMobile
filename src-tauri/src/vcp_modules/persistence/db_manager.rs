@@ -50,11 +50,29 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .pragma("cache_size", "-8000")
         .pragma("auto_vacuum", "2");
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(connect_options)
-        .await
-        .map_err(|e| format!("Connect failed: {}", e))?;
+    let mut retry_count = 0;
+    let pool = loop {
+        match SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(connect_options.clone())
+            .await
+        {
+            Ok(p) => break p,
+            Err(e) => {
+                retry_count += 1;
+                if retry_count >= 3 {
+                    return Err(format!("数据库连接重试失败 (已重试 {} 次): {}", retry_count, e));
+                }
+                log::warn!(
+                    "[DBManager] Connection failed: {}. Retrying in {}ms... (Attempt {})",
+                    e,
+                    retry_count * 50,
+                    retry_count
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(retry_count * 50)).await;
+            }
+        }
+    };
 
     // 运行初始化建表
     setup_tables(&pool).await?;

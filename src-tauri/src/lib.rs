@@ -147,6 +147,8 @@ pub fn run() {
                     // 在核心引导成功后，安全地执行自动系统维护 (此时 DbState 保证已由 handle.manage 托管)
                     let h_maintenance = handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        // 给予 30 秒冷启动后台静默期，避免抢占前台核心渲染周期的 CPU 与闪存 IO
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                         init_automatic_maintenance(h_maintenance).await;
                     });
                 }
