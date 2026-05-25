@@ -191,6 +191,7 @@ pub fn extract_single_frame(path: &Path, timestamp_secs: f64) -> Result<Vec<u8>,
 }
 
 /// 利用 FFmpeg 内存管道将任意格式的头像字节流解码并等比例缩放到 128x128（大图降采样，小图保持原样），输出 Raw RGBA 像素流
+#[allow(dead_code)]
 pub fn decode_avatar_to_rgba(image_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let ffmpeg = get_ffmpeg_path()?;
     let mut child = Command::new(&ffmpeg)

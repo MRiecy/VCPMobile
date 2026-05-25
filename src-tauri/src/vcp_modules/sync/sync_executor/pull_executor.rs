@@ -180,9 +180,10 @@ async fn process_topic_messages<R: Runtime>(
     let parsed_count = parsed_messages.len();
 
     if !parsed_messages.is_empty() {
-        // 3. 并发处理 (Parallel Processing on CPU): 预渲染 + 指纹计算
+        // 3. 并发处理 (Parallel Processing on CPU): 预渲染 + 指纹计算 + Zstd 压缩
         let mut render_bytes_list = Vec::with_capacity(parsed_count);
         let mut content_hashes = Vec::with_capacity(parsed_count);
+        let mut compressed_contents = Vec::with_capacity(parsed_count);
 
         for msg in &parsed_messages {
             // A. 计算指纹 (SHA-256 + JSON Serialization)
@@ -200,31 +201,32 @@ async fn process_topic_messages<R: Runtime>(
                 HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
             content_hashes.push(content_hash);
 
-            // B. 并发预渲染
+            // B. 并发预渲染 & 文本压缩 (核心优化：将 Zstd 压缩从单线程 DB 队列移至并发管线)
             let content = msg.content.clone();
             let topic_id_log = topic_id.to_string();
             let msg_id_log = msg.id.clone();
 
             let result = std::panic::catch_unwind(|| {
+                // 渲染编译
                 let blocks = MessageRenderCompiler::compile(&content);
-                MessageRenderCompiler::serialize(&blocks)
+                let rb = MessageRenderCompiler::serialize(&blocks).unwrap_or_default();
+                // 文本压缩
+                let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(&content).unwrap_or_default();
+                (rb, cc)
             });
 
             match result {
-                Ok(Ok(bytes)) => render_bytes_list.push(bytes),
-                Ok(Err(e)) => {
-                    println!(
-                        "[PullExecutor] Serialize failed for msg {} (topic {}): {}",
-                        msg_id_log, topic_id_log, e
-                    );
-                    render_bytes_list.push(Vec::new());
+                Ok((rb, cc)) => {
+                    render_bytes_list.push(rb);
+                    compressed_contents.push(cc);
                 }
                 Err(_) => {
                     println!(
-                        "[PullExecutor] Compile panicked for msg {} (topic {})",
+                        "[PullExecutor] Compile/Compress panicked for msg {} (topic {})",
                         msg_id_log, topic_id_log
                     );
                     render_bytes_list.push(Vec::new());
+                    compressed_contents.push(Vec::new());
                 }
             }
         }
@@ -234,6 +236,7 @@ async fn process_topic_messages<R: Runtime>(
             .submit(DbWriteTask::TopicMessages {
                 topic_id: topic_id.to_string(),
                 messages: parsed_messages,
+                compressed_contents,
                 render_bytes: render_bytes_list,
                 content_hashes,
                 skip_bubble,
@@ -669,6 +672,7 @@ impl PullExecutor {
         use futures_util::StreamExt;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
+        let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
@@ -686,9 +690,12 @@ impl PullExecutor {
 
             buffer.extend_from_slice(&chunk);
 
-            // 逐行解析 NDJSON（支持 chunk 边界跨越）
-            while let Some(line_end) = buffer.iter().position(|&b| b == b'\n') {
+            // 逐行解析 NDJSON（优化为从游标处开始扫描，实现 O(N) 性能）
+            while let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
+                let line_end = search_start + pos;
                 let line = buffer.drain(..=line_end).collect::<Vec<_>>();
+                search_start = 0; // 成功切分一行后，后续扫描从头开始（因为 buffer 已被 drain）
+
                 if line.len() <= 1 {
                     continue;
                 }
@@ -765,6 +772,9 @@ impl PullExecutor {
                 });
                 spawn_handles.push(handle);
             }
+
+            // 循环结束后，游标指向 buffer 末尾，下一轮 chunk 进来时只需扫描新增部分
+            search_start = buffer.len();
         }
 
         // 处理流结束后 buffer 中残留的非换行数据（兜底）

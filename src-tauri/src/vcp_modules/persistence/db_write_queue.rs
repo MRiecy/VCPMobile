@@ -1,4 +1,3 @@
-use crate::vcp_modules::avatar_service::extract_dominant_color_from_bytes;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
@@ -42,6 +41,7 @@ pub enum DbWriteTask {
     TopicMessages {
         topic_id: String,
         messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+        compressed_contents: Vec<Vec<u8>>,
         render_bytes: Vec<Vec<u8>>,
         content_hashes: Vec<String>,
         skip_bubble: bool,
@@ -73,6 +73,9 @@ impl DbWriteQueue {
     pub fn new(_pool: sqlx::SqlitePool, db_path: std::path::PathBuf) -> Self {
         let (tx, mut rx) = mpsc::channel(256);
         let db_path_for_worker = db_path.clone();
+
+        // 核心优化：利用 Mutex 持有持久连接，确保 spawn_blocking 之间 prepare_cached 缓存不失效
+        let conn_holder: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(None));
 
         let worker = tokio::spawn(async move {
             println!("[DbWriteQueue] Worker started (Turbo rusqlite Mode)");
@@ -116,15 +119,20 @@ impl DbWriteQueue {
                 }
 
                 let db_path = db_path_for_worker.clone();
+                let ch = conn_holder.clone();
+
                 // [Turbo Phase 3] 使用 spawn_blocking + rusqlite 进行极致写入
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut conn = rusqlite::Connection::open(&db_path)?;
-
-                    // 极致性能调优
-                    conn.pragma_update(None, "journal_mode", "WAL")?;
-                    conn.pragma_update(None, "synchronous", "NORMAL")?;
-                    conn.busy_timeout(std::time::Duration::from_millis(30000))?;
-
+                    let mut guard = ch.lock().unwrap();
+                    if guard.is_none() {
+                        let conn = rusqlite::Connection::open(&db_path)?;
+                        // 极致性能调优 (仅在初始化连接时执行一次)
+                        conn.pragma_update(None, "journal_mode", "WAL")?;
+                        conn.pragma_update(None, "synchronous", "NORMAL")?;
+                        conn.busy_timeout(std::time::Duration::from_millis(30000))?;
+                        *guard = Some(conn);
+                    }
+                    let conn = guard.as_mut().unwrap();
                     let tx = conn.transaction()?;
 
                     let mut affected_owners = HashSet::new();
@@ -163,11 +171,11 @@ impl DbWriteQueue {
                                     Self::rusqlite_upsert_group_topic(&tx, &tid, &dto)?;
                                 }
                             }
-                            DbWriteTask::TopicMessages { topic_id, messages, render_bytes, content_hashes, skip_bubble } => {
+                            DbWriteTask::TopicMessages { topic_id, messages, compressed_contents, render_bytes, content_hashes, skip_bubble } => {
                                 if !skip_bubble {
                                     affected_topics.insert(topic_id.clone());
                                 }
-                                Self::rusqlite_upsert_messages_batch(&tx, &topic_id, messages, render_bytes, content_hashes)?;
+                                Self::rusqlite_upsert_messages_batch(&tx, &topic_id, messages, compressed_contents, render_bytes, content_hashes)?;
                             }
                             DbWriteTask::Flush { .. } => unreachable!(),
                         }
@@ -373,7 +381,7 @@ impl DbWriteQueue {
         bytes: &[u8],
     ) -> rusqlite::Result<()> {
         let hash = HashAggregator::compute_avatar_hash(bytes);
-        let dominant_color = extract_dominant_color_from_bytes(bytes).ok();
+        let dominant_color: Option<String> = None;
         let now = chrono::Utc::now().timestamp_millis();
 
         tx.execute(
@@ -432,6 +440,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         topic_id: &str,
         messages: Vec<ChatMessage>,
+        compressed_contents: Vec<Vec<u8>>,
         render_bytes: Vec<Vec<u8>>,
         content_hashes: Vec<String>,
     ) -> rusqlite::Result<()> {
@@ -492,17 +501,7 @@ impl DbWriteQueue {
                 params_msgs.push(Box::new(msg.role.clone()));
                 params_msgs.push(Box::new(msg.name.clone()));
                 params_msgs.push(Box::new(msg.agent_id.clone()));
-                let content_compressed =
-                    crate::vcp_modules::message_repository::ContentCompressor::compress(
-                        &msg.content,
-                    )
-                    .map_err(|e| {
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            e,
-                        )))
-                    })?;
-                params_msgs.push(Box::new(content_compressed));
+                params_msgs.push(Box::new(compressed_contents[*idx].clone()));
                 params_msgs.push(Box::new(msg.timestamp as i64));
                 params_msgs.push(Box::new(msg.is_thinking.unwrap_or(false)));
                 params_msgs.push(Box::new(msg.is_group_message.unwrap_or(false)));

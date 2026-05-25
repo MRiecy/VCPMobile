@@ -3,13 +3,13 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { ChevronDown, ChevronUp, Settings, Loader2 } from 'lucide-vue-next';
 import type { ContentBlock } from '../../../core/types/chat';
 
-const props = defineProps<{
+defineProps<{
   type: 'tool-use' | 'tool-result';
   content?: string;
   block: ContentBlock;
 }>();
 
-const isExpanded = ref(props.type === 'tool-result' ? false : true);
+const isExpanded = ref(false);
 const toolBlockRef = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 

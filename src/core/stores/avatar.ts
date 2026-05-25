@@ -14,6 +14,101 @@ interface AvatarResult {
   updated_at: number;
 }
 
+/**
+ * 采用 Canvas 提取图片的主色调 (在前端 WebView 高效执行，100% 避免后台体积和 ffmpeg 权限问题)
+ */
+const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "Anonymous";
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 16;
+        canvas.height = 16;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve("#808080");
+          return;
+        }
+        
+        ctx.drawImage(img, 0, 0, 16, 16);
+        const imgData = ctx.getImageData(0, 0, 16, 16).data;
+        
+        const colorBuckets = new Map<string, { r: number, g: number, b: number, count: number }>();
+        let rSum = 0, gSum = 0, bSum = 0, count = 0;
+        
+        for (let i = 0; i < imgData.length; i += 4) {
+          const r = imgData[i];
+          const g = imgData[i + 1];
+          const b = imgData[i + 2];
+          const a = imgData[i + 3];
+          
+          if (a < 128) continue; // 忽略透明像素
+          
+          // 计算亮度与色度以进行过滤
+          const max = Math.max(r, g, b);
+          const min = Math.min(r, g, b);
+          const chroma = max - min;
+          
+          // 排除纯黑、纯白以及低饱和度的灰色
+          if (max < 30 || min > 225 || chroma < 25) {
+            continue;
+          }
+          
+          // 512-bin 相似色归纳量化
+          const rBin = Math.floor(r / 32);
+          const gBin = Math.floor(g / 32);
+          const bBin = Math.floor(b / 32);
+          const binKey = `${rBin},${gBin},${bBin}`;
+          
+          const bucket = colorBuckets.get(binKey) || { r: 0, g: 0, b: 0, count: 0 };
+          bucket.r += r;
+          bucket.g += g;
+          bucket.b += b;
+          bucket.count++;
+          colorBuckets.set(binKey, bucket);
+          
+          rSum += r;
+          gSum += g;
+          bSum += b;
+          count++;
+        }
+        
+        let bestBucket = null;
+        let maxCount = 0;
+        for (const bucket of colorBuckets.values()) {
+          if (bucket.count > maxCount) {
+            maxCount = bucket.count;
+            bestBucket = bucket;
+          }
+        }
+        
+        if (bestBucket) {
+          const r = Math.round(bestBucket.r / bestBucket.count);
+          const g = Math.round(bestBucket.g / bestBucket.count);
+          const b = Math.round(bestBucket.b / bestBucket.count);
+          resolve(`#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`);
+        } else if (count > 0) {
+          const r = Math.round(rSum / count);
+          const g = Math.round(gSum / count);
+          const b = Math.round(bSum / count);
+          resolve(`#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`);
+        } else {
+          resolve("#808080");
+        }
+      } catch (e) {
+        console.error("[AvatarStore] Canvas dominant color computation error:", e);
+        resolve("#808080");
+      }
+    };
+    img.onerror = () => {
+      resolve("#808080");
+    };
+    img.src = blobUrl;
+  });
+};
+
 export const useAvatarStore = defineStore("avatar", () => {
   // 使用 reactive 包装 Map，配合同步访问
   const cache = reactive(new Map<string, AvatarCache>());
@@ -61,19 +156,29 @@ export const useAvatarStore = defineStore("avatar", () => {
           if (result.dominant_color) {
             dominantColors.set(key, result.dominant_color);
           }
-          // 如果 dominant_color 缺失，异步触发后端计算（仅处理存量数据）
+          // 如果 dominant_color 缺失，在前端通过 Canvas 计算并回写到后端数据库
           if (result.dominant_color === null) {
             if (!inFlightCompute.has(key)) {
               inFlightCompute.add(key);
-              invoke("compute_and_store_dominant_color", { ownerType, ownerId })
+              
+              const bytes = new Uint8Array(result.image_data);
+              const blob = new Blob([bytes], { type: result.mime_type });
+              const tempBlobUrl = URL.createObjectURL(blob);
+
+              extractDominantColorFromBlob(tempBlobUrl)
                 .then((color) => {
-                  console.log(`[AvatarStore] Computed dominant_color for ${key}: ${color}`);
+                  dominantColors.set(key, color);
+                  return invoke("store_dominant_color", { ownerType, ownerId, color });
+                })
+                .then(() => {
+                  console.log(`[AvatarStore] Computed and stored dominant_color for ${key}`);
                 })
                 .catch((err) => {
-                  console.error(`[AvatarStore] Failed to compute dominant_color for ${key}:`, err);
+                  console.error(`[AvatarStore] Failed to handle dominant_color for ${key}:`, err);
                 })
                 .finally(() => {
                   inFlightCompute.delete(key);
+                  URL.revokeObjectURL(tempBlobUrl);
                 });
             }
           }

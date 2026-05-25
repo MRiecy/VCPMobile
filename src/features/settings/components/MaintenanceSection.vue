@@ -64,7 +64,7 @@ const openDbPageSizeUpgrade = () => {
       @action-click="cleanupAttachments"
     />
 
-    <div class="pt-4 border-t border-white/5">
+    <div class="pt-4 border-t border-black/5 dark:border-white/5">
       <SettingsActionWithStatus
         title="清理系统缓存 (System Cache)"
         description="清除 WebView 内部 HTTP/图片缓存（解决磁盘空间异常占用）"
@@ -79,7 +79,7 @@ const openDbPageSizeUpgrade = () => {
       />
     </div>
 
-    <div class="pt-4 border-t border-white/5">
+    <div class="pt-4 border-t border-black/5 dark:border-white/5">
       <SettingsActionWithStatus
         title="全量预渲染重建"
         description="对数据库中所有历史消息进行高性能 AST 重新解析与代码高亮固化"
@@ -91,7 +91,7 @@ const openDbPageSizeUpgrade = () => {
       />
     </div>
 
-    <div class="pt-4 border-t border-white/5">
+    <div class="pt-4 border-t border-black/5 dark:border-white/5">
       <SettingsActionWithStatus
         title="全量消息内容压缩"
         description="将数据库中所有未压缩的历史消息文本进行 zstd 压缩，降低存储占用"
@@ -103,7 +103,7 @@ const openDbPageSizeUpgrade = () => {
       />
     </div>
 
-    <div class="pt-4 border-t border-white/5">
+    <div class="pt-4 border-t border-black/5 dark:border-white/5">
       <SettingsActionWithStatus
         title="数据库 page_size 优化"
         description="将数据库存储页从 4KB 升级至 16KB，提升闪存 I/O 效率（执行 VACUUM）"

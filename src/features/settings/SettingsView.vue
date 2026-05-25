@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, onMounted, watch, computed } from "vue";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import { useSettingsStore, type AppSettings } from "../../core/stores/settings";
@@ -122,9 +122,10 @@ watch(
   () => props.isOpen,
   (val: boolean) => {
     if (val) {
+      currentSubPage.value = null; // 重新打开时，先确保重置回设置主页，防止滞留子页面
       loadSettings();
     } else {
-      currentSubPage.value = null;
+      // 关闭时绝不重置，防止与外层 SlidePage 的退场 Transition 动画产生 DOM 突兀卸载冲突
     }
   },
 );
@@ -153,7 +154,7 @@ watch(currentSubPage, (val) => {
         <h2 class="text-xl font-bold">{{ currentSubPage ? subPageTitle : '全局设置' }}</h2>
         <button
           @click="currentSubPage ? goBack() : closeSettings()"
-          class="p-2.5 bg-white/10 border border-white/15 rounded-full active:scale-90 transition-all flex items-center justify-center"
+          class="p-2 active:scale-90 transition-all flex items-center justify-center opacity-70 active:opacity-100"
         >
           <svg
             v-if="currentSubPage"
@@ -194,7 +195,7 @@ watch(currentSubPage, (val) => {
       </div>
       <div v-else class="flex-1 overflow-y-auto relative no-rubber-band">
         <!-- 主页 -->
-        <div class="px-3 py-15 space-y-6 pb-safe">
+        <div class="px-3 pt-8 pb-safe min-h-full flex flex-col">
           <SettingsCard>
             <div class="divide-y divide-black/5 dark:divide-white/5">
               <SettingsRow
@@ -208,10 +209,9 @@ watch(currentSubPage, (val) => {
             </div>
           </SettingsCard>
 
-          <div
-            class="text-center opacity-10 text-[9px] py-8 pb-12 font-mono uppercase tracking-widest"
-          >
-            VCP MOBILE · PROJECT AVATAR<br />INTERNAL RELEASE 2026.04.07
+          <!-- Footer -->
+          <div class="mt-auto text-center opacity-15 text-[8px] py-8 pb-12 font-mono uppercase tracking-[0.25em] select-none">
+            VCP MOBILE // PROJECT AVATAR // 2026.04.07
           </div>
         </div>
 
@@ -219,13 +219,12 @@ watch(currentSubPage, (val) => {
         <Transition name="slide-subpage">
           <div
             v-if="currentSubPage"
-            class="absolute inset-0 flex flex-col z-10 transition-colors duration-300"
-            :class="currentSubPage === 'about' ? 'bg-[#0f172a]' : 'bg-[var(--primary-bg)]'"
+            class="absolute inset-0 flex flex-col z-10 transition-colors duration-300 bg-[var(--primary-bg)]"
           >
 
             <div 
               class="flex-1 pb-safe"
-              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pb-5 space-y-6 no-rubber-band'"
+              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pt-6 pb-5 space-y-6 no-rubber-band'"
             >
               <!-- 用户身份 -->
               <template v-if="currentSubPage === 'identity'">

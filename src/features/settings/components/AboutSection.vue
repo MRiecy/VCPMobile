@@ -6,6 +6,9 @@ import SettingsCard from '../../../components/settings/SettingsCard.vue';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import UpdateSection from './UpdateSection.vue';
 import { useNotificationStore } from '../../../core/stores/notification';
+import { useThemeStore } from '../../../core/stores/theme';
+
+const themeStore = useThemeStore();
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -165,19 +168,41 @@ const openFeedback = () => {
 </script>
 
 <template>
-  <div class="flex flex-col flex-1 h-full relative bg-transparent overflow-hidden">
+  <div 
+    class="flex flex-col flex-1 h-full relative bg-transparent overflow-hidden transition-colors duration-300"
+    :class="themeStore.isDarkResolved ? 'theme-dark' : 'theme-light'"
+  >
     <!-- Immersive Back Button -->
     <button 
       @click="$emit('back')"
-      class="absolute top-4 left-4 z-20 p-2.5 bg-white/5 border border-white/10 rounded-full active:scale-90 transition-all flex items-center justify-center backdrop-blur-md shadow-lg"
+      class="absolute left-4 z-20 p-2 active:scale-90 transition-all flex items-center justify-center opacity-70 active:opacity-100"
+      style="top: calc(var(--vcp-safe-top, 24px) + 12px);"
     >
-      <div class="i-carbon-chevron-left text-xl opacity-90" />
+      <svg
+        width="22"
+        height="22"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        :class="themeStore.isDarkResolved ? 'text-white' : 'text-slate-800'"
+      >
+        <path d="m15 18-6-6 6-6"/>
+      </svg>
     </button>
+
+    <!-- 电影级胶片噪点层 (Film Grain Dithering) - 采用 0KB 纯 SVG 分形噪声物理抹平大模糊带来的色彩渐变断层(等高线条纹) -->
+    <div 
+      class="noise-overlay absolute inset-0 pointer-events-none z-1 overflow-hidden transition-opacity duration-300"
+      :class="themeStore.isDarkResolved ? '' : 'light-mode-noise'"
+    />
 
     <!-- Header with 3D Logo (Invisible Hitbox Layer) -->
     <div 
       ref="hitboxRef"
-      class="relative pt-24 pb-12 flex flex-col items-center justify-center z-10"
+      class="relative pt-16 pb-12 flex flex-col items-center justify-center z-10"
       @mousemove="handleMove"
       @mouseleave="resetRotation"
       @touchmove.prevent="handleMove"
@@ -185,14 +210,18 @@ const openFeedback = () => {
       @mousedown="handlePress"
       @touchstart.passive="handlePress"
     >
-      <!-- Atmosphere Background (Restricted to Logo Area) -->
+      <!-- Atmosphere Background (Fluid Aurora Canvas) -->
       <div 
-        class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full pointer-events-none transition-all duration-300 z-0"
-        :class="[isMixing ? 'mixing' : '']"
+        class="aurora-container absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-[120%] pointer-events-none overflow-hidden z-0"
+        :class="[
+          isMixing ? 'active-turbulence' : 'ambient-flow',
+          themeStore.isDarkResolved ? 'dark-mode' : 'light-mode'
+        ]"
       >
-        <div class="blob blob-cyan" />
-        <div class="blob blob-blue" />
-        <div class="blob blob-pink" />
+        <div class="blob-fluid blob-cyan" />
+        <div class="blob-fluid blob-magenta" />
+        <div class="blob-fluid blob-violet" />
+        <div class="blob-fluid blob-amber" />
       </div>
 
       <!-- 3D Logo Container (Removed preserve-3d to fix clipping) -->
@@ -203,17 +232,6 @@ const openFeedback = () => {
           transition: transitionStyle
         }"
       >
-        <!-- Soft Circular Aura -->
-        <div 
-          class="absolute inset-0 rounded-full opacity-60 blur-[60px] transition-opacity duration-500"
-          :style="{
-            background: `radial-gradient(circle at ${glowPos.x}% ${glowPos.y}%, rgba(0, 229, 255, 0.8), rgba(59, 130, 246, 0.6), transparent)`
-          }"
-        />
-        
-        <!-- Inner Glow for depth -->
-        <div class="absolute w-32 h-32 bg-white/15 rounded-full blur-3xl" />
-        
         <!-- Logo Image -->
         <img 
           src="/vcpmobile.svg" 
@@ -224,19 +242,19 @@ const openFeedback = () => {
       </div>
 
       <!-- App Info -->
-      <div class="mt-4 text-center z-10 pointer-events-none">
+      <div class="mt-1 text-center z-10 pointer-events-none">
         <h1 class="text-[26px] font-black tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-[#00e5ff] via-[#3b82f6] to-[#ff3366] cursor-default drop-shadow-sm pb-1">VCPMobile</h1>
       </div>
     </div>
 
     <!-- Actions List -->
     <div class="px-4 space-y-4 relative z-10">
-      <SettingsCard class="!py-1.5 !bg-white/10 !backdrop-blur-3xl !border-white/10 shadow-2xl">
+      <SettingsCard class="!py-1.5 !backdrop-blur-3xl shadow-2xl transition-all duration-300">
         <UpdateSection />
       </SettingsCard>
 
-      <SettingsCard class="!bg-white/10 !backdrop-blur-3xl !border-white/10 shadow-2xl">
-        <div class="divide-y divide-white/10">
+      <SettingsCard class="!backdrop-blur-3xl shadow-2xl transition-all duration-300">
+        <div class="divide-y transition-colors duration-300" :class="themeStore.isDarkResolved ? 'divide-white/10' : 'divide-black/5'">
           <SettingsRow 
             title="功能介绍" 
             clickable
@@ -277,76 +295,261 @@ const openFeedback = () => {
     </div>
 
     <!-- Footer -->
-    <div class="mt-auto pt-8 pb-4 text-center space-y-1 opacity-30 relative z-10 pointer-events-none">
-      <p class="text-[9px] font-mono tracking-[0.2em] uppercase text-white">Powered by Tauri & Vue 3</p>
-      <p class="text-[9px] text-white/80">2024-2026 © VCPMobile PROJECT AVATAR</p>
+    <div class="footer-section mt-auto pt-8 pb-4 text-center space-y-1 opacity-30 relative z-10 pointer-events-none transition-colors duration-300">
+      <p class="text-[9px] font-mono tracking-[0.2em] uppercase">Powered by Tauri & Vue 3</p>
+      <p class="text-[9px] opacity-80">2024-2026 © VCPMobile PROJECT AVATAR</p>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* Aerosol blobs base - Restricted to Logo Area */
-.blob {
-  position: absolute;
-  border-radius: 50%;
+/* Atmospheric Fluid Aurora Canvas */
+.aurora-container {
+  filter: blur(95px) saturate(170%);
   mix-blend-mode: screen;
-  transition: opacity 0.3s ease-in-out, filter 0.3s ease-in-out;
-  opacity: 0.35;
+  opacity: 0.55;
+  transition: filter 0.6s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.5s ease;
+  will-change: filter;
 }
 
-/* Static positions - Logo area */
+.aurora-container.active-turbulence {
+  filter: blur(75px) saturate(230%); /* 交互激荡时收拢到 75px 保持动感 */
+}
+
+/* 亮色模式下的流变调整 - 墨晕水彩流光风格 */
+.aurora-container.light-mode {
+  mix-blend-mode: multiply;
+  opacity: 0.14; /* 极致淡雅，仅留下高档白卡片上淡淡的水彩印记 */
+  filter: blur(105px) saturate(145%); /* 亮色下模糊半径增加，融化更广 */
+}
+
+.aurora-container.light-mode.active-turbulence {
+  filter: blur(85px) saturate(190%);
+  opacity: 0.22;
+}
+
+/* Fluid Organic Blobs */
+.blob-fluid {
+  position: absolute;
+  border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  will-change: transform, border-radius;
+  opacity: 0.55;
+  transition: opacity 0.5s ease;
+}
+
+.active-turbulence .blob-fluid {
+  opacity: 0.75;
+}
+
+/* Coprime period dynamics - Refactored to solid translucent colors to eliminate gradient interference */
 .blob-cyan {
-  background: #00e5ff;
-  width: 250px; height: 250px;
-  top: 50%; left: 50%;
-  margin: -125px 0 0 -125px; /* Center perfectly */
-  transform: translate(-30px, -30px);
-  filter: blur(50px);
-}
-.blob-blue {
-  background: #3b82f6;
-  width: 200px; height: 200px;
-  top: 50%; left: 50%;
-  margin: -100px 0 0 -100px;
-  transform: translate(20px, -40px);
-  filter: blur(40px);
-}
-.blob-pink {
-  background: #ff3366;
-  width: 275px; height: 275px; /* RE-ADJUSTED PINK BLOB SIZE */
-  top: 50%; left: 50%;
-  margin: -137.5px 0 0 -137.5px;
-  transform: translate(0px, 30px);
-  filter: blur(80px);
+  width: 280px;
+  height: 280px;
+  background: rgba(0, 229, 255, 0.48); /* 实心半透色块 */
+  top: 10%;
+  left: 5%;
+  animation: liquid-cyan 23s infinite alternate ease-in-out;
 }
 
-/* Animated mixing states - Deep crossing movement */
-.mixing .blob {
-  opacity: 0.7; /* Increased opacity for stronger fusion */
-}
-.mixing .blob-cyan {
-  animation: float-cyan 8s infinite alternate ease-in-out;
-}
-.mixing .blob-blue {
-  animation: float-blue 10s infinite alternate ease-in-out;
-}
-.mixing .blob-pink {
-  animation: float-pink 12s infinite alternate ease-in-out;
+.blob-magenta {
+  width: 300px;
+  height: 300px;
+  background: rgba(255, 51, 102, 0.45); /* 实心半透色块 */
+  bottom: 5%;
+  right: 5%;
+  animation: liquid-magenta 19s infinite alternate ease-in-out;
 }
 
-@keyframes float-cyan {
-  0% { transform: translate(-40px, -40px) scale(1); }
-  50% { transform: translate(30px, 10px) scale(1.1); }
-  100% { transform: translate(-10px, 40px) scale(1.2); }
+.blob-violet {
+  width: 250px;
+  height: 250px;
+  background: rgba(168, 85, 247, 0.42); /* 实心半透色块 */
+  top: 30%;
+  right: 15%;
+  animation: liquid-violet 29s infinite alternate ease-in-out;
 }
-@keyframes float-blue {
-  0% { transform: translate(30px, -40px) scale(1); }
-  50% { transform: translate(-30px, 20px) scale(1.2); }
-  100% { transform: translate(30px, 40px) scale(1.1); }
+
+.blob-amber {
+  width: 220px;
+  height: 220px;
+  background: rgba(245, 158, 11, 0.32); /* 实心半透色块 */
+  bottom: 20%;
+  left: 20%;
+  animation: liquid-amber 17s infinite alternate ease-in-out;
 }
-@keyframes float-pink {
-  0% { transform: translate(0px, 30px) scale(1); }
-  50% { transform: translate(-40px, -20px) scale(1.1); }
-  100% { transform: translate(40px, -10px) scale(1.2); }
+
+/* Coprime interactive speed scaling (Acceleration on drag/shake) */
+.active-turbulence .blob-cyan {
+  animation-duration: 9s;
+}
+.active-turbulence .blob-magenta {
+  animation-duration: 7.5s;
+}
+.active-turbulence .blob-violet {
+  animation-duration: 11s;
+}
+.active-turbulence .blob-amber {
+  animation-duration: 6.5s;
+}
+
+/* fluid metaballs transform animations */
+@keyframes liquid-cyan {
+  0% {
+    transform: translate(0px, 0px) rotate(0deg) scale(1);
+    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  }
+  33% {
+    transform: translate(40px, -60px) rotate(120deg) scale(1.2);
+    border-radius: 50% 50% 40% 60% / 60% 40% 60% 40%;
+  }
+  66% {
+    transform: translate(-50px, 30px) rotate(240deg) scale(0.85);
+    border-radius: 60% 40% 60% 40% / 40% 60% 50% 50%;
+  }
+  100% {
+    transform: translate(0px, 0px) rotate(360deg) scale(1);
+    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
+  }
+}
+
+@keyframes liquid-magenta {
+  0% {
+    transform: translate(0px, 0px) rotate(360deg) scale(1);
+    border-radius: 60% 40% 60% 40% / 40% 60% 50% 50%;
+  }
+  50% {
+    transform: translate(-60px, 50px) rotate(180deg) scale(0.85);
+    border-radius: 40% 60% 50% 50% / 50% 40% 60% 50%;
+  }
+  100% {
+    transform: translate(0px, 0px) rotate(0deg) scale(1.15);
+    border-radius: 50% 50% 40% 60% / 60% 40% 60% 40%;
+  }
+}
+
+@keyframes liquid-violet {
+  0% {
+    transform: translate(0px, 0px) scale(0.95);
+  }
+  50% {
+    transform: translate(50px, -40px) scale(1.25) rotate(90deg);
+  }
+  100% {
+    transform: translate(-30px, 40px) scale(1) rotate(-90deg);
+  }
+}
+
+@keyframes liquid-amber {
+  0% {
+    transform: translate(0px, 0px) rotate(0deg);
+  }
+  50% {
+    transform: translate(-40px, -50px) rotate(-180deg) scale(1.25);
+  }
+  100% {
+    transform: translate(50px, 20px) rotate(180deg) scale(0.9);
+  }
+}
+
+/* 胶片颗粒噪点层，使用 0KB 纯 SVG 分形噪声物理抹除大渐变色带 */
+.noise-overlay {
+  opacity: 0.06; /* 从 0.045 提升至 0.06，增强像素打散强度以抵抗物理干涉，颗粒质感更细腻高级 */
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  transition: opacity 0.5s ease;
+}
+
+/* 亮色模式下的胶片颗粒 - 呈 multiply 模式，不透明度略降，提供 pure white 磨砂玻璃颗粒触感 */
+.noise-overlay.light-mode-noise {
+  mix-blend-mode: multiply;
+  opacity: 0.038;
+}
+
+/* ==========================================================================
+   Theme Adaptations (Dynamic Dark/Light Overrides via Scoped Deep Selectors)
+   ========================================================================== */
+
+/* 1. Dark Theme Base Variables */
+.theme-dark {
+  color: #ffffff;
+  background-color: #0f172a !important; /* 强制接管关于页面暗色底盘背景 */
+}
+
+.theme-dark :deep(.settings-card) {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  color: #ffffff !important;
+}
+
+.theme-dark :deep(.settings-row .text-primary-text) {
+  color: #ffffff !important;
+}
+
+.theme-dark .footer-section {
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+
+/* 2. Light Theme Refined Adaptations (Surgical deep-selector overrides) */
+.theme-light {
+  color: #1e293b; /* text-slate-800 */
+  background-color: #f8fafc !important; /* 强制接管关于页面亮色底盘背景 */
+}
+
+/* 亮色半透明毛玻璃卡片 */
+.theme-light :deep(.settings-card) {
+  background-color: rgba(255, 255, 255, 0.65) !important;
+  border-color: rgba(0, 0, 0, 0.05) !important;
+  backdrop-filter: blur(24px) !important;
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.02) !important;
+  color: #1e293b !important;
+}
+
+/* 亮色卡片文字 */
+.theme-light :deep(.settings-row .text-primary-text) {
+  color: #1e293b !important; /* 强制 row 标题为 slate-800 */
+}
+
+.theme-light :deep(.settings-row .opacity-40) {
+  color: #64748b !important; /* 强制 row 描述文字为 slate-500 */
+  opacity: 0.85 !important;
+}
+
+/* 亮色卡片内部精细分割线 */
+.theme-light :deep(.divide-white\/10) {
+  border-color: rgba(0, 0, 0, 0.06) !important;
+}
+
+/* 亮色操作右箭头及小图标高保真提亮 */
+.theme-light :deep(.i-carbon-chevron-right),
+.theme-light :deep(.i-carbon-logo-github),
+.theme-light :deep(.i-carbon-debug),
+.theme-light :deep(.opacity-20 svg) {
+  color: #475569 !important; /* slate-600 */
+  opacity: 0.65 !important;
+}
+
+/* UpdateSection.vue (更新模块内部亮色深度重置) */
+.theme-light :deep(.bg-white\/5) {
+  background-color: rgba(0, 0, 0, 0.04) !important; /* 亮色更新信息框底色 */
+  color: #1e293b !important;
+}
+
+.theme-light :deep(.bg-white\/10) {
+  background-color: rgba(0, 0, 0, 0.06) !important; /* 进度条轨道 */
+}
+
+.theme-light :deep(.settings-inline-status) {
+  color: #334155 !important;
+}
+
+.theme-light :deep(.settings-action-button.secondary) {
+  background-color: rgba(0, 0, 0, 0.05) !important;
+  color: #1e293b !important;
+  border-color: rgba(0, 0, 0, 0.05) !important;
+}
+
+/* Footer & 版权声明自适应 */
+.theme-light .footer-section {
+  color: #475569 !important; /* slate-600 */
 }
 </style>
