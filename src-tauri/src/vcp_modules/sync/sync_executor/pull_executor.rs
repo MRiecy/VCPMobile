@@ -331,7 +331,7 @@ impl PullExecutor {
     }
 
     pub async fn pull_entities_batch<R: Runtime>(
-        _app: &AppHandle<R>,
+        app: &AppHandle<R>,
         client: &reqwest::Client,
         http_url: &str,
         sync_token: &str,
@@ -433,7 +433,7 @@ impl PullExecutor {
                 .await;
         }
 
-        println!("[PullExecutor] Batch pull completed");
+        crate::vcp_modules::sync::sync_service::emit_sync_log(app, "info", "[PullExecutor] Batch pull completed");
         Ok(())
     }
 
@@ -646,22 +646,25 @@ impl PullExecutor {
         let total = requests.len();
 
         // 启动接收协程：实时消费 channel 输出进度日志
+        let app_receiver = app.clone();
         let receiver_handle = tokio::spawn(async move {
             let mut results = Vec::new();
             let mut completed = 0usize;
             while let Some(result) = rx.recv().await {
                 completed += 1;
                 if result.success {
-                    println!(
+                    let msg = format!(
                         "[PullExecutor] Batch pull: topic {} completed ({}/{})",
                         result.topic_id, completed, total
                     );
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(&app_receiver, "info", &msg);
                 } else {
                     let err = result.error.as_deref().unwrap_or("unknown");
-                    eprintln!(
+                    let msg = format!(
                         "[PullExecutor] Batch pull: topic {} FAILED ({}/{}): {}",
                         result.topic_id, completed, total, err
                     );
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(&app_receiver, "error", &msg);
                 }
                 results.push(result);
             }
@@ -706,7 +709,7 @@ impl PullExecutor {
                 let topic_id = topic_data["topicId"].as_str().unwrap_or("").to_string();
 
                 if topic_id.is_empty() {
-                    eprintln!("[PullExecutor] Batch pull: malformed NDJSON line, skipping");
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(app, "error", "[PullExecutor] Batch pull: malformed NDJSON line, skipping");
                     continue;
                 }
 
@@ -837,10 +840,11 @@ impl PullExecutor {
 
         let ok_count = results.iter().filter(|r| r.success).count();
         let err_count = results.iter().filter(|r| !r.success).count();
-        println!(
+        let msg = format!(
             "[PullExecutor] Batch pull completed: {}/{} topics processed, {} errors",
             ok_count, total, err_count
         );
+        crate::vcp_modules::sync::sync_service::emit_sync_log(app, "info", &msg);
         Ok(results)
     }
 }

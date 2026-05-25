@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, watch, nextTick } from 'vue';
 import { X, Copy, Play } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
@@ -16,6 +16,16 @@ const props = defineProps<Props>();
 const store = useSyncSessionStore();
 const overlayStore = useOverlayStore();
 const { performFullReload } = useDataReload();
+
+const logContainer = ref<HTMLElement | null>(null);
+
+watch(() => store.logs.length, () => {
+  nextTick(() => {
+    if (logContainer.value) {
+      logContainer.value.scrollTop = logContainer.value.scrollHeight;
+    }
+  });
+});
 
 const visibleLogs = computed(() => {
   // 只渲染最近 100 条，避免 DOM 过重；内存中保留 200 条
@@ -178,7 +188,7 @@ const handleClose = async () => {
 
           <!-- 日志终端 -->
           <div class="flex-1 px-4 overflow-hidden flex flex-col min-h-0">
-            <div class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto flex flex-col-reverse min-h-0">
+            <div ref="logContainer" class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto flex flex-col min-h-0">
               <div v-if="store.logs.length === 0" class="text-white/20 italic">
                 等待连接...
               </div>

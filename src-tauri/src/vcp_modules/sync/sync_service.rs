@@ -26,6 +26,7 @@ pub struct SyncState {
     pub uploaded_hashes: Arc<RwLock<HashSet<String>>>,
     pub is_syncing: Arc<std::sync::atomic::AtomicBool>,
     pub current_log_path: Arc<RwLock<Option<String>>>,
+    pub current_logger: Arc<tokio::sync::RwLock<Option<Arc<std::sync::Mutex<SyncLogger>>>>>,
 }
 
 /// 追踪 Phase 3 中已处理完成的 topic，替代 AtomicU32 避免双重递减下溢
@@ -191,6 +192,7 @@ pub fn init_sync_service(_app_handle: AppHandle) -> SyncState {
         uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
         is_syncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         current_log_path: Arc::new(RwLock::new(None)),
+        current_logger: Arc::new(tokio::sync::RwLock::new(None)),
     }
 }
 
@@ -217,7 +219,7 @@ async fn run_sync_session(
         .app_log_dir()
         .ok()
         .map(|d| d.join("sync_logs"));
-    let sync_logger = Arc::new(Mutex::new(SyncLogger::new_session(sync_log_level, log_dir)));
+    let sync_logger = Arc::new(std::sync::Mutex::new(SyncLogger::new_session(sync_log_level, log_dir, Some(app_handle.clone()))));
     {
         let sync_state = app_handle.state::<SyncState>();
         let log_path = {
@@ -228,6 +230,8 @@ async fn run_sync_session(
             let mut guard = sync_state.current_log_path.write().await;
             *guard = Some(path.to_string_lossy().to_string());
         }
+        let mut logger_guard = sync_state.current_logger.write().await;
+        *logger_guard = Some(sync_logger.clone());
     }
     write_queue.set_logger(sync_logger.clone());
     let write_queue = Arc::new(write_queue);
@@ -740,6 +744,41 @@ async fn run_sync_session(
                                             println!("[SyncService] Finalizing {} modified topics (recalculating hashes)...", modified_topics.len());
                                             emit_sync_log(&handle_clone, "info", &format!("正在校验 {} 个话题的一致性...", modified_topics.len()));
 
+                                            // [批量优化 Phase 1] 一次性批量预读取所有受影响话题的元数据到内存中，消灭循环内 N+1 读
+                                            struct TopicBubbleMeta {
+                                                owner_id: String,
+                                                owner_type: String,
+                                                title: String,
+                                                created_at: i64,
+                                                locked: bool,
+                                                unread: bool,
+                                            }
+
+                                            let mut meta_map = std::collections::HashMap::new();
+                                            let placeholders = modified_topics.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                                            let query_sql = format!(
+                                                "SELECT topic_id, owner_id, owner_type, title, created_at, locked, unread FROM topics WHERE topic_id IN ({})",
+                                                placeholders
+                                            );
+                                            let mut q = sqlx::query(&query_sql);
+                                            for tid in &modified_topics {
+                                                q = q.bind(tid);
+                                            }
+
+                                            if let Ok(rows) = q.fetch_all(&db.pool).await {
+                                                for row in rows {
+                                                    let tid: String = row.get("topic_id");
+                                                    meta_map.insert(tid, TopicBubbleMeta {
+                                                        owner_id: row.get("owner_id"),
+                                                        owner_type: row.get("owner_type"),
+                                                        title: row.get("title"),
+                                                        created_at: row.get("created_at"),
+                                                        locked: row.get::<i64, _>("locked") != 0,
+                                                        unread: row.get::<i64, _>("unread") != 0,
+                                                    });
+                                                }
+                                            }
+
                                             if let Ok(mut tx) = db.pool.begin().await {
                                                 // 1. [Batch Optimization] 一条 SQL 更新所有受影响话题的消息计数和时间戳
                                                 let placeholders = modified_topics.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -753,19 +792,30 @@ async fn run_sync_session(
                                                 for tid in &modified_topics { query = query.bind(tid); }
                                                 let _ = query.execute(&mut *tx).await;
 
-                                                // 2. 逐话题计算指纹（涉及 MerkleRoot，必须逐个处理但现在已无其他 SQL 负担）
+                                                // 2. 逐话题计算指纹并向上冒泡（使用传参版接口，彻底避免折返 SELECT）
                                                 let mut affected_agents: HashSet<String> = HashSet::new();
                                                 let mut affected_groups: HashSet<String> = HashSet::new();
 
                                                 for tid in &modified_topics {
-                                                    if let Err(e) = HashAggregator::bubble_topic_hash(&mut tx, tid).await {
-                                                        println!("[SyncService] bubble_topic_hash failed for {}: {}", tid, e);
-                                                    }
-                                                    if let Ok(row) = sqlx::query("SELECT owner_id, owner_type FROM topics WHERE topic_id = ?").bind(tid).fetch_one(&mut *tx).await {
-                                                        let owner_id: String = row.get("owner_id");
-                                                        let owner_type: String = row.get("owner_type");
-                                                        if owner_type == "agent" { affected_agents.insert(owner_id); }
-                                                        else if owner_type == "group" { affected_groups.insert(owner_id); }
+                                                    if let Some(meta) = meta_map.get(tid) {
+                                                        if let Err(e) = HashAggregator::bubble_topic_hash_with_meta(
+                                                            &mut tx,
+                                                            tid,
+                                                            &meta.owner_type,
+                                                            &meta.title,
+                                                            meta.created_at,
+                                                            meta.locked,
+                                                            meta.unread,
+                                                        ).await {
+                                                            println!("[SyncService] bubble_topic_hash_with_meta failed for {}: {}", tid, e);
+                                                        }
+
+                                                        // 直接从内存提取 owner 归属，杜绝 N+1 读
+                                                        if meta.owner_type == "agent" {
+                                                            affected_agents.insert(meta.owner_id.clone());
+                                                        } else if meta.owner_type == "group" {
+                                                            affected_groups.insert(meta.owner_id.clone());
+                                                        }
                                                     }
                                                 }
                                                 for aid in affected_agents { let _ = HashAggregator::bubble_agent_hash(&mut tx, &aid).await; }
@@ -1431,6 +1481,13 @@ async fn run_sync_session(
             }
         }
     }
+
+    // 同步会话结束，清空 current_logger
+    {
+        let sync_state = app_handle.state::<SyncState>();
+        let mut logger_guard = sync_state.current_logger.write().await;
+        *logger_guard = None;
+    }
 }
 
 /// 每批最多包含的消息数，控制单次 WS payload 大小（约 10000 条消息 ≈ 1.5-2MB JSON）
@@ -1474,16 +1531,34 @@ fn build_diff_batches(
     batches
 }
 
-fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
+pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
     let _ = app_handle.emit(
         "vcp-log",
-        json!({
+        serde_json::json!({
             "id": format!("{}_{}", level, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             "level": level,
             "category": "sync",
             "message": message,
         }),
     );
+
+    // 整合：写入 log 文件和控制台！
+    let sync_state = app_handle.state::<SyncState>();
+    if let Some(logger_arc) = tauri::async_runtime::block_on(async {
+        let guard = sync_state.current_logger.read().await;
+        guard.clone()
+    }) {
+        if let Ok(mut logger) = logger_arc.lock() {
+            let log_level = match level {
+                "error" => LogLevel::Error,
+                "warn" | "warning" => LogLevel::Info,
+                _ => LogLevel::Info,
+            };
+            logger.log_direct(log_level, "sync", message);
+        }
+    } else {
+        println!("[Sync] [{}] {}", level, message);
+    }
 }
 
 #[tauri::command]
@@ -1548,6 +1623,7 @@ pub async fn list_sync_log_files(app: AppHandle) -> Result<Vec<SyncLogFileInfo>,
             let filename = entry.file_name().to_string_lossy().to_string();
             let created_at = metadata
                 .created()
+                .or_else(|_| metadata.modified())
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())

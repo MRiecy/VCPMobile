@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tauri::Emitter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Debug = 0,
@@ -58,10 +59,15 @@ pub struct SyncLogger {
     error_aggregator: ErrorAggregator,
     log_file: Option<std::fs::File>,
     log_path: Option<PathBuf>,
+    app_handle: Option<tauri::AppHandle>,
 }
 
 impl SyncLogger {
-    pub fn new_session(log_level: LogLevel, log_dir: Option<PathBuf>) -> Self {
+    pub fn new_session(
+        log_level: LogLevel,
+        log_dir: Option<PathBuf>,
+        app_handle: Option<tauri::AppHandle>,
+    ) -> Self {
         println!("[Sync] Session started");
 
         let (log_file, log_path) = if let Some(dir) = log_dir {
@@ -91,14 +97,11 @@ impl SyncLogger {
             error_aggregator: ErrorAggregator::new(),
             log_file,
             log_path,
+            app_handle,
         }
     }
 
-    pub fn log(&mut self, level: LogLevel, phase: &str, message: &str) {
-        if level < self.log_level {
-            return;
-        }
-
+    pub fn log_direct(&mut self, level: LogLevel, phase: &str, message: &str) {
         let line = format!(
             "[{}] [{:?}] [{}] {}",
             chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
@@ -111,6 +114,31 @@ impl SyncLogger {
         if let Some(ref mut file) = self.log_file {
             let _ = writeln!(file, "{}", line);
             let _ = file.flush();
+        }
+    }
+
+    pub fn log(&mut self, level: LogLevel, phase: &str, message: &str) {
+        if level < self.log_level {
+            return;
+        }
+
+        self.log_direct(level, phase, message);
+
+        if let Some(ref handle) = self.app_handle {
+            let level_str = match level {
+                LogLevel::Debug => "debug",
+                LogLevel::Info => "info",
+                LogLevel::Error => "error",
+            };
+            let _ = handle.emit(
+                "vcp-log",
+                serde_json::json!({
+                    "id": format!("{}_{}", level_str, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
+                    "level": level_str,
+                    "category": "sync",
+                    "message": message,
+                }),
+            );
         }
     }
 

@@ -178,6 +178,49 @@ impl HashAggregator {
         Ok(())
     }
 
+    pub async fn bubble_topic_hash_with_meta(
+        tx: &mut Transaction<'_, Sqlite>,
+        topic_id: &str,
+        owner_type: &str,
+        title: &str,
+        created_at: i64,
+        locked: bool,
+        unread: bool,
+    ) -> Result<(), String> {
+        // 1. 计算并更新 content_hash (消息聚合)
+        let root_hash = Self::compute_topic_root_hash(tx, topic_id).await?;
+
+        // 2. 直接根据外部传入的元数据参数计算 config_hash (省去 2 次 SELECT)
+        let config_hash = if owner_type == "agent" {
+            let dto = AgentTopicSyncDTO {
+                id: topic_id.to_string(),
+                name: title.to_string(),
+                created_at,
+                locked,
+                unread,
+                owner_id: String::new(),
+            };
+            Self::compute_agent_topic_metadata_hash(&dto)
+        } else {
+            let dto = GroupTopicSyncDTO {
+                id: topic_id.to_string(),
+                name: title.to_string(),
+                created_at,
+                owner_id: String::new(),
+            };
+            Self::compute_group_topic_metadata_hash(&dto)
+        };
+
+        sqlx::query("UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ?")
+            .bind(root_hash)
+            .bind(config_hash)
+            .bind(topic_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub async fn bubble_agent_hash(
         tx: &mut Transaction<'_, Sqlite>,
         agent_id: &str,
