@@ -28,7 +28,7 @@ last_updated: 2026-05-13
 | avatars | avatar_hash | TEXT | NOT NULL | 头像二进制 SHA-256 摘要，用于 WebSocket 快速 Diff | `avatar_index.hash` |
 | avatars | mime_type | TEXT | NOT NULL | 图像 MIME 类型，如 `image/webp`、`image/png` | 由文件扩展名推导 |
 | avatars | image_data | BLOB | NOT NULL | 头像物理二进制数据，移动端真理之源 | `UserData/avatars/*` 或同级文件 |
-| avatars | dominant_color | TEXT | — | 预计算主色调（rgb/hex），用于 UI 主题混色 | — |
+| avatars | dominant_color | TEXT | — | 前端 Canvas 计算主色调（rgb/hex），后端仅存储。commit `df3f219` 将计算从后端 FFmpeg 移至前端 `extractDominantColorFromBlob` | — |
 | avatars | updated_at | BIGINT | NOT NULL | 逻辑时钟，毫秒时间戳 | `avatar_index.updated_at` |
 
 > **设计说明**：`avatars` 表采用复合主键 `(owner_type, owner_id)`，实现多态头像的统一存储。头像二进制以 BLOB 形式保存在移动端数据库内部，桌面端则分散存储为独立图像文件。
