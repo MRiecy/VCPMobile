@@ -389,12 +389,18 @@ fn build_stream_block(
             StreamBlock::html_preview(inner_content.to_string(), hash)
         }
         BlockType::HtmlContainer => {
-            let mut full_html = String::new();
-            full_html.push_str(&remaining[start_idx..end_idx]);
-            full_html.push_str(inner_content);
-            full_html.push_str(&remaining[end_idx + inner_content.len()..end_idx + end_end]);
+            let open_tag = &remaining[start_idx..end_idx];
+            let deindented_inner = crate::vcp_modules::chat::pre_renderer::markdown_parser::trim_common_leading_indent(inner_content);
+            let mut nodes = vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(open_tag.to_string())];
+            nodes.extend(crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&deindented_inner));
             
-            let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&full_html);
+            let mut full_html = format!("{}{}", open_tag, inner_content);
+            if end_end > 0 {
+                let close_tag = &remaining[end_idx + inner_content.len()..end_idx + end_end];
+                nodes.push(crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(close_tag.to_string()));
+                full_html.push_str(close_tag);
+            }
+            
             let hash = HashAggregator::compute_content_hash(&full_html);
             StreamBlock::markdown(full_html, Some(nodes), hash)
         }

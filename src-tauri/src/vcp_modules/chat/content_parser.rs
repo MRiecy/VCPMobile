@@ -520,30 +520,26 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     full_html.push_str(&remaining[start_idx..end_idx]);
                     full_html.push_str(inner_content);
                     if is_complete {
-                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
+                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {  
                             full_html.push_str(&search_area[s..e]);
                         }
                     }
                     ContentBlock::html_preview(full_html)
                 }
                 BlockType::HtmlContainer => {
-                    let mut full_html = String::new();
-                    full_html.push_str(&remaining[start_idx..end_idx]);
-                    full_html.push_str(inner_content);
+                    let open_tag = &remaining[start_idx..end_idx];
+                    let deindented_inner = crate::vcp_modules::chat::pre_renderer::markdown_parser::trim_common_leading_indent(inner_content);
+                    let mut nodes = vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(open_tag.to_string())];
+                    nodes.extend(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&deindented_inner));
                     if is_complete {
                         if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
-                            full_html.push_str(&search_area[s..e]);
+                            let close_tag = &search_area[s..e];
+                            nodes.push(crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(close_tag.to_string()));
                         }
                     }
-                    ContentBlock::markdown(
-                        None,
-                        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
-                            &full_html,
-                        )),
-                    )
+                    ContentBlock::markdown(None, Some(nodes))
                 }
-                BlockType::RoleDivider => {
-                    let marker_text = &remaining[start_idx..end_idx];
+                BlockType::RoleDivider => {                    let marker_text = &remaining[start_idx..end_idx];
                     if let Some(caps) = ROLE_DIVIDER.captures(marker_text) {
                         let is_end = caps.get(1).is_some();
                         let role = caps

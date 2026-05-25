@@ -19,6 +19,8 @@ lazy_static! {
 
     static ref HTML_CONTAINER_PLACEHOLDER_RE: Regex =
         Regex::new(r"<!--VCP_HTML_CONTAINER:(\d+)-->").unwrap();
+
+    static ref TAG_SCANNER: Regex = Regex::new(r"(?i)(</?)([a-z0-9\-]+)(\s[^>]*)?>").unwrap();
 }
 
 fn preprocess_latex_math(text: &str) -> String {
@@ -141,7 +143,7 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
 /// 去除文本中所有非空行的公共前导缩进（空格/制表符）。
 /// 用于 HTML 容器内部文本：去除嵌套带来的绝对缩进，保留相对结构，
 /// 防止 pulldown-cmark 将缩进内容误识别为 Indented Code Block。
-fn trim_common_leading_indent(text: &str) -> String {
+pub(crate) fn trim_common_leading_indent(text: &str) -> String {
     let mut min_indent = usize::MAX;
 
     for line in text.split('\n') {
@@ -171,31 +173,25 @@ fn trim_common_leading_indent(text: &str) -> String {
 
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
 pub(crate) fn find_matching_close_tag(text: &str, start_pos: usize, tag: &str) -> Option<(usize, usize)> {
-    let lower = text.to_lowercase();
-    let close_pat = format!("</{}>", tag);
-    let open_pat1 = format!("<{}>", tag);
-    let open_pat2 = format!("<{} ", tag);
-
     let mut depth = 1;
-    let mut search_start = start_pos;
+    let search_area = &text[start_pos..];
 
-    while let Some(close_pos) = lower[search_start..].find(&close_pat) {
-        let actual_close_start = search_start + close_pos;
-        let actual_close_end = actual_close_start + close_pat.len();
+    for cap in TAG_SCANNER.captures_iter(search_area) {
+        let is_close_tag = cap.get(1).unwrap().as_str() == "</";
+        let tag_name = cap.get(2).unwrap().as_str();
 
-        // 计算这段区间内开标签的数量
-        let segment = &lower[search_start..actual_close_start];
-        let open_count = segment.matches(&open_pat1).count() + segment.matches(&open_pat2).count();
-        depth += open_count;
-        depth -= 1;
-
-        if depth == 0 {
-            return Some((actual_close_start, actual_close_end));
+        if tag_name.eq_ignore_ascii_case(tag) {
+            if is_close_tag {
+                depth -= 1;
+                if depth == 0 {
+                    let full_match = cap.get(0).unwrap();
+                    return Some((start_pos + full_match.start(), start_pos + full_match.end()));
+                }
+            } else {
+                depth += 1;
+            }
         }
-
-        search_start = actual_close_end;
     }
-
     None
 }
 
