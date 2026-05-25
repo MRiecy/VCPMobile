@@ -14,9 +14,6 @@ lazy_static! {
     static ref MAGIC_RE: Regex =
         Regex::new(r##"(?s)(["“”](?:[^"“”]|\\.)+?["“”])|(@![^\s@!]+)|(@[^\s@]+)"##).unwrap();
 
-    static ref HTML_CONTAINER_OPEN_RE: Regex =
-        Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
-
     static ref HTML_CONTAINER_PLACEHOLDER_RE: Regex =
         Regex::new(r"<!--VCP_HTML_CONTAINER:(\d+)-->").unwrap();
 
@@ -90,7 +87,7 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
     let mut fence_cursor = 0;
     let mut in_fence = false;
 
-    for cap in HTML_CONTAINER_OPEN_RE.captures_iter(text) {
+    for cap in crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE.captures_iter(text) {
         let m = cap.get(0).unwrap();
         let tag = cap.get(1).unwrap().as_str().to_lowercase();
 
@@ -128,7 +125,7 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
 
             last_pos = close_end;
 
-            // 由于 last_pos 跳跃了，同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步同步
+            // 由于 last_pos 跳跃了，同步围栏游标状态
             while fence_cursor < fences.len() && fences[fence_cursor].start() < last_pos {
                 in_fence = !in_fence;
                 fence_cursor += 1;

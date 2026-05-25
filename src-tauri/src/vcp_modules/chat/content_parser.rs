@@ -272,46 +272,61 @@ lazy_static! {
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?[a-zA-Z][a-zA-Z0-9]*[\s>/]").unwrap();
-    static ref CHINESE_PARA_REGEX: Regex = Regex::new(r"^[\u4e00-\u9fa5]").unwrap();
-    static ref VCP_SPECIAL_MARKER_REGEX: Regex = Regex::new(r"(?i)^(<<<|\[\[VCP|\[---|<think|</think)").unwrap();
+}
+
+#[inline]
+fn is_chinese_char(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fa5}').contains(&c)
+}
+
+#[inline]
+fn is_vcp_marker(s: &str) -> bool {
+    s.starts_with("<<<")
+        || s.starts_with("[---")
+        || (s.len() >= 5 && s.is_char_boundary(5) && s[..5].eq_ignore_ascii_case("[[vcp"))
+        || (s.len() >= 6 && s.is_char_boundary(6) && s[..6].eq_ignore_ascii_case("<think"))
+        || (s.len() >= 7 && s.is_char_boundary(7) && s[..7].eq_ignore_ascii_case("</think"))
 }
 
 pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
     let mut in_fence = false;
-    let mut result = Vec::new();
+    let mut result = String::with_capacity(text.len());
 
-    for line in text.lines() {
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
             in_fence = !in_fence;
-            result.push(trimmed.to_string());
+            result.push_str(trimmed);
             continue;
         }
 
         if in_fence {
-            result.push(line.to_string());
+            result.push_str(line);
             continue;
         }
 
         let has_indentation = line.len() > trimmed.len();
         if has_indentation {
             if LIST_REGEX.is_match(line) {
-                result.push(line.to_string());
-            } else if HTML_TAG_REGEX.is_match(line)
-                || CHINESE_PARA_REGEX.is_match(trimmed)
-                || VCP_SPECIAL_MARKER_REGEX.is_match(trimmed)
+                result.push_str(line);
+            } else if (trimmed.starts_with('<') && HTML_TAG_REGEX.is_match(trimmed))
+                || trimmed.chars().next().map_or(false, is_chinese_char)
+                || is_vcp_marker(trimmed)
                 || trimmed.starts_with("<!--")
             {
-                result.push(trimmed.to_string());
+                result.push_str(trimmed);
             } else {
-                result.push(line.to_string());
+                result.push_str(line);
             }
         } else {
-            result.push(line.to_string());
+            result.push_str(line);
         }
     }
 
-    result.join("\n")
+    result
 }
 
 /// 核心解析函数：将原始 Markdown 文本解析为 AST 块数组
