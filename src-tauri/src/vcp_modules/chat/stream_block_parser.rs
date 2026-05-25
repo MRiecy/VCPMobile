@@ -54,7 +54,12 @@ pub enum StreamBlock {
         hash: String,
     },
     #[serde(rename = "html-preview")]
-    HtmlPreview { content: String, hash: String },
+    HtmlPreview {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        highlighted_content: Option<String>,
+        hash: String,
+    },
     #[serde(rename = "role-divider")]
     RoleDivider {
         role: String,
@@ -133,7 +138,12 @@ impl StreamBlock {
     }
 
     pub fn html_preview(content: String, hash: String) -> Self {
-        Self::HtmlPreview { content, hash }
+        let highlighted_content = crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(&content, "html");
+        Self::HtmlPreview {
+            content,
+            highlighted_content,
+            hash,
+        }
     }
 
     pub fn role_divider(role: String, is_end: bool, hash: String) -> Self {

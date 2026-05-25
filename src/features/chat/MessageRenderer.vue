@@ -434,6 +434,7 @@ onUnmounted(() => {
             <HtmlPreviewBlock
               v-else-if="block.type === 'html-preview'"
               :content="block.content || ''"
+              :highlighted-content="block.highlighted_content"
               :message-id="message.id"
             />
           </div>

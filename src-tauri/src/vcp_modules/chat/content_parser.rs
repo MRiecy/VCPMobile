@@ -64,6 +64,8 @@ pub enum ContentBlock {
     HtmlPreview {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        highlighted_content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
     #[serde(rename = "role-divider")]
@@ -159,8 +161,10 @@ impl ContentBlock {
     }
 
     pub fn html_preview(content: String) -> Self {
+        let highlighted_content = crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(&content, "html");
         Self::HtmlPreview {
             content,
+            highlighted_content,
             hash: None,
         }
     }

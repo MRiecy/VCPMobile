@@ -6,6 +6,7 @@ import { useThemeStore } from '../../../core/stores/theme';
 const props = defineProps<{
   content: string;
   messageId: string;
+  highlightedContent?: string;
 }>();
 
 const themeStore = useThemeStore();
@@ -13,8 +14,11 @@ const isPreviewing = ref(false); // 默认开启代码模式，减小开销
 const isFullScreen = ref(false);
 const fullScreenTab = ref<'code' | 'preview'>('code');
 
-// 代码预览转义处理 (基础安全 HTML 转义，不再依赖 highlight.js)
+// 代码预览转义处理 (优先使用后端预渲染 syntect 高亮，无值时回退为安全 HTML 转义)
 const highlightedCode = computed(() => {
+  if (props.highlightedContent) {
+    return props.highlightedContent;
+  }
   return props.content
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

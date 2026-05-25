@@ -63,6 +63,7 @@ export interface ContentBlock {
   role?: string;
   is_end?: boolean;
   display_mode?: boolean;
+  highlighted_content?: string;
   hash?: string | number;
 }
 
@@ -157,6 +158,7 @@ export interface StreamBlock {
   date?: string;
   role?: string;
   is_end?: boolean;
+  highlighted_content?: string;
   hash?: string;
 }
 
