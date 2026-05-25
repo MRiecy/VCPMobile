@@ -8,49 +8,22 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
 
-/// 规范化桌面端返回的消息 JSON，修复常见字段类型不匹配
-fn normalize_desktop_message(val: &mut serde_json::Value) {
-    if let Some(obj) = val.as_object_mut() {
-        // isThinking: 数字 0/1 -> bool
-        if let Some(v) = obj.get("isThinking").and_then(|v| v.as_i64()) {
-            obj.insert("isThinking".to_string(), serde_json::json!(v != 0));
-        }
-        // isGroupMessage: 数字 0/1 -> bool
-        if let Some(v) = obj.get("isGroupMessage").and_then(|v| v.as_i64()) {
-            obj.insert("isGroupMessage".to_string(), serde_json::json!(v != 0));
-        }
-        // timestamp: 字符串数字 -> u64
-        if let Some(v) = obj.get("timestamp") {
-            if v.is_string() {
-                if let Some(s) = v.as_str() {
-                    if let Ok(n) = s.parse::<u64>() {
-                        obj.insert("timestamp".to_string(), serde_json::json!(n));
-                    }
-                }
-            }
-        }
-        // 附件 size: i64 -> u64
-        if let Some(attachments) = obj.get_mut("attachments").and_then(|a| a.as_array_mut()) {
-            for att in attachments {
-                if let Some(att_obj) = att.as_object_mut() {
-                    if let Some(v) = att_obj.get("size").and_then(|v| v.as_i64()) {
-                        if v >= 0 {
-                            att_obj.insert("size".to_string(), serde_json::json!(v as u64));
-                        }
-                    }
-                }
-            }
-        }
-    }
+#[derive(serde::Deserialize)]
+struct TopicNDJSONFrame {
+    #[serde(rename = "topicId")]
+    topic_id: String,
+    messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+    #[serde(rename = "_error")]
+    error: Option<String>,
 }
 
-/// 共享消息处理管线：附件路径批量查询 → 规范化 → 解析 → 预渲染 → 写入队列
+/// 共享消息处理管线：附件路径批量查询 → 填充 → 预渲染并文本压缩(通过Rayon并行化) → 写入队列
 /// 被 `pull_messages_batch` 内各并发任务复用。
 /// 返回 `(parsed_count, failed_count)`。
 async fn process_topic_messages<R: Runtime>(
     app: &AppHandle<R>,
     topic_id: &str,
-    messages: Vec<serde_json::Value>,
+    mut parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
     write_queue: &DbWriteQueue,
 ) -> Result<(usize, usize), String> {
     use crate::vcp_modules::db_manager::DbState;
@@ -59,16 +32,12 @@ async fn process_topic_messages<R: Runtime>(
 
     // 1. 批量收集所有附件 hash，一次性查询本地路径（替代 N+1 查询）
     let mut all_hashes = Vec::new();
-    for m_val in &messages {
-        if let Some(obj) = m_val.as_object() {
-            if let Some(attachments) = obj.get("attachments").and_then(|a| a.as_array()) {
-                for att in attachments {
-                    if let Some(att_obj) = att.as_object() {
-                        if let Some(hash) = att_obj.get("hash").and_then(|h| h.as_str()) {
-                            if !hash.is_empty() {
-                                all_hashes.push(hash.to_string());
-                            }
-                        }
+    for msg in &parsed_messages {
+        if let Some(ref atts) = msg.attachments {
+            for att in atts {
+                if let Some(ref hash) = att.hash {
+                    if !hash.is_empty() {
+                        all_hashes.push(hash.to_string());
                     }
                 }
             }
@@ -102,136 +71,88 @@ async fn process_topic_messages<R: Runtime>(
         }
     }
 
-    // 2. 遍历消息，用缓存的 path_map 填充附件路径，并规范化桌面端字段
-    let mut parsed_messages = Vec::new();
-    let mut failed_count = 0usize;
-    for mut m_val in messages {
-        normalize_desktop_message(&mut m_val);
-
-        if let Some(obj) = m_val.as_object_mut() {
-            if let Some(attachments) = obj.get_mut("attachments").and_then(|a| a.as_array_mut()) {
-                for att in attachments {
-                    if let Some(att_obj) = att.as_object_mut() {
-                        if let Some(hash) = att_obj.get("hash").and_then(|h| h.as_str()) {
-                            if !hash.is_empty() {
-                                if let Some(path) = path_map.get(hash) {
-                                    att_obj
-                                        .entry("internalPath".to_string())
-                                        .or_insert(serde_json::json!(path));
-                                    att_obj
-                                        .entry("src".to_string())
-                                        .or_insert(serde_json::json!(format!("file://{}", path)));
-                                } else {
-                                    let default_path = format!("file://attachments/{}", hash);
-                                    att_obj.entry("internalPath".to_string()).or_insert(
-                                        serde_json::json!(
-                                            default_path.trim_start_matches("file://")
-                                        ),
-                                    );
-                                    att_obj
-                                        .entry("src".to_string())
-                                        .or_insert(serde_json::json!(default_path));
-                                }
-                            }
+    // 2. 用缓存的 path_map 填充附件路径与状态
+    for msg in &mut parsed_messages {
+        if let Some(ref mut atts) = msg.attachments {
+            for att in atts {
+                if let Some(ref hash) = att.hash {
+                    if !hash.is_empty() {
+                        if let Some(path) = path_map.get(hash) {
+                            att.internal_path = path.clone();
+                            att.src = format!("file://{}", path);
+                        } else {
+                            let default_path = format!("file://attachments/{}", hash);
+                            att.internal_path = default_path.trim_start_matches("file://").to_string();
+                            att.src = default_path;
                         }
-                        att_obj
-                            .entry("status".to_string())
-                            .or_insert(serde_json::json!("ready"));
                     }
                 }
-            }
-            obj.remove("avatarUrl");
-            obj.remove("avatarColor");
-        }
-
-        match serde_json::from_value::<crate::vcp_modules::chat_manager::ChatMessage>(m_val.clone())
-        {
-            Ok(msg) => {
-                parsed_messages.push(msg);
-            }
-            Err(e) => {
-                failed_count += 1;
-                if let Some(obj) = m_val.as_object() {
-                    println!(
-                        "[PullExecutor] Parse fail diagnostic for topic {} msg id={:?}:",
-                        topic_id,
-                        obj.get("id").or_else(|| obj.get("msgId"))
-                    );
-                }
-                println!(
-                    "[PullExecutor] Failed to parse message in topic {}: {}. Raw value: {}",
-                    topic_id, e, m_val
-                );
+                att.status = Some("ready".to_string());
             }
         }
     }
-    if failed_count > 0 {
-        println!(
-            "[PullExecutor] Topic {} message parse summary: total_received={}, success={}, failed={}",
-            topic_id,
-            parsed_messages.len() + failed_count,
-            parsed_messages.len(),
-            failed_count
-        );
-    }
 
-    // Sync 期间强制跳过即时冒泡
-    let skip_bubble = true;
     let parsed_count = parsed_messages.len();
 
     if !parsed_messages.is_empty() {
-        // 3. 并发处理 (Parallel Processing on CPU): 预渲染 + 指纹计算 + Zstd 压缩
-        let mut render_bytes_list = Vec::with_capacity(parsed_count);
+        // 3. 顺序处理 (Sequential Processing): 预渲染 + 指纹计算 + Zstd 压缩
+        // 注: 取消了 Rayon 宏观侵入，因为在 Tokio Worker 级别已经实现了 Topic 并发，微观并行反而会增加调度开销并破坏缓存局部性
+
+        let results: Vec<(String, Vec<u8>, Vec<u8>)> = parsed_messages
+            .iter()
+            .map(|msg| {
+                // A. 计算指纹
+                let attachment_hashes: Vec<String> = msg
+                    .attachments
+                    .as_ref()
+                    .map(|atts| {
+                        atts.iter()
+                            .map(|a| a.hash.clone().unwrap_or_default())
+                            .filter(|h| !h.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let content_hash =
+                    HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
+
+                // B. 预渲染 & 文本压缩 (保留 std::panic::catch_unwind 进行安全包装)
+                let content = &msg.content;
+                let topic_id_log = topic_id.to_string();
+                let msg_id_log = msg.id.clone();
+
+                let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let blocks = MessageRenderCompiler::compile(content);
+                    let rb = MessageRenderCompiler::serialize(&blocks).unwrap_or_default();
+                    let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(content).unwrap_or_default();
+                    (rb, cc)
+                }));
+
+                let (rb, cc) = match comp_res {
+                    Ok(val) => val,
+                    Err(_) => {
+                        println!(
+                            "[PullExecutor] Compile/Compress panicked for msg {} (topic {})",
+                            msg_id_log, topic_id_log
+                        );
+                        (Vec::new(), Vec::new())
+                    }
+                };
+
+                (content_hash, rb, cc)
+            })
+            .collect();
+
         let mut content_hashes = Vec::with_capacity(parsed_count);
+        let mut render_bytes_list = Vec::with_capacity(parsed_count);
         let mut compressed_contents = Vec::with_capacity(parsed_count);
 
-        for msg in &parsed_messages {
-            // A. 计算指纹 (SHA-256 + JSON Serialization)
-            let attachment_hashes: Vec<String> = msg
-                .attachments
-                .as_ref()
-                .map(|atts| {
-                    atts.iter()
-                        .map(|a| a.hash.clone().unwrap_or_default())
-                        .filter(|h| !h.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let content_hash =
-                HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
+        for (content_hash, rb, cc) in results {
             content_hashes.push(content_hash);
-
-            // B. 并发预渲染 & 文本压缩 (核心优化：将 Zstd 压缩从单线程 DB 队列移至并发管线)
-            let content = msg.content.clone();
-            let topic_id_log = topic_id.to_string();
-            let msg_id_log = msg.id.clone();
-
-            let result = std::panic::catch_unwind(|| {
-                // 渲染编译
-                let blocks = MessageRenderCompiler::compile(&content);
-                let rb = MessageRenderCompiler::serialize(&blocks).unwrap_or_default();
-                // 文本压缩
-                let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(&content).unwrap_or_default();
-                (rb, cc)
-            });
-
-            match result {
-                Ok((rb, cc)) => {
-                    render_bytes_list.push(rb);
-                    compressed_contents.push(cc);
-                }
-                Err(_) => {
-                    println!(
-                        "[PullExecutor] Compile/Compress panicked for msg {} (topic {})",
-                        msg_id_log, topic_id_log
-                    );
-                    render_bytes_list.push(Vec::new());
-                    compressed_contents.push(Vec::new());
-                }
-            }
+            render_bytes_list.push(rb);
+            compressed_contents.push(cc);
         }
 
-        // 4. 提交到写入队列
+        // 4. 提交落盘
         write_queue
             .submit(DbWriteTask::TopicMessages {
                 topic_id: topic_id.to_string(),
@@ -239,12 +160,12 @@ async fn process_topic_messages<R: Runtime>(
                 compressed_contents,
                 render_bytes: render_bytes_list,
                 content_hashes,
-                skip_bubble,
+                skip_bubble: true,
             })
             .await;
     }
 
-    Ok((parsed_count, failed_count))
+    Ok((parsed_count, 0))
 }
 
 /// 批量 Pull 单 topic 处理结果
@@ -703,18 +624,23 @@ impl PullExecutor {
                     continue;
                 }
 
-                let topic_data: serde_json::Value =
-                    serde_json::from_slice(&line).unwrap_or(serde_json::Value::Null);
+                let frame: TopicNDJSONFrame = match serde_json::from_slice(&line) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let err_msg = format!("[PullExecutor] Malformed NDJSON frame: {}", e);
+                        crate::vcp_modules::sync::sync_service::emit_sync_log(app, "error", &err_msg);
+                        continue;
+                    }
+                };
 
-                let topic_id = topic_data["topicId"].as_str().unwrap_or("").to_string();
-
+                let topic_id = frame.topic_id;
                 if topic_id.is_empty() {
-                    crate::vcp_modules::sync::sync_service::emit_sync_log(app, "error", "[PullExecutor] Batch pull: malformed NDJSON line, skipping");
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(app, "error", "[PullExecutor] Batch pull: empty topicId in NDJSON line, skipping");
                     continue;
                 }
 
                 // 检查单 topic 错误帧
-                if let Some(topic_err) = topic_data["_error"].as_str() {
+                if let Some(topic_err) = frame.error {
                     let _ = tx.send(BatchPullResult {
                         topic_id,
                         success: false,
@@ -725,11 +651,7 @@ impl PullExecutor {
                     continue;
                 }
 
-                let messages: Vec<serde_json::Value> = topic_data["messages"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-
+                let messages = frame.messages;
                 if messages.is_empty() {
                     let _ = tx.send(BatchPullResult {
                         topic_id,
@@ -782,52 +704,58 @@ impl PullExecutor {
 
         // 处理流结束后 buffer 中残留的非换行数据（兜底）
         if !buffer.is_empty() {
-            if let Ok(topic_data) = serde_json::from_slice::<serde_json::Value>(&buffer) {
-                let topic_id = topic_data["topicId"].as_str().unwrap_or("").to_string();
+            if let Ok(frame) = serde_json::from_slice::<TopicNDJSONFrame>(&buffer) {
+                let topic_id = frame.topic_id;
                 if !topic_id.is_empty() {
-                    let messages: Vec<serde_json::Value> = topic_data["messages"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    if !messages.is_empty() {
-                        let permit = sem.acquire_owned().await.map_err(|e| e.to_string())?;
-                        let app_clone = app.clone();
-                        let wq_clone = write_queue.clone();
-                        let tx_clone = tx.clone();
-                        let handle = tokio::spawn(async move {
-                            let _permit = permit;
-                            match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone)
-                                .await
-                            {
-                                Ok((parsed, failed)) => {
-                                    let _ = tx_clone.send(BatchPullResult {
-                                        topic_id,
-                                        success: true,
-                                        parsed_count: parsed,
-                                        failed_count: failed,
-                                        error: None,
-                                    });
-                                }
-                                Err(e) => {
-                                    let _ = tx_clone.send(BatchPullResult {
-                                        topic_id,
-                                        success: false,
-                                        parsed_count: 0,
-                                        failed_count: 0,
-                                        error: Some(e),
-                                    });
-                                }
-                            }
-                        });
-                        spawn_handles.push(handle);
-                    } else {
+                    if let Some(topic_err) = frame.error {
                         let _ = tx.send(BatchPullResult {
                             topic_id,
-                            success: true,
+                            success: false,
                             parsed_count: 0,
                             failed_count: 0,
-                            error: None,
+                            error: Some(format!("Desktop error: {}", topic_err)),
                         });
+                    } else {
+                        let messages = frame.messages;
+                        if !messages.is_empty() {
+                            if let Ok(permit) = sem.clone().acquire_owned().await {
+                                let app_clone = app.clone();
+                                let wq_clone = write_queue.clone();
+                                let tx_clone = tx.clone();
+                                let handle = tokio::spawn(async move {
+                                    let _permit = permit;
+                                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone).await {
+                                        Ok((parsed, failed)) => {
+                                            let _ = tx_clone.send(BatchPullResult {
+                                                topic_id,
+                                                success: true,
+                                                parsed_count: parsed,
+                                                failed_count: failed,
+                                                error: None,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_clone.send(BatchPullResult {
+                                                topic_id,
+                                                success: false,
+                                                parsed_count: 0,
+                                                failed_count: 0,
+                                                error: Some(e),
+                                            });
+                                        }
+                                    }
+                                });
+                                spawn_handles.push(handle);
+                            }
+                        } else {
+                            let _ = tx.send(BatchPullResult {
+                                topic_id,
+                                success: true,
+                                parsed_count: 0,
+                                failed_count: 0,
+                                error: None,
+                            });
+                        }
                     }
                 }
             }

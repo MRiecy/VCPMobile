@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, onUnmounted } from 'vue';
 import DOMPurify from 'dompurify';
-import hljs from 'highlight.js';
 import { useThemeStore } from '../../../core/stores/theme';
 
 const props = defineProps<{
@@ -14,9 +13,14 @@ const isPreviewing = ref(false); // 默认开启代码模式，减小开销
 const isFullScreen = ref(false);
 const fullScreenTab = ref<'code' | 'preview'>('code');
 
-// 语法高亮处理
+// 代码预览转义处理 (基础安全 HTML 转义，不再依赖 highlight.js)
 const highlightedCode = computed(() => {
-  return hljs.highlight(props.content, { language: 'xml' }).value;
+  return props.content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 });
 
 // 复制功能
