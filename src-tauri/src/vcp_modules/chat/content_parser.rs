@@ -367,7 +367,14 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             // 1. 将起始标记之前的文本作为 Markdown 块推入
             if start_idx > 0 {
                 let md_text = &remaining[..start_idx];
-                blocks.extend(parse_inline_blocks(md_text));
+                if md_text.contains("[[点击按钮:") {
+                    blocks.extend(parse_inline_blocks(md_text));
+                } else {
+                    blocks.push(ContentBlock::markdown(
+                        None,
+                        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(md_text)),
+                    ));
+                }
             }
 
             // 识别匹配到的块类型
@@ -600,7 +607,14 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             }
         } else {
             // 没有找到任何特种块，剩余部分全部作为 Markdown 处理
-            blocks.extend(parse_inline_blocks(remaining));
+            if remaining.contains("[[点击按钮:") {
+                blocks.extend(parse_inline_blocks(remaining));
+            } else {
+                blocks.push(ContentBlock::markdown(
+                    None,
+                    Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(remaining)),
+                ));
+            }
             break;
         }
     }
@@ -652,12 +666,15 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
 fn extract_tool_name(content: &str) -> String {
     if let Some(caps) = TOOL_NAME.captures(content) {
         if let Some(m) = caps.get(1).or_else(|| caps.get(2)) {
-            let mut name = m.as_str().trim().to_string();
-            name = name
-                .replace("「始」", "")
-                .replace("「末」", "")
-                .replace("「始exp」", "")
-                .replace("「末exp」", "");
+            let s = m.as_str().trim();
+            let mut name = if s.contains('「') {
+                s.replace("「始」", "")
+                    .replace("「末」", "")
+                    .replace("「始exp」", "")
+                    .replace("「末exp」", "")
+            } else {
+                s.to_string()
+            };
             if name.ends_with(',') {
                 name.pop();
             }
@@ -697,16 +714,22 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
     let mut tool_name = "Unknown Tool".to_string();
     let mut status = "Unknown Status".to_string();
     let mut details = Vec::new();
-    let mut footer_lines = Vec::new();
+    let mut footer = String::new();
 
     let mut current_key: Option<String> = None;
-    let mut current_value_lines: Vec<String> = Vec::new();
+    let mut current_value = String::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if let Some(captures) = KV_REGEX.captures(trimmed) {
+        let captures = if trimmed.starts_with('-') {
+            KV_REGEX.captures(trimmed)
+        } else {
+            None
+        };
+
+        if let Some(captures) = captures {
             if let Some(key) = current_key.take() {
-                let val = current_value_lines.join("\n").trim().to_string();
+                let val = current_value.trim().to_string();
                 if key == "工具名称" {
                     tool_name = val;
                 } else if key == "执行状态" {
@@ -717,17 +740,25 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
             }
             if let (Some(key_match), Some(val_match)) = (captures.get(1), captures.get(2)) {
                 current_key = Some(key_match.as_str().trim().to_string());
-                current_value_lines = vec![val_match.as_str().trim().to_string()];
+                current_value = val_match.as_str().trim().to_string();
+            } else {
+                current_value = String::new();
             }
         } else if current_key.is_some() {
-            current_value_lines.push(line.to_string());
+            if !current_value.is_empty() {
+                current_value.push('\n');
+            }
+            current_value.push_str(line);
         } else if !trimmed.is_empty() {
-            footer_lines.push(line.to_string());
+            if !footer.is_empty() {
+                footer.push('\n');
+            }
+            footer.push_str(line);
         }
     }
 
     if let Some(key) = current_key {
-        let val = current_value_lines.join("\n").trim().to_string();
+        let val = current_value.trim().to_string();
         if key == "工具名称" {
             tool_name = val;
         } else if key == "执行状态" {
@@ -737,5 +768,5 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
         }
     }
 
-    (tool_name, status, details, footer_lines.join("\n"))
+    (tool_name, status, details, footer)
 }
