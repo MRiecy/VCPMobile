@@ -145,10 +145,9 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
 /// 防止 pulldown-cmark 将缩进内容误识别为 Indented Code Block。
 pub(crate) fn trim_common_leading_indent(text: &str) -> String {
     let mut min_indent = usize::MAX;
-    let mut lines = Vec::new();
 
+    // 第一遍：纯计算最小公共前导缩进（利用 split 惰性迭代，零堆分配）
     for line in text.split('\n') {
-        lines.push(line);
         let trimmed = line.trim();
         if !trimmed.is_empty() && trimmed != "<br>" && trimmed != "<br/>" {
             let mut indent = 0;
@@ -171,8 +170,9 @@ pub(crate) fn trim_common_leading_indent(text: &str) -> String {
         return text.to_string();
     }
 
+    // 第二遍：直接 split('\n') 惰性迭代追加到预分容量的 result 中，彻底消除 Vec 缓存
     let mut result = String::with_capacity(text.len());
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in text.split('\n').enumerate() {
         if i > 0 {
             result.push('\n');
         }
