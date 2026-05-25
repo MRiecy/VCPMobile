@@ -219,6 +219,7 @@ pub(crate) enum BlockType {
     Diary,
     HtmlFence,
     HtmlDoc,
+    HtmlContainer,
     Style,
     RoleDivider,
     CodeFence,
@@ -257,6 +258,9 @@ lazy_static! {
     // 修复：强行增加行首锚定符 ^，防止正文中的内联 `<!DOCTYPE html>` 触发解析截断
     pub(crate) static ref HTML_DOC_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
     pub(crate) static ref HTML_DOC_END: Regex = Regex::new(r"(?i)</html>").unwrap();
+
+    pub(crate) static ref HTML_CONTAINER_OPEN_RE: Regex =
+        Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
 
     pub(crate) static ref ROLE_DIVIDER: Regex = Regex::new(r"(?im)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
     pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?i)<style\b[^>]*>").unwrap();
@@ -319,8 +323,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
     let mut current_pos = 0;
 
     // 预编译主匹配正则（包含所有特种块起始标记，利用捕获组编号识别类型）
-    // 捕获组对应关系：
-    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_FENCE, 7: HTML_DOC, 8: ROLE_DIVIDER, 9: STYLE, 10: CODE_FENCE
+    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_FENCE, 7: HTML_DOC, 8: ROLE_DIVIDER, 9: STYLE, 10: CODE_FENCE, 11: HTML_CONTAINER
     lazy_static! {
         static ref MASTER_START: Regex = Regex::new(concat!(
             r"(?im)",
@@ -333,7 +336,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 7
             r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 8
             r"(<style\b[^>]*>)|",                                      // 9
-            r"(^[ \t]*```[a-zA-Z0-9-]*[ \t]*$)"                         // 10
+            r"(^[ \t]*```[a-zA-Z0-9-]*[ \t]*$)|",                       // 10
+            r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)" // 11
         )).unwrap();
     }
 
@@ -352,6 +356,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             }
 
             // 识别匹配到的块类型
+            let mut container_tag = String::new();
             let block_type = if caps.get(1).is_some() {
                 BlockType::Tool
             } else if caps.get(2).is_some() {
@@ -370,8 +375,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                 BlockType::RoleDivider
             } else if caps.get(9).is_some() {
                 BlockType::Style
-            } else {
+            } else if caps.get(10).is_some() {
                 BlockType::CodeFence
+            } else {
+                container_tag = caps.get(11).unwrap().as_str().to_lowercase();
+                BlockType::HtmlContainer
             };
 
             // 2. 寻找对应的结束标记
@@ -412,6 +420,10 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
                     }),
+                BlockType::HtmlContainer => crate::vcp_modules::chat::pre_renderer::markdown_parser::find_matching_close_tag(remaining, content_start, &container_tag)
+                    .map_or((None, None, false), |(s, e)| {
+                        (Some(s - content_start), Some(e - content_start), true)
+                    }),
                 BlockType::RoleDivider => (Some(0), Some(0), true),
                 BlockType::Style => STYLE_TAG_END
                     .find(search_area)
@@ -431,6 +443,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     block_type,
                     BlockType::HtmlFence
                         | BlockType::HtmlDoc
+                        | BlockType::HtmlContainer
                         | BlockType::CodeFence
                         | BlockType::RoleDivider
                 )
@@ -512,6 +525,22 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         }
                     }
                     ContentBlock::html_preview(full_html)
+                }
+                BlockType::HtmlContainer => {
+                    let mut full_html = String::new();
+                    full_html.push_str(&remaining[start_idx..end_idx]);
+                    full_html.push_str(inner_content);
+                    if is_complete {
+                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
+                            full_html.push_str(&search_area[s..e]);
+                        }
+                    }
+                    ContentBlock::markdown(
+                        None,
+                        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                            &full_html,
+                        )),
+                    )
                 }
                 BlockType::RoleDivider => {
                     let marker_text = &remaining[start_idx..end_idx];

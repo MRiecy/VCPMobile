@@ -170,7 +170,7 @@ fn trim_common_leading_indent(text: &str) -> String {
 }
 
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
-fn find_matching_close_tag(text: &str, start_pos: usize, tag: &str) -> Option<(usize, usize)> {
+pub(crate) fn find_matching_close_tag(text: &str, start_pos: usize, tag: &str) -> Option<(usize, usize)> {
     let lower = text.to_lowercase();
     let close_pat = format!("</{}>", tag);
     let open_pat1 = format!("<{}>", tag);
