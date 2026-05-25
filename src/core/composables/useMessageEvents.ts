@@ -16,6 +16,42 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
       return;
     }
 
+    // 1.5 拦截 AI 回复中生成的内嵌 <button> 元素
+    const aiButton = target.closest('button') as HTMLButtonElement | null;
+    if (aiButton) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // 如果按钮已被禁用，直接拦截，防止重复点击
+      if (aiButton.disabled) {
+        return;
+      }
+
+      // 提取发送文本（优先级：data-send 属性 > 按钮 textContent）
+      const sendText = aiButton.getAttribute('data-send') || aiButton.textContent?.trim();
+      if (sendText) {
+        let finalSendText = `[[点击按钮:${sendText}]]`;
+
+        // 超长文本截断（防超限）
+        if (finalSendText.length > 500) {
+          const maxTextLength = 500 - '[[点击按钮:]]'.length;
+          const truncatedText = sendText.substring(0, maxTextLength);
+          finalSendText = `[[点击按钮:${truncatedText}]]`;
+        }
+
+        // 按钮物理禁用与状态置灰反馈（与桌面端一致）
+        aiButton.disabled = true;
+        aiButton.style.opacity = '0.6';
+        aiButton.style.cursor = 'not-allowed';
+        const originalText = aiButton.textContent || '';
+        aiButton.textContent = originalText + ' ✓';
+
+        // 发送消息
+        historyStore.sendMessage(finalSendText);
+      }
+      return;
+    }
+
     // 2. 外部链接
     const externalLink = target.closest('a[href^="http"]');
     if (externalLink) {

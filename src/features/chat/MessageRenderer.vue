@@ -127,12 +127,16 @@ function renderBlockHtml(block: ContentBlock): string {
         </div>
       `;
 
-    case "button-click":
+    case "button-click": {
+      const escapedContent = escapeHtml(block.content || "");
+      const finalText = `[[点击按钮:${block.content || ""}]]`;
       return `
-        <div class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1">
-          ${escapeHtml(block.content || "")}
+        <div class="inline-block px-3 py-1 bg-black/10 dark:bg-white/10 rounded-full text-[10px] font-bold opacity-70 my-1 cursor-pointer active:opacity-40 transition-opacity select-none border border-black/5 dark:border-white/5 active:scale-95 duration-75 transform"
+             data-vcp-button="${escapeHtml(finalText)}">
+          ${escapedContent}
         </div>
       `;
+    }
 
     case "style":
       return "";
