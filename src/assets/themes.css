@@ -44,6 +44,8 @@ body {
   overflow: hidden;
   /* 禁止系统滚动回弹 */
   overscroll-behavior: none;
+  /* 彻底禁止双指缩放引起的拉伸 (替代 user-scalable=no) */
+  touch-action: pan-x pan-y;
 }
 
 /* --- 根容器防拉伸 (Targeted Rubber-band Control) --- */

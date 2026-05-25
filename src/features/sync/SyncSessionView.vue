@@ -188,7 +188,7 @@ const handleClose = async () => {
 
           <!-- 日志终端 -->
           <div class="flex-1 px-4 overflow-hidden flex flex-col min-h-0">
-            <div ref="logContainer" class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto flex flex-col min-h-0">
+            <div ref="logContainer" class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto no-rubber-band flex flex-col min-h-0">
               <div v-if="store.logs.length === 0" class="text-white/20 italic">
                 等待连接...
               </div>

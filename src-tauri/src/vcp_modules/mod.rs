@@ -42,7 +42,6 @@ pub use sync::sync_dto;
 pub use sync::sync_executor;
 pub use sync::sync_hash;
 pub use sync::sync_logger;
-pub use sync::sync_manifest;
 pub use sync::sync_pipeline;
 pub use sync::sync_service;
 pub use sync::sync_types;

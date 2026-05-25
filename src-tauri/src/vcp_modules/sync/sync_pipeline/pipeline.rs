@@ -1,6 +1,43 @@
-use crate::vcp_modules::sync_pipeline::pipeline_state::{PhaseProgress, PipelinePhase};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseProgress {
+    pub total: u32,
+    pub completed: u32,
+    pub pending: Vec<String>,
+}
+
+impl PhaseProgress {
+    pub fn new() -> Self {
+        Self {
+            total: 0,
+            completed: 0,
+            pending: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum PipelinePhase {
+    #[default]
+    Idle,
+    Phase1Metadata {
+        progress: PhaseProgress,
+    },
+    Phase2TopicMetadata {
+        progress: PhaseProgress,
+    },
+    Phase3Messages {
+        progress: PhaseProgress,
+    },
+    Completed,
+    Failed {
+        error: String,
+        phase: String,
+    },
+}
 
 pub enum PipelineCommand {
     StartTopicMetadata,   // Phase 2: Pull missing configs
@@ -20,6 +57,11 @@ impl SyncPipeline {
             state: Arc::new(RwLock::new(PipelinePhase::Idle)),
             command_tx,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn get_state(&self) -> Arc<RwLock<PipelinePhase>> {
+        self.state.clone()
     }
 
     /// 进入 Phase 2: Topic 元数据补全

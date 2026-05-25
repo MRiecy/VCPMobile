@@ -103,7 +103,7 @@ onMounted(() => {
 <template>
   <div class="h-full flex flex-col overflow-hidden">
     <!-- File List -->
-    <div v-if="!currentFile" class="flex-1 overflow-y-auto">
+    <div v-if="!currentFile" class="flex-1 overflow-y-auto no-rubber-band">
       <div v-if="loading" class="flex items-center justify-center h-32 text-white/30 text-xs">
         加载中...
       </div>
@@ -151,7 +151,7 @@ onMounted(() => {
         </button>
       </div>
 
-      <div class="flex-1 overflow-y-auto overflow-x-auto px-4 py-3 font-mono text-[10px] leading-relaxed min-w-0">
+      <div class="flex-1 overflow-y-auto overflow-x-auto px-4 py-3 font-mono text-[10px] leading-relaxed min-w-0 no-rubber-band">
         <div v-for="(line, i) in visibleLines()" :key="i"
           class="whitespace-nowrap text-white/70"
           :class="{

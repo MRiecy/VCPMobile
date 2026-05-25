@@ -400,7 +400,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             } else if caps.get(10).is_some() {
                 BlockType::CodeFence
             } else {
-                container_tag = caps.get(11).unwrap().as_str().to_lowercase();
+                container_tag = caps.get(12).unwrap().as_str().to_lowercase();
                 BlockType::HtmlContainer
             };
 

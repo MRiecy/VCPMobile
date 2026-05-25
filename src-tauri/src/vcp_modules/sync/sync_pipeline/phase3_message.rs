@@ -35,8 +35,12 @@ impl Phase3Message {
 
         let mut result = HashMap::new();
         for row in rows {
+            let topic_id: String = row.get("topic_id");
+            if topic_id == "default" {
+                continue;
+            }
             result.insert(
-                row.get::<String, _>("topic_id"),
+                topic_id,
                 (
                     row.get::<String, _>("config_hash"),
                     row.get::<String, _>("content_hash"),

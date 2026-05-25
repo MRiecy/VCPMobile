@@ -95,68 +95,68 @@ async fn process_topic_messages<R: Runtime>(
     let parsed_count = parsed_messages.len();
 
     if !parsed_messages.is_empty() {
-        // 3. 顺序处理 (Sequential Processing): 预渲染 + 指纹计算 + Zstd 压缩
-        // 注: 取消了 Rayon 宏观侵入，因为在 Tokio Worker 级别已经实现了 Topic 并发，微观并行反而会增加调度开销并破坏缓存局部性
+        // 3. 将预渲染和 Zstd 压缩等 CPU 密集型任务完美剥离至 spawn_blocking 线程池，解除 Tokio Worker 线程阻塞
+        let topic_id_clone = topic_id.to_string();
+        let (parsed_messages_back, content_hashes, render_bytes_list, compressed_contents) =
+            tokio::task::spawn_blocking(move || {
+                let count = parsed_messages.len();
+                let mut content_hashes = Vec::with_capacity(count);
+                let mut render_bytes_list = Vec::with_capacity(count);
+                let mut compressed_contents = Vec::with_capacity(count);
 
-        let results: Vec<(String, Vec<u8>, Vec<u8>)> = parsed_messages
-            .iter()
-            .map(|msg| {
-                // A. 计算指纹
-                let attachment_hashes: Vec<String> = msg
-                    .attachments
-                    .as_ref()
-                    .map(|atts| {
-                        atts.iter()
-                            .map(|a| a.hash.clone().unwrap_or_default())
-                            .filter(|h| !h.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let content_hash =
-                    HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
+                for msg in &parsed_messages {
+                    // A. 计算指纹
+                    let attachment_hashes: Vec<String> = msg
+                        .attachments
+                        .as_ref()
+                        .map(|atts| {
+                            atts.iter()
+                                .map(|a| a.hash.clone().unwrap_or_default())
+                                .filter(|h| !h.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let content_hash =
+                        HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
 
-                // B. 预渲染 & 文本压缩 (保留 std::panic::catch_unwind 进行安全包装)
-                let content = &msg.content;
-                let topic_id_log = topic_id.to_string();
-                let msg_id_log = msg.id.clone();
+                    // B. 预渲染 & 文本压缩 (保留 std::panic::catch_unwind 进行安全包装)
+                    let content = &msg.content;
+                    let topic_id_log = topic_id_clone.clone();
+                    let msg_id_log = msg.id.clone();
 
-                let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let blocks = MessageRenderCompiler::compile(content);
-                    let rb = MessageRenderCompiler::serialize(&blocks).unwrap_or_default();
-                    let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(content).unwrap_or_default();
-                    (rb, cc)
-                }));
+                    let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let blocks = MessageRenderCompiler::compile(content);
+                        let rb = MessageRenderCompiler::serialize(&blocks).unwrap_or_default();
+                        let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(content).unwrap_or_default();
+                        (rb, cc)
+                    }));
 
-                let (rb, cc) = match comp_res {
-                    Ok(val) => val,
-                    Err(_) => {
-                        println!(
-                            "[PullExecutor] Compile/Compress panicked for msg {} (topic {})",
-                            msg_id_log, topic_id_log
-                        );
-                        (Vec::new(), Vec::new())
-                    }
-                };
+                    let (rb, cc) = match comp_res {
+                        Ok(val) => val,
+                        Err(_) => {
+                            println!(
+                                "[PullExecutor] Compile/Compress panicked for msg {} (topic {})",
+                                msg_id_log, topic_id_log
+                            );
+                            (Vec::new(), Vec::new())
+                        }
+                    };
 
-                (content_hash, rb, cc)
+                    content_hashes.push(content_hash);
+                    render_bytes_list.push(rb);
+                    compressed_contents.push(cc);
+                }
+
+                (parsed_messages, content_hashes, render_bytes_list, compressed_contents)
             })
-            .collect();
-
-        let mut content_hashes = Vec::with_capacity(parsed_count);
-        let mut render_bytes_list = Vec::with_capacity(parsed_count);
-        let mut compressed_contents = Vec::with_capacity(parsed_count);
-
-        for (content_hash, rb, cc) in results {
-            content_hashes.push(content_hash);
-            render_bytes_list.push(rb);
-            compressed_contents.push(cc);
-        }
+            .await
+            .map_err(|e| format!("Spawn blocking failed: {}", e))?;
 
         // 4. 提交落盘
         write_queue
             .submit(DbWriteTask::TopicMessages {
                 topic_id: topic_id.to_string(),
-                messages: parsed_messages,
+                messages: parsed_messages_back,
                 compressed_contents,
                 render_bytes: render_bytes_list,
                 content_hashes,
