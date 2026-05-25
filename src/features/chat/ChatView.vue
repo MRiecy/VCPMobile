@@ -209,7 +209,7 @@ onUnmounted(() => {
     </header>
 
     <!-- 2. 消息展示区 (确保 flex-1 撑开) -->
-    <div ref="messageListRef" class="flex-1 overflow-y-auto py-4 space-y-2 relative no-rubber-band">
+    <div ref="messageListRef" class="flex-1 overflow-y-auto relative no-rubber-band">
       <!-- 零数据引导状态 -->
       <div v-if="historyStore.currentChatHistory.length === 0"
         class="absolute inset-0 flex flex-col items-center justify-center text-center px-10">
@@ -234,15 +234,17 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <MessageRenderer
-        v-for="msg in historyStore.currentChatHistory"
-        :key="msg.id"
-        :message="msg"
-        :agent-id="sessionStore.currentSelectedItem?.id"
-        :data-message-id="msg.id"
-      />
-      <!-- 底部留白，避免最后一条消息被输入框遮挡 -->
-      <div class="h-20"></div>
+      <div class="messages-inner-container py-4 space-y-2 flex flex-col min-h-full">
+        <MessageRenderer
+          v-for="msg in historyStore.currentChatHistory"
+          :key="msg.id"
+          :message="msg"
+          :agent-id="sessionStore.currentSelectedItem?.id"
+          :data-message-id="msg.id"
+        />
+        <!-- 底部留白，避免最后一条消息被输入框遮挡 -->
+        <div class="h-20"></div>
+      </div>
     </div>
 
     <!-- 一键置底按钮 -->

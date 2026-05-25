@@ -29,11 +29,16 @@ export function useChatScroll(options: UseChatScrollOptions) {
   const showScrollToBottom = ref(false);
   const scrollScene = ref<ScrollScene>("initial");
 
+  // 高性能测量与安全保护罩状态
+  let lastScrollHeight = 0;
+  const isInitialRendering = ref(true);
+
   // 加载锚点：记录加载前视口中最顶部可见消息
   let loadAnchor: { messageId: string; offsetFromTop: number } | null = null;
   let scrollThrottleId: number | null = null;
-  let mutationObserver: MutationObserver | null = null;
+  let resizeObserver: ResizeObserver | null = null;
   let scrollRafId: number | null = null;
+  let loadMoreDebounceId: number | null = null;
 
   const scrollToBottom = (smooth = false) => {
     const list = messageListRef.value;
@@ -71,10 +76,46 @@ export function useChatScroll(options: UseChatScrollOptions) {
     loadAnchor = null;
   };
 
+  // --- 自动加载历史几何判定与防抖 ---
+  const evaluateAutoLoadMore = () => {
+    const list = messageListRef.value;
+    if (!list) return;
+
+    // 首屏防抖稳定后，关闭首屏渲染保护罩
+    isInitialRendering.value = false;
+
+    if (
+      scrollScene.value !== "initial" &&
+      list.scrollHeight <= list.clientHeight + 10 &&
+      hasMoreHistory.value &&
+      !isLoadingHistory.value
+    ) {
+      console.log(`[useChatScroll] Auto loading more because height (${list.scrollHeight}) <= clientHeight (${list.clientHeight}) + 10`);
+      prepareLoadAnchor();
+      scrollScene.value = "loading-top";
+      onLoadMore();
+    }
+  };
+
+  const triggerAutoLoadMoreWithDebounce = () => {
+    if (loadMoreDebounceId) {
+      clearTimeout(loadMoreDebounceId);
+    }
+    loadMoreDebounceId = setTimeout(() => {
+      loadMoreDebounceId = null;
+      evaluateAutoLoadMore();
+    }, 200) as unknown as number; // 200ms 防抖，完美等待图片、头像与异步排版彻底稳定
+  };
+
   // --- 内容变化处理（等效于 ResizeObserver 的布局稳定信号）---
   const handleContentChange = () => {
     const list = messageListRef.value;
     if (!list) return;
+
+    const currentScrollHeight = list.scrollHeight;
+    // 高度物理守卫：物理高度若无实质变化，瞬间拦截并退出。这极大释放了 CPU 性能，并从物理上秒杀了用户手动上滑时的误置底无限回弹 Bug
+    if (currentScrollHeight === lastScrollHeight) return;
+    lastScrollHeight = currentScrollHeight;
 
     // 场景1：首屏加载完成（initial → following/free）
     if (scrollScene.value === "initial") {
@@ -82,19 +123,12 @@ export function useChatScroll(options: UseChatScrollOptions) {
         if (messageCount.value > 0) {
           scrollToBottom(false);
           scrollScene.value = "following";
-          // 首屏置底后，如果内容仍未撑满容器，自动续载
-          if (
-            list.scrollHeight <= list.clientHeight + 10 &&
-            hasMoreHistory.value &&
-            !isLoadingHistory.value
-          ) {
-            prepareLoadAnchor();
-            scrollScene.value = "loading-top";
-            onLoadMore();
-          }
+          // 状态迁移后，触发防抖续载判定，防抖时间内的高频高度增长（如头像加载）会重定位滚动位置并推迟加载
+          triggerAutoLoadMoreWithDebounce();
         } else {
           // 首屏无消息，切换到 free，允许用户上滑尝试加载
           scrollScene.value = "free";
+          isInitialRendering.value = false; // 空状态直接解除首屏保护罩
         }
       }
       return;
@@ -116,48 +150,41 @@ export function useChatScroll(options: UseChatScrollOptions) {
     // 场景3：跟随模式下的新内容/流式追加
     if (scrollScene.value === "following" && !showScrollToBottom.value) {
       scrollToBottom(false);
+      // 随着内容变动，持续评估并推迟可能的自动续载
+      triggerAutoLoadMoreWithDebounce();
       return;
     }
 
-    // 场景4：内容不足自动续载（执行到此处时 scrollScene 已不可能是 initial）
-    if (
-      list.scrollHeight <= list.clientHeight + 10 &&
-      hasMoreHistory.value &&
-      !isLoadingHistory.value
-    ) {
-      prepareLoadAnchor();
-      scrollScene.value = "loading-top";
-      onLoadMore();
-    }
+    // 场景4：其他高度变化引起的续载评估
+    triggerAutoLoadMoreWithDebounce();
   };
 
-  // --- MutationObserver：监听 DOM 变化，双重 RAF 确保布局稳定后处理 ---
+  // --- ResizeObserver：监听 DOM 物理渲染尺寸变化 ---
   const startContentObserver = () => {
-    if (mutationObserver || !messageListRef.value) return;
+    const list = messageListRef.value;
+    if (!list) return;
 
-    mutationObserver = new MutationObserver(() => {
-      // RAF 节流：合并同一帧内的所有变化
+    if (resizeObserver) return;
+
+    // 优先监听专门用于测量高度的内部容器，它是无条件渲染的，100% 存在
+    const target = list.querySelector(".messages-inner-container") || list;
+
+    resizeObserver = new ResizeObserver(() => {
+      // 节流处理，合并单帧内的高频尺寸变动
       if (scrollRafId) cancelAnimationFrame(scrollRafId);
       scrollRafId = requestAnimationFrame(() => {
         scrollRafId = null;
-        // 第二次 RAF：确保浏览器布局计算已完成
-        requestAnimationFrame(() => {
-          handleContentChange();
-        });
+        handleContentChange();
       });
     });
 
-    mutationObserver.observe(messageListRef.value, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
+    resizeObserver.observe(target);
   };
 
   const stopContentObserver = () => {
-    if (mutationObserver) {
-      mutationObserver.disconnect();
-      mutationObserver = null;
+    if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
     }
     if (scrollRafId) {
       cancelAnimationFrame(scrollRafId);
@@ -172,6 +199,13 @@ export function useChatScroll(options: UseChatScrollOptions) {
       scrollThrottleId = null;
       const list = messageListRef.value;
       if (!list) return;
+
+      // 如果首屏渲染尚未彻底完成稳定（高度还在持续图片加载增长），屏蔽自由滚动，防止状态机提前叛逃
+      if (isInitialRendering.value) {
+        showScrollToBottom.value = false;
+        scrollScene.value = "following";
+        return;
+      }
 
       const nearTop = list.scrollTop < 100;
       const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
@@ -212,7 +246,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     }
   });
 
-  // --- 监听 isLoadingHistory：兜底恢复（应对 MutationObserver 未及时触发的情况）---
+  // --- 监听 isLoadingHistory：兜底恢复（应对 ResizeObserver 未及时触发的情况）---
   watch(isLoadingHistory, async (loading) => {
     if (loading) return;
 
@@ -233,6 +267,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
       scrollScene.value = "initial";
       showScrollToBottom.value = false;
       loadAnchor = null;
+      lastScrollHeight = 0;
+      isInitialRendering.value = true;
     }
   });
 
@@ -241,14 +277,20 @@ export function useChatScroll(options: UseChatScrollOptions) {
     scrollScene.value = "initial";
     showScrollToBottom.value = false;
     loadAnchor = null;
+    lastScrollHeight = 0;
+    isInitialRendering.value = true;
     if (scrollRafId) {
       cancelAnimationFrame(scrollRafId);
       scrollRafId = null;
     }
+    if (loadMoreDebounceId) {
+      clearTimeout(loadMoreDebounceId);
+      loadMoreDebounceId = null;
+    }
   };
 
   const startAutoScroll = () => {
-    // 新架构中由 MutationObserver 自动处理，此函数保留以保持调用方兼容
+    // 新架构中由 ResizeObserver 自动处理，此函数保留以保持调用方兼容
   };
 
   const stopAutoScroll = () => {
@@ -256,18 +298,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
   };
 
   const checkAndLoadMore = () => {
-    const list = messageListRef.value;
-    if (!list) return;
-    if (
-      scrollScene.value !== "initial" &&
-      list.scrollHeight <= list.clientHeight + 10 &&
-      hasMoreHistory.value &&
-      !isLoadingHistory.value
-    ) {
-      prepareLoadAnchor();
-      scrollScene.value = "loading-top";
-      onLoadMore();
-    }
+    triggerAutoLoadMoreWithDebounce();
   };
 
   const dispose = () => {
@@ -275,6 +306,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
     if (scrollThrottleId) {
       cancelAnimationFrame(scrollThrottleId);
       scrollThrottleId = null;
+    }
+    if (loadMoreDebounceId) {
+      clearTimeout(loadMoreDebounceId);
+      loadMoreDebounceId = null;
     }
     if (messageListRef.value) {
       messageListRef.value.removeEventListener("scroll", onScroll);

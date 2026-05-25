@@ -145,10 +145,22 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
 /// 防止 pulldown-cmark 将缩进内容误识别为 Indented Code Block。
 pub(crate) fn trim_common_leading_indent(text: &str) -> String {
     let mut min_indent = usize::MAX;
+    let mut lines = Vec::new();
 
     for line in text.split('\n') {
-        if !line.chars().all(|c| c.is_whitespace()) {
-            let indent = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+        lines.push(line);
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && trimmed != "<br>" && trimmed != "<br/>" {
+            let mut indent = 0;
+            for c in line.chars() {
+                if c == ' ' {
+                    indent += 1;
+                } else if c == '\t' {
+                    indent += 4;
+                } else {
+                    break;
+                }
+            }
             if indent < min_indent {
                 min_indent = indent;
             }
@@ -159,16 +171,38 @@ pub(crate) fn trim_common_leading_indent(text: &str) -> String {
         return text.to_string();
     }
 
-    text.split('\n')
-        .map(|line| {
-            if line.chars().all(|c| c.is_whitespace()) {
-                String::new()
-            } else {
-                line.chars().skip(min_indent).collect::<String>()
+    let mut result = String::with_capacity(text.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        if line.chars().all(|c| c.is_whitespace()) {
+            // 保留空行，清除空格噪音
+        } else {
+            let mut skipped = 0;
+            let mut char_indices = line.char_indices();
+            let mut skip_bytes = 0;
+            
+            while skipped < min_indent {
+                if let Some((idx, c)) = char_indices.next() {
+                    if c == ' ' {
+                        skipped += 1;
+                        skip_bytes = idx + 1;
+                    } else if c == '\t' {
+                        skipped += 4;
+                        skip_bytes = idx + 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
-        })
-        .collect::<Vec<String>>()
-        .join("\n")
+            result.push_str(&line[skip_bytes..]);
+        }
+    }
+
+    result
 }
 
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
@@ -176,7 +210,26 @@ pub(crate) fn find_matching_close_tag(text: &str, start_pos: usize, tag: &str) -
     let mut depth = 1;
     let search_area = &text[start_pos..];
 
+    // 预先收集 search_area 中所有标准代码围栏的物理范围（支持流式未闭合边界）
+    let mut fence_ranges = Vec::new();
+    let mut fence_iter = FENCE_RE.find_iter(search_area);
+    while let Some(start) = fence_iter.next() {
+        if let Some(end) = fence_iter.next() {
+            fence_ranges.push(start.start()..end.end());
+        } else {
+            fence_ranges.push(start.start()..search_area.len());
+        }
+    }
+
     for cap in TAG_SCANNER.captures_iter(search_area) {
+        let full_match = cap.get(0).unwrap();
+        let cap_start = full_match.start();
+
+        // 健壮性防御：如果当前扫描到的 HTML 标签处于代码块围栏内部，直接跳过
+        if fence_ranges.iter().any(|range| range.contains(&cap_start)) {
+            continue;
+        }
+
         let is_close_tag = cap.get(1).unwrap().as_str() == "</";
         let tag_name = cap.get(2).unwrap().as_str();
 
