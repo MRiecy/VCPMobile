@@ -25,6 +25,7 @@ async fn process_topic_messages<R: Runtime>(
     topic_id: &str,
     mut parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
     write_queue: &DbWriteQueue,
+    prerender_enabled: bool,
 ) -> Result<(usize, usize), String> {
     use crate::vcp_modules::db_manager::DbState;
     use sqlx::Row;
@@ -119,27 +120,29 @@ async fn process_topic_messages<R: Runtime>(
                     let content_hash =
                         HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
 
-                    // B. 预渲染 & 文本压缩 (保留 std::panic::catch_unwind 进行安全包装)
+                    // B. 文本压缩（始终执行）+ 预渲染（按开关控制）
                     let content = &msg.content;
                     let topic_id_log = topic_id_clone.clone();
                     let msg_id_log = msg.id.clone();
 
-                    let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let blocks = MessageRenderCompiler::compile(content);
-                        let rb = MessageRenderCompiler::serialize(&blocks).unwrap_or_default();
-                        let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(content).unwrap_or_default();
-                        (rb, cc)
-                    }));
-
-                    let (rb, cc) = match comp_res {
-                        Ok(val) => val,
-                        Err(_) => {
-                            println!(
-                                "[PullExecutor] Compile/Compress panicked for msg {} (topic {})",
-                                msg_id_log, topic_id_log
-                            );
-                            (Vec::new(), Vec::new())
+                    let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(content).unwrap_or_default();
+                    let rb = if prerender_enabled {
+                        let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let blocks = MessageRenderCompiler::compile(content);
+                            MessageRenderCompiler::serialize(&blocks).unwrap_or_default()
+                        }));
+                        match comp_res {
+                            Ok(val) => val,
+                            Err(_) => {
+                                println!(
+                                    "[PullExecutor] Compile panicked for msg {} (topic {})",
+                                    msg_id_log, topic_id_log
+                                );
+                                Vec::new()
+                            }
                         }
+                    } else {
+                        Vec::new()
                     };
 
                     content_hashes.push(content_hash);
@@ -531,6 +534,7 @@ impl PullExecutor {
         sync_token: &str,
         requests: &[(String, Vec<String>)], // (topic_id, msg_ids), 空 vec = 拉全部消息
         write_queue: &DbWriteQueue,
+        prerender_enabled: bool,
     ) -> Result<Vec<BatchPullResult>, String> {
         if requests.is_empty() {
             return Ok(Vec::new());
@@ -674,7 +678,7 @@ impl PullExecutor {
                 let tx_clone = tx.clone();
                 let handle = tokio::spawn(async move {
                     let _permit = permit; // 持有 permit 直到任务完成
-                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone).await {
+                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
                         Ok((parsed, failed)) => {
                             let _ = tx_clone.send(BatchPullResult {
                                 topic_id,
@@ -724,7 +728,7 @@ impl PullExecutor {
                                 let tx_clone = tx.clone();
                                 let handle = tokio::spawn(async move {
                                     let _permit = permit;
-                                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone).await {
+                                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
                                         Ok((parsed, failed)) => {
                                             let _ = tx_clone.send(BatchPullResult {
                                                 topic_id,

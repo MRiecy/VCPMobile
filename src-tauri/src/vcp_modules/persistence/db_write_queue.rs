@@ -517,36 +517,45 @@ impl DbWriteQueue {
             stmt_msgs.execute(&*refs_msgs)?;
 
             // 2. 批量插入 render_cache 表
-            let mut sql_render = String::from(
-                "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES ",
-            );
+            // 过滤出有实际预渲染内容的消息（当预渲染关闭时，所有 render_bytes 均为空）
+            let render_chunk: Vec<_> = chunk_indices
+                .iter()
+                .map(|&(idx, msg)| (idx, msg))
+                .filter(|(idx, _)| !render_bytes[*idx].is_empty())
+                .collect();
 
-            for i in 0..chunk_indices.len() {
-                if i > 0 {
-                    sql_render.push_str(", ");
+            if !render_chunk.is_empty() {
+                let mut sql_render = String::from(
+                    "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES ",
+                );
+
+                for i in 0..render_chunk.len() {
+                    if i > 0 {
+                        sql_render.push_str(", ");
+                    }
+                    sql_render.push_str("(?, ?, ?, ?)");
                 }
-                sql_render.push_str("(?, ?, ?, ?)");
+
+                sql_render.push_str(
+                    " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+                        render_content = excluded.render_content,
+                        updated_at = excluded.updated_at",
+                );
+
+                let mut stmt_render = tx.prepare_cached(&sql_render)?;
+                let mut params_render: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+                for (idx, msg) in render_chunk {
+                    params_render.push(Box::new(topic_id.to_string()));
+                    params_render.push(Box::new(msg.id.clone()));
+                    params_render.push(Box::new(render_bytes[idx].clone()));
+                    params_render.push(Box::new(now));
+                }
+
+                let refs_render: Vec<&dyn rusqlite::ToSql> =
+                    params_render.iter().map(|p| p.as_ref()).collect();
+                stmt_render.execute(&*refs_render)?;
             }
-
-            sql_render.push_str(
-                " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
-                    render_content = excluded.render_content,
-                    updated_at = excluded.updated_at",
-            );
-
-            let mut stmt_render = tx.prepare_cached(&sql_render)?;
-            let mut params_render: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-
-            for (idx, msg) in chunk_indices {
-                params_render.push(Box::new(topic_id.to_string()));
-                params_render.push(Box::new(msg.id.clone()));
-                params_render.push(Box::new(render_bytes[*idx].clone()));
-                params_render.push(Box::new(now));
-            }
-
-            let refs_render: Vec<&dyn rusqlite::ToSql> =
-                params_render.iter().map(|p| p.as_ref()).collect();
-            stmt_render.execute(&*refs_render)?;
         }
 
         // Phase 4: Attachment Optimization

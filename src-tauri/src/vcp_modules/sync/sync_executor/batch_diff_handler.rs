@@ -23,6 +23,7 @@ impl BatchDiffHandler {
         logger: &Arc<Mutex<SyncLogger>>,
         write_queue: &Arc<DbWriteQueue>,
         pending_diff_batches: &Arc<tokio::sync::Mutex<std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>>>,
+        prerender_enabled: bool,
     ) -> Result<(), String> {
         if let Some(results) = payload["results"].as_object() {
             // 分类 topics: push_only, push_pull, pull_only
@@ -130,7 +131,7 @@ impl BatchDiffHandler {
                     // 2. Pull 批量（push 完成后再 pull，确保 push_pull 的 topic 数据已合并）
                     if has_pull {
                         match PullExecutor::pull_messages_batch(
-                            &h_in, &c_in, &b_in, &token, &pull_batch, &wq_in,
+                            &h_in, &c_in, &b_in, &token, &pull_batch, &wq_in, prerender_enabled,
                         )
                         .await
                         {

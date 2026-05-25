@@ -269,17 +269,58 @@ pub async fn load_chat_history_internal(
         let msg_id: String = row.get("msg_id");
         let role: String = row.get("role");
         let name: Option<String> = row.get("name");
-        let content: String = if include_content {
-            let bytes: Vec<u8> = row.get("content");
-            ContentCompressor::decompress(&bytes).unwrap_or_default()
+
+        let content_bytes: Vec<u8> = row.get("content");
+        let render_content: Option<Vec<u8>> = row.get("render_content");
+
+        // 懒渲染策略：render_cache 命中则直接用，未命中则实时编译
+        let (blocks, content) = if let Some(ref rb) = render_content {
+            let blocks = parse_render_bytes(Some(rb.clone()));
+            let content = if include_content {
+                ContentCompressor::decompress(&content_bytes).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (blocks, content)
         } else {
-            String::new()
+            // 未命中：解压 content → 编译 blocks → 异步回写 cache
+            let decompressed = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
+            if decompressed.is_empty() {
+                (None, String::new())
+            } else {
+                let compiled = MessageRenderCompiler::compile(&decompressed);
+                let blocks_json = serde_json::to_value(&compiled).ok();
+                
+                // 异步回写 render_cache (使用 tokio::spawn，不阻塞消息加载流)
+                if let Ok(serialized) = MessageRenderCompiler::serialize(&compiled) {
+                    let pool_c = pool.clone();
+                    let tid = topic_id.to_string();
+                    let mid = msg_id.clone();
+                    tokio::spawn(async move {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let _ = sqlx::query(
+                            "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) \
+                             VALUES (?, ?, ?, ?) \
+                             ON CONFLICT(topic_id, msg_id) DO UPDATE SET \
+                             render_content = excluded.render_content, \
+                             updated_at = excluded.updated_at"
+                        )
+                        .bind(&tid)
+                        .bind(&mid)
+                        .bind(&serialized)
+                        .bind(now)
+                        .execute(&pool_c)
+                        .await;
+                    });
+                }
+                
+                let content = if include_content { decompressed } else { String::new() };
+                (blocks_json, content)
+            }
         };
+
         let timestamp: i64 = row.get("timestamp");
         let is_thinking: Option<bool> = Some(row.get::<i64, _>("is_thinking") != 0);
-
-        let render_content: Option<Vec<u8>> = row.get("render_content");
-        let blocks = parse_render_bytes(render_content);
 
         let attachments = att_map.remove(&msg_id);
 

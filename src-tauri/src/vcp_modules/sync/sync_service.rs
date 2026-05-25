@@ -876,6 +876,7 @@ async fn run_sync_session(
                                             &sync_logger_task,
                                             &wq,
                                             &pending_diff_batches,
+                                            settings.sync_prerender_enabled,
                                         ).await {
                                             println!("[SyncService] BatchDiffHandler failed: {}", e);
                                         }

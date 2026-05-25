@@ -20,6 +20,7 @@ export interface AppSettings {
   agentOrder: string[];
   groupOrder: string[];
   currentThemeMode?: string;
+  syncPrerenderEnabled?: boolean;
   [key: string]: any;
 }
 

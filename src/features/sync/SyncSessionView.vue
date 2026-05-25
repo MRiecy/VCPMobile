@@ -99,6 +99,23 @@ const handleClose = async () => {
   }
   overlayStore.closeSyncSession();
 };
+
+import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
+import { useSettingsStore } from '../../core/stores/settings';
+
+const settingsStore = useSettingsStore();
+
+const prerenderEnabled = computed(() =>
+  settingsStore.settings?.syncPrerenderEnabled ?? false
+);
+
+const handlePrerenderToggle = (val: boolean) => {
+  if (val) {
+    const ok = confirm('启用后将在同步时进行预渲染计算，可能导致同步耗时增加。确认启用？');
+    if (!ok) return;
+  }
+  settingsStore.updateSettings({ syncPrerenderEnabled: val });
+};
 </script>
 
 <template>
@@ -161,6 +178,26 @@ const handleClose = async () => {
           >
             开始同步
           </button>
+
+          <!-- 高级设置区 -->
+          <div class="w-full max-w-xs mt-8 border-t border-white/5 pt-4">
+            <div class="text-[9px] font-bold uppercase tracking-widest text-white/20 mb-3 text-left">
+              高级设置
+            </div>
+            <div class="flex items-center justify-between">
+              <div class="flex flex-col text-left">
+                <span class="text-[12px] font-semibold text-white/70">预渲染同步</span>
+                <span class="text-[9px] text-white/25 mt-0.5">
+                  同步时预编译渲染缓存，增加耗时
+                </span>
+              </div>
+              <SettingsSwitch
+                :model-value="prerenderEnabled"
+                @update:model-value="handlePrerenderToggle"
+              />
+            </div>
+          </div>
+
           <button
             @click="store.switchTab('history')"
             class="mt-4 text-[10px] text-white/20 hover:text-white/40 transition-colors"
