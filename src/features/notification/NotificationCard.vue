@@ -96,12 +96,9 @@ const onTouchEnd = () => {
     <div class="flex items-start gap-2.5">
       <component :is="getIcon(props.item.type)" :size="13" :class="getTypeColor(props.item.type)"
         class="mt-0.5 shrink-0 opacity-75" />
-      
+
       <div class="flex-1 min-w-0 flex flex-col">
-        <div class="flex justify-between items-start gap-2">
-          <span class="text-[10.5px] font-black tracking-wide opacity-80 pr-2 text-highlight-text leading-tight">{{ props.item.title }}</span>
-          <span class="text-[9px] font-mono opacity-30 whitespace-nowrap text-secondary-text leading-none mt-0.5">{{ format(props.item.timestamp, 'HH:mm:ss') }}</span>
-        </div>
+        <span class="text-[10.5px] font-black tracking-wide opacity-80 leading-tight text-[var(--highlight-text)]">{{ props.item.title }}</span>
 
         <div v-if="props.item.isPreformatted"
           class="mt-1.5 p-1.5 bg-black/10 dark:bg-black/20 rounded text-[9px] max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-70 text-primary-text leading-normal select-text">
@@ -113,9 +110,13 @@ const onTouchEnd = () => {
 
         <div v-if="props.item.actions && props.item.actions.length > 0" class="mt-2 flex gap-1.5">
           <button v-for="action in props.item.actions" :key="action.label" @click="handleAction(action)"
-            :class="getActionButtonClass(action)" class="!py-1 !px-2.5 !text-[9.5px] !rounded-md active:scale-95 transition-transform duration-100">
+            :class="getActionButtonClass(action)">
             {{ action.label }}
           </button>
+        </div>
+
+        <div class="flex justify-end mt-1">
+          <span class="text-[9px] font-mono opacity-30 whitespace-nowrap leading-none text-[var(--secondary-text)]">{{ format(props.item.timestamp, 'HH:mm:ss') }}</span>
         </div>
       </div>
 

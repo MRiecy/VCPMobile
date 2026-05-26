@@ -25,15 +25,15 @@ export function useNotificationPresentation() {
 
   const getTypeColor = (type: VcpNotification['type']) => (colorMap as any)[type] ?? colorMap.info;
   const getActionButtonClass = (action: { label: string; color: string }) => {
-    const toneClass = action.label === 'Approve' || action.color?.includes('green')
-      ? 'bg-green-600'
-      : action.label === 'Deny' || action.color?.includes('red')
-        ? 'bg-red-600'
-        : action.color;
+    const isGreen = action.label === '允许' || action.label === 'Approve' || action.color?.includes('green');
+    const isRed = action.label === '拒绝' || action.label === 'Deny' || action.color?.includes('red');
+    const toneClass = isGreen ? 'bg-green-600' : isRed ? 'bg-red-600' : action.color;
 
     return [
       toneClass,
-      'px-3 py-1.5 shadow-sm hover:shadow-md hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 font-medium text-[11px] rounded-lg text-white'
+      'px-2.5 py-1 text-[9.5px] rounded-md text-white font-medium',
+      'hover:opacity-90 active:scale-95',
+      'transition-all duration-100'
     ];
   };
 
