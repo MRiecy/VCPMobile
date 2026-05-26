@@ -2,7 +2,6 @@
 import { computed, ref } from 'vue';
 import { useSwipe } from '@vueuse/core';
 import { Info, CheckCircle, AlertTriangle, X, Cpu, User } from 'lucide-vue-next';
-import { invoke } from '@tauri-apps/api/core';
 import { useNotificationStore, type VcpNotification } from '../../core/stores/notification';
 
 const props = defineProps<{
@@ -22,28 +21,19 @@ const getIcon = (type: string) => {
   }
 };
 
-const dismissToast = (id: string) => {
-  store.activeToasts = store.activeToasts.filter((t: VcpNotification) => t.id !== id);
+const getIconColor = (type: string) => {
+  switch (type) {
+    case 'success': return 'text-green-500';
+    case 'warning': return 'text-amber-500';
+    case 'error': return 'text-red-500';
+    case 'tool': return 'text-purple-500';
+    case 'agent': return 'text-blue-500';
+    default: return 'text-blue-400';
+  }
 };
 
-const handleAction = async (item: VcpNotification, action: any) => {
-  if (item.type === 'warning' && item.rawPayload?.type === 'tool_approval_request') {
-    const response = {
-      type: 'tool_approval_response',
-      data: {
-        requestId: item.rawPayload.data.requestId,
-        approved: action.value
-      }
-    };
-
-    try {
-      await invoke('send_vcp_log_message', { payload: response });
-      item.actions = [];
-      dismissToast(item.id);
-    } catch (e) {
-      console.error('Action failed from toast', e);
-    }
-  }
+const dismissToast = (id: string) => {
+  store.activeToasts = store.activeToasts.filter((t: VcpNotification) => t.id !== id);
 };
 
 const el = ref<HTMLElement | null>(null);
@@ -64,41 +54,39 @@ const swipeStyle = computed(() => {
   };
 });
 
+const displayMessage = computed(() => {
+  if (!props.toast.message) return '';
+  // 对于预格式化或者带有换行的消息，在极简 Toast 中仅展示为单行空格分隔的纯文本并裁剪
+  const cleanMsg = props.toast.message.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleanMsg.length > 50 ? cleanMsg.substring(0, 50) + '...' : cleanMsg;
+});
+
 const handleClick = () => {
-  if (!props.toast.actions || props.toast.actions.length === 0) {
-    dismissToast(props.toast.id);
-  }
+  dismissToast(props.toast.id);
 };
 </script>
 
 <template>
   <div 
     ref="el"
-    class="pointer-events-auto flex items-center justify-between gap-3 px-3 py-2.5 rounded-2xl bg-white/95 dark:bg-[#1e1e1e]/95 backdrop-blur-md border border-black/5 dark:border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)] max-w-sm w-full overflow-hidden transition-all duration-200 active:scale-[0.98]"
+    class="pointer-events-auto flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-white/90 dark:bg-zinc-900/90 backdrop-blur-md border border-black/5 dark:border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.12)] max-w-[90vw] w-[320px] overflow-hidden transition-all duration-200 active:scale-[0.98] cursor-pointer"
     :style="swipeStyle"
     @click="handleClick"
   >
     <div class="flex items-center gap-3 min-w-0 flex-1">
-      <component :is="getIcon(toast.type)" :size="15"
-        :class="toast.type === 'error' ? 'text-red-500' : toast.type === 'success' ? 'text-green-500' : 'text-blue-500'" class="shrink-0" />
-      <div class="flex-col flex min-w-0">
-         <span class="text-[12px] font-bold text-black/90 dark:text-white/90 truncate leading-tight">{{ toast.title }}</span>
-         <span v-if="toast.type !== 'error' && !toast.isPreformatted" class="text-[10px] text-black/50 dark:text-white/50 truncate mt-0.5">{{ toast.message }}</span>
+      <component :is="getIcon(toast.type)" :size="14" :class="getIconColor(toast.type)" class="shrink-0 opacity-80" />
+      <div class="flex flex-col min-w-0 flex-1">
+         <span class="text-[11px] font-bold text-primary-text leading-tight tracking-wide truncate">{{ toast.title }}</span>
+         <span v-if="displayMessage" class="text-[9px] text-primary-text opacity-50 truncate mt-0.5 font-sans leading-none pr-1">
+           {{ displayMessage }}
+         </span>
       </div>
     </div>
 
-    <div v-if="toast.actions && toast.actions.length > 0" class="flex gap-2 shrink-0 ml-1">
-      <button v-for="action in toast.actions" :key="action.label" @click.stop="handleAction(toast, action)" :class="[
-        action.label === 'Approve' || action.color?.includes('green') ? 'text-green-600 bg-green-500/10' :
-          action.label === 'Deny' || action.color?.includes('red') ? 'text-red-600 bg-red-500/10' : 'text-blue-600 bg-blue-500/10',
-        'px-2.5 py-1.5 transition-all duration-200 font-black text-[10px] rounded-lg uppercase tracking-wider'
-      ]">
-        {{ action.label }}
-      </button>
-    </div>
-    <button v-else @click.stop="dismissToast(toast.id)"
-      class="p-1.5 opacity-20 hover:opacity-100 text-black dark:text-white transition-opacity shrink-0 ml-1">
-      <X :size="14" />
+    <button @click.stop="dismissToast(toast.id)"
+      class="p-1 opacity-20 hover:opacity-100 text-primary-text transition-opacity shrink-0 ml-1">
+      <X :size="12" />
     </button>
   </div>
 </template>
+

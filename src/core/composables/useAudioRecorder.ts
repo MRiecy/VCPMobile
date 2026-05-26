@@ -37,7 +37,7 @@ export function useAudioRecorder() {
       if (isAndroid) {
         try {
           // 主动呼起原生 Android 麦克风录音权限弹窗申请
-          await invoke('plugin:vcp-mobile|requestAndroidPermission', { type: 'microphone' });
+          await invoke('plugin:vcp-mobile|request_android_permission', { pType: 'microphone' });
         } catch (pe) {
           console.warn('[AudioRecorder] Failed to request native microphone permission:', pe);
         }

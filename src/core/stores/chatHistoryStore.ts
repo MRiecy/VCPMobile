@@ -482,7 +482,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
   const reRenderMessage = async (messageId: string, topicId: string) => {
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
-    if (targetIndex === -1) return;
+    if (targetIndex === -1) {
+      throw new Error("消息未在当前历史记录中找到");
+    }
 
     clearMessageCache(messageId);
 
@@ -497,6 +499,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       };
     } catch (e) {
       console.error("[reRenderMessage] re_render_message failed:", e);
+      throw e;
     }
   };
 

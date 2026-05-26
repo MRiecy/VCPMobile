@@ -305,10 +305,25 @@ const showMessageContextMenu = async () => {
       label: "重新渲染",
       icon: RotateCcw,
       handler: async () => {
-        await historyStore.reRenderMessage(
-          props.message.id,
-          props.message.topicId || props.message.topic_id || sessionStore.currentTopicId || ""
-        );
+        try {
+          await historyStore.reRenderMessage(
+            props.message.id,
+            props.message.topicId || props.message.topic_id || sessionStore.currentTopicId || ""
+          );
+          notificationStore.addNotification({
+            type: "success",
+            title: "重构完成",
+            message: "消息内容已完成物理就地重绘与排版刷新",
+            toastOnly: true,
+          });
+        } catch (e) {
+          notificationStore.addNotification({
+            type: "error",
+            title: "重构失败",
+            message: String(e),
+            toastOnly: true,
+          });
+        }
       },
     });
 
