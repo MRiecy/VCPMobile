@@ -146,7 +146,7 @@ const handleSTTTouchEnd = async (e: TouchEvent) => {
     if (recognizedText && !recognizedText.startsWith('[')) {
       input.value += recognizedText;
       
-      // 业界流式自动切回键盘并聚焦，方便用户在键盘上微调！
+      // 自动切回键盘并聚焦，方便用户在键盘上微调！
       isAudioMode.value = false;
       await nextTick();
       if (textareaRef.value) {
@@ -175,11 +175,15 @@ const handleSTTTouchCancel = (e: TouchEvent) => {
 const handleIconTouchStart = (e: TouchEvent) => {
   if (props.disabled) return;
   
-  // 阻断默认 WebView 长按弹出菜单，防止滑动冲突
-  if (e.cancelable) e.preventDefault();
-
-  // 如果当前是语音模式条状态，忽略该手势以免跟 Tap 冲突
-  if (isAudioMode.value) return;
+  // 核心修复：如果当前已经处于“按住说话”模式，点击此按钮是为了切回键盘，直接触发 Tap 切换！
+  // 彻底解决了由于 touchstart.prevent 导致 click 无法触发的“点不回去”手势缺陷！
+  if (isAudioMode.value) {
+    if (e.cancelable) e.preventDefault();
+    toggleAudioMode();
+    return;
+  }
+  
+  if (e.cancelable) e.preventDefault(); // 阻止 WebView 的震动和菜单弹起
 
   iconTouchStartTime = Date.now();
   isIconLongPress = false;
@@ -225,7 +229,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
   const duration = Date.now() - iconTouchStartTime;
 
   if (!isIconLongPress && duration < 350) {
-    // 判定为 Tap：直接切换为“按住 说话”大长条
+    // 判定为 Tap：直接切换为语音模式
     toggleAudioMode();
   } else if (isLongPressRecording.value) {
     isLongPressRecording.value = false;
@@ -251,7 +255,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
           });
 
           if (finalData) {
-            // 塞入 stagedAttachments 首位
+            // 塞入 stagedAttachments
             attachmentStore.stagedAttachments.unshift({
               id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
               type: finalData.type,
@@ -264,7 +268,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
 
             if (navigator.vibrate) navigator.vibrate([40, 40]);
             
-            // 松手后直接发送！
+            // 松手直接以附件形式发送
             await nextTick();
             handleSend();
           }
@@ -420,7 +424,6 @@ const removeStagedAttachment = (index: number) => {
         
         <!-- 左侧：语音/键盘切换及长按附件录制按钮 -->
         <button 
-          @click="isAudioMode ? toggleAudioMode() : undefined"
           @touchstart.prevent="handleIconTouchStart"
           @touchmove="handleIconTouchMove"
           @touchend="handleIconTouchEnd"
@@ -445,7 +448,7 @@ const removeStagedAttachment = (index: number) => {
             <line x1="7" y1="16" x2="17" y2="16"></line>
           </svg>
           
-          <!-- 麦克风图标 (当处于普通文本输入状态时) -->
+          <!-- 麦克风图标 -->
           <svg v-else width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" class="shrink-0" :class="{ 'animate-pulse text-blue-500': isLongPressRecording }">
             <circle cx="24" cy="24" r="19.5" stroke="currentColor" stroke-width="3.5" fill="none"/>
             <circle cx="17.5" cy="24" r="3" fill="currentColor"/>
@@ -454,7 +457,7 @@ const removeStagedAttachment = (index: number) => {
           </svg>
         </button>
 
-        <!-- 核心输入/按住说话极简交互区 -->
+        <!-- 核心输入/按住说话极简交互区 (极致自然：仅原 textarea 区域变化，右侧按钮完全正常静止显示) -->
         <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
           
           <!-- 情况 1：普通文本输入键盘状态 -->
@@ -472,7 +475,7 @@ const removeStagedAttachment = (index: number) => {
             :disabled="disabled"
           ></textarea>
           
-          <!-- 情况 2：语音模式 - “按住 说话” 大条状态 (横跨原本中间的输入区域) -->
+          <!-- 情况 2：语音模式 - “按住 说话” 大条状态 (仅静默填入原本 textarea 的位置，右侧加号/发送正常显示) -->
           <div 
             v-else-if="isAudioMode && !isSTTActive" 
             @touchstart.prevent="handleSTTTouchStart"
@@ -485,7 +488,7 @@ const removeStagedAttachment = (index: number) => {
           </div>
 
           <!-- 情况 3：正在按压“按住说话”大条进行实时流式转文字中 (展示倾听与临时出字) -->
-          <div v-else-if="isSTTActive" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1.5 select-none animate-fade-in">
+          <div v-else-if="isSTTActive" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1 select-none animate-fade-in">
             <div class="flex items-center gap-1.5 text-xs font-semibold text-blue-500" :class="{ 'text-red-500': isSwipeCancel }">
               <span class="w-2.5 h-2.5 rounded-full" :class="isSwipeCancel ? 'bg-red-500 animate-pulse' : 'bg-blue-500 animate-ping'"></span>
               <span>{{ isSwipeCancel ? '松手取消转写' : '正在识别流式文字... (上滑取消)' }}</span>
@@ -496,22 +499,22 @@ const removeStagedAttachment = (index: number) => {
           </div>
 
           <!-- 情况 4：在非语音模式下，直接长按语音图标录制音频附件进行中 (经典的“倾听中”说明，松手直发) -->
-          <div v-else-if="isLongPressRecording" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1.5 select-none animate-fade-in">
+          <div v-else-if="isLongPressRecording" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1 select-none animate-fade-in">
             <div class="flex items-center gap-1.5 text-xs font-semibold text-blue-500" :class="{ 'text-red-500': isSwipeCancel }">
               <span class="w-2.5 h-2.5 rounded-full" :class="isSwipeCancel ? 'bg-red-500 animate-pulse' : 'bg-blue-500 animate-ping'"></span>
               <span>{{ isSwipeCancel ? '松手取消发送' : '倾听中... (上滑取消)' }}</span>
             </div>
             <div class="text-[14px] text-[var(--primary-text)] font-mono opacity-85 mt-0.5">
-              音频录制时长: {{ recordingDuration }} 秒
+              录音时长: {{ recordingDuration }} 秒
             </div>
           </div>
           
           <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-gradient-to-b from-[var(--secondary-bg)] to-transparent opacity-90"></div>
         </div>
 
-        <!-- 右侧动态操作区 (在语音模式大按键时静默隐藏，给“按住说话”大长条留足宽度) -->
-        <div v-if="!isAudioMode && !isSTTActive && !isLongPressRecording" class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
-          <!-- 展开附件按钮 (带旋转动画) -->
+        <!-- 右侧动态操作区 (始终正常、平静地保留，保证视觉绝无抖动！) -->
+        <div class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
+          <!-- 展开附件按钮 -->
           <button
             @click="showAttachMenu = !showAttachMenu"
             class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all"
