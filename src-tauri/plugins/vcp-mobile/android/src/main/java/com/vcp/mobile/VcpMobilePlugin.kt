@@ -30,7 +30,8 @@ import com.vcp.mobile.service.StreamKeepaliveService
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
-    Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE"], alias = "storageLegacy")
+    Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE"], alias = "storageLegacy"),
+    Permission(strings = ["android.permission.RECORD_AUDIO"], alias = "microphone")
 ])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -61,11 +62,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
 
+        val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
 
         val result = JSObject()
         result.put("notification", notificationGranted)
         result.put("storage", storageGranted)
+        result.put("microphone", microphoneGranted)
         result.put("battery", batteryOptimizationIgnored)
         
         invoke.resolve(result)
@@ -89,6 +93,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 } else {
                     requestPermissionForAlias("storageLegacy", invoke, "onPermissionResult")
                 }
+            }
+            "microphone" -> {
+                requestPermissionForAlias("microphone", invoke, "onPermissionResult")
             }
             "battery" -> {
                 try {
@@ -140,9 +147,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
 
+        val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
 
-        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"battery":$batteryOptimizationIgnored}"""
+        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"battery":$batteryOptimizationIgnored}"""
         val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
         webViewRef?.evaluateJavascript(script, null)
     }

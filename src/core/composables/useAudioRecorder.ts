@@ -1,4 +1,5 @@
 import { ref } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 
 export function useAudioRecorder() {
   const isRecording = ref(false);
@@ -32,6 +33,16 @@ export function useAudioRecorder() {
     if (isRecording.value) return;
 
     try {
+      const isAndroid = navigator.userAgent.toLowerCase().includes('android');
+      if (isAndroid) {
+        try {
+          // 主动呼起原生 Android 麦克风录音权限弹窗申请
+          await invoke('plugin:vcp-mobile|requestAndroidPermission', { type: 'microphone' });
+        } catch (pe) {
+          console.warn('[AudioRecorder] Failed to request native microphone permission:', pe);
+        }
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunks = [];
       recordingDuration.value = 0;

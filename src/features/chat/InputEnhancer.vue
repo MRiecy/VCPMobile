@@ -90,7 +90,7 @@ const toggleAudioMode = () => {
 // ----------------------------------------------------
 const handleSTTTouchStart = async (e: TouchEvent) => {
   if (props.disabled) return;
-  e.preventDefault(); // 阻断默认上下文菜单与滚动
+  if (e.cancelable) e.preventDefault(); // 阻断默认上下文菜单与滚动
 
   isSTTActive.value = true;
   isSwipeCancel.value = false;
@@ -128,7 +128,7 @@ const handleSTTTouchMove = (e: TouchEvent) => {
 };
 
 const handleSTTTouchEnd = async (e: TouchEvent) => {
-  e.preventDefault();
+  if (e.cancelable) e.preventDefault();
   if (!isSTTActive.value) return;
 
   isSTTActive.value = false;
@@ -146,7 +146,7 @@ const handleSTTTouchEnd = async (e: TouchEvent) => {
     if (recognizedText && !recognizedText.startsWith('[')) {
       input.value += recognizedText;
       
-      // 业界极致工学细节：识别完成后自动切换回普通文本框并聚焦，方便用户在键盘上微调！
+      // 业界流式自动切回键盘并聚焦，方便用户在键盘上微调！
       isAudioMode.value = false;
       await nextTick();
       if (textareaRef.value) {
@@ -161,7 +161,7 @@ const handleSTTTouchEnd = async (e: TouchEvent) => {
 };
 
 const handleSTTTouchCancel = (e: TouchEvent) => {
-  e.preventDefault();
+  if (e.cancelable) e.preventDefault();
   if (isSTTActive.value) {
     cancelListening();
     isSTTActive.value = false;
@@ -174,7 +174,9 @@ const handleSTTTouchCancel = (e: TouchEvent) => {
 // ----------------------------------------------------
 const handleIconTouchStart = (e: TouchEvent) => {
   if (props.disabled) return;
-  e.preventDefault(); // 阻止 WebView 的震动和菜单弹起
+  
+  // 阻断默认 WebView 长按弹出菜单，防止滑动冲突
+  if (e.cancelable) e.preventDefault();
 
   // 如果当前是语音模式条状态，忽略该手势以免跟 Tap 冲突
   if (isAudioMode.value) return;
@@ -213,7 +215,7 @@ const handleIconTouchMove = (e: TouchEvent) => {
 };
 
 const handleIconTouchEnd = async (e: TouchEvent) => {
-  e.preventDefault();
+  if (e.cancelable) e.preventDefault();
   
   if (iconLongPressTimeout) {
     clearTimeout(iconLongPressTimeout);
@@ -262,7 +264,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
 
             if (navigator.vibrate) navigator.vibrate([40, 40]);
             
-            // 满足用户要求：松手后直接以附件形式发送！
+            // 松手后直接发送！
             await nextTick();
             handleSend();
           }
@@ -283,7 +285,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
 };
 
 const handleIconTouchCancel = (e: TouchEvent) => {
-  e.preventDefault();
+  if (e.cancelable) e.preventDefault();
   if (iconLongPressTimeout) {
     clearTimeout(iconLongPressTimeout);
     iconLongPressTimeout = null;
@@ -417,7 +419,6 @@ const removeStagedAttachment = (index: number) => {
       >
         
         <!-- 左侧：语音/键盘切换及长按附件录制按钮 -->
-        <!-- 原生 Touch 拦截，轻触切换 isAudioMode，长按触发附件录音 -->
         <button 
           @click="isAudioMode ? toggleAudioMode() : undefined"
           @touchstart.prevent="handleIconTouchStart"
@@ -430,8 +431,19 @@ const removeStagedAttachment = (index: number) => {
             'bg-red-500/10 text-red-500': isSwipeCancel && isLongPressRecording
           }"
         >
-          <!-- 键盘图标 (当处于语音输入框状态时) -->
-          <div v-if="isAudioMode" class="i-heroicons-keyboard text-2xl animate-fade-in"></div>
+          <!-- 键盘图标 (纯 inline SVG，100% 精美、零依赖，规避 UnoCSS 找不到图标的问题) -->
+          <svg v-if="isAudioMode" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6 shrink-0 animate-fade-in">
+            <rect x="2" y="4" width="20" height="16" rx="2" ry="2"></rect>
+            <line x1="6" y1="8" x2="6" y2="8"></line>
+            <line x1="10" y1="8" x2="10" y2="8"></line>
+            <line x1="14" y1="8" x2="14" y2="8"></line>
+            <line x1="18" y1="8" x2="18" y2="8"></line>
+            <line x1="6" y1="12" x2="6" y2="12"></line>
+            <line x1="10" y1="12" x2="10" y2="12"></line>
+            <line x1="14" y1="12" x2="14" y2="12"></line>
+            <line x1="18" y1="12" x2="18" y2="12"></line>
+            <line x1="7" y1="16" x2="17" y2="16"></line>
+          </svg>
           
           <!-- 麦克风图标 (当处于普通文本输入状态时) -->
           <svg v-else width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" class="shrink-0" :class="{ 'animate-pulse text-blue-500': isLongPressRecording }">
