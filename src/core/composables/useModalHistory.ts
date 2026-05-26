@@ -137,10 +137,20 @@ export function useModalHistory() {
     modalStack.value.splice(index, 1);
   };
 
+  const closeTopModal = (): boolean => {
+    if (modalStack.value.length > 0) {
+      const topModal = modalStack.value[modalStack.value.length - 1];
+      topModal.close();
+      return true;
+    }
+    return false;
+  };
+
   return {
     registerModal,
     unregisterModal,
     modalStackLength: () => modalStack.value.length,
-    initRootHistory
+    initRootHistory,
+    closeTopModal
   };
 }

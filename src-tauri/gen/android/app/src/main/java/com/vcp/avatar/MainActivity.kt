@@ -26,13 +26,7 @@ class MainActivity : TauriActivity() {
             this,
             object : androidx.activity.OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (webView.canGoBack()) {
-                        webView.goBack()
-                    } else {
-                        isEnabled = false
-                        onBackPressedDispatcher.onBackPressed()
-                        isEnabled = true
-                    }
+                    webView.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-hardware-back'))", null)
                 }
             }
         )

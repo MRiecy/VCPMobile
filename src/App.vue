@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref, watch } from "vue";
+import { onMounted, onUnmounted, computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -34,22 +34,7 @@ const { initGlobalFixer } = useEmoticonFixer();
 const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
 const router = useRouter();
 
-const { initRootHistory, registerModal, unregisterModal } = useModalHistory();
-
-// Watch chat session selection to register/unregister AgentChat virtual modal
-watch(
-  () => sessionStore.currentSelectedItem,
-  (newVal, oldVal) => {
-    if (newVal && !oldVal) {
-      registerModal("AgentChat", () => {
-        sessionStore.currentSelectedItem = null;
-        sessionStore.currentTopicId = null;
-      });
-    } else if (!newVal && oldVal) {
-      unregisterModal("AgentChat");
-    }
-  }
-);
+const { initRootHistory } = useModalHistory();
 
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
@@ -120,14 +105,20 @@ let exitTimer: number | null = null;
 const isWaitingExit = ref(false);
 
 const handleExitRequest = async () => {
-  // 第一级：若当前在 Agent 聊天中，按返回键先退回到初始零数据引导欢迎页
-  if (sessionStore.currentSelectedItem !== null) {
+  // 1. 优先让 Modal Stack 消费返回事件 (支持 Sidebar、Page、Dialog 等 LIFO 退出)
+  const { closeTopModal } = useModalHistory();
+  if (closeTopModal()) {
+    return;
+  }
+
+  // 2. 第二级：若当前在 Agent 聊天中（且已就绪），按返回键退回到初始零数据引导欢迎页
+  if (lifecycleStore.state === 'READY' && sessionStore.currentSelectedItem !== null) {
     sessionStore.currentSelectedItem = null;
     sessionStore.currentTopicId = null;
     return;
   }
 
-  // 第二级：已在初始页，触发高精度双击物理退出到后台
+  // 3. 第三级：已在初始引导页，触发高精度双击物理退出到后台
   if (isWaitingExit.value) {
     if (exitTimer) {
       clearTimeout(exitTimer);
@@ -138,7 +129,7 @@ const handleExitRequest = async () => {
     try {
       await invoke("plugin:vcp-mobile|move_task_to_back");
     } catch (err) {
-      console.warn("[Exit] Failed to move task to back, falling back to window close:", err);
+      console.warn("[Exit] Failed to move task to back, calling window close fallback:", err);
       getCurrentWebviewWindow().close();
     }
   } else {
@@ -194,12 +185,19 @@ const handleVcpLifecycle = async (e: Event) => {
 };
 
 onMounted(async () => {
+  // 1. 同步挂载基础物理按键与系统事件监听 (混合应用黄金铁律：物理拦截最优先挂载，杜绝初始化阻塞失效)
+  window.addEventListener("vcp-exit-requested", handleExitRequest);
+  window.addEventListener("vcp-hardware-back", handleExitRequest);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
+
   // 初始化全局表情包修复器
   initGlobalFixer();
 
+  // 2. 异步执行重度核心资源加载 (启动引导)
   await bootstrapApp();
 
-  // 启动 VCP Log IPC 监听 (使用 1:1 移植的解析大脑)
+  // 启动 VCP Log IPC 监听 (使用 1:1 移植 of 解析大脑)
   unlistenLog = await listen("vcp-system-event", (event: any) => {
     const payload = event.payload;
     const processed = processPayload(payload);
@@ -217,20 +215,12 @@ onMounted(async () => {
   router.afterEach(() => {
     initRootHistory();
   });
-
-  // Listen for root exit requests from the modal history stack
-  window.addEventListener("vcp-exit-requested", handleExitRequest);
-
-  // 监听页面可见性，切到后台时暂停所有 CSS 动画以节省 GPU
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-
-  // 监听物理生命周期事件实现自适应心跳
-  window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
 });
 
 onUnmounted(() => {
   if (unlistenLog) unlistenLog();
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
+  window.removeEventListener("vcp-hardware-back", handleExitRequest);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("vcp-lifecycle", handleVcpLifecycle);
 });

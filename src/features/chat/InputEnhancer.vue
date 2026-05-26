@@ -45,110 +45,186 @@ const {
   cancelRecording
 } = useAudioRecorder();
 
-const isVoiceInputMode = ref(false);       // 是否处于点击语音转文字模式
-const isLongPressRecording = ref(false);   // 是否处于长按录音附件模式
+// 状态控制器
+const isAudioMode = ref(false);            // 是否切换为经典的“按住 说话”模式
+const isSTTActive = ref(false);             // 语音转文字（点击切换后的按住模式）是否激活
+const isLongPressRecording = ref(false);   // 直接长按语音按钮录制音频附件是否激活
 const isSwipeCancel = ref(false);          // 手势是否判定为上滑取消
-let touchStartY = 0;
-let touchStartTime = 0;
-let isLongPress = false;
-let longPressTimeout: number | null = null;
 
-// 点击按钮切换流式语音输入
-const handleVoiceClick = async () => {
-  if (isVoiceInputMode.value) {
-    // 结束转文字
-    const recognizedText = await stopListening();
-    isVoiceInputMode.value = false;
-    if (recognizedText && !recognizedText.startsWith('[')) {
-      input.value += recognizedText;
-    }
-    await nextTick();
-    if (textareaRef.value) {
-      textareaRef.value.focus();
-      autoResize();
-    }
-  } else {
-    // 开启流式语音识别
-    isVoiceInputMode.value = true;
-    try {
-      await startListening((_text) => {
-        // 流式回调可实时更新 transcriptionResult，已由 Hook 接管
-      });
-      if (navigator.vibrate) navigator.vibrate(40);
-    } catch (err: any) {
-      isVoiceInputMode.value = false;
-      notificationStore.addNotification({
-        type: 'warning',
-        title: '语音识别启动失败',
-        message: err.message || String(err),
-        toastOnly: true,
-      });
-    }
+let touchStartY = 0;
+let iconTouchStartTime = 0;
+let isIconLongPress = false;
+let iconLongPressTimeout: number | null = null;
+
+// 切换语音模式与普通文本模式
+const toggleAudioMode = () => {
+  if (props.disabled) return;
+  
+  // 如果当前正处于某种语音输入状态中，先彻底释放
+  if (isSTTActive.value) {
+    cancelListening();
+    isSTTActive.value = false;
+  }
+  if (isLongPressRecording.value) {
+    cancelRecording();
+    isLongPressRecording.value = false;
+  }
+  
+  isAudioMode.value = !isAudioMode.value;
+  isSwipeCancel.value = false;
+  
+  if (navigator.vibrate) navigator.vibrate(35);
+  
+  if (!isAudioMode.value) {
+    nextTick(() => {
+      if (textareaRef.value) {
+        textareaRef.value.focus();
+        autoResize();
+      }
+    });
   }
 };
 
-// 放弃当前倾听
-const discardVoiceInput = () => {
-  cancelListening();
-  isVoiceInputMode.value = false;
-};
-
-// Touch 手势管理：实现完美的长按与点击分流交互
-const handleVoiceTouchStart = (e: TouchEvent) => {
+// ----------------------------------------------------
+// 交互 A：在“按住 说话”大长条上的 STT 手势管理
+// ----------------------------------------------------
+const handleSTTTouchStart = async (e: TouchEvent) => {
   if (props.disabled) return;
-  e.preventDefault(); // 彻底阻止 WebView 弹出长按菜单或缩放抖动
+  e.preventDefault(); // 阻断默认上下文菜单与滚动
 
-  touchStartTime = Date.now();
-  isLongPress = false;
+  isSTTActive.value = true;
   isSwipeCancel.value = false;
   touchStartY = e.touches[0].clientY;
 
-  // 如果按住超过 350ms，自动唤醒“长按录音附件”模式
-  longPressTimeout = window.setTimeout(async () => {
-    isLongPress = true;
-    if (isVoiceInputMode.value) {
-      await handleVoiceClick(); // 强行清算当前的流式输入
-    }
-    isLongPressRecording.value = true;
-    try {
-      await startRecording();
-      if (navigator.vibrate) navigator.vibrate(50);
-    } catch (err: any) {
-      isLongPressRecording.value = false;
-      isLongPress = false;
-    }
-  }, 350);
+  try {
+    await startListening((_text) => {
+      // 实时流式回调更新 transcriptionResult
+    });
+    if (navigator.vibrate) navigator.vibrate(50);
+  } catch (err: any) {
+    isSTTActive.value = false;
+    notificationStore.addNotification({
+      type: 'warning',
+      title: '语音转写启动失败',
+      message: err.message || String(err),
+      toastOnly: true,
+    });
+  }
 };
 
-const handleVoiceTouchMove = (e: TouchEvent) => {
-  if (!isLongPress || !isLongPressRecording.value) return;
+const handleSTTTouchMove = (e: TouchEvent) => {
+  if (!isSTTActive.value) return;
   const currentY = e.touches[0].clientY;
   const diffY = currentY - touchStartY;
 
-  // 手指上滑超过 60 像素判定为上滑取消
   if (diffY < -60) {
     if (!isSwipeCancel.value) {
       isSwipeCancel.value = true;
-      if (navigator.vibrate) navigator.vibrate(30); // 触发微弱警告震动
+      if (navigator.vibrate) navigator.vibrate(30);
     }
   } else {
     isSwipeCancel.value = false;
   }
 };
 
-const handleVoiceTouchEnd = async (e: TouchEvent) => {
+const handleSTTTouchEnd = async (e: TouchEvent) => {
+  e.preventDefault();
+  if (!isSTTActive.value) return;
+
+  isSTTActive.value = false;
+
+  if (isSwipeCancel.value) {
+    cancelListening();
+    notificationStore.addNotification({
+      type: 'warning',
+      title: '已取消转写',
+      message: '上滑取消操作已完成',
+      toastOnly: true,
+    });
+  } else {
+    const recognizedText = await stopListening();
+    if (recognizedText && !recognizedText.startsWith('[')) {
+      input.value += recognizedText;
+      
+      // 业界极致工学细节：识别完成后自动切换回普通文本框并聚焦，方便用户在键盘上微调！
+      isAudioMode.value = false;
+      await nextTick();
+      if (textareaRef.value) {
+        textareaRef.value.focus();
+        autoResize();
+      }
+      
+      if (navigator.vibrate) navigator.vibrate([40, 40]);
+    }
+  }
+  isSwipeCancel.value = false;
+};
+
+const handleSTTTouchCancel = (e: TouchEvent) => {
+  e.preventDefault();
+  if (isSTTActive.value) {
+    cancelListening();
+    isSTTActive.value = false;
+    isSwipeCancel.value = false;
+  }
+};
+
+// ----------------------------------------------------
+// 交互 B：直接长按左侧语音按钮，进行附件录制并松手直发
+// ----------------------------------------------------
+const handleIconTouchStart = (e: TouchEvent) => {
+  if (props.disabled) return;
+  e.preventDefault(); // 阻止 WebView 的震动和菜单弹起
+
+  // 如果当前是语音模式条状态，忽略该手势以免跟 Tap 冲突
+  if (isAudioMode.value) return;
+
+  iconTouchStartTime = Date.now();
+  isIconLongPress = false;
+  isSwipeCancel.value = false;
+  touchStartY = e.touches[0].clientY;
+
+  iconLongPressTimeout = window.setTimeout(async () => {
+    isIconLongPress = true;
+    isLongPressRecording.value = true;
+    try {
+      await startRecording();
+      if (navigator.vibrate) navigator.vibrate(50);
+    } catch (err: any) {
+      isLongPressRecording.value = false;
+      isIconLongPress = false;
+    }
+  }, 350);
+};
+
+const handleIconTouchMove = (e: TouchEvent) => {
+  if (!isIconLongPress || !isLongPressRecording.value) return;
+  const currentY = e.touches[0].clientY;
+  const diffY = currentY - touchStartY;
+
+  if (diffY < -60) {
+    if (!isSwipeCancel.value) {
+      isSwipeCancel.value = true;
+      if (navigator.vibrate) navigator.vibrate(30);
+    }
+  } else {
+    isSwipeCancel.value = false;
+  }
+};
+
+const handleIconTouchEnd = async (e: TouchEvent) => {
   e.preventDefault();
   
-  if (longPressTimeout) {
-    clearTimeout(longPressTimeout);
-    longPressTimeout = null;
+  if (iconLongPressTimeout) {
+    clearTimeout(iconLongPressTimeout);
+    iconLongPressTimeout = null;
   }
 
-  const duration = Date.now() - touchStartTime;
+  const duration = Date.now() - iconTouchStartTime;
 
-  if (!isLongPress && duration < 350) {
-    // 判定为 Tap：开启/关闭流式语音输入
-    await handleVoiceClick();
+  if (!isIconLongPress && duration < 350) {
+    // 判定为 Tap：直接切换为“按住 说话”大长条
+    toggleAudioMode();
   } else if (isLongPressRecording.value) {
     isLongPressRecording.value = false;
     
@@ -165,7 +241,7 @@ const handleVoiceTouchEnd = async (e: TouchEvent) => {
       if (result) {
         try {
           const originalName = `Voice_${Date.now()}.webm`;
-          // 零拷贝直传：保存至后端沙盒，生成正式的 Attachment
+          // 保存音频至后端物理沙盒
           const finalData = await invoke<any>('store_file', {
             originalName,
             fileBytes: result.bytes,
@@ -173,6 +249,7 @@ const handleVoiceTouchEnd = async (e: TouchEvent) => {
           });
 
           if (finalData) {
+            // 塞入 stagedAttachments 首位
             attachmentStore.stagedAttachments.unshift({
               id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
               type: finalData.type,
@@ -184,18 +261,16 @@ const handleVoiceTouchEnd = async (e: TouchEvent) => {
             });
 
             if (navigator.vibrate) navigator.vibrate([40, 40]);
-            notificationStore.addNotification({
-              type: 'success',
-              title: '语音录制成功',
-              message: '已添加为音频附件',
-              toastOnly: true,
-            });
+            
+            // 满足用户要求：松手后直接以附件形式发送！
+            await nextTick();
+            handleSend();
           }
         } catch (err: any) {
-          console.error('[InputEnhancer] Store voice file failed:', err);
+          console.error('[InputEnhancer] Direct send voice failed:', err);
           notificationStore.addNotification({
             type: 'warning',
-            title: '录音保存异常',
+            title: '语音发送异常',
             message: String(err),
             toastOnly: true,
           });
@@ -203,22 +278,22 @@ const handleVoiceTouchEnd = async (e: TouchEvent) => {
       }
     }
   }
-  isLongPress = false;
+  isIconLongPress = false;
   isSwipeCancel.value = false;
 };
 
-const handleVoiceTouchCancel = (e: TouchEvent) => {
+const handleIconTouchCancel = (e: TouchEvent) => {
   e.preventDefault();
-  if (longPressTimeout) {
-    clearTimeout(longPressTimeout);
-    longPressTimeout = null;
+  if (iconLongPressTimeout) {
+    clearTimeout(iconLongPressTimeout);
+    iconLongPressTimeout = null;
   }
   if (isLongPressRecording.value) {
     cancelRecording();
     isLongPressRecording.value = false;
     isSwipeCancel.value = false;
   }
-  isLongPress = false;
+  isIconLongPress = false;
 };
 
 // 自动调整输入框高度
@@ -247,6 +322,7 @@ watch(() => historyStore.editMessageContent, async (newContent) => {
   if (newContent) {
     input.value = newContent;
     historyStore.editMessageContent = ''; // 消费掉
+    isAudioMode.value = false; // 强行切回键盘输入态
     await nextTick();
     if (textareaRef.value) {
       textareaRef.value.focus();
@@ -331,24 +407,34 @@ const removeStagedAttachment = (index: number) => {
       </TransitionGroup>
     </div>
 
+    <!-- 框体主容器 -->
     <div class="flex items-end gap-2 px-1">
-      <div class="flex-1 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible"
-        :class="{ 'ring-1 ring-blue-500/30 border-blue-500/50': isVoiceInputMode || isLongPressRecording, 'ring-1 ring-red-500/30 border-red-500/50': isSwipeCancel }"
+      <div class="flex-1 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible transition-all duration-300"
+        :class="{ 
+          'ring-1 ring-blue-500/30 border-blue-500/50': isSTTActive || isLongPressRecording, 
+          'ring-1 ring-red-500/30 border-red-500/50': isSwipeCancel 
+        }"
       >
         
-        <!-- 左侧：语音按钮 (Touch 手势激活，点击流式转文字，长按录音作为音频附件) -->
+        <!-- 左侧：语音/键盘切换及长按附件录制按钮 -->
+        <!-- 原生 Touch 拦截，轻触切换 isAudioMode，长按触发附件录音 -->
         <button 
-          @touchstart.prevent="handleVoiceTouchStart"
-          @touchmove="handleVoiceTouchMove"
-          @touchend="handleVoiceTouchEnd"
-          @touchcancel="handleVoiceTouchCancel"
+          @click="isAudioMode ? toggleAudioMode() : undefined"
+          @touchstart.prevent="handleIconTouchStart"
+          @touchmove="handleIconTouchMove"
+          @touchend="handleIconTouchEnd"
+          @touchcancel="handleIconTouchCancel"
           class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-90 active:scale-90 transition-all relative select-none touch-none"
           :class="{ 
-            'bg-blue-500/10 text-blue-500': isVoiceInputMode || isLongPressRecording,
-            'bg-red-500/10 text-red-500': isSwipeCancel
+            'bg-blue-500/10 text-blue-500': isAudioMode || isLongPressRecording,
+            'bg-red-500/10 text-red-500': isSwipeCancel && isLongPressRecording
           }"
         >
-          <svg width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" class="shrink-0" :class="{ 'animate-pulse text-blue-500': isVoiceInputMode || isLongPressRecording }">
+          <!-- 键盘图标 (当处于语音输入框状态时) -->
+          <div v-if="isAudioMode" class="i-heroicons-keyboard text-2xl animate-fade-in"></div>
+          
+          <!-- 麦克风图标 (当处于普通文本输入状态时) -->
+          <svg v-else width="26" height="26" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" class="shrink-0" :class="{ 'animate-pulse text-blue-500': isLongPressRecording }">
             <circle cx="24" cy="24" r="19.5" stroke="currentColor" stroke-width="3.5" fill="none"/>
             <circle cx="17.5" cy="24" r="3" fill="currentColor"/>
             <path d="M 21.5 18 A 6.5 6.5 0 0 1 21.5 30" stroke="currentColor" stroke-width="3" stroke-linecap="round" fill="none"/>
@@ -356,11 +442,12 @@ const removeStagedAttachment = (index: number) => {
           </svg>
         </button>
 
-        <!-- 核心输入与极简占位融合区 (Balthasar 美学：框内平滑收缩) -->
-        <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-hidden">
-          <!-- 1. 普通文本输入状态 -->
+        <!-- 核心输入/按住说话极简交互区 -->
+        <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
+          
+          <!-- 情况 1：普通文本输入键盘状态 -->
           <textarea 
-            v-if="!isVoiceInputMode && !isLongPressRecording"
+            v-if="!isAudioMode && !isLongPressRecording"
             ref="textareaRef" 
             v-model="input" 
             @keydown="handleKeydown" 
@@ -373,38 +460,45 @@ const removeStagedAttachment = (index: number) => {
             :disabled="disabled"
           ></textarea>
           
-          <!-- 2. 点击模式：流式语音转文字占位 -->
-          <div v-else-if="isVoiceInputMode" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1.5 select-none animate-fade-in">
-            <div class="flex items-center justify-between gap-2 mb-1">
-              <div class="flex items-center gap-1.5 text-xs font-semibold text-blue-500">
-                <span class="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping"></span>
-                <span>正在倾听... (点击麦克风保存)</span>
-              </div>
-              <button @click="discardVoiceInput" class="text-[10px] text-[var(--primary-text)] opacity-40 hover:opacity-100 flex items-center gap-1 active:scale-95 transition-all px-1.5 py-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/5">
-                <span>取消</span>
-              </button>
+          <!-- 情况 2：语音模式 - “按住 说话” 大条状态 (横跨原本中间的输入区域) -->
+          <div 
+            v-else-if="isAudioMode && !isSTTActive" 
+            @touchstart.prevent="handleSTTTouchStart"
+            @touchmove="handleSTTTouchMove"
+            @touchend="handleSTTTouchEnd"
+            @touchcancel="handleSTTTouchCancel"
+            class="w-full h-[36px] flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 active:bg-black/15 dark:active:bg-white/15 select-none touch-none cursor-pointer transform active:scale-[0.98] transition-all duration-75"
+          >
+            <span class="text-[13px] font-semibold text-[var(--primary-text)] opacity-85 tracking-wider">按住 说话</span>
+          </div>
+
+          <!-- 情况 3：正在按压“按住说话”大条进行实时流式转文字中 (展示倾听与临时出字) -->
+          <div v-else-if="isSTTActive" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1.5 select-none animate-fade-in">
+            <div class="flex items-center gap-1.5 text-xs font-semibold text-blue-500" :class="{ 'text-red-500': isSwipeCancel }">
+              <span class="w-2.5 h-2.5 rounded-full" :class="isSwipeCancel ? 'bg-red-500 animate-pulse' : 'bg-blue-500 animate-ping'"></span>
+              <span>{{ isSwipeCancel ? '松手取消转写' : '正在识别流式文字... (上滑取消)' }}</span>
             </div>
-            <div class="text-[14px] text-[var(--primary-text)] min-h-[1.25rem] leading-[1.25] break-all opacity-80 italic font-medium">
+            <div class="text-[14px] text-[var(--primary-text)] min-h-[1.25rem] leading-[1.25] break-all opacity-85 italic font-medium mt-0.5">
               {{ transcriptionResult || '请开始说话...' }}
             </div>
           </div>
 
-          <!-- 3. 长按模式：录音附件暂存占位 -->
+          <!-- 情况 4：在非语音模式下，直接长按语音图标录制音频附件进行中 (经典的“倾听中”说明，松手直发) -->
           <div v-else-if="isLongPressRecording" class="w-full flex flex-col justify-center min-h-[36px] py-1 px-1.5 select-none animate-fade-in">
-            <div class="flex items-center gap-1.5 text-xs font-semibold" :class="isSwipeCancel ? 'text-red-500' : 'text-blue-500'">
+            <div class="flex items-center gap-1.5 text-xs font-semibold text-blue-500" :class="{ 'text-red-500': isSwipeCancel }">
               <span class="w-2.5 h-2.5 rounded-full" :class="isSwipeCancel ? 'bg-red-500 animate-pulse' : 'bg-blue-500 animate-ping'"></span>
-              <span>{{ isSwipeCancel ? '松手取消发送' : '按住录制音频附件... (上滑取消)' }}</span>
+              <span>{{ isSwipeCancel ? '松手取消发送' : '倾听中... (上滑取消)' }}</span>
             </div>
-            <div class="text-[14px] text-[var(--primary-text)] font-mono opacity-80 mt-0.5">
-              已录制: {{ recordingDuration }} 秒
+            <div class="text-[14px] text-[var(--primary-text)] font-mono opacity-85 mt-0.5">
+              音频录制时长: {{ recordingDuration }} 秒
             </div>
           </div>
           
           <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-gradient-to-b from-[var(--secondary-bg)] to-transparent opacity-90"></div>
         </div>
 
-        <!-- 右侧动态操作区 -->
-        <div class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
+        <!-- 右侧动态操作区 (在语音模式大按键时静默隐藏，给“按住说话”大长条留足宽度) -->
+        <div v-if="!isAudioMode && !isSTTActive && !isLongPressRecording" class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
           <!-- 展开附件按钮 (带旋转动画) -->
           <button
             @click="showAttachMenu = !showAttachMenu"
@@ -414,7 +508,7 @@ const removeStagedAttachment = (index: number) => {
           </button>
 
           <Transition name="pop-slide">
-            <!-- 发送/中止按钮 (浅蓝色背景，w-8h-8，精准居中) -->
+            <!-- 发送/中止按钮 -->
             <button v-if="hasContent || isGenerating"
               @click="handleAction"
               class="w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 transition-all bg-blue-500 text-white"
@@ -456,7 +550,7 @@ const removeStagedAttachment = (index: number) => {
   cursor: text;
 }
 
-/* 气泡弹出/切换动画 (优化宽度塌陷，确保 + 按钮平滑跟随) */
+/* 气泡弹出/切换动画 */
 .pop-slide-enter-active,
 .pop-slide-leave-active {
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -474,7 +568,7 @@ const removeStagedAttachment = (index: number) => {
   opacity: 0;
   transform: scale(0.4) translateX(10px);
   width: 0;
-  margin-left: -6px; /* 抵消 gap-1.5 (6px)，让 + 按钮平滑吸附 */
+  margin-left: -6px;
 }
 
 /* 附件菜单淡入淡出缩放 */
