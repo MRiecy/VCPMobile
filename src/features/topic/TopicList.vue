@@ -163,9 +163,7 @@ const selectTopic = async (
   }
 
   // 在移动端，选择话题后自动关闭侧边栏
-  if (window.innerWidth < 768) {
-    layoutStore.setLeftDrawer(false);
-  }
+  layoutStore.setLeftDrawer(false);
 
   emit("select-topic");
 };

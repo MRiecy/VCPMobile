@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref } from "vue";
+import { onMounted, onUnmounted, computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -34,7 +34,22 @@ const { initGlobalFixer } = useEmoticonFixer();
 const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
 const router = useRouter();
 
-const { initRootHistory } = useModalHistory();
+const { initRootHistory, registerModal, unregisterModal } = useModalHistory();
+
+// Watch chat session selection to register/unregister AgentChat virtual modal
+watch(
+  () => sessionStore.currentSelectedItem,
+  (newVal, oldVal) => {
+    if (newVal && !oldVal) {
+      registerModal("AgentChat", () => {
+        sessionStore.currentSelectedItem = null;
+        sessionStore.currentTopicId = null;
+      });
+    } else if (!newVal && oldVal) {
+      unregisterModal("AgentChat");
+    }
+  }
+);
 
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
@@ -104,7 +119,7 @@ let unlistenLog: (() => void) | null = null;
 let exitTimer: number | null = null;
 const isWaitingExit = ref(false);
 
-const handleExitRequest = () => {
+const handleExitRequest = async () => {
   // 第一级：若当前在 Agent 聊天中，按返回键先退回到初始零数据引导欢迎页
   if (sessionStore.currentSelectedItem !== null) {
     sessionStore.currentSelectedItem = null;
@@ -112,14 +127,20 @@ const handleExitRequest = () => {
     return;
   }
 
-  // 第二级：已在初始页，触发高精度双击物理退出
+  // 第二级：已在初始页，触发高精度双击物理退出到后台
   if (isWaitingExit.value) {
     if (exitTimer) {
       clearTimeout(exitTimer);
       exitTimer = null;
     }
     isWaitingExit.value = false;
-    getCurrentWebviewWindow().close();
+    
+    try {
+      await invoke("plugin:vcp-mobile|move_task_to_back");
+    } catch (err) {
+      console.warn("[Exit] Failed to move task to back, falling back to window close:", err);
+      getCurrentWebviewWindow().close();
+    }
   } else {
     isWaitingExit.value = true;
     notificationStore.addNotification({

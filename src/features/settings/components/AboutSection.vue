@@ -7,6 +7,7 @@ import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import UpdateSection from './UpdateSection.vue';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useThemeStore } from '../../../core/stores/theme';
+import WebGLFluidBackground from '../../../components/ui/WebGLFluidBackground.vue';
 
 const themeStore = useThemeStore();
 
@@ -172,6 +173,9 @@ const openFeedback = () => {
     class="flex flex-col flex-1 h-full relative bg-transparent overflow-hidden transition-colors duration-300"
     :class="themeStore.isDarkResolved ? 'theme-dark' : 'theme-light'"
   >
+    <!-- WebGL Fluid Background promoted to fullscreen backdrop (Z-0) -->
+    <WebGLFluidBackground class="absolute inset-0 w-full h-full pointer-events-none z-0" />
+
     <!-- Immersive Back Button -->
     <button 
       @click="$emit('back')"
@@ -210,20 +214,6 @@ const openFeedback = () => {
       @mousedown="handlePress"
       @touchstart.passive="handlePress"
     >
-      <!-- Atmosphere Background (Fluid Aurora Canvas) -->
-      <div 
-        class="aurora-container absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-[120%] pointer-events-none overflow-hidden z-0"
-        :class="[
-          isMixing ? 'active-turbulence' : 'ambient-flow',
-          themeStore.isDarkResolved ? 'dark-mode' : 'light-mode'
-        ]"
-      >
-        <div class="blob-fluid blob-cyan" />
-        <div class="blob-fluid blob-magenta" />
-        <div class="blob-fluid blob-violet" />
-        <div class="blob-fluid blob-amber" />
-      </div>
-
       <!-- 3D Logo Container (Removed preserve-3d to fix clipping) -->
       <div 
         class="relative z-10 w-48 h-48 flex items-center justify-center pointer-events-none"
@@ -303,153 +293,7 @@ const openFeedback = () => {
 </template>
 
 <style scoped>
-/* Atmospheric Fluid Aurora Canvas */
-.aurora-container {
-  filter: blur(95px) saturate(170%);
-  mix-blend-mode: screen;
-  opacity: 0.55;
-  transition: filter 0.6s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.5s ease;
-  will-change: filter;
-}
 
-.aurora-container.active-turbulence {
-  filter: blur(75px) saturate(230%); /* 交互激荡时收拢到 75px 保持动感 */
-}
-
-/* 亮色模式下的流变调整 - 墨晕水彩流光风格 */
-.aurora-container.light-mode {
-  mix-blend-mode: multiply;
-  opacity: 0.14; /* 极致淡雅，仅留下高档白卡片上淡淡的水彩印记 */
-  filter: blur(105px) saturate(145%); /* 亮色下模糊半径增加，融化更广 */
-}
-
-.aurora-container.light-mode.active-turbulence {
-  filter: blur(85px) saturate(190%);
-  opacity: 0.22;
-}
-
-/* Fluid Organic Blobs */
-.blob-fluid {
-  position: absolute;
-  border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
-  will-change: transform, border-radius;
-  opacity: 0.55;
-  transition: opacity 0.5s ease;
-}
-
-.active-turbulence .blob-fluid {
-  opacity: 0.75;
-}
-
-/* Coprime period dynamics - Refactored to solid translucent colors to eliminate gradient interference */
-.blob-cyan {
-  width: 280px;
-  height: 280px;
-  background: rgba(0, 229, 255, 0.48); /* 实心半透色块 */
-  top: 10%;
-  left: 5%;
-  animation: liquid-cyan 23s infinite alternate ease-in-out;
-}
-
-.blob-magenta {
-  width: 300px;
-  height: 300px;
-  background: rgba(255, 51, 102, 0.45); /* 实心半透色块 */
-  bottom: 5%;
-  right: 5%;
-  animation: liquid-magenta 19s infinite alternate ease-in-out;
-}
-
-.blob-violet {
-  width: 250px;
-  height: 250px;
-  background: rgba(168, 85, 247, 0.42); /* 实心半透色块 */
-  top: 30%;
-  right: 15%;
-  animation: liquid-violet 29s infinite alternate ease-in-out;
-}
-
-.blob-amber {
-  width: 220px;
-  height: 220px;
-  background: rgba(245, 158, 11, 0.32); /* 实心半透色块 */
-  bottom: 20%;
-  left: 20%;
-  animation: liquid-amber 17s infinite alternate ease-in-out;
-}
-
-/* Coprime interactive speed scaling (Acceleration on drag/shake) */
-.active-turbulence .blob-cyan {
-  animation-duration: 9s;
-}
-.active-turbulence .blob-magenta {
-  animation-duration: 7.5s;
-}
-.active-turbulence .blob-violet {
-  animation-duration: 11s;
-}
-.active-turbulence .blob-amber {
-  animation-duration: 6.5s;
-}
-
-/* fluid metaballs transform animations */
-@keyframes liquid-cyan {
-  0% {
-    transform: translate(0px, 0px) rotate(0deg) scale(1);
-    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
-  }
-  33% {
-    transform: translate(40px, -60px) rotate(120deg) scale(1.2);
-    border-radius: 50% 50% 40% 60% / 60% 40% 60% 40%;
-  }
-  66% {
-    transform: translate(-50px, 30px) rotate(240deg) scale(0.85);
-    border-radius: 60% 40% 60% 40% / 40% 60% 50% 50%;
-  }
-  100% {
-    transform: translate(0px, 0px) rotate(360deg) scale(1);
-    border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
-  }
-}
-
-@keyframes liquid-magenta {
-  0% {
-    transform: translate(0px, 0px) rotate(360deg) scale(1);
-    border-radius: 60% 40% 60% 40% / 40% 60% 50% 50%;
-  }
-  50% {
-    transform: translate(-60px, 50px) rotate(180deg) scale(0.85);
-    border-radius: 40% 60% 50% 50% / 50% 40% 60% 50%;
-  }
-  100% {
-    transform: translate(0px, 0px) rotate(0deg) scale(1.15);
-    border-radius: 50% 50% 40% 60% / 60% 40% 60% 40%;
-  }
-}
-
-@keyframes liquid-violet {
-  0% {
-    transform: translate(0px, 0px) scale(0.95);
-  }
-  50% {
-    transform: translate(50px, -40px) scale(1.25) rotate(90deg);
-  }
-  100% {
-    transform: translate(-30px, 40px) scale(1) rotate(-90deg);
-  }
-}
-
-@keyframes liquid-amber {
-  0% {
-    transform: translate(0px, 0px) rotate(0deg);
-  }
-  50% {
-    transform: translate(-40px, -50px) rotate(-180deg) scale(1.25);
-  }
-  100% {
-    transform: translate(50px, 20px) rotate(180deg) scale(0.9);
-  }
-}
 
 /* 胶片颗粒噪点层，使用 0KB 纯 SVG 分形噪声物理抹除大渐变色带 */
 .noise-overlay {

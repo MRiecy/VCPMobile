@@ -142,7 +142,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         }
       };
 
-      await invoke('load_chat_history_streamed', {
+      const total = await invoke<number>('load_chat_history_streamed', {
         ownerId,
         ownerType,
         topicId,
@@ -151,7 +151,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         onMessage: channel,
       });
 
-      if (receivedCount === 0) {
+      if (total === 0) {
         if (offset === 0) {
           currentChatHistory.value = [];
           historyOffset.value = 0;
@@ -162,7 +162,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
       await completePromise;
 
-      const loadedCount = offset === 0 ? receivedCount : buffer.length;
+      const loadedCount = offset === 0 ? total : buffer.length;
       console.log(
         `[ChatHistoryStore] Loaded ${loadedCount} messages [${loadType}] for ${ownerId}, topic: ${topicId}`,
       );

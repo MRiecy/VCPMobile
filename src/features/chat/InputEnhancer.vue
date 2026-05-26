@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed } from 'vue';
+import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue';
 import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
 import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
@@ -14,10 +14,15 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'send', content: string): void;
   (e: 'attach'): void;
+  (e: 'toggle-menu', visible: boolean): void;
 }>();
 
 const input = ref('');
 const showAttachMenu = ref(false);
+
+watch(showAttachMenu, (val) => {
+  emit('toggle-menu', val);
+});
 const historyStore = useChatHistoryStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
@@ -96,37 +101,33 @@ const removeStagedAttachment = (index: number) => {
   attachmentStore.removeStaged(index);
 };
 
+const rootRef = ref<HTMLElement | null>(null);
+
+const handleClickOutside = (event: MouseEvent) => {
+  if (showAttachMenu.value && rootRef.value && !rootRef.value.contains(event.target as Node)) {
+    showAttachMenu.value = false;
+  }
+};
+
+onMounted(() => {
+  document.addEventListener('click', handleClickOutside, true);
+});
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside, true);
+});
+
 // 注意：textarea 上的 touch 拦截已移除，交由 WebView 原生处理 focus 与滚动。
 // 若后续仍需防止 rubber-band，应在容器层面（ChatView）统一处理，而非在 input 上。
 </script>
 
 <template>
-  <div class="px-1 py-1 w-full transition-opacity duration-300 no-swipe relative" :class="{ 'opacity-70 pointer-events-none': disabled }">
+  <div ref="rootRef" class="px-1 py-1 w-full transition-opacity duration-300 no-swipe relative flex flex-col gap-1.5" :class="{ 'opacity-70 pointer-events-none': disabled }">
     <!-- 全局群组停止按钮 -->
     <GroupStopAllButton />
 
-    <!-- 附件选择菜单 (浮层) -->
-    <Transition name="fade-scale">
-      <div v-if="showAttachMenu" 
-        class="absolute bottom-16 right-4 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl shadow-2xl p-2 z-local flex flex-col gap-1 min-w-[120px] backdrop-blur-md"
-      >
-        <button @click="triggerFilePick('camera')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
-          <div class="i-heroicons-camera text-lg text-blue-500"></div>
-          <span class="text-sm font-medium text-[var(--primary-text)]">拍摄</span>
-        </button>
-        <button @click="triggerFilePick('gallery')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
-          <div class="i-heroicons-photo text-lg text-purple-500"></div>
-          <span class="text-sm font-medium text-[var(--primary-text)]">相册</span>
-        </button>
-        <button @click="triggerFilePick('file')" class="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all">
-          <div class="i-heroicons-document-text text-lg text-orange-500"></div>
-          <span class="text-sm font-medium text-[var(--primary-text)]">文件</span>
-        </button>
-      </div>
-    </Transition>
-
     <!-- 暂存附件预览区 -->
-    <div v-if="attachmentStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
+    <div v-if="attachmentStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-1 px-2 overflow-x-auto pb-1 pt-1">
       <TransitionGroup name="list">
         <StagedAttachmentPreview 
           v-for="(file, idx) in attachmentStore.stagedAttachments" 
@@ -138,6 +139,7 @@ const removeStagedAttachment = (index: number) => {
       </TransitionGroup>
     </div>
 
+    <!-- 输入操作栏 -->
     <div class="flex items-end gap-2 px-1">
       <div class="flex-1 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible">
         
@@ -157,7 +159,7 @@ const removeStagedAttachment = (index: number) => {
 
         <!-- 核心输入区 -->
         <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px]">
-          <textarea ref="textareaRef" v-model="input" @keydown="handleKeydown" @paste="handlePaste" @beforeinput="handleBeforeInput" rows="1"
+          <textarea ref="textareaRef" v-model="input" @focus="showAttachMenu = false" @keydown="handleKeydown" @paste="handlePaste" @beforeinput="handleBeforeInput" rows="1"
             class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[var(--primary-text)] text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide vcp-textarea"
             style="max-height: 114px;"
             :placeholder="disabled ? '请先选择话题以开启对话' : '说点什么...'" :disabled="disabled"></textarea>
@@ -187,6 +189,48 @@ const removeStagedAttachment = (index: number) => {
             </button>
           </Transition>
         </div>
+      </div>
+    </div>
+
+    <!-- 往上平滑弹起的百搭扩展面板 -->
+    <div 
+      class="overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+      :class="showAttachMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+      :style="{ height: showAttachMenu ? '112px' : '0px' }"
+    >
+      <div 
+        class="w-full h-full border-t border-[var(--border-color)]/20 pt-3 pb-2 flex justify-around items-center transition-all duration-300"
+        :class="showAttachMenu ? 'translate-y-0 opacity-100 scale-100' : 'translate-y-4 opacity-0 scale-95'"
+      >
+        <!-- 拍摄按钮 -->
+        <button @click="triggerFilePick('camera')" 
+          class="group flex flex-col items-center gap-1.5 active:scale-95 transition-all outline-none"
+        >
+          <div class="w-13 h-13 flex items-center justify-center rounded-2xl bg-black/5 dark:bg-white/5 border border-[var(--border-color)]/30 group-hover:border-[var(--highlight-text)]/40 transition-all shadow-inner">
+            <div class="i-heroicons-camera text-2xl text-blue-500/80 group-hover:text-blue-500 group-hover:scale-105 transition-all"></div>
+          </div>
+          <span class="text-[11px] font-semibold text-[var(--primary-text)]/70 group-hover:text-[var(--primary-text)] transition-colors">拍摄</span>
+        </button>
+
+        <!-- 相册按钮 -->
+        <button @click="triggerFilePick('gallery')" 
+          class="group flex flex-col items-center gap-1.5 active:scale-95 transition-all outline-none"
+        >
+          <div class="w-13 h-13 flex items-center justify-center rounded-2xl bg-black/5 dark:bg-white/5 border border-[var(--border-color)]/30 group-hover:border-[var(--highlight-text)]/40 transition-all shadow-inner">
+            <div class="i-heroicons-photo text-2xl text-purple-500/80 group-hover:text-purple-500 group-hover:scale-105 transition-all"></div>
+          </div>
+          <span class="text-[11px] font-semibold text-[var(--primary-text)]/70 group-hover:text-[var(--primary-text)] transition-colors">相册</span>
+        </button>
+
+        <!-- 文件按钮 -->
+        <button @click="triggerFilePick('file')" 
+          class="group flex flex-col items-center gap-1.5 active:scale-95 transition-all outline-none"
+        >
+          <div class="w-13 h-13 flex items-center justify-center rounded-2xl bg-black/5 dark:bg-white/5 border border-[var(--border-color)]/30 group-hover:border-[var(--highlight-text)]/40 transition-all shadow-inner">
+            <div class="i-heroicons-document-text text-2xl text-orange-500/80 group-hover:text-orange-500 group-hover:scale-105 transition-all"></div>
+          </div>
+          <span class="text-[11px] font-semibold text-[var(--primary-text)]/70 group-hover:text-[var(--primary-text)] transition-colors">文件</span>
+        </button>
       </div>
     </div>
   </div>
@@ -237,16 +281,5 @@ const removeStagedAttachment = (index: number) => {
   transform: scale(0.4) translateX(10px);
   width: 0;
   margin-left: -6px; /* 抵消 gap-1.5 (6px)，让 + 按钮平滑吸附 */
-}
-
-/* 附件菜单淡入淡出缩放 */
-.fade-scale-enter-active,
-.fade-scale-leave-active {
-  transition: all 0.2s ease-out;
-}
-.fade-scale-enter-from,
-.fade-scale-leave-to {
-  opacity: 0;
-  transform: scale(0.9) translateY(10px);
 }
 </style>

@@ -92,7 +92,7 @@ pub async fn load_chat_history_streamed(
     limit: Option<usize>,
     offset: Option<usize>,
     on_message: tauri::ipc::Channel<HistoryChunk>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let messages = crate::vcp_modules::message_service::load_chat_history_internal(
         &app_handle,
         &owner_id,
@@ -112,7 +112,7 @@ pub async fn load_chat_history_streamed(
             is_last,
         });
     }
-    Ok(())
+    Ok(total)
 }
 
 #[tauri::command]

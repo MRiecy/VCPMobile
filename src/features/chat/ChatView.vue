@@ -24,6 +24,12 @@ const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
 const { keyboardHeight, forceRecalculate } = useKeyboardInsets();
 
+// 跟踪输入增强组件底部的扩展菜单状态
+const isMenuExpanded = ref(false);
+const handleMenuToggle = (expanded: boolean) => {
+  isMenuExpanded.value = expanded;
+};
+
 // 容器 refs
 const messageListRef = ref<HTMLElement | null>(null);
 const chatViewContainerRef = ref<HTMLElement | null>(null);
@@ -250,14 +256,16 @@ onUnmounted(() => {
     <!-- 一键置底按钮 -->
     <Transition name="fade-slide-up">
       <button v-if="showScrollToBottom" @click="scrollToBottom(true)"
-        class="absolute bottom-24 right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-local active:scale-90 transition-all">
+        class="absolute right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-local active:scale-90 transition-[bottom,transform,opacity] duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+        :style="{ bottom: `calc(6rem + ${isMenuExpanded ? 112 : 0}px + var(--keyboard-offset, 0px))` }"
+      >
         <ArrowDown :size="20" />
       </button>
     </Transition>
 
     <!-- 3. 输入增强区 (固定底部) -->
     <footer class="vcp-input-footer px-4 py-1.5 border-t border-white/5 shrink-0">
-      <InputEnhancer :disabled="!sessionStore.currentTopicId" @send="historyStore.sendMessage" />
+      <InputEnhancer :disabled="!sessionStore.currentTopicId" @send="historyStore.sendMessage" @toggle-menu="handleMenuToggle" />
       <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))] no-swipe pointer-events-none"></div>
     </footer>
   </div>
