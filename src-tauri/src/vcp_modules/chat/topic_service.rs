@@ -384,6 +384,7 @@ pub async fn regenerate_topic_response(
         attachments: None, // 重新生成时，上下文组装会自动从数据库重新拉取附件
         blocks: None,
         shell: None,
+        content_hash: None,
     };
 
     // 5. 获取配置并发起生成

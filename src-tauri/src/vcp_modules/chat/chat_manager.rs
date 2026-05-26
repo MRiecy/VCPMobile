@@ -69,6 +69,9 @@ pub struct ChatMessage {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<crate::vcp_modules::pre_renderer::MessageShell>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

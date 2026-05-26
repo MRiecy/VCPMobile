@@ -193,6 +193,7 @@ pub async fn internal_process_agent_chat_message(
                     attachments: None,
                     blocks: None,
                     shell: None,
+                    content_hash: None,
                 };
 
                 let patch_result = message_service::patch_single_message(

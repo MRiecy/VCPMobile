@@ -172,6 +172,8 @@ pub struct UserMessageSyncDTO {
     pub timestamp: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
 }
 
 impl From<&ChatMessage> for UserMessageSyncDTO {
@@ -186,6 +188,7 @@ impl From<&ChatMessage> for UserMessageSyncDTO {
                 .attachments
                 .as_ref()
                 .map(|atts| atts.iter().map(AttachmentSyncDTO::from).collect()),
+            content_hash: msg.content_hash.clone(),
         }
     }
 }
@@ -208,6 +211,8 @@ pub struct AgentMessageSyncDTO {
     pub finish_reason: Option<String>,
     #[serde(rename = "avatarColor")]
     pub avatar_color: String,
+    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
 }
 
 impl AgentMessageSyncDTO {
@@ -222,6 +227,7 @@ impl AgentMessageSyncDTO {
             is_thinking: msg.is_thinking,
             finish_reason: msg.finish_reason.clone(),
             avatar_color,
+            content_hash: msg.content_hash.clone(),
         }
     }
 }
@@ -246,6 +252,8 @@ pub struct GroupMessageSyncDTO {
     pub is_group_message: bool,
     #[serde(rename = "avatarColor")]
     pub avatar_color: String,
+    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
 }
 
 impl GroupMessageSyncDTO {
@@ -261,6 +269,76 @@ impl GroupMessageSyncDTO {
             topic_id: msg.topic_id.clone().unwrap_or_default(),
             is_group_message: true,
             avatar_color,
+            content_hash: msg.content_hash.clone(),
+        }
+    }
+}
+
+/// ⚡ 捍卫 sync_dto.rs 的至高威严：专门用于同步下载消息的平铺标准网络契约
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePullSyncDTO {
+    pub id: String,
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub content: String,
+    pub timestamp: u64,
+    #[serde(default)]
+    pub is_thinking: Option<bool>,
+    #[serde(rename = "agentId", default)]
+    pub agent_id: Option<String>,
+    #[serde(rename = "groupId", default)]
+    pub group_id: Option<String>,
+    #[serde(rename = "topicId", default)]
+    pub topic_id: Option<String>,
+    #[serde(rename = "isGroupMessage", default)]
+    pub is_group_message: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<AttachmentSyncDTO>>,
+    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(rename = "avatarColor", skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<String>,
+}
+
+impl From<MessagePullSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
+    fn from(dto: MessagePullSyncDTO) -> Self {
+        Self {
+            id: dto.id,
+            role: dto.role,
+            name: dto.name,
+            content: dto.content,
+            timestamp: dto.timestamp,
+            is_thinking: dto.is_thinking,
+            agent_id: dto.agent_id,
+            group_id: dto.group_id,
+            topic_id: dto.topic_id,
+            is_group_message: dto.is_group_message,
+            finish_reason: dto.finish_reason,
+            attachments: dto.attachments.map(|atts| {
+                atts.into_iter()
+                    .map(|a| crate::vcp_modules::chat_manager::Attachment {
+                        r#type: a.r#type,
+                        src: "".to_string(), // 在下游的 process_topic_messages 里会被 path_map 自动填充
+                        name: a.name,
+                        size: a.size,
+                        hash: Some(a.hash),
+                        status: a.status,
+                        internal_path: "".to_string(),
+                        extracted_text: a.extracted_text,
+                        image_frames: a.image_frames,
+                        thumbnail_path: None,
+                        created_at: a.created_at,
+                    })
+                    .collect()
+            }),
+            blocks: None, // ⚡ 同步下载阶段不再执行耗时预渲染，直接设为 None，由 Lazy Render 闭环接管！
+            content_hash: dto.content_hash,
+            shell: None,
         }
     }
 }

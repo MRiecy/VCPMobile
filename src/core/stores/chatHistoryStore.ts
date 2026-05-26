@@ -480,26 +480,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     } catch (e) {}
   };
 
-  /**
-   * 为指定消息向后端请求预渲染 blocks（用于无 blocks 的消息回退）
-   */
-  const compileMessageBlocks = async (messageId: string) => {
-    const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
-    if (targetIndex === -1) return;
-    const msg = currentChatHistory.value[targetIndex];
-    if (msg.blocks || !msg.content) return;
-
-    try {
-      const blocks = await invoke("process_message_content", { content: msg.content });
-      currentChatHistory.value[targetIndex] = {
-        ...msg,
-        blocks: blocks as any,
-      };
-    } catch (e) {
-      console.error("[ChatHistoryStore] compileMessageBlocks failed:", e);
-    }
-  };
-
   return {
     currentChatHistory,
     loading,
@@ -519,6 +499,5 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     regenerateResponse,
     fetchRawContent,
     persistMessageBlocks,
-    compileMessageBlocks,
   };
 });

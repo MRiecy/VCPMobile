@@ -105,13 +105,45 @@ import { useSettingsStore } from '../../core/stores/settings';
 
 const settingsStore = useSettingsStore();
 
+const scrollContainer = ref<HTMLElement | null>(null);
+const isUserScrolling = ref(false);
+
+// 监听 Tab 变化，驱动滚动
+watch(() => store.activeTab, (newTab) => {
+  if (!scrollContainer.value || isUserScrolling.value) return;
+  const targetX = newTab === 'live' ? 0 : scrollContainer.value.clientWidth;
+  if (scrollContainer.value.scrollLeft !== targetX) {
+    scrollContainer.value.scrollTo({ left: targetX, behavior: 'smooth' });
+  }
+});
+
+// 监听滚动，驱动 Tab 切换
+const handleScroll = (e: Event) => {
+  const el = e.target as HTMLElement;
+  const width = el.clientWidth;
+  if (width <= 0) return;
+
+  isUserScrolling.value = true;
+  const scrollLeft = el.scrollLeft;
+  const activeTab = scrollLeft < width / 2 ? 'live' : 'history';
+
+  if (store.activeTab !== activeTab) {
+    store.switchTab(activeTab);
+  }
+
+  // 延时重置用户滚动标志，防止 watch 导致的循环滚动
+  setTimeout(() => {
+    isUserScrolling.value = false;
+  }, 100);
+};
+
 const prerenderEnabled = computed(() =>
   settingsStore.settings?.syncPrerenderEnabled ?? false
 );
 
 const handlePrerenderToggle = (val: boolean) => {
   if (val) {
-    const ok = confirm('启用后将在同步时进行预渲染计算，可能导致同步耗时增加。确认启用？');
+    const ok = confirm('启用后将在同步时进行预渲染计算，可能导致同步耗时增加，首次同步建议关闭。确认启用？');
     if (!ok) return;
   }
   settingsStore.updateSettings({ syncPrerenderEnabled: val });
@@ -160,93 +192,100 @@ const handlePrerenderToggle = (val: boolean) => {
         </button>
       </div>
 
-      <!-- 实时视图 -->
-      <div v-if="store.activeTab === 'live'" class="flex-1 flex flex-col overflow-hidden">
-        <!-- idle 状态：同步启动占位 -->
-        <div v-if="store.status === 'idle'" class="flex-1 flex flex-col items-center justify-center px-8">
-          <div class="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-6">
-            <Play :size="28" class="text-blue-400 ml-1" />
-          </div>
-          <div class="text-sm font-bold tracking-wider mb-2">全量神经同步</div>
-          <div class="text-[11px] text-white/30 text-center mb-8 leading-relaxed">
-            与桌面端进行数据全量比对与同步<br>
-            包括会话主题、历史消息及附件
-          </div>
-          <button
-            @click="store.startSync()"
-            class="px-8 py-3 rounded-lg bg-blue-500/20 text-blue-400 text-xs font-bold tracking-widest uppercase active:bg-blue-500/30 transition-colors"
-          >
-            开始同步
-          </button>
-
-          <!-- 高级设置区 -->
-          <div class="w-full max-w-xs mt-8 border-t border-white/5 pt-4">
-            <div class="text-[9px] font-bold uppercase tracking-widest text-white/20 mb-3 text-left">
-              高级设置
+      <!-- 内容区域：水平滑动容器 -->
+      <div
+        ref="scrollContainer"
+        class="flex-1 flex overflow-x-auto snap-x snap-mandatory no-scrollbar no-rubber-band select-none"
+        @scroll="handleScroll"
+      >
+        <!-- 实时视图 -->
+        <div class="w-full shrink-0 snap-center flex flex-col overflow-hidden">
+          <!-- idle 状态：同步启动占位 -->
+          <div v-if="store.status === 'idle'" class="flex-1 flex flex-col items-center justify-center px-8">
+            <div class="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-6">
+              <Play :size="28" class="text-blue-400 ml-1" />
             </div>
-            <div class="flex items-center justify-between">
-              <div class="flex flex-col text-left">
-                <span class="text-[12px] font-semibold text-white/70">预渲染同步</span>
-                <span class="text-[9px] text-white/25 mt-0.5">
-                  同步时预编译渲染缓存，增加耗时
+            <div class="text-sm font-bold tracking-wider mb-2">全量神经同步</div>
+            <div class="text-[11px] text-white/30 text-center mb-8 leading-relaxed">
+              与桌面端进行数据全量比对与同步<br>
+              包括会话主题、历史消息及附件
+            </div>
+            <button
+              @click="store.startSync()"
+              class="px-8 py-3 rounded-lg bg-blue-500/20 text-blue-400 text-xs font-bold tracking-widest uppercase active:bg-blue-500/30 transition-colors"
+            >
+              开始同步
+            </button>
+
+            <button
+              @click="store.switchTab('history')"
+              class="mt-4 text-[10px] text-white/20 hover:text-white/40 transition-colors"
+            >
+              或查看历史日志
+            </button>
+
+            <!-- 高级设置区 -->
+            <div class="w-full max-w-xs mt-8 border-t border-white/5 pt-4">
+              <div class="text-[9px] font-bold uppercase tracking-widest text-white/20 mb-3 text-left">
+                高级设置
+              </div>
+              <div class="flex items-center justify-between">
+                <div class="flex flex-col text-left">
+                  <span class="text-[12px] font-semibold text-white/70">预渲染同步</span>
+                  <span class="text-[9px] text-white/25 mt-0.5">
+                    同步时预编译渲染缓存，增加耗时，首次同步时建议关闭
+                  </span>
+                </div>
+                <SettingsSwitch
+                  :model-value="prerenderEnabled"
+                  @update:model-value="handlePrerenderToggle"
+                />
+              </div>
+            </div>
+          </div>
+
+          <!-- 非 idle 状态：进度 + 日志 -->
+          <template v-else>
+            <!-- 进度条 -->
+            <div class="px-4 mb-4">
+              <div class="h-1 bg-white/10 rounded-full overflow-hidden">
+                <div class="h-full transition-all duration-500 rounded-full"
+                     :class="progressBarClass"
+                     :style="{ width: progressPercent + '%' }"></div>
+              </div>
+              <div class="flex justify-between text-[10px] mt-1 opacity-50">
+                <span>{{ phaseLabel }}</span>
+                <span v-if="store.progressData.total > 0">
+                  {{ store.progressData.completed }}/{{ store.progressData.total }}
                 </span>
               </div>
-              <SettingsSwitch
-                :model-value="prerenderEnabled"
-                @update:model-value="handlePrerenderToggle"
-              />
             </div>
-          </div>
 
-          <button
-            @click="store.switchTab('history')"
-            class="mt-4 text-[10px] text-white/20 hover:text-white/40 transition-colors"
-          >
-            或查看历史日志
-          </button>
+            <!-- 日志终端 -->
+            <div class="flex-1 px-4 overflow-hidden flex flex-col min-h-0">
+              <div ref="logContainer" class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto no-rubber-band flex flex-col min-h-0">
+                <div v-if="store.logs.length === 0" class="text-white/20 italic">
+                  等待连接...
+                </div>
+                <template v-else>
+                  <div v-for="log in visibleLogs" :key="log.id"
+                       class="break-words mb-0.5"
+                       :class="logColor(log.level)">
+                    [{{ log.time }}] {{ log.message }}
+                  </div>
+                  <div v-if="store.logs.length > 100" class="text-white/20 text-center py-1">
+                    ... {{ store.logs.length - 100 }} 条更早的日志已折叠（内存中保留最近 200 条）
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
         </div>
 
-        <!-- 非 idle 状态：进度 + 日志 -->
-        <template v-else>
-          <!-- 进度条 -->
-          <div class="px-4 mb-4">
-            <div class="h-1 bg-white/10 rounded-full overflow-hidden">
-              <div class="h-full transition-all duration-500 rounded-full"
-                   :class="progressBarClass"
-                   :style="{ width: progressPercent + '%' }"></div>
-            </div>
-            <div class="flex justify-between text-[10px] mt-1 opacity-50">
-              <span>{{ phaseLabel }}</span>
-              <span v-if="store.progressData.total > 0">
-                {{ store.progressData.completed }}/{{ store.progressData.total }}
-              </span>
-            </div>
-          </div>
-
-          <!-- 日志终端 -->
-          <div class="flex-1 px-4 overflow-hidden flex flex-col min-h-0">
-            <div ref="logContainer" class="bg-black/40 rounded-lg p-3 font-mono text-[10px] leading-relaxed flex-1 overflow-y-auto no-rubber-band flex flex-col min-h-0">
-              <div v-if="store.logs.length === 0" class="text-white/20 italic">
-                等待连接...
-              </div>
-              <template v-else>
-                <div v-for="log in visibleLogs" :key="log.id"
-                     class="break-words mb-0.5"
-                     :class="logColor(log.level)">
-                  [{{ log.time }}] {{ log.message }}
-                </div>
-                <div v-if="store.logs.length > 100" class="text-white/20 text-center py-1">
-                  ... {{ store.logs.length - 100 }} 条更早的日志已折叠（内存中保留最近 200 条）
-                </div>
-              </template>
-            </div>
-          </div>
-        </template>
-      </div>
-
-      <!-- 历史视图 -->
-      <div v-else class="flex-1 flex flex-col overflow-hidden">
-        <SyncLogBrowserCore />
+        <!-- 历史视图 -->
+        <div class="w-full shrink-0 snap-center flex flex-col overflow-hidden">
+          <SyncLogBrowserCore />
+        </div>
       </div>
 
       <!-- 底部工具栏 -->

@@ -353,20 +353,6 @@ function formatTime(ts: number) {
   });
 }
 
-// === Block Compilation Fallback ===
-// 当消息无 blocks 且不在流式中时，向后端请求预渲染
-const blocksRequested = ref(false);
-watch(
-  () => props.message.blocks,
-  (blocks) => {
-    if (!blocks && props.message.content && !blocksRequested.value && !isStreaming.value) {
-      blocksRequested.value = true;
-      historyStore.compileMessageBlocks(props.message.id);
-    }
-  },
-  { immediate: true }
-);
-
 // === Style Block CSS Injection ===
 const { injectScopedCss, removeScopedCss } = useContentProcessor();
 

@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, Semaphore};
 struct TopicNDJSONFrame {
     #[serde(rename = "topicId")]
     topic_id: String,
-    messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+    messages: Vec<crate::vcp_modules::sync_dto::MessagePullSyncDTO>,
     #[serde(rename = "_error")]
     error: Option<String>,
 }
@@ -27,11 +27,13 @@ async fn process_topic_messages<R: Runtime>(
     write_queue: &DbWriteQueue,
     prerender_enabled: bool,
 ) -> Result<(usize, usize), String> {
+    let t_start = std::time::Instant::now();
     use crate::vcp_modules::db_manager::DbState;
     use sqlx::Row;
     let db = app.state::<DbState>();
 
     // 1. 批量收集所有附件 hash，一次性查询本地路径（替代 N+1 查询）
+    let t_att_start = std::time::Instant::now();
     let mut all_hashes = Vec::new();
     for msg in &parsed_messages {
         if let Some(ref atts) = msg.attachments {
@@ -71,6 +73,7 @@ async fn process_topic_messages<R: Runtime>(
             }
         }
     }
+    let t_att = t_att_start.elapsed();
 
     // 2. 用缓存的 path_map 填充附件路径与状态
     for msg in &mut parsed_messages {
@@ -94,9 +97,12 @@ async fn process_topic_messages<R: Runtime>(
     }
 
     let parsed_count = parsed_messages.len();
+    let mut t_block = std::time::Duration::from_secs(0);
+    let mut t_submit = std::time::Duration::from_secs(0);
 
     if !parsed_messages.is_empty() {
         // 3. 将预渲染和 Zstd 压缩等 CPU 密集型任务完美剥离至 spawn_blocking 线程池，解除 Tokio Worker 线程阻塞
+        let t_block_start = std::time::Instant::now();
         let topic_id_clone = topic_id.to_string();
         let (parsed_messages_back, content_hashes, render_bytes_list, compressed_contents) =
             tokio::task::spawn_blocking(move || {
@@ -106,7 +112,7 @@ async fn process_topic_messages<R: Runtime>(
                 let mut compressed_contents = Vec::with_capacity(count);
 
                 for msg in &parsed_messages {
-                    // A. 计算指纹
+                    // A. 计算/直读指纹
                     let attachment_hashes: Vec<String> = msg
                         .attachments
                         .as_ref()
@@ -117,8 +123,12 @@ async fn process_topic_messages<R: Runtime>(
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let content_hash =
-                        HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes);
+
+                    // ⚡ 优化：如果桌面端下发了 content_hash，则直接秒级复用，免去重算开销
+                    let content_hash = match msg.content_hash {
+                        Some(ref h) if !h.is_empty() => h.clone(),
+                        _ => HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes),
+                    };
 
                     // B. 文本压缩（始终执行）+ 预渲染（按开关控制）
                     let content = &msg.content;
@@ -154,8 +164,10 @@ async fn process_topic_messages<R: Runtime>(
             })
             .await
             .map_err(|e| format!("Spawn blocking failed: {}", e))?;
+        t_block = t_block_start.elapsed();
 
         // 4. 提交落盘
+        let t_submit_start = std::time::Instant::now();
         write_queue
             .submit(DbWriteTask::TopicMessages {
                 topic_id: topic_id.to_string(),
@@ -166,6 +178,15 @@ async fn process_topic_messages<R: Runtime>(
                 skip_bubble: true,
             })
             .await;
+        t_submit = t_submit_start.elapsed();
+    }
+
+    let t_total = t_start.elapsed();
+    if parsed_count > 0 {
+        println!(
+            "[PullExecutor] [ProfileDetail] topic={} msgs={} | sql_att={:?} spawn_blocking={:?} submit_queue={:?} | total_proc={:?}",
+            topic_id, parsed_count, t_att, t_block, t_submit, t_total
+        );
     }
 
     Ok((parsed_count, 0))
@@ -628,65 +649,96 @@ impl PullExecutor {
                     continue;
                 }
 
-                let frame: TopicNDJSONFrame = match serde_json::from_slice(&line) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let err_msg = format!("[PullExecutor] Malformed NDJSON frame: {}", e);
-                        crate::vcp_modules::sync::sync_service::emit_sync_log(app, "error", &err_msg);
-                        continue;
-                    }
-                };
-
-                let topic_id = frame.topic_id;
-                if topic_id.is_empty() {
-                    crate::vcp_modules::sync::sync_service::emit_sync_log(app, "error", "[PullExecutor] Batch pull: empty topicId in NDJSON line, skipping");
-                    continue;
-                }
-
-                // 检查单 topic 错误帧
-                if let Some(topic_err) = frame.error {
-                    let _ = tx.send(BatchPullResult {
-                        topic_id,
-                        success: false,
-                        parsed_count: 0,
-                        failed_count: 0,
-                        error: Some(format!("Desktop error: {}", topic_err)),
-                    });
-                    continue;
-                }
-
-                let messages = frame.messages;
-                if messages.is_empty() {
-                    let _ = tx.send(BatchPullResult {
-                        topic_id,
-                        success: true,
-                        parsed_count: 0,
-                        failed_count: 0,
-                        error: None,
-                    });
-                    continue;
-                }
-
-                // 并发处理：Semaphore 控制并发度，spawn 异步任务
-                let permit = sem
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|e| e.to_string())?;
+                // ⚡ 异步重构：流主协程不等待解析，立即把 line 抛进后台多核协程
                 let app_clone = app.clone();
+                let sem_clone = sem.clone();
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
+                let prerender_enabled = prerender_enabled; // Copy 捕获
+
                 let handle = tokio::spawn(async move {
-                    let _permit = permit; // 持有 permit 直到任务完成
-                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
-                        Ok((parsed, failed)) => {
-                            let _ = tx_clone.send(BatchPullResult {
-                                topic_id,
-                                success: true,
-                                parsed_count: parsed,
-                                failed_count: failed,
-                                error: None,
-                            });
+                    let start_t = std::time::Instant::now();
+                    // 1. 在后台多核并发解码标准 DTO JSON
+                    let frame: TopicNDJSONFrame = match serde_json::from_slice(&line) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            let err_msg = format!("[PullExecutor] Malformed NDJSON frame: {}", e);
+                            crate::vcp_modules::sync::sync_service::emit_sync_log(&app_clone, "error", &err_msg);
+                            return;
+                        }
+                    };
+
+                    let topic_id = frame.topic_id;
+                    if topic_id.is_empty() {
+                        crate::vcp_modules::sync::sync_service::emit_sync_log(&app_clone, "error", "[PullExecutor] Batch pull: empty topicId in NDJSON line, skipping");
+                        return;
+                    }
+
+                    // 2. 检查单 topic 错误帧
+                    if let Some(topic_err) = frame.error {
+                        let _ = tx_clone.send(BatchPullResult {
+                            topic_id,
+                            success: false,
+                            parsed_count: 0,
+                            failed_count: 0,
+                            error: Some(format!("Desktop error: {}", topic_err)),
+                        });
+                        return;
+                    }
+
+                    let pull_dtos = frame.messages;
+                    if pull_dtos.is_empty() {
+                        let _ = tx_clone.send(BatchPullResult {
+                            topic_id,
+                            success: true,
+                            parsed_count: 0,
+                            failed_count: 0,
+                            error: None,
+                        });
+                        return;
+                    }
+
+                    // ⚡ 核心转换：通过 DTO From 实现三层完全隔离，净化核心 ChatMessage
+                    let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> = pull_dtos
+                        .into_iter()
+                        .map(crate::vcp_modules::chat_manager::ChatMessage::from)
+                        .collect();
+
+                    let decode_t = start_t.elapsed();
+
+                    // 3. 抢占信号量，控制写入并发度
+                    let sem_start = std::time::Instant::now();
+                    match sem_clone.acquire_owned().await {
+                        Ok(permit) => {
+                            let sem_t = sem_start.elapsed();
+                            let _permit = permit; // 持有 permit 直到任务完成
+                            let proc_start = std::time::Instant::now();
+                            match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
+                                Ok((parsed, failed)) => {
+                                    let proc_t = proc_start.elapsed();
+                                    let total_t = start_t.elapsed();
+                                    println!(
+                                        "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} sem_wait={:?} process={:?} | total={:?}",
+                                        topic_id, parsed, decode_t, sem_t, proc_t, total_t
+                                    );
+                                    let _ = tx_clone.send(BatchPullResult {
+                                        topic_id,
+                                        success: true,
+                                        parsed_count: parsed,
+                                        failed_count: failed,
+                                        error: None,
+                                    });
+                                }
+                                Err(e) => {
+                                    let _ = tx_clone.send(BatchPullResult {
+                                        topic_id,
+                                        success: false,
+                                        parsed_count: 0,
+                                        failed_count: 0,
+                                        error: Some(e),
+                                    });
+                                }
+                            }
                         }
                         Err(e) => {
                             let _ = tx_clone.send(BatchPullResult {
@@ -694,7 +746,7 @@ impl PullExecutor {
                                 success: false,
                                 parsed_count: 0,
                                 failed_count: 0,
-                                error: Some(e),
+                                error: Some(e.to_string()),
                             });
                         }
                     }
@@ -720,37 +772,54 @@ impl PullExecutor {
                             error: Some(format!("Desktop error: {}", topic_err)),
                         });
                     } else {
-                        let messages = frame.messages;
-                        if !messages.is_empty() {
-                            if let Ok(permit) = sem.clone().acquire_owned().await {
-                                let app_clone = app.clone();
-                                let wq_clone = write_queue.clone();
-                                let tx_clone = tx.clone();
-                                let handle = tokio::spawn(async move {
-                                    let _permit = permit;
-                                    match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
-                                        Ok((parsed, failed)) => {
-                                            let _ = tx_clone.send(BatchPullResult {
-                                                topic_id,
-                                                success: true,
-                                                parsed_count: parsed,
-                                                failed_count: failed,
-                                                error: None,
-                                            });
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_clone.send(BatchPullResult {
-                                                topic_id,
-                                                success: false,
-                                                parsed_count: 0,
-                                                failed_count: 0,
-                                                error: Some(e),
-                                            });
+                        let pull_dtos = frame.messages;
+                        if !pull_dtos.is_empty() {
+                            let app_clone = app.clone();
+                            let sem_clone = sem.clone();
+                            let wq_clone = write_queue.clone();
+                            let tx_clone = tx.clone();
+                            let handle = tokio::spawn(async move {
+                                match sem_clone.acquire_owned().await {
+                                    Ok(permit) => {
+                                        let _permit = permit;
+                                        // 转换 DTO 到 ChatMessage 核心实体
+                                        let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> = pull_dtos
+                                            .into_iter()
+                                            .map(crate::vcp_modules::chat_manager::ChatMessage::from)
+                                            .collect();
+                                        match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
+                                            Ok((parsed, failed)) => {
+                                                let _ = tx_clone.send(BatchPullResult {
+                                                    topic_id,
+                                                    success: true,
+                                                    parsed_count: parsed,
+                                                    failed_count: failed,
+                                                    error: None,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                let _ = tx_clone.send(BatchPullResult {
+                                                    topic_id,
+                                                    success: false,
+                                                    parsed_count: 0,
+                                                    failed_count: 0,
+                                                    error: Some(e),
+                                                });
+                                            }
                                         }
                                     }
-                                });
-                                spawn_handles.push(handle);
-                            }
+                                    Err(e) => {
+                                        let _ = tx_clone.send(BatchPullResult {
+                                            topic_id,
+                                            success: false,
+                                            parsed_count: 0,
+                                            failed_count: 0,
+                                            error: Some(e.to_string()),
+                                        });
+                                    }
+                                }
+                            });
+                            spawn_handles.push(handle);
                         } else {
                             let _ = tx.send(BatchPullResult {
                                 topic_id,
