@@ -151,7 +151,11 @@ export function useNotificationProcessor() {
         }
       }
       if (vcpData.tool_name && vcpData.status) {
-        type = vcpData.status === 'error' ? 'error' : 'tool';
+        // 如果是 DailyNote 工具成功运行，直接接管为 success 样式（展现精美的绿色圆钩图标），接管历史遗留的 daily_note_created 视觉角色
+        type = vcpData.status === 'error' 
+          ? 'error' 
+          : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
+        
         title = `${vcpData.tool_name} ${vcpData.status}`;
 
         let rawContent = String(vcpData.content || '');
@@ -251,7 +255,7 @@ export function useNotificationProcessor() {
         isPreformatted = false;
       }
     }
-    // 4. 日记创建状态 (对标桌面端 L118)
+    // 4. 日记创建状态 (遗留兼容，后端可能仍发送此类型)
     else if (payload.type === 'daily_note_created') {
       const noteData = payload.data || {};
       title = `日记: ${noteData.maidName || 'N/A'} (${noteData.dateString || 'N/A'})`;

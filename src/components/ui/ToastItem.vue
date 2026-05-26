@@ -54,13 +54,6 @@ const swipeStyle = computed(() => {
   };
 });
 
-const displayMessage = computed(() => {
-  if (!props.toast.message) return '';
-  // 对于预格式化或者带有换行的消息，在极简 Toast 中仅展示为单行空格分隔的纯文本并裁剪
-  const cleanMsg = props.toast.message.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return cleanMsg.length > 50 ? cleanMsg.substring(0, 50) + '...' : cleanMsg;
-});
-
 const handleClick = () => {
   dismissToast(props.toast.id);
 };
@@ -73,18 +66,23 @@ const handleClick = () => {
     :style="swipeStyle"
     @click="handleClick"
   >
-    <div class="flex items-center gap-3 min-w-0 flex-1">
-      <component :is="getIcon(toast.type)" :size="14" :class="getIconColor(toast.type)" class="shrink-0 opacity-80" />
+    <div class="flex items-start gap-3 min-w-0 flex-1">
+      <component :is="getIcon(toast.type)" :size="14" :class="getIconColor(toast.type)" class="mt-0.5 shrink-0 opacity-80" />
       <div class="flex flex-col min-w-0 flex-1">
          <span class="text-[11px] font-bold text-primary-text leading-tight tracking-wide truncate">{{ toast.title }}</span>
-         <span v-if="displayMessage" class="text-[9px] text-primary-text opacity-50 truncate mt-0.5 font-sans leading-none pr-1">
-           {{ displayMessage }}
-         </span>
+         
+         <div v-if="toast.isPreformatted" 
+           class="mt-1 p-1.5 bg-black/[0.04] dark:bg-black/25 rounded text-[8px] max-h-[60px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-60 text-primary-text leading-normal select-text">
+           {{ toast.message }}
+         </div>
+         <p v-else-if="toast.message" class="text-[9.5px] text-primary-text opacity-50 break-words mt-0.5 leading-snug select-text">
+           {{ toast.message }}
+         </p>
       </div>
     </div>
 
     <button @click.stop="dismissToast(toast.id)"
-      class="p-1 opacity-20 hover:opacity-100 text-primary-text transition-opacity shrink-0 ml-1">
+      class="p-1 opacity-20 hover:opacity-100 text-primary-text transition-opacity shrink-0 ml-1 self-start">
       <X :size="12" />
     </button>
   </div>

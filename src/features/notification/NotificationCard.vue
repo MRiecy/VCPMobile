@@ -98,13 +98,13 @@ const onTouchEnd = () => {
         class="mt-0.5 shrink-0 opacity-75" />
       
       <div class="flex-1 min-w-0 flex flex-col">
-        <div class="flex justify-between items-center">
-          <span class="text-[10.5px] font-black uppercase tracking-wider opacity-80 truncate pr-2 text-primary-text">{{ props.item.title }}</span>
-          <span class="text-[9px] font-mono opacity-30 whitespace-nowrap text-primary-text leading-none">{{ format(props.item.timestamp, 'HH:mm:ss') }}</span>
+        <div class="flex justify-between items-start gap-2">
+          <span class="text-[10.5px] font-black tracking-wide opacity-80 pr-2 text-highlight-text leading-tight">{{ props.item.title }}</span>
+          <span class="text-[9px] font-mono opacity-30 whitespace-nowrap text-secondary-text leading-none mt-0.5">{{ format(props.item.timestamp, 'HH:mm:ss') }}</span>
         </div>
 
         <div v-if="props.item.isPreformatted"
-          class="mt-1.5 p-2 bg-black/[0.04] dark:bg-black/25 border-l-2 border-primary-text/10 rounded text-[9px] max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-60 text-primary-text leading-normal select-text">
+          class="mt-1.5 p-1.5 bg-black/10 dark:bg-black/20 rounded text-[9px] max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-70 text-primary-text leading-normal select-text">
           {{ props.item.message }}
         </div>
         <div v-else class="text-[10.5px] leading-relaxed break-words text-primary-text opacity-65 mt-0.5 select-text">
@@ -120,7 +120,7 @@ const onTouchEnd = () => {
       </div>
 
       <button @click="$emit('copy')"
-        class="opacity-0 group-hover:opacity-30 hover:!opacity-80 transition-opacity p-1 shrink-0 text-primary-text active:scale-90 duration-100">
+        class="self-center opacity-0 group-hover:opacity-30 hover:!opacity-80 transition-opacity p-1 shrink-0 text-primary-text active:scale-90 duration-100">
         <component :is="props.copyIcon" :size="13" />
       </button>
     </div>
