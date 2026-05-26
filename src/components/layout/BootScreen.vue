@@ -11,7 +11,7 @@ const reloadApp = () => {
 <template>
   <!-- 0. 全局初始化加载层 (通用) -->
   <Transition name="fade">
-    <div v-if="lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR' && lifecycleStore.state !== 'INITIAL_SYNCING'"
+    <div v-if="lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR'"
       class="fixed inset-0 z-boot bg-white/96 dark:bg-gray-950/96 flex flex-col items-center justify-center gap-6 px-8 text-center">
       <div class="w-18 h-18 relative">
         <div class="absolute inset-0 rounded-full border-4 border-blue-500/15"></div>

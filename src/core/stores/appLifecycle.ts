@@ -6,7 +6,7 @@ import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
 import { useNotificationStore } from './notification';
 
-export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'INITIAL_SYNCING' | 'READY' | 'ERROR';
+export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR';
 
 export interface CoreStatus {
   status: 'initializing' | 'ready' | 'error' | 'none';
@@ -305,6 +305,11 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   };
 
   const bootstrap = async (force = false) => {
+    if (isBootstrapping.value && force) {
+      console.log('[Lifecycle] Reusing existing bootstrap promise (force-in-progress ignored)');
+      return bootstrapPromise;
+    }
+
     if (bootstrapPromise && !force) {
       console.log('[Lifecycle] Reusing existing bootstrap promise');
       return bootstrapPromise;
@@ -357,6 +362,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     hasBootstrapped,
     lastTransitionAt,
     coreStatus: computed(() => notificationStore.vcpCoreStatus),
-    bootstrap
+    bootstrap,
+    hydrateSystemStatus
   };
 });

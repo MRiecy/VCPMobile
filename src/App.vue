@@ -187,6 +187,8 @@ const handleVcpLifecycle = async (e: Event) => {
     console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
     try {
       await invoke("set_vcp_log_heartbeat", { intervalMs: 15000 });
+      // 唤醒时主动校准系统最新状态快照
+      await lifecycleStore.hydrateSystemStatus();
     } catch (err) {
       console.error("[Lifecycle] Failed to restore foreground heartbeat:", err);
     }
@@ -203,10 +205,7 @@ onMounted(async () => {
   // 初始化全局表情包修复器
   initGlobalFixer();
 
-  // 2. 异步执行重度核心资源加载 (启动引导)
-  await bootstrapApp();
-
-  // 启动 VCP Log IPC 监听 (使用 1:1 移植 of 解析大脑)
+  // 1.5. 启动 VCP Log IPC 监听 (必须在 bootstrapApp 前挂载，防止 bootstrap 期间的 ready 事件丢失)
   unlistenLog = await listen("vcp-system-event", (event: any) => {
     const payload = event.payload;
     const processed = processPayload(payload);
@@ -215,6 +214,9 @@ onMounted(async () => {
       notificationStore.addNotification(processed);
     }
   });
+
+  // 2. 异步执行重度核心资源加载 (启动引导)
+  await bootstrapApp();
 
   // Operation Dummy Root: Wait for router and inject dummy layer
   await router.isReady();
