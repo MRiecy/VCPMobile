@@ -56,7 +56,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             true
         }
 
-        val storageGranted = if (Build.VERSION.SDK_INT >= 33) {
+        val storageGranted = if (Build.VERSION.SDK_INT >= 34) {
+            val hasAll = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+            val hasVisualSelected = ContextCompat.checkSelfPermission(activity, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
+            hasAll || hasVisualSelected
+        } else if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
         } else {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
@@ -148,7 +152,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             true
         }
 
-        val storageGranted = if (Build.VERSION.SDK_INT >= 33) {
+        val storageGranted = if (Build.VERSION.SDK_INT >= 34) {
+            val hasAll = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+            val hasVisualSelected = ContextCompat.checkSelfPermission(activity, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
+            hasAll || hasVisualSelected
+        } else if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
         } else {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
@@ -222,6 +230,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
+        webViewRef = null
         super.onDestroy(activity)
     }
 

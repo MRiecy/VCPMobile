@@ -10,6 +10,7 @@ pub struct PermissionStatus {
     pub notification: bool,
     pub storage: bool,
     pub battery: bool,
+    pub microphone: bool,
 }
 
 #[tauri::command]
@@ -32,6 +33,7 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
             notification: true,
             storage: true,
             battery: true,
+            microphone: true,
         })
     }
 }

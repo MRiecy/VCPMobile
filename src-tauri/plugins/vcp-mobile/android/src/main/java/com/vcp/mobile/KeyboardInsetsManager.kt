@@ -59,7 +59,9 @@ class KeyboardInsetsManager(private val activity: Activity) {
     private fun emit(eventName: String, detail: Map<String, Any?>) {
         val json = serializeValue(detail)
         val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
-        webViewRef?.evaluateJavascript(script, null)
+        activity.runOnUiThread {
+            webViewRef?.evaluateJavascript(script, null)
+        }
     }
 
     private fun serializeValue(value: Any?): String {

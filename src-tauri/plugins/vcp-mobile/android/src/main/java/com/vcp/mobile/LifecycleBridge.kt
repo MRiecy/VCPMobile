@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import android.webkit.WebView
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import java.lang.ref.WeakReference
 
 /**
  * 应用生命周期桥接器
@@ -15,12 +16,21 @@ import androidx.lifecycle.LifecycleOwner
 class LifecycleBridge : DefaultLifecycleObserver {
 
     private var webViewRef: WebView? = null
+    private var activityRef: WeakReference<Activity>? = null
 
     fun attach(activity: Activity, webView: WebView) {
         webViewRef = webView
+        activityRef = WeakReference(activity)
         if (activity is LifecycleOwner) {
             activity.lifecycle.addObserver(this)
         }
+    }
+
+    override fun onDestroy(owner: LifecycleOwner) {
+        webViewRef = null
+        activityRef = null
+        owner.lifecycle.removeObserver(this)
+        super.onDestroy(owner)
     }
 
     override fun onResume(owner: LifecycleOwner) {
@@ -51,7 +61,16 @@ class LifecycleBridge : DefaultLifecycleObserver {
     private fun emit(eventName: String, detail: Map<String, Any?>) {
         val json = serializeValue(detail)
         val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
-        webViewRef?.evaluateJavascript(script, null)
+        val activity = activityRef?.get()
+        if (activity != null) {
+            activity.runOnUiThread {
+                webViewRef?.evaluateJavascript(script, null)
+            }
+        } else {
+            webViewRef?.post {
+                webViewRef?.evaluateJavascript(script, null)
+            }
+        }
     }
 
     private fun serializeValue(value: Any?): String {

@@ -25,8 +25,16 @@ pub fn set_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         log::error!("[VcpMobilePlugin] getWindow failed");
                         return;
                     };
+                    let Ok(window_obj) = window.l() else {
+                        log::error!("[VcpMobilePlugin] getWindow returned non-object");
+                        return;
+                    };
+                    if window_obj.is_null() {
+                        log::error!("[VcpMobilePlugin] getWindow returned null");
+                        return;
+                    }
                     if let Err(e) = env.call_method(
-                        window.l().unwrap(),
+                        window_obj,
                         "addFlags",
                         "(I)V",
                         &[JValue::Int(FLAG_KEEP_SCREEN_ON)],
@@ -62,8 +70,16 @@ pub fn clear_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
                         log::error!("[VcpMobilePlugin] getWindow failed");
                         return;
                     };
+                    let Ok(window_obj) = window.l() else {
+                        log::error!("[VcpMobilePlugin] getWindow returned non-object");
+                        return;
+                    };
+                    if window_obj.is_null() {
+                        log::error!("[VcpMobilePlugin] getWindow returned null");
+                        return;
+                    }
                     if let Err(e) = env.call_method(
-                        window.l().unwrap(),
+                        window_obj,
                         "clearFlags",
                         "(I)V",
                         &[JValue::Int(FLAG_KEEP_SCREEN_ON)],
