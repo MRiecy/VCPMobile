@@ -302,6 +302,17 @@ const showMessageContextMenu = async () => {
 
   if (!isStreaming.value) {
     actions.push({
+      label: "重新渲染",
+      icon: RotateCcw,
+      handler: async () => {
+        await historyStore.reRenderMessage(
+          props.message.id,
+          props.message.topicId || props.message.topic_id || sessionStore.currentTopicId || ""
+        );
+      },
+    });
+
+    actions.push({
       label: "编辑消息",
       icon: Edit2,
       handler: async () => {

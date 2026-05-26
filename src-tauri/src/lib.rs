@@ -41,7 +41,7 @@ use vcp_modules::maintenance_manager::{
 use vcp_modules::message_repository::{
     compress_all_contents, process_message_content, rebuild_all_pre_renders,
 };
-use vcp_modules::message_service::fetch_raw_message_content;
+use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     toggle_favorite_model,
@@ -234,6 +234,7 @@ pub fn run() {
             register_local_file,
             prepare_vcp_upload,
             fetch_raw_message_content,
+            re_render_message,
             get_attachment_real_path,
             open_file,
             clear_webview_cache,

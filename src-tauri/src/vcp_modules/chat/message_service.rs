@@ -506,6 +506,60 @@ pub async fn fetch_raw_message_content(
     }
 }
 
+#[tauri::command]
+pub async fn re_render_message(
+    app_handle: tauri::AppHandle,
+    message_id: String,
+    topic_id: String,
+) -> Result<serde_json::Value, String> {
+    let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
+    let pool = &db_state.pool;
+
+    let row = sqlx::query("SELECT content FROM messages WHERE msg_id = ? AND topic_id = ?")
+        .bind(&message_id)
+        .bind(&topic_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    match row {
+        Some(r) => {
+            let bytes: Vec<u8> = r.get("content");
+            let decompressed = ContentCompressor::decompress(&bytes).map_err(|e| {
+                format!(
+                    "Failed to decompress content for message {} in topic {}: {}",
+                    message_id, topic_id, e
+                )
+            })?;
+
+            let compiled = MessageRenderCompiler::compile(&decompressed);
+            let serialized = MessageRenderCompiler::serialize(&compiled)?;
+
+            let now = chrono::Utc::now().timestamp_millis();
+            sqlx::query(
+                "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) \
+                 VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(topic_id, msg_id) DO UPDATE SET \
+                 render_content = excluded.render_content, \
+                 updated_at = excluded.updated_at",
+            )
+            .bind(&topic_id)
+            .bind(&message_id)
+            .bind(&serialized)
+            .bind(now)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            serde_json::to_value(&compiled).map_err(|e| e.to_string())
+        }
+        None => Err(format!(
+            "Message {} with topic {} not found",
+            message_id, topic_id
+        )),
+    }
+}
+
 pub async fn patch_single_message(
     app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,

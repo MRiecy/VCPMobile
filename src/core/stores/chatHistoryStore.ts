@@ -480,6 +480,26 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     } catch (e) {}
   };
 
+  const reRenderMessage = async (messageId: string, topicId: string) => {
+    const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
+    if (targetIndex === -1) return;
+
+    clearMessageCache(messageId);
+
+    try {
+      const compiledBlocks = await invoke<ContentBlock[]>("re_render_message", {
+        messageId,
+        topicId,
+      });
+      currentChatHistory.value[targetIndex] = {
+        ...currentChatHistory.value[targetIndex],
+        blocks: compiledBlocks,
+      };
+    } catch (e) {
+      console.error("[reRenderMessage] re_render_message failed:", e);
+    }
+  };
+
   return {
     currentChatHistory,
     loading,
@@ -499,5 +519,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     regenerateResponse,
     fetchRawContent,
     persistMessageBlocks,
+    reRenderMessage,
   };
 });

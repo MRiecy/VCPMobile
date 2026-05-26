@@ -58,21 +58,22 @@ const {
   onLoadMore: () => historyStore.loadMoreHistory(),
 });
 
-// 监听话题切换，触发历史加载与状态重置
+// 监听话题切换与智能体变更，触发历史加载与防御性状态清空
 watch(
-  () => sessionStore.currentTopicId,
-  (newTopicId) => {
+  [() => sessionStore.currentTopicId, () => sessionStore.currentSelectedItem],
+  ([newTopicId, newSelectedItem]) => {
     showScrollToBottom.value = false;
     resetChatScroll();
-    if (newTopicId && sessionStore.currentSelectedItem) {
+    if (newTopicId && newSelectedItem) {
       console.log(`[ChatView] Topic changed to ${newTopicId}, loading history...`);
       topicStore.markTopicAsRead(newTopicId);
       historyStore.loadHistoryPaginated(
-        sessionStore.currentSelectedItem.id,
-        sessionStore.currentSelectedItem.type,
+        newSelectedItem.id,
+        newSelectedItem.type,
         newTopicId
       );
-    } else if (!newTopicId) {
+    } else {
+      console.log('[ChatView] Clearing chat history (Selected item or Topic became null).');
       historyStore.currentChatHistory = [];
     }
   },

@@ -105,6 +105,12 @@ let exitTimer: number | null = null;
 const isWaitingExit = ref(false);
 
 const handleExitRequest = async () => {
+  console.log(
+    `[ExitRequest] KeyPressed! State: ${lifecycleStore.state}, Item: ${
+      sessionStore.currentSelectedItem ? sessionStore.currentSelectedItem.id : 'NULL'
+    }, Topic: ${sessionStore.currentTopicId}, Modals: ${useModalHistory().modalStackLength()}`
+  );
+
   // 1. 优先让 Modal Stack 消费返回事件 (支持 Sidebar、Page、Dialog 等 LIFO 退出)
   const { closeTopModal } = useModalHistory();
   if (closeTopModal()) {
@@ -113,8 +119,11 @@ const handleExitRequest = async () => {
 
   // 2. 第二级：若当前在 Agent 聊天中（且已就绪），按返回键退回到初始零数据引导欢迎页
   if (lifecycleStore.state === 'READY' && sessionStore.currentSelectedItem !== null) {
-    sessionStore.currentSelectedItem = null;
-    sessionStore.currentTopicId = null;
+    console.log('[ExitRequest] Resetting active session to welcome boot screen.');
+    sessionStore.$patch((state) => {
+      state.currentSelectedItem = null;
+      state.currentTopicId = null;
+    });
     return;
   }
 

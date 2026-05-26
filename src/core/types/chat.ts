@@ -105,6 +105,8 @@ export interface ChatMessage {
   isGroupMessage?: boolean;
   finishReason?: string;
   attachments?: Attachment[];
+  topicId?: string;
+  topic_id?: string; // 兼容两种写法
 
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
