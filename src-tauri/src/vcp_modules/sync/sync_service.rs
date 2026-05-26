@@ -133,6 +133,7 @@ pub enum SyncCommand {
     },
     StartManualSync,
     SendWsMessage(serde_json::Value),
+    Cancel,
 }
 
 pub fn parse_sync_data_type(value: &Value) -> Option<SyncDataType> {
@@ -257,6 +258,9 @@ async fn run_sync_session(
     let sync_logger_task = sync_logger.clone();
 
     loop {
+        if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
         let (ws_url, http_url) = {
             let settings_state =
                 handle_clone.state::<crate::vcp_modules::settings_manager::SettingsState>();
@@ -667,6 +671,10 @@ async fn run_sync_session(
                         },
                         Some(cmd) = rx.recv() => {
                             match cmd {
+                                SyncCommand::Cancel => {
+                                    let _ = ws_stream.close(None).await;
+                                    break;
+                                },
                                 SyncCommand::NotifyLocalChange { id, data_type, hash, ts } => {
                                     let msg = json!({ "type": "SYNC_ENTITY_UPDATE", "id": id, "dataType": data_type, "hash": hash, "ts": ts });
                                     let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
@@ -990,7 +998,13 @@ async fn run_sync_session(
                         backoff, retry_count, MAX_RETRIES
                     );
                     emit_sync_log(&handle_clone, "warn", &err_msg);
+                    if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
                     tokio::time::sleep(backoff).await;
+                    if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
                     continue; // 重新尝试连接
                 }
             }
@@ -1010,7 +1024,13 @@ async fn run_sync_session(
                 }
                 let warn_msg = format!("连接失败，第 {} 次重试 | {}", retry_count, err_detail);
                 emit_sync_log(&handle_clone, "warning", &warn_msg);
+                if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
                 tokio::time::sleep(retry_delay).await;
+                if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
                 retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
             }
         }
@@ -1090,6 +1110,17 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
     } else {
         println!("[Sync] [{}] {}", level, message);
     }
+}
+
+#[tauri::command]
+pub async fn stop_sync(state: State<'_, SyncState>) -> Result<(), String> {
+    state.is_syncing.store(false, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut guard = state.connection_status.write().await;
+        *guard = "disconnected".to_string();
+    }
+    let _ = state.ws_sender.send(SyncCommand::Cancel);
+    Ok(())
 }
 
 #[tauri::command]

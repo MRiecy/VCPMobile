@@ -50,7 +50,7 @@ use vcp_modules::high_speed_channel::prepare_vcp_upload;
 
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
-    read_sync_log_file, start_manual_sync,
+    read_sync_log_file, start_manual_sync, stop_sync,
 };
 use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
@@ -258,6 +258,7 @@ pub fn run() {
             get_last_error,
             get_sync_status,
             start_manual_sync,
+            stop_sync,
             get_sync_session_log_path,
             list_sync_log_files,
             read_sync_log_file,

@@ -55,6 +55,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     activeTab.value = 'live';
     cleanupListeners();
     releaseScreenKeep();
+    invoke('stop_sync').catch(() => {});
   };
 
   const copyLogs = async () => {
