@@ -306,11 +306,33 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // 14. tarven_rules 表 (VCPChatTarven 规则库)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS tarven_rules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            rule_type TEXT NOT NULL,
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            content TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            wrap INTEGER NOT NULL DEFAULT 1,
+            role TEXT,
+            depth INTEGER,
+            position TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // Migrations (幂等 — .ok() 忽略 duplicate column 错误)
     sqlx::query("ALTER TABLE agents ADD COLUMN use_temperature INTEGER NOT NULL DEFAULT 1")
         .execute(pool).await.ok();
 
-    // 索引 (共 8 个)
+    // 索引 (共 9 个)
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_id, owner_type, created_at DESC)").execute(pool).await.map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category)").execute(pool).await.map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_topic_time ON messages(topic_id, timestamp DESC)").execute(pool).await.map_err(|e| e.to_string())?;
@@ -319,6 +341,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_attachments_hash ON message_attachments(hash)").execute(pool).await.map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_attachments_msg ON message_attachments(topic_id, msg_id)").execute(pool).await.map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_render_cache_msg ON render_cache(topic_id, msg_id)").execute(pool).await.map_err(|e| e.to_string())?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC)").execute(pool).await.map_err(|e| e.to_string())?;
 
     Ok(())
 }

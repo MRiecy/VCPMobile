@@ -80,7 +80,7 @@ onMounted(() => {
           <template v-if="tarvenStore.rules.length > 0">
             <div v-for="rule in tarvenStore.rules" :key="rule.id"
               class="flex items-center justify-between p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-800/40 border border-zinc-100 dark:border-zinc-800 transition-all select-none"
-              :class="{ 'opacity-90 border-blue-500/30 dark:border-blue-500/20': rule.enabled }"
+              :class="{ 'opacity-90 border-blue-500/30 dark:border-blue-500/20': rule.isEnabled }"
               @click="toggleRuleState(rule.id)"
             >
               <div class="flex items-center gap-3 flex-1 min-w-0 pr-4">
@@ -96,9 +96,9 @@ onMounted(() => {
 
               <!-- iOS 经典优雅 Switch -->
               <div class="relative shrink-0 w-[42px] h-[24px] bg-zinc-200 dark:bg-zinc-700 rounded-full transition-colors duration-200"
-                :class="{ 'bg-blue-500 dark:bg-blue-600': rule.enabled }">
+                :class="{ 'bg-blue-500 dark:bg-blue-600': rule.isEnabled }">
                 <div class="absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200"
-                  :class="{ 'translate-x-[18px]': rule.enabled }">
+                  :class="{ 'translate-x-[18px]': rule.isEnabled }">
                 </div>
               </div>
             </div>

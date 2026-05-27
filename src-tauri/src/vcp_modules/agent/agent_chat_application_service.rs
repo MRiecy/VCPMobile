@@ -100,21 +100,22 @@ pub async fn internal_process_agent_chat_message(
         agent_config.system_prompt.clone()
     };
 
-    let system_content = crate::vcp_modules::chat::context_injection::build_injected_system_prompt(
-        &db_state.pool,
-        &topic_id,
-        &agent_config.name,
-        effective_prompt,
-    )
-    .await?;
-
     messages.insert(
         0,
         json!({
             "role": "system",
-            "content": system_content
+            "content": effective_prompt
         }),
     );
+
+    crate::vcp_modules::chat::context_injection::apply_tarven_pipeline(
+        &db_state.pool,
+        &topic_id,
+        &agent_config.name,
+        "agent",
+        &mut messages,
+    )
+    .await?;
 
     // 6. 构造 VCP 请求载荷
     let mut model_config = json!({

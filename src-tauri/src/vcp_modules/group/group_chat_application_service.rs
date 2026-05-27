@@ -183,14 +183,6 @@ pub async fn internal_process_group_chat_message(
             assemble_group_context(&speaker, &group_config_inner, &active_member_configs_inner)
                 .await;
 
-        let system_prompt = crate::vcp_modules::chat::context_injection::build_injected_system_prompt(
-            &db_pool,
-            &topic_id,
-            &agent_name,
-            base_system_prompt,
-        )
-        .await?;
-
         // 动态路由决策：是否使用群组统一模型
         let model_to_use = if group_config_inner.use_unified_model {
             if let Some(ref unified) = group_config_inner.unified_model {
@@ -223,7 +215,16 @@ pub async fn internal_process_group_chat_message(
                 "content": processed_invite
             }));
         }
-        messages.insert(0, json!({"role": "system", "content": system_prompt}));
+        messages.insert(0, json!({"role": "system", "content": base_system_prompt}));
+
+        crate::vcp_modules::chat::context_injection::apply_tarven_pipeline(
+            &db_pool,
+            &topic_id,
+            &agent_name,
+            "group",
+            &mut messages,
+        )
+        .await?;
 
         let context = Some(json!({
             "groupId": group_id,
