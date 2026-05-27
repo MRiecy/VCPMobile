@@ -680,10 +680,14 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         "pptx" => extract_pptx_text(path),
         "xlsx" => extract_xlsx_text(path),
         "pdf" => extract_pdf_text(path),
-        _ => None,
+        _ => {
+            println!("[FileExtractor] No specialized extractor for extension: {}", ext);
+            None
+        }
     };
 
     if let Some(text) = doc_text {
+        println!("[FileExtractor] Successfully extracted {} chars from structured doc: {:?}", text.chars().count(), path);
         const MAX_TEXT_CHARS: usize = 10_000_000;
         if text.chars().count() > MAX_TEXT_CHARS {
             let truncated: String = text.chars().take(MAX_TEXT_CHARS).collect();
@@ -692,6 +696,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         return Some(text);
     }
 
+    println!("[FileExtractor] Extraction failed or returned no content for path: {:?}", path);
     None
 }
 
