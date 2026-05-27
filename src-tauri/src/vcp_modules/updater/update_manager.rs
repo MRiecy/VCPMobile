@@ -201,22 +201,34 @@ pub async fn download_update(
 
 #[tauri::command]
 pub async fn install_update(app: AppHandle, apk_path: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-
-    // 尝试用 opener 打开本地 APK 触发系统安装器
-    let result = app
-        .opener()
-        .open_path(&apk_path, Some("application/vnd.android.package-archive"));
-
-    match result {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            // 删除失败的缓存文件
+    #[cfg(target_os = "android")]
+    {
+        let result = tauri_plugin_vcp_mobile::system::open_file_native(app.clone(), apk_path.clone());
+        if result.is_err() {
             let _ = tokio::fs::remove_file(&apk_path).await;
-            Err(format!(
-                "无法启动安装器: {}。建议前往 GitHub Release 页面手动下载安装。",
-                e
-            ))
+        }
+        return result;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+
+        // 尝试用 opener 打开本地 APK 触发系统安装器
+        let result = app
+            .opener()
+            .open_path(&apk_path, Some("application/vnd.android.package-archive"));
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // 删除失败的缓存文件
+                let _ = tokio::fs::remove_file(&apk_path).await;
+                Err(format!(
+                    "无法启动安装器: {}。建议前往 GitHub Release 页面手动下载安装。",
+                    e
+                ))
+            }
         }
     }
 }
