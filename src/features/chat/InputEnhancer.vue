@@ -531,9 +531,13 @@ onUnmounted(() => {
           <button
             v-longpress="openTarvenSelector"
             @click="showAttachMenu = !showAttachMenu"
-            class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all"
+            class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all relative"
           >
             <div class="i-heroicons-plus-circle text-2xl transition-transform duration-300 ease-out" :class="{ 'rotate-45': showAttachMenu }"></div>
+            <!-- 当有激活规则时显示绿色指示点 -->
+            <div v-if="tarvenStore.rules.some(r => r.isEnabled)" 
+              class="absolute top-1.5 right-1.5 w-2 h-2 bg-emerald-500 rounded-full border-2 border-[var(--secondary-bg)] shadow-[0_0_8px_rgba(16,185,129,0.5)]">
+            </div>
           </button>
 
           <Transition name="pop-slide">

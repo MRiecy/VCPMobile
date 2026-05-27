@@ -24,9 +24,9 @@ const triggerDebugNotifications = () => {
 
   // 调试 payload 必须与后端真实消息结构一致，统一走 processPayload 引擎
   const debugPayloads = [
-    // 1. DailyNote 成功（无 original_plugin_output，走 friendly fallback）
+    // 1. DailyNote 成功 (vcp_log)
     {
-      type: 'vcp-log-message',
+      type: 'vcp_log',
       data: {
         tool_name: 'DailyNote',
         status: 'success',
@@ -36,9 +36,9 @@ const triggerDebugNotifications = () => {
         })
       }
     },
-    // 2. 普通工具成功（含 original_plugin_output 对象，pre 渲染）
+    // 2. 普通工具成功 (vcp_log)
     {
-      type: 'vcp-log-message',
+      type: 'vcp_log',
       data: {
         tool_name: 'PowerShellExecutor',
         status: 'success',
@@ -53,9 +53,9 @@ const triggerDebugNotifications = () => {
         })
       }
     },
-    // 3. 工具错误（JSON 嵌套 plugin_error，解析为 plain text）
+    // 3. 工具错误 (vcp_log)
     {
-      type: 'vcp-log-message',
+      type: 'vcp_log',
       data: {
         tool_name: 'AdbBridge',
         status: 'error',
@@ -63,9 +63,9 @@ const triggerDebugNotifications = () => {
         content: '执行错误: {"plugin_error": "device \'emulator-5554\' not found."}'
       }
     },
-    // 4. DistPluginManager 消息（非 pre 渲染）
+    // 4. DistPluginManager 消息 (vcp_log)
     {
-      type: 'vcp-log-message',
+      type: 'vcp_log',
       data: {
         source: 'DistPluginManager',
         content: '已成功同步 3 个分布式计算节点状态，物理核心 CPU 综合占用率 14%。'

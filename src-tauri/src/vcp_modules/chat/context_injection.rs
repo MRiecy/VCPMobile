@@ -29,15 +29,12 @@ pub struct TarvenRule {
 // 注入逻辑内部引擎
 // ---------------------------------------------------------
 
-fn wrap_injection(content: &str) -> String {
-    let header = "[本信息由VCPMobile客户端注入]";
-    let footer = "[临时注入结束]";
-    format!("{}\n{}\n{}", header, content, footer)
-}
-
 fn render_rule_content(rule: &TarvenRule) -> String {
     if rule.wrap {
-        wrap_injection(&rule.content)
+        format!(
+            "<vcp_injection description=\"由 VCPMobile 注入\">\n{}\n</vcp_injection>",
+            rule.content
+        )
     } else {
         rule.content.clone()
     }

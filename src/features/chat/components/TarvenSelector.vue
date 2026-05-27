@@ -92,13 +92,43 @@ onMounted(() => {
                 <div class="flex flex-col min-w-0">
                   <span class="text-[14px] font-black text-zinc-800 dark:text-zinc-100 truncate transition-colors"
                     :class="{ 'text-emerald-600 dark:text-emerald-400': rule.isEnabled }">{{ rule.name }}</span>
-                  <span class="text-[11px] text-zinc-400 dark:text-zinc-500 truncate mt-0.5">{{ rule.content }}</span>
+                  
+                  <!-- 标签化元数据展示 -->
+                  <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+                    <!-- 类型标签 -->
+                    <span class="px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider"
+                      :class="{
+                        'bg-blue-500/10 text-blue-500 border border-blue-500/20': rule.ruleType === 'system_suffix',
+                        'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20': rule.ruleType === 'user_suffix',
+                        'bg-orange-500/10 text-orange-500 border border-orange-500/20': rule.ruleType === 'context_inject'
+                      }">
+                      {{ 
+                        rule.ruleType === 'system_suffix' ? '系统提示词' : 
+                        rule.ruleType === 'user_suffix' ? '用户消息' : 
+                        '上下文注入' 
+                      }}
+                    </span>
+
+                    <!-- 作用域标签 -->
+                    <span class="px-2 py-0.5 rounded-md text-[9px] font-bold bg-zinc-100 dark:bg-zinc-800 text-zinc-500 border border-zinc-200 dark:border-zinc-700">
+                      {{ 
+                        rule.scope === 'global' ? '全局' : 
+                        rule.scope === 'agent' ? '智能体' : '群组' 
+                      }}
+                    </span>
+
+                    <!-- 注入专用信息 (角色与深度) -->
+                    <span v-if="rule.ruleType === 'context_inject'" 
+                      class="px-2 py-0.5 rounded-md text-[9px] font-bold bg-zinc-100 dark:bg-zinc-800 text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+                      {{ rule.role === 'user' ? '用户' : '助手' }} · 深度 {{ rule.depth || 0 }}
+                    </span>
+                  </div>
                 </div>
               </div>
 
               <!-- iOS 经典优雅 Switch (亮绿高对比度) -->
               <div class="relative shrink-0 w-[42px] h-[24px] bg-zinc-200 dark:bg-zinc-700 rounded-full transition-colors duration-200"
-                :class="{ 'bg-emerald-500 dark:bg-emerald-500': rule.isEnabled }">
+                :class="{ '!bg-emerald-500': rule.isEnabled }">
                 <div class="absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200"
                   :class="{ 'translate-x-[18px]': rule.isEnabled }">
                 </div>

@@ -139,19 +139,20 @@ export function useNotificationProcessor() {
     let notificationId: string | undefined = undefined;
     let historyOnly = false;
 
-    // 1. 核心 VCP 日志解析 (对标 renderVCPLogNotification)
-    if (payload.type === 'vcp-log-message' && payload.data) {
+    // --- 核心协议解析层 (对标桌面端 notificationRenderer.js) ---
+
+    // 1. vcp_log: 核心工具调用日志 (服务端协议) 或 vcp-log-message (移动端内部兼容)
+    if ((payload.type === 'vcp_log' || payload.type === 'vcp-log-message') && payload.data) {
       const vcpData = payload.data;
-      // 保留后端传递的固定 ID，用于前端 Toast 去重（如 sync 重连错误抑制）
+      
       if (vcpData.id) {
         notificationId = vcpData.id;
-        // 特殊处理：Sync 连接失败不弹出悬浮 Toast，仅进入历史记录
         if (vcpData.id === 'vcp_sync_connection_status' && vcpData.status === 'error') {
           historyOnly = true;
         }
       }
+
       if (vcpData.tool_name && vcpData.status) {
-        // 如果是 DailyNote 工具成功运行，直接接管为 success 样式（展现精美的绿色圆钩图标），接管历史遗留的 daily_note_created 视觉角色
         type = vcpData.status === 'error' 
           ? 'error' 
           : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
@@ -162,114 +163,107 @@ export function useNotificationProcessor() {
         message = rawContent;
         isPreformatted = true;
 
-        // 尝试深层解析
-        try {
-          const inner = JSON.parse(rawContent);
-
-          // P1-5 Gap: 提取内部时间戳并聚合标题 (对标桌面端 L61-68)
-          const ts = inner.timestamp;
-          if (ts && typeof ts === 'string' && ts.length >= 16) {
-            const timeStr = ts.substring(11, 16);
-            if (inner.MaidName) {
-              title += ` (by ${inner.MaidName} @ ${timeStr})`;
-            } else {
-              title += ` (@ ${timeStr})`;
-            }
-          } else if (inner.MaidName) {
-            title += ` (${inner.MaidName})`;
-          }
-
-          let hasValidOutput = false;
-          // 提取原始输出
-          if (inner.original_plugin_output) {
-            if (typeof inner.original_plugin_output === 'object') {
-              message = JSON.stringify(inner.original_plugin_output, null, 2);
-              hasValidOutput = true;
-            } else if (String(inner.original_plugin_output).trim()) {
-              message = String(inner.original_plugin_output);
-              isPreformatted = false;
-              hasValidOutput = true;
-            }
-          }
-
-          // DailyNote 成功状态 Fallback (P1-4 Gap)
-          if (!hasValidOutput && vcpData.tool_name === 'DailyNote' && vcpData.status === 'success') {
-            message = "✅ 日记内容已成功记录到本地知识库。";
-            isPreformatted = false;
-          }
-        } catch (e) {
-          // 解析失败则保持 rawContent
-        }
-
-        // 错误模式处理 (针对嵌套的 JSON 错误) - 对标桌面端 L56-70
+        // 处理错误模式: "执行错误: {"plugin_error": "..."}"
         if (vcpData.status === 'error' && rawContent.includes('{')) {
           const jsonStart = rawContent.indexOf('{');
           const prefix = rawContent.substring(0, jsonStart).trim();
           const jsonPart = rawContent.substring(jsonStart);
-          
           try {
             const parsed = JSON.parse(jsonPart);
             const errorMsg = parsed.plugin_error || parsed.error || parsed.message;
             if (errorMsg) {
-              // 保留前缀，如 "执行错误: [详细信息]"
               message = prefix ? `${prefix}${prefix.endsWith(':') ? ' ' : ': '}${errorMsg}` : errorMsg;
               isPreformatted = false;
             }
           } catch (e) { }
         }
-      } else if (vcpData.source === 'DistPluginManager') {
+
+        // 尝试解析内部元数据 (MaidName, timestamp)
+        try {
+          const inner = JSON.parse(rawContent);
+          let titleSuffix = '';
+          if (inner.MaidName) {
+            titleSuffix += ` by ${inner.MaidName}`;
+          }
+          if (inner.timestamp && typeof inner.timestamp === 'string' && inner.timestamp.length >= 16) {
+            const timeStr = inner.timestamp.substring(11, 16);
+            titleSuffix += `${inner.MaidName ? ' ' : ''}@ ${timeStr}`;
+          }
+          if (titleSuffix) {
+            title += ` (${titleSuffix.trim()})`;
+          }
+
+          if (typeof inner.original_plugin_output !== 'undefined') {
+            if (typeof inner.original_plugin_output === 'object' && inner.original_plugin_output !== null) {
+              message = JSON.stringify(inner.original_plugin_output, null, 2);
+            } else {
+              message = String(inner.original_plugin_output);
+              isPreformatted = false;
+            }
+          } else if (vcpData.tool_name === 'DailyNote' && vcpData.status === 'success') {
+            message = "✅ 日记内容已成功记录到本地知识库。";
+            isPreformatted = false;
+          }
+        } catch (e) { }
+      } else if (vcpData.source === 'DistPluginManager' || vcpData.source === 'Distributed') {
         title = '分布式服务器';
         message = vcpData.content || JSON.stringify(vcpData);
         isPreformatted = false;
+      } else {
+        title = 'VCP 日志条目';
+        message = JSON.stringify(vcpData, null, 2);
+        isPreformatted = true;
       }
     }
-    // 2. 审批请求 (对标 L142)
-    else if (payload.type === 'tool_approval_request') {
+    // 2. video_generation_status: 视频生成状态
+    else if (payload.type === 'video_generation_status' && payload.data) {
+      type = 'info';
+      title = '视频生成状态';
+      const vData = payload.data;
+
+      if (vData.original_plugin_output && typeof vData.original_plugin_output.message === 'string') {
+        message = vData.original_plugin_output.message;
+        isPreformatted = false;
+      } else if (vData.original_plugin_output) {
+        message = JSON.stringify(vData.original_plugin_output, null, 2);
+        isPreformatted = true;
+      } else {
+        message = JSON.stringify(vData, null, 2);
+        isPreformatted = true;
+      }
+
+      if (vData.timestamp && typeof vData.timestamp === 'string' && vData.timestamp.length >= 16) {
+        title += ` (@ ${vData.timestamp.substring(11, 16)})`;
+      }
+    }
+    // 3. daily_note_created: 日记创建通知
+    else if (payload.type === 'daily_note_created' && payload.data) {
+      const noteData = payload.data;
+      title = `日记: ${noteData.maidName || 'N/A'} (${noteData.dateString || 'N/A'})`;
+      type = noteData.status === 'success' ? 'success' : 'info';
+      message = noteData.message || (noteData.status === 'success' ? '日记已成功创建。' : `日记处理状态: ${noteData.status || '未知'}`);
+      isPreformatted = false;
+    }
+    // 4. connection_ack: 连接确认
+    else if (payload.type === 'connection_ack' && payload.message) {
+      title = 'VCP 连接';
+      message = String(payload.message);
+      isPreformatted = false;
+    }
+    // 5. tool_approval_request: 审核请求
+    else if (payload.type === 'tool_approval_request' && payload.data) {
       const approvalData = payload.data;
       type = 'warning';
       title = `🛠️ 审核请求: ${approvalData.toolName || 'Unknown'}`;
       message = `助手: ${approvalData.maid || 'N/A'}\n命令: ${approvalData.args?.command || JSON.stringify(approvalData.args || {})}\n时间: ${approvalData.timestamp || 'Just now'}`;
       isPreformatted = true;
-      duration = 0; // 永不自动消失
+      duration = 0;
       actions = [
         { label: '允许', value: true, color: 'bg-green-500 shadow-lg shadow-green-500/20' },
         { label: '拒绝', value: false, color: 'bg-red-500 shadow-lg shadow-red-500/20' }
       ];
     }
-    // 3. 视频生成状态 (对标桌面端 L93-97)
-    else if (payload.type === 'video_generation_status') {
-      type = 'info';
-      title = '视频生成状态';
-
-      const vTs = payload.data?.timestamp;
-      if (vTs && typeof vTs === 'string' && vTs.length >= 16) {
-        title += ` (@ ${vTs.substring(11, 16)})`;
-      }
-
-      const output = payload.data?.original_plugin_output;
-      if (output && typeof output === 'object') {
-        message = output.message || JSON.stringify(output, null, 2);
-        isPreformatted = !output.message;
-      } else {
-        message = String(output || JSON.stringify(payload.data || {}));
-        isPreformatted = false;
-      }
-    }
-    // 4. 日记创建状态 (遗留兼容，后端可能仍发送此类型)
-    else if (payload.type === 'daily_note_created') {
-      const noteData = payload.data || {};
-      title = `日记: ${noteData.maidName || 'N/A'} (${noteData.dateString || 'N/A'})`;
-
-      if (noteData.status === 'success') {
-        type = 'success';
-        message = noteData.message || '日记已成功创建。';
-      } else {
-        type = 'info';
-        message = noteData.message || '日记处理状态: ' + (noteData.status || '未知');
-      }
-      isPreformatted = false;
-    }
-    // 5. 默认回退 (对标桌面端 L175-180: Generic type + message)
+    // 6. 默认回退 (Generic fallback)
     else {
       if (typeof payload === 'object' && payload !== null) {
         title = payload.type ? `类型: ${payload.type}` : 'VCP 消息';
