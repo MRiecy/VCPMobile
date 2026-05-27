@@ -325,6 +325,18 @@
           "markdownDescription": "Denies the clear_keep_screen_on command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_battery_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-battery-status",
+          "markdownDescription": "Enables the get_battery_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_battery_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-battery-status",
+          "markdownDescription": "Denies the get_battery_status command without any pre-configured scope."
+        },
+        {
           "description": "Enables the move_task_to_back command without any pre-configured scope.",
           "type": "string",
           "const": "allow-move-task-to-back",
@@ -385,6 +397,18 @@
           "markdownDescription": "Denies the start_stream_service command without any pre-configured scope."
         },
         {
+          "description": "Enables the start_streaming_service command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-streaming-service",
+          "markdownDescription": "Enables the start_streaming_service command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_streaming_service command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-streaming-service",
+          "markdownDescription": "Denies the start_streaming_service command without any pre-configured scope."
+        },
+        {
           "description": "Enables the stop_stream_service command without any pre-configured scope.",
           "type": "string",
           "const": "allow-stop-stream-service",
@@ -395,6 +419,18 @@
           "type": "string",
           "const": "deny-stop-stream-service",
           "markdownDescription": "Denies the stop_stream_service command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop_streaming_service command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-stop-streaming-service",
+          "markdownDescription": "Enables the stop_streaming_service command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_streaming_service command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-stop-streaming-service",
+          "markdownDescription": "Denies the stop_streaming_service command without any pre-configured scope."
         },
         {
           "description": "Default permission for VCP Mobile plugin",
