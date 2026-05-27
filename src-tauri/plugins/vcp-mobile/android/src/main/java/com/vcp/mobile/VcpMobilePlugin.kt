@@ -43,6 +43,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
+    private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     // ==================================================================
     // Permissions & App Control
@@ -248,6 +249,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     override fun onDestroy(activity: AppCompatActivity) {
         webViewRef = null
+        try {
+            fileIoExecutor.shutdown()
+        } catch (_: Exception) {}
         super.onDestroy(activity)
     }
 
@@ -288,7 +292,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        Thread {
+        fileIoExecutor.execute {
             try {
                 val context = activity
                 val contentResolver = context.contentResolver
@@ -315,8 +319,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     put("size", size)
                     put("mime", mimeType)
                 }
+                val safeStartDetail = escapeJsonForJsString(startDetail.toString())
                 activity.runOnUiThread {
-                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: $startDetail }))", null)
+                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: JSON.parse(\"$safeStartDetail\") }))", null)
                 }
 
                 // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
@@ -351,7 +356,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                                     put("name", originalName)
                                     put("mime", mimeType)
                                 }
-                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: $progressDetail }))"
+                                val safeProgressDetail = escapeJsonForJsString(progressDetail.toString())
+                                val progressScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-progress', { detail: JSON.parse(\"$safeProgressDetail\") }))"
                                 activity.runOnUiThread {
                                     webViewRef?.evaluateJavascript(progressScript, null)
                                 }
@@ -409,7 +415,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                         put("thumbnailPath", org.json.JSONObject.NULL)
                     }
                 }
-                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: $pickedDetail }))"
+                val safePickedDetail = escapeJsonForJsString(pickedDetail.toString())
+                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: JSON.parse(\"$safePickedDetail\") }))"
                 activity.runOnUiThread {
                     webViewRef?.evaluateJavascript(pickedScript, null)
                 }
@@ -419,7 +426,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 Log.e(TAG, "[onPickFileResult] File pick handling failed", e)
                 invoke.reject("Handling picked file failed: ${e.message}")
             }
-        }.start()
+        }
     }
 
     private fun generateNativeThumbnail(context: Context, originalFile: java.io.File, hash: String): String? {
@@ -483,6 +490,15 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             Log.e(TAG, "Native thumbnail generation failed", e)
             return null
         }
+    }
+
+    private fun escapeJsonForJsString(json: String): String {
+        return json
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
     }
 }
 

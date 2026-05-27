@@ -77,7 +77,7 @@ class StreamKeepaliveService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "神经同步通道",
+                "后台服务增强通道",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Agent 流式响应保活"
