@@ -38,6 +38,10 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
   const startSync = async () => {
     if (status.value !== 'idle') return;
 
+    // 首先清空上一轮的面板日志
+    logs.value = [];
+    progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
+
     // 原生设备电量与省电检测保障
     try {
       const battery = await invoke<{ level: number; isPowerSaveMode: boolean }>('plugin:vcp-mobile|get_battery_status');
@@ -64,8 +68,6 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     }
 
     status.value = 'connecting';
-    logs.value = [];
-    progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
     acquireScreenKeep();
     // 启动前台保活服务，显示“数据同步”通知
     invoke('plugin:vcp-mobile|start_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
