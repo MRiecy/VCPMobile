@@ -1,0 +1,656 @@
+const fs = require('fs');
+const path = 'docs/vue_docs/architecture/01_应用架构与生命周期.md';
+
+const parts = [
+  // Part 1 already written
+  // Part 3
+  `
+---
+
+## 2. 应用入口（main.ts）
+
+### 2.1 初始化流程
+
+> 文件位置：\`src/main.ts\`
+
+\`\`\`
+┌──────────────────────────────────────────────┐
+│ 1. createApp(App)                            │
+│    创建 Vue 3 应用实例                        │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 2. createPinia() + piniaPluginPersistedstate │
+│    创建 Pinia 根实例并挂载持久化插件          │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 3. app.use(pinia)                            │
+│    注册状态管理                               │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 4. app.use(router)                           │
+│    注册 Hash 模式路由                         │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 5. 注册全局指令                               │
+│    v-intersection-observer, v-longpress       │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 6. 挂载全局样式                               │
+│    UnoCSS / Tailwind Reset / themes.css       │
+│    message-blocks.css / katex.min.css         │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 7. app.mount("#app")                         │
+│    挂载到 DOM                                 │
+└──────────────┬───────────────────────────────┘
+               ▼
+┌──────────────────────────────────────────────┐
+│ 8. invoke('confirm_frontend_boot')           │
+│    OTA 回滚保护标记（失败静默）                │
+└──────────────────────────────────────────────┘
+\`\`\`
+
+### 2.2 插件注册顺序与理由
+
+| 顺序 | 插件/模块 | 理由 |
+|------|----------|------|
+| 1 | \`pinia\` | 状态管理必须在所有使用 Store 的组件/逻辑之前就绪。App.vue 的模板直接依赖 \`lifecycleStore.state\`，若 Router 先于 Pinia 注册，则路由守卫中访问 Store 会触发未初始化错误 |
+| 2 | \`router\` | 路由系统需在挂载前就绪，但可晚于 Pinia，因为路由配置本身不依赖 Store；\`router.isReady()\` 的 await 在 App.vue \`onMounted\` 中执行 |
+| 3 | 指令 (\`v-intersection-observer\`, \`v-longpress\`) | 全局指令属于纯模板增强能力，无运行时依赖，最后注册不影响任何初始化时序 |
+| 4 | 样式 (\`uno.css\`, \`themes.css\` 等) | 样式导入为副作用导入，不改变 JS 运行时状态，在 \`mount\` 前完成即可保证首屏渲染时 CSS 已生效 |
+
+> **关键约束**：\`main.ts\` 本身**不**调用任何 Tauri Command 或执行异步初始化（除第 8 步的 OTA 标记外）。所有重度异步逻辑（权限检查、主题加载、数据预加载）被下放到 \`App.vue\` 的 \`onMounted\` → \`bootstrapApp()\` 中，确保 Vue 应用已挂载到 DOM，监听器和响应式系统可用。
+
+### 2.3 OTA 回滚保护机制
+
+\`\`\`typescript
+// src/main.ts 第 27–28 行
+import { invoke } from '@tauri-apps/api/core';
+invoke('confirm_frontend_boot').catch(() => {});
+\`\`\`
+
+| 项目 | 说明 |
+|------|------|
+| **触发时机** | \`app.mount("#app")\` 之后的**最后一行** |
+| **失败策略** | \`.catch(() => {})\` 完全静默，不阻塞任何后续流程 |
+| **后端行为** | Rust 侧的 \`confirm_frontend_boot\` 命令将前端成功启动的事实持久化到本地状态。若某次 OTA 更新导致前端无法启动（如资源损坏、JS 执行错误），下次冷启动时后端可检测到此标记缺失，从而触发回滚到上一版本 |
+| **为何在 main.ts 而非 App.vue** | OTA 保护必须在 Vue 应用**成功挂载**后立即标记。若放在 \`App.vue\` 的 \`onMounted\` 中，一旦 Vue 组件自身抛出错误导致 \`onMounted\` 未执行，后端将无法区分"前端未启动"与"前端启动后崩溃" |
+`,
+  // Part 4
+  `
+---
+
+## 3. 根组件布局（App.vue）
+
+### 3.1 DOM 层级与 Z-Index 语义
+
+> 文件位置：\`src/App.vue\`
+
+App.vue 的 \`<template>\` 定义了从底到顶的 7 层 DOM 结构。每层对应 \`src/core/constants/layers.ts\` 中的一个语义层级：
+
+\`\`\`
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              App.vue DOM 层级                            │
+│                         （从底到顶，数字越大越靠上）                      │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  LAYER_GATE    (110)  ┌─────────────────────────────────────────────┐  │
+│                       │  0. PermissionGate                           │  │
+│                       │     仅在 state === 'PERMISSIONS' 时渲染      │  │
+│                       │     三步入权引导页（权限 / 电池 / 进入）      │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+│  LAYER_BOOT    (100)  ┌─────────────────────────────────────────────┐  │
+│                       │  0.5 BootScreen                              │  │
+│                       │     加载动画 + 错误看板                        │  │
+│                       │     v-if: state !== 'READY' && !== 'ERROR'   │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+│  LAYER_CONTENT (0)    ┌─────────────────────────────────────────────┐  │
+│                       │  1. Background Layer                         │  │
+│                       │     绝对定位全屏，主题壁纸 + Transition        │  │
+│                       │     bg-fade 动画 (0.8s ease-in-out)          │  │
+│                       │                                              │  │
+│                       │  1.5 Background Overlay                      │  │
+│                       │     暗色模式叠加层 bg-black/12               │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+│  LAYER_CONTENT (0)    ┌─────────────────────────────────────────────┐  │
+│                       │  2. Main Content                             │  │
+│                       │     <router-view> → ChatView                 │  │
+│                       │     flex-1, overflow-hidden                  │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+│  LAYER_DRAWER  (20)   ┌─────────────────────────────────────────────┐  │
+│                       │  3. Drawer Overlay                           │  │
+│                       │     左右抽屉共用的遮罩层                       │  │
+│                       │     z-drawer, bg-black/12, md:hidden         │  │
+│                       │     点击空白关闭两侧抽屉                       │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+│  LAYER_DRAWER  (20)   ┌─────────────────────────────────────────────┐  │
+│                       │  4. AgentSidebar (左抽屉)                    │  │
+│                       │     RightSidebar (右抽屉)                    │  │
+│                       │     后声明者自然覆盖主内容                    │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+│  LAYER_OVERLAY (30+)  ┌─────────────────────────────────────────────┐  │
+│                       │  5. GlobalOverlayManager                     │  │
+│                       │     全局覆盖层（Toast、提示等统一管理）        │  │
+│                       │                                              │  │
+│                       │  6. FeatureOverlays                          │  │
+│                       │     业务 Feature 视图挂载点                   │  │
+│                       │                                              │  │
+│                       │  7. UpdatePrompt                             │  │
+│                       │     自动更新提示弹窗 (z-dialog, 60)          │  │
+│                       └─────────────────────────────────────────────┘  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+\`\`\`
+
+**层级设计细节**：
+
+- **PermissionGate 与 BootScreen 的互斥**：\`v-if\` / \`v-else\` 保证两者永不同时渲染。PermissionGate 在 \`PERMISSIONS\` 态独占屏幕；BootScreen 在 \`BOOTING/CONNECTING/PRELOADING/ERROR\` 态渲染。
+- **Background Layer 的 Transition 策略**：使用 \`:key="backgroundStyle.backgroundImage"\` 强制 Vue 在壁纸变更时重新创建 DOM 节点，配合 \`bg-fade\` CSS Transition 实现跨壁纸的淡入淡出。
+- **Drawer Overlay 的 \`md:hidden\`**：在桌面端（\`md:\` 断点）隐藏遮罩，因为桌面端抽屉不采用全屏遮罩 + 侧滑的移动端模式。
+- **DOM 顺位覆盖原则**：AgentSidebar 和 RightSidebar 不额外声明 \`z-index\`，完全依靠在 \`<main>\` 之后声明的 DOM 顺位自然压过主内容。只有 Drawer Overlay 显式使用 \`z-drawer\`（值为 20），因为遮罩需要同时压在主内容和背景之上。
+
+### 3.2 背景壁纸系统
+
+> 逻辑位置：\`src/App.vue\` 第 51–81 行
+
+壁纸解析采用**双模式回退链**：
+
+\`\`\`
+当前主题变量 ──> 取 light/dark 对应模式壁纸
+       │
+       ▼
+┌─────────────────────┐
+│ 当前模式有壁纸?      │──> 有则直接使用
+│ (非 "none")         │
+└──────────┬──────────┘
+      No   │
+       ┌───┘
+       ▼
+┌─────────────────────┐
+│ 尝试另一模式壁纸     │──> 例如暗色模式缺壁纸时回退到亮色壁纸
+│ (跨模式回退)         │    保证任何主题下都不出现空背景
+└──────────┬──────────┘
+       No   │
+       ┌───┘
+       ▼
+   返回 {} (透明背景，由 CSS 变量兜底)
+\`\`\`
+
+**文件名净化逻辑**：
+
+1. 用正则 \`url\\(['"]?(.*?)['"]?\\)\` 提取 CSS \`url()\` 中的路径
+2. \`replace(/^.*[\\\\\\/]/, "")\` 去除路径前缀
+3. \`split(".")[0] + ".webp"\` 强制替换为 \`.webp\` 扩展名，匹配 \`public/wallpaper/\` 目录下的优化后资源
+
+### 3.3 抽屉与遮罩交互
+
+左右抽屉的开关状态由 \`layoutStore\`（\`useLayoutStore\`）集中管理：
+
+| 抽屉 | Store 状态 | 关闭触发方式 |
+|------|-----------|-------------|
+| 左侧 AgentSidebar | \`layoutStore.leftDrawerOpen\` | 遮罩点击、侧边栏内关闭按钮、全局 Swipe 手势 |
+| 右侧 RightSidebar | \`layoutStore.rightDrawerOpen\` | 遮罩点击、\`@close\` 事件、全局 Swipe 手势 |
+
+全局 Swipe 手势通过 \`useSidebarSwipe(appRootRef, { type: "global" })\` 注册在根容器上，与抽屉组件内部的局部 Swipe 形成嵌套手势系统。
+`,
+  // Part 5
+  `
+---
+
+## 4. 启动引导流程
+
+### 4.1 bootstrapApp 生命周期
+
+> 核心逻辑：\`src/App.vue\` 第 43–49 行（调用点）
+> 状态机实现：\`src/core/stores/appLifecycle.ts\`
+
+\`\`\`
+main.ts mount() ──────────────────────────────────────────────────────►
+    │
+    ▼
+App.vue onMounted()
+    │
+    ├──► [同步] 挂载物理按键监听 (vcp-exit-requested, vcp-hardware-back)
+    │
+    ├──► [同步] 挂载生命周期监听 (visibilitychange, vcp-lifecycle)
+    │
+    ├──► [同步] initGlobalFixer() (表情包修复器)
+    │
+    ├──► [异步] listen("vcp-system-event", ...)  ← 必须在 bootstrap 前挂载
+    │         防止 bootstrap 期间后端推送的 ready 事件丢失
+    │
+    ├──► [异步] bootstrapApp() ─────────────────────────────────────►
+    │         │
+    │         ▼
+    │    ┌─────────────────────────────────────────────────────────┐
+    │    │ lifecycleStore.bootstrap()                              │
+    │    │                                                         │
+    │    │  1. PERMISSIONS ──► check_all_permissions               │
+    │    │     缺失 ──► 停留在 PERMISSIONS 态，等待用户操作         │
+    │    │     齐全 ──► 进入 BOOTING                               │
+    │    │                                                         │
+    │    │  2. BOOTING ──► hydrateSystemStatus()                   │
+    │    │              ──► themeStore.initTheme()                  │
+    │    │                                                         │
+    │    │  3. CONNECTING ──► waitForCoreReady()                   │
+    │    │     轮询 get_core_status ──► ready/error/超时            │
+    │    │                                                         │
+    │    │  4. PRELOADING ──► startPreloading()                    │
+    │    │     顺序: Settings ──► 并发: Agents + Groups             │
+    │    │                                                         │
+    │    │  5. READY ──► 状态切换，BootScreen 消失                 │
+    │    │                                                         │
+    │    │  [异常路径] ──► ERROR 态，显示错误看板 + 重试按钮        │
+    │    └─────────────────────────────────────────────────────────┘
+    │
+    ├──► [异步] router.isReady() ──► initRootHistory()
+    │         注入 dummy history state，建立 Operation Aegis 防护盾
+    │
+    └──► [后置] router.afterEach(() => initRootHistory())
+              路由切换后自动校准防护盾
+\`\`\`
+
+### 4.2 BootScreen 与 PermissionGate 状态切换
+
+> 渲染逻辑：\`src/App.vue\` 第 226–229 行
+> BootScreen 实现：\`src/components/layout/BootScreen.vue\`
+> PermissionGate 实现：\`src/components/layout/PermissionGate.vue\`
+
+六态状态机（\`AppState\`）的渲染映射：
+
+| 状态 | 渲染组件 | 用户可见内容 |
+|------|---------|-------------|
+| \`PERMISSIONS\` | \`PermissionGate\` | 三步入权引导（通知 / 存储 / 后台权限 + 电池白名单说明） |
+| \`BOOTING\` | \`BootScreen\` (加载态) | 旋转动画 + "正在初始化界面资源..." |
+| \`CONNECTING\` | \`BootScreen\` (加载态) | "正在连接核心服务..." / "等待核心就绪..." |
+| \`PRELOADING\` | \`BootScreen\` (加载态) | 动态阶段标签（如"预加载 Agents..."） |
+| \`READY\` | 主内容 (\`<router-view>\`) | ChatView 正常渲染，BootScreen 消失 |
+| \`ERROR\` | \`BootScreen\` (错误态) | 红色错误看板 + \`errorMsg\` + 重试启动按钮 |
+
+**PermissionGate 的三步引导**：
+
+\`\`\`
+┌─────────────┐     ┌─────────────────────┐     ┌─────────────────────┐
+│   Step 1    │───► │       Step 2        │───► │       Step 3        │
+│  授予权限    │     │  品牌电池白名单设置  │     │    更多功能预告      │
+│             │     │                     │     │                     │
+│ • 系统通知   │     │ 说明各品牌电池策略   │     │ (占位，未来扩展)     │
+│ • 储存空间   │     │ 引导进入全局设置     │     │                     │
+│ • 后台运行   │     │                     │     │ 点击"进入应用"       │
+│             │     │ 点击"进入应用"       │     │ 触发 bootstrap(true) │
+│ 全部 OK 后   │     │                     │     │                     │
+│ 显示"下一步" │     │                     │     │                     │
+└─────────────┘     └─────────────────────┘     └─────────────────────┘
+\`\`\`
+
+### 4.3 生命周期 Store 的职责
+
+> 文件位置：\`src/core/stores/appLifecycle.ts\`
+
+\`useAppLifecycleStore\` 采用 Pinia Composition API 风格（\`defineStore('appLifecycle', () => { ... })\`），对外暴露以下核心能力：
+
+**状态与计算属性**：
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| \`state\` | \`Ref<AppState>\` | 当前六态值，驱动 App.vue 的渲染分支 |
+| \`statusText\` | \`Computed<string>\` | 人类可读的状态描述，BootScreen 主标题来源 |
+| \`currentPhaseLabel\` | \`Ref<string>\` | 当前阶段细标签，PRELOADING 态动态更新 |
+| \`errorMsg\` | \`Ref<string \\| null>\` | ERROR 态的详细错误信息 |
+| \`isBootstrapping\` | \`Ref<boolean>\` | 是否正在执行 bootstrap（防并发重入） |
+| \`hasBootstrapped\` | \`Ref<boolean>\` | 是否至少完成过一次成功引导 |
+| \`coreStatus\` | \`Computed<CoreStatus>\` | 委托自 \`notificationStore.vcpCoreStatus\` 的代理 |
+
+**核心方法**：
+
+| 方法 | 说明 |
+|------|------|
+| \`bootstrap(force?)\` | 完整的六态引导流程入口。使用单例 Promise 合并并发调用；\`force=true\` 用于 PermissionGate 中用户点击"进入应用"后的强制重试 |
+| \`hydrateSystemStatus()\` | 主动拉取后端系统快照（core / log / sync 三态），校准前端通知 Store 中的状态真相源 |
+| \`setState(nextState, reason)\` | 内部状态切换，自动记录时间戳与日志 |
+| \`fail(message)\` | 统一的错误收敛点：清理等待器、设置 errorMsg、切换到 ERROR 态、通知核心状态看板 |
+
+**预加载任务调度**：
+
+预加载采用**先串行后并发**的策略：
+
+\`\`\`
+startPreloading()
+    │
+    ▼
+┌─────────────────────────────┐
+│ 串行: Settings              │
+│ await settingsStore.fetchSettings()
+│ (配置是后续所有操作的基础)    │
+└─────────────┬───────────────┘
+              ▼
+┌─────────────────────────────┐
+│ 并发: Agents + Groups       │
+│ Promise.all([
+│   assistantStore.fetchAgents(),
+│   assistantStore.fetchGroups()
+│ ])
+│ (两者无依赖，可并行)          │
+│ 硬超时: 20秒                 │
+└─────────────────────────────┘
+\`\`\`
+
+**视觉防抖机制**：每个串行/并发任务组完成后，若实际耗时不足 150ms，则主动 \`setTimeout\` 补白至 150ms。这是为了避免在高端设备上预加载过快导致 BootScreen 闪跳，保持用户感知的"加载确实发生过"。
+
+**核心就绪等待（\`waitForCoreReady\`）**：
+
+采用**同步轮询 + 响应式监听**的双保险：
+
+1. **同步轮询**：先调用 \`get_core_status\` 获取当前快照。若已是 \`ready\`，立即返回；若是 \`error\`，读取 \`get_last_error\` 后抛错。
+2. **响应式监听**：若状态为 \`initializing\`，则通过 \`watch\` 监听 \`notificationStore.vcpCoreStatus.status\`，等待其变为 \`ready\` 或 \`error\`。
+3. **兜底超时**：\`CONNECT_TIMEOUT_MS = 15000\`，防止后端挂死时前端无限等待。
+`,
+  // Part 6
+  `
+---
+
+## 5. 全局事件与物理按键处理
+
+### 5.1 返回键/退出键三层消费模型
+
+> 核心逻辑：\`src/App.vue\` 第 90–147 行（\`handleExitRequest\`）
+
+Android 返回键（以及通过 \`vcp-hardware-back\` 注入的硬件返回事件）采用严格的三级消费模型，优先级递减：
+
+\`\`\`
+返回键触发
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Layer 1: Modal History Stack (Operation Aegis)                  │
+│                                                                 │
+│  if (closeTopModal()) return;                                   │
+│                                                                 │
+│  关闭当前最上层的 Modal（Sidebar / Page / Dialog / BottomSheet） │
+│  采用 LIFO 策略，支持多层嵌套覆盖层的逐级退出                    │
+│                                                                 │
+│  消费方: useModalHistory.closeTopModal()                        │
+└─────────────────────────────┬───────────────────────────────────┘
+                         未消费
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Layer 2: 重置当前会话到欢迎页                                    │
+│                                                                 │
+│  if (lifecycleStore.state === 'READY' &&                        │
+│      sessionStore.currentSelectedItem !== null) {               │
+│      sessionStore.$patch({ currentSelectedItem: null,           │
+│                            currentTopicId: null });             │
+│      return;                                                    │
+│  }                                                              │
+│                                                                 │
+│  若应用已就绪且用户当前在某个 Agent/Group 的聊天中，             │
+│  返回键将清空选中项，退回到 ChatView 的零数据欢迎态              │
+│                                                                 │
+│  消费方: chatSessionStore                                       │
+└─────────────────────────────┬───────────────────────────────────┘
+                         未消费
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Layer 3: 双击退出到后台 (Double-Tap to Exit)                     │
+│                                                                 │
+│  if (isWaitingExit.value) {                                     │
+│      // 第二次按下：调用 move_task_to_back                      │
+│      invoke("plugin:vcp-mobile|move_task_to_back");             │
+│  } else {                                                       │
+│      // 第一次按下：显示 Toast "再按一次退出应用"                │
+│      notificationStore.addNotification({ ... });                │
+│      navigator.vibrate(50); // 触觉反馈                        │
+│      setTimeout(() => isWaitingExit = false, 2000);             │
+│  }                                                              │
+│                                                                 │
+│  消费方: Android Activity.moveTaskToBack()                      │
+└─────────────────────────────────────────────────────────────────┘
+\`\`\`
+
+### 5.2 Modal History Stack（Operation Aegis）
+
+> 文件位置：\`src/core/composables/useModalHistory.ts\`
+
+Operation Aegis 是 VCP Mobile 的**统一返回手势拦截系统**，解决混合应用（Hybrid App）中物理返回键与 WebView History 的天然冲突。
+
+**核心机制**：
+
+1. **Dummy State 注入**：\`initRootHistory()\` 在 \`window.history\` 中压入一个带有 \`vcpMain: true\` 标记的 dummy state。这是"防护盾"——只要 dummy state 在栈底，任何 \`popstate\` 都不会导致 WebView 直接退出。
+
+2. **Modal 注册**：当 Sidebar、SlidePage、Dialog 等覆盖层打开时，调用 \`registerModal(id, closeHandler)\`：
+   - 向 history 压入一个带 \`vcpModalId\` 的 state
+   - 将 \`{ id, close }\` 推入 LIFO 栈 \`modalStack\`
+
+3. **PopState 拦截**：全局 \`popstate\` 监听器按以下优先级处理：
+   - 若在 \`INTERNAL_BACK\` 状态（由 \`unregisterModal\` 触发），忽略
+   - 若当前路由不是 \`/chat\` 或 \`/\`，交给 vue-router 处理真实路由后退
+   - 若 \`modalStack\` 非空，关闭栈顶 Modal 并从栈中移除
+   - 若弹到了 dummy state 之外，触发 \`vcp-exit-requested\` CustomEvent，然后重新注入 dummy state（THE BOUNCE）
+
+**状态机**：
+
+\`\`\`
+        ┌─────────────┐
+        │    IDLE     │◄────────────────────────────┐
+        └──────┬──────┘                             │
+               │ registerModal                      │
+               │ (UI 打开覆盖层)                     │
+               ▼                                    │
+        ┌─────────────┐     popstate 触发关闭      │
+        │POPSTATE_    │────────────────────────────┘
+        │HANDLING     │     执行 close() → 移除栈顶
+        └─────────────┘     回到 IDLE
+               ▲
+               │ unregisterModal (UI 主动关闭)
+               │ state = INTERNAL_BACK
+               │ history.back()
+        ┌──────┴──────┐
+        │ INTERNAL_   │───► popstate 触发，识别为内部回退
+        │   BACK      │     直接回到 IDLE，不执行关闭逻辑
+        └─────────────┘
+\`\`\`
+
+**路由避让原则**：
+
+\`\`\`typescript
+// useModalHistory.ts 第 51–54 行
+const currentPath = window.location.hash.replace(/^#/, '') || '/';
+if (currentPath !== '/chat' && currentPath !== '/') {
+  return; // 交给 vue-router
+}
+\`\`\`
+
+对于 \`/settings\`、SlidePage 路由等真实页面，返回手势应执行路由后退而非关闭 Modal。此判断确保 Aegis 仅在主界面（无真实路由可退时）生效。
+
+### 5.3 Android 生命周期事件（pause/resume/stop）
+
+> 监听逻辑：\`src/App.vue\` 第 158–179 行（\`handleVcpLifecycle\`）
+
+Android 原生层（\`LifecycleBridge.kt\`）通过 \`evaluateJavascript\` 注入 \`vcp-lifecycle\` CustomEvent，前端在 \`window\` 上监听：
+
+| 原生事件 | 注入的 state | 前端行为 |
+|---------|-------------|---------|
+| \`onPause\` | \`"pause"\` | 心跳调慢至 120s（降低后台功耗） |
+| \`onResume\` | \`"resume"\` | 心跳恢复至 15s；调用 \`hydrateSystemStatus()\` 主动校准系统快照 |
+| \`onStop\` | \`"stop"\` | 与 pause 相同处理（心跳调慢） |
+
+**页面可见性兜底**：\`document.visibilitychange\` 提供第二道防线：
+
+\`\`\`typescript
+// src/App.vue 第 150–156 行
+const handleVisibilityChange = () => {
+  if (document.hidden) {
+    document.documentElement.classList.add("vcp-paused-animations");
+  } else {
+    document.documentElement.classList.remove("vcp-paused-animations");
+  }
+};
+\`\`\`
+
+切到后台时，通过 CSS 全局暂停所有 \`animation\`（\`animation-play-state: paused !important\`），避免后台线程消耗 GPU/CPU 资源。
+
+### 5.4 VCP System Event 监听
+
+> 监听逻辑：\`src/App.vue\` 第 192–199 行
+
+\`\`\`typescript
+unlistenLog = await listen("vcp-system-event", (event: any) => {
+  const payload = event.payload;
+  const processed = processPayload(payload);
+  if (processed && !processed.silent) {
+    notificationStore.addNotification(processed);
+  }
+});
+\`\`\`
+
+\`vcp-system-event\` 是 Rust 后端向前端推送系统级通知的核心通道。\`useNotificationProcessor\` 将原始 payload 解析为结构化的通知对象，再由 \`notificationStore\` 决定是显示 Toast、更新状态栏，还是静默处理。
+
+**挂载时机约束**：此监听器必须在 \`bootstrapApp()\` 之前注册。因为 \`bootstrap()\` 中的 \`waitForCoreReady()\` 依赖 \`vcpCoreStatus\` 的变更，而该变更可能由 \`vcp-system-event\` 事件驱动。若监听器晚于 bootstrap 注册，则 bootstrap 期间的 \`ready\` 事件会丢失，导致 15 秒超时。
+`,
+  // Part 7
+  `
+---
+
+## 6. 与 Rust 后端的 IPC 交互
+
+### 6.1 Tauri Commands 调用表
+
+| Command | 调用位置 | 参数 | 返回值 | 用途 |
+|---------|---------|------|--------|------|
+| \`confirm_frontend_boot\` | \`src/main.ts\` 第 28 行 | 无 | \`void\` | OTA 回滚保护标记 |
+| \`get_core_status\` | \`src/core/stores/appLifecycle.ts\` 第 225 行 | 无 | \`string\` (\`ready\` / \`initializing\` / \`error\`) | 同步轮询后端核心状态 |
+| \`get_last_error\` | \`src/core/stores/appLifecycle.ts\` 第 234 行 | 无 | \`string \\| null\` | 核心初始化失败时读取错误详情 |
+| \`get_system_snapshot\` | \`src/core/stores/appLifecycle.ts\` 第 284 行 | 无 | \`{ core, log, sync }\` | 主动拉取系统三态快照 |
+| \`set_vcp_log_heartbeat\` | \`src/App.vue\` 第 165、172 行 | \`{ intervalMs: number }\` | \`void\` | 动态调整 VCP Log 心跳间隔 |
+| \`plugin:vcp-mobile\\|check_all_permissions\` | \`src/core/stores/appLifecycle.ts\` 第 325 行 | 无 | \`{ notification, storage, battery }\` | 批量检查 Android 权限状态 |
+| \`plugin:vcp-mobile\\|check_all_permissions\` | \`src/components/layout/PermissionGate.vue\` 第 26 行 | 无 | 同上 | PermissionGate 独立重检 |
+| \`plugin:vcp-mobile\\|request_android_permission\` | \`src/components/layout/PermissionGate.vue\` 第 35 行 | \`{ pType: string }\` | \`void\` | 请求单项 Android 权限 |
+| \`plugin:vcp-mobile\\|move_task_to_back\` | \`src/App.vue\` 第 122 行 | 无 | \`void\` | 双击退出时将应用移入后台 |
+| \`plugin:vcp-mobile\\|move_task_to_back\` | \`src/components/layout/PermissionGate.vue\` 第 43 行 | 无 | \`void\` | PermissionGate "暂不授权" 退出 |
+
+### 6.2 事件监听表
+
+| 事件名 | 来源 | 监听位置 | 触发方式 | 用途 |
+|--------|------|---------|---------|------|
+| \`vcp-system-event\` | Rust 后端（Tauri Event Channel） | \`src/App.vue\` 第 192 行 | \`listen()\` API | 系统通知、核心状态变更、同步事件 |
+| \`vcp-exit-requested\` | \`useModalHistory.ts\`（CustomEvent） | \`src/App.vue\` 第 183 行 | \`window.dispatchEvent()\` | Modal Stack 到底后触发三级退出 |
+| \`vcp-hardware-back\` | Kotlin \`LifecycleBridge.kt\` | \`src/App.vue\` 第 184 行 | \`evaluateJavascript\` 注入 | Android 物理返回键映射 |
+| \`vcp-lifecycle\` | Kotlin \`LifecycleBridge.kt\` | \`src/App.vue\` 第 186 行 | \`evaluateJavascript\` 注入 | Android pause/resume/stop |
+| \`vcp-permission-change\` | Kotlin \`VcpMobilePlugin.kt\` | \`PermissionGate.vue\` 第 70 行 | \`evaluateJavascript\` 注入 | 权限状态变更主动推送 |
+| \`visibilitychange\` | WebView 标准 API | \`src/App.vue\` 第 185 行 | 浏览器原生 | 页面可见性变化（后台动画暂停） |
+| \`popstate\` | History API | \`useModalHistory.ts\` 第 89 行 | 浏览器原生 | 返回手势拦截与 Modal 关闭 |
+`,
+  // Part 8
+  `
+---
+
+## 7. 设计决策与注意事项
+
+### 7.1 为什么物理按键监听在 bootstrap 之前挂载？
+
+\`src/App.vue\` 的 \`onMounted\` 中，第 183–186 行的 \`addEventListener\` 调用位于第 202 行 \`await bootstrapApp()\` 之前。这是**混合应用黄金铁律**：
+
+- \`bootstrapApp()\` 内部包含多个可能阻塞的异步操作（权限检查、核心就绪等待、预加载），总耗时可达数秒。
+- 若用户在此期间按下物理返回键，而监听器尚未注册，WebView 将执行默认行为（直接退出或返回上一页）。
+- 更严重的是，Android 的 \`onBackPressed\` 若未在前端被消费，可能导致 Activity 直接销毁而非 \`moveTaskToBack\`。
+
+因此，所有与物理交互相关的监听器必须以**同步、零依赖**的方式在 bootstrap 前完成注册。
+
+### 7.2 为什么用 CustomEvent 而非 Tauri Event 传递生命周期？
+
+\`vcp-lifecycle\`、\`vcp-hardware-back\`、\`vcp-permission-change\` 均采用 \`window.CustomEvent\` 而非 Tauri 的标准 \`listen()\` 事件通道。这一决策基于以下权衡：
+
+| 维度 | CustomEvent (\`evaluateJavascript\`) | Tauri Event (\`listen()\`) |
+|------|-----------------------------------|-------------------------|
+| **注册成本** | 零，前端直接 \`window.addEventListener\` | 需要 Tauri Runtime 初始化完成并建立 IPC 桥接 |
+| **时序确定性** | 只要 WebView 加载完成即可接收 | 依赖 Tauri 插件初始化顺序 |
+| **双向通信** | 仅单向推送（Kotlin → JS） | 天然支持双向 |
+| **类型安全** | 弱，需手动 \`as CustomEvent\` 断言 | 强，通过 Rust 类型生成 |
+| **批处理能力** | JS 侧可自由组合多个事件源 | 每个事件独立通道 |
+
+对于生命周期事件，其关键需求是**尽早可达、绝不丢失**。\`evaluateJavascript\` 在 Kotlin 侧无需等待 Tauri 插件通道就绪，可在 \`WebView\` 刚加载时就注入事件。而 Tauri Event 的 \`listen()\` 需要 Rust 侧的插件初始化完成后才能建立，存在窗口期风险。
+
+### 7.3 为什么 Bootstrap 使用单例 Promise？
+
+\`appLifecycle.ts\` 第 36 行的 \`bootstrapPromise\` 用于合并并发调用：
+
+\`\`\`typescript
+if (bootstrapPromise && !force) {
+  console.log('[Lifecycle] Reusing existing bootstrap promise');
+  return bootstrapPromise;
+}
+\`\`\`
+
+场景：用户在 PermissionGate 点击"进入应用"后快速切换应用到后台再返回，可能触发二次 \`bootstrap()\` 调用。单例 Promise 保证：
+
+1. 同一时刻仅存在一个引导流程在执行
+2. 多个调用方（如 App.vue 自动触发 + PermissionGate 手动触发）共享同一结果
+3. \`force=true\` 作为逃生舱，供用户主动点击"重试"时绕过复用逻辑
+
+### 7.4 为什么 \`initRootHistory\` 在 router ready 后执行？
+
+\`initRootHistory()\` 的第一次调用在 \`router.isReady()\` 之后（\`src/App.vue\` 第 205–206 行），而非 \`onMounted\` 开头。原因是：
+
+- \`createWebHashHistory()\` 在初始化时会自动替换当前 history state
+- 若在 router 就绪前注入 dummy state，router 的初始化操作可能覆盖或打乱 state 栈
+- 等待 \`router.isReady()\` 确保 Hash 路由的初始导航已完成，此时注入 dummy state 可稳定处于栈底
+
+此外，\`router.afterEach(() => initRootHistory())\` 作为后置守护，在任何路由切换后自动校准防护盾，防止第三方代码或深层导航意外弹出 dummy state。
+
+### 7.5 视觉防抖机制的必要性
+
+\`runSequentialTask\` 和 \`runParallelTasks\` 中均有：
+
+\`\`\`typescript
+if (elapsed < 150) {
+  await new Promise(resolve => setTimeout(resolve, 150 - elapsed));
+}
+\`\`\`
+
+这并非性能优化，而是**感知工程**：在高端设备上，本地 SQLite 读取 + 内存缓存命中可在 20ms 内完成。若 BootScreen 的文案刚显示就消失，用户会怀疑"是否真正加载了数据"，甚至产生"应用闪退了"的误判。150ms 的最低停留时间确保人眼能确认加载行为确实发生过。
+
+---
+
+## 8. 术语速查表
+
+| 术语 | 英文/缩写 | 定义 | 相关文件 |
+|------|----------|------|----------|
+| 六态状态机 | Six-State FSM | \`PERMISSIONS → BOOTING → CONNECTING → PRELOADING → READY → ERROR\` 的启动引导状态机 | \`appLifecycle.ts\` |
+| Operation Aegis | — | VCP Mobile 的统一返回手势拦截系统，通过 History API + Modal Stack 防止物理返回键直接退出应用 | \`useModalHistory.ts\` |
+| Modal Stack | — | 覆盖层 LIFO 栈，记录当前打开的 Sidebar / Page / Dialog 等，支持逐级关闭 | \`useModalHistory.ts\` |
+| Dummy State | — | 带有 \`vcpMain: true\` 标记的 \`history.pushState\` 注入状态，作为 PopState 拦截的"防护盾" | \`useModalHistory.ts\` |
+| THE BOUNCE | — | 当 PopState 弹出 dummy state 后，立即重新注入一个新的 dummy state，确保下一次返回手势仍能触发拦截 | \`useModalHistory.ts\` |
+| Bootstrap Promise | — | \`appLifecycle.ts\` 中的单例 Promise，合并并发 bootstrap 调用，防止重复初始化 | \`appLifecycle.ts\` |
+| 视觉防抖 | Visual Debounce | 预加载任务完成后若耗时不足 150ms，则主动延迟至 150ms 再切换状态，避免 BootScreen 闪跳 | \`appLifecycle.ts\` |
+| 核心就绪等待 | Core Ready Wait | 通过 \`get_core_status\` 轮询 + \`vcpCoreStatus\` Watch 双通道等待 Rust 后端就绪 | \`appLifecycle.ts\` |
+| 系统快照校准 | System Snapshot Hydration | 调用 \`get_system_snapshot\` 主动拉取 core/log/sync 三态，同步到前端通知 Store | \`appLifecycle.ts\` |
+| 自适应心跳 | Adaptive Heartbeat | 应用前台 15s / 后台 120s 的动态 VCP Log 心跳间隔调整 | \`App.vue\` |
+| OTA 回滚保护 | OTA Rollback Guard | 前端成功挂载后调用 \`confirm_frontend_boot\`，为后端提供"前端可启动"的判定依据 | \`main.ts\` |
+| 三层消费模型 | Three-Tier Consumption | 返回键的 Modal Stack → 会话重置 → 双击退出三级优先级处理 | \`App.vue\` |
+| DOM 顺位覆盖 | DOM Order Stacking | 不依赖 z-index，依靠 DOM 后声明者自然覆盖前声明者的层级策略 | \`App.vue\` |
+| 跨模式壁纸回退 | Cross-Mode Wallpaper Fallback | 当前亮/暗模式无壁纸时，尝试回退到另一模式的壁纸 | \`App.vue\` |
+| 权限门禁 | Permission Gate | 应用首次启动时的三步入权引导页，强制完成权限授予后才可进入主界面 | \`PermissionGate.vue\` |
+| 全局动画暂停 | Global Animation Pause | 通过 \`vcp-paused-animations\` CSS 类在后台时暂停所有 animation，降低资源消耗 | \`App.vue\` |
+| Hash 路由 | Hash Router | \`createWebHashHistory()\` 实现的前端路由，避免 Android WebView 中 History 模式的 base URL 问题 | \`router/index.ts\` |
+| Composition API 风格 Store | — | Pinia Store 使用 \`defineStore(id, () => { ... })\` 而非 Options API 风格，与 Vue 3 \`<script setup>\` 保持一致 | \`appLifecycle.ts\` |
+
+---
+
+*最后更新：2026-05-27 | VCP Mobile v0.9.14*
+`
+];
+
+parts.forEach(part => fs.appendFileSync(path, part, {encoding:'utf8'}));
+console.log('Done: all parts appended');

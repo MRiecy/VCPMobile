@@ -82,8 +82,8 @@ fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Conn
     Ok(conn)
 }
 
-/// 分页流式读取所有消息的 (topic_id, msg_id, content_bytes)，不做任何解压
-async fn stream_all_message_contents(
+/// 分页流式读取已有渲染缓存的消息的 (topic_id, msg_id, content_bytes)，不做任何解压
+async fn stream_cached_message_contents(
     pool: &sqlx::SqlitePool,
     tx: mpsc::Sender<(String, String, Vec<u8>)>,
 ) -> Result<(), String> {
@@ -92,7 +92,12 @@ async fn stream_all_message_contents(
 
     loop {
         let rows = sqlx::query(
-            "SELECT rowid, topic_id, msg_id, content FROM messages WHERE rowid > ? ORDER BY rowid LIMIT ?",
+            "SELECT m.rowid, m.topic_id, m.msg_id, m.content \
+             FROM messages m \
+             INNER JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id \
+             WHERE m.rowid > ? \
+             ORDER BY m.rowid \
+             LIMIT ?",
         )
         .bind(last_rowid)
         .bind(FETCH_SIZE)
@@ -183,7 +188,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
     let pool = db_state.pool.clone();
     let db_path = db_state.path.clone();
 
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM render_cache")
         .fetch_one(&pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -260,7 +265,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         let (tx_inner, mut rx_inner) = mpsc::channel::<(String, String, Vec<u8>)>(1000);
 
         let stream_handle = tokio::spawn(async move {
-            let _ = stream_all_message_contents(&pool, tx_inner).await;
+            let _ = stream_cached_message_contents(&pool, tx_inner).await;
         });
 
         while let Some((topic_id, msg_id, content_bytes)) = rx_inner.recv().await {
