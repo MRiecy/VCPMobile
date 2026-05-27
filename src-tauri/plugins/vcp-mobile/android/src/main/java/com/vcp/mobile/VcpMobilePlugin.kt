@@ -505,7 +505,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun openFile(invoke: Invoke) {
-        val path = invoke.getString("path") ?: ""
+        val args = invoke.parseArgs(OpenFileArgs::class.java)
+        val path = args.path
         if (path.isEmpty()) {
             invoke.reject("Path is empty")
             return
@@ -566,4 +567,9 @@ class StartStreamArgs {
 @InvokeArg
 class RequestPermissionArgs {
     lateinit var type: String
+}
+
+@InvokeArg
+class OpenFileArgs {
+    lateinit var path: String
 }
