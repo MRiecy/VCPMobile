@@ -1,5 +1,88 @@
 use std::fs;
 use std::io::Read;
+use std::collections::HashSet;
+
+lazy_static::lazy_static! {
+    /// 统一维护的、可提取的纯文本/代码后缀列表
+    pub static ref TEXT_AND_CODE_EXTENSIONS: HashSet<&'static str> = {
+        let mut s = HashSet::new();
+        s.insert("txt");
+        s.insert("md");
+        s.insert("csv");
+        s.insert("json");
+        s.insert("js");
+        s.insert("mjs");
+        s.insert("bat");
+        s.insert("sh");
+        s.insert("ts");
+        s.insert("tsx");
+        s.insert("jsx");
+        s.insert("vue");
+        s.insert("rs");
+        s.insert("py");
+        s.insert("java");
+        s.insert("c");
+        s.insert("cpp");
+        s.insert("h");
+        s.insert("hpp");
+        s.insert("cs");
+        s.insert("go");
+        s.insert("rb");
+        s.insert("php");
+        s.insert("swift");
+        s.insert("kt");
+        s.insert("kts");
+        s.insert("css");
+        s.insert("html");
+        s.insert("xml");
+        s.insert("yaml");
+        s.insert("yml");
+        s.insert("toml");
+        s.insert("ini");
+        s.insert("sql");
+        s.insert("log");
+        s.insert("jsonc");
+        s.insert("dart");
+        s.insert("lua");
+        s.insert("r");
+        s.insert("pl");
+        s.insert("ex");
+        s.insert("exs");
+        s.insert("zig");
+        s.insert("hs");
+        s.insert("scala");
+        s.insert("groovy");
+        s.insert("d");
+        s.insert("nim");
+        s.insert("cr");
+        s
+    };
+    
+    /// 统一维护的、可提取的结构化文档后缀列表
+    pub static ref STRUCTURED_DOC_EXTENSIONS: HashSet<&'static str> = {
+        let mut s = HashSet::new();
+        s.insert("docx");
+        s.insert("pdf");
+        s.insert("xlsx");
+        s.insert("pptx");
+        s
+    };
+}
+
+/// 判定后缀是否属于可提取的纯文本/代码类文件
+pub fn is_text_or_code_extension(ext: &str) -> bool {
+    TEXT_AND_CODE_EXTENSIONS.contains(ext)
+}
+
+/// 判定后缀是否属于可提取的结构化文档
+pub fn is_structured_doc_extension(ext: &str) -> bool {
+    STRUCTURED_DOC_EXTENSIONS.contains(ext)
+}
+
+/// 判定是否是任何可提取的文档/代码格式
+pub fn is_extractable_extension(ext: &str) -> bool {
+    is_text_or_code_extension(ext) || is_structured_doc_extension(ext)
+}
 
 /// =================================================================
 /// vcp_modules/infra/file_extractor.rs - 多模态文件文本内容提取纯函数库
@@ -598,56 +681,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         || mime_type == "application/json"
         || mime_type == "application/javascript"
         || mime_type == "application/x-javascript"
-        || matches!(
-            ext.as_str(),
-            "md" | "txt"
-                | "json"
-                | "js"
-                | "mjs"
-                | "bat"
-                | "sh"
-                | "ts"
-                | "tsx"
-                | "jsx"
-                | "vue"
-                | "rs"
-                | "py"
-                | "java"
-                | "c"
-                | "cpp"
-                | "h"
-                | "hpp"
-                | "cs"
-                | "go"
-                | "rb"
-                | "php"
-                | "swift"
-                | "kt"
-                | "css"
-                | "html"
-                | "xml"
-                | "yaml"
-                | "yml"
-                | "toml"
-                | "ini"
-                | "sql"
-                | "log"
-                | "jsonc"
-                | "dart"
-                | "lua"
-                | "r"
-                | "pl"
-                | "ex"
-                | "exs"
-                | "zig"
-                | "hs"
-                | "scala"
-                | "groovy"
-                | "d"
-                | "nim"
-                | "cr"
-                | "csv"
-        );
+        || is_text_or_code_extension(&ext);
 
     if is_text_type {
         // 硬上限：防止极端巨型文件载入内存导致 OOM（50MB 为安全阈值）

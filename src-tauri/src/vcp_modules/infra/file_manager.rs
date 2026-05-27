@@ -180,11 +180,9 @@ pub fn get_refined_mime_type(
             "3gp" | "3g2" => return "video/3gpp".to_string(),
             "mts" | "m2ts" => return "video/mp2t".to_string(),
             // 所有代码/文本类文件统一为 text/plain 以触发提取逻辑
-            "js" | "mjs" | "bat" | "sh" | "py" | "java" | "c" | "cpp" | "h" | "hpp" | "cs"
-            | "go" | "rb" | "php" | "swift" | "kt" | "kts" | "ts" | "tsx" | "jsx" | "vue"
-            | "yml" | "yaml" | "toml" | "ini" | "log" | "sql" | "jsonc" | "rs" | "dart" | "lua"
-            | "r" | "pl" | "ex" | "exs" | "zig" | "hs" | "scala" | "groovy" | "d" | "nim"
-            | "cr" => return "text/plain".to_string(),
+            _ if super::file_extractor::is_text_or_code_extension(&ext) => {
+                return "text/plain".to_string();
+            }
             _ => {
                 // 3. 终极兜底：物理层嗅探
                 if path.exists() {
@@ -742,45 +740,7 @@ pub async fn ensure_extracted_text(
         .unwrap_or("")
         .to_lowercase();
         
-    let is_doc = matches!(
-        ext.as_str(),
-        "docx"
-            | "pdf"
-            | "xlsx"
-            | "pptx"
-            | "txt"
-            | "md"
-            | "csv"
-            | "json"
-            | "js"
-            | "mjs"
-            | "ts"
-            | "tsx"
-            | "jsx"
-            | "vue"
-            | "rs"
-            | "py"
-            | "java"
-            | "c"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "cs"
-            | "go"
-            | "rb"
-            | "php"
-            | "swift"
-            | "kt"
-            | "css"
-            | "html"
-            | "xml"
-            | "yaml"
-            | "yml"
-            | "toml"
-            | "ini"
-            | "sql"
-            | "log"
-    );
+    let is_doc = super::file_extractor::is_extractable_extension(&ext);
     
     if !is_doc {
         return None;
