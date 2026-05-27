@@ -551,6 +551,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
                 context.startActivity(intent)
                 invoke.resolve()
+            } catch (e: android.content.ActivityNotFoundException) {
+                val ext = java.io.File(path).extension.lowercase()
+                Log.e(TAG, "[openFile] No activity found to handle file type: .$ext", e)
+                invoke.reject("您的手机上未安装能打开此类文件 (.$ext) 的应用，请先安装相关阅读器 (如 WPS Office)。")
             } catch (e: Throwable) {
                 Log.e(TAG, "[openFile] Native file viewing failed", e)
                 invoke.reject("打开文件失败: ${e.message}")
