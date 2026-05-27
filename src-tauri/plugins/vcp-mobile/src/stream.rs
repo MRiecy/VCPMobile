@@ -110,7 +110,7 @@ pub fn stop_stream_service_inner<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn start_stream_service<R: Runtime>(
+pub fn start_streaming_service<R: Runtime>(
     app: AppHandle<R>,
     agent_name: String,
 ) -> Result<(), String> {
@@ -118,7 +118,7 @@ pub fn start_stream_service<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn stop_stream_service<R: Runtime>(
+pub fn stop_streaming_service<R: Runtime>(
     app: AppHandle<R>,
     agent_name: String,
 ) -> Result<(), String> {

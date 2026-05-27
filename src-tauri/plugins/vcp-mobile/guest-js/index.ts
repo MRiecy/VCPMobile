@@ -17,11 +17,11 @@ export function clearKeepScreenOn(): Promise<void> {
 // ==================================================================
 
 export function startStreamService(agentName: string): Promise<void> {
-  return invoke('plugin:vcp-mobile|start_stream_service', { agentName });
+  return invoke('plugin:vcp-mobile|start_streaming_service', { agentName });
 }
 
 export function stopStreamService(): Promise<void> {
-  return invoke('plugin:vcp-mobile|stop_stream_service');
+  return invoke('plugin:vcp-mobile|stop_streaming_service');
 }
 
 // ==================================================================

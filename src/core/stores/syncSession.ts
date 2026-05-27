@@ -125,7 +125,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       if (s === 'error') { 
         status.value = 'error'; 
         canDismiss.value = true; 
-        invoke('clear_keep_screen_on').catch(() => {}); 
+        releaseScreenKeep();
         invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
       }
     }).then(fn => unlistenFns.push(fn));

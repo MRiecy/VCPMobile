@@ -22,12 +22,13 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             screen::set_keep_screen_on,
             screen::clear_keep_screen_on,
-            stream::start_stream_service,
-            stream::stop_stream_service,
+            stream::start_streaming_service,
+            stream::stop_streaming_service,
             system::check_all_permissions,
             system::request_android_permission,
             system::move_task_to_back,
             system::pick_file,
+            system::get_battery_status,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

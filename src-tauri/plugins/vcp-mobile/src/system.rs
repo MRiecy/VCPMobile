@@ -113,3 +113,33 @@ pub fn pick_file<R: Runtime>(app: AppHandle<R>) -> Result<PickedFileInfo, String
         Err("该接口仅在 Android 物理端可用".to_string())
     }
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatteryStatus {
+    pub level: i32,
+    pub is_power_save_mode: bool,
+}
+
+#[tauri::command]
+pub fn get_battery_status<R: Runtime>(app: AppHandle<R>) -> Result<BatteryStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let status = plugin_handle
+            .run_mobile_plugin::<BatteryStatus>("getBatteryStatus", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(status)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(BatteryStatus {
+            level: 100,
+            is_power_save_mode: false,
+        })
+    }
+}
