@@ -230,6 +230,86 @@ pub async fn load_chat_history_internal(
             let display_name: String = ar.get("display_name");
             let size_i64: i64 = ar.get("size");
             let created_at_i64: i64 = ar.get("created_at");
+            let mut extracted_text: Option<String> = ar.get("extracted_text");
+
+            // 自愈机制：如果请求中需要大文本 (include_extracted_text)，但数据库中的 extracted_text 为空，
+            // 且该附件的手机本地物理文件实际存在，则立即触发 try_extract_text 进行实时自愈提取，并异步持久化回库
+            if include_extracted_text && extracted_text.is_none() && !internal_path.is_empty() {
+                let ext = Path::new(&display_name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                
+                let is_doc = matches!(
+                    ext.as_str(),
+                    "docx"
+                        | "pdf"
+                        | "xlsx"
+                        | "pptx"
+                        | "txt"
+                        | "md"
+                        | "csv"
+                        | "json"
+                        | "js"
+                        | "mjs"
+                        | "ts"
+                        | "tsx"
+                        | "jsx"
+                        | "vue"
+                        | "rs"
+                        | "py"
+                        | "java"
+                        | "c"
+                        | "cpp"
+                        | "h"
+                        | "hpp"
+                        | "cs"
+                        | "go"
+                        | "rb"
+                        | "php"
+                        | "swift"
+                        | "kt"
+                        | "css"
+                        | "html"
+                        | "xml"
+                        | "yaml"
+                        | "yml"
+                        | "toml"
+                        | "ini"
+                        | "sql"
+                        | "log"
+                );
+
+                if is_doc {
+                    let local_path = Path::new(&internal_path);
+                    if local_path.exists() {
+                        println!(
+                            "[MessageService] Self-Healing: Missing extracted_text for {}, starting real-time extraction",
+                            display_name
+                        );
+                        if let Some(text) = crate::vcp_modules::infra::file_extractor::try_extract_text(local_path, &mime_type) {
+                            let pool_clone = pool.clone();
+                            let hash_clone = hash.clone();
+                            let text_clone = text.clone();
+                            
+                            // 异步更新数据库中该附件的提取文本，不阻塞当前的请求加载流
+                            tokio::spawn(async move {
+                                let _ = sqlx::query(
+                                    "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?"
+                                )
+                                .bind(&text_clone)
+                                .bind(chrono::Utc::now().timestamp_millis())
+                                .bind(&hash_clone)
+                                .execute(&pool_clone)
+                                .await;
+                            });
+                            
+                            extracted_text = Some(text);
+                        }
+                    }
+                }
+            }
 
             att_map.entry(msg_id).or_default().push(Attachment {
                 r#type: mime_type,
@@ -239,7 +319,7 @@ pub async fn load_chat_history_internal(
                 hash: Some(hash),
                 status: Some(ar.get("status")),
                 internal_path,
-                extracted_text: ar.get("extracted_text"),
+                extracted_text,
                 image_frames: ar
                     .get::<Option<String>, _>("image_frames")
                     .and_then(|s| serde_json::from_str(&s).ok()),
