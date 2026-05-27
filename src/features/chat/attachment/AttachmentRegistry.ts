@@ -16,7 +16,6 @@ export class AttachmentRegistry {
    */
   static register(type: AttachmentType, component: Component): void {
     this.componentMap.set(type, component);
-    console.log(`[AttachmentRegistry] Registered component for type: ${type}`);
   }
 
   /**
@@ -27,6 +26,7 @@ export class AttachmentRegistry {
     Object.entries(mappings).forEach(([type, component]) => {
       this.register(type as AttachmentType, component);
     });
+    console.log(`[AttachmentRegistry] Registered ${this.count} components successfully.`);
   }
 
   /**

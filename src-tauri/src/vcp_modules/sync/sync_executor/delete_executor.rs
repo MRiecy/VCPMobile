@@ -139,7 +139,8 @@ impl DeleteExecutor {
                 .map_err(|e| e.to_string())?;
 
         println!(
-            "[DeleteExecutor] Cleaned up old records: agents={}, groups={}, topics={}, messages={}",
+            "[DeleteExecutor] Cleaned up old records (older than {} days): agents={}, groups={}, topics={}, messages={}",
+            days,
             agents.rows_affected(),
             groups.rows_affected(),
             topics.rows_affected(),

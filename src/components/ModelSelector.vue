@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useModelStore, type ModelInfo } from '../core/stores/modelStore';
+import { useModalHistory } from '../core/composables/useModalHistory';
 import {
   Search,
   Star,
@@ -11,7 +12,7 @@ import {
   Cpu
 } from 'lucide-vue-next';
 
-defineProps<{
+const props = defineProps<{
   modelValue: boolean;
   currentModel?: string;
   title?: string;
@@ -21,17 +22,145 @@ const emit = defineEmits(['update:modelValue', 'select']);
 
 const modelStore = useModelStore();
 const searchQuery = ref('');
+const activeTag = ref('全部');
+const visibleLimit = ref(30);
 
+// --- Modal History Shield ---
+const { registerModal, unregisterModal } = useModalHistory();
+const modalId = 'ModelSelector';
+
+// --- Dynamic Manufacturer Filter ---
+const manufacturerTags = computed(() => {
+  const tags = ['全部', '收藏', '热门'];
+  const counts: Record<string, number> = {};
+  
+  modelStore.models.forEach((m: ModelInfo) => {
+    if (m.owned_by) {
+      counts[m.owned_by] = (counts[m.owned_by] || 0) + 1;
+    }
+  });
+
+  // 按拥有的模型数量降序排列厂商
+  const sortedManufacturers = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
+  return [...tags, ...sortedManufacturers];
+});
+
+// --- List Filters & Search ---
 const filteredModels = computed(() => {
+  let list = modelStore.sortedModels;
+
+  // 1. Tag 快捷切片过滤
+  if (activeTag.value === '收藏') {
+    list = list.filter(m => modelStore.isFavorite(m.id));
+  } else if (activeTag.value === '热门') {
+    list = list.filter(m => modelStore.hotModels.includes(m.id));
+  } else if (activeTag.value !== '全部') {
+    list = list.filter(m => m.owned_by === activeTag.value);
+  }
+
+  // 2. 搜索关键词匹配
   const query = searchQuery.value.toLowerCase().trim();
-  if (!query) return modelStore.sortedModels;
-  return modelStore.sortedModels.filter((m: ModelInfo) =>
+  if (!query) return list;
+  return list.filter((m: ModelInfo) =>
     m.id.toLowerCase().includes(query) ||
     m.owned_by.toLowerCase().includes(query)
   );
 });
 
+// --- Lazy Load Pagination ---
+const displayedModels = computed(() => {
+  return filteredModels.value.slice(0, visibleLimit.value);
+});
+
+// 监听搜索词和 Tag 的改变，重置展示限制，优化 DOM 渲染压力
+watch([searchQuery, activeTag], () => {
+  visibleLimit.value = 30;
+});
+
+const handleScroll = (e: Event) => {
+  const target = e.target as HTMLElement;
+  if (target.scrollHeight - target.scrollTop - target.clientHeight < 100) {
+    if (visibleLimit.value < filteredModels.value.length) {
+      visibleLimit.value += 30;
+    }
+  }
+};
+
+const selectTag = (tag: string) => {
+  activeTag.value = tag;
+};
+
+// --- Drag Down Gesture Closure Mechanism ---
+const sheetRef = ref<HTMLElement | null>(null);
+const touchStartY = ref(0);
+const currentTranslateY = ref(0);
+const isDragging = ref(false);
+
+const onTouchStart = (e: TouchEvent) => {
+  const listEl = sheetRef.value?.querySelector('.overflow-y-auto');
+  // 只有当列表在最顶端时，才允许下拉拖拽关闭
+  if (listEl && listEl.scrollTop > 0) {
+    return;
+  }
+  touchStartY.value = e.touches[0].clientY;
+  isDragging.value = true;
+  if (sheetRef.value) {
+    sheetRef.value.style.transition = 'none';
+  }
+};
+
+const onTouchMove = (e: TouchEvent) => {
+  if (!isDragging.value) return;
+  const clientY = e.touches[0].clientY;
+  const deltaY = clientY - touchStartY.value;
+
+  if (deltaY > 0) {
+    currentTranslateY.value = deltaY;
+    if (sheetRef.value) {
+      sheetRef.value.style.transform = `translateY(${deltaY}px)`;
+      const maskEl = document.querySelector('.bg-black\\/50') as HTMLElement;
+      if (maskEl) {
+        maskEl.style.opacity = String(Math.max(0, 1 - deltaY / 400));
+      }
+    }
+  }
+};
+
+const onTouchEnd = () => {
+  if (!isDragging.value) return;
+  isDragging.value = false;
+
+  if (sheetRef.value) {
+    sheetRef.value.style.transition = 'transform 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
+  }
+
+  // 120px 动力学触发关闭阀值
+  if (currentTranslateY.value > 120) {
+    close();
+  } else {
+    // 弹回原点
+    currentTranslateY.value = 0;
+    if (sheetRef.value) {
+      sheetRef.value.style.transform = '';
+    }
+    const maskEl = document.querySelector('.bg-black\\/50') as HTMLElement;
+    if (maskEl) {
+      maskEl.style.opacity = '';
+    }
+  }
+};
+
+// --- Actions ---
 const close = () => {
+  // 确保退出时重置位移
+  currentTranslateY.value = 0;
+  if (sheetRef.value) {
+    sheetRef.value.style.transform = '';
+  }
+  const maskEl = document.querySelector('.bg-black\\/50') as HTMLElement;
+  if (maskEl) {
+    maskEl.style.opacity = '';
+  }
   emit('update:modelValue', false);
 };
 
@@ -52,6 +181,19 @@ const refresh = () => {
 onMounted(() => {
   modelStore.fetchModels();
 });
+
+// --- Modal History Stack Registration ---
+watch(() => props.modelValue, (newVal) => {
+  if (newVal) {
+    registerModal(modalId, close);
+  } else {
+    unregisterModal(modalId);
+  }
+}, { immediate: true });
+
+onUnmounted(() => {
+  unregisterModal(modalId);
+});
 </script>
 
 <template>
@@ -66,11 +208,15 @@ onMounted(() => {
     <!-- 抽屉内容 -->
     <Transition name="slide-up">
       <div v-if="modelValue"
-        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden"
-        style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);">
+        ref="sheetRef"
+        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden select-none"
+        style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);"
+        @touchstart="onTouchStart"
+        @touchmove="onTouchMove"
+        @touchend="onTouchEnd">
 
-        <!-- 顶部拉手条 -->
-        <div class="w-12 h-1.5 bg-black/10 dark:bg-white/20 rounded-full mx-auto mt-4 mb-1"></div>
+        <!-- 顶部拉手条 (支持手势下拉) -->
+        <div class="w-12 h-1.5 bg-black/10 dark:bg-white/20 rounded-full mx-auto mt-4 mb-1 cursor-grab active:cursor-grabbing"></div>
 
         <!-- 头部区域 -->
         <div class="px-5 pt-3 pb-3 flex items-center justify-between">
@@ -90,7 +236,7 @@ onMounted(() => {
         </div>
 
         <!-- 搜索框 -->
-        <div class="px-5 pb-3">
+        <div class="px-5 pb-2">
           <div class="relative group">
             <Search class="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" :size="16" />
             <input v-model="searchQuery" type="text" placeholder="搜索模型名称..."
@@ -102,12 +248,35 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- 模型列表 (桌面端结构的单行列表) -->
-        <div class="flex-1 overflow-y-auto px-2 pb-4 space-y-1 no-rubber-band">
-          <!-- 骨架屏：正在加载状态 -->
-          <div v-if="modelStore.isLoading && filteredModels.length === 0" class="py-20 text-center">
-            <RefreshCw :size="28" class="mx-auto mb-3 text-blue-500 animate-spin opacity-80" />
-            <p class="text-xs font-semibold text-gray-400 dark:text-zinc-500 tracking-wider">正在拉取可用模型列表...</p>
+        <!-- 厂商快捷分类 Tags (横向惯性滚动栏) -->
+        <div class="px-5 pb-3">
+          <div class="flex items-center gap-1.5 overflow-x-auto no-scrollbar scroll-smooth py-1 -mx-5 px-5">
+            <button v-for="tag in manufacturerTags" :key="tag" @click="selectTag(tag)"
+              class="px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-all duration-200"
+              :class="activeTag === tag
+                ? 'bg-blue-500 text-white shadow-md shadow-blue-500/20 scale-105'
+                : 'bg-black/5 dark:bg-white/5 text-gray-600 dark:text-zinc-400 active:scale-95'">
+              {{ tag }}
+            </button>
+          </div>
+        </div>
+
+        <!-- 模型列表 (支持滚动懒加载) -->
+        <div class="flex-1 overflow-y-auto px-2 pb-4 space-y-1 no-rubber-band" @scroll="handleScroll">
+          <!-- 骨架屏：正在加载状态 (高密度微光 Shimmer) -->
+          <div v-if="modelStore.isLoading && filteredModels.length === 0" class="px-2 py-1 space-y-2">
+            <div v-for="i in 5" :key="i"
+              class="relative overflow-hidden flex items-center gap-3 px-4 py-3.5 rounded-2xl border border-black/5 dark:border-white/5 bg-gray-50/30 dark:bg-zinc-800/10">
+              <!-- 左侧指示器占位 -->
+              <div class="w-1 h-6 bg-gray-200 dark:bg-zinc-800 rounded-r-md"></div>
+              <!-- 中间文本占位 -->
+              <div class="flex-1 space-y-2">
+                <div class="h-4 w-1/2 bg-gray-200 dark:bg-zinc-800 rounded-md shimmer-bar"></div>
+                <div class="h-3 w-1/4 bg-gray-150 dark:bg-zinc-850 rounded-md shimmer-bar"></div>
+              </div>
+              <!-- 右侧按钮占位 -->
+              <div class="w-8 h-8 rounded-full bg-gray-200 dark:bg-zinc-800 shimmer-bar shrink-0"></div>
+            </div>
           </div>
 
           <!-- 兜底屏：未找到匹配模型 -->
@@ -116,7 +285,8 @@ onMounted(() => {
             <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>
           </div>
 
-          <div v-else v-for="model in filteredModels" :key="model.id" @click="selectModel(model.id)"
+          <!-- 实际渲染的模型列表 -->
+          <div v-else v-for="model in displayedModels" :key="model.id" @click="selectModel(model.id)"
             class="relative group px-4 py-3.5 flex items-center gap-3 rounded-2xl active:bg-black/5 dark:active:bg-white/5 transition-colors cursor-pointer"
             :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === model.id }">
 
@@ -124,7 +294,7 @@ onMounted(() => {
             <div class="absolute left-0 top-1/4 bottom-1/4 w-1 bg-blue-500 rounded-r-md transition-all scale-y-0"
               :class="{ 'scale-y-100': currentModel === model.id }"></div>
 
-            <!-- 模型 ID (高对比) -->
+            <!-- 模型 ID -->
             <div class="flex-1 min-w-0 flex flex-col justify-center">
               <div class="flex items-center gap-2">
                 <span class="text-[15px] font-medium tracking-tight truncate text-gray-900 dark:text-zinc-100"
@@ -139,7 +309,7 @@ onMounted(() => {
               </div>
             </div>
 
-            <!-- 右侧状态 (星星 + 勾选) -->
+            <!-- 右侧状态 -->
             <div class="flex items-center gap-3 shrink-0">
               <button @click="toggleFavorite($event, model.id)" class="p-2 -mr-2 transition-transform active:scale-75"
                 :class="modelStore.isFavorite(model.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
@@ -165,7 +335,7 @@ onMounted(() => {
 <style scoped>
 .fade-enter-active,
 .fade-leave-active {
-  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .fade-enter-from,
@@ -189,5 +359,55 @@ onMounted(() => {
 
 .overflow-y-auto::-webkit-scrollbar {
   display: none;
+}
+
+/* 厂商横向快捷栏隐藏滚动条 */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 🌟 高质感 Shimmer 拂过扫光动画 🌟 */
+.shimmer-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+.shimmer-bar::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  transform: translateX(-100%);
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.25) 30%,
+    rgba(255, 255, 255, 0.5) 60%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: vcp-shimmer 1.5s infinite ease-in-out;
+  content: '';
+}
+
+@media (prefers-color-scheme: dark) {
+  .shimmer-bar::after {
+    background-image: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(255, 255, 255, 0.05) 30%,
+      rgba(255, 255, 255, 0.12) 60%,
+      rgba(255, 255, 255, 0) 100%
+    );
+  }
+}
+
+@keyframes vcp-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
 }
 </style>
