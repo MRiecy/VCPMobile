@@ -387,7 +387,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           ownerId: sessionStore.currentSelectedItem.id,
           ownerType: sessionStore.currentSelectedItem.type,
           topicId: sessionStore.currentTopicId,
-          message: currentChatHistory.value[targetIndex],
+          message: {
+            ...currentChatHistory.value[targetIndex],
+            blocks: undefined,
+          },
         });
         currentChatHistory.value[targetIndex] = {
           ...currentChatHistory.value[targetIndex],

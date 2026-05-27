@@ -54,11 +54,17 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
                             att.src.clone()
                         };
 
-                        // 注入路径标记，对齐桌面端逻辑
+                        // 注入路径标记，对齐桌面端逻辑，并无缝注入原始文件名
                         if is_image {
-                            combined_text.push_str(&format!("\n\n[附加图片: {}]", path));
+                            combined_text.push_str(&format!(
+                                "\n\n[附加图片: {}] (文件名: {})",
+                                path, att.name
+                            ));
                         } else {
-                            combined_text.push_str(&format!("\n\n[附加文件: {}]", path));
+                            combined_text.push_str(&format!(
+                                "\n\n[附加文件: {}] (文件名: {})",
+                                path, att.name
+                            ));
                         }
 
                         content_parts.push(json!({
@@ -73,7 +79,10 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
                         } else {
                             att.src.clone()
                         };
-                        combined_text.push_str(&format!("\n\n[附加文件: {}]", path));
+                        combined_text.push_str(&format!(
+                            "\n\n[附加文件: {}] (文件名: {})",
+                            path, att.name
+                        ));
                     }
                 }
             }

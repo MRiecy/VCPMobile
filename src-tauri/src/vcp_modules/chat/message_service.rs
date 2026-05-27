@@ -160,6 +160,7 @@ pub async fn load_chat_history_internal(
     limit: Option<usize>,
     offset: Option<usize>,
     include_content: bool,
+    include_extracted_text: bool,
 ) -> Result<Vec<ChatMessage>, String> {
     let db_state = _app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
@@ -201,14 +202,19 @@ pub async fn load_chat_history_internal(
         std::collections::HashMap::new();
     if !msg_ids.is_empty() {
         let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let extracted_text_column = if include_extracted_text {
+            "a.extracted_text"
+        } else {
+            "NULL"
+        };
         let att_query = format!(
-            "SELECT a.hash, a.mime_type, a.size, a.internal_path, NULL as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
+            "SELECT a.hash, a.mime_type, a.size, a.internal_path, {} as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
              WHERE ma.topic_id = ? AND ma.msg_id IN ({}) 
              ORDER BY ma.msg_id, ma.attachment_order ASC",
-            placeholders
+            extracted_text_column, placeholders
         );
         let mut q = sqlx::query(&att_query).bind(topic_id);
         for id in &msg_ids {
@@ -662,7 +668,9 @@ pub async fn truncate_history_after_timestamp(
 
     sqlx::query("DELETE FROM message_attachments WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
         .bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM messages WHERE topic_id = ? AND timestamp > ?")
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ?")
+        .bind(now)
         .bind(topic_id)
         .bind(timestamp)
         .execute(&mut *tx)

@@ -103,6 +103,7 @@ pub async fn internal_process_group_chat_message(
         Some(8), // 限制上下文长度
         None,
         true,
+        false, // include_extracted_text: 决策发言者不需要大体积的提取文本内容
     )
     .await?;
 
@@ -137,6 +138,7 @@ pub async fn internal_process_group_chat_message(
         None, // 加载全部用于 VCP 上下文
         None,
         true,
+        true, // include_extracted_text: 组装群聊上下文发送给 VCP 时需要包含附件提取文本内容
     )
     .await?;
 

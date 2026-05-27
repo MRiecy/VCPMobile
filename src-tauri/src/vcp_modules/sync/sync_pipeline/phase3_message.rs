@@ -85,9 +85,9 @@ impl Phase3Message {
             );
         }
 
-        // 2. 批量查询所有消息 hash
+        // 2. 批量查询所有消息 hash (包含已软删除的消息)
         let msg_query = format!(
-            "SELECT topic_id, msg_id, content_hash FROM messages WHERE topic_id IN ({}) AND deleted_at IS NULL",
+            "SELECT topic_id, msg_id, content_hash, deleted_at FROM messages WHERE topic_id IN ({})",
             placeholders
         );
         let mut q = sqlx::query(&msg_query);
@@ -100,8 +100,13 @@ impl Phase3Message {
             let tid: String = row.get("topic_id");
             let msg_id: String = row.get("msg_id");
             let hash: String = row.get("content_hash");
+            let deleted_at: Option<i64> = row.get("deleted_at");
             if let Some(state) = result.get_mut(&tid) {
-                state.messages.insert(msg_id, hash);
+                if deleted_at.is_some() {
+                    state.messages.insert(msg_id, "DELETED".to_string());
+                } else {
+                    state.messages.insert(msg_id, hash);
+                }
             }
         }
 

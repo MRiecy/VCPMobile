@@ -86,6 +86,7 @@ pub async fn internal_process_agent_chat_message(
         None, // 加载全部（或按需限制）
         None,
         true,
+        true, // include_extracted_text: 组装上下文发送给 VCP 时需要包含附件提取文本内容
     )
     .await?;
 

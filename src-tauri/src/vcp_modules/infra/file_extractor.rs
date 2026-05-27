@@ -46,12 +46,33 @@ fn col_name_to_index(r: &str) -> usize {
 }
 
 fn extract_docx_text(path: &std::path::Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
-    let mut doc_file = archive.by_name("word/document.xml").ok()?;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("[FileExtractor] Failed to open DOCX: {:?}, error: {}", path, e);
+            return None;
+        }
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(e) => {
+            println!("[FileExtractor] Failed to read DOCX zip archive: {:?}, error: {}", path, e);
+            return None;
+        }
+    };
+    let mut doc_file = match archive.by_name("word/document.xml") {
+        Ok(f) => f,
+        Err(e) => {
+            println!("[FileExtractor] Failed to find word/document.xml in DOCX: {:?}, error: {}", path, e);
+            return None;
+        }
+    };
     
     let mut content = String::new();
-    doc_file.read_to_string(&mut content).ok()?;
+    if let Err(e) = doc_file.read_to_string(&mut content) {
+        println!("[FileExtractor] Failed to read document.xml content: {:?}, error: {}", path, e);
+        return None;
+    }
     
     let mut result = String::new();
     let mut in_tag = false;
