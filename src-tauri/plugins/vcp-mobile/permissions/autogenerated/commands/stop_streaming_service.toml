@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-stop-streaming-service"
+description = "Enables the stop_streaming_service command without any pre-configured scope."
+commands.allow = ["stop_streaming_service"]
+
+[[permission]]
+identifier = "deny-stop-streaming-service"
+description = "Denies the stop_streaming_service command without any pre-configured scope."
+commands.deny = ["stop_streaming_service"]

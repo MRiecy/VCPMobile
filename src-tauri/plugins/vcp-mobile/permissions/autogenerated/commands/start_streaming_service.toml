@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-start-streaming-service"
+description = "Enables the start_streaming_service command without any pre-configured scope."
+commands.allow = ["start_streaming_service"]
+
+[[permission]]
+identifier = "deny-start-streaming-service"
+description = "Denies the start_streaming_service command without any pre-configured scope."
+commands.deny = ["start_streaming_service"]

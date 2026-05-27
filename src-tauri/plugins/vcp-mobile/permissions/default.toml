@@ -4,11 +4,12 @@ description = "Default permission for VCP Mobile plugin"
 commands.allow = [
     "set_keep_screen_on",
     "clear_keep_screen_on",
-    "start_stream_service",
-    "stop_stream_service",
+    "start_streaming_service",
+    "stop_streaming_service",
     "check_all_permissions",
     "request_android_permission",
     "move_task_to_back",
     "pick_file",
+    "get_battery_status",
 ]
 
