@@ -717,3 +717,100 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
         }
     }
 }
+
+/// ⚡ 确保附件大文本已被安全提取。
+/// 若数据库中缺失大文本，且手机本地物理文件真实存在，则在后台立即触发提取，并异步持久化自愈回库。
+pub async fn ensure_extracted_text(
+    pool: &sqlx::SqlitePool,
+    hash: &str,
+    internal_path: &str,
+    mime_type: &str,
+) -> Option<String> {
+    if internal_path.is_empty() {
+        return None;
+    }
+    
+    let path = std::path::Path::new(internal_path);
+    if !path.exists() {
+        return None;
+    }
+
+    // 1. 后缀名白名单过滤
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+        
+    let is_doc = matches!(
+        ext.as_str(),
+        "docx"
+            | "pdf"
+            | "xlsx"
+            | "pptx"
+            | "txt"
+            | "md"
+            | "csv"
+            | "json"
+            | "js"
+            | "mjs"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "vue"
+            | "rs"
+            | "py"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "cs"
+            | "go"
+            | "rb"
+            | "php"
+            | "swift"
+            | "kt"
+            | "css"
+            | "html"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "sql"
+            | "log"
+    );
+    
+    if !is_doc {
+        return None;
+    }
+
+    println!(
+        "[FileManager] Self-Healing: Triggering real-time text extraction for hash={}",
+        hash
+    );
+
+    // 2. 调起提取器进行自愈提取
+    if let Some(text) = super::file_extractor::try_extract_text(path, mime_type) {
+        let pool_c = pool.clone();
+        let hash_c = hash.to_string();
+        let text_c = text.clone();
+        
+        // 3. 异步持久化写入 SQLite，不阻塞当前的上下文加载请求
+        tokio::spawn(async move {
+            let _ = sqlx::query(
+                "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?"
+            )
+            .bind(&text_c)
+            .bind(chrono::Utc::now().timestamp_millis())
+            .bind(&hash_c)
+            .execute(&pool_c)
+            .await;
+        });
+        
+        Some(text)
+    } else {
+        None
+    }
+}
