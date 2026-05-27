@@ -1,7 +1,7 @@
 ---
 id: MOD-PERSISTENCE-014
 version: "1.0"
-date: 2026-05-22
+date: 2026-05-27
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
 related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs]
@@ -86,7 +86,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 **流程**（L11–L64）：
 
 1. **路径解析**：通过 `app_handle.path().app_config_dir()` 获取配置目录，追加 `vcp_avatar.db`（L13–L24）。在 Android 上，该路径通常为 `/data/user/0/com.vcp.avatar/files/vcp_avatar.db`。
-2. **旧数据迁移**：调用 `file_manager::migrate_legacy_attachments` 将 Android 内部存储的附件迁移到外部存储（L29）。
+2. ~~旧数据迁移~~：`migrate_legacy_attachments` 已在 v0.9.14 彻底移除，附件目录结构由启动流程直接确保。
 3. **连接选项配置**（L32–L51）：链式配置 SQLite PRAGMA。
 4. **连接池创建**：`SqlitePoolOptions::new().max_connections(5).connect_with(...)`（L53–L57）。
 5. **建表**：调用 `setup_tables(&pool).await`（L60）。
@@ -186,7 +186,6 @@ CREATE TABLE messages (
     agent_id TEXT,
     content TEXT NOT NULL,          -- zstd 压缩二进制
     timestamp BIGINT NOT NULL,
-    is_thinking INTEGER NOT NULL DEFAULT 0,
     is_group_message INTEGER NOT NULL DEFAULT 0,
     group_id TEXT,
     finish_reason TEXT,
@@ -201,8 +200,8 @@ CREATE TABLE messages (
 | 字段 | 说明 |
 |------|------|
 | `content` | 存储 zstd 压缩后的原始消息文本，非明文。读取时需 `ContentCompressor::decompress` |
-| `content_hash` | 消息内容与附件 hash 的聚合指纹，用于同步 Diff |
-| `is_thinking` | 标记是否为推理/思考过程消息，影响前端渲染样式 |
+| `content_hash` | 消息内容与附件 hash 的聚合指纹，用于同步 Diff；同步下载时若桌面端已提供则直接复用 |
+| `is_thinking` | **已弃用**。v0.9.14 起所有查询均硬编码为 `Some(false)`，字段保留仅作历史兼容 |
 | `finish_reason` | 流式输出的结束原因（如 `stop`、`length`、`error`） |
 | `deleted_at` | 软删除时间戳，`NULL` 表示未删除。同步系统依赖此字段识别删除状态 |
 
@@ -386,7 +385,7 @@ pub async fn flush(&self) {
 
 **消息批量插入的极限优化**（`rusqlite_upsert_messages_batch`，L431–L635）：
 - `MAX_PARAMS = 999`：SQLite 单条 SQL 的参数上限。
-- `PARAMS_PER_MSG = 14`：messages 表每条记录需 14 个参数（msg_id, topic_id, role, name, agent_id, content, timestamp, is_thinking, is_group_message, group_id, finish_reason, content_hash, created_at, updated_at）。
+- `PARAMS_PER_MSG = 13`：messages 表每条记录需 13 个参数（msg_id, topic_id, role, name, agent_id, content, timestamp, is_group_message, group_id, finish_reason, content_hash, created_at, updated_at）。v0.9.14 移除 `is_thinking`。
 - 计算 `chunk_size = 999 / 14 = 71`，即单条 SQL 最多插入 71 条消息。
 - 使用 `String` 拼接动态 SQL，构造 `VALUES (?,?...), (?,?...), ...` 形式。
 - `prepare_cached` 缓存编译后语句，在同事务内的多个 chunk 间复用。
@@ -496,7 +495,7 @@ match result {
 
 ## 4. 消息仓储（`message_repository.rs`）
 
-`message_repository.rs`（584 行）负责消息的**渲染编译**、**内容压缩**、**仓储操作**以及**全量维护任务**（预渲染重建、内容压缩）。
+`message_repository.rs`（~580 行）负责消息的**渲染编译**、**仓储操作**以及**全量维护任务**（预渲染重建）。内容压缩（`compress_all_contents`）已在 v0.9.14 移除。
 
 ### 4.1 MessageRenderCompiler
 
@@ -524,27 +523,7 @@ impl MessageRenderCompiler {
 - 尤其利好长对话回溯场景：切换话题时消息列表秒开。
 - `render_cache` 作为独立表，允许全量重建而不影响 `messages` 表的主数据。
 
-### 4.2 ContentCompressor
-
-```rust
-pub struct ContentCompressor;
-
-impl ContentCompressor {
-    pub fn compress(text: &str) -> Result<Vec<u8>, String>;
-    pub fn decompress(bytes: &[u8]) -> Result<String, String>;
-}
-```
-
-`ContentCompressor` 是 persistence/ 领域的**通用文本压缩原语**，使用 zstd level=3。
-
-- **压缩比**：纯文本通常可达 3–10 倍。
-- **使用位置**：
-  - `message_repository.rs`：`upsert_message` 将消息正文压缩后存入 `messages.content`（BLOB）。
-  - `db_write_queue.rs`：`rusqlite_upsert_messages_batch` 同样调用 `ContentCompressor::compress`。
-- **解压上限**：16 MB（`zstd::bulk::decompress(bytes, 16 * 1024 * 1024)`），防止恶意膨胀攻击。
-- **为什么选 zstd**：在压缩比与解压速度之间取得优秀平衡，且支持流式解压。level=3 是速度与压缩比的甜点，适合移动端 CPU。
-
-### 4.3 process_message_content
+### 4.2 process_message_content
 
 ```rust
 #[tauri::command]
@@ -560,7 +539,7 @@ pub async fn process_message_content(
 - 与 `render_cache` 的区别：此命令不操作数据库，仅为单次解析服务。
 - 返回值 `Vec<ContentBlock>` 直接通过 Tauri IPC 的 JSON 序列化传递回前端。
 
-### 4.4 MessageRepository
+### 4.3 MessageRepository
 
 ```rust
 pub struct MessageRepository;
@@ -605,6 +584,52 @@ impl MessageRepository {
    - 若 `!skip_bubble`：调用 `HashAggregator::bubble_from_topic(tx, topic_id).await?`。
    - 该操作在 `sqlx::Transaction` 内异步执行，与 `db_write_queue.rs` 中的 rusqlite 冒泡逻辑等价但接口不同。
 
+### 4.3a 懒渲染缓存策略（Lazy Render Cache）
+
+v0.9.14 对消息加载流程进行了重大重构，引入**懒渲染缓存策略**：
+
+```
+加载消息时
+│
+├─→ 查询 LEFT JOIN render_cache
+│
+├─→ render_content 命中 ?
+│   ├─Yes─→ parse_render_bytes(rb) → blocks
+│   │        跳过编译，直接返回
+│   │
+│   └─No──→ ContentCompressor::decompress(content)
+│            MessageRenderCompiler::compile(decompressed)
+│            serde_json::to_value(&compiled) → blocks
+│            │
+│            └─→ tokio::spawn(async { 异步写回 render_cache })
+│                 （非阻塞，使用 sqlx UPSERT）
+```
+
+- **命中即走**：`render_cache` 存在时直接反序列化 `blocks`，零编译开销。
+- **未命中编译**：解压 `content` 后实时调用 `MessageRenderCompiler::compile`，生成 AST。
+- **异步回写**：通过 `tokio::spawn` 将编译结果异步写入 `render_cache`，不阻塞消息加载流。这是关键设计：若同步写回，高并发加载时会显著增加延迟。
+- **幂等安全**：回写使用 `ON CONFLICT DO UPDATE`，即使并发回写同一消息也安全。
+
+### 4.3b re_render_message 命令
+
+```rust
+#[tauri::command]
+pub async fn re_render_message(
+    app_handle: tauri::AppHandle,
+    message_id: String,
+    topic_id: String,
+) -> Result<serde_json::Value, String>
+```
+
+**触发场景**：内容解析器升级后，单条消息的 `render_cache` 可能与新渲染逻辑不兼容。前端通过 MessageRenderer 的上下文菜单「重新渲染」调用此命令。
+
+**流程**：
+1. 从 `messages` 表读取 `content` 并解压。
+2. `MessageRenderCompiler::compile` 重新编译。
+3. `MessageRenderCompiler::serialize` 序列化。
+4. UPSERT 到 `render_cache` 表。
+5. 返回编译后的 `Vec<ContentBlock>` JSON，前端立即替换本地 `blocks`。
+
 **`upsert_attachments_for_message` 实现细节**（L511–L583）：
 - 先 `DELETE FROM message_attachments WHERE topic_id = ? AND msg_id = ?` 清理旧关系。
 - 遍历附件列表，对每个附件：
@@ -624,7 +649,7 @@ impl MessageRepository {
 | 附件处理 | 逐条 DELETE + INSERT | Chunked Delete + Chunked Insert |
 | 事务来源 | 调用方提供（可跨多个操作共享） | Worker 内部新建（每批次独立） |
 
-### 4.5 通用三段流水线基础设施
+### 4.4 通用三段流水线基础设施
 
 `message_repository.rs` 为全量维护任务设计了一套**可复用的三段流水线**：Reader → Processor → Writer。
 
@@ -666,7 +691,7 @@ fn run_batch_update_writer(
 - 由 `rebuild_all_pre_renders` 和 `compress_all_contents` 各自定义，通常为多个 `spawn_blocking` 并行 Worker。
 - 并发度：`std::thread::available_parallelism().clamp(2, 12)`，根据设备核心数自适应，最低 2 线程保证基础并行，最高 12 线程防止线程爆炸。
 
-### 4.6 全量预渲染重建
+### 4.5 全量预渲染重建
 
 ```rust
 #[tauri::command]
@@ -705,41 +730,16 @@ Stage 3: Writer (spawn_blocking)
 
 **进度补偿**：Writer 结束后，显式发射一次 `current == total` 的进度事件（L285–L291），确保前端进度条达到 100%。
 
-### 4.7 全量内容压缩
-
-```rust
-#[tauri::command]
-pub async fn compress_all_contents(app_handle: AppHandle) -> Result<(), String>
-```
-
-**触发场景**：历史数据库中可能存在早期版本以明文存储的 `messages.content`，需要批量压缩以节省空间。
-
-**智能识别机制**（L351–L358）：
-- Reader 传出的 `content_bytes` 首先尝试 `ContentCompressor::decompress`。
-- 若解压成功 → 已是 zstd 格式，**跳过**。
-- 若解压失败 → 判定为明文，执行 `ContentCompressor::compress` 后进入 Writer。
-- 这种**幂等识别**确保任务可反复执行而不会对已压缩内容造成二次压缩或损坏。
-
-**与预渲染重建的差异**：
-
-| 维度 | `rebuild_all_pre_renders` | `compress_all_contents` |
-|------|--------------------------|------------------------|
-| 处理目标 | `render_cache.render_content` | `messages.content` |
-| Processor 逻辑 | `compile` + `serialize` | 智能识别 + `compress` |
-| Writer SQL | `INSERT INTO render_cache ...` | `UPDATE messages SET content = ?` |
-| 进度事件 | `render_rebuild_progress` | `content_compress_progress` |
-| 幂等性 | 非严格幂等（重新编译可能产生不同 AST） | 严格幂等（已压缩内容跳过） |
-
-### 4.8 性能特征
+### 4.6 性能特征
 
 | 操作 | 主导开销 | 大致耗时（典型数据） |
 |------|---------|---------------------|
 | 单条消息写入 (`upsert_message`) | zstd 压缩 + 2 次 UPSERT + 附件处理 | 5–20 ms |
 | 批量消息写入 (71 条/批) | 动态 SQL 拼接 + 事务提交 | 10–50 ms/批 |
 | 预渲染重建 (三段流水线) | AST 编译（CPU 密集型） | 1000 条消息约 1–3 秒 |
-| 内容压缩 (三段流水线) | zstd 压缩（CPU 密集型） | 1000 条消息约 0.5–1 秒 |
-| 消息查询（带缓存） | render_cache 反序列化 | 单条 <1 ms |
-| 消息查询（无缓存） | content 解压 + compile | 单条 5–20 ms |
+| 消息查询（带缓存，命中） | render_cache 反序列化 | 单条 <1 ms |
+| 消息查询（带缓存，未命中） | content 解压 + compile + 异步回写 | 单条 5–20 ms |
+| ~~内容压缩~~ | ~~已在 v0.9.14 移除~~ | — |
 
 ---
 
@@ -832,18 +832,19 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 | **哈希冒泡** | 自底向上重新计算并更新 content_hash / config_hash | `db_write_queue.rs` L637 |
 | **Merkle Root** | 对有序哈希列表计算出的聚合根哈希 | `sync_types.rs` |
 | **MessageRenderCompiler** | 消息渲染编译器，将文本转为 AST 二进制缓存 | `message_repository.rs` L10 |
-| **ContentCompressor** | zstd 文本压缩器，用于 messages.content 存储 | `message_repository.rs` L39 |
-| **render_cache** | 独立表，存储预编译的 AST zstd 二进制 | `db_manager.rs` L242 |
-| **三段流水线** | Reader → Processor → Writer 的通用全量维护架构 | `message_repository.rs` L74 |
+| **ContentCompressor** | zstd 文本压缩/解压器，用于 messages.content 存储与读取 | `message_service.rs` |
+| **render_cache** | 独立表，存储预编译的 AST zstd 二进制；v0.9.14 起条件写入（仅非空时插入） | `db_manager.rs` L242 |
+| **三段流水线** | Reader → Processor → Writer 的通用全量维护架构；仅保留预渲染重建 | `message_repository.rs` L74 |
 | **复合主键** | messages 表主键为 `(topic_id, msg_id)`，支持按话题分片 | `db_manager.rs` L219 |
 | **内容寻址** | attachments 表以 SHA-256 hash 为主键，物理文件同名存储 | `db_manager.rs` L401 |
 | **增量迁移** | 通过检测列/主键存在性，对存量数据库执行渐进式升级 | `db_manager.rs` L188 |
-| **幂等识别** | 尝试解压以判断内容是否已压缩，避免二次处理 | `message_repository.rs` L352 |
+| **懒渲染缓存** | render_cache 命中直接反序列化 blocks；未命中编译后异步回写 | `message_service.rs` |
+| **re_render_message** | 手动强制重新编译单条消息并更新 render_cache 的 Tauri 命令 | `message_service.rs` |
 | **快照读** | WAL 模式下读操作基于事务开始时的数据库快照 | `db_manager.rs` L44 |
 
 ---
 
-*最后更新：2026-05-22 | VCP Mobile v0.9.14*
+*最后更新：2026-05-27 | VCP Mobile v0.9.14*
 
 > **关键设计决策备忘**
 >
@@ -852,4 +853,5 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 > 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时使全量重建可独立进行而不影响消息正文。
 > 4. **zstd 压缩全链路**：messages.content 和 render_cache.render_content 均以 zstd level=3 压缩存储，纯文本压缩比通常 3–10 倍。
 > 5. **哈希冒泡分层去重**：事务提交后先批量校验 Owner 存在性，再执行 Topic → Owner 的两层冒泡，避免对幽灵数据做无意义计算。
+> 6. **懒渲染缓存闭环**：加载时 render_cache 命中即走；未命中实时编译并异步回写，确保首次访问后的后续加载均为 O(1) 反序列化。
 > 6. **渐进式 Schema 迁移**：通过检测 `pragma_table_info` 和 `ALTER TABLE ... ADD COLUMN` 的幂等执行，实现无版本号数据库升级。
