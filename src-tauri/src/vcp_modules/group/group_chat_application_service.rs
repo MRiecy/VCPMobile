@@ -179,9 +179,17 @@ pub async fn internal_process_group_chat_message(
         );
 
         // 组装上下文
-        let system_prompt =
+        let base_system_prompt =
             assemble_group_context(&speaker, &group_config_inner, &active_member_configs_inner)
                 .await;
+
+        let system_prompt = crate::vcp_modules::chat::context_injection::build_injected_system_prompt(
+            &db_pool,
+            &topic_id,
+            &agent_name,
+            base_system_prompt,
+        )
+        .await?;
 
         // 动态路由决策：是否使用群组统一模型
         let model_to_use = if group_config_inner.use_unified_model {

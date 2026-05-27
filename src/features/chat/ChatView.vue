@@ -9,6 +9,7 @@ import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
 import { useLayoutStore } from "../../core/stores/layout";
 import MessageRenderer from "./MessageRenderer.vue";
 import InputEnhancer from "./InputEnhancer.vue";
+import TarvenSelector from "./components/TarvenSelector.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import CoreStatusIndicator from "../../components/ui/CoreStatusIndicator.vue";
 import { ArrowDown } from "lucide-vue-next";
@@ -269,6 +270,9 @@ onUnmounted(() => {
       <InputEnhancer :disabled="!sessionStore.currentTopicId" @send="historyStore.sendMessage" @toggle-menu="handleMenuToggle" />
       <div class="h-[calc(var(--vcp-safe-bottom,20px)+var(--keyboard-offset,0px))] no-swipe pointer-events-none"></div>
     </footer>
+
+    <!-- VCPChatTarven 规则快捷选择器 -->
+    <TarvenSelector />
   </div>
 </template>
 

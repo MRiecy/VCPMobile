@@ -93,22 +93,28 @@ pub async fn internal_process_agent_chat_message(
     // 4. 使用公共工具组装上下文
     let mut messages = assemble_history_for_vcp(&history);
 
-    // 5. 注入 System Prompt (优先使用移动端专用提示词)
+    // 5. 注入 System Prompt (优先使用移动端专用提示词) 并调用物理上下文与 Tarven 注入系统
     let effective_prompt = if !agent_config.mobile_system_prompt.is_empty() {
-        &agent_config.mobile_system_prompt
+        agent_config.mobile_system_prompt.clone()
     } else {
-        &agent_config.system_prompt
+        agent_config.system_prompt.clone()
     };
-    if !effective_prompt.is_empty() {
-        let system_content = effective_prompt.replace("{{AgentName}}", &agent_config.name);
-        messages.insert(
-            0,
-            json!({
-                "role": "system",
-                "content": system_content
-            }),
-        );
-    }
+
+    let system_content = crate::vcp_modules::chat::context_injection::build_injected_system_prompt(
+        &db_state.pool,
+        &topic_id,
+        &agent_config.name,
+        effective_prompt,
+    )
+    .await?;
+
+    messages.insert(
+        0,
+        json!({
+            "role": "system",
+            "content": system_content
+        }),
+    );
 
     // 6. 构造 VCP 请求载荷
     let mut model_config = json!({

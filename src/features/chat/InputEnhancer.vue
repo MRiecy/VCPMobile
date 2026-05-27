@@ -5,11 +5,20 @@ import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
 import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../core/stores/notification';
+import { useTarvenStore } from '../../core/stores/tarvenStore';
 import { useLongTextPaste } from './composables/useLongTextPaste';
 import { useSpeechRecognition } from '../../core/composables/useSpeechRecognition';
 import { useAudioRecorder } from '../../core/composables/useAudioRecorder';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
+
+const tarvenStore = useTarvenStore();
+
+const openTarvenSelector = () => {
+  if (props.disabled) return;
+  if (navigator.vibrate) navigator.vibrate(50);
+  tarvenStore.isSelectorOpen = true;
+};
 
 const props = defineProps<{
   disabled?: boolean;
@@ -520,6 +529,7 @@ onUnmounted(() => {
         <div class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
           <!-- 展开附件按钮 -->
           <button
+            v-longpress="openTarvenSelector"
             @click="showAttachMenu = !showAttachMenu"
             class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all"
           >

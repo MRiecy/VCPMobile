@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 /**
  * FeatureOverlays.vue
  *
@@ -18,6 +18,7 @@ import { useOverlayStore } from '../core/stores/overlay';
 import SettingsView from '../features/settings/SettingsView.vue';
 import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
 import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
+import TarvenSettingsView from '../features/chat/components/TarvenSettings.vue';
 import SensorCollector from '../features/distributed/SensorCollector.vue';
 import ToolInteractionOverlay from '../features/distributed/ToolInteractionOverlay.vue';
 
@@ -53,6 +54,12 @@ onMounted(() => {
       :id="overlayStore.groupSettingsId"
       :z-index="overlayStore.getPageZIndex('groupSettings')"
       @close="overlayStore.closeGroupSettings()"
+    />
+
+    <TarvenSettingsView
+      :is-open="overlayStore.isTarvenSettingsOpen"
+      :z-index="overlayStore.getPageZIndex('tarvenSettings')"
+      @close="overlayStore.closeTarvenSettings()"
     />
 
     <SyncSessionView

@@ -29,6 +29,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isGroupSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'groupSettings'));
   const isSyncSessionOpen = computed(() => pageStack.value.some(p => p.type === 'syncSession'));
   const isRebuildSessionOpen = computed(() => pageStack.value.some(p => p.type === 'rebuildSession'));
+  const isTarvenSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'tarvenSettings'));
 
   const agentSettingsId = computed(() => {
     const page = pageStack.value.find(p => p.type === 'agentSettings');
@@ -154,6 +155,14 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openTarvenSettings = () => {
+    pushPage('tarvenSettings');
+  };
+
+  const closeTarvenSettings = () => {
+    popPage();
+  };
+
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
@@ -210,6 +219,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     groupSettingsId,
     isSyncSessionOpen,
     isRebuildSessionOpen,
+    isTarvenSettingsOpen,
     // Legacy open/close (now backed by page stack)
     openSettings,
     closeSettings,
@@ -221,6 +231,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeSyncSession,
     openRebuildSession,
     closeRebuildSession,
+    openTarvenSettings,
+    closeTarvenSettings,
     // Modals
     promptConfig,
     contextMenuConfig,

@@ -13,6 +13,7 @@ use vcp_modules::chat_manager::{
     patch_single_message, truncate_history_after_timestamp,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
+use vcp_modules::context_injection::{get_tarven_rules, save_tarven_rules};
 use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 // use vcp_modules::db_manager::DbState;
 use tauri_plugin_log::{Target, TargetKind};
@@ -183,6 +184,8 @@ pub fn run() {
         .plugin(tauri_plugin_vcp_mobile::init())
         .invoke_handler(tauri::generate_handler![
             sendToVCP,
+            get_tarven_rules,
+            save_tarven_rules,
             interruptRequest,
             interruptGroupTurn,
             test_vcp_connection,

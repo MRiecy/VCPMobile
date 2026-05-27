@@ -36,6 +36,8 @@ pub use chat::stream_block_parser;
 pub use chat::topic_service;
 pub use chat::topic_summary_service;
 pub use chat::topic_types;
+pub use chat::context_injection;
+
 
 // --- Sync 领域 ---
 pub use sync::sync_dto;
