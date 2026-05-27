@@ -29,6 +29,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::move_task_to_back,
             system::pick_file,
             system::get_battery_status,
+            system::open_file_native,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

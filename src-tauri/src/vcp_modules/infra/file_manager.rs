@@ -696,12 +696,21 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
     // 安全校验：禁止打开系统敏感路径
     ensure_safe_path(&app_handle, &path_buf)?;
 
+    #[cfg(target_os = "android")]
+    {
+        return tauri_plugin_vcp_mobile::system::open_file_native(app_handle, clean_path);
+    }
+
     // 使用 tauri-plugin-opener 的原生能力
-    use tauri_plugin_opener::OpenerExt;
-    app_handle
-        .opener()
-        .open_path(clean_path, Option::<String>::None)
-        .map_err(|e| e.to_string())
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app_handle
+            .opener()
+            .open_path(clean_path, Option::<String>::None)
+            .map_err(|e| e.to_string())
+    }
+
 }
 
 /// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)

@@ -143,3 +143,24 @@ pub fn get_battery_status<R: Runtime>(app: AppHandle<R>) -> Result<BatteryStatus
         })
     }
 }
+
+#[tauri::command]
+pub fn open_file_native<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("openFile", serde_json::json!({ "path": path }))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = path;
+    }
+    Ok(())
+}
+

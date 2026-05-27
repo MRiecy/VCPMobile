@@ -17,6 +17,8 @@ import androidx.activity.result.ActivityResult
 import app.tauri.plugin.Plugin
 import android.content.Intent
 import android.util.Log
+import androidx.core.content.FileProvider
+import android.webkit.MimeTypeMap
 import android.os.PowerManager
 import android.net.Uri
 import android.provider.Settings
@@ -499,6 +501,60 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             .replace("\'", "\\'")
             .replace("\n", "\\n")
             .replace("\r", "\\r")
+    }
+
+    @Command
+    fun openFile(invoke: Invoke) {
+        val path = invoke.getString("path") ?: ""
+        if (path.isEmpty()) {
+            invoke.reject("Path is empty")
+            return
+        }
+        
+        fileIoExecutor.execute {
+            try {
+                val context = activity
+                val file = java.io.File(path)
+                if (!file.exists()) {
+                    invoke.reject("文件不存在: $path")
+                    return@execute
+                }
+
+                // 1. 自动提取并修正 MIME 类型
+                val ext = file.extension.lowercase()
+                val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+                Log.i(TAG, "[openFile] Opening file: ${file.absolutePath} (ext=$ext, mime=$mimeType)")
+
+                // 2. 借助 FileProvider 生成临时读取授权的 content:// URI
+                val uri = try {
+                    FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.opener.fileprovider",
+                        file
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "[openFile] Fallback to default FileProvider authority", e)
+                    FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        file
+                    )
+                }
+
+                // 3. 构建并分发默认的系统 ACTION_VIEW 意图
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mimeType)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+                context.startActivity(intent)
+                invoke.resolve()
+            } catch (e: Throwable) {
+                Log.e(TAG, "[openFile] Native file viewing failed", e)
+                invoke.reject("打开文件失败: ${e.message}")
+            }
+        }
     }
 }
 
