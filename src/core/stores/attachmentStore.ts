@@ -497,16 +497,18 @@ export const useAttachmentStore = defineStore("attachment", () => {
   /**
    * 清空暂存附件
    */
-  const clearStaged = () => {
+  const clearStaged = (performGc = false) => {
     const toClear = [...stagedAttachments.value];
     stagedAttachments.value = [];
-    toClear.forEach(att => {
-      if (att.hash) {
-        invoke("cleanup_single_orphaned_attachment", { hash: att.hash }).catch((err) => {
-          console.warn(`[AttachmentStore] Targeted GC failed for ${att.name}:`, err);
-        });
-      }
-    });
+    if (performGc) {
+      toClear.forEach(att => {
+        if (att.hash) {
+          invoke("cleanup_single_orphaned_attachment", { hash: att.hash }).catch((err) => {
+            console.warn(`[AttachmentStore] Targeted GC failed for ${att.name}:`, err);
+          });
+        }
+      });
+    }
   };
 
   return {

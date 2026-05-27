@@ -138,15 +138,37 @@ pub async fn cleanup_single_orphaned_attachment(
         return Ok("附件已被其他消息引用，跳过清理".to_string());
     }
 
-    // 2. 获取记录的物理路径
-    let internal_path: Option<String> =
-        sqlx::query_scalar("SELECT internal_path FROM attachments WHERE hash = ?")
+    // 2. 获取记录的物理路径与创建时间
+    let row: Option<(String, i64)> =
+        sqlx::query_as("SELECT internal_path, created_at FROM attachments WHERE hash = ?")
             .bind(&hash)
             .fetch_optional(&db_state.pool)
             .await
             .map_err(|e| e.to_string())?;
 
-    if let Some(path_str) = internal_path {
+    if let Some((path_str, created_at)) = row {
+        // ⚡ 5分钟安全锁宽限期 (300秒)
+        // 弹性判定：由于 created_at 部分来自秒，部分来自毫秒，统一换算为秒级进行对比
+        let created_secs = if created_at > 10_000_000_000 {
+            created_at / 1000 // 毫秒级转换为秒
+        } else {
+            created_at // 秒级
+        };
+        
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        if now_secs - created_secs < 300 {
+            println!(
+                "[Maintenance] Safe-Shield: Hash {} was created recently ({} secs ago). Skipping targeted GC to prevent race condition.",
+                hash,
+                now_secs - created_secs
+            );
+            return Ok("附件创建不久，处于安全锁宽限期，跳过物理清理以防时序冲突".to_string());
+        }
+
         let path = std::path::Path::new(&path_str);
         if path.exists() {
             let _ = tokio::fs::remove_file(path).await;
