@@ -70,12 +70,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
-  /** @deprecated 保留兼容，实际调用批量接口 */
-  const refreshUnreadCountsForItems = async (
-    _fetchedItems: (AgentConfig | GroupConfig)[],
-  ) => {
-    await refreshUnreadCounts();
-  };
+
 
   const combinedItems = computed(() => [
     ...agents.value.map((agent) => ({ ...agent, type: "agent" as const })),
@@ -88,7 +83,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     try {
       const fetchedAgents = await invoke<AgentConfig[]>("get_agents");
       agents.value = fetchedAgents;
-      refreshUnreadCountsForItems(fetchedAgents);
+      refreshUnreadCounts();
     } catch (e: any) {
       const msg = e.toString();
       error.value = msg;
@@ -105,7 +100,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     try {
       const fetchedGroups = await invoke<GroupConfig[]>("get_groups");
       groups.value = fetchedGroups;
-      refreshUnreadCountsForItems(fetchedGroups);
+      refreshUnreadCounts();
     } catch (e: any) {
       const msg = e.toString();
       error.value = msg;
@@ -260,6 +255,6 @@ export const useAssistantStore = defineStore("assistant", () => {
     saveAgent,
     saveGroup,
     saveAvatar,
-    refreshUnreadCountsForItems,
+    refreshUnreadCounts,
   };
 });

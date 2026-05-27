@@ -348,7 +348,7 @@ pub async fn regenerate_topic_response(
 
     // 2. 加载消息元数据（为了获取 timestamp 以后续截断）
     let pool = &db_state.pool;
-    let row = sqlx::query("SELECT timestamp, role, name, agent_id, group_id, is_thinking, is_group_message FROM messages WHERE msg_id = ?")
+    let row = sqlx::query("SELECT timestamp, role, name, agent_id, group_id, is_group_message FROM messages WHERE msg_id = ?")
         .bind(&target_user_msg_id)
         .fetch_one(pool)
         .await
@@ -375,7 +375,7 @@ pub async fn regenerate_topic_response(
         name: row.get("name"),
         content: user_msg,
         timestamp: timestamp as u64,
-        is_thinking: Some(row.get::<i64, _>("is_thinking") != 0),
+        is_thinking: Some(false),
         agent_id: row.get("agent_id"),
         group_id: row.get("group_id"),
         topic_id: Some(topic_id.clone()),

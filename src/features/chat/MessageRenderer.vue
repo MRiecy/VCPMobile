@@ -426,33 +426,40 @@ onUnmounted(() => {
       <ThinkingIndicator v-if="isStreaming && (!message.blocks || message.blocks.length === 0)" />
 
       <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
-        <template v-for="(block, index) in message.blocks" :key="getBlockKey(block, index)">
-          <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
-          <div v-memo="[getBlockKey(block, index)]">
-            <div
-              v-if="isPlainBlock(block.type)"
-              v-html="renderBlockHtml(block)"
-            />
+        <template v-if="message.blocks && message.blocks.length > 0">
+          <template v-for="(block, index) in message.blocks" :key="getBlockKey(block, index)">
+            <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
+            <div v-memo="[getBlockKey(block, index)]">
+              <div
+                v-if="isPlainBlock(block.type)"
+                v-html="renderBlockHtml(block)"
+              />
 
-            <ToolBlock
-              v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
-              :type="block.type"
-              :content="block.content"
-              :block="block"
-            />
+              <ToolBlock
+                v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
+                :type="block.type"
+                :content="block.content"
+                :block="block"
+              />
 
-            <ThoughtBlock
-              v-else-if="block.type === 'thought'"
-              :block="block"
-              :message-id="message.id"
-            />
+              <ThoughtBlock
+                v-else-if="block.type === 'thought'"
+                :block="block"
+                :message-id="message.id"
+              />
 
-            <HtmlPreviewBlock
-              v-else-if="block.type === 'html-preview'"
-              :content="block.content || ''"
-              :highlighted-content="block.highlighted_content"
-              :message-id="message.id"
-            />
+              <HtmlPreviewBlock
+                v-else-if="block.type === 'html-preview'"
+                :content="block.content || ''"
+                :highlighted-content="block.highlighted_content"
+                :message-id="message.id"
+              />
+            </div>
+          </template>
+        </template>
+        <template v-else-if="message.content">
+          <div class="vcp-markdown-block select-text">
+            <p>{{ message.content }}</p>
           </div>
         </template>
         

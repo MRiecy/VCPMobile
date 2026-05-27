@@ -430,15 +430,14 @@ impl MessageRepository {
         sqlx::query(
             "INSERT INTO messages (
                 msg_id, topic_id, role, name, agent_id, content, timestamp,
-                is_thinking, is_group_message, group_id, finish_reason,
+                is_group_message, group_id, finish_reason,
                 content_hash,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
                 name = excluded.name,
-                is_thinking = excluded.is_thinking,
                 agent_id = excluded.agent_id,
                 is_group_message = excluded.is_group_message,
                 group_id = excluded.group_id,
@@ -454,7 +453,6 @@ impl MessageRepository {
         .bind(&message.agent_id)
         .bind(ContentCompressor::compress(&message.content)?)
         .bind(message.timestamp as i64)
-        .bind(message.is_thinking.unwrap_or(false))
         .bind(message.is_group_message.unwrap_or(false))
         .bind(&message.group_id)
         .bind(&message.finish_reason)

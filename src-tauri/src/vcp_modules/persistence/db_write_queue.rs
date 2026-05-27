@@ -452,7 +452,7 @@ impl DbWriteQueue {
 
         // Phase 3: Turbo Mode - Chunked Bulk Insert
         const MAX_PARAMS: usize = 999;
-        const PARAMS_PER_MSG: usize = 14;
+        const PARAMS_PER_MSG: usize = 13;
         let chunk_size = MAX_PARAMS / PARAMS_PER_MSG;
 
         for chunk_indices in messages
@@ -465,7 +465,7 @@ impl DbWriteQueue {
             let mut sql_msgs = String::from(
                 "INSERT INTO messages (
                     msg_id, topic_id, role, name, agent_id, content, timestamp,
-                    is_thinking, is_group_message, group_id, finish_reason,
+                    is_group_message, group_id, finish_reason,
                     content_hash, created_at, updated_at
                 ) VALUES ",
             );
@@ -474,7 +474,7 @@ impl DbWriteQueue {
                 if i > 0 {
                     sql_msgs.push_str(", ");
                 }
-                sql_msgs.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                sql_msgs.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             }
 
             sql_msgs.push_str(
@@ -482,7 +482,6 @@ impl DbWriteQueue {
                     content = excluded.content,
                     role = excluded.role,
                     name = excluded.name,
-                    is_thinking = excluded.is_thinking,
                     agent_id = excluded.agent_id,
                     is_group_message = excluded.is_group_message,
                     group_id = excluded.group_id,
@@ -503,7 +502,6 @@ impl DbWriteQueue {
                 params_msgs.push(Box::new(msg.agent_id.clone()));
                 params_msgs.push(Box::new(compressed_contents[*idx].clone()));
                 params_msgs.push(Box::new(msg.timestamp as i64));
-                params_msgs.push(Box::new(msg.is_thinking.unwrap_or(false)));
                 params_msgs.push(Box::new(msg.is_group_message.unwrap_or(false)));
                 params_msgs.push(Box::new(msg.group_id.clone()));
                 params_msgs.push(Box::new(msg.finish_reason.clone()));

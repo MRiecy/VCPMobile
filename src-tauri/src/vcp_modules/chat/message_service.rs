@@ -37,7 +37,7 @@ pub async fn load_multi_topic_messages(
 
     let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let query_str = format!(
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.topic_id, m.content_hash
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.topic_id, m.content_hash
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id IN ({}) AND m.deleted_at IS NULL
@@ -70,7 +70,7 @@ pub async fn load_multi_topic_messages(
             name: row.get("name"),
             content,
             timestamp: timestamp as u64,
-            is_thinking: Some(row.get::<i64, _>("is_thinking") != 0),
+            is_thinking: Some(false),
             agent_id: row.get("agent_id"),
             group_id: row.get("group_id"),
             topic_id: Some(topic_id.clone()),
@@ -167,14 +167,14 @@ pub async fn load_chat_history_internal(
     let offset = offset.unwrap_or(0);
 
     let query_str = if limit.is_some() {
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC 
          LIMIT ? OFFSET ?"
     } else {
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_thinking, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
@@ -326,7 +326,7 @@ pub async fn load_chat_history_internal(
         let content_hash = if content_hash_raw.is_empty() { None } else { Some(content_hash_raw) };
 
         let timestamp: i64 = row.get("timestamp");
-        let is_thinking: Option<bool> = Some(row.get::<i64, _>("is_thinking") != 0);
+        let is_thinking: Option<bool> = Some(false);
 
         let attachments = att_map.remove(&msg_id);
 

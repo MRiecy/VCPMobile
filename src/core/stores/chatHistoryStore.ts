@@ -286,7 +286,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (targetIndex !== -1) {
         const targetMsg = currentChatHistory.value[targetIndex];
         targetMsg.content = content;
-        targetMsg.blocks = undefined;
+        targetMsg.blocks = [{ type: "markdown" as const, content }];
         await invoke("truncate_history_after_timestamp", {
           ownerId: sessionStore.currentSelectedItem.id,
           ownerType: sessionStore.currentSelectedItem.type,
@@ -315,6 +315,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       timestamp: now,
       attachments: currentStaged.length > 0 ? currentStaged : undefined,
       shell: streamStore.computeShell({ role: "user", name: userName }),
+      blocks: [{ type: "markdown" as const, content }],
     };
 
     currentChatHistory.value.push(userMsg);
@@ -369,7 +370,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     currentChatHistory.value[targetIndex] = {
       ...msg,
       content: newContent,
-      blocks: undefined,
+      blocks: [{ type: "markdown" as const, content: newContent }],
     };
 
     if (sessionStore.currentSelectedItem?.id && sessionStore.currentTopicId) {
