@@ -530,14 +530,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 val uri = try {
                     FileProvider.getUriForFile(
                         context,
-                        "${context.packageName}.opener.fileprovider",
+                        "${context.packageName}.fileprovider",
                         file
                     )
                 } catch (e: Exception) {
-                    Log.w(TAG, "[openFile] Fallback to default FileProvider authority", e)
+                    Log.w(TAG, "[openFile] Fallback to opener FileProvider authority", e)
                     FileProvider.getUriForFile(
                         context,
-                        "${context.packageName}.fileprovider",
+                        "${context.packageName}.opener.fileprovider",
                         file
                     )
                 }
