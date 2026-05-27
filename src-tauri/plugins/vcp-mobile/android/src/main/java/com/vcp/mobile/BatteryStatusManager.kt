@@ -35,12 +35,31 @@ class BatteryStatusManager(private val context: Context) {
     }
 
     /**
-     * 检测系统是否处于省电模式 (Power Save Mode)
+     * 检测系统是否处于省电模式 (Power Save Mode) - 三合一补强防线，全面兼容国产定制 ROM
      */
     fun isPowerSaveMode(): Boolean {
         return try {
+            // 1. 原生 PowerManager 状态检测
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            powerManager.isPowerSaveMode
+            if (powerManager.isPowerSaveMode) {
+                return true
+            }
+
+            val resolver = context.contentResolver
+
+            // 2. 原生 Android 广播全局低电量/省电标记检测
+            val lowPowerGlobal = android.provider.Settings.Global.getInt(resolver, "low_power", 0)
+            if (lowPowerGlobal == 1) {
+                return true
+            }
+
+            // 3. 部分国产厂商 (如小米/华为等) 常用系统设置省电标记检测
+            val powerSaveSystem = android.provider.Settings.System.getInt(resolver, "power_save_mode", 0)
+            if (powerSaveSystem == 1) {
+                return true
+            }
+
+            false
         } catch (e: Exception) {
             false
         }

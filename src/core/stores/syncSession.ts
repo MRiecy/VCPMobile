@@ -42,6 +42,9 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     try {
       const battery = await invoke<{ level: number; isPowerSaveMode: boolean }>('plugin:vcp-mobile|get_battery_status');
       if (battery) {
+        // 在同步滚屏日志中打印诊断日志，让用户直接看到检测数据，提升技术感与诊断可见性
+        pushLog('info', `[设备健康检测] 电量百分比: ${battery.level}%, 省电模式: ${battery.isPowerSaveMode ? '开启' : '关闭'}`);
+
         if (battery.isPowerSaveMode) {
           pushLog('error', '当前设备处于系统省电模式，已智能拦截同步，请关闭省电模式或充电后重试。');
           status.value = 'error';
