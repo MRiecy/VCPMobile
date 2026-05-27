@@ -46,7 +46,7 @@ VCPMobile implements a distributed synchronization system designed for mobile-de
 │  └──────────────────────────────────────────────────────┘  │
 │                                                             │
 │  ┌──────────────────────────────────────────────────────┐  │
-│  │  HashAggregator │ HashInitializer │ ManifestBuilder  │  │
+│  │  HashAggregator │ HashInitializer │ Phase1Metadata   │  │
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```

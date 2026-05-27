@@ -29,7 +29,7 @@ last_updated: 2026-05-13
 | 2 | `sync_dto.rs` | 新建该实体的 `XxxSyncDTO` 结构体 | P0 |
 | 3 | `sync_hash.rs` | 新增 `compute_xxx_config_hash()` 函数 | P0 |
 | 4 | `db_manager.rs` | 新建/修改表定义，添加 `config_hash`、`content_hash` 字段 | P0 |
-| 5 | `sync_manifest/manifest_builder.rs` | 新增 `build_xxx_manifest()` 函数 | P0 |
+| 5 | `sync_pipeline/phase1_metadata.rs` | 新增 `build_xxx_manifest()` 函数 | P0 |
 | 6 | 桌面端 `dto/*.js` | 新增字段白名单 `XXX_SYNC_FIELDS` 与提取函数 | P0 |
 | 7 | 桌面端 `sync/entity.js` | 新增上传/下载/删除处理分支 | P0 |
 
@@ -79,16 +79,18 @@ pub fn compute_prompt_preset_hash(dto: &PromptPresetSyncDTO) -> String {
 }
 ```
 
-**第四步：修改 ManifestBuilder**
+**第四步：在 Phase1Metadata 中新增清单构建函数**
 
-在 `sync_manifest/manifest_builder.rs` 中新增清单构建函数。该函数从 SQLite 查询实体的 `id`、`config_hash`、`updated_at`、`deleted_at`，并组装为 `Vec<EntityState>`：
+在 `sync_pipeline/phase1_metadata.rs` 中直接新增清单构建函数。v0.9.14 已将清单构建从独立的 `ManifestBuilder` 结构体重构为 `Phase1Metadata` 模块的纯函数。新增函数从 SQLite 查询实体的 `id`、`config_hash`、`updated_at`、`deleted_at`，并组装为 `Vec<EntityState>`：
 
 ```rust
-pub async fn build_prompt_preset_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
+pub async fn build_prompt_preset_manifest(pool: &SqlitePool) -> Vec<EntityState> {
     // SELECT preset_id, config_hash, updated_at, deleted_at FROM prompt_presets
     // 映射为 EntityState 数组
 }
 ```
+
+然后在 `build_phase1_manifests()` 中调用该函数，将结果追加到返回的 `Vec<SyncManifest>` 中。
 
 ### 1.3 桌面端（Node.js）详细步骤
 
@@ -220,7 +222,7 @@ function extractPresetDTO(config) {
 
 **步骤一：扩展枚举**
 
-在 `sync_pipeline/pipeline_state.rs` 的 `PipelinePhase` 中添加新变体：
+在 `sync_pipeline/pipeline.rs` 的 `PipelinePhase` 中添加新变体（v0.9.14 已将 `pipeline_state.rs` 合并入 `pipeline.rs`）：
 
 ```rust
 pub enum PipelinePhase {
