@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { watch } from 'vue';
+import { watch, ref } from 'vue';
 import { X, Trash2, Bug } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
+import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
 import NotificationStatusBar from '../../features/notification/NotificationStatusBar.vue';
 import NotificationList from '../../features/notification/NotificationList.vue';
 
@@ -14,6 +15,9 @@ const emit = defineEmits<{
 
 const store = useNotificationStore();
 const { processPayload } = useNotificationProcessor();
+
+const sidebarRef = ref<HTMLElement | null>(null);
+useSidebarSwipe(sidebarRef, { type: 'right' });
 
 const triggerDebugNotifications = () => {
   const randomSuffix = () => Math.random().toString(36).substring(2, 5);
@@ -118,7 +122,7 @@ watch(
 </script>
 
 <template>
-  <aside class="vcp-drawer vcp-drawer-right pt-safe flex flex-col" :class="{ 'is-open': props.isOpen }">
+  <aside ref="sidebarRef" class="vcp-drawer vcp-drawer-right pt-safe flex flex-col" :class="{ 'is-open': props.isOpen }">
     <div class="px-5 py-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center shrink-0">
       <div class="flex items-center gap-2">
         <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-70 text-primary-text">Notifications</h3>

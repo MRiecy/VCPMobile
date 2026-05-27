@@ -2,7 +2,7 @@
 import { computed, watch, ref } from "vue";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { X, ExternalLink, Download } from "lucide-vue-next";
+import { X, ExternalLink } from "lucide-vue-next";
 
 interface Attachment {
   type: string;
@@ -27,24 +27,39 @@ const previewText = ref("");
 const isTextTruncated = ref(false);
 const isLoading = ref(false);
 
-const isImage = computed(() => (props.file?.type || "").startsWith("image/"));
+const IMAGE_WHITELIST = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "heic", "heif", "avif"];
+const TEXT_WHITELIST = [
+  "txt", "md", "csv", "json", "js", "ts", "py", "rs", "java", "c", "cpp",
+  "h", "go", "rb", "php", "swift", "kt", "html", "css", "xml", "yaml",
+  "yml", "toml", "ini", "log", "sql", "vue", "jsx", "tsx"
+];
+
+const isImage = computed(() => {
+  if (!props.file) return false;
+  const ext = props.file.name.split(".").pop()?.toLowerCase() || "";
+  return IMAGE_WHITELIST.includes(ext) || (props.file.type || "").startsWith("image/");
+});
+
 const isText = computed(() => {
-  const type = (props.file?.type || "").toLowerCase();
-  if (
+  if (!props.file) return false;
+  const ext = props.file.name.split(".").pop()?.toLowerCase() || "";
+  
+  // 核心加固：若存在后缀且完全不属于文本白名单，绝不判定为文本（与 Preview 判定主权一致）
+  if (ext && !TEXT_WHITELIST.includes(ext)) {
+    return false;
+  }
+  
+  if (TEXT_WHITELIST.includes(ext)) {
+    return true;
+  }
+  
+  const type = (props.file.type || "").toLowerCase();
+  return (
     type.startsWith("text/") ||
     type === "application/json" ||
     type === "application/javascript" ||
     type === "application/x-javascript"
-  ) {
-    return true;
-  }
-  const ext = props.file?.name.split(".").pop()?.toLowerCase() || "";
-  const textExtensions = [
-    "txt", "md", "csv", "json", "js", "ts", "py", "rs", "java", "c", "cpp",
-    "h", "go", "rb", "php", "swift", "kt", "html", "css", "xml", "yaml",
-    "yml", "toml", "ini", "log", "sql", "vue", "jsx", "tsx"
-  ];
-  return textExtensions.includes(ext);
+  );
 });
 
 watch(() => props.isOpen, async (newVal) => {
@@ -210,20 +225,7 @@ const close = () => emit("close");
           />
         </div>
 
-        <!-- Unsupported Format -->
-        <div v-else class="h-full flex flex-col items-center justify-center gap-6 p-4">
-          <div
-            class="w-20 h-20 rounded-3xl bg-gray-100 dark:bg-gray-800 flex items-center justify-center border border-black/5 dark:border-white/10"
-          >
-            <Download :size="40" class="text-gray-400 dark:text-gray-500" />
-          </div>
-          <div class="text-center">
-            <p class="text-gray-800 dark:text-gray-200 font-bold">暂不支持在线预览该格式</p>
-            <p class="text-xs text-gray-400 dark:text-gray-500 mt-1">
-              请使用外部应用安全打开
-            </p>
-          </div>
-        </div>
+
       </div>
     </div>
   </Transition>

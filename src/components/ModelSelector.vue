@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { useVirtualList } from '@vueuse/core';
 import { useModelStore, type ModelInfo } from '../core/stores/modelStore';
 import { useModalHistory } from '../core/composables/useModalHistory';
 import {
@@ -23,7 +24,6 @@ const emit = defineEmits(['update:modelValue', 'select']);
 const modelStore = useModelStore();
 const searchQuery = ref('');
 const activeTag = ref('全部');
-const visibleLimit = ref(30);
 
 // --- Modal History Shield ---
 const { registerModal, unregisterModal } = useModalHistory();
@@ -67,28 +67,33 @@ const filteredModels = computed(() => {
   );
 });
 
-// --- Lazy Load Pagination ---
-const displayedModels = computed(() => {
-  return filteredModels.value.slice(0, visibleLimit.value);
+// --- Virtual Scroll Engine (Zero-Lag fixed height) ---
+const { list, containerProps, wrapperProps } = useVirtualList(filteredModels, {
+  itemHeight: 62, // py-3.5 (28px) + text-15 (20px) + text-11 (14px) 约 62px
+  overscan: 10,
 });
 
-// 监听搜索词和 Tag 的改变，重置展示限制，优化 DOM 渲染压力
-watch([searchQuery, activeTag], () => {
-  visibleLimit.value = 30;
-});
-
-const handleScroll = (e: Event) => {
-  const target = e.target as HTMLElement;
-  if (target.scrollHeight - target.scrollTop - target.clientHeight < 100) {
-    if (visibleLimit.value < filteredModels.value.length) {
-      visibleLimit.value += 30;
-    }
-  }
+const scrollContainerRef = ref<HTMLElement | null>(null);
+const bindContainerRef = (el: unknown) => {
+  const htmlEl = el as HTMLElement | null;
+  containerProps.ref.value = htmlEl;
+  scrollContainerRef.value = htmlEl;
 };
 
 const selectTag = (tag: string) => {
   activeTag.value = tag;
+  // 切换 Tag 时滚动重置回顶部，防止虚拟滚动越界导致瞬间空白
+  if (scrollContainerRef.value) {
+    scrollContainerRef.value.scrollTop = 0;
+  }
 };
+
+// 搜索词改变时同样重置回顶部
+watch(searchQuery, () => {
+  if (scrollContainerRef.value) {
+    scrollContainerRef.value.scrollTop = 0;
+  }
+});
 
 // --- Drag Down Gesture Closure Mechanism ---
 const sheetRef = ref<HTMLElement | null>(null);
@@ -261,8 +266,13 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 模型列表 (支持滚动懒加载) -->
-        <div class="flex-1 overflow-y-auto px-2 pb-4 no-rubber-band" @scroll="handleScroll">
+        <!-- 模型列表 (使用 VueUse 虚拟滚动) -->
+        <div 
+          :ref="bindContainerRef"
+          :style="containerProps.style"
+          @scroll="containerProps.onScroll"
+          class="flex-1 overflow-y-auto px-2 pb-4 no-rubber-band vcp-scrollable"
+        >
           <!-- 骨架屏 -->
           <div v-if="modelStore.isLoading && filteredModels.length === 0" class="px-2 py-1 space-y-2">
             <div v-for="i in 5" :key="i"
@@ -282,35 +292,36 @@ onUnmounted(() => {
             <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>
           </div>
 
-          <!-- 实际渲染的模型列表 -->
-          <div class="space-y-1">
-            <div v-for="model in displayedModels" :key="model.id" @click="selectModel(model.id)"
+          <!-- 实际渲染的模型虚拟列表 -->
+          <div v-else v-bind="wrapperProps" class="space-y-1">
+            <div v-for="item in list" :key="item.data.id" @click="selectModel(item.data.id)"
               class="relative group px-4 py-3.5 flex items-center gap-3 rounded-2xl active:bg-black/5 dark:active:bg-white/5 transition-colors cursor-pointer"
-              :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === model.id }">
-
+              :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === item.data.id }"
+              style="height: 62px; box-sizing: border-box;"
+            >
               <div class="absolute left-0 top-1/4 bottom-1/4 w-1 bg-blue-500 rounded-r-md transition-all scale-y-0"
-                :class="{ 'scale-y-100': currentModel === model.id }"></div>
+                :class="{ 'scale-y-100': currentModel === item.data.id }"></div>
 
               <div class="flex-1 min-w-0 flex flex-col justify-center">
                 <div class="flex items-center gap-2">
                   <span class="text-[15px] font-medium tracking-tight truncate text-gray-900 dark:text-zinc-100"
-                    :class="{ 'text-blue-600 dark:text-blue-400 font-semibold': currentModel === model.id }">
-                    {{ model.id }}
+                    :class="{ 'text-blue-600 dark:text-blue-400 font-semibold': currentModel === item.data.id }">
+                    {{ item.data.id }}
                   </span>
-                  <Flame v-if="modelStore.hotModels.includes(model.id)" :size="14"
+                  <Flame v-if="modelStore.hotModels.includes(item.data.id)" :size="14"
                     class="text-orange-500 fill-orange-500/20 shrink-0" />
                 </div>
                 <div class="flex items-center gap-2 mt-0.5">
-                  <span class="text-[11px] text-gray-500 dark:text-gray-400">{{ model.owned_by }}</span>
+                  <span class="text-[11px] text-gray-500 dark:text-gray-400">{{ item.data.owned_by }}</span>
                 </div>
               </div>
 
               <div class="flex items-center gap-3 shrink-0">
-                <button @click="toggleFavorite($event, model.id)" class="p-2 -mr-2 transition-transform active:scale-75"
-                  :class="modelStore.isFavorite(model.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
-                  <Star :size="20" :fill="modelStore.isFavorite(model.id) ? 'currentColor' : 'none'" />
+                <button @click="toggleFavorite($event, item.data.id)" class="p-2 -mr-2 transition-transform active:scale-75"
+                  :class="modelStore.isFavorite(item.data.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
+                  <Star :size="20" :fill="modelStore.isFavorite(item.data.id) ? 'currentColor' : 'none'" />
                 </button>
-                <Check v-if="currentModel === model.id" :size="18" class="text-blue-500" />
+                <Check v-if="currentModel === item.data.id" :size="18" class="text-blue-500" />
               </div>
             </div>
           </div>

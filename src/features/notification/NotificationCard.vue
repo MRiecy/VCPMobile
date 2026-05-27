@@ -87,9 +87,9 @@ const onTouchEnd = () => {
 
 <template>
   <div
-    @touchstart="onTouchStart"
-    @touchmove="onTouchMove"
-    @touchend="onTouchEnd"
+    @touchstart.stop="onTouchStart"
+    @touchmove.stop="onTouchMove"
+    @touchend.stop="onTouchEnd"
     class="group relative px-3.5 py-2.5 border-b border-black/5 dark:border-white/5 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
     :class="isDragging ? 'transition-none' : 'transition-transform duration-200 ease-out'"
     :style="{ transform: `translateX(${swipeX}px)` }">

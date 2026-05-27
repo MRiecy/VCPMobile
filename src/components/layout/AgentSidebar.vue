@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { useSwipe } from '@vueuse/core';
+import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
@@ -20,24 +20,11 @@ const searchQuery = ref('');
 
 const sidebarRef = ref<HTMLElement | null>(null);
 
-// 侧边栏内部监听左滑以关闭
-const { direction, lengthX, lengthY } = useSwipe(sidebarRef, {
-  threshold: 15,
-  onSwipeEnd: (e: TouchEvent | MouseEvent) => {
-    const absX = Math.abs(lengthX.value);
-    const absY = Math.abs(lengthY.value);
-
-    // 水平手势判定：位移大于 50px，且角度在 30 度以内 (tan(30deg) ≈ 0.577)
-    if (absX <= 50 || absY / absX >= 0.577) return;
-
-    // 1. 向左滑 -> 关闭侧边栏 (放开滚动区限制，仅拦截特定 no-swipe 区域)
-    if (direction.value === 'left') {
-      if (e.target instanceof Element && e.target.closest(".no-swipe")) return;
-      layoutStore.setLeftDrawer(false);
-    }
-
-    // 2. 向右滑 -> 若当前是话题列表(topics)，则无感、敏捷地切回助手列表(agents)
-    if (direction.value === 'right' && activeTab.value === 'topics') {
+// 侧边栏内部监听左滑以关闭或 Tab 切换
+useSidebarSwipe(sidebarRef, {
+  type: 'left',
+  onTabSwitch: () => {
+    if (activeTab.value === 'topics') {
       activeTab.value = 'agents';
     }
   }

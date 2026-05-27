@@ -4,7 +4,7 @@ import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useSwipe } from "@vueuse/core";
+import { useSidebarSwipe } from "./core/composables/useSidebarSwipe";
 import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
 import { useLayoutStore } from "./core/stores/layout";
@@ -38,24 +38,7 @@ const { initRootHistory } = useModalHistory();
 
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
-const { direction, lengthX, lengthY } = useSwipe(appRootRef, {
-  threshold: 30, // 稍微提高阈值，防止微小误触
-  onSwipeEnd: (e: TouchEvent | MouseEvent) => {
-    // 只有在抽屉关闭时才从左往右滑开启
-    if (!layoutStore.leftDrawerOpen && !layoutStore.rightDrawerOpen) {
-      // 检查是否从受限区域发起
-      if (e.target instanceof Element && e.target.closest(".no-swipe, .vcp-scrollable")) return;
-
-      const absX = Math.abs(lengthX.value);
-      const absY = Math.abs(lengthY.value);
-
-      // 从左往右划 (开启左侧边栏)
-      if (direction.value === "right" && absX > 60 && absY / absX < 0.6) {
-        layoutStore.setLeftDrawer(true);
-      }
-    }
-  },
-});
+useSidebarSwipe(appRootRef, { type: "global" });
 
 const bootstrapApp = async () => {
   try {
