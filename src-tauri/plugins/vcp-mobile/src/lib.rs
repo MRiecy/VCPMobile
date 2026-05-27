@@ -5,7 +5,7 @@ use tauri::{
 
 mod screen;
 pub mod stream;
-mod system;
+pub mod system;
 
 /// Plugin state shared across commands
 pub struct VcpMobileState<R: Runtime> {
