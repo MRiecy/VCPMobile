@@ -53,12 +53,31 @@ class BatteryStatusManager(private val context: Context) {
                 return true
             }
 
-            // 3. 部分国产厂商 (如小米/华为等) 常用系统设置省电标记检测
+            // 3. 通用系统省电标记检测
             val powerSaveSystem = android.provider.Settings.System.getInt(resolver, "power_save_mode", 0)
             if (powerSaveSystem == 1) {
                 return true
             }
 
+            // 4. 小米 (MIUI / HyperOS) 专用省电标记
+            val miuiPowerSave = android.provider.Settings.System.getInt(resolver, "POWER_SAVE_MODE_OPEN", 0)
+            if (miuiPowerSave == 1) {
+                return true
+            }
+
+            // 5. 华为 (EMUI / HarmonyOS) 专用省电标记
+            // SmartModeStatus: 1=正常, 2=省电, 3=超级省电, 4=性能
+            val hwPowerSave = android.provider.Settings.System.getInt(resolver, "SmartModeStatus", 1)
+            if (hwPowerSave == 2 || hwPowerSave == 3) {
+                return true
+            }
+
+            // 6. Vivo / Oppo 等其他定制 ROM 可能存放在 Global 或 Secure 中
+            val globalPowerSave = android.provider.Settings.Global.getInt(resolver, "power_save_mode", 0)
+            if (globalPowerSave == 1) {
+                return true
+            }
+            
             false
         } catch (e: Exception) {
             false

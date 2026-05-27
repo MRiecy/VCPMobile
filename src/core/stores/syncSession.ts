@@ -46,8 +46,8 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     try {
       const battery = await invoke<{ level: number; isPowerSaveMode: boolean }>('plugin:vcp-mobile|get_battery_status');
       if (battery) {
-        // 在同步滚屏日志中打印诊断日志，让用户直接看到检测数据，提升技术感与诊断可见性
-        pushLog('info', `[设备健康检测] 电量百分比: ${battery.level}%, 省电模式: ${battery.isPowerSaveMode ? '开启' : '关闭'}`);
+        // 绿色日志（success级别）以便排查
+        pushLog('success', `[设备健康检测] 电量百分比: ${battery.level}%, 省电模式: ${battery.isPowerSaveMode ? '开启' : '关闭'}`);
 
         if (battery.isPowerSaveMode) {
           pushLog('error', '当前设备处于系统省电模式，已智能拦截同步，请关闭省电模式或充电后重试。');
@@ -62,8 +62,9 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
           return;
         }
       }
-    } catch (e) {
-      // 容错：如果是非 Android 环境（如桌面端开发测试），电量命令抛错，直接放行不予拦截
+    } catch (e: any) {
+      // 容错：将真实错误打印到日志面板中以便真机排查！
+      pushLog('error', `[电量检测异常] 无法获取设备电量状态: ${e}`);
       console.warn('Get battery status failed, bypassing security block:', e);
     }
 
