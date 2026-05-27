@@ -21,15 +21,10 @@ const progressPercent = computed(() => {
   return Math.min(100, Math.round((store.progress.current / store.progress.total) * 100));
 });
 
-const isPreRender = computed(() => store.taskType === 'preRender');
-const isDbUpgrade = computed(() => store.taskType === 'dbPageSizeUpgrade');
-
 const statusLabel = computed(() => {
   switch (store.status) {
     case 'idle': return '准备就绪';
-    case 'running':
-      if (isDbUpgrade.value) return '优化中';
-      return isPreRender.value ? '重建中' : '压缩中';
+    case 'running': return '重建中';
     case 'completed': return '已完成';
     case 'error': return '失败';
     default: return '等待';
@@ -94,26 +89,16 @@ const handleClose = async () => {
             <Play :size="28" class="text-blue-400 ml-1" />
           </div>
           <div class="text-sm font-bold tracking-wider mb-2">
-            <template v-if="isDbUpgrade">数据库 page_size 优化</template>
-            <template v-else>{{ isPreRender ? '全量预渲染重建' : '全量消息内容压缩' }}</template>
+            全量预渲染重建
           </div>
           <div class="text-[11px] text-white/30 text-center mb-8 leading-relaxed">
-            <template v-if="isPreRender">
-              对数据库中所有历史消息进行<br>AST 重新解析与代码高亮固化
-            </template>
-            <template v-else-if="isDbUpgrade">
-              将数据库 page_size 从 4KB 升级至 16KB，<br>提升现代闪存 I/O 效率<br>此操作会重建数据库文件，耗时取决于数据量
-            </template>
-            <template v-else>
-              将数据库中所有未压缩的历史消息文本<br>进行 zstd 压缩，降低存储占用
-            </template>
+            对数据库中所有历史消息进行<br>AST 重新解析与代码高亮固化
           </div>
           <button
             @click="store.startRebuild()"
             class="px-8 py-3 rounded-lg bg-blue-500/20 text-blue-400 text-xs font-bold tracking-widest uppercase active:bg-blue-500/30 transition-colors"
           >
-            <template v-if="isDbUpgrade">开始优化</template>
-            <template v-else>{{ isPreRender ? '开始重建' : '开始压缩' }}</template>
+            开始重建
           </button>
         </template>
 
@@ -127,10 +112,7 @@ const handleClose = async () => {
                    :style="{ width: progressPercent + '%' }"></div>
             </div>
             <div class="flex justify-between text-[10px] mt-1 opacity-50">
-              <span>
-                <template v-if="isDbUpgrade">数据库优化</template>
-                <template v-else>{{ isPreRender ? '预渲染重建' : '消息内容压缩' }}</template>
-              </span>
+              <span>预渲染重建</span>
               <span v-if="store.progress.total > 0">
                 {{ store.progress.current }} / {{ store.progress.total }}
               </span>
@@ -140,15 +122,13 @@ const handleClose = async () => {
           <!-- 状态文字 -->
           <div class="text-center mt-4">
             <div v-if="store.status === 'running'" class="text-xs text-white/60">
-              <template v-if="isDbUpgrade">正在重建数据库文件...</template>
-              <template v-else>{{ isPreRender ? '正在重新解析消息...' : '正在压缩消息内容...' }}</template>
+              正在重新解析消息...
             </div>
             <div v-else-if="store.status === 'completed'" class="text-xs text-green-400 font-bold">
-              <template v-if="isDbUpgrade">数据库 page_size 优化完成</template>
-              <template v-else>{{ isPreRender ? '全量预渲染重建完成' : '全量消息内容压缩完成' }}</template>
+              全量预渲染重建完成
             </div>
             <div v-else-if="store.status === 'error'" class="text-xs text-red-400 font-bold max-w-xs break-words">
-              {{ isDbUpgrade ? '优化失败' : '重建失败' }}: {{ store.errorMessage }}
+              重建失败: {{ store.errorMessage }}
             </div>
           </div>
 
@@ -167,18 +147,9 @@ const handleClose = async () => {
       <div class="flex items-center justify-center px-4 py-2 border-t border-white/5">
         <div class="text-[9px] opacity-30 font-bold tracking-[0.2em] uppercase">
           <span v-if="store.status === 'idle'">点击上方按钮以开始</span>
-          <span v-else-if="store.status === 'running'">
-            <template v-if="isDbUpgrade">优化进行中</template>
-            <template v-else>{{ isPreRender ? '重建进行中' : '压缩进行中' }}</template>
-          </span>
-          <span v-else-if="store.status === 'completed'">
-            <template v-if="isDbUpgrade">优化已完成</template>
-            <template v-else>{{ isPreRender ? '重建已完成' : '压缩已完成' }}</template>
-          </span>
-          <span v-else-if="store.status === 'error'">
-            <template v-if="isDbUpgrade">优化失败</template>
-            <template v-else>{{ isPreRender ? '重建失败' : '压缩失败' }}</template>
-          </span>
+          <span v-else-if="store.status === 'running'">重建进行中</span>
+          <span v-else-if="store.status === 'completed'">重建已完成</span>
+          <span v-else-if="store.status === 'error'">重建失败</span>
         </div>
       </div>
 
@@ -189,8 +160,7 @@ const handleClose = async () => {
         <div class="pb-8 text-center">
           <div class="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-black/60 text-white/90 text-xs font-bold tracking-wider">
             <div class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></div>
-            <template v-if="isDbUpgrade">优化进行中</template>
-            <template v-else>{{ isPreRender ? '重建进行中' : '压缩进行中' }}</template> — 请勿退出
+            重建进行中 — 请勿退出
           </div>
         </div>
       </div>

@@ -36,10 +36,10 @@ use vcp_modules::lifecycle_manager::{
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
-    init_automatic_maintenance, upgrade_database_page_size,
+    init_automatic_maintenance,
 };
 use vcp_modules::message_repository::{
-    compress_all_contents, process_message_content, rebuild_all_pre_renders,
+    process_message_content, rebuild_all_pre_renders,
 };
 use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
 use vcp_modules::model_manager::{
@@ -195,7 +195,6 @@ pub fn run() {
             truncate_history_after_timestamp,
             process_message_content,
             rebuild_all_pre_renders,
-            compress_all_contents,
             get_topics,
             get_topics_streamed,
             get_unread_counts,
@@ -235,7 +234,6 @@ pub fn run() {
             clear_webview_cache,
             cleanup_orphaned_attachments,
             cleanup_single_orphaned_attachment,
-            upgrade_database_page_size,
             get_cached_models,
             refresh_models,
             get_hot_models,

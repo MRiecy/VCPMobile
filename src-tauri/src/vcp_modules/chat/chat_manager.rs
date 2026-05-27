@@ -144,7 +144,7 @@ pub async fn append_single_message(
     owner_type: String,
     topic_id: String,
     message: ChatMessage,
-) -> Result<(), String> {
+) -> Result<Vec<ContentBlock>, String> {
     message_service::append_single_message(
         app_handle,
         &db_state.pool,
@@ -153,8 +153,7 @@ pub async fn append_single_message(
         topic_id,
         message,
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 #[tauri::command]

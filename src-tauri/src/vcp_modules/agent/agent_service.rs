@@ -50,6 +50,7 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
         context_token_limit: 1000000,
         max_output_tokens: 64000,
         stream_output: true,
+        use_temperature: true,
         avatar_calculated_color: None,
         topics: vec![],
     }
@@ -79,7 +80,7 @@ pub async fn read_agent_config_internal<R: Runtime>(
     let pool = &db_state.pool;
 
     let agent_row = sqlx::query(
-        "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, av.dominant_color 
+        "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
          WHERE a.agent_id = ? AND a.deleted_at IS NULL"
@@ -127,6 +128,7 @@ pub async fn read_agent_config_internal<R: Runtime>(
             context_token_limit: row.get("context_token_limit"),
             max_output_tokens: row.get("max_output_tokens"),
             stream_output: row.get::<i32, _>("stream_output") != 0,
+            use_temperature: row.get::<i32, _>("use_temperature") != 0,
             avatar_calculated_color,
             topics,
         };
@@ -273,8 +275,8 @@ async fn internal_write_agent_config<R: Runtime>(
         "INSERT INTO agents (
             agent_id, name, system_prompt, mobile_system_prompt, model, temperature, 
             context_token_limit, max_output_tokens, 
-            stream_output, config_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            stream_output, use_temperature, config_hash, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name, 
             system_prompt = excluded.system_prompt, 
@@ -284,6 +286,7 @@ async fn internal_write_agent_config<R: Runtime>(
             context_token_limit = excluded.context_token_limit, 
             max_output_tokens = excluded.max_output_tokens, 
             stream_output = excluded.stream_output, 
+            use_temperature = excluded.use_temperature,
             config_hash = excluded.config_hash,
             updated_at = excluded.updated_at",
     )
@@ -296,6 +299,7 @@ async fn internal_write_agent_config<R: Runtime>(
     .bind(new_config.context_token_limit)
     .bind(new_config.max_output_tokens)
     .bind(if new_config.stream_output { 1 } else { 0 })
+    .bind(if new_config.use_temperature { 1 } else { 0 })
     .bind(&config_hash)
     .bind(now)
     .execute(&mut *tx)
@@ -416,6 +420,7 @@ pub async fn create_agent(
             context_token_limit: 1000000,
             max_output_tokens: 60000,
             stream_output: true,
+            use_temperature: true,
             avatar_calculated_color: None,
             topics: vec![Topic {
                 id: default_topic_id.clone(),
@@ -439,8 +444,8 @@ pub async fn create_agent(
     let dto = AgentSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
     sqlx::query(
-        "INSERT INTO agents (agent_id, name, system_prompt, mobile_system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (agent_id, name, system_prompt, mobile_system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, use_temperature, config_hash, updated_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&agent_id)
     .bind(&config.name)
@@ -451,6 +456,7 @@ pub async fn create_agent(
     .bind(config.context_token_limit)
     .bind(config.max_output_tokens)
     .bind(if config.stream_output { 1 } else { 0 })
+    .bind(if config.use_temperature { 1 } else { 0 })
     .bind(&config_hash)
     .bind(timestamp)
     .execute(&mut *tx)

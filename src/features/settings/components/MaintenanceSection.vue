@@ -39,14 +39,6 @@ const clearSystemCache = async () => {
 const openRebuildSession = () => {
   overlayStore.openRebuildSession('preRender');
 };
-
-const openCompressSession = () => {
-  overlayStore.openRebuildSession('contentCompress');
-};
-
-const openDbPageSizeUpgrade = () => {
-  overlayStore.openRebuildSession('dbPageSizeUpgrade');
-};
 </script>
 
 <template>
@@ -88,30 +80,6 @@ const openDbPageSizeUpgrade = () => {
         button-label="一键重建"
         status-mono
         @action-click="openRebuildSession"
-      />
-    </div>
-
-    <div class="pt-4 border-t border-black/5 dark:border-white/5">
-      <SettingsActionWithStatus
-        title="全量消息内容压缩"
-        description="将数据库中所有未压缩的历史消息文本进行 zstd 压缩，降低存储占用"
-        button-variant="primary"
-        button-size="sm"
-        button-label="开始压缩"
-        status-mono
-        @action-click="openCompressSession"
-      />
-    </div>
-
-    <div class="pt-4 border-t border-black/5 dark:border-white/5">
-      <SettingsActionWithStatus
-        title="数据库 page_size 优化"
-        description="将数据库存储页从 4KB 升级至 16KB，提升闪存 I/O 效率（执行 VACUUM）"
-        button-variant="primary"
-        button-size="sm"
-        button-label="开始优化"
-        status-mono
-        @action-click="openDbPageSizeUpgrade"
       />
     </div>
   </div>

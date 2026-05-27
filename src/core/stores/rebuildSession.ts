@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { withScreenKeep } from '../composables/useScreenKeeper';
 
-export type RebuildTaskType = 'preRender' | 'contentCompress' | 'dbPageSizeUpgrade';
+export type RebuildTaskType = 'preRender';
 
 export const useRebuildSessionStore = defineStore('rebuildSession', () => {
   // --- 视图状态 ---
@@ -48,16 +48,8 @@ export const useRebuildSessionStore = defineStore('rebuildSession', () => {
     errorMessage.value = '';
 
     try {
-      if (taskType.value === 'preRender') {
-        await withScreenKeep(() => invoke('rebuild_all_pre_renders'));
-        needsReload.value = true;
-      } else if (taskType.value === 'contentCompress') {
-        await withScreenKeep(() => invoke('compress_all_contents'));
-        needsReload.value = true;
-      } else if (taskType.value === 'dbPageSizeUpgrade') {
-        await withScreenKeep(() => invoke('upgrade_database_page_size'));
-        needsReload.value = false;
-      }
+      await withScreenKeep(() => invoke('rebuild_all_pre_renders'));
+      needsReload.value = true;
       status.value = 'completed';
       canDismiss.value = true;
     } catch (e: any) {
@@ -81,10 +73,7 @@ export const useRebuildSessionStore = defineStore('rebuildSession', () => {
 
   const registerListener = () => {
     cleanupListener();
-    const eventName = taskType.value === 'preRender'
-      ? 'render_rebuild_progress'
-      : 'content_compress_progress';
-    listen<{ current: number; total: number }>(eventName, (event) => {
+    listen<{ current: number; total: number }>('render_rebuild_progress', (event) => {
       progress.value = event.payload;
     }).then((fn) => {
       unlistenFn = fn;

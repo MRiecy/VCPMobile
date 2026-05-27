@@ -37,6 +37,10 @@ pub struct AgentConfig {
     #[serde(default = "default_true")]
     pub stream_output: bool,
 
+    /// 是否在请求中发送 temperature 参数（关闭可兼容不支持温度的模型）
+    #[serde(default = "default_true")]
+    pub use_temperature: bool,
+
     // avatars 表派生字段
     #[serde(default)]
     pub avatar_calculated_color: Option<String>,

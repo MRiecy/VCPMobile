@@ -197,11 +197,13 @@ pub async fn internal_process_group_chat_message(
         };
 
         // 构造请求载荷
-        let model_config = json!({
+        let mut model_config = json!({
             "model": model_to_use,
-            "temperature": speaker.temperature,
             "stream": true
         });
+        if speaker.use_temperature {
+            model_config["temperature"] = json!(speaker.temperature);
+        }
 
         let mut messages = assemble_history_for_vcp(&full_history_for_context);
         if let Some(invite_prompt) = &group_config_inner.invite_prompt {

@@ -10,16 +10,15 @@ use tauri::{AppHandle, State};
 const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一个简洁的话题标题。要求：1. 标题长度控制在10个汉字以内。2. 标题本身不能包含任何标点符号、数字编号 or 任何非标题文字。3. 直接给出标题文字，不要添加任何解释或前缀。";
 
 /// 话题总结的默认模型
-const DEFAULT_SUMMARY_MODEL: &str = "gemini-2.5-flash";
+const DEFAULT_SUMMARY_MODEL: &str = "gemini-3.1-flash-lite";
 
-/// 话题总结的默认温度系数 (硬编码为 0.7)
-const DEFAULT_SUMMARY_TEMPERATURE: f64 = 0.7;
+/// 注：不主动发送 temperature 参数，以兼容 o1/Gemini thinking 等不支持该参数的模型
 
 /// AI 请求超时时间 (秒)
 const AI_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-/// AI 请求最大 Token 数
-const AI_MAX_TOKENS: u32 = 4000;
+/// AI 响应最大 Token 数（话题标题≤12汉字，64 token 绰绰有余）
+const AI_MAX_TOKENS: u32 = 64;
 
 pub async fn summarize_topic(
     app_handle: AppHandle,
@@ -86,7 +85,6 @@ pub async fn summarize_topic(
         .json(&json!({
             "messages": [{"role": "user", "content": summary_prompt}],
             "model": model,
-            "temperature": DEFAULT_SUMMARY_TEMPERATURE,
             "max_tokens": AI_MAX_TOKENS,
             "stream": false
         }))

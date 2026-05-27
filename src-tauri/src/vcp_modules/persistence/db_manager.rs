@@ -304,6 +304,10 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // Migrations (幂等 — .ok() 忽略 duplicate column 错误)
+    sqlx::query("ALTER TABLE agents ADD COLUMN use_temperature INTEGER NOT NULL DEFAULT 1")
+        .execute(pool).await.ok();
+
     // 索引 (共 8 个)
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_id, owner_type, created_at DESC)").execute(pool).await.map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category)").execute(pool).await.map_err(|e| e.to_string())?;

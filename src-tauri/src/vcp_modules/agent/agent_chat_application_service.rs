@@ -110,13 +110,15 @@ pub async fn internal_process_agent_chat_message(
     }
 
     // 6. 构造 VCP 请求载荷
-    let model_config = json!({
+    let mut model_config = json!({
         "model": agent_config.model,
-        "temperature": agent_config.temperature,
         "max_tokens": agent_config.max_output_tokens,
         "contextTokenLimit": agent_config.context_token_limit,
         "stream": true
     });
+    if agent_config.use_temperature {
+        model_config["temperature"] = json!(agent_config.temperature);
+    }
 
     let context = Some(json!({
         "agentId": agent_id,

@@ -25,6 +25,7 @@ export interface AgentConfig {
   contextTokenLimit: number;
   maxOutputTokens: number;
   streamOutput: boolean;
+  useTemperature: boolean;
   avatarCalculatedColor?: string;
   topics?: Topic[];
 }

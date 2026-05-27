@@ -220,12 +220,20 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     acquireScreenKeep();
 
     try {
-      await invoke("append_single_message", {
+      const compiledBlocks = await invoke<ContentBlock[]>("append_single_message", {
         ownerId: sessionStore.currentSelectedItem.id,
         ownerType: sessionStore.currentSelectedItem.type,
         topicId,
         message: userMsg,
       });
+
+      const targetIndex = currentChatHistory.value.findIndex(m => m.id === userMsg.id);
+      if (targetIndex !== -1) {
+        currentChatHistory.value[targetIndex] = {
+          ...currentChatHistory.value[targetIndex],
+          blocks: compiledBlocks as any,
+        };
+      }
 
       const settings = settingsStore.settings;
       if (!settings) throw new Error("应用尚未完成初始化");

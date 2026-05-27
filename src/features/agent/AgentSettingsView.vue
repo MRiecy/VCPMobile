@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
@@ -22,6 +22,7 @@ interface AgentConfig {
   contextTokenLimit: number;
   maxOutputTokens: number;
   streamOutput: boolean;
+  useTemperature: boolean;
 }
 
 const props = withDefaults(defineProps<{
@@ -49,6 +50,7 @@ const agentConfig = ref<AgentConfig>({
   contextTokenLimit: 1000000,
   maxOutputTokens: 32000,
   streamOutput: true,
+  useTemperature: true,
 });
 
 // UI State
@@ -315,6 +317,13 @@ onMounted(async () => {
               </div>
             </div>
 
+            <div :class="{ 'opacity-30 pointer-events-none': !agentConfig.useTemperature }" class="transition-opacity duration-200">
+              <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">Temperature (0-2):</label>
+              <input type="number" v-model.number="agentConfig.temperature"
+                min="0" max="2" step="0.1" :disabled="!agentConfig.useTemperature"
+                class="w-full bg-black/5 dark:bg-white/5 rounded-xl px-4 py-3 text-sm outline-none font-mono" />
+            </div>
+
             <div class="grid grid-cols-2 gap-5">
               <div>
                 <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">上下文 Token 上限</label>
@@ -332,6 +341,16 @@ onMounted(async () => {
               <span class="text-sm font-medium">流式输出</span>
               <label class="relative inline-flex items-center cursor-pointer">
                 <input type="checkbox" v-model="agentConfig.streamOutput" class="sr-only peer" />
+                <div
+                  class="w-10 h-5 bg-black/10 dark:bg-white/10 rounded-full peer peer-checked:bg-blue-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5">
+                </div>
+              </label>
+            </div>
+
+            <div class="flex justify-between items-center py-2">
+              <span class="text-sm font-medium">发送温度参数</span>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input type="checkbox" v-model="agentConfig.useTemperature" class="sr-only peer" />
                 <div
                   class="w-10 h-5 bg-black/10 dark:bg-white/10 rounded-full peer peer-checked:bg-blue-500 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-5">
                 </div>

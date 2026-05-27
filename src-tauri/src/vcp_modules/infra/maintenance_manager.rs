@@ -212,36 +212,4 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
     }
 }
 
-/// 4. 数据库 page_size 优化升级
-/// 检查当前 page_size，若非 16KB 则执行 VACUUM 重建数据库文件
-#[tauri::command]
-pub async fn upgrade_database_page_size(db_state: State<'_, DbState>) -> Result<String, String> {
-    let current_page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
-        .fetch_one(&db_state.pool)
-        .await
-        .map_err(|e| format!("读取 page_size 失败: {}", e))?;
 
-    if current_page_size == 16384 {
-        return Ok("当前数据库 page_size 已为 16KB，无需优化".to_string());
-    }
-
-    println!(
-        "[Maintenance] Optimizing page_size from {} to 16KB (Executing VACUUM)...",
-        current_page_size
-    );
-
-    sqlx::query("VACUUM")
-        .execute(&db_state.pool)
-        .await
-        .map_err(|e| format!("VACUUM 执行失败: {}", e))?;
-
-    let new_page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
-        .fetch_one(&db_state.pool)
-        .await
-        .map_err(|e| format!("验证 page_size 失败: {}", e))?;
-
-    Ok(format!(
-        "数据库 page_size 已从 {}B 优化至 {}B",
-        current_page_size, new_page_size
-    ))
-}
