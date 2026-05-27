@@ -35,8 +35,31 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     registerListeners();
   };
 
-  const startSync = () => {
+  const startSync = async () => {
     if (status.value !== 'idle') return;
+
+    // 原生设备电量与省电检测保障
+    try {
+      const battery = await invoke<{ level: number; isPowerSaveMode: boolean }>('plugin:vcp-mobile|get_battery_status');
+      if (battery) {
+        if (battery.isPowerSaveMode) {
+          pushLog('error', '当前设备处于系统省电模式，已智能拦截同步，请关闭省电模式或充电后重试。');
+          status.value = 'error';
+          canDismiss.value = true;
+          return;
+        }
+        if (battery.level > 0 && battery.level < 30) {
+          pushLog('error', `当前设备电量过低 (${battery.level}%)，低于 30% 限制，已智能拦截同步以保护电池与数据安全。`);
+          status.value = 'error';
+          canDismiss.value = true;
+          return;
+        }
+      }
+    } catch (e) {
+      // 容错：如果是非 Android 环境（如桌面端开发测试），电量命令抛错，直接放行不予拦截
+      console.warn('Get battery status failed, bypassing security block:', e);
+    }
+
     status.value = 'connecting';
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };

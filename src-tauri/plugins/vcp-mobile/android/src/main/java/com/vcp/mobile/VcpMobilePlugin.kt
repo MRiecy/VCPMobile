@@ -42,6 +42,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private var webViewRef: WebView? = null
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
+    private val batteryStatusManager = BatteryStatusManager(activity)
 
     // ==================================================================
     // Permissions & App Control
@@ -186,6 +187,17 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve()
     }
 
+    @Command
+    fun getBatteryStatus(invoke: Invoke) {
+        try {
+            val status = batteryStatusManager.getStatusJson()
+            invoke.resolve(status)
+        } catch (e: Exception) {
+            Log.e(TAG, "getBatteryStatus failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
     // ==================================================================
     // Stream Service
     // ==================================================================
@@ -194,10 +206,15 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         try {
             val args = invoke.parseArgs(StartStreamArgs::class.java)
             val intent = StreamKeepaliveService.createIntent(activity, args.agentName)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                activity.startForegroundService(intent)
-            } else {
-                activity.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    activity.startForegroundService(intent)
+                } else {
+                    activity.startService(intent)
+                }
+            } catch (e: SecurityException) {
+                Log.w(TAG, "POST_NOTIFICATIONS permission denied, degrading to normal service", e)
+                activity.startService(intent) // 静默降级为普通 Service，防止闪退崩溃
             }
             invoke.resolve()
         } catch (e: Exception) {

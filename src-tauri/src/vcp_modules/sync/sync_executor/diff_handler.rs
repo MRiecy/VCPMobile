@@ -139,7 +139,11 @@ impl DiffHandler {
 
                             if stuck_count >= 6 {
                                 println!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
-                                emit_sync_log(&handle_clone_wd, "warn", &format!("检测到同步停滞 (Phase {})，正在尝试强制恢复...", current_phase_wd));
+                                emit_sync_log(
+                                    &handle_clone_wd,
+                                    "error",
+                                    &format!("[TIMEOUT WARNING] 检测到同步流程异常停滞超过 60 秒 (Phase {})。看门狗机制介入强制过渡以恢复正常通信流水线。部分未决 Topic 状态将推迟到下次同步时补齐。", current_phase_wd)
+                                );
                                 if current_phase_wd == 1 {
                                     let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata);
                                 } else if current_phase_wd == 2 {

@@ -275,6 +275,22 @@ fn replace_container_placeholders(
 }
 
 pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
+    let raw_text = text.to_string();
+    let result = std::panic::catch_unwind(move || {
+        parse_markdown_to_ast_impl(&raw_text)
+    });
+    match result {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            log::error!("[PreRender] parse_markdown_to_ast panicked: {:?}", e);
+            let mut fallback_node = MarkdownNode::paragraph(vec![InlineNode::text(text.to_string())]);
+            fallback_node.compute_hashes_recursively();
+            vec![fallback_node]
+        }
+    }
+}
+
+fn parse_markdown_to_ast_impl(text: &str) -> Vec<MarkdownNode> {
     let text = preprocess_latex_math(text);
     let (text, containers) = extract_html_containers(&text);
     let mut nodes = Vec::new();

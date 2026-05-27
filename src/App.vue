@@ -14,6 +14,7 @@ import { useNotificationProcessor } from "./core/composables/useNotificationProc
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
+import { reapplyScreenKeepIfActive, suspendPhysicalScreenKeep } from "./core/composables/useScreenKeeper";
 
 // Layout Components
 import PermissionGate from "./components/layout/PermissionGate.vue";
@@ -161,6 +162,7 @@ const handleVcpLifecycle = async (e: Event) => {
   
   if (state === "stop" || state === "pause") {
     console.log("[Lifecycle] App moved to background, tuning heartbeat to 120s...");
+    suspendPhysicalScreenKeep(); // 休眠物理亮屏，达到省电效果
     try {
       await invoke("set_vcp_log_heartbeat", { intervalMs: 120000 });
     } catch (err) {
@@ -168,6 +170,7 @@ const handleVcpLifecycle = async (e: Event) => {
     }
   } else if (state === "resume") {
     console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
+    reapplyScreenKeepIfActive(); // 唤醒时自动校准和恢复可能丢失的物理亮屏 FLAG
     try {
       await invoke("set_vcp_log_heartbeat", { intervalMs: 15000 });
       // 唤醒时主动校准系统最新状态快照
