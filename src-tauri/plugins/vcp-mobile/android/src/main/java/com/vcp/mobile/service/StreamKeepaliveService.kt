@@ -108,9 +108,16 @@ class StreamKeepaliveService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val contentText = when {
+            agentName.contains("[数据同步]") -> "正在与云端服务器进行高精度同步..."
+            agentName.contains("[预渲染重建]") -> "正在优化与加速本地响应缓存..."
+            else -> "思考中……"
+        }
+        val cleanTitle = agentName.replace("[数据同步]", "").replace("[预渲染重建]", "").trim()
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(agentName)
-            .setContentText("思考中……")
+            .setContentTitle(if (cleanTitle.isEmpty()) "VCP Mobile" else cleanTitle)
+            .setContentText(contentText)
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
             .setContentIntent(openPendingIntent)
