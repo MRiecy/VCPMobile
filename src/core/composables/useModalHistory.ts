@@ -61,6 +61,9 @@ const handlePopState = (event: PopStateEvent) => {
     try {
       topModal.close();
     } finally {
+      // 主动从栈中移除，不再依赖 close 回调自行调用 unregisterModal
+      const idx = modalStack.value.findIndex(m => m.id === topModal.id);
+      if (idx !== -1) modalStack.value.splice(idx, 1);
       state = 'IDLE';
     }
     return;
@@ -143,23 +146,15 @@ export function useModalHistory() {
       const topModal = modalStack.value[topIdx];
       
       console.log(`[ModalHistory] Closing top modal: ${topModal.id}`);
+
+      // 先从栈中移除，再调用 close 回调，确保无论回调是否调用 unregisterModal 都不会残留
+      modalStack.value.splice(topIdx, 1);
       
       try {
         topModal.close();
       } catch (err) {
         console.error(`[ModalHistory] Failed to call close on modal ${topModal.id}:`, err);
       }
-      
-      // 幽灵 Modal 防锁死强行保底剔除机制 (P0 级可靠性设计)
-      // 如果 50ms 后该 modal 依然存在于栈中，说明 close() 回调发生了异常、或者没有正常调用 unregisterModal，
-      // 那么我们强行将其从栈中剔除，防止物理返回键被永远卡死拦截！
-      setTimeout(() => {
-        const checkIdx = modalStack.value.findIndex(m => m.id === topModal.id);
-        if (checkIdx !== -1) {
-          console.warn(`[ModalHistory] Ghost modal detected! Forcefully evicting ${topModal.id} to prevent lockup.`);
-          modalStack.value.splice(checkIdx, 1);
-        }
-      }, 50);
       
       return true;
     }

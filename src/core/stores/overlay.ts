@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia';
+import { defineStore } from 'pinia';
 import { ref, shallowRef, computed } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
 import { LAYER_PAGE_BASE, LAYER_PAGE_MAX_OFFSET } from '../constants/layers';
@@ -57,9 +57,11 @@ export const useOverlayStore = defineStore('overlay', () => {
     });
   };
 
-  // Internal pop: removes from pageStack only (used by handlePopState close callback)
+  // Internal pop: removes from both pageStack and modalStack (used by handlePopState close callback)
   const popPageInternal = () => {
     if (pageStack.value.length === 0) return;
+    const top = pageStack.value[pageStack.value.length - 1];
+    unregisterModal(top.modalId);
     pageStack.value.pop();
   };
 
