@@ -557,25 +557,36 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
 }
 
 fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
-    let doc = lopdf::Document::load(path).ok()?;
+    let doc = match lopdf::Document::load(path) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("[FileExtractor] Failed to load PDF: {:?}, error: {}", path, e);
+            return None;
+        }
+    };
     let mut text = String::new();
-    
+
     let pages = doc.get_pages();
     let mut page_numbers: Vec<u32> = pages.keys().cloned().collect();
     page_numbers.sort();
-    
+
     for page_id in page_numbers {
-        if let Ok(page_text) = doc.extract_text(&[page_id]) {
-            text.push_str(&page_text);
-            text.push('\n');
+        match doc.extract_text(&[page_id]) {
+            Ok(page_text) => {
+                text.push_str(&page_text);
+                text.push('\n');
+            }
+            Err(e) => {
+                println!("[FileExtractor] Failed to extract text from PDF page {}: {:?}, error: {}", page_id, path, e);
+            }
         }
     }
-    
+
     if text.is_empty() { None } else { Some(text) }
 }
-
 /// 物理文件多模态异步/同步提取文本主入口
 pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<String> {
+    println!("[FileExtractor] Starting extraction for path: {:?}, mime: {}", path, mime_type);
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

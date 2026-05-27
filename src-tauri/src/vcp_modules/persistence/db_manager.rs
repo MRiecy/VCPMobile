@@ -39,6 +39,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
     // 4. temp_store: 将临时表、排序操作强制放在内存中
     // 5. page_size: 提升至 16KB，优化现代闪存 I/O 效率
     // 6. auto_vacuum: 开启增量清理逻辑，配合维护任务物理回收空间
+    // 7. foreign_keys: 开启外键约束，以支持级联删除
     connect_options = connect_options
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
@@ -47,7 +48,8 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .pragma("temp_store", "2")
         .pragma("page_size", "16384")
         .pragma("cache_size", "-8000")
-        .pragma("auto_vacuum", "2");
+        .pragma("auto_vacuum", "2")
+        .pragma("foreign_keys", "1");
 
     let mut retry_count = 0;
     let pool = loop {

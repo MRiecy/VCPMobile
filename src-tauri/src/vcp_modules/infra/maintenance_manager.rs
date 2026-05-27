@@ -45,15 +45,29 @@ pub async fn cleanup_orphaned_attachments(
         return Ok("索引库为空，无需清理".to_string());
     }
 
-    // 2. 查 message_attachments 确定哪些 hash 正在被引用
+    // 1.5 先清理已删除消息的 message_attachments 关联 (防线三：GC 阶段关联自愈)
+    let _ = sqlx::query(
+        "DELETE FROM message_attachments WHERE (topic_id, msg_id) IN (\
+         SELECT ma.topic_id, ma.msg_id FROM message_attachments ma \
+         INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+         WHERE m.deleted_at IS NOT NULL)",
+    )
+    .execute(&db_state.pool)
+    .await;
+
+    // 2. 查 message_attachments 确定哪些 hash 正在被有效消息引用 (防线四：GC 强校验)
     let used_hashes: std::collections::HashSet<String> =
-        sqlx::query_as::<_, (String,)>("SELECT DISTINCT hash FROM message_attachments")
-            .fetch_all(&db_state.pool)
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|(h,)| h)
-            .collect();
+        sqlx::query_as::<_, (String,)>(
+            "SELECT DISTINCT ma.hash FROM message_attachments ma \
+             INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+             WHERE m.deleted_at IS NULL"
+        )
+        .fetch_all(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(h,)| h)
+        .collect();
 
     // 3. 找出未引用的哈希并删除
     let mut deleted_count = 0;
@@ -107,9 +121,12 @@ pub async fn cleanup_single_orphaned_attachment(
     db_state: State<'_, DbState>,
     hash: String,
 ) -> Result<String, String> {
-    // 1. 查 message_attachments 确定该 hash 是否被历史消息引用
+    // 1. 查 message_attachments 确定该 hash 是否被有效历史消息引用
     let is_used: bool = sqlx::query_scalar::<_, i32>(
-        "SELECT EXISTS(SELECT 1 FROM message_attachments WHERE hash = ?)",
+        "SELECT EXISTS(\
+         SELECT 1 FROM message_attachments ma \
+         INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+         WHERE ma.hash = ? AND m.deleted_at IS NULL)",
     )
     .bind(&hash)
     .fetch_one(&db_state.pool)
@@ -200,7 +217,17 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
             .execute(&db_state.pool)
             .await;
 
-        // 3. SQLite 查询规划器优化
+        // 3. 自动清除已删除消息的多余附件关联 (防线二：自动维护自愈)
+        let _ = sqlx::query(
+            "DELETE FROM message_attachments WHERE (topic_id, msg_id) IN (\
+             SELECT ma.topic_id, ma.msg_id FROM message_attachments ma \
+             INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+             WHERE m.deleted_at IS NOT NULL)",
+        )
+        .execute(&db_state.pool)
+        .await;
+
+        // 4. SQLite 查询规划器优化
         let _ = sqlx::query("PRAGMA optimize").execute(&db_state.pool).await;
 
         // 更新时间戳

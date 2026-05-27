@@ -632,6 +632,17 @@ pub async fn delete_messages(
     }
     q_cache.execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
+    // 物理强清除 message_attachments 关联，防止孤立关联残留
+    let delete_attachments_query = format!(
+        "DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN ({})",
+        msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+    );
+    let mut q_attachments = sqlx::query(&delete_attachments_query).bind(topic_id);
+    for id in &msg_ids {
+        q_attachments = q_attachments.bind(id);
+    }
+    q_attachments.execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
     )
@@ -666,8 +677,8 @@ pub async fn truncate_history_after_timestamp(
     sqlx::query("DELETE FROM render_cache WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
         .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
-    sqlx::query("DELETE FROM message_attachments WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
-        .bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
+        .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ?")
         .bind(now)
