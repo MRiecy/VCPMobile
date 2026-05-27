@@ -332,7 +332,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     if (inputStream == null) {
                         Log.e(TAG, "[onPickFileResult] openInputStream returned null")
                         invoke.reject("Could not open input stream")
-                        return@Thread
+                        return@execute
                     }
                     java.io.FileOutputStream(tempFile).use { outputStream ->
                         val buffer = ByteArray(65536)
