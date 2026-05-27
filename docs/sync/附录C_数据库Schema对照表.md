@@ -115,7 +115,7 @@ last_updated: 2026-05-13
 | messages | agent_id | TEXT | — | 发送者 Agent ID（Agent/Group 消息有效） | `history.json` → `agentId` |
 | messages | content | TEXT | NOT NULL | 消息文本内容（Markdown 或纯文本） | `history.json` → `content` |
 | messages | timestamp | BIGINT | NOT NULL | 消息时间戳，毫秒 | `history.json` → `timestamp` |
-| messages | is_thinking | INTEGER | NOT NULL DEFAULT 0 | 是否为思考中状态（兼容占位，0/1） | `history.json` → `isThinking` |
+| messages | is_thinking | INTEGER | `NOT NULL DEFAULT 0` | **已弃用**。v0.9.14 起 bulk INSERT 移除该列，`PARAMS_PER_MSG` 14→13 | `history.json` → `isThinking`（协议层保留） |
 | messages | is_group_message | INTEGER | NOT NULL DEFAULT 0 | 是否为群组消息（0/1） | `history.json` → `isGroupMessage` |
 | messages | group_id | TEXT | — | 所属 Group ID（群组消息有效） | `history.json` → `groupId` |
 | messages | finish_reason | TEXT | — | 模型结束原因，如 `stop`、`length` | `history.json` → `finishReason` |
@@ -349,7 +349,8 @@ last_updated: 2026-05-13
 - `groups.use_unified_model`
 - `topics.locked`
 - `topics.unread`
-- `messages.is_thinking`
+- ~~`messages.is_thinking`~~（v0.9.14 已从 bulk INSERT 和 SELECT 中移除）
+- `render_cache` 条件写入：v0.9.14 起仅当 `render_bytes` 非空时才执行 INSERT
 - `messages.is_group_message`
 
 Rust 端通过 `serde` 的自定义序列化将这些字段映射为 `bool`，但在 SQL 层面保持数值型以确保 SQLite 兼容性。
