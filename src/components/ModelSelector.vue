@@ -97,11 +97,6 @@ const currentTranslateY = ref(0);
 const isDragging = ref(false);
 
 const onTouchStart = (e: TouchEvent) => {
-  const listEl = sheetRef.value?.querySelector('.overflow-y-auto');
-  // 只有当列表在最顶端时，才允许下拉拖拽关闭
-  if (listEl && listEl.scrollTop > 0) {
-    return;
-  }
   touchStartY.value = e.touches[0].clientY;
   isDragging.value = true;
   if (sheetRef.value) {
@@ -117,7 +112,8 @@ const onTouchMove = (e: TouchEvent) => {
   if (deltaY > 0) {
     currentTranslateY.value = deltaY;
     if (sheetRef.value) {
-      sheetRef.value.style.transform = `translateY(${deltaY}px)`;
+      // 开启 GPU 硬件加速，防止滚动时内部子元素（如取消按钮）的重排闪烁
+      sheetRef.value.style.transform = `translate3d(0, ${deltaY}px, 0)`;
       const maskEl = document.querySelector('.bg-black\\/50') as HTMLElement;
       if (maskEl) {
         maskEl.style.opacity = String(Math.max(0, 1 - deltaY / 400));
@@ -209,30 +205,34 @@ onUnmounted(() => {
     <Transition name="slide-up">
       <div v-if="modelValue"
         ref="sheetRef"
-        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden select-none"
+        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden select-none no-rubber-band"
         style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);"
-        @touchstart="onTouchStart"
-        @touchmove="onTouchMove"
-        @touchend="onTouchEnd">
+        :class="{ 'transition-transform duration-300': !isDragging }">
 
-        <!-- 顶部拉手条 (支持手势下拉) -->
-        <div class="w-12 h-1.5 bg-black/10 dark:bg-white/20 rounded-full mx-auto mt-4 mb-1 cursor-grab active:cursor-grabbing"></div>
-
-        <!-- 头部区域 -->
-        <div class="px-5 pt-3 pb-3 flex items-center justify-between">
-          <div class="flex flex-col">
-            <h3 class="text-[17px] font-bold text-gray-900 dark:text-zinc-100 tracking-tight">
-              {{ title || '选择模型' }}
-            </h3>
-            <span class="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-              共 {{ modelStore.models.length }} 个可用模型
-            </span>
+        <!-- 顶部拉手条及头部 (支持手势下拉) -->
+        <div class="w-full shrink-0"
+          @touchstart="onTouchStart"
+          @touchmove.prevent="onTouchMove"
+          @touchend="onTouchEnd"
+          @touchcancel="onTouchEnd">
+          <div class="w-12 h-1.5 bg-black/10 dark:bg-white/20 rounded-full mx-auto mt-4 mb-1 cursor-grab active:cursor-grabbing"></div>
+          
+          <!-- 头部区域 -->
+          <div class="px-5 pt-3 pb-3 flex items-center justify-between">
+            <div class="flex flex-col">
+              <h3 class="text-[17px] font-bold text-gray-900 dark:text-zinc-100 tracking-tight">
+                {{ title || '选择模型' }}
+              </h3>
+              <span class="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                共 {{ modelStore.models.length }} 个可用模型
+              </span>
+            </div>
+            <button @click="refresh"
+              class="p-2 rounded-xl bg-black/5 dark:bg-white/5 active:scale-95 transition-all text-gray-600 dark:text-gray-300"
+              :class="{ 'animate-spin': modelStore.isLoading }">
+              <RefreshCw :size="18" />
+            </button>
           </div>
-          <button @click="refresh"
-            class="p-2 rounded-xl bg-black/5 dark:bg-white/5 active:scale-95 transition-all text-gray-600 dark:text-gray-300"
-            :class="{ 'animate-spin': modelStore.isLoading }">
-            <RefreshCw :size="18" />
-          </button>
         </div>
 
         <!-- 搜索框 -->
@@ -262,60 +262,56 @@ onUnmounted(() => {
         </div>
 
         <!-- 模型列表 (支持滚动懒加载) -->
-        <div class="flex-1 overflow-y-auto px-2 pb-4 space-y-1 no-rubber-band" @scroll="handleScroll">
-          <!-- 骨架屏：正在加载状态 (高密度微光 Shimmer) -->
+        <div class="flex-1 overflow-y-auto px-2 pb-4 no-rubber-band" @scroll="handleScroll">
+          <!-- 骨架屏 -->
           <div v-if="modelStore.isLoading && filteredModels.length === 0" class="px-2 py-1 space-y-2">
             <div v-for="i in 5" :key="i"
               class="relative overflow-hidden flex items-center gap-3 px-4 py-3.5 rounded-2xl border border-black/5 dark:border-white/5 bg-gray-50/30 dark:bg-zinc-800/10">
-              <!-- 左侧指示器占位 -->
               <div class="w-1 h-6 bg-gray-200 dark:bg-zinc-800 rounded-r-md"></div>
-              <!-- 中间文本占位 -->
               <div class="flex-1 space-y-2">
                 <div class="h-4 w-1/2 bg-gray-200 dark:bg-zinc-800 rounded-md shimmer-bar"></div>
                 <div class="h-3 w-1/4 bg-gray-150 dark:bg-zinc-850 rounded-md shimmer-bar"></div>
               </div>
-              <!-- 右侧按钮占位 -->
               <div class="w-8 h-8 rounded-full bg-gray-200 dark:bg-zinc-800 shimmer-bar shrink-0"></div>
             </div>
           </div>
 
-          <!-- 兜底屏：未找到匹配模型 -->
+          <!-- 兜底屏 -->
           <div v-else-if="filteredModels.length === 0" class="py-20 text-center opacity-50">
             <Cpu :size="28" class="mx-auto mb-3 text-gray-400" />
             <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>
           </div>
 
           <!-- 实际渲染的模型列表 -->
-          <div v-else v-for="model in displayedModels" :key="model.id" @click="selectModel(model.id)"
-            class="relative group px-4 py-3.5 flex items-center gap-3 rounded-2xl active:bg-black/5 dark:active:bg-white/5 transition-colors cursor-pointer"
-            :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === model.id }">
+          <div class="space-y-1">
+            <div v-for="model in displayedModels" :key="model.id" @click="selectModel(model.id)"
+              class="relative group px-4 py-3.5 flex items-center gap-3 rounded-2xl active:bg-black/5 dark:active:bg-white/5 transition-colors cursor-pointer"
+              :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === model.id }">
 
-            <!-- 选中指示器 (左侧细条) -->
-            <div class="absolute left-0 top-1/4 bottom-1/4 w-1 bg-blue-500 rounded-r-md transition-all scale-y-0"
-              :class="{ 'scale-y-100': currentModel === model.id }"></div>
+              <div class="absolute left-0 top-1/4 bottom-1/4 w-1 bg-blue-500 rounded-r-md transition-all scale-y-0"
+                :class="{ 'scale-y-100': currentModel === model.id }"></div>
 
-            <!-- 模型 ID -->
-            <div class="flex-1 min-w-0 flex flex-col justify-center">
-              <div class="flex items-center gap-2">
-                <span class="text-[15px] font-medium tracking-tight truncate text-gray-900 dark:text-zinc-100"
-                  :class="{ 'text-blue-600 dark:text-blue-400 font-semibold': currentModel === model.id }">
-                  {{ model.id }}
-                </span>
-                <Flame v-if="modelStore.hotModels.includes(model.id)" :size="14"
-                  class="text-orange-500 fill-orange-500/20 shrink-0" />
+              <div class="flex-1 min-w-0 flex flex-col justify-center">
+                <div class="flex items-center gap-2">
+                  <span class="text-[15px] font-medium tracking-tight truncate text-gray-900 dark:text-zinc-100"
+                    :class="{ 'text-blue-600 dark:text-blue-400 font-semibold': currentModel === model.id }">
+                    {{ model.id }}
+                  </span>
+                  <Flame v-if="modelStore.hotModels.includes(model.id)" :size="14"
+                    class="text-orange-500 fill-orange-500/20 shrink-0" />
+                </div>
+                <div class="flex items-center gap-2 mt-0.5">
+                  <span class="text-[11px] text-gray-500 dark:text-gray-400">{{ model.owned_by }}</span>
+                </div>
               </div>
-              <div class="flex items-center gap-2 mt-0.5">
-                <span class="text-[11px] text-gray-500 dark:text-gray-400">{{ model.owned_by }}</span>
-              </div>
-            </div>
 
-            <!-- 右侧状态 -->
-            <div class="flex items-center gap-3 shrink-0">
-              <button @click="toggleFavorite($event, model.id)" class="p-2 -mr-2 transition-transform active:scale-75"
-                :class="modelStore.isFavorite(model.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
-                <Star :size="20" :fill="modelStore.isFavorite(model.id) ? 'currentColor' : 'none'" />
-              </button>
-              <Check v-if="currentModel === model.id" :size="18" class="text-blue-500" />
+              <div class="flex items-center gap-3 shrink-0">
+                <button @click="toggleFavorite($event, model.id)" class="p-2 -mr-2 transition-transform active:scale-75"
+                  :class="modelStore.isFavorite(model.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
+                  <Star :size="20" :fill="modelStore.isFavorite(model.id) ? 'currentColor' : 'none'" />
+                </button>
+                <Check v-if="currentModel === model.id" :size="18" class="text-blue-500" />
+              </div>
             </div>
           </div>
         </div>
@@ -361,13 +357,13 @@ onUnmounted(() => {
   display: none;
 }
 
-/* 厂商横向快捷栏隐藏滚动条 */
 .no-scrollbar {
   scrollbar-width: none;
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
 
 /* 🌟 高质感 Shimmer 拂过扫光动画 🌟 */
 .shimmer-bar {

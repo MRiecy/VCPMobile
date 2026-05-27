@@ -308,7 +308,6 @@ watch(currentSubPage, (val) => {
         </Transition>
 
         <ModelSelector
-          v-if="showSummaryModelSelector"
           :model-value="showSummaryModelSelector"
           @update:model-value="showSummaryModelSelector = $event"
           :current-model="settings.topicSummaryModel"
