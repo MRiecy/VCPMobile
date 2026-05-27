@@ -337,4 +337,46 @@ const getPageZIndex = (type: string) => {
 | `uno.config.ts` | UnoCSS Theme 扩展 |
 | `src/assets/themes.css` | CSS 变量定义 |
 | `src/core/stores/overlay.ts` | 页面栈动态层级计算 |
+| `src/core/composables/useModalHistory.ts` | Modal 历史栈管理（LIFO，返回键优先关闭） |
+| `src/core/composables/useSidebarSwipe.ts` | 侧边栏滑动手势管理（全局/左/右三模式） |
 | `AGENTS.md` §6 | 代理编码规范中的层级速查 |
+
+---
+
+## 11. v0.9.14 新增架构组件
+
+### 11.1 useModalHistory — Modal 历史栈
+
+`useModalHistory.ts` 提供全局 Modal 栈的 LIFO（后进先出）管理，解决返回键与 Modal 关闭的竞态问题：
+
+- **注册**：`registerModal(id, closeFn)` 将 Modal 的关闭函数入栈；
+- **关闭**：`closeTopModal()` 按 LIFO 顺序关闭最顶层的 Modal；
+- **幽灵驱逐**：若 Modal 在调用 `close()` 后 50ms 仍存在于栈中，强制驱逐以防止返回键锁死；
+- **返回键集成**：`App.vue` 的 `handleExitRequest` 优先调用 `closeTopModal()`，仅当栈空时才执行应用返回逻辑。
+
+**层级影响**：Modal 组件（`ModelSelector`、`BottomSheet`、`ContextMenu` 等）通过 `useModalHistory` 注册后，其关闭行为与返回键统一，无需各自处理 `vcp-hardware-back` 事件。
+
+### 11.2 useSidebarSwipe — 侧边栏滑动手势
+
+`useSidebarSwipe.ts` 将原先分散在 `App.vue`、`AgentSidebar.vue`、`RightSidebar.vue` 中的内联 swipe 逻辑统一为可复用的 Composable：
+
+| 模式 | 行为 | 适用组件 |
+|------|------|---------|
+| `global` | 右滑打开左抽屉，左滑打开右抽屉（当抽屉关闭时） | `App.vue` |
+| `left` | 左滑关闭左抽屉，右滑触发 `onTabSwitch` | `AgentSidebar.vue` |
+| `right` | 右滑关闭右抽屉 | `RightSidebar.vue` |
+
+- **角度阈值**：`absY / absX < 0.577`（约 30°），防止垂直滚动误触发；
+- **排除区**：`.no-swipe` 和 `.vcp-scrollable` 类内的触摸事件被忽略；
+- **层级影响**：抽屉的打开/关闭不再依赖移动端宽度门控（`window.innerWidth < 768`），`layout.ts` 中 `setLeftDrawer(true)` 和 `setRightDrawer(true)` 始终调用 `registerModal`，确保桌面端和移动端的行为一致性。
+
+### 11.3 WebGLFluidBackground — 流体极光背景
+
+`WebGLFluidBackground.vue` 是 v0.9.14 新增的 WebGL 基于流体动力学模拟的背景组件，替代了原先 `AboutSection.vue` 中的 CSS blob 动画：
+
+- **层级**：`z-content`（0）或更低，作为页面背景使用；
+- **特性**：4 个轨道颜色 blob（青/品红/紫/蓝）+ 鼠标/触摸交互 + DPR 感知缩放（最大 2x）；
+- **清理**：组件卸载时调用 `WEBGL_lose_context` 释放 GPU 内存；
+- **使用位置**：`AboutSection.vue`（设置页关于页面）。
+
+**层级注意事项**：WebGL 背景应在所有内容之下，严禁将其 z-index 提升到 `z-local` 以上，否则会遮挡交互元素。
