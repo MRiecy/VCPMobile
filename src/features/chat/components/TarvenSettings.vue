@@ -35,6 +35,10 @@ const collapsedSections = ref({
   context_inject: false,
 });
 
+// 自定义删除确认弹窗状态
+const showDeleteConfirm = ref(false);
+const ruleIdToDelete = ref<string | null>(null);
+
 // 分类筛选列表
 const systemRules = computed(() => 
   tarvenStore.rules.filter(r => r.ruleType === 'system_suffix').sort((a, b) => a.sortOrder - b.sortOrder)
@@ -158,8 +162,23 @@ const handleSave = async () => {
   closeForm();
 };
 
-const handleDelete = async (id: string) => {
-  await tarvenStore.deleteRule(id);
+// 触发优雅的删除确认弹窗
+const confirmDelete = (id: string) => {
+  ruleIdToDelete.value = id;
+  showDeleteConfirm.value = true;
+};
+
+const executeDelete = async () => {
+  if (ruleIdToDelete.value) {
+    await tarvenStore.deleteRule(ruleIdToDelete.value);
+  }
+  showDeleteConfirm.value = false;
+  ruleIdToDelete.value = null;
+};
+
+const cancelDelete = () => {
+  showDeleteConfirm.value = false;
+  ruleIdToDelete.value = null;
 };
 
 const handleToggle = async (id: string) => {
@@ -231,13 +250,13 @@ watch(() => props.isOpen, (val) => {
       <!-- 头部 -->
       <header class="px-4 py-3 flex items-center justify-between border-b border-white/5 pt-[calc(var(--vcp-safe-top,24px)+12px)] pb-3 shrink-0">
         <div class="flex items-center gap-2">
-          <button @click="handleBack" class="p-2 -ml-2 active:scale-90 transition-transform opacity-70 active:opacity-100 flex items-center justify-center">
+          <button @click="handleBack" class="p-2 -ml-2 active:scale-90 transition-transform opacity-75 active:opacity-100 flex items-center justify-center">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="m15 18-6-6 6-6"/>
             </svg>
           </button>
-          <h2 class="text-lg font-bold tracking-tight">
-            {{ currentView === 'form' ? (editingRule.id ? '编辑规则' : '添加新规则') : 'VCPChatTarven 注入预设' }}
+          <h2 class="text-[17px] font-extrabold tracking-tight">
+            {{ currentView === 'form' ? (editingRule.id ? '编辑注入预设' : '创建注入预设') : 'VCPChatTarven 注入预设' }}
           </h2>
         </div>
       </header>
@@ -248,60 +267,62 @@ watch(() => props.isOpen, (val) => {
         <!-- 视图 A: 规则列表 (按类型分区展示与排序) -->
         <div v-if="currentView === 'list'" class="flex flex-col gap-5 animate-fade-in pb-16">
           
-          <!-- 添加新规则虚线按钮 -->
+          <!-- 创建新规则虚线按钮 -->
           <button @click="openForm()"
-            class="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 active:scale-[0.99] transition-all bg-transparent">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            class="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-dashed border-zinc-300 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-[0.99] transition-all bg-transparent">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="M8 12h8"/>
             </svg>
-            <span class="text-[13px] font-bold">创建自定义注入规则</span>
+            <span class="text-[13px] font-extrabold">创建自定义注入规则</span>
           </button>
 
           <!-- 1. 系统提示词尾部注入分区 -->
           <div class="category-section flex flex-col gap-2">
             <button @click="collapsedSections.system_suffix = !collapsedSections.system_suffix"
-              class="flex items-center justify-between py-1 px-1 text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+              class="flex items-center justify-between py-1.5 px-2.5 rounded-lg bg-zinc-100/50 dark:bg-zinc-900/40 text-[11px] font-black uppercase tracking-wider text-zinc-600 dark:text-zinc-400 border border-white/5">
               <span>系统提示词注入 (SYSTEM_SUFFIX) · {{ systemRules.length }}</span>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="transition-transform duration-200" :class="collapsedSections.system_suffix ? '-rotate-90' : ''">
                 <path d="m6 9 6 6 6-6"/>
               </svg>
             </button>
             
-            <div v-show="!collapsedSections.system_suffix" class="flex flex-col gap-2.5">
+            <div v-show="!collapsedSections.system_suffix" class="flex flex-col gap-2.5 mt-1">
               <div v-for="(rule, idx) in systemRules" :key="rule.id"
-                class="rule-card flex flex-col p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/10 border border-zinc-100 dark:border-zinc-900/60 relative group">
+                class="rule-card flex flex-col p-3.5 rounded-xl bg-white dark:bg-zinc-900/60 border border-zinc-150 dark:border-zinc-800 relative group transition-colors"
+                :class="{ '!border-emerald-500/20 bg-emerald-500/[0.01] dark:bg-emerald-500/[0.005]': rule.isEnabled }">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2.5 min-w-0">
                     <input type="checkbox" :checked="rule.isEnabled" @change="handleToggle(rule.id)"
-                      class="rounded border-zinc-300 text-blue-500 focus:ring-blue-500/20 w-4 h-4 bg-transparent cursor-pointer" />
-                    <span class="text-[14px] font-bold text-zinc-800 dark:text-zinc-200 truncate">{{ rule.name }}</span>
-                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-mono scale-90 uppercase">
+                      class="rounded border-zinc-300 text-emerald-500 focus:ring-emerald-500/20 w-4.5 h-4.5 bg-transparent cursor-pointer" />
+                    <span class="text-[14px] font-black text-zinc-900 dark:text-zinc-100 truncate"
+                      :class="{ 'text-emerald-600 dark:text-emerald-400': rule.isEnabled }">{{ rule.name }}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-mono font-black scale-90 uppercase">
                       {{ rule.position === 'prepend' ? '前置' : '后置' }}
                     </span>
                   </div>
 
-                  <div class="flex items-center gap-1.5">
+                  <div class="flex items-center gap-1">
                     <button @click="handleMove(rule, 'up')" :disabled="idx === 0"
-                      class="p-1 rounded text-zinc-400 hover:text-zinc-600 disabled:opacity-30 active:scale-90 transition-transform">
+                      class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-20 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m18 15-6-6-6 6"/></svg>
                     </button>
                     <button @click="handleMove(rule, 'down')" :disabled="idx === systemRules.length - 1"
-                      class="p-1 rounded text-zinc-400 hover:text-zinc-600 disabled:opacity-30 active:scale-90 transition-transform">
+                      class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-20 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
                     </button>
-                    <button @click="openForm(rule)" class="p-1 rounded text-zinc-400 hover:text-zinc-600 active:scale-90 transition-transform">
+                    <button @click="openForm(rule)" class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
                     </button>
-                    <button @click="handleDelete(rule.id)" class="p-1 rounded text-zinc-400 hover:text-red-500 active:scale-90 transition-transform">
+                    <button @click="confirmDelete(rule.id)" class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-red-500 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                     </button>
                   </div>
                 </div>
-                <p class="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2 line-clamp-2 break-all font-medium leading-relaxed">
+                <p class="text-[11.5px] text-zinc-400 dark:text-zinc-500 mt-2 line-clamp-2 break-all font-semibold leading-relaxed">
                   {{ rule.content }}
                 </p>
               </div>
-              <div v-if="systemRules.length === 0" class="text-[11px] text-zinc-400 py-3 text-center border border-dashed border-zinc-100 dark:border-zinc-900 rounded-xl">
+              <div v-if="systemRules.length === 0" class="text-[11px] text-zinc-400 dark:text-zinc-500 py-3 text-center border border-dashed border-zinc-200 dark:border-zinc-800 rounded-xl">
                 无激活的系统提示词注入项
               </div>
             </div>
@@ -310,48 +331,50 @@ watch(() => props.isOpen, (val) => {
           <!-- 2. 用户消息注入分区 -->
           <div class="category-section flex flex-col gap-2">
             <button @click="collapsedSections.user_suffix = !collapsedSections.user_suffix"
-              class="flex items-center justify-between py-1 px-1 text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+              class="flex items-center justify-between py-1.5 px-2.5 rounded-lg bg-zinc-100/50 dark:bg-zinc-900/40 text-[11px] font-black uppercase tracking-wider text-zinc-600 dark:text-zinc-400 border border-white/5">
               <span>用户消息注入 (USER_SUFFIX) · {{ userRules.length }}</span>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="transition-transform duration-200" :class="collapsedSections.user_suffix ? '-rotate-90' : ''">
                 <path d="m6 9 6 6 6-6"/>
               </svg>
             </button>
             
-            <div v-show="!collapsedSections.user_suffix" class="flex flex-col gap-2.5">
+            <div v-show="!collapsedSections.user_suffix" class="flex flex-col gap-2.5 mt-1">
               <div v-for="(rule, idx) in userRules" :key="rule.id"
-                class="rule-card flex flex-col p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/10 border border-zinc-100 dark:border-zinc-900/60 relative group">
+                class="rule-card flex flex-col p-3.5 rounded-xl bg-white dark:bg-zinc-900/60 border border-zinc-150 dark:border-zinc-800 relative group transition-colors"
+                :class="{ '!border-emerald-500/20 bg-emerald-500/[0.01] dark:bg-emerald-500/[0.005]': rule.isEnabled }">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2.5 min-w-0">
                     <input type="checkbox" :checked="rule.isEnabled" @change="handleToggle(rule.id)"
-                      class="rounded border-zinc-300 text-blue-500 focus:ring-blue-500/20 w-4 h-4 bg-transparent cursor-pointer" />
-                    <span class="text-[14px] font-bold text-zinc-800 dark:text-zinc-200 truncate">{{ rule.name }}</span>
-                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-mono scale-90 uppercase">
+                      class="rounded border-zinc-300 text-emerald-500 focus:ring-emerald-500/20 w-4.5 h-4.5 bg-transparent cursor-pointer" />
+                    <span class="text-[14px] font-black text-zinc-900 dark:text-zinc-100 truncate"
+                      :class="{ 'text-emerald-600 dark:text-emerald-400': rule.isEnabled }">{{ rule.name }}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-mono font-black scale-90 uppercase">
                       {{ rule.position === 'prepend' ? '前置' : '后置' }}
                     </span>
                   </div>
 
-                  <div class="flex items-center gap-1.5">
+                  <div class="flex items-center gap-1">
                     <button @click="handleMove(rule, 'up')" :disabled="idx === 0"
-                      class="p-1 rounded text-zinc-400 hover:text-zinc-600 disabled:opacity-30 active:scale-90 transition-transform">
+                      class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-20 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m18 15-6-6-6 6"/></svg>
                     </button>
                     <button @click="handleMove(rule, 'down')" :disabled="idx === userRules.length - 1"
-                      class="p-1 rounded text-zinc-400 hover:text-zinc-600 disabled:opacity-30 active:scale-90 transition-transform">
+                      class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-20 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
                     </button>
-                    <button @click="openForm(rule)" class="p-1 rounded text-zinc-400 hover:text-zinc-600 active:scale-90 transition-transform">
+                    <button @click="openForm(rule)" class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
                     </button>
-                    <button @click="handleDelete(rule.id)" class="p-1 rounded text-zinc-400 hover:text-red-500 active:scale-90 transition-transform">
+                    <button @click="confirmDelete(rule.id)" class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-red-500 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                     </button>
                   </div>
                 </div>
-                <p class="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2 line-clamp-2 break-all font-medium leading-relaxed">
+                <p class="text-[11.5px] text-zinc-400 dark:text-zinc-500 mt-2 line-clamp-2 break-all font-semibold leading-relaxed">
                   {{ rule.content }}
                 </p>
               </div>
-              <div v-if="userRules.length === 0" class="text-[11px] text-zinc-400 py-3 text-center border border-dashed border-zinc-100 dark:border-zinc-900 rounded-xl">
+              <div v-if="userRules.length === 0" class="text-[11px] text-zinc-400 dark:text-zinc-500 py-3 text-center border border-dashed border-zinc-200 dark:border-zinc-800 rounded-xl">
                 无激活的用户消息注入项
               </div>
             </div>
@@ -360,51 +383,53 @@ watch(() => props.isOpen, (val) => {
           <!-- 3. 独立上下文消息插入分区 -->
           <div class="category-section flex flex-col gap-2">
             <button @click="collapsedSections.context_inject = !collapsedSections.context_inject"
-              class="flex items-center justify-between py-1 px-1 text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
+              class="flex items-center justify-between py-1.5 px-2.5 rounded-lg bg-zinc-100/50 dark:bg-zinc-900/40 text-[11px] font-black uppercase tracking-wider text-zinc-600 dark:text-zinc-400 border border-white/5">
               <span>独立消息节点注入 (CONTEXT_INJECT) · {{ contextRules.length }}</span>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="transition-transform duration-200" :class="collapsedSections.context_inject ? '-rotate-90' : ''">
                 <path d="m6 9 6 6 6-6"/>
               </svg>
             </button>
             
-            <div v-show="!collapsedSections.context_inject" class="flex flex-col gap-2.5">
+            <div v-show="!collapsedSections.context_inject" class="flex flex-col gap-2.5 mt-1">
               <div v-for="(rule, idx) in contextRules" :key="rule.id"
-                class="rule-card flex flex-col p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/10 border border-zinc-100 dark:border-zinc-900/60 relative group">
+                class="rule-card flex flex-col p-3.5 rounded-xl bg-white dark:bg-zinc-900/60 border border-zinc-150 dark:border-zinc-800 relative group transition-colors"
+                :class="{ '!border-emerald-500/20 bg-emerald-500/[0.01] dark:bg-emerald-500/[0.005]': rule.isEnabled }">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-2.5 min-w-0">
                     <input type="checkbox" :checked="rule.isEnabled" @change="handleToggle(rule.id)"
-                      class="rounded border-zinc-300 text-blue-500 focus:ring-blue-500/20 w-4 h-4 bg-transparent cursor-pointer" />
-                    <span class="text-[14px] font-bold text-zinc-800 dark:text-zinc-200 truncate">{{ rule.name }}</span>
-                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-200 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-mono scale-90 uppercase">
+                      class="rounded border-zinc-300 text-emerald-500 focus:ring-emerald-500/20 w-4.5 h-4.5 bg-transparent cursor-pointer" />
+                    <span class="text-[14px] font-black text-zinc-900 dark:text-zinc-100 truncate"
+                      :class="{ 'text-emerald-600 dark:text-emerald-400': rule.isEnabled }">{{ rule.name }}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 font-mono font-black scale-90 uppercase">
                       Depth: {{ rule.depth }}
                     </span>
-                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 dark:bg-blue-500/20 text-blue-500 font-mono scale-90 uppercase">
+                    <span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/10 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 font-mono font-black scale-90 uppercase">
                       {{ rule.role }}
                     </span>
                   </div>
 
-                  <div class="flex items-center gap-1.5">
+                  <div class="flex items-center gap-1">
                     <button @click="handleMove(rule, 'up')" :disabled="idx === 0"
-                      class="p-1 rounded text-zinc-400 hover:text-zinc-600 disabled:opacity-30 active:scale-90 transition-transform">
+                      class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-20 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m18 15-6-6-6 6"/></svg>
                     </button>
                     <button @click="handleMove(rule, 'down')" :disabled="idx === contextRules.length - 1"
-                      class="p-1 rounded text-zinc-400 hover:text-zinc-600 disabled:opacity-30 active:scale-90 transition-transform">
+                      class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-20 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
                     </button>
-                    <button @click="openForm(rule)" class="p-1 rounded text-zinc-400 hover:text-zinc-600 active:scale-90 transition-transform">
+                    <button @click="openForm(rule)" class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
                     </button>
-                    <button @click="handleDelete(rule.id)" class="p-1 rounded text-zinc-400 hover:text-red-500 active:scale-90 transition-transform">
+                    <button @click="confirmDelete(rule.id)" class="p-1 rounded text-zinc-400 dark:text-zinc-500 hover:text-red-500 active:scale-90 transition-transform">
                       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                     </button>
                   </div>
                 </div>
-                <p class="text-[11px] text-zinc-400 dark:text-zinc-500 mt-2 line-clamp-2 break-all font-medium leading-relaxed">
+                <p class="text-[11.5px] text-zinc-400 dark:text-zinc-500 mt-2 line-clamp-2 break-all font-semibold leading-relaxed">
                   {{ rule.content }}
                 </p>
               </div>
-              <div v-if="contextRules.length === 0" class="text-[11px] text-zinc-400 py-3 text-center border border-dashed border-zinc-100 dark:border-zinc-900 rounded-xl">
+              <div v-if="contextRules.length === 0" class="text-[11px] text-zinc-400 dark:text-zinc-500 py-3 text-center border border-dashed border-zinc-200 dark:border-zinc-800 rounded-xl">
                 无激活的独立节点注入项
               </div>
             </div>
@@ -412,45 +437,102 @@ watch(() => props.isOpen, (val) => {
         </div>
 
         <!-- 视图 B: 表单配置与实时所见即所得 JSON 预览页 -->
-        <div v-else class="flex flex-col gap-4.5 animate-fade-in pb-20">
+        <div v-else class="flex flex-col gap-5 animate-fade-in pb-24">
           
           <!-- 规则基础设置 -->
-          <div class="flex flex-col gap-4 p-4 rounded-xl bg-zinc-50 dark:bg-zinc-800/10 border border-zinc-100 dark:border-zinc-900/60">
+          <div class="flex flex-col gap-4.5 p-4.5 rounded-xl bg-white dark:bg-zinc-900/60 border border-zinc-150 dark:border-zinc-850">
             <!-- 名称 -->
             <div class="flex flex-col gap-1.5">
               <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500 px-0.5">规则名称</label>
               <input v-model="editingRule.name" type="text" placeholder="例如：文言文古风 / Android 系统真理"
-                class="w-full px-3.5 py-2.5 rounded-xl bg-zinc-100/50 dark:bg-zinc-850 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-1 focus:ring-blue-500/20 text-[13px] font-bold" />
+                class="w-full px-3.5 py-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 text-[13px] font-bold text-zinc-800 dark:text-zinc-100 transition-all" />
             </div>
 
-            <!-- 类型选择 -->
-            <div class="flex flex-col gap-1.5">
+            <!-- 注入类型 ( Segmented Custom Tabs ) -->
+            <div class="flex flex-col gap-2">
               <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500 px-0.5">注入类型</label>
-              <select v-model="editingRule.ruleType"
-                class="w-full px-3.5 py-2.5 rounded-xl bg-zinc-100/50 dark:bg-zinc-850 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-1 focus:ring-blue-500/20 text-[13px] font-bold text-[var(--primary-text)] appearance-none cursor-pointer">
-                <option value="system_suffix">追加到系统提示词 (SYSTEM_SUFFIX)</option>
-                <option value="user_suffix">追加到最新用户输入末尾 (USER_SUFFIX)</option>
-                <option value="context_inject">独立消息节点插入 (CONTEXT_INJECT)</option>
-              </select>
+              <div class="grid grid-cols-3 gap-2">
+                <button type="button" @click="editingRule.ruleType = 'system_suffix'"
+                  class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                  :class="editingRule.ruleType === 'system_suffix'
+                    ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                    : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M21 9H3M21 15H3M12 3v18"/>
+                  </svg>
+                  <span class="text-[10px] tracking-tight">系统提示词</span>
+                </button>
+                
+                <button type="button" @click="editingRule.ruleType = 'user_suffix'"
+                  class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                  :class="editingRule.ruleType === 'user_suffix'
+                    ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                    : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                  </svg>
+                  <span class="text-[10px] tracking-tight">用户消息尾</span>
+                </button>
+
+                <button type="button" @click="editingRule.ruleType = 'context_inject'"
+                  class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                  :class="editingRule.ruleType === 'context_inject'
+                    ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                    : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M12 8v8M8 12h8"/>
+                  </svg>
+                  <span class="text-[10px] tracking-tight">独立消息</span>
+                </button>
+              </div>
             </div>
 
-            <!-- 作用范围 -->
-            <div class="flex flex-col gap-1.5">
+            <!-- 作用范围 ( Segmented Custom Tabs ) -->
+            <div class="flex flex-col gap-2">
               <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500 px-0.5">作用范围 (Scope)</label>
-              <select v-model="editingRule.scope"
-                class="w-full px-3.5 py-2.5 rounded-xl bg-zinc-100/50 dark:bg-zinc-850 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-1 focus:ring-blue-500/20 text-[13px] font-bold text-[var(--primary-text)] appearance-none cursor-pointer">
-                <option value="global">全部生效 (Global)</option>
-                <option value="agent">仅在智能体单聊生效 (Agent)</option>
-                <option value="group">仅在智能体群聊生效 (Group)</option>
-              </select>
+              <div class="grid grid-cols-3 gap-2">
+                <button type="button" @click="editingRule.scope = 'global'"
+                  class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                  :class="editingRule.scope === 'global'
+                    ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                    : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/>
+                  </svg>
+                  <span class="text-[10px] tracking-tight">全局生效</span>
+                </button>
+                
+                <button type="button" @click="editingRule.scope = 'agent'"
+                  class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                  :class="editingRule.scope === 'agent'
+                    ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                    : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                  </svg>
+                  <span class="text-[10px] tracking-tight">仅单聊</span>
+                </button>
+
+                <button type="button" @click="editingRule.scope = 'group'"
+                  class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                  :class="editingRule.scope === 'group'
+                    ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                    : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                    <path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+                  </svg>
+                  <span class="text-[10px] tracking-tight">仅群聊</span>
+                </button>
+              </div>
             </div>
 
             <!-- 包裹配置与位置动态项 -->
-            <div class="flex flex-wrap items-center justify-between gap-4 border-t border-zinc-100 dark:border-zinc-900/50 pt-3">
+            <div class="flex flex-wrap items-center justify-between gap-4 border-t border-zinc-150 dark:border-zinc-800/80 pt-3">
               <div class="flex items-center gap-2">
                 <input type="checkbox" v-model="editingRule.wrap" id="chk-wrap"
-                  class="rounded border-zinc-300 text-blue-500 focus:ring-blue-500/20 w-4 h-4 bg-transparent cursor-pointer" />
-                <label for="chk-wrap" class="text-[12px] font-bold text-zinc-700 dark:text-zinc-300 cursor-pointer">
+                  class="rounded border-zinc-300 text-blue-500 focus:ring-blue-500/20 w-4.5 h-4.5 bg-transparent cursor-pointer" />
+                <label for="chk-wrap" class="text-[12px] font-extrabold text-zinc-700 dark:text-zinc-300 cursor-pointer">
                   使用 [VCPMobile] 临时注入标记包裹
                 </label>
               </div>
@@ -458,15 +540,15 @@ watch(() => props.isOpen, (val) => {
 
             <!-- SYSTEM_SUFFIX / USER_SUFFIX 位置配置 -->
             <div v-if="editingRule.ruleType === 'system_suffix' || editingRule.ruleType === 'user_suffix'" 
-              class="flex flex-col gap-1.5 border-t border-zinc-100 dark:border-zinc-900/50 pt-3">
+              class="flex flex-col gap-1.5 border-t border-zinc-150 dark:border-zinc-800/80 pt-3">
               <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500 px-0.5">拼接位置 (Position)</label>
               <div class="flex gap-4">
-                <label class="flex items-center gap-2 text-[12px] font-bold cursor-pointer">
-                  <input type="radio" v-model="editingRule.position" value="prepend" class="text-blue-500 w-4 h-4 cursor-pointer bg-transparent border-zinc-300" />
+                <label class="flex items-center gap-2 text-[12.5px] font-bold cursor-pointer text-zinc-700 dark:text-zinc-300">
+                  <input type="radio" v-model="editingRule.position" value="prepend" class="text-blue-500 w-4.5 h-4.5 cursor-pointer bg-transparent border-zinc-300" />
                   <span>置顶前置 (Prepend)</span>
                 </label>
-                <label class="flex items-center gap-2 text-[12px] font-bold cursor-pointer">
-                  <input type="radio" v-model="editingRule.position" value="append" class="text-blue-500 w-4 h-4 cursor-pointer bg-transparent border-zinc-300" />
+                <label class="flex items-center gap-2 text-[12.5px] font-bold cursor-pointer text-zinc-700 dark:text-zinc-300">
+                  <input type="radio" v-model="editingRule.position" value="append" class="text-blue-500 w-4.5 h-4.5 cursor-pointer bg-transparent border-zinc-300" />
                   <span>置底后置 (Append)</span>
                 </label>
               </div>
@@ -474,22 +556,43 @@ watch(() => props.isOpen, (val) => {
 
             <!-- CONTEXT_INJECT 消息注入专用参数 -->
             <div v-if="editingRule.ruleType === 'context_inject'" 
-              class="flex flex-col gap-3.5 border-t border-zinc-100 dark:border-zinc-900/50 pt-3">
-              <div class="flex flex-col gap-1.5">
+              class="flex flex-col gap-3.5 border-t border-zinc-150 dark:border-zinc-800/80 pt-3">
+              
+              <!-- Role ( Segmented Custom Tabs ) -->
+              <div class="flex flex-col gap-2">
                 <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500 px-0.5">虚拟消息角色 (Role)</label>
-                <select v-model="editingRule.role"
-                  class="w-full px-3.5 py-2 rounded-xl bg-zinc-100/50 dark:bg-zinc-850 border border-zinc-200 dark:border-zinc-800 focus:outline-none text-[13px] font-bold text-[var(--primary-text)]">
-                  <option value="user">用户 (User)</option>
-                  <option value="assistant">智能体 (Assistant)</option>
-                </select>
+                <div class="grid grid-cols-2 gap-2">
+                  <button type="button" @click="editingRule.role = 'user'"
+                    class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                    :class="editingRule.role === 'user'
+                      ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                      : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                    </svg>
+                    <span class="text-[10px] tracking-tight">用户角色 (User)</span>
+                  </button>
+
+                  <button type="button" @click="editingRule.role = 'assistant'"
+                    class="flex flex-col items-center justify-center gap-1.5 py-3 px-2 rounded-xl border transition-all text-center"
+                    :class="editingRule.role === 'assistant'
+                      ? 'bg-blue-500 border-blue-500 text-white shadow-lg shadow-blue-500/10 font-black'
+                      : 'bg-zinc-50 dark:bg-zinc-950 border-zinc-200 dark:border-zinc-800 text-zinc-500 dark:text-zinc-400 active:scale-95 font-bold'">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                      <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 17h6M9 12h6M9 8h6"/>
+                    </svg>
+                    <span class="text-[10px] tracking-tight">智能体角色 (Assistant)</span>
+                  </button>
+                </div>
               </div>
 
+              <!-- Depth -->
               <div class="flex flex-col gap-1.5">
                 <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500 px-0.5">插入深度 (Depth)</label>
                 <div class="flex items-center gap-3">
                   <input type="number" v-model.number="editingRule.depth" min="0" max="20"
-                    class="w-20 px-3 py-2 rounded-xl bg-zinc-100/50 dark:bg-zinc-850 border border-zinc-200 dark:border-zinc-800 focus:outline-none text-[13px] font-mono text-center font-bold" />
-                  <span class="text-[11px] text-zinc-400 dark:text-zinc-500">
+                    class="w-20 px-3 py-2.5 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:outline-none text-[13px] font-mono text-center font-bold text-zinc-800 dark:text-zinc-100" />
+                  <span class="text-[11px] text-zinc-400 dark:text-zinc-500 font-semibold leading-normal">
                     0 = 上下文绝对末尾；N = 倒数第 N+1 条消息之前
                   </span>
                 </div>
@@ -498,14 +601,14 @@ watch(() => props.isOpen, (val) => {
           </div>
 
           <!-- 规则内容输入框 -->
-          <div class="flex flex-col gap-2 p-4 rounded-xl bg-zinc-50 dark:bg-zinc-800/10 border border-zinc-100 dark:border-zinc-900/60">
+          <div class="flex flex-col gap-2 p-4 rounded-xl bg-white dark:bg-zinc-900/60 border border-zinc-150 dark:border-zinc-850">
             <label class="text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500">规则内容 (Content)</label>
             <textarea v-model="editingRule.content" rows="6" placeholder="请在此输入你需要注入的文本，支持使用 {{AgentName}} 占位符引用当前智能体名称..."
-              class="w-full px-3.5 py-2.5 rounded-xl bg-zinc-100/50 dark:bg-zinc-850 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:ring-1 focus:ring-blue-500/20 text-[12px] font-semibold leading-relaxed resize-none scrollbar-none"></textarea>
+              class="w-full px-3.5 py-3 rounded-xl bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 focus:outline-none focus:border-blue-500 dark:focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10 text-[12px] font-semibold text-zinc-800 dark:text-zinc-100 leading-relaxed resize-none scrollbar-none"></textarea>
           </div>
 
           <!-- 所见即所得“注入预览”区域 -->
-          <div class="flex flex-col gap-2 p-4 rounded-xl bg-zinc-50 dark:bg-zinc-800/10 border border-zinc-100 dark:border-zinc-900/60">
+          <div class="flex flex-col gap-2 p-4 rounded-xl bg-white dark:bg-zinc-900/60 border border-zinc-150 dark:border-zinc-850">
             <button @click="showPreview = !showPreview"
               class="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-zinc-400 dark:text-zinc-500">
               <span>所见即所得：大模型上下文注入预览</span>
@@ -523,36 +626,70 @@ watch(() => props.isOpen, (val) => {
                 <span class="text-[11px]">正在利用 Rust 规则管道渲染预览...</span>
               </div>
               
-              <div v-else-if="previewMessages.length > 0" class="flex flex-col gap-2 bg-black/20 dark:bg-black/40 p-3 rounded-xl border border-zinc-100/5 dark:border-zinc-900 font-mono text-[10px] overflow-x-auto max-h-[300px] scrollbar-none leading-relaxed">
+              <div v-else-if="previewMessages.length > 0" class="flex flex-col gap-2 bg-zinc-50/50 dark:bg-black/40 p-3 rounded-xl border border-zinc-200/50 dark:border-zinc-900 font-mono text-[10px] overflow-x-auto max-h-[300px] scrollbar-none leading-relaxed">
                 <div v-for="(msg, index) in previewMessages" :key="index"
-                  class="flex flex-col p-2.5 rounded-lg bg-zinc-900/40 border"
-                  :class="msg.__tavernInjected ? 'border-dashed border-blue-500/50 bg-blue-500/5' : 'border-white/5'">
-                  <div class="flex items-center justify-between pb-1 mb-1 border-b border-white/5 opacity-70">
-                    <span class="font-black uppercase tracking-wider" :class="msg.role === 'system' ? 'text-purple-400' : msg.role === 'user' ? 'text-blue-400' : 'text-green-400'">
+                  class="flex flex-col p-2.5 rounded-lg bg-white dark:bg-zinc-900/40 border transition-all"
+                  :class="msg.__tavernInjected ? 'border-dashed border-blue-500/50 bg-blue-500/5' : 'border-zinc-200 dark:border-white/5'">
+                  <div class="flex items-center justify-between pb-1 mb-1 border-b border-zinc-150 dark:border-white/5 opacity-75">
+                    <span class="font-black uppercase tracking-wider text-[9px]" :class="msg.role === 'system' ? 'text-purple-600 dark:text-purple-400' : msg.role === 'user' ? 'text-blue-600 dark:text-blue-400' : 'text-green-600 dark:text-green-400'">
                       [{{ index }}] {{ msg.role }}
                     </span>
-                    <span v-if="msg.__tavernInjected" class="text-[8px] bg-blue-500/20 text-blue-400 px-1 py-0.5 rounded font-sans uppercase font-black">
+                    <span v-if="msg.__tavernInjected" class="text-[8px] bg-blue-500/20 text-blue-600 dark:text-blue-400 px-1 py-0.5 rounded font-sans uppercase font-black tracking-wide">
                       VCPMobile 注入
                     </span>
                   </div>
-                  <pre class="whitespace-pre-wrap break-all select-text font-medium opacity-90">{{ msg.content }}</pre>
+                  <pre class="whitespace-pre-wrap break-all select-text font-semibold opacity-90 text-zinc-800 dark:text-zinc-100">{{ msg.content }}</pre>
                 </div>
               </div>
               
-              <div v-else class="text-[11px] text-zinc-400/70 py-6 text-center">
-                输入规则名和内容后，此处将自动呈现所见即所得的消息上下文预览
+              <div v-else class="text-[11px] text-zinc-400/70 dark:text-zinc-500/70 py-6 text-center">
+                输入预设名和内容后，此处将自动呈现所见即所得的消息上下文预览
               </div>
             </div>
           </div>
 
           <!-- 保存按钮 -->
           <button @click="handleSave" :disabled="!editingRule.name || !editingRule.content"
-            class="w-full mt-2 py-3 rounded-xl bg-blue-500 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 text-white disabled:text-zinc-400 dark:disabled:text-zinc-500 text-[13px] font-black shadow-lg shadow-blue-500/10 active:scale-[0.99] transition-all flex items-center justify-center">
+            class="w-full mt-2 py-3.5 rounded-xl bg-blue-500 disabled:bg-zinc-200 dark:disabled:bg-zinc-800 text-white disabled:text-zinc-400 dark:disabled:text-zinc-500 text-[13px] font-black shadow-lg shadow-blue-500/10 active:scale-[0.99] transition-all flex items-center justify-center">
             保存规则并应用到数据库
           </button>
         </div>
       </div>
     </div>
+
+    <!-- 独立的自定义优雅删除确认弹窗 -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div v-if="showDeleteConfirm" 
+          class="fixed inset-0 bg-black/60 backdrop-blur-md z-dialog flex items-center justify-center p-6"
+          @click="cancelDelete"
+          @touchmove.prevent>
+          
+          <div class="bg-white/95 dark:bg-zinc-900/95 border border-zinc-200 dark:border-white/10 rounded-2xl w-full max-w-[280px] p-5 shadow-2xl flex flex-col text-center"
+            @click.stop>
+            <div class="w-11 h-11 rounded-full bg-red-500/10 text-red-500 flex items-center justify-center mx-auto mb-3.5">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+            </div>
+            
+            <h3 class="text-[15px] font-extrabold text-zinc-900 dark:text-zinc-100">确认删除该预设吗？</h3>
+            <p class="text-[11.5px] text-zinc-400 dark:text-zinc-500 mt-2 leading-relaxed font-semibold">
+              此操作将无法撤销，并会从本地数据库中永久移除该项注入预设。
+            </p>
+            
+            <div class="grid grid-cols-2 gap-2 mt-5 shrink-0">
+              <button @click="cancelDelete"
+                class="py-2.5 rounded-xl border border-zinc-200 dark:border-zinc-800 text-[12px] font-bold bg-transparent text-zinc-500 dark:text-zinc-400 active:scale-95 transition-all">
+                取消
+              </button>
+              <button @click="executeDelete"
+                class="py-2.5 rounded-xl bg-red-500 hover:bg-red-600 text-white text-[12px] font-black active:scale-95 transition-all shadow-md shadow-red-500/10">
+                确认删除
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
   </SlidePage>
 </template>
 
@@ -573,5 +710,14 @@ watch(() => props.isOpen, (val) => {
 pre {
   margin: 0;
   font-family: inherit;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 </style>

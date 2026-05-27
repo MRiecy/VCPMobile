@@ -79,24 +79,26 @@ onMounted(() => {
         <div class="flex flex-col max-h-[300px] overflow-y-auto px-1 gap-2 scrollbar-none">
           <template v-if="tarvenStore.rules.length > 0">
             <div v-for="rule in tarvenStore.rules" :key="rule.id"
-              class="flex items-center justify-between p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-800/40 border border-zinc-100 dark:border-zinc-800 transition-all select-none"
-              :class="{ 'opacity-90 border-blue-500/30 dark:border-blue-500/20': rule.isEnabled }"
+              class="flex items-center justify-between p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-800/40 border border-zinc-100 dark:border-zinc-800 transition-all select-none cursor-pointer"
+              :class="{ 'border-emerald-500/40 dark:border-emerald-500/35 bg-emerald-500/[0.04] dark:bg-emerald-500/[0.02]': rule.isEnabled, 'opacity-70': !rule.isEnabled }"
               @click="toggleRuleState(rule.id)"
             >
               <div class="flex items-center gap-3 flex-1 min-w-0 pr-4">
                 <!-- 预留图标，降级为简洁规则板 -->
-                <div class="w-10 h-10 flex items-center justify-center rounded-xl bg-blue-500/10 text-blue-500 shrink-0">
+                <div class="w-10 h-10 flex items-center justify-center rounded-xl bg-zinc-100 dark:bg-zinc-800 text-zinc-500 shrink-0 transition-colors"
+                  :class="{ '!bg-emerald-500/10 !text-emerald-500': rule.isEnabled }">
                   <div class="i-heroicons-sparkles text-lg"></div>
                 </div>
                 <div class="flex flex-col min-w-0">
-                  <span class="text-[14px] font-black text-zinc-800 dark:text-zinc-100 truncate">{{ rule.name }}</span>
+                  <span class="text-[14px] font-black text-zinc-800 dark:text-zinc-100 truncate transition-colors"
+                    :class="{ 'text-emerald-600 dark:text-emerald-400': rule.isEnabled }">{{ rule.name }}</span>
                   <span class="text-[11px] text-zinc-400 dark:text-zinc-500 truncate mt-0.5">{{ rule.content }}</span>
                 </div>
               </div>
 
-              <!-- iOS 经典优雅 Switch -->
+              <!-- iOS 经典优雅 Switch (亮绿高对比度) -->
               <div class="relative shrink-0 w-[42px] h-[24px] bg-zinc-200 dark:bg-zinc-700 rounded-full transition-colors duration-200"
-                :class="{ 'bg-blue-500 dark:bg-blue-600': rule.isEnabled }">
+                :class="{ 'bg-emerald-500 dark:bg-emerald-500': rule.isEnabled }">
                 <div class="absolute top-[2px] left-[2px] w-[20px] h-[20px] bg-white rounded-full shadow-sm transition-transform duration-200"
                   :class="{ 'translate-x-[18px]': rule.isEnabled }">
                 </div>
