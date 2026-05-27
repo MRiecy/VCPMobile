@@ -47,6 +47,9 @@ export const useRebuildSessionStore = defineStore('rebuildSession', () => {
     progress.value = { current: 0, total: 0 };
     errorMessage.value = '';
 
+    // 启动前台保活服务，显示“预渲染重建”通知
+    invoke('plugin:vcp-mobile|start_streaming_service', { agentName: '[预渲染重建] VCP Mobile' }).catch(() => {});
+
     try {
       await withScreenKeep(() => invoke('rebuild_all_pre_renders'));
       needsReload.value = true;
@@ -58,6 +61,9 @@ export const useRebuildSessionStore = defineStore('rebuildSession', () => {
       errorMessage.value = msg;
       status.value = 'error';
       canDismiss.value = true;
+    } finally {
+      // 无论成功还是失败，均安全释放前台服务
+      invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[预渲染重建] VCP Mobile' }).catch(() => {});
     }
   };
 

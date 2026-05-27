@@ -64,11 +64,14 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
     acquireScreenKeep();
+    // 启动前台保活服务，显示“数据同步”通知
+    invoke('plugin:vcp-mobile|start_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
     invoke('start_manual_sync').catch((e: any) => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';
       canDismiss.value = true;
       releaseScreenKeep();
+      invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
     });
   };
 
@@ -79,6 +82,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     cleanupListeners();
     releaseScreenKeep();
     invoke('stop_sync').catch(() => {});
+    invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
   };
 
   const copyLogs = async () => {
@@ -113,7 +117,12 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     listen('vcp-sync-status', (event: any) => {
       const s = event.payload.status;
       if (s === 'open') { status.value = 'connected'; canDismiss.value = false; }
-      if (s === 'error') { status.value = 'error'; canDismiss.value = true; invoke('clear_keep_screen_on').catch(() => {}); }
+      if (s === 'error') { 
+        status.value = 'error'; 
+        canDismiss.value = true; 
+        invoke('clear_keep_screen_on').catch(() => {}); 
+        invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
+      }
     }).then(fn => unlistenFns.push(fn));
 
     listen('vcp-sync-completed', () => {
@@ -122,6 +131,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       needsReload.value = true;
       releaseScreenKeep();
       pushLog('success', '同步已全部完成，点击关闭以刷新数据');
+      invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
     }).then(fn => unlistenFns.push(fn));
   };
 
