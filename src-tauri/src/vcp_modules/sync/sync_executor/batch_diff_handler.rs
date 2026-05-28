@@ -201,7 +201,7 @@ impl BatchDiffHandler {
                             .await;
                     }
 
-                    println!(
+                    log::info!(
                         "[SyncService] Phase 3 batch done: push={} pull={}",
                         push_topic_ids.len(),
                         pull_batch.len()
@@ -212,7 +212,7 @@ impl BatchDiffHandler {
             // 当前批次处理完毕，发送下一批（如果还有）
             let mut pending = pending_diff_batches.lock().await;
             if let Some(next_batch) = pending.pop_front() {
-                println!(
+                log::debug!(
                     "[SyncService] Sending next diff batch, {} remaining",
                     pending.len()
                 );

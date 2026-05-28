@@ -138,7 +138,7 @@ impl DeleteExecutor {
                 .await
                 .map_err(|e| e.to_string())?;
 
-        println!(
+        log::info!(
             "[DeleteExecutor] Cleaned up old records (older than {} days): agents={}, groups={}, topics={}, messages={}",
             days,
             agents.rows_affected(),
