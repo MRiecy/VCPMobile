@@ -367,7 +367,7 @@ pub async fn regenerate_topic_response(
     target_user_msg_id: String,
     stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
-    println!(
+    log::info!(
         "[TopicService] Regenerating response for topic: {}, target msg: {}",
         topic_id, target_user_msg_id
     );

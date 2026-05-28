@@ -47,7 +47,7 @@ pub fn determine_naturerandom_speakers(
             && spoken_this_turn.insert(member.id.clone())
         {
             speakers.push(member.clone());
-            println!(
+            log::info!(
                 "[GroupSpeakingPolicy] @{} triggered by direct mention.",
                 member.name
             );

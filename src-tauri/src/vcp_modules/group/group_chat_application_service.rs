@@ -54,7 +54,7 @@ pub async fn internal_process_group_chat_message(
     let vcp_url = params.vcp_url;
     let vcp_api_key = params.vcp_api_key;
 
-    println!(
+    log::info!(
         "[GroupChatAppService] process_group_chat_message invoked for group: {}",
         group_id
     );
@@ -118,7 +118,7 @@ pub async fn internal_process_group_chat_message(
             &user_message,
         )
     } else {
-        println!(
+        log::warn!(
             "[GroupChatAppService] Mode {} not implemented, ignoring.",
             group_config.mode
         );
@@ -148,7 +148,7 @@ pub async fn internal_process_group_chat_message(
     for speaker in speakers {
         // 检查全局中断令牌：如果话题已被标记为取消，立即停止接力赛
         if cancelled_turns.0.contains(&topic_id) {
-            println!(
+            log::info!(
                 "[GroupChatAppService] Group turn for topic {} was cancelled. Breaking loop.",
                 topic_id
             );
@@ -253,7 +253,7 @@ pub async fn internal_process_group_chat_message(
         if let Err(e) =
             tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_name)
         {
-            println!(
+            log::warn!(
                 "[GroupChatAppService] Failed to start streaming service: {}",
                 e
             );
@@ -272,7 +272,7 @@ pub async fn internal_process_group_chat_message(
         if let Err(e) =
             tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(&app_handle, &agent_name)
         {
-            println!(
+            log::warn!(
                 "[GroupChatAppService] Failed to stop streaming service: {}",
                 e
             );
@@ -320,7 +320,7 @@ pub async fn internal_process_group_chat_message(
                 let end_blocks = match &append_result {
                     Ok(blocks) => Some(blocks.clone()),
                     Err(e) => {
-                        eprintln!(
+                        log::error!(
                             "[GroupChatAppService] Failed to append final message: {}",
                             e
                         );
@@ -348,7 +348,7 @@ pub async fn internal_process_group_chat_message(
                 final_new_msgs.push(ai_msg);
             }
         } else if let Err(e) = res_result {
-            eprintln!(
+            log::error!(
                 "[GroupChatAppService] Error during agent {} response: {}",
                 agent_id, e
             );

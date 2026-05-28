@@ -42,7 +42,7 @@ impl ContextSanitizer {
     /// @param capacity 缓存最大容量
     /// @param ttl_secs 过期时间（秒）
     pub fn new(capacity: usize, ttl_secs: u64) -> Self {
-        println!(
+        log::info!(
             "[ContextSanitizer] Initializing Rust ContextSanitizer with capacity {} and TTL {}s",
             capacity, ttl_secs
         );
@@ -61,7 +61,7 @@ impl ContextSanitizer {
             // 检查是否过期
             if let Ok(elapsed) = item.timestamp.elapsed() {
                 if elapsed < self.ttl {
-                    println!("[ContextSanitizer] Cache hit for content");
+                    log::debug!("[ContextSanitizer] Cache hit for content");
                     return Some(item.value.clone());
                 }
             }
@@ -84,7 +84,7 @@ impl ContextSanitizer {
                 timestamp: SystemTime::now(),
             },
         );
-        println!("[ContextSanitizer] Sanitized content, cached result");
+        log::debug!("[ContextSanitizer] Sanitized content, cached result");
     }
 
     /// 净化单条消息内容：HTML -> Markdown (带缓存逻辑)

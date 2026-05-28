@@ -252,7 +252,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     let emoticon_state = app_handle.state::<EmoticonManagerState>();
     *emoticon_state.library.lock().await = library;
 
-    println!(
+    log::info!(
         "[EmoticonManager] Library regenerated via API: {} items",
         count
     );

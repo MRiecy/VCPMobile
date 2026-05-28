@@ -150,7 +150,7 @@ pub async fn internal_process_agent_chat_message(
     if let Err(e) =
         tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_config.name)
     {
-        println!(
+        log::warn!(
             "[AgentChatAppService] Failed to start streaming service: {}",
             e
         );
@@ -169,7 +169,7 @@ pub async fn internal_process_agent_chat_message(
     if let Err(e) =
         tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(&app_handle, &agent_config.name)
     {
-        println!(
+        log::warn!(
             "[AgentChatAppService] Failed to stop streaming service: {}",
             e
         );
@@ -219,7 +219,7 @@ pub async fn internal_process_agent_chat_message(
                 let end_blocks = match &patch_result {
                     Ok(blocks) => Some(blocks.clone()),
                     Err(e) => {
-                        println!(
+                        log::error!(
                             "[AgentChatAppService] Failed to patch final message after stream: {}",
                             e
                         );
@@ -239,7 +239,7 @@ pub async fn internal_process_agent_chat_message(
             }
         }
         Err(e) => {
-            println!("[AgentChatAppService] perform_vcp_request failed: {}", e);
+            log::error!("[AgentChatAppService] perform_vcp_request failed: {}", e);
         }
     }
 
