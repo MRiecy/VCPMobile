@@ -83,7 +83,9 @@ function startMotion() {
     };
 
     // Step 1: Start listening
-    console.debug("[SensorCollector] Burst start");
+    if (import.meta.env.DEV) {
+      console.debug("[SensorCollector] Burst start");
+    }
     window.addEventListener("devicemotion", handler);
     motionHandler = handler;
 
@@ -91,7 +93,9 @@ function startMotion() {
     setTimeout(() => {
       window.removeEventListener("devicemotion", handler);
       motionHandler = null;
-      console.debug(`[SensorCollector] Burst end, samples: ${accSamples.length}`);
+      if (import.meta.env.DEV) {
+        console.debug(`[SensorCollector] Burst end, samples: ${accSamples.length}`);
+      }
 
       if (accSamples.length > 0) {
         const avg = accSamples.reduce((a, b) => a + b, 0) / accSamples.length;

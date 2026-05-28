@@ -69,6 +69,10 @@ export default defineConfig(async () => ({
     UnoCSS(),
   ],
 
+  esbuild: {
+    pure: process.env.NODE_ENV === "production" ? ["console.log", "console.debug"] : [],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

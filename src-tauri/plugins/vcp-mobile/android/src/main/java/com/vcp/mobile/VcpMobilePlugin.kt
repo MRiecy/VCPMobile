@@ -103,14 +103,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
             }
             "microphone" -> {
-                if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(
-                        activity,
-                        arrayOf(android.Manifest.permission.RECORD_AUDIO),
-                        999
-                    )
-                }
-                invoke.resolve()
+                requestPermissionForAlias("microphone", invoke, "onPermissionResult")
             }
             "battery" -> {
                 try {

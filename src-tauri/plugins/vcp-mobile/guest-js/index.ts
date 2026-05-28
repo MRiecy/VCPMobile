@@ -40,3 +40,8 @@ export interface PickedFile {
 export function pickFile(): Promise<PickedFile> {
   return invoke<PickedFile>('plugin:vcp-mobile|pick_file');
 }
+
+export function openFileNative(path: string): Promise<void> {
+  return invoke('plugin:vcp-mobile|open_file_native', { path });
+}
+

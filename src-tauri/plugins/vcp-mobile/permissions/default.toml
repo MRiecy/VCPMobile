@@ -11,5 +11,6 @@ commands.allow = [
     "move_task_to_back",
     "pick_file",
     "get_battery_status",
+    "open_file_native",
 ]
 
