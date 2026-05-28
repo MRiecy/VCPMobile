@@ -207,7 +207,8 @@ pub async fn internal_process_group_chat_message(
             model_config["temperature"] = json!(speaker.temperature);
         }
 
-        let mut messages = assemble_history_for_vcp(&full_history_for_context);
+        // 组装上下文（群聊需要添加发言人前缀以消歧）
+        let mut messages = assemble_history_for_vcp(&full_history_for_context, true);
         if let Some(invite_prompt) = &group_config_inner.invite_prompt {
             let processed_invite = invite_prompt.replace("{{VCPChatAgentName}}", &agent_name);
             messages.push(json!({

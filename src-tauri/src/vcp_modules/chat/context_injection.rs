@@ -1,5 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use chrono::{Local, TimeZone};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Sqlite};
 use tauri::State;
@@ -15,7 +16,7 @@ pub struct TarvenRule {
     pub scope: String, // 'global' | 'agent' | 'group'
     pub wrap: bool,
 
-    // context_inject 专用
+    // context_inject专用
     pub role: Option<String>, // 'user' | 'assistant'
     pub depth: Option<i32>,
 
@@ -75,30 +76,54 @@ pub async fn fetch_active_rules(
     Ok(rules)
 }
 
-async fn inject_base_environment(pool: &Pool<Sqlite>, topic_id: &str, system_prompt: &mut String) {
-    let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let mut prepend = format!(
-        "当前系统时间: {}\n运行环境: VCP Mobile (Android 移动端)\n",
-        now
+fn format_system_metadata(
+    now_str: &str,
+    created_at_str: Option<&str>,
+    system_prompt: &mut String,
+) {
+    let mut metadata = format!(
+        "<system_metadata>\n\
+         - 当前系统时间: {}\n\
+         - 运行环境: VCP Mobile (Android 移动端)\n",
+        now_str
     );
 
-    if let Ok(Some(row)) = sqlx::query("SELECT created_at FROM topics WHERE topic_id = ?")
+    if let Some(created_at) = created_at_str {
+        metadata.push_str(&format!("- 当前话题创建于: {}\n", created_at));
+    }
+
+    metadata.push_str("</system_metadata>\n\n");
+
+    let original_prompt = std::mem::take(system_prompt);
+    *system_prompt = format!("{}{}", metadata, original_prompt);
+}
+
+async fn inject_base_environment(pool: &Pool<Sqlite>, topic_id: &str, system_prompt: &mut String) {
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+    let mut created_at_str = None;
+
+    match sqlx::query("SELECT created_at FROM topics WHERE topic_id = ?")
         .bind(topic_id)
         .fetch_optional(pool)
         .await
     {
-        use sqlx::Row;
-        let created_at: i64 = row.get("created_at");
-        if let Some(dt) = Local.timestamp_millis_opt(created_at).single() {
-            prepend.push_str(&format!(
-                "当前话题创建于: {}\n",
-                dt.format("%Y-%m-%d %H:%M:%S %Z")
-            ));
+        Ok(Some(row)) => {
+            use sqlx::Row;
+            let created_at: i64 = row.get("created_at");
+            if let Some(dt) = Local.timestamp_millis_opt(created_at).single() {
+                created_at_str = Some(dt.format("%Y-%m-%d %H:%M:%S %Z").to_string());
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(
+                "Failed to fetch topic created_at for topic_id {}: {:?}",
+                topic_id, e
+            );
         }
     }
 
-    prepend.push_str("\n---\n\n");
-    system_prompt.insert_str(0, &prepend);
+    format_system_metadata(&now, created_at_str.as_deref(), system_prompt);
 }
 
 // 核心流水线：将 VCP 待发送消息列表进行就地拦截与多方位注入
@@ -438,12 +463,8 @@ pub async fn preview_tarven_injection(
     };
 
     // 模拟环境注入
-    let mock_now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let prepend = format!(
-        "当前系统时间: {}\n运行环境: VCP Mobile (Android 移动端)\n当前话题创建于: {}\n\n---\n\n",
-        mock_now, mock_now
-    );
-    system_content.insert_str(0, &prepend);
+    let mock_now = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+    format_system_metadata(&mock_now, Some(&mock_now), &mut system_content);
 
     // 过滤 system_suffix 规则并按位置拼接
     let system_rules: Vec<&TarvenRule> = rules

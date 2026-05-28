@@ -6,26 +6,30 @@ use serde_json::{json, Value};
 /// 1. 过滤掉正在思考中的消息 (is_thinking == true)
 /// 2. 提取附件中的文本内容 (extracted_text) 并拼接到文本中
 /// 3. 将多模态附件 (图片/音频/视频) 转换为 {"type": "local_file", "path": "..."} 结构
-pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
+pub fn assemble_history_for_vcp(history: &[ChatMessage], is_group: bool) -> Vec<Value> {
     history
         .iter()
         .filter(|msg| !msg.is_thinking.unwrap_or(false))
         .map(|msg| {
-            // 提取发言人名字以构造前缀，若为空则安全降级到角色默认称谓以兼容历史脏数据
-            let speaker_name = msg
-                .name
-                .as_ref()
-                .filter(|name| !name.is_empty())
-                .cloned()
-                .unwrap_or_else(|| {
-                    if msg.role == "user" {
-                        "User".to_string()
-                    } else {
-                        "AI".to_string()
-                    }
-                });
+            let mut combined_text = if is_group {
+                // 提取发言人名字以构造前缀，若为空则安全降级到角色默认称谓以兼容历史脏数据
+                let speaker_name = msg
+                    .name
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        if msg.role == "user" {
+                            "User".to_string()
+                        } else {
+                            "AI".to_string()
+                        }
+                    });
+                format!("[{}的发言]: \n{}", speaker_name, msg.content)
+            } else {
+                msg.content.clone()
+            };
 
-            let mut combined_text = format!("[{}的发言]: \n{}", speaker_name, msg.content);
             let mut content_parts = Vec::new();
 
             if let Some(attachments) = &msg.attachments {

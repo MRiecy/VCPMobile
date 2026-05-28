@@ -90,8 +90,8 @@ pub async fn internal_process_agent_chat_message(
     )
     .await?;
 
-    // 4. 使用公共工具组装上下文
-    let mut messages = assemble_history_for_vcp(&history);
+    // 4. 使用公共工具组装上下文 (单聊不添加发言人前缀)
+    let mut messages = assemble_history_for_vcp(&history, false);
 
     // 5. 注入 System Prompt (优先使用移动端专用提示词) 并调用物理上下文与 Tarven 注入系统
     let effective_prompt = if !agent_config.mobile_system_prompt.is_empty() {

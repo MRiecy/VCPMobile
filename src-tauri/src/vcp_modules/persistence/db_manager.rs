@@ -113,6 +113,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             context_token_limit INTEGER NOT NULL DEFAULT 0,
             max_output_tokens INTEGER NOT NULL DEFAULT 0,
             stream_output INTEGER NOT NULL DEFAULT 1,
+            use_temperature INTEGER NOT NULL DEFAULT 1,
             config_hash TEXT NOT NULL DEFAULT '',  -- 配置内容指纹
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
             updated_at BIGINT NOT NULL,
@@ -328,12 +329,6 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
-
-    // Migrations (幂等 — .ok() 忽略 duplicate column 错误)
-    sqlx::query("ALTER TABLE agents ADD COLUMN use_temperature INTEGER NOT NULL DEFAULT 1")
-        .execute(pool)
-        .await
-        .ok();
 
     // 索引 (共 9 个)
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_id, owner_type, created_at DESC)").execute(pool).await.map_err(|e| e.to_string())?;

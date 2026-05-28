@@ -290,11 +290,26 @@ async fn run_sync_session(
                         .await;
                         break;
                     }
-                    let ws_addr = if let Ok(mut u) = url::Url::parse(&s.sync_server_url) {
-                        u.set_query(Some(&format!("token={}", s.sync_token)));
-                        u.to_string()
-                    } else {
-                        format!("ws://127.0.0.1:5975?token={}", s.sync_token)
+                    let ws_addr = match url::Url::parse(&s.sync_server_url) {
+                        Ok(mut u) => {
+                            u.set_query(Some(&format!("token={}", s.sync_token)));
+                            u.to_string()
+                        }
+                        Err(e) => {
+                            emit_sync_log(
+                                &handle_clone,
+                                "error",
+                                &format!("同步服务 URL 格式非法: {}", e),
+                            );
+                            publish_sync_status(
+                                &handle_clone,
+                                &connection_status_for_task,
+                                "error",
+                                "同步服务 URL 格式非法",
+                            )
+                            .await;
+                            break;
+                        }
                     };
                     (ws_addr, s.sync_http_url.clone())
                 }
