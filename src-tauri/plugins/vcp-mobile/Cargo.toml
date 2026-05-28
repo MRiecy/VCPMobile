@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-vcp-mobile"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["MRiecy"]
 description = "VCP Mobile Android native capabilities plugin"
 edition = "2021"

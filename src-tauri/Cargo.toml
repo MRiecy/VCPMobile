@@ -1,6 +1,6 @@
 [package]
 name = "vcp-mobile"
-version = "0.9.14"
+version = "1.0.0"
 description = "A Tauri App"
 authors = ["MRiecy"]
 edition = "2021"

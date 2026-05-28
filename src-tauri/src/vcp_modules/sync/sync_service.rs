@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
-const EXPECTED_PLUGIN_VERSION: &str = "0.9.14";
+const EXPECTED_PLUGIN_VERSION: &str = "1.0.0";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct SyncState {
