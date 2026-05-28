@@ -20,16 +20,18 @@ related_files:
 ## 2. 代码结构
 
 ```
-src-tauri/plugins/vcp-mobile/guest-js/index.ts (25 lines)
+src-tauri/plugins/vcp-mobile/guest-js/index.ts (42 lines)
 ├── Screen
 │   ├── setKeepScreenOn(): Promise<void>
 │   └── clearKeepScreenOn(): Promise<void>
-└── Stream Service
-    ├── startStreamService(agentName: string): Promise<void>
-    └── stopStreamService(): Promise<void>
+├── Stream Service
+│   ├── startStreamService(agentName: string): Promise<void>
+│   └── stopStreamService(): Promise<void>
+└── Native File Picker
+    └── pickFile(): Promise<PickedFile>
 ```
 
-> **注意**：当前 `guest-js/index.ts` 仅封装了 `screen` 和 `stream` 两组命令。`system` 模块的命令（权限检查、请求、返回桌面）尚未在前端封装层暴露，前端目前直接通过 `invoke()` 调用。
+> **注意**：`system` 模块的部分命令（权限检查、请求、返回桌面、电池状态、原生打开文件）尚未在 `guest-js/index.ts` 中封装，前端目前直接通过 `invoke()` 调用。
 
 ---
 
@@ -58,23 +60,57 @@ export function clearKeepScreenOn(): Promise<void> {
 
 ```typescript
 export function startStreamService(agentName: string): Promise<void> {
-  return invoke('plugin:vcp-mobile|start_stream_service', { agentName });
+  return invoke('plugin:vcp-mobile|start_streaming_service', { agentName });
 }
 
 export function stopStreamService(): Promise<void> {
-  return invoke('plugin:vcp-mobile|stop_stream_service');
+  return invoke('plugin:vcp-mobile|stop_streaming_service');
 }
 ```
 
 | 函数 | Tauri 命令 | 参数 | 返回值 | 对应 Rust 函数 |
 |------|-----------|------|--------|---------------|
-| `startStreamService(agentName)` | `plugin:vcp-mobile\|start_stream_service` | `{ agentName: string }` | `Promise<void>` | `stream::start_stream_service` |
-| `stopStreamService()` | `plugin:vcp-mobile\|stop_stream_service` | 无 | `Promise<void>` | `stream::stop_stream_service` |
+| `startStreamService(agentName)` | `plugin:vcp-mobile\|start_streaming_service` | `{ agentName: string }` | `Promise<void>` | `stream::start_streaming_service` |
+| `stopStreamService()` | `plugin:vcp-mobile\|stop_streaming_service` | 无 | `Promise<void>` | `stream::stop_streaming_service` |
 
 #### 参数说明
 
 - **`agentName`**：当前正在流式输出的 Agent 名称。支持多 Agent 同时流式输出，Rust 侧通过引用计数管理。
 - **调用约定**：`startStreamService` 与 `stopStreamService` 必须成对调用。异常路径中应确保 `stopStreamService` 被调用，否则服务将永久驻留。
+
+---
+
+### 3.3 原生文件选择器
+
+```typescript
+export interface PickedFile {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  hash: string;
+  thumbnailPath?: string;
+}
+
+export function pickFile(): Promise<PickedFile> {
+  return invoke<PickedFile>('plugin:vcp-mobile|pick_file');
+}
+```
+
+| 函数 | Tauri 命令 | 参数 | 返回值 | 对应 Rust 函数 |
+|------|-----------|------|--------|---------------|
+| `pickFile()` | `plugin:vcp-mobile\|pick_file` | 无 | `Promise<PickedFile>` | `system::pick_file` |
+
+#### 返回值说明
+
+- **`path`**：文件在应用私有目录中的绝对路径。
+- **`name`**：原始文件名。
+- **`mime`**：MIME 类型（如 `image/jpeg`、`application/pdf`）。
+- **`size`**：文件大小（字节）。
+- **`hash`**：文件内容的 SHA-256 哈希值，用于去重与完整性校验。
+- **`thumbnailPath`**（可选）：当选择图片/视频时，系统生成的缩略图路径。
+
+> **平台限制**：该接口仅在 Android 物理端可用；桌面端调用将抛出错误。
 
 ---
 
@@ -136,6 +172,7 @@ const status = await invoke<{
   notification: boolean;
   storage: boolean;
   battery: boolean;
+  microphone: boolean;
 }>('plugin:vcp-mobile|check_all_permissions');
 
 if (!status.notification) {
@@ -153,11 +190,13 @@ if (!status.notification) {
 
 | 命令 | 参数 | 返回类型 | 说明 |
 |------|------|----------|------|
-| `plugin:vcp-mobile\|check_all_permissions` | 无 | `{ notification: boolean, storage: boolean, battery: boolean }` | 检查三项权限状态 |
-| `plugin:vcp-mobile\|request_android_permission` | `{ p_type: string }` | `void` | 请求指定权限 |
+| `plugin:vcp-mobile\|check_all_permissions` | 无 | `{ notification: boolean, storage: boolean, battery: boolean, microphone: boolean }` | 检查四项权限状态 |
+| `plugin:vcp-mobile\|request_android_permission` | `{ p_type: string }` | `void` | 请求指定权限（`notification` / `storage` / `microphone` 等） |
 | `plugin:vcp-mobile\|move_task_to_back` | 无 | `void` | 将应用移至后台 |
+| `plugin:vcp-mobile\|get_battery_status` | 无 | `{ level: number, isPowerSaveMode: boolean }` | 获取电池电量与省电模式状态 |
+| `plugin:vcp-mobile\|open_file_native` | `{ path: string }` | `void` | 调用系统原生应用打开指定路径文件 |
 
-> **建议**：后续应在 `guest-js/index.ts` 中补充这三个函数的 TS 封装，以保持一致性。参数名 `p_type` 也应在前端枚举化，避免字符串硬编码。
+> **建议**：后续应在 `guest-js/index.ts` 中补充这些函数的 TS 封装，以保持一致性。参数名 `p_type` 也应在前端枚举化，避免字符串硬编码。
 
 ---
 

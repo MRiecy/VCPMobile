@@ -1,7 +1,7 @@
 ---
 id: VUE-CORE-002
 title: 状态管理总览与Store全景图
-description: VCP Mobile 前端 16 个 Pinia Store 的职责分类、依赖关系与状态设计全景
+description: VCP Mobile 前端 18 个 Pinia Store 的职责分类、依赖关系与状态设计全景
 version: 0.9.14
 date: 2026-05-27
 ---
@@ -12,7 +12,7 @@ date: 2026-05-27
 
 ### 1.1 领域定位
 
-`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 16 个 Pinia Store。这些 Store 按领域边界划分为 5 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置与同步五大业务域。
+`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 18 个 Pinia Store。这些 Store 按领域边界划分为 5 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置与同步五大业务域。
 
 与 Rust 后端不同，前端 Store 不负责数据持久化（SQLite 由后端托管），而是承担以下职责：
 
@@ -26,7 +26,7 @@ date: 2026-05-27
 - HTTP 网络请求底层（由 Rust 后端 `vcp_client.rs` 负责）
 - 文件系统读写（由 Rust 后端 `file_manager.rs` 负责）
 
-### 1.2 模块构成表（16 个 Store）
+### 1.2 模块构成表（18 个 Store）
 
 | 分类 | 文件名 | Store 名 | 职责简述 | 持久化 |
 |------|--------|----------|----------|--------|
@@ -46,6 +46,7 @@ date: 2026-05-27
 | 系统与设置 | `settings.ts` | `useSettingsStore` | 全局配置读写（后端 SQLite 持久化） | ❌ |
 | 系统与设置 | `rebuildSession.ts` | `useRebuildSessionStore` | 预渲染重建任务会话（状态机 + 进度监听） | ❌ |
 | 同步与分布式 | `syncSession.ts` | `useSyncSessionStore` | 手动同步会话（WebSocket 连接、日志、进度） | ❌ |
+| 系统与设置 | `tarvenStore.ts` | `useTarvenStore` | Tarven 注入规则列表、启用状态、选择器开关 | ❌ |
 
 > **持久化说明**：
 > - ✅ = `pinia-plugin-persistedstate` 自动持久化到 `localStorage`

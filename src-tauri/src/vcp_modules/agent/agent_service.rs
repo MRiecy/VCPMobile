@@ -307,34 +307,40 @@ async fn internal_write_agent_config<R: Runtime>(
     .map_err(|e| e.to_string())?;
 
     // 更新话题 (Upsert)
-    for topic in &new_config.topics {
-        sqlx::query(
-            "INSERT INTO topics (
-                topic_id, owner_type, owner_id, title,
-                created_at, updated_at, locked, unread
-            ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(topic_id) DO UPDATE SET
-                title = excluded.title,
-                locked = excluded.locked,
-                unread = excluded.unread,
-                updated_at = excluded.updated_at",
-        )
-        .bind(&topic.id)
-        .bind(agent_id)
-        .bind(&topic.name)
-        .bind(topic.created_at)
-        .bind(now)
-        .bind(topic.locked)
-        .bind(topic.unread)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    if !new_config.topics.is_empty() {
+        for topic in &new_config.topics {
+            sqlx::query(
+                "INSERT INTO topics (
+                    topic_id, owner_type, owner_id, title,
+                    created_at, updated_at, locked, unread
+                ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(topic_id) DO UPDATE SET
+                    title = excluded.title,
+                    locked = excluded.locked,
+                    unread = excluded.unread,
+                    updated_at = excluded.updated_at",
+            )
+            .bind(&topic.id)
+            .bind(agent_id)
+            .bind(&topic.name)
+            .bind(topic.created_at)
+            .bind(now)
+            .bind(topic.locked)
+            .bind(topic.unread)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            // 初始化/更新 Topic 自身哈希 (config_hash, content_hash)
+            HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
+        }
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
-    if !skip_bubble {
+    // 只有在明确要求冒泡且话题列表不为空（即话题可能有变动）时才执行
+    if !skip_bubble && !new_config.topics.is_empty() {
         let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
         HashAggregator::bubble_agent_hash(&mut bubble_tx, agent_id).await?;
         bubble_tx.commit().await.map_err(|e| e.to_string())?;
@@ -476,11 +482,14 @@ pub async fn create_agent(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+
+        // 初始化 Topic 自身哈希 (config_hash, content_hash)
+        HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    // 触发聚合哈希冒泡
+    // 触发聚合哈希冒泡 (更新 agents.content_hash)
     let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
     HashAggregator::bubble_agent_hash(&mut bubble_tx, &agent_id).await?;
     bubble_tx.commit().await.map_err(|e| e.to_string())?;

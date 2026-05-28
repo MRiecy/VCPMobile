@@ -291,10 +291,12 @@ pub async fn create_group(
         .bind(&topic.name)
         .bind(topic.created_at)
         .bind(timestamp)
-        .bind(timestamp)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+
+        // 初始化 Topic 自身哈希
+        HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
@@ -413,34 +415,39 @@ async fn internal_write_group_config<R: Runtime>(
         .map_err(|e| e.to_string())?;
     }
 
-    for topic in &config.topics {
-        sqlx::query(
-            "INSERT INTO topics (
-                topic_id, owner_type, owner_id, title,
-                created_at, updated_at, locked, unread
-            ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(topic_id) DO UPDATE SET
-                title = excluded.title,
-                locked = excluded.locked,
-                unread = excluded.unread,
-                updated_at = excluded.updated_at",
-        )
-        .bind(&topic.id)
-        .bind(group_id)
-        .bind(&topic.name)
-        .bind(topic.created_at)
-        .bind(now)
-        .bind(topic.locked)
-        .bind(topic.unread)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    if !config.topics.is_empty() {
+        for topic in &config.topics {
+            sqlx::query(
+                "INSERT INTO topics (
+                    topic_id, owner_type, owner_id, title,
+                    created_at, updated_at, locked, unread
+                ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(topic_id) DO UPDATE SET
+                    title = excluded.title,
+                    locked = excluded.locked,
+                    unread = excluded.unread,
+                    updated_at = excluded.updated_at",
+            )
+            .bind(&topic.id)
+            .bind(group_id)
+            .bind(&topic.name)
+            .bind(topic.created_at)
+            .bind(now)
+            .bind(topic.locked)
+            .bind(topic.unread)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+            // 初始化/更新 Topic 自身哈希
+            HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
+        }
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
     // 触发聚合哈希冒泡
-    if !skip_bubble {
+    if !skip_bubble && !config.topics.is_empty() {
         let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
         HashAggregator::bubble_group_hash(&mut bubble_tx, group_id).await?;
         bubble_tx.commit().await.map_err(|e| e.to_string())?;

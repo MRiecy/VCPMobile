@@ -79,6 +79,13 @@ export const useAttachmentStore = defineStore("attachment", () => {
   const handleAttachment = async (mode: 'camera' | 'gallery' | 'file' = 'file') => {
     const isAndroid = navigator.userAgent.toLowerCase().includes("android");
     
+    // ==================================================================
+    // Android 端主链路：原生插件拦截直传
+    //   - 不走下方的 store_file / prepare_vcp_upload 分流逻辑
+    //   - 由 Kotlin 侧的 VcpMobilePlugin.pickFile 启动系统文件选择器
+    //   - Native 层流式拷贝到 cacheDir 并计算 SHA-256，最后通过
+    //     register_local_file 零拷贝注册到附件目录
+    // ==================================================================
     if (isAndroid) {
       console.log(`[AttachmentStore] Android environment detected. Intercepting via native picker. Mode: ${mode}`);
       const notificationStore = useNotificationStore();
@@ -248,7 +255,12 @@ export const useAttachmentStore = defineStore("attachment", () => {
       return;
     }
 
+    // ==================================================================
     // 非 Android 端的标准 HTML `<input>` 流程
+    //   - 含旧版分流逻辑：小文件 (<2MB) 走 store_file IPC；大文件走
+    //     prepare_vcp_upload 高速 TCP 链路
+    //   - Android 端已在上方通过原生插件处理，不会执行到此处
+    // ==================================================================
     return new Promise<void>((resolve, reject) => {
       const input = document.createElement("input");
       input.type = "file";

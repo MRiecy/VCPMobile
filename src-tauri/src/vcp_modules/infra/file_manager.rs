@@ -374,7 +374,12 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
 }
 
 /// 存储文件到中心化附件目录 (内容寻址存储)
-/// 这个方法依然保留，用于接收前端传来的极小内存数据（如录音片段或二维码）
+///
+/// 【适用场景】非 Android 端的前端小文件上传 (<2MB) 及录音片段、二维码等内存数据。
+/// Android 端不走此函数：Android 通过原生插件 `pick_file` 在 Native 层完成文件拷贝与
+/// 哈希计算后，直接调用 `register_local_file` 进行零拷贝注册。
+///
+/// 后端兜底硬上限 100MB，防止前端异常或 IPC 绕过导致 OOM。
 #[tauri::command]
 pub async fn store_file(
     app_handle: AppHandle,
@@ -436,6 +441,15 @@ pub async fn store_file(
 
 /// 注册本地已有的文件（例如 Android Kotlin 端沙盒临时复制的大文件/硬解缩略图）
 /// 彻底实现“前端零拷贝物理路径传输”
+/// 注册本地已有文件到附件系统 (零拷贝移动)
+///
+/// 【适用场景】Android 端实际上传入口。原生插件 `pick_file` 已将文件从 Scoped Storage
+/// 流式拷贝到 app_cache_dir 并完成 SHA-256 计算，本函数仅负责：
+///   1. rename/move 到附件目录 (内容寻址去重)
+///   2. 生成/复用缩略图
+///   3. 提取文本内容 (如适用)
+///   4. 写入 attachment_registry 数据库
+/// 全程不加载文件内容到内存，实现真正的零拷贝。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn register_local_file(

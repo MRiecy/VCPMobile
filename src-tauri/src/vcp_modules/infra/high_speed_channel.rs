@@ -19,6 +19,12 @@ pub struct UploadEndpoint {
 }
 
 /// 准备高速上传链路：启动临时本地服务器并返回端口
+///
+/// 【适用场景】非 Android 端的大文件 (≥2MB) 上传。前端通过 XHR 向本地临时 TCP
+/// 端口发送流式数据，Rust 直接写入磁盘，绕过 Tauri IPC 的内存限制。
+///
+/// Android 端不走此链路：Android 通过原生插件 `pick_file` 在 Kotlin 层完成流式
+/// 拷贝与哈希，直接调用 `register_local_file` 零拷贝注册，无需 WebView 参与传输。
 #[tauri::command]
 pub async fn prepare_vcp_upload<R: Runtime>(
     app_handle: AppHandle<R>,
