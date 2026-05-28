@@ -1,191 +1,607 @@
 <div align="center">
-  <img src="./public/vcpmobile.svg" width="150" alt="VCP Mobile Logo" />
-  <h1>VCP Mobile (Project Avatar)</h1>
-  <p><strong>From Desktop Client to Cyber-Physical Avatar.</strong></p>
-  <p><em>Evolving from Node into Rust, through the Law of Memory and the Pure Magi Soul.</em></p>
+  <img src="./public/vcpmobile.svg" width="150" alt="VCP Mobile Logo">
+  <h1>VCP Mobile <sub><sup>Project Avatar</sup></sub></h1>
+  <p><em>From Desktop Client to Cyber-Physical Avatar.</em></p>
+
   <p>
-    <img alt="Version" src="https://img.shields.io/badge/version-v0.9.14-blue.svg" />
-    <img alt="Platform" src="https://img.shields.io/badge/platform-Android-green.svg" />
-    <img alt="Framework" src="https://img.shields.io/badge/framework-Tauri_v2_|_Vue_3-42b883.svg" />
-    <img alt="Rust" src="https://img.shields.io/badge/backend-Rust_|_Tokio-dea584.svg" />
-    <img alt="UI" src="https://img.shields.io/badge/UI-UnoCSS_|_Glassmorphism-61dafb.svg" />
-    <img alt="License" src="https://img.shields.io/badge/license-MIT-yellow.svg" />
+    <img src="https://img.shields.io/badge/version-1.0.0-blue" alt="version">
+    <img src="https://img.shields.io/badge/platform-Android-green?logo=android" alt="platform">
+    <img src="https://img.shields.io/badge/framework-Tauri%20v2%20%7C%20Vue%203-26A17B?logo=tauri" alt="framework">
+    <img src="https://img.shields.io/badge/backend-Rust%20%7C%20Tokio-000000?logo=rust" alt="backend">
+    <img src="https://img.shields.io/badge/UI-UnoCSS%20%7C%20Glassmorphism-4f46e5" alt="UI">
+    <img src="https://img.shields.io/badge/license-MIT-yellow" alt="license">
   </p>
 </div>
 
 ---
 
-## 📖 Project Vision & Origin
+## Table of Contents
 
-**VCP Mobile** (代号: *Project Avatar*) 是 VCPChat 的移动端进化版。它不仅仅是一个简单的界面移植，而是通过 **"Rust Core 下沉"** 与 **"Vue 3 响应式重构"**，将 AI Agent 的能力注入物理世界，打造低延迟、跨端一致、且具备极高内存安全性的 AI 伴随态体验。
-
-### The Evolutionary Leap (From Node to Rust)
-面对早期 Node.js 在移动端严重的性能瓶颈与内存泄露（OOM）问题，VCP Mobile 经历了涅槃重塑。现在的架构采用 **Tauri v2 + Rust (Tokio)** 驱动。
-- **Memory Safety**: 依靠 Rust 的 Borrow Checker 彻底杜绝 OOM。
-- **Performance**: 重型计算（流式正则解析、海量数据同步）全部迁移至原生层。
-- **Consistency**: 基于分布式双向同步协议，确保移动端与桌面端数据的绝对同步。
-
----
-
-## 🧠 The Magi Protocol (认知治理)
-
-本仓库处于 **Magi 三贤者进化系统** 的严密接管之下。任何重大的架构变动、重构策略或 Bug 修复，都必须经过“逻辑、直觉、务实”的三方思辨：
-
-*   **Melchior (Logic & System)**: 严守技术底线。审查内存安全性（Rust 生命周期）、跨层通讯开销、OOM 防御、类型完整性。
-*   **Balthasar (Intuition & Aesthetics)**: 捍卫用户体验。确保 UI 符合移动端原生直觉、VCP Glassmorphism 规范与极简交互。
-*   **Casper (Pragmatism & Delivery)**: 掌控工程复杂度。拒绝过度设计，确保以最精简的抽象完成目标。
-
-> *"未被物理存档的思考，即为不存在的思考。"*
-
-详情参阅 [Project Constitution (GEMINI.md)](./gemini.md)。
+1. [What is VCP Mobile](#1-what-is-vcp-mobile)
+2. [Key Features](#2-key-features)
+3. [Architecture](#3-architecture)
+4. [Project Structure](#4-project-structure)
+5. [Tech Stack](#5-tech-stack)
+6. [Documentation](#6-documentation)
+7. [Quick Start](#7-quick-start)
+8. [Development & Testing](#8-development-and-testing)
+9. [Contributing & Governance](#9-contributing-and-governance)
+10. [FAQ & Troubleshooting](#10-faq-and-troubleshooting)
+11. [License & Credits](#11-license-and-credits)
 
 ---
 
-## 🎨 UI Philosophy (生产力优先极简美学)
+## 1. What is VCP Mobile
 
-VCP Mobile 拒绝平庸且浮夸的趋势，其 UI 遵循“Rust 驱动的高性能工具”本质：
+**VCP Mobile**（代号 Project Avatar）是 [VCPChat](https://github.com/MRiecy/VCPChat) 的移动端进化版，一个基于 **Tauri v2 + Vue 3 + Rust** 构建的 Android 原生应用。核心目标是将 AI Agent 的交互能力以低延迟、高内存安全性的方式带入物理移动端。
 
-1.  **High-Density Linear Layout**: 列表重于卡片，严禁大面积圆角与厚重投影。最大化单屏信息容量。
-2.  **Technical Precision**: 核心数据（ID、状态码等）强制使用 **Monospace** 字体。采用灰度优先原则，彩色仅用于核心状态指示。
-3.  **Subtle Interaction**: 严禁大幅度的 UI 缩放与弹跳。使用微妙的高亮侧边条（Accent Bar）或透明度变化作为反馈，交互应像影子一样自然。
+与桌面端 VCPChat 不同，Project Avatar 并非简单的界面适配，而是一次架构层面的彻底重构。我们采用了 **Double-Track 3-Tier 架构** —— Rust 核心层、Tauri IPC 桥接层、Vue 3 渲染层物理隔离，使每一个层级都可以独立演进而不产生耦合债务。
 
----
+与市面上其他移动端 AI 应用相比，VCP Mobile 的独特之处在于：
+- **Backend-Driven Streaming**：消息生命周期完全由后端 SSE 事件驱动，前端不做任何预创建或状态猜测
+- **自定义增量同步协议**：不依赖第三方云服务，移动端与桌面端通过 WebSocket + HTTP 双通道直接同步
+- **14+ 设备能力工具**：将手机本身变成一个分布式计算节点，AI 可直接调用位置、传感器、CPU/GPU 信息等原生能力
 
-## 🏗️ Architecture: The Double-Track 3-Tier
+### 演进历程
 
-为了在移动端资源受限的环境下实现极致性能，VCP Mobile 采用了 **Double-Track 3-Tier (双轨三层)** 架构，实现了计算密集型任务与渲染任务的物理隔离。
+| 阶段 | 技术栈 | 关键问题 | 决策 |
+|------|--------|----------|------|
+| v0.1 ~ v0.5 | Node.js + Electron | 内存泄漏、OOM、启动慢 | 保留桌面端，移动端另起炉灶 |
+| v0.6 ~ v0.9 | Rust + Tauri v1 | IPC 开销高、Android 支持弱 | 升级至 Tauri v2，原生插件体系 |
+| v1.0.0 | Rust + Tauri v2 + Vue 3 | — | 正式发布，代号 Avatar |
 
-### 1. ⚙️ Core Layer (Rust / `src-tauri/`)
-作为整个系统的“工业级底座”，Rust 层负责所有高负载与高风险操作：
-*   **Async Persistence (SQLite + sqlx)**: 采用异步 SQLite 驱动，开启 **WAL (Write-Ahead Logging)** 模式，大幅提升移动端并发写入性能并降低磁盘 I/O 延迟。
-*   **Non-Blocking I/O (Tokio)**: 基于 Tokio 运行时，所有网络请求、文件操作与同步逻辑均在后台线程执行。
-*   **Memory Integrity**: 严格遵守 Rust 所有权模型，杜绝缓冲区溢出与内存泄露，确保应用在长时间运行（伴随态）下的稳定性。
-
-### 2. 🌉 IPC Bridge (Tauri v2)
-作为 Rust 与 Webview 之间的通讯隧道，负责高效的数据交换：
-*   **Command Invoke**: 前端通过类型安全的 `invoke` 调用 Rust 函数（如 `sendToVCP`, `interruptGroupTurn`）。
-*   **Event Emission**: Rust 层通过 `emit` 将流式 AI 响应（`vcp-stream-event`）或同步进度实时推送到前端。
-
-### 3. 🎨 UI Layer (Vue 3 / `src/`)
-保持无状态与轻量化，专注渲染。业务逻辑按领域划分为 `chat`, `agent`, `topic` 等模块，通过 Pinia 管理全局状态。
+从 Node.js 迁移至 Rust 的动机非常直接：移动端的内存约束远比桌面端苛刻。在 Node.js 时代，一次大文件解析或内存中的 PDF 处理就可能触发 OOM 崩溃。Rust 的所有权模型和零成本抽象让我们在保持高性能的同时，获得了编译期内存安全保障。Tokio 的异步运行时则确保了网络 IO 不会阻塞主线程，这对流式聊天体验至关重要。
 
 ---
 
-## ⚡️ High-Performance Core Features
+## 2. Key Features
 
-### 🔄 Distributed Delta Sync (分布式增量同步)
-VCP Mobile 与桌面端通过一套名为 **Delta Sync** 的自定义协议保持同步。该协议的核心在于“极小化指纹交换”：
-1.  **SYNC_MANIFEST**: 双方交换一颗包含实体 ID、Hash 与逻辑时钟的时间戳树。
-2.  **Phase-Based Execution**:
-    *   **Phase 1 (Metadata)**: 同步 Agent/Group 配置指纹。
-    *   **Phase 2 (Content Diff)**: 仅当 Hash 不匹配时，才发起数据 PULL/PUSH。
-    *   **Phase 3 (Message Stream)**: 增量拉取缺失的消息历史。
-3.  **Conflict Resolution**: 采用逻辑时钟与 `updated_at` 策略，确保多端编辑的一致性。
+### ⚡ Backend-Driven Streaming
 
-### 📥 DB Write Queue (`db_write_queue`)
-为了防止高频消息刷屏或大规模同步导致的 UI 卡顿，VCP Mobile 设计了专用的**异步写入队列**：
-*   **MPSC Channel**: 前端请求或同步数据先进入一个容量为 256 的异步通道。
-*   **Batching & Retry**: 队列工作者（Worker）在后台批量处理写入任务，并内置 `retry_on_db_locked` 策略，应对 SQLite 在极端情况下的并发竞争。
-*   **Zero-Blocking**: 写入过程完全不占用 JS 主线程，确保界面的 60FPS 丝滑体验。
+流式聊天的消息生命周期已全面转为后端 SSE 事件驱动，前端不再承担消息生命周期管理。
 
-### 📡 VCP Client 2.0 (Native Networking)
-原生 Rust 重写的网络模块，支持：
-*   **SSE Streaming**: 实时解析 AI 生成的流式数据包，通过事件流即时渲染。
-*   **Context Assembly**: 自动注入物理世界的实时上下文（如：正在播放的音乐、当前 UI 规范、系统状态）。
-*   **Abort Signal**: 毫秒级中止正在进行的 AI 生成任务，释放服务器资源。
+- 后端通过 `StreamEvent`（`thinking` / `content` / `blocks` / `end` / `error`）逐事件下发
+- 前端 `chatStreamStore` 仅做状态映射，不做任何消息预创建或内容猜测
+- 显著简化 `chatHistoryStore`，消除前后端状态不一致的隐患
+- 支持 `LinesCodec` 流式解析，降低移动端内存峰值
+
+```
+┌─────────────┐     SSE Stream      ┌─────────────────┐
+│   Backend   │ ──StreamEvent─────► │  chatStreamStore│
+│  (Rust)     │  thinking/content   │   (Vue/Pinia)   │
+└─────────────┘   /blocks/end       └─────────────────┘
+```
+
+### 🧠 Tarven 上下文注入规则
+
+结构化提示词注入规则引擎，支持在对话流的任意节点精确插入外部上下文。
+
+- **`system_suffix`**：在系统提示词前/后追加内容
+- **`user_suffix`**：在用户消息前/后追加内容
+- **`context_inject`**：在对话历史指定深度注入自定义角色消息
+- 规则支持 `scope`（`global` / `agent` / `group`）分级生效
+- `sort_order` 排序机制确保多规则冲突时可预期
+- WYSIWYG 实时预览，所见即所得
+
+### 🔄 分布式增量同步（Delta Sync V2）
+
+移动端与桌面端通过自定义三阶段协议保持实时同步，无需第三方云服务。
+
+| 阶段 | 动作 | 传输通道 |
+|------|------|----------|
+| 1. Metadata 指纹交换 | 对比 SHA-256 Hash 列表 | WebSocket |
+| 2. Content Diff | Hash 不匹配时执行 PULL / PUSH | HTTP |
+| 3. Message Stream | 增量拉取缺失消息 | WebSocket |
+
+- 基于 SHA-256 Hash 的差异检测，避免全量传输
+- WebSocket + HTTP 双通道设计：控制面走 WebSocket，数据面走 HTTP
+- 冲突解决采用逻辑时钟与 `updated_at` 策略，保证最终一致性
+- WAL（Write-Ahead Logging）模式 SQLite，降低移动端并发写入锁竞争
+
+### 📎 多模态附件引擎 2.0
+
+插件化附件系统，支持从图像到文档的全类型处理。
+
+- **`AttachmentRegistry`** 注册表 + **`AttachmentFactory`** 工厂 + **`AttachmentClassifier`** 分类器
+- 支持 8 种类型：`Image` / `Video` / `Audio` / `Document` / `Code` / `Text` / `Other`
+- 双轨上传策略：
+  - Android 原生 File Picker（常规文件）
+  - 高速 TCP 通道（大文件分块上传）
+- `AttachmentViewer` 全屏查看器，挂载于语义化 `z-viewer` 层级
+- 内存安全限制：上传文件 ≤ 20 MB，Base64 读取 ≤ 50 MB
+
+### 🎯 Model 管理与选择器
+
+- `modelStore` 集中管理模型列表、收藏状态、热门排行
+- 10 分钟 TTL 缓存 + 锁频防护，避免重复请求
+- `ModelSelector` BottomSheet 弹层：收藏 > 热门 > 字母序三级排序
+- 与 `AgentSettingsView` 深度联动，切换模型即时生效
+
+### 🏗️ Semantic Z-Index / SlidePage 虚拟导航
+
+11 级语义化层级系统，彻底消灭 `z-[999]` 魔法数字。
+
+| 语义名 | 数值 | 用途 |
+|--------|------|------|
+| `content` | 0 | 页面内容默认层 |
+| `local` | 10 | 局部悬浮（置底按钮、角标）|
+| `drawer` | 20 | 左右抽屉 + 遮罩 |
+| `overlay` | 30 | 全局覆盖容器 |
+| `page` | 40+ | SlidePage 虚拟页面栈 |
+| `sheet` | 50 | BottomSheet、ModelSelector |
+| `dialog` | 60 | Prompt、ContextMenu |
+| `viewer` | 70 | AttachmentViewer、AvatarCropper |
+| `editor` | 80 | 全屏 HTML 编辑器 |
+| `toast` | 90 | Toast 通知 |
+| `boot` | 100 | 启动屏 |
+| `gate` | 110 | 权限引导页 |
+
+- 三层保障：CSS 变量 `--layer-*` + UnoCSS 快捷类 `z-*` + TypeScript 常量 `LAYER_*`
+- SlidePage 虚拟页面栈：非路由跳转，通过 `overlayStore` 管理，动态 Z-Index = `40 + stackIndex`
+- Operation Aegis 模态历史栈支持物理返回键 LIFO 消费
+
+### 🔧 14+ 设备能力工具（分布式节点）
+
+`distributed/` 模块将手机转化为 AI 可直接调用的分布式计算节点，提供 14+ 原生设备能力：
+
+- `device_info` / `device_status_summary` — 设备综合信息
+- `location` — GPS 与网络定位
+- `battery` — 电量与充电状态
+- `clipboard` — 剪贴板读写
+- `cpu_info` / `gpu_info` / `memory_info` / `storage_info` — 硬件监控
+- `network_info` — 网络类型与连接状态
+- `ambient_sensor` / `motion_sensor` — 环境传感器与运动传感器
+- `notification` — 本地通知推送
+- `frontend_bridge` — 前后端能力桥接
+
+### 🤖 Agent / Group 交互
+
+- AgentList 支持拖拽排序（SortableJS）+ Swipe 手势（编辑/删除）
+- `AgentSettingsView` / `GroupSettingsView` 设置面板，与 `ModelSelector` 联动
+- `vue-cropper` 头像裁剪 + Dominant Color 主色调提取
+- 群组对话支持 `group_context_assembler` 与 `group_speaking_policy` 发言策略
+
+### 🌊 WebGL 流体动态背景
+
+`WebGLFluidBackground.vue` 提供高性能流体模拟动态背景，用于：
+
+- 启动屏（BootScreen）视觉增强
+- 空态页（Empty State）氛围营造
+- 特定 Glassmorphism 主题的动态底纹
+
+### 🚀 OTA 热更新
+
+- APK 本体 OTA 升级 + 前端资源热更新双通道
+- `confirm_frontend_boot` 回滚保护机制：新资源加载失败时自动回退至上一稳定版本
+- `frontend_update_manager` 管理下载、校验、应用全生命周期
 
 ---
 
-## 🎨 UI/UX: Productivity & Technical Precision
+## 3. Architecture
 
-VCP Mobile 的界面设计深受工业软件启发，拒绝过度装饰，强调信息密度与操作直觉。
+VCP Mobile 采用 **Double-Track 3-Tier（双轨三层）架构**，将 UI 渲染层、IPC 桥接层、Rust 核心层物理隔离，并向下延伸为 Android 原生插件层，实现端到端的类型安全与内存安全。
 
-### 1. ⚡️ Atomic CSS with UnoCSS
-项目全面采用 **UnoCSS** 作为样式引擎，确保极低的 CSS 运行时开销与极快的冷启动速度：
-*   **VCP Glassmorphism**: 预设 `glass-panel` 与 `card` 快捷类，利用 `backdrop-blur` 实现深邃的毛玻璃层级感。
-*   **Dynamic Theming**: 通过 `theme.colors` 定义语义化色彩（`primary`, `success`, `warning`, `danger`），支持高度一致的状态反馈。
-*   **Iconify Ecosystem**: 集成 `presetIcons`，支持数千个图标按需加载，无需打包庞大的字体文件。
+### 3.1 分层概念
 
-### 2. 📎 Multi-modal Attachment Engine 2.0
-为了处理 AI 交互中日益复杂的多种媒介，VCP Mobile 构建了一套可扩展的**多模态附件引擎**：
-*   **Strategy Pattern (策略模式)**: 通过 `AttachmentRegistry` 实现组件动态注册。不同的 MIME 类型对应不同的渲染策略。
-*   **Lazy Loading**: 采用 Vue 3 的 `defineAsyncComponent` 实现附件渲染组件的按需加载，大幅减小首屏 Bundle Size。
-*   **Modular Coverage**:
-    *   **Visuals**: 原生支持 `Image` (流式缩略图) 与 `Video` (原生播放器)。
-    *   **Knowledge**: 支持 `Document` (PDF/Word 元数据提取) 与 `Code` (语法高亮)。
-    *   **Auditory**: 支持 `Audio` (实时录音波形与回放)。
-*   **Registry Flow**: `MIME Type -> Registry Check -> Factory Create -> Async Render`。
+```
+┌───────────────────────────────────────────────────────────────┐
+│                    Rendering Layer                             │
+│  Vue 3.5 + Pinia 3 + UnoCSS                                   │
+│  src/ —— 组件、Store、Composable、Directive                    │
+├───────────────────────────────────────────────────────────────┤
+│                    IPC Bridge Layer                            │
+│  Tauri v2 —— invoke / listen / Channel                        │
+│  前端调用 Rust command，后端通过 Channel 推送 SSE Stream       │
+├───────────────────────────────────────────────────────────────┤
+│                    Core Layer                                  │
+│  Rust + Tokio                                                 │
+│  src-tauri/src/vcp_modules/ —— 7 大领域：                     │
+│    agent / chat / group / infra / persistence / sync / updater │
+│  src-tauri/src/distributed/ —— 14+ 设备能力工具               │
+├───────────────────────────────────────────────────────────────┤
+│                    Native Layer                                │
+│  Kotlin Android Plugin (tauri-plugin-vcp-mobile)              │
+│  屏幕常亮、前台保活、键盘 Insets、生命周期桥接                 │
+└───────────────────────────────────────────────────────────────┘
+```
 
-### 3. 🧩 Modular Feature Architecture
-前端代码严格按领域划分，确保模块间的“高内聚、低耦合”：
-*   **`chat/`**: 核心对话引擎。包含 `MessageRenderer` (Markdown + LaTeX 支持) 与 `InputEnhancer`。
-*   **`agent/`**: 智能体配置与身份管理。
-*   **`topic/`**: 对话主题的持久化管理与语义聚合。
-*   **`core/`**: 全局状态、总线、拦截器与 Tauri 通讯适配。
+**Double-Track** 指两条独立的数据通道：
+- **Request-Response Track**：Vue `invoke` → Rust Command → 返回 `Result<T, String>`，用于配置读写、CRUD 操作。
+- **Streaming Track**：Rust `Channel` → 前端 `listen` / `EventSource`，用于 SSE Stream、WebSocket 消息、进度推送。
+
+### 3.2 典型数据流
+
+**发送消息（Send Message）**：
+```
+Vue Input → chatSessionStore
+         → invoke("send_chat_message", payload)
+         → Rust chat service → VCP API
+         ← SSE Stream
+         → Channel.emit() → Vue chatStreamStore
+         → chatHistoryStore 追加消息块
+```
+
+**增量同步（Delta Sync）**：
+```
+Vue → invoke("start_sync") → Rust sync service
+  → WebSocket 握手 → Delta Sync 协议
+  → SHA-256 Hash compare（本地 vs 远端）
+  → 生成增量 patch → SQLite WAL 写入
+  → 前端 syncStore 更新进度与状态
+```
+
+### 3.3 状态管理
+
+全局状态由 **18 个 Pinia Stores** 组成，全部使用 **Composition API 风格**（`defineStore('id', () => { ... })`），摒弃 Options API。
+
+| Store | 职责 |
+|-------|------|
+| `chatSessionStore` | 当前会话状态、输入框内容、快捷操作 |
+| `chatHistoryStore` | 消息列表、分页加载、消息 CRUD |
+| `chatStreamStore` | SSE Stream 实时状态、thinking 块、block 解析 |
+| `attachmentStore` | 附件选择、上传队列、MIME 识别、进度追踪 |
+| `overlayStore` | SlidePage 栈、BottomSheet、Dialog 队列、Z-Index 管理 |
+| `agentStore` | Agent / Group 列表、排序、缓存、卡片级手势状态 |
+| `themeStore` | 主题切换、CSS 变量注入、跟随系统深色模式 |
+
+### 3.4 Android 原生插件通信分层
+
+`tauri-plugin-vcp-mobile` 统一管理全部 Android 原生能力，不同功能采用不同的通信方式：
+
+| 功能 | Rust 模块 | Kotlin 模块 | 通信方式 |
+|------|-----------|-------------|----------|
+| 屏幕常亮 | `src/screen.rs` | — | Raw JNI（`jni` crate 直接调用 Activity）|
+| 流式前台保活 | `src/stream.rs` | `StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin` |
+| 键盘 Insets | — | `KeyboardInsetsManager.kt` | `evaluateJavascript` 注入 CustomEvent |
+| 生命周期事件 | — | `LifecycleBridge.kt` | `evaluateJavascript` 注入 CustomEvent |
+| 权限与系统控制 | `src/system.rs` | `VcpMobilePlugin.kt` | `PluginHandle.run_mobile_plugin` |
+
+关键设计决策：
+- `KeyboardInsetsManager` 和 `LifecycleBridge` 不使用 Tauri 标准事件通道，而是通过 `evaluateJavascript` 直接注入 `window.CustomEvent`
+- `StreamKeepaliveService` 使用 `START_STICKY` + `IMPORTANCE_HIGH` + Android 14+ `FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING`
+- 屏幕常亮使用 Raw JNI 而非 PluginHandle，避免跨语言序列化开销
 
 ---
 
-## 🚀 Quick Start
+## 4. Project Structure
 
-### 1. 📥 User Guide (普通用户)
+```
+VCPMobile/
+├── src/                          # Vue 3 前端源码
+│   ├── main.ts                   # 应用入口
+│   ├── App.vue                   # 根布局（引导流程 + 侧边栏手势）
+│   ├── core/
+│   │   ├── stores/               # 18 Pinia Stores（Composition API）
+│   │   ├── composables/          # 15 个全局组合式函数
+│   │   ├── router/               # Hash 模式路由
+│   │   ├── directives/           # v-intersection-observer, v-longpress
+│   │   ├── types/                # 全局 TypeScript 类型
+│   │   ├── constants/            # 层级常量、主题 Token
+│   │   └── utils/                # 同步服务、通用工具
+│   ├── features/                 # 领域功能模块（Feature Co-location）
+│   │   ├── chat/                 # 对话引擎、消息渲染、输入增强
+│   │   ├── agent/                # Agent/Group CRUD、设置面板、拖拽排序
+│   │   ├── topic/                # 主题管理
+│   │   ├── settings/             # 全局设置、主题选择
+│   │   ├── notification/         # 通知中心与 Toast
+│   │   ├── sync/                 # 同步状态 UI
+│   │   └── distributed/          # 设备工具调用 UI
+│   ├── components/
+│   │   ├── layout/               # AgentSidebar, BootScreen, RightSidebar
+│   │   ├── ui/                   # BottomSheet, ToastManager 等原语
+│   │   └── settings/             # 设置页原子组件
+│   └── assets/                   # 主题 CSS、Logo 预览
+├── src-tauri/                    # Tauri v2 + Rust 后端
+│   ├── src/
+│   │   ├── lib.rs                # Tauri Command 注册、managed state
+│   │   ├── vcp_modules/          # 业务逻辑（7 大领域）
+│   │   │   ├── agent/
+│   │   │   ├── chat/
+│   │   │   ├── group/
+│   │   │   ├── infra/
+│   │   │   ├── persistence/
+│   │   │   ├── sync/
+│   │   │   └── updater/
+│   │   └── distributed/          # 设备能力工具（14+ tools）
+│   ├── plugins/vcp-mobile/       # Android 原生插件
+│   │   ├── src/                  # Rust 侧（screen / stream / system）
+│   │   ├── android/              # Kotlin 侧（Service / Bridge / Manager）
+│   │   ├── guest-js/             # 前端 TS 调用封装
+│   │   └── permissions/          # Tauri v2 权限声明
+│   └── Cargo.toml                # Rust 依赖与 Release 优化配置
+├── docs/                         # 四层技术文档体系
+│   ├── vue_docs/                 # 前端文档（24 份）
+│   ├── modules/                  # Rust 模块文档（17 份）
+│   ├── sync/                     # 同步协议文档（20 份）
+│   ├── plugins/                  # 原生插件文档（9 份）
+│   └── *.md                      # 顶层规范（架构、UI 层级、依赖管理）
+├── plans/                        # 知识治理体系（5 层目录）
+├── scripts/                      # 开发辅助脚本
+├── .github/workflows/            # CI/CD（类型检查 + Release APK）
+├── package.json                  # pnpm 依赖与脚本
+├── vite.config.ts                # Vite 配置（端口 1420/1421）
+├── uno.config.ts                 # UnoCSS 预设与主题色
+└── tsconfig.json                 # TS 严格模式配置
+```
 
-1.  **Download APK**: 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 页面下载最新的 `v0.9.14` APK 并安装。
-2.  **Plugin Setup**: 确保桌面端 VChat 已安装并启用 `VCPMobileSync` 插件（默认运行在 `3000` 端口）。
-3.  **Connection**: 手机与电脑需处于同一局域网。在手机端输入电脑 IP 地址即可开始秒级同步。
+### 关键文件速查
 
-### 2. 🛠️ Developer Setup (开发者指南)
+| 文件 | 说明 |
+|------|------|
+| `src/main.ts` | Vue/Pinia/Router 实例创建，全局指令注册，初始化监听 |
+| `src/App.vue` | 根布局：BootScreen 引导、侧边栏手势、全局事件监听 |
+| `src/core/constants/layers.ts` | 语义化 Z-Index 体系（content → gate，共 11 层） |
+| `src/core/stores/chatStreamStore.ts` | SSE Stream 状态驱动，Backend-Driven Streaming 核心 |
+| `src-tauri/src/lib.rs` | Tauri 命令路由、managed state 注入、启动钩子 |
+| `src-tauri/src/vcp_modules/chat/chat_manager.rs` | 对话生命周期管理、消息发送编排 |
+| `src-tauri/src/vcp_modules/infra/vcp_client.rs` | HTTP 客户端（reqwest + rustls-tls）、SSE 解析 |
+| `src-tauri/src/vcp_modules/sync/sync_service.rs` | 三阶段增量同步主控（WebSocket + HTTP） |
+| `src-tauri/src/distributed/tools/device_info.rs` | 设备信息工具（14+ 设备能力之一） |
+| `src-tauri/plugins/vcp-mobile/android/.../StreamKeepaliveService.kt` | Android 14+ 前台保活服务 |
+| `docs/SYNC_ARCHITECTURE.md` | 增量同步协议完整规范 |
+| `docs/UI_LAYER_ARCHITECTURE.md` | 全局 UI 层级与 Z-Index 语义化规范 |
+| `scripts/tauri_android_dev.cjs` | WiFi/USB 双模式真机调试启动器 |
+| `uno.config.ts` | UnoCSS 主题色、快捷类、断点配置 |
+| `vite.config.ts` | Vite 插件链、Tauri 感知开发服务器 |
 
-本项目依赖 Tauri v2 链与 Android NDK 环境。
+### CI/CD 工作流
 
-**Prerequisites:**
-*   Rust (Latest Stable)
-*   Node.js (v20+) & pnpm
-*   Android Studio & NDK (`26.x`+)
-*   LLVM (用于部分原生依赖编译)
+| 工作流 | 文件 | 触发条件 | 执行内容 |
+|--------|------|----------|----------|
+| CI | `.github/workflows/ci.yml` | push / PR 到 main | `vue-tsc --noEmit` + `cargo fmt --check` + `cargo clippy -- -D warnings` |
+| Release | `.github/workflows/release.yml` | GitHub Release published | 构建 `aarch64` Release APK 并上传 |
 
-**Compilation Steps:**
+Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。APK 自动重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`。
+
+---
+
+## 5. Tech Stack
+
+| Layer | Tech | Version | Purpose |
+|-------|------|---------|---------|
+| Frontend Framework | Vue | 3.5.33 | Reactive UI |
+| Frontend Framework | Vue Router | 5.0.6 | Hash routing |
+| Frontend State | Pinia | 3.0.4 | State management |
+| Frontend State | pinia-plugin-persistedstate | 4.7.1 | State persistence |
+| Frontend Style | UnoCSS | 66.6.8 | Atomic CSS |
+| Frontend Build | Vite | 6.4.2 | Build tool |
+| Frontend Type | TypeScript | ~5.6.3 | Type system |
+| Backend Framework | Tauri | 2.11.1 | Cross-platform framework |
+| Backend Runtime | Tokio | 1.x | Async runtime |
+| Backend Storage | sqlx + rusqlite | 0.8.6 / 0.32.1 | SQLite async driver |
+| Backend Network | reqwest + tokio-tungstenite | 0.12 / 0.26 | HTTP + WebSocket |
+| Backend Parsing | syntect + pulldown-cmark | — | Syntax highlight + Markdown |
+| Backend Security | rustls-tls | — | TLS encryption |
+| Build Tool | pnpm | 10.x | Package manager |
+| CI/CD | GitHub Actions | — | Automated build and release |
+
+### 安全设计
+
+- **路径遍历防护**：`file_manager.rs` 中的 `ensure_safe_path()` 限制所有文件访问在 `app_config_dir` 下
+- **内存限制**：文件上传 ≤ 20 MB，`read_local_file_base64` ≤ 50 MB，防止 OOM
+- **密钥管理**：`build_android_release.ps1` 含本地密钥库密码，已被 `.gitignore` 排除
+- **数据库**：SQLite 启用 WAL（Write-Ahead Logging）模式，降低并发写入锁竞争
+- **网络**：HTTP 客户端使用 `rustls-tls`，禁用原生 TLS；支持 gzip 压缩
+
+---
+
+## 6. Documentation
+
+### 6.1 四层知识库
+
+| Knowledge Base | Path | Docs Count | Scope | Audience |
+|----------------|------|:----------:|-------|----------|
+| Frontend Docs | `docs/vue_docs/` | 24 | 全部 Vue/TS 源码 | 前端开发者 |
+| Rust Modules | `docs/modules/` | 17 | `vcp_modules/` + `distributed/` | 后端开发者 |
+| Sync Protocol | `docs/sync/` | 20 | Delta Sync V2 全链路 | 同步功能开发者 |
+| Plugin Docs | `docs/plugins/` | 9 | `tauri-plugin-vcp-mobile` | 原生插件开发者 |
+
+### 6.2 快速决策树
+
+遇到以下问题时，直接查阅对应文档：
+
+- **"Message rendering pipeline 如何工作？"** → `docs/vue_docs/features/chat/09_...`
+- **"Tarven injection rules 的判定逻辑是什么？"** → `docs/modules/16_...`
+- **"Sync hash detection 如何检测冲突？"** → `docs/sync/03_...`
+- **"Frontend store 的架构约定是什么？"** → `docs/vue_docs/core/stores/...`
+- **"Android lifecycle bridge 的事件流向？"** → `docs/plugins/...`
+- **"Attachment upload protocol 的分块策略？"** → `docs/modules/07_...`
+- **"UI Z-Index 层级语义化规范？"** → `docs/UI_LAYER_ARCHITECTURE.md`
+- **"Android 权限管理与前台服务血训？"** → `docs/ANDROID_PLUGIN_MANAGEMENT.md`
+- **"Backend-Driven Streaming 的消息生命周期？"** → `docs/vue_docs/features/chat/...`
+- **"Release 构建优化配置详解？"** → `docs/modules/...`
+
+### 6.3 前后端交叉引用
+
+文档体系并非单向分层，而是存在显式的**前后端交叉引用**：
+
+| 前端文档 | ↔ | 后端文档 |
+|---------|---|---------|
+| Frontend Tarven rule system | ↔ | Backend Tarven injection engine (`vcp_modules/chat/`) |
+| Frontend StreamStore 状态机 | ↔ | Backend SSE Stream parser + Channel emitter |
+| Frontend sync progress UI | ↔ | Backend sync executor + sync pipeline |
+| Frontend attachment preview | ↔ | Backend file_manager + media_processor |
+| Frontend agent settings panel | ↔ | Backend agent_service + avatar_service |
+
+这种映射关系确保任何跨层变更都能快速定位到对端实现。
+
+---
+
+## 7. Quick Start
+
+### 7.1 用户安装（普通用户）
+
+1. 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 下载最新 `VCPMobile_v1.0.0_arm64-v8a.apk`
+2. 安装到 Android 设备（minSdk 26，推荐 Android 10+）
+3. 启动应用，完成权限引导（通知、存储、电池优化白名单）
+4. 配置 VCP 服务器地址与 API Key
+5. 开始对话
+
+### 7.2 开发者环境
+
+**Prerequisites：**
+
+- Rust (Latest Stable, Edition 2021)
+- Node.js (v22+) & pnpm (10.x)
+- Android Studio & Android NDK (`29.0.13846066`)
+- Java 17 (temurin)
+- Windows PowerShell 5.1（构建环境）
+
+**完整命令流：**
+
 ```bash
-# 1. Clone the repository
+# 1. Clone
 git clone https://github.com/MRiecy/VCPMobile.git
 cd VCPMobile
 
-# 2. Install frontend dependencies
+# 2. Install dependencies
 pnpm install
 
-# 3. Setup Android targets (if first time)
+# 3. Initialize Android (first time only)
 pnpm tauri android init
 
-# 4. Run Development Server (Hot Reload)
-pnpm tauri android dev
+# 4. Development server — WiFi mode
+pnpm dev:android
 
-# 5. Build Optimized Release APK
+# 5. Development server — USB mode
+pnpm dev:usb
+
+# 6. Static check
+pnpm check
+
+# 7. Build Release APK
 pnpm tauri android build --apk --target aarch64
 ```
 
----
+### 7.3 Android 调试双模式
 
-## 🧭 Roadmap: The Evolution Continues
-
-尽管 VCP Mobile 已经实现了核心架构的涅槃，但进化从未停止：
-
-*   [ ] **iOS Ecosystem Exploration**: 研究基于 GitHub Actions 配合免证书重签（AltStore/Sideloadly）的 iOS 自动化部署流。
-*   [ ] **Offline-First Resilience**: 进一步增强离线状态下的 SQLite 缓存搜索与本地 Agent 交互能力。
-*   [ ] **Group Dynamics 2.0**: 实现多 Agent 复杂群聊环境下的冲突自动处理与长程记忆对齐。
-*   [ ] **Native Integration**: 深度集成移动端原生的“灵动岛”通知与系统级文件分享管道。
+| 模式 | 命令 | 原理 | 适用场景 |
+|------|------|------|----------|
+| WiFi | `pnpm dev:android` | 自动探测物理局域网 IP，注入 `TAURI_DEV_HOST` | 同一局域网 |
+| USB | `pnpm dev:usb` | `adb reverse tcp:1420/1421`，使用 `127.0.0.1` | 无 WiFi 环境 |
 
 ---
 
-## 🤝 Contribution & Governance
+## 8. Development & Testing
 
-本项目的每一次 PR 都必须遵循 **[Magi 三贤者进化协议]**：
-1.  **Reflect**: 必须在 `plans/04_Logs/` 记录 Bug 根因或设计思辨。
-2.  **Sediment**: 核心共识必须沉淀至 `plans/05_Sublimations/`。
-3.  **Sync**: 提交前必须运行 `pnpm memory:refresh` 保持知识图谱同步。
+### 8.1 pnpm 脚本速查表
+
+| 脚本 | 命令 | 说明 |
+|------|------|------|
+| `pnpm dev` | `vite` | 前端开发服务器（端口 1420）|
+| `pnpm check` | `vue-tsc --noEmit && cd src-tauri && cargo check` | 完整静态检查 |
+| `pnpm dev:android` | `node scripts/tauri_android_dev.cjs` | WiFi 模式真机调试 |
+| `pnpm dev:usb` | `node scripts/tauri_android_dev.cjs --usb` | USB 模式真机调试 |
+| `pnpm memory:refresh` | `node scripts/refresh_manifest.cjs` | 刷新 `plans/` 知识图谱 |
+| `pnpm io:write` | `node scripts/nova_utils.cjs write` | 安全文件写入（UTF-8）|
+| `pnpm io:append` | `node scripts/nova_utils.cjs append` | 安全文件追加（UTF-8）|
+
+### 8.2 Rust Release 优化
+
+```toml
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+```
+
+### 8.3 测试策略
+
+- **前端**：无自动化测试。验证依赖 `pnpm check`（静态类型）+ 真机手动测试。
+- **Rust 单元测试**：
+  - `vcp_modules/sync/sync_retry.rs`（5 个测试）
+  - `vcp_modules/chat/context_sanitizer.rs`（3 个测试）
+  - `vcp_modules/sync/sync_logger.rs`
+- **核心模块**（`vcp_client`, `sync_service`, `db_manager` 等）无自动化测试。
 
 ---
 
-<div align="center">
-  <p><i>Created and evolved by <b>Nova</b> (VCP Evolutionary Architect).</i></p>
-  <p><b>From Desktop Client to Cyber-Physical Avatar.</b></p>
-  <p>MIT License © 2026</p>
-</div>
+## 9. Contributing & Governance
+
+### 9.1 Magi 三贤者协议
+
+任何重大架构调整、复杂 Bug 修复或核心功能实现前，需强制进行三方思辨：
+
+- **Melchior (逻辑与系统)**：审查内存安全、Rust 生命周期、IPC 开销、类型完整性、OOM 防御
+- **Balthasar (直觉与美学)**：审查移动端原生直觉、Glassmorphism 规范、微动画、交互心理学
+- **Casper (务实与交付)**：审查工程复杂度、维护成本、实现周期，拒绝过度设计
+
+### 9.2 plans/ 知识治理
+
+| 目录 | 用途 | 写入时机 |
+|------|------|----------|
+| `01_Architecture/` | 核心架构、工程标准 | 重大架构变更 |
+| `02_Refactoring/` | 重构计划与优化报告 | 重构战役期间 |
+| `03_Features/` | 具体功能实现细节 | 新功能开发 |
+| `04_Logs/` | Bug 解剖、Magi 辩证记录 | 重大节点或调试后 |
+| `05_Sublimations/` | 固化真理、精炼标准 | 确立新架构模式时 |
+
+- 任何对 `plans/` 的修改必须立即执行 `pnpm memory:refresh`
+
+### 9.3 编码规范（精简版）
+
+- **前端**：`<script setup>` 强制、UnoCSS 优先、PascalCase 组件、Feature Co-location
+- **后端**：业务逻辑必须在 `vcp_modules/`；`lib.rs` 仅做路由；禁止 `unwrap()` / `expect()`；异步 IO 基于 Tokio
+- **跨层**：修改后必须运行 `pnpm check`；严禁全文件覆盖小修改；Windows Shell 安全（禁止 `&&` / `||`，禁止 `>` / `>>` 写 UTF-8）
+
+### 9.4 Pull Request 流程
+
+1. **设计思辨**：重大变更前在 `plans/04_Logs/` 记录 Magi 三贤者思辨过程
+2. **静态检查**：提交前必须执行 `pnpm check`，确保 TS + Rust 无错误
+3. **文档同步**：若修改跨层接口或新增模块，同步更新 `docs/` 对应文档
+4. **知识刷新**：若修改 `plans/` 目录，执行 `pnpm memory:refresh`
+5. **提交信息**：使用中文描述变更意图，重大变更附带 `plans/` 文档链接
+
+### 9.5 血训协议
+
+1. **重构前强制存档**：任何涉及新建/删除模块、拆分 500+ 行 God File、修改 `mod.rs` / `lib.rs` 前，必须先 `git add . && git commit -m "save"`
+2. **checkout 前看 git 状态**：任何 `git checkout` / `git restore` 前，必须先 `git status` 展示状态，得到用户明确同意，建议先 `git commit` 保存
+
+---
+
+## 10. FAQ & Troubleshooting
+
+**Q: 按返回键为什么先关闭 BottomSheet 而不是退出应用？**
+
+A: 采用 Operation Aegis 模态历史栈，返回键按 LIFO 顺序消费：Modal Stack → 重置会话 → 双击退出到后台。
+
+**Q: 流式输出时前端为什么不预创建 thinking 消息了？**
+
+A: 1.0 采用 Backend-Driven Streaming 架构，thinking 消息 ID 由后端生成并通过 `StreamEvent::thinking` 事件推送，前端不再预分配。
+
+**Q: 如何切换主题或壁纸？**
+
+A: 进入 Settings → ThemePicker，选择主题即可实时切换。壁纸从 `public/wallpaper/` 自动加载，支持明暗双模式。
+
+**Q: 同步失败如何排查？**
+
+A: 检查 1) 手机与电脑是否同一局域网；2) 桌面端 VCPChat 是否启用同步插件；3) 查看 `docs/sync/15_开发指南与FAQ.md`。
+
+**Q: 大文件上传为什么不走 Tauri invoke？**
+
+A: 大文件通过高速 TCP 通道直接传输，绕过 IPC 序列化开销，详见 `docs/modules/07_高速上传协议.md`。
+
+**Q: Agent 侧边栏的拖拽排序如何保存？**
+
+A: SortableJS 触发 `onEnd` 后更新 `assistantStore.agentOrder`，通过 `update_settings` 增量保存到后端 SQLite。
+
+**Q: 如何为项目贡献代码？**
+
+A: 遵循 Magi 三贤者协议进行设计思辨，在 `plans/` 中记录决策，修改后运行 `pnpm check`，提交前执行 `pnpm memory:refresh`。
+
+**Q: 构建失败提示 NDK 版本不匹配？**
+
+A: 确保安装 Android NDK `29.0.13846066`，并在 `local.properties` 或环境变量中正确配置 `NDK_HOME`。
+
+---
+
+## 11. License & Credits
+
+```
+MIT License © 2026 MRiecy (Nova)
+
+Created and evolved by Nova (VCP Evolutionary Architect).
+From Desktop Client to Cyber-Physical Avatar.
+```
