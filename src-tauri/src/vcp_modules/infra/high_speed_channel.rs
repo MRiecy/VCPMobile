@@ -201,7 +201,8 @@ async fn finalize_high_speed_upload<R: Runtime>(
     let dest_path = dest.join(internal_name);
 
     if !dest_path.exists() {
-        crate::vcp_modules::file_manager::safe_rename(temp_path, &dest_path).map_err(|e| e.to_string())?;
+        crate::vcp_modules::file_manager::safe_rename(temp_path, &dest_path)
+            .map_err(|e| e.to_string())?;
     } else {
         let _ = std::fs::remove_file(temp_path);
     }

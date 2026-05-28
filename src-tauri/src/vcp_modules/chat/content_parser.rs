@@ -161,7 +161,10 @@ impl ContentBlock {
     }
 
     pub fn html_preview(content: String) -> Self {
-        let highlighted_content = crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(&content, "html");
+        let highlighted_content =
+            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(
+                &content, "html",
+            );
         Self::HtmlPreview {
             content,
             highlighted_content,
@@ -313,7 +316,7 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
             if LIST_REGEX.is_match(line) {
                 result.push_str(line);
             } else if (trimmed.starts_with('<') && HTML_TAG_REGEX.is_match(trimmed))
-                || trimmed.chars().next().map_or(false, is_chinese_char)
+                || trimmed.chars().next().is_some_and(is_chinese_char)
                 || is_vcp_marker(trimmed)
                 || trimmed.starts_with("<!--")
             {
@@ -372,7 +375,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                 } else {
                     blocks.push(ContentBlock::markdown(
                         None,
-                        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(md_text)),
+                        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                            md_text,
+                        )),
                     ));
                 }
             }
@@ -542,7 +547,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     full_html.push_str(&remaining[start_idx..end_idx]);
                     full_html.push_str(inner_content);
                     if is_complete {
-                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {  
+                        if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
                             full_html.push_str(&search_area[s..e]);
                         }
                     }
@@ -551,17 +556,24 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                 BlockType::HtmlContainer => {
                     let open_tag = &remaining[start_idx..end_idx];
                     let deindented_inner = crate::vcp_modules::chat::pre_renderer::markdown_parser::trim_common_leading_indent(inner_content);
-                    let mut nodes = vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(open_tag.to_string())];
-                    nodes.extend(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&deindented_inner));
+                    let mut nodes = vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                        open_tag.to_string(),
+                    )];
+                    nodes.extend(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                        &deindented_inner,
+                    ));
                     if is_complete {
                         if let (Some(s), Some(e)) = (end_marker_start, end_marker_end) {
                             let close_tag = &search_area[s..e];
-                            nodes.push(crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(close_tag.to_string()));
+                            nodes.push(crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                                close_tag.to_string(),
+                            ));
                         }
                     }
                     ContentBlock::markdown(None, Some(nodes))
                 }
-                BlockType::RoleDivider => {                    let marker_text = &remaining[start_idx..end_idx];
+                BlockType::RoleDivider => {
+                    let marker_text = &remaining[start_idx..end_idx];
                     if let Some(caps) = ROLE_DIVIDER.captures(marker_text) {
                         let is_end = caps.get(1).is_some();
                         let role = caps
@@ -612,7 +624,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             } else {
                 blocks.push(ContentBlock::markdown(
                     None,
-                    Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(remaining)),
+                    Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                        remaining,
+                    )),
                 ));
             }
             break;

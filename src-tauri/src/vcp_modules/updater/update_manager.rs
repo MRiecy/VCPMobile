@@ -203,7 +203,8 @@ pub async fn download_update(
 pub async fn install_update(app: AppHandle, apk_path: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        let result = tauri_plugin_vcp_mobile::system::open_file_native(app.clone(), apk_path.clone());
+        let result =
+            tauri_plugin_vcp_mobile::system::open_file_native(app.clone(), apk_path.clone());
         if result.is_err() {
             let _ = tokio::fs::remove_file(&apk_path).await;
         }

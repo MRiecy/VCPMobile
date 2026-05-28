@@ -62,7 +62,11 @@ pub async fn load_multi_topic_messages(
         let content_bytes: Vec<u8> = row.get("content");
         let content = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
         let content_hash_raw: String = row.get("content_hash");
-        let content_hash = if content_hash_raw.is_empty() { None } else { Some(content_hash_raw) };
+        let content_hash = if content_hash_raw.is_empty() {
+            None
+        } else {
+            Some(content_hash_raw)
+        };
 
         let message = crate::vcp_modules::chat_manager::ChatMessage {
             id: msg_id,
@@ -152,6 +156,7 @@ pub async fn load_multi_topic_messages(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn load_chat_history_internal(
     _app_handle: &AppHandle,
     _owner_id: &str,
@@ -311,7 +316,7 @@ pub async fn load_chat_history_internal(
             } else {
                 let compiled = MessageRenderCompiler::compile(&decompressed);
                 let blocks_json = serde_json::to_value(&compiled).ok();
-                
+
                 // 异步回写 render_cache (使用 tokio::spawn，不阻塞消息加载流)
                 if let Ok(serialized) = MessageRenderCompiler::serialize(&compiled) {
                     let pool_c = pool.clone();
@@ -334,14 +339,22 @@ pub async fn load_chat_history_internal(
                         .await;
                     });
                 }
-                
-                let content = if include_content { decompressed } else { String::new() };
+
+                let content = if include_content {
+                    decompressed
+                } else {
+                    String::new()
+                };
                 (blocks_json, content)
             }
         };
 
         let content_hash_raw: String = row.get("content_hash");
-        let content_hash = if content_hash_raw.is_empty() { None } else { Some(content_hash_raw) };
+        let content_hash = if content_hash_raw.is_empty() {
+            None
+        } else {
+            Some(content_hash_raw)
+        };
 
         let timestamp: i64 = row.get("timestamp");
         let is_thinking: Option<bool> = Some(false);
@@ -653,7 +666,10 @@ pub async fn delete_messages(
     for id in &msg_ids {
         q_attachments = q_attachments.bind(id);
     }
-    q_attachments.execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    q_attachments
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",

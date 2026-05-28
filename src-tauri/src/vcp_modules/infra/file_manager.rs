@@ -45,7 +45,10 @@ pub fn get_thumbnails_root_dir<R: tauri::Runtime>(
 }
 
 /// 物理安全的文件重命名工具，能够跨越物理挂载分区 (EXDEV) 降级进行物理拷贝+删除
-pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(from: P, to: Q) -> std::io::Result<()> {
+pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+    from: P,
+    to: Q,
+) -> std::io::Result<()> {
     let from = from.as_ref();
     let to = to.as_ref();
 
@@ -56,10 +59,6 @@ pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(from: P
     }
     Ok(())
 }
-
-
-
-
 
 /// 附件元数据结构
 /// 对齐 @/plans/Rust文件数据管理重构详细规划.md 中的 2.1 节
@@ -338,7 +337,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         sqlx::query(
             "UPDATE attachments 
              SET extracted_text = ?, thumbnail_path = ?, updated_at = ? 
-             WHERE hash = ?"
+             WHERE hash = ?",
         )
         .bind(&extracted_text)
         .bind(&thumbnail_path)
@@ -436,8 +435,6 @@ pub async fn store_file(
     )
     .await
 }
-
-
 
 /// 注册本地已有的文件（例如 Android Kotlin 端沙盒临时复制的大文件/硬解缩略图）
 /// 彻底实现“前端零拷贝物理路径传输”
@@ -724,7 +721,6 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
             .open_path(clean_path, Option::<String>::None)
             .map_err(|e| e.to_string())
     }
-
 }
 
 /// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)
@@ -750,7 +746,7 @@ pub async fn ensure_extracted_text(
     if internal_path.is_empty() {
         return None;
     }
-    
+
     let path = std::path::Path::new(internal_path);
     if !path.exists() {
         return None;
@@ -762,9 +758,9 @@ pub async fn ensure_extracted_text(
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-        
+
     let is_doc = super::file_extractor::is_extractable_extension(&ext);
-    
+
     if !is_doc {
         return None;
     }
@@ -779,11 +775,11 @@ pub async fn ensure_extracted_text(
         let pool_c = pool.clone();
         let hash_c = hash.to_string();
         let text_c = text.clone();
-        
+
         // 3. 异步持久化写入 SQLite，不阻塞当前的上下文加载请求
         tokio::spawn(async move {
             let _ = sqlx::query(
-                "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?"
+                "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?",
             )
             .bind(&text_c)
             .bind(chrono::Utc::now().timestamp_millis())
@@ -791,7 +787,7 @@ pub async fn ensure_extracted_text(
             .execute(&pool_c)
             .await;
         });
-        
+
         Some(text)
     } else {
         None

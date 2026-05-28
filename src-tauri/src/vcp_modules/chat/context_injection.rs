@@ -1,8 +1,8 @@
-use sqlx::{Pool, Sqlite};
-use chrono::{Local, TimeZone};
-use serde::{Serialize, Deserialize};
-use tauri::State;
 use crate::vcp_modules::db_manager::DbState;
+use chrono::{Local, TimeZone};
+use serde::{Deserialize, Serialize};
+use sqlx::{Pool, Sqlite};
+use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,16 +12,16 @@ pub struct TarvenRule {
     pub rule_type: String, // 'system_suffix' | 'user_suffix' | 'context_inject'
     pub is_enabled: bool,
     pub content: String,
-    pub scope: String,     // 'global' | 'agent' | 'group'
+    pub scope: String, // 'global' | 'agent' | 'group'
     pub wrap: bool,
-    
+
     // context_inject 专用
     pub role: Option<String>, // 'user' | 'assistant'
     pub depth: Option<i32>,
-    
+
     // system_suffix / user_suffix 专用
     pub position: Option<String>, // 'prepend' | 'append'
-    
+
     pub sort_order: i32,
 }
 
@@ -75,13 +75,12 @@ pub async fn fetch_active_rules(
     Ok(rules)
 }
 
-async fn inject_base_environment(
-    pool: &Pool<Sqlite>,
-    topic_id: &str,
-    system_prompt: &mut String,
-) {
+async fn inject_base_environment(pool: &Pool<Sqlite>, topic_id: &str, system_prompt: &mut String) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let mut prepend = format!("当前系统时间: {}\n运行环境: VCP Mobile (Android 移动端)\n", now);
+    let mut prepend = format!(
+        "当前系统时间: {}\n运行环境: VCP Mobile (Android 移动端)\n",
+        now
+    );
 
     if let Ok(Some(row)) = sqlx::query("SELECT created_at FROM topics WHERE topic_id = ?")
         .bind(topic_id)
@@ -91,7 +90,10 @@ async fn inject_base_environment(
         use sqlx::Row;
         let created_at: i64 = row.get("created_at");
         if let Some(dt) = Local.timestamp_millis_opt(created_at).single() {
-            prepend.push_str(&format!("当前话题创建于: {}\n", dt.format("%Y-%m-%d %H:%M:%S %Z")));
+            prepend.push_str(&format!(
+                "当前话题创建于: {}\n",
+                dt.format("%Y-%m-%d %H:%M:%S %Z")
+            ));
         }
     }
 
@@ -111,8 +113,10 @@ pub async fn apply_tarven_pipeline(
     let rules = fetch_active_rules(pool, scope).await?;
 
     // 2. 处理 System Prompt 注入
-    let system_index = messages.iter().position(|m| m["role"].as_str() == Some("system"));
-    
+    let system_index = messages
+        .iter()
+        .position(|m| m["role"].as_str() == Some("system"));
+
     let mut system_content = if let Some(idx) = system_index {
         messages[idx]["content"].as_str().unwrap_or("").to_string()
     } else {
@@ -183,9 +187,15 @@ pub async fn apply_tarven_pipeline(
         .collect();
 
     if !user_rules.is_empty() {
-        if let Some(user_idx) = messages.iter().rposition(|m| m["role"].as_str() == Some("user")) {
-            let mut user_content = messages[user_idx]["content"].as_str().unwrap_or("").to_string();
-            
+        if let Some(user_idx) = messages
+            .iter()
+            .rposition(|m| m["role"].as_str() == Some("user"))
+        {
+            let mut user_content = messages[user_idx]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
             let mut user_prepend_parts = Vec::new();
             let mut user_append_parts = Vec::new();
 
@@ -277,9 +287,7 @@ pub async fn apply_tarven_pipeline(
 // ---------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_tarven_rules(
-    db_state: State<'_, DbState>,
-) -> Result<Vec<TarvenRule>, String> {
+pub async fn get_tarven_rules(db_state: State<'_, DbState>) -> Result<Vec<TarvenRule>, String> {
     let rows = sqlx::query(
         "SELECT id, name, rule_type, is_enabled, content, scope, wrap, role, depth, position, sort_order 
          FROM tarven_rules 
@@ -355,10 +363,7 @@ pub async fn save_tarven_rule(
 }
 
 #[tauri::command]
-pub async fn delete_tarven_rule(
-    db_state: State<'_, DbState>,
-    id: String,
-) -> Result<(), String> {
+pub async fn delete_tarven_rule(db_state: State<'_, DbState>, id: String) -> Result<(), String> {
     sqlx::query("DELETE FROM tarven_rules WHERE id = ?")
         .bind(id)
         .execute(&db_state.pool)
@@ -423,7 +428,9 @@ pub async fn preview_tarven_injection(
     });
 
     // 1. 处理 System Prompt
-    let system_index = messages.iter().position(|m| m["role"].as_str() == Some("system"));
+    let system_index = messages
+        .iter()
+        .position(|m| m["role"].as_str() == Some("system"));
     let mut system_content = if let Some(idx) = system_index {
         messages[idx]["content"].as_str().unwrap_or("").to_string()
     } else {
@@ -432,7 +439,10 @@ pub async fn preview_tarven_injection(
 
     // 模拟环境注入
     let mock_now = Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let prepend = format!("当前系统时间: {}\n运行环境: VCP Mobile (Android 移动端)\n当前话题创建于: {}\n\n---\n\n", mock_now, mock_now);
+    let prepend = format!(
+        "当前系统时间: {}\n运行环境: VCP Mobile (Android 移动端)\n当前话题创建于: {}\n\n---\n\n",
+        mock_now, mock_now
+    );
     system_content.insert_str(0, &prepend);
 
     // 过滤 system_suffix 规则并按位置拼接
@@ -471,12 +481,17 @@ pub async fn preview_tarven_injection(
         }
     }
 
-    system_content = system_content.replace("{{AgentName}}", "秋水智能体").replace("{{VCPChatAgentName}}", "秋水智能体");
+    system_content = system_content
+        .replace("{{AgentName}}", "秋水智能体")
+        .replace("{{VCPChatAgentName}}", "秋水智能体");
 
     if let Some(idx) = system_index {
         messages[idx]["content"] = serde_json::Value::String(system_content);
     } else {
-        messages.insert(0, serde_json::json!({ "role": "system", "content": system_content }));
+        messages.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": system_content }),
+        );
     }
 
     // 2. 处理 User Suffix
@@ -486,9 +501,15 @@ pub async fn preview_tarven_injection(
         .collect();
 
     if !user_rules.is_empty() {
-        if let Some(user_idx) = messages.iter().rposition(|m| m["role"].as_str() == Some("user")) {
-            let mut user_content = messages[user_idx]["content"].as_str().unwrap_or("").to_string();
-            
+        if let Some(user_idx) = messages
+            .iter()
+            .rposition(|m| m["role"].as_str() == Some("user"))
+        {
+            let mut user_content = messages[user_idx]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
             let mut user_prepend_parts = Vec::new();
             let mut user_append_parts = Vec::new();
 

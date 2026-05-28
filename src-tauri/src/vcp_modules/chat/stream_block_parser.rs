@@ -138,7 +138,10 @@ impl StreamBlock {
     }
 
     pub fn html_preview(content: String, hash: String) -> Self {
-        let highlighted_content = crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(&content, "html");
+        let highlighted_content =
+            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(
+                &content, "html",
+            );
         Self::HtmlPreview {
             content,
             highlighted_content,
@@ -199,10 +202,18 @@ impl StreamBlockParser {
                 let content_start = end;
                 let search_area = &remaining[content_start..];
 
-                if let Some((end_start, end_end)) = find_end_marker(remaining, start, end, &block_type) {
+                if let Some((end_start, end_end)) =
+                    find_end_marker(remaining, start, end, &block_type)
+                {
                     let inner_content = &search_area[..end_start];
-                    let block =
-                        build_stream_block(&block_type, inner_content, remaining, start, end, end_end);
+                    let block = build_stream_block(
+                        &block_type,
+                        inner_content,
+                        remaining,
+                        start,
+                        end,
+                        end_end,
+                    );
                     blocks.push(block);
                     pos += content_start + end_end;
                 } else {
@@ -267,7 +278,10 @@ fn find_earliest_start_marker(text: &str) -> Option<(usize, usize, BlockType)> {
         (&ROLE_DIVIDER, BlockType::RoleDivider),
         (&STYLE_TAG_START, BlockType::Style),
         (&GENERIC_CODE_FENCE_START, BlockType::CodeFence),
-        (&crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE, BlockType::HtmlContainer),
+        (
+            &crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE,
+            BlockType::HtmlContainer,
+        ),
     ];
 
     let mut earliest: Option<(usize, usize, BlockType)> = None;
@@ -283,13 +297,20 @@ fn find_earliest_start_marker(text: &str) -> Option<(usize, usize, BlockType)> {
 
 /// 寻找对应块的结束标记
 /// 返回 (end_start_offset, end_end_offset) 在 remaining[content_start..] 内的相对偏移量
-fn find_end_marker(remaining: &str, start: usize, end: usize, block_type: &BlockType) -> Option<(usize, usize)> {
+fn find_end_marker(
+    remaining: &str,
+    start: usize,
+    end: usize,
+    block_type: &BlockType,
+) -> Option<(usize, usize)> {
     let content_start = end;
     let search_area = &remaining[content_start..];
 
     if let BlockType::HtmlContainer = block_type {
         let marker_text = &remaining[start..end];
-        if let Some(caps) = crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE.captures(marker_text) {
+        if let Some(caps) =
+            crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE.captures(marker_text)
+        {
             let tag_name = caps.get(1).unwrap().as_str().to_lowercase();
             return crate::vcp_modules::chat::pre_renderer::markdown_parser::find_matching_close_tag(remaining, content_start, &tag_name)
                 .map(|(s, e)| (s - content_start, e - content_start));
@@ -348,13 +369,15 @@ fn build_stream_block(
                 .and_then(|c| c.get(1))
                 .map(|m| m.as_str().trim().replace("\"", ""))
                 .unwrap_or_else(|| "元思考链".to_string());
-            let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(inner_content);
+            let nodes =
+                crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(inner_content);
             let hash =
                 HashAggregator::compute_content_hash(&format!("{}:{}", theme, inner_content));
             StreamBlock::thought(theme, inner_content.to_string(), true, Some(nodes), hash)
         }
         BlockType::Think => {
-            let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(inner_content);
+            let nodes =
+                crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(inner_content);
             let hash = HashAggregator::compute_content_hash(inner_content);
             StreamBlock::thought(
                 "思维链".to_string(),
@@ -390,17 +413,26 @@ fn build_stream_block(
         }
         BlockType::HtmlContainer => {
             let open_tag = &remaining[start_idx..end_idx];
-            let deindented_inner = crate::vcp_modules::chat::pre_renderer::markdown_parser::trim_common_leading_indent(inner_content);
-            let mut nodes = vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(open_tag.to_string())];
-            nodes.extend(crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&deindented_inner));
-            
+            let deindented_inner =
+                crate::vcp_modules::chat::pre_renderer::markdown_parser::trim_common_leading_indent(
+                    inner_content,
+                );
+            let mut nodes = vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                open_tag.to_string(),
+            )];
+            nodes.extend(
+                crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&deindented_inner),
+            );
+
             let mut full_html = format!("{}{}", open_tag, inner_content);
             if end_end > 0 {
                 let close_tag = &remaining[end_idx + inner_content.len()..end_idx + end_end];
-                nodes.push(crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(close_tag.to_string()));
+                nodes.push(crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                    close_tag.to_string(),
+                ));
                 full_html.push_str(close_tag);
             }
-            
+
             let hash = HashAggregator::compute_content_hash(&full_html);
             StreamBlock::markdown(full_html, Some(nodes), hash)
         }

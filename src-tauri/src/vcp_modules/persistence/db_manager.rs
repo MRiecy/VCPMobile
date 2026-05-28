@@ -25,8 +25,6 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
 
     println!("[DBManager] Initializing SQLite at: {:?}", db_path);
 
-
-
     // 配置连接选项
     let mut connect_options = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(&db_path)
@@ -62,7 +60,10 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
             Err(e) => {
                 retry_count += 1;
                 if retry_count >= 3 {
-                    return Err(format!("数据库连接重试失败 (已重试 {} 次): {}", retry_count, e));
+                    return Err(format!(
+                        "数据库连接重试失败 (已重试 {} 次): {}",
+                        retry_count, e
+                    ));
                 }
                 log::warn!(
                     "[DBManager] Connection failed: {}. Retrying in {}ms... (Attempt {})",
@@ -330,17 +331,43 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
 
     // Migrations (幂等 — .ok() 忽略 duplicate column 错误)
     sqlx::query("ALTER TABLE agents ADD COLUMN use_temperature INTEGER NOT NULL DEFAULT 1")
-        .execute(pool).await.ok();
+        .execute(pool)
+        .await
+        .ok();
 
     // 索引 (共 9 个)
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_id, owner_type, created_at DESC)").execute(pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category)").execute(pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_topic_time ON messages(topic_id, timestamp DESC)").execute(pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at)").execute(pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_group_members_agent ON group_members(agent_id)").execute(pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_attachments_hash ON message_attachments(hash)").execute(pool).await.map_err(|e| e.to_string())?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_topic_time ON messages(topic_id, timestamp DESC)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_group_members_agent ON group_members(agent_id)")
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_message_attachments_hash ON message_attachments(hash)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_message_attachments_msg ON message_attachments(topic_id, msg_id)").execute(pool).await.map_err(|e| e.to_string())?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_render_cache_msg ON render_cache(topic_id, msg_id)").execute(pool).await.map_err(|e| e.to_string())?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_render_cache_msg ON render_cache(topic_id, msg_id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC)").execute(pool).await.map_err(|e| e.to_string())?;
 
     Ok(())

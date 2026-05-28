@@ -56,18 +56,17 @@ pub async fn cleanup_orphaned_attachments(
     .await;
 
     // 2. 查 message_attachments 确定哪些 hash 正在被有效消息引用 (防线四：GC 强校验)
-    let used_hashes: std::collections::HashSet<String> =
-        sqlx::query_as::<_, (String,)>(
-            "SELECT DISTINCT ma.hash FROM message_attachments ma \
+    let used_hashes: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT DISTINCT ma.hash FROM message_attachments ma \
              INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
-             WHERE m.deleted_at IS NULL"
-        )
-        .fetch_all(&db_state.pool)
-        .await
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(h,)| h)
-        .collect();
+             WHERE m.deleted_at IS NULL",
+    )
+    .fetch_all(&db_state.pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .map(|(h,)| h)
+    .collect();
 
     // 3. 找出未引用的哈希并删除
     let mut deleted_count = 0;
@@ -154,7 +153,7 @@ pub async fn cleanup_single_orphaned_attachment(
         } else {
             created_at // 秒级
         };
-        
+
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -260,5 +259,3 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         println!("[Maintenance] Scheduled maintenance complete.");
     }
 }
-
-

@@ -1,6 +1,6 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
-use std::collections::HashSet;
 
 lazy_static::lazy_static! {
     /// 统一维护的、可提取的纯文本/代码后缀列表
@@ -57,7 +57,7 @@ lazy_static::lazy_static! {
         s.insert("cr");
         s
     };
-    
+
     /// 统一维护的、可提取的结构化文档后缀列表
     pub static ref STRUCTURED_DOC_EXTENSIONS: HashSet<&'static str> = {
         let mut s = HashSet::new();
@@ -87,7 +87,6 @@ pub fn is_extractable_extension(ext: &str) -> bool {
 /// =================================================================
 /// vcp_modules/infra/file_extractor.rs - 多模态文件文本内容提取纯函数库
 /// =================================================================
-
 /// 内存映射读取文件，自动检测编码并转换为 UTF-8
 /// 1. 优先 BOM 头检测（最可靠）
 /// 2. 无 BOM 时使用 chardetng 统计检测（Firefox 同款）
@@ -112,10 +111,10 @@ fn read_text_with_mmap(path: &std::path::Path) -> Option<String> {
 
 fn simple_xml_unescape(s: &str) -> String {
     s.replace("&amp;", "&")
-     .replace("&lt;", "<")
-     .replace("&gt;", ">")
-     .replace("&quot;", "\"")
-     .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
 }
 
 fn col_name_to_index(r: &str) -> usize {
@@ -125,70 +124,84 @@ fn col_name_to_index(r: &str) -> usize {
         let val = (c.to_ascii_uppercase() as usize) - ('A' as usize) + 1;
         index = index * 26 + val;
     }
-    if index > 0 { index - 1 } else { 0 }
+    if index > 0 {
+        index - 1
+    } else {
+        0
+    }
 }
 
 fn extract_docx_text(path: &std::path::Path) -> Option<String> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            println!("[FileExtractor] Failed to open DOCX: {:?}, error: {}", path, e);
+            println!(
+                "[FileExtractor] Failed to open DOCX: {:?}, error: {}",
+                path, e
+            );
             return None;
         }
     };
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(e) => {
-            println!("[FileExtractor] Failed to read DOCX zip archive: {:?}, error: {}", path, e);
+            println!(
+                "[FileExtractor] Failed to read DOCX zip archive: {:?}, error: {}",
+                path, e
+            );
             return None;
         }
     };
     let mut doc_file = match archive.by_name("word/document.xml") {
         Ok(f) => f,
         Err(e) => {
-            println!("[FileExtractor] Failed to find word/document.xml in DOCX: {:?}, error: {}", path, e);
+            println!(
+                "[FileExtractor] Failed to find word/document.xml in DOCX: {:?}, error: {}",
+                path, e
+            );
             return None;
         }
     };
-    
+
     let mut content = String::new();
     if let Err(e) = doc_file.read_to_string(&mut content) {
-        println!("[FileExtractor] Failed to read document.xml content: {:?}, error: {}", path, e);
+        println!(
+            "[FileExtractor] Failed to read document.xml content: {:?}, error: {}",
+            path, e
+        );
         return None;
     }
-    
+
     let mut result = String::new();
     let mut in_tag = false;
     let mut is_collecting = false;
     let mut tag_buffer = String::new();
-    
+
     // 表格提取状态
     let mut in_tc = false;
     let mut row_count = 0;
     let mut cell_texts: Vec<String> = Vec::new();
     let mut current_cell_text = String::new();
-    
+
     // 段落属性追踪状态
     let mut in_p_pr = false;
     let mut p_heading_level = 0; // 0=普通段落, 1=#, 2=##, 3=###...
     let mut p_is_list = false;
     let mut current_p_text = String::new();
-    
+
     // 字符加粗状态追踪
     let mut in_r_pr = false;
     let mut r_is_bold = false;
-    
-    let mut chars = content.chars().peekable();
-    while let Some(c) = chars.next() {
+
+    for c in content.chars() {
         if c == '<' {
             in_tag = true;
             tag_buffer.clear();
         } else if c == '>' {
             in_tag = false;
             let tag_content = tag_buffer.trim();
-            
-            if tag_content.starts_with('/') {
-                let name = &tag_content[1..];
+
+            if let Some(name) = tag_content.strip_prefix('/') {
                 if name == "w:t" {
                     is_collecting = false;
                 } else if name == "w:pPr" {
@@ -200,7 +213,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
                     if !cleaned_p.is_empty() {
                         let mut prefix = String::new();
                         if p_heading_level > 0 {
-                            prefix.push_str("\n");
+                            prefix.push('\n');
                             for _ in 0..p_heading_level {
                                 prefix.push('#');
                             }
@@ -208,7 +221,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
                         } else if p_is_list {
                             prefix.push_str("- ");
                         }
-                        
+
                         if in_tc {
                             current_cell_text.push_str(&prefix);
                             current_cell_text.push_str(&cleaned_p);
@@ -232,10 +245,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
                         let row_str = format!("| {} |\n", cell_texts.join(" | "));
                         result.push_str(&row_str);
                         if row_count == 0 {
-                            let mut separators = Vec::new();
-                            for _ in 0..cell_texts.len() {
-                                separators.push("---");
-                            }
+                            let separators = vec!["---"; cell_texts.len()];
                             let sep_str = format!("| {} |\n", separators.join(" | "));
                             result.push_str(&sep_str);
                         }
@@ -249,10 +259,10 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
                 let is_self_closing = tag_content.ends_with('/');
                 let mut clean_content = tag_content;
                 if is_self_closing {
-                    clean_content = &tag_content[..tag_content.len() - 1].trim_end();
+                    clean_content = tag_content[..tag_content.len() - 1].trim_end();
                 }
                 let name = clean_content.split_whitespace().next().unwrap_or("");
-                
+
                 if name == "w:t" {
                     if !is_self_closing {
                         is_collecting = true;
@@ -280,19 +290,33 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
                                 val = &sub[..end_pos];
                             }
                         }
-                        
+
                         let lower_val = val.to_lowercase();
                         // 1. 精确防误匹配（如 ListParagraph3 不判定为 H3）
                         if lower_val.starts_with("heading") || lower_val.contains("heading") {
-                            if lower_val.contains("1") { p_heading_level = 1; }
-                            else if lower_val.contains("2") { p_heading_level = 2; }
-                            else if lower_val.contains("3") { p_heading_level = 3; }
-                            else if lower_val.contains("4") { p_heading_level = 4; }
-                        } else if lower_val == "1" || lower_val == "heading1" || lower_val == "标题 1" {
+                            if lower_val.contains("1") {
+                                p_heading_level = 1;
+                            } else if lower_val.contains("2") {
+                                p_heading_level = 2;
+                            } else if lower_val.contains("3") {
+                                p_heading_level = 3;
+                            } else if lower_val.contains("4") {
+                                p_heading_level = 4;
+                            }
+                        } else if lower_val == "1"
+                            || lower_val == "heading1"
+                            || lower_val == "标题 1"
+                        {
                             p_heading_level = 1;
-                        } else if lower_val == "2" || lower_val == "heading2" || lower_val == "标题 2" {
+                        } else if lower_val == "2"
+                            || lower_val == "heading2"
+                            || lower_val == "标题 2"
+                        {
                             p_heading_level = 2;
-                        } else if lower_val == "3" || lower_val == "heading3" || lower_val == "标题 3" {
+                        } else if lower_val == "3"
+                            || lower_val == "heading3"
+                            || lower_val == "标题 3"
+                        {
                             p_heading_level = 3;
                         } else if lower_val.contains("title") {
                             p_heading_level = 1;
@@ -333,27 +357,32 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
             }
         }
     }
-    
+
     // 加粗熔接：把 "**学****号**" 优化为 "**学号**"
     let cleaned_result = result.replace("****", "");
-    if cleaned_result.trim().is_empty() { None } else { Some(cleaned_result) }
+    if cleaned_result.trim().is_empty() {
+        None
+    } else {
+        Some(cleaned_result)
+    }
 }
 
 fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
     let mut text = String::new();
-    
-    let mut slide_names: Vec<String> = archive.file_names()
+
+    let mut slide_names: Vec<String> = archive
+        .file_names()
         .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
         .map(|name| name.to_string())
         .collect();
-    
+
     slide_names.sort_by_key(|name| {
         let num_str: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
         num_str.parse::<usize>().unwrap_or(0)
     });
-    
+
     for (idx, name) in slide_names.iter().enumerate() {
         if let Ok(mut slide_file) = archive.by_name(name) {
             let mut content = String::new();
@@ -362,7 +391,7 @@ fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
                 let mut in_tag = false;
                 let mut is_collecting = false;
                 let mut tag_buffer = String::new();
-                
+
                 for c in content.chars() {
                     if c == '<' {
                         in_tag = true;
@@ -370,8 +399,7 @@ fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
                     } else if c == '>' {
                         in_tag = false;
                         let tag_content = tag_buffer.trim();
-                        if tag_content.starts_with('/') {
-                            let name = &tag_content[1..];
+                        if let Some(name) = tag_content.strip_prefix('/') {
                             if name == "a:t" {
                                 is_collecting = false;
                             } else if name == "a:p" {
@@ -381,7 +409,7 @@ fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
                             let is_self_closing = tag_content.ends_with('/');
                             let mut clean_content = tag_content;
                             if is_self_closing {
-                                clean_content = &tag_content[..tag_content.len() - 1].trim_end();
+                                clean_content = tag_content[..tag_content.len() - 1].trim_end();
                             }
                             let name = clean_content.split_whitespace().next().unwrap_or("");
                             if name == "a:t" {
@@ -399,7 +427,7 @@ fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
                         slide_text.push(c);
                     }
                 }
-                
+
                 let cleaned = simple_xml_unescape(&slide_text);
                 if !cleaned.trim().is_empty() {
                     text.push_str(&format!("\n--- Slide {} ---\n", idx + 1));
@@ -408,14 +436,18 @@ fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
             }
         }
     }
-    
-    if text.trim().is_empty() { None } else { Some(text) }
+
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
     let file = std::fs::File::open(path).ok()?;
     let mut archive = zip::ZipArchive::new(file).ok()?;
-    
+
     // 1. 从 xl/workbook.xml 提取每个 sheet 的真实名称，建立 ID 到名字的映射
     let mut sheet_names_map = std::collections::HashMap::new();
     if let Ok(mut wb_file) = archive.by_name("xl/workbook.xml") {
@@ -434,7 +466,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                     if name == "sheet" {
                         let mut s_name = String::new();
                         let mut s_id = 0;
-                        
+
                         if let Some(n_pos) = tag_content.find("name=\"") {
                             let sub = &tag_content[n_pos + 6..];
                             if let Some(end_pos) = sub.find('"') {
@@ -446,7 +478,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                                 s_name = simple_xml_unescape(&sub[..end_pos]);
                             }
                         }
-                        
+
                         let mut id_str = "";
                         if let Some(id_pos) = tag_content.find("sheetId=\"") {
                             let sub = &tag_content[id_pos + 9..];
@@ -462,7 +494,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                         if let Ok(parsed_id) = id_str.parse::<usize>() {
                             s_id = parsed_id;
                         }
-                        
+
                         if s_id > 0 && !s_name.is_empty() {
                             sheet_names_map.insert(s_id, s_name);
                         }
@@ -474,7 +506,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
             }
         }
     }
-    
+
     // 2. 获取共享字符串表
     let mut shared_strings = Vec::new();
     if let Ok(mut ss_file) = archive.by_name("xl/sharedStrings.xml") {
@@ -484,7 +516,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
             let mut is_collecting = false;
             let mut tag_buffer = String::new();
             let mut current_str = String::new();
-            
+
             for c in content.chars() {
                 if c == '<' {
                     in_tag = true;
@@ -492,8 +524,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                 } else if c == '>' {
                     in_tag = false;
                     let tag_content = tag_buffer.trim();
-                    if tag_content.starts_with('/') {
-                        let name = &tag_content[1..];
+                    if let Some(name) = tag_content.strip_prefix('/') {
                         if name == "t" {
                             is_collecting = false;
                             shared_strings.push(simple_xml_unescape(&current_str));
@@ -514,29 +545,31 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
             }
         }
     }
-    
+
     // 3. 扫描并收集所有的 worksheets/sheet*.xml 并按照编号排序
-    let mut sheet_names: Vec<String> = archive.file_names()
+    let mut sheet_names: Vec<String> = archive
+        .file_names()
         .filter(|name| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
         .map(|name| name.to_string())
         .collect();
-        
+
     sheet_names.sort_by_key(|name| {
         let num_str: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
         num_str.parse::<usize>().unwrap_or(0)
     });
-    
+
     let mut final_text = String::new();
-    
+
     for name in sheet_names {
         // 从名称中提取数字，建立 ID 到名字的映射
         let num_str: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
         let sheet_id = num_str.parse::<usize>().unwrap_or(0);
-        
-        let sheet_display_name = sheet_names_map.get(&sheet_id)
+
+        let sheet_display_name = sheet_names_map
+            .get(&sheet_id)
             .cloned()
             .unwrap_or_else(|| format!("Sheet {}", sheet_id));
-            
+
         if let Ok(mut sheet_file) = archive.by_name(&name) {
             let mut content = String::new();
             if sheet_file.read_to_string(&mut content).is_ok() {
@@ -548,7 +581,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                 let mut is_shared_string = false;
                 let mut in_val = false;
                 let mut val_buffer = String::new();
-                
+
                 for c in content.chars() {
                     if c == '<' {
                         in_tag = true;
@@ -556,8 +589,7 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                     } else if c == '>' {
                         in_tag = false;
                         let tag_content = tag_buffer.trim();
-                        if tag_content.starts_with('/') {
-                            let name = &tag_content[1..];
+                        if let Some(name) = tag_content.strip_prefix('/') {
                             if name == "v" {
                                 in_val = false;
                                 let val_str = val_buffer.trim().to_string();
@@ -571,31 +603,30 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                                     val_str
                                 };
                                 row_cells.push((current_col_idx, final_val));
-                            } else if name == "row" {
-                                if !row_cells.is_empty() {
-                                    row_cells.sort_by_key(|&(idx, _)| idx);
-                                    let mut last_idx = 0;
-                                    let mut line_str = String::new();
-                                    for &(idx, ref val) in &row_cells {
-                                        while last_idx < idx {
-                                            line_str.push('\t');
-                                            last_idx += 1;
-                                        }
-                                        if last_idx > 0 {
-                                            line_str.push('\t');
-                                        }
-                                        line_str.push_str(val);
-                                        last_idx = idx + 1;
+                            } else if name == "row" && !row_cells.is_empty() {
+                                row_cells.sort_by_key(|&(idx, _)| idx);
+                                let mut last_idx = 0;
+                                let mut line_str = String::new();
+                                for &(idx, ref val) in &row_cells {
+                                    while last_idx < idx {
+                                        line_str.push('\t');
+                                        last_idx += 1;
                                     }
-                                    sheet_text.push_str(&line_str);
-                                    sheet_text.push('\n');
-                                    row_cells.clear();
+                                    if last_idx > 0 {
+                                        line_str.push('\t');
+                                    }
+                                    line_str.push_str(val);
+                                    last_idx = idx + 1;
                                 }
+                                sheet_text.push_str(&line_str);
+                                sheet_text.push('\n');
+                                row_cells.clear();
                             }
                         } else {
                             let name = tag_content.split_whitespace().next().unwrap_or("");
                             if name == "c" {
-                                is_shared_string = tag_content.contains("t=\"s\"") || tag_content.contains("t='s'");
+                                is_shared_string = tag_content.contains("t=\"s\"")
+                                    || tag_content.contains("t='s'");
                                 let mut r_val = "";
                                 if let Some(r_pos) = tag_content.find("r=\"") {
                                     let sub = &tag_content[r_pos + 3..];
@@ -627,49 +658,114 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
                         val_buffer.push(c);
                     }
                 }
-                
+
                 if !sheet_text.trim().is_empty() {
-                    final_text.push_str(&format!("\n--- Sheet {}: {} ---\n", sheet_id, sheet_display_name));
+                    final_text.push_str(&format!(
+                        "\n--- Sheet {}: {} ---\n",
+                        sheet_id, sheet_display_name
+                    ));
                     final_text.push_str(&sheet_text);
                 }
             }
         }
     }
-    
-    if final_text.trim().is_empty() { None } else { Some(final_text) }
+
+    if final_text.trim().is_empty() {
+        None
+    } else {
+        Some(final_text)
+    }
 }
 
 fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
-    let doc = match lopdf::Document::load(path) {
+    use pdf_oxide::pipeline::converters::{MarkdownOutputConverter, OutputConverter};
+    use pdf_oxide::pipeline::{
+        ReadingOrderContext, ReadingOrderStrategyType, TextPipeline, TextPipelineConfig,
+    };
+    use pdf_oxide::PdfDocument;
+
+    let doc = match PdfDocument::open(path) {
         Ok(d) => d,
         Err(e) => {
-            println!("[FileExtractor] Failed to load PDF: {:?}, error: {}", path, e);
+            println!(
+                "[FileExtractor] Failed to open PDF (pdf_oxide): {:?}, error: {:?}",
+                path, e
+            );
             return None;
         }
     };
-    let mut text = String::new();
 
-    let pages = doc.get_pages();
-    let mut page_numbers: Vec<u32> = pages.keys().cloned().collect();
-    page_numbers.sort();
+    let mut full_markdown = String::new();
+    let pages_count = match doc.page_count() {
+        Ok(count) => count,
+        Err(e) => {
+            println!(
+                "[FileExtractor] Failed to get page count (pdf_oxide): {:?}, error: {:?}",
+                path, e
+            );
+            return None;
+        }
+    };
 
-    for page_id in page_numbers {
-        match doc.extract_text(&[page_id]) {
-            Ok(page_text) => {
-                text.push_str(&page_text);
-                text.push('\n');
+    // 配置高性能 Pipeline：启用 XY-Cut (投影剖分算法) 识别多栏布局，并开启标题检测
+    let mut config = TextPipelineConfig::default();
+    config.reading_order.strategy = ReadingOrderStrategyType::XYCut;
+    config.output.detect_headings = true;
+
+    let pipeline = TextPipeline::with_config(config.clone());
+    let converter = MarkdownOutputConverter::new();
+
+    for i in 0..pages_count {
+        // 1. 提取带坐标的原始文本跨度 (Spans)
+        match doc.extract_spans(i) {
+            Ok(spans) => {
+                // 2. 通过 Pipeline 进行阅读顺序分析 (XY-Cut)
+                let context = ReadingOrderContext::new().with_page(i as u32);
+                match pipeline.process(spans, context) {
+                    Ok(ordered_spans) => {
+                        // 3. 转换为结构化的 Markdown
+                        match converter.convert(&ordered_spans, &config) {
+                            Ok(page_md) => {
+                                full_markdown.push_str(&page_md);
+                                full_markdown.push_str("\n\n");
+                            }
+                            Err(e) => {
+                                println!(
+                                    "[FileExtractor] Markdown conversion failed for page {}: {:?}",
+                                    i, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "[FileExtractor] Reading order analysis failed for page {}: {:?}",
+                            i, e
+                        );
+                    }
+                }
             }
             Err(e) => {
-                println!("[FileExtractor] Failed to extract text from PDF page {}: {:?}, error: {}", page_id, path, e);
+                println!(
+                    "[FileExtractor] Span extraction failed for page {}: {:?}",
+                    i, e
+                );
             }
         }
     }
 
-    if text.is_empty() { None } else { Some(text) }
+    if full_markdown.trim().is_empty() {
+        Some("[此文件可能为扫描件或图片型 PDF，暂不支持文字提取]".to_string())
+    } else {
+        Some(full_markdown)
+    }
 }
 /// 物理文件多模态异步/同步提取文本主入口
 pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<String> {
-    println!("[FileExtractor] Starting extraction for path: {:?}, mime: {}", path, mime_type);
+    println!(
+        "[FileExtractor] Starting extraction for path: {:?}, mime: {}",
+        path, mime_type
+    );
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -715,13 +811,20 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         "xlsx" => extract_xlsx_text(path),
         "pdf" => extract_pdf_text(path),
         _ => {
-            println!("[FileExtractor] No specialized extractor for extension: {}", ext);
+            println!(
+                "[FileExtractor] No specialized extractor for extension: {}",
+                ext
+            );
             None
         }
     };
 
     if let Some(text) = doc_text {
-        println!("[FileExtractor] Successfully extracted {} chars from structured doc: {:?}", text.chars().count(), path);
+        println!(
+            "[FileExtractor] Successfully extracted {} chars from structured doc: {:?}",
+            text.chars().count(),
+            path
+        );
         const MAX_TEXT_CHARS: usize = 10_000_000;
         if text.chars().count() > MAX_TEXT_CHARS {
             let truncated: String = text.chars().take(MAX_TEXT_CHARS).collect();
@@ -730,16 +833,19 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         return Some(text);
     }
 
-    println!("[FileExtractor] Extraction failed or returned no content for path: {:?}", path);
+    println!(
+        "[FileExtractor] Extraction failed or returned no content for path: {:?}",
+        path
+    );
     None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::fs;
     use serde_json::json;
+    use std::fs;
+    use std::path::Path;
 
     #[test]
     fn test_extract_sample_files() {
@@ -750,11 +856,23 @@ mod tests {
         }
 
         let files = vec![
-            ("上机实验一：蒙特卡罗模拟原理与方法.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+            (
+                "上机实验一：蒙特卡罗模拟原理与方法.pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ),
             ("模拟模型——仓库卸货问题.pdf", "application/pdf"),
-            ("蒙特卡洛计算π值.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            ("蒙特卡罗模拟实验报告.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-            ("计划书【四稿】new.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            (
+                "蒙特卡洛计算π值.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            (
+                "蒙特卡罗模拟实验报告.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            (
+                "计划书【四稿】new.docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
             ("计划书【四稿】new.pdf", "application/pdf"),
             ("银杏科技.pdf", "application/pdf"),
         ];
@@ -768,19 +886,22 @@ mod tests {
 
             // 如果是 PDF，我们进行详细诊断
             if filename.ends_with(".pdf") {
-                match lopdf::Document::load(&file_path) {
+                use pdf_oxide::PdfDocument;
+                match PdfDocument::open(&file_path) {
                     Ok(doc) => {
-                        let pages = doc.get_pages();
-                        println!("PDF 成功载入! 总页数: {}", pages.len());
-                        let mut page_numbers: Vec<u32> = pages.keys().cloned().collect();
-                        page_numbers.sort();
-                        for page_id in page_numbers {
-                            match doc.extract_text(&[page_id]) {
+                        let pages_count = doc.page_count().unwrap_or(0);
+                        println!("PDF 成功载入! 总页数: {}", pages_count);
+                        for i in 0..pages_count {
+                            match doc.extract_text(i) {
                                 Ok(page_text) => {
-                                    println!("  - 页码 {}: 成功提取 {} 字符", page_id, page_text.chars().count());
+                                    println!(
+                                        "  - 页码 {}: 成功提取 {} 字符",
+                                        i + 1,
+                                        page_text.chars().count()
+                                    );
                                 }
                                 Err(e) => {
-                                    println!("  - 页码 {}: 提取文本失败: {:?}", page_id, e);
+                                    println!("  - 页码 {}: 提取文本失败: {:?}", i + 1, e);
                                 }
                             }
                         }
@@ -820,8 +941,9 @@ mod tests {
                 let json_path = test_dir.join(format!("{}.extracted.json", filename));
                 fs::write(
                     &json_path,
-                    serde_json::to_string_pretty(&json_meta).unwrap()
-                ).expect("写入 json 文件失败");
+                    serde_json::to_string_pretty(&json_meta).unwrap(),
+                )
+                .expect("写入 json 文件失败");
             } else {
                 println!("【失败】提取文件: {}，结果为 None", filename);
             }

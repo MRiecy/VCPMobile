@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 pub struct DiffHandler;
 
 impl DiffHandler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_diff(
         app_handle: &AppHandle,
         payload: &Value,
@@ -39,14 +40,8 @@ impl DiffHandler {
             let items_clone: Vec<serde_json::Value> = items.clone();
 
             // 统计有效操作数（排除 SKIP）
-            let pull_count = items_clone
-                .iter()
-                .filter(|i| i["action"] == "PULL")
-                .count() as u32;
-            let push_count = items_clone
-                .iter()
-                .filter(|i| i["action"] == "PUSH")
-                .count() as u32;
+            let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
+            let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
             let delete_count = items_clone
                 .iter()
                 .filter(|i| i["action"] == "DELETE")
@@ -147,8 +142,7 @@ impl DiffHandler {
                                 if current_phase_wd == 1 {
                                     let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata);
                                 } else if current_phase_wd == 2 {
-                                    let _ =
-                                        tx_internal_wd.send(SyncCommand::StartTopicValidation);
+                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicValidation);
                                 }
                                 break;
                             } else if stuck_count >= 1 {
@@ -299,7 +293,10 @@ impl DiffHandler {
                             Ok(Some(r)) => {
                                 let db_owner_id: String = r.get("owner_id");
                                 let tid: String = r.get("topic_id");
-                                println!("[SyncDebug] Found topic {} (owner: {})", tid, db_owner_id);
+                                println!(
+                                    "[SyncDebug] Found topic {} (owner: {})",
+                                    tid, db_owner_id
+                                );
 
                                 let type_str = if owner_type == "group" {
                                     "group_topic"
@@ -311,7 +308,8 @@ impl DiffHandler {
                                 } else {
                                     json!({ "id": tid, "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": db_owner_id })
                                 };
-                                batch_push_requests.push(json!({ "id": id, "type": type_str, "data": dto }));
+                                batch_push_requests
+                                    .push(json!({ "id": id, "type": type_str, "data": dto }));
                             }
                             Ok(None) => {
                                 println!("[SyncDebug] Topic NOT FOUND in database: {}", id);

@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 pub struct BatchDiffHandler;
 
 impl BatchDiffHandler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_diff_batch(
         app_handle: &AppHandle,
         payload: &Value,
@@ -22,7 +23,11 @@ impl BatchDiffHandler {
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         logger: &Arc<Mutex<SyncLogger>>,
         write_queue: &Arc<DbWriteQueue>,
-        pending_diff_batches: &Arc<tokio::sync::Mutex<std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>>>,
+        pending_diff_batches: &Arc<
+            tokio::sync::Mutex<
+                std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>,
+            >,
+        >,
         prerender_enabled: bool,
     ) -> Result<(), String> {
         if let Some(results) = payload["results"].as_object() {
@@ -70,7 +75,8 @@ impl BatchDiffHandler {
                 let sync_logger_msg = logger.clone();
                 let wq_in = write_queue.clone();
 
-                let sync_state = app_handle.state::<crate::vcp_modules::sync::sync_service::SyncState>();
+                let sync_state =
+                    app_handle.state::<crate::vcp_modules::sync::sync_service::SyncState>();
                 let uploaded_hashes = sync_state.uploaded_hashes.clone();
 
                 // 收集所有涉及的 topic ID（去重）
@@ -131,7 +137,13 @@ impl BatchDiffHandler {
                     // 2. Pull 批量（push 完成后再 pull，确保 push_pull 的 topic 数据已合并）
                     if has_pull {
                         match PullExecutor::pull_messages_batch(
-                            &h_in, &c_in, &b_in, &token, &pull_batch, &wq_in, prerender_enabled,
+                            &h_in,
+                            &c_in,
+                            &b_in,
+                            &token,
+                            &pull_batch,
+                            &wq_in,
+                            prerender_enabled,
                         )
                         .await
                         {

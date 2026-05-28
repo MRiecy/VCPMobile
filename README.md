@@ -11,7 +11,7 @@
     <img src="https://img.shields.io/badge/UI-UnoCSS%20%7C%20Glassmorphism-4f46e5" alt="UI">
     <img src="https://img.shields.io/badge/license-MIT-yellow" alt="license">
   </p>
-</div>
+
 
 ---
 
@@ -44,13 +44,16 @@
 
 ### 演进历程
 
-| 阶段 | 技术栈 | 关键问题 | 决策 |
-|------|--------|----------|------|
-| v0.1 ~ v0.5 | Node.js + Electron | 内存泄漏、OOM、启动慢 | 保留桌面端，移动端另起炉灶 |
-| v0.6 ~ v0.9 | Rust + Tauri v1 | IPC 开销高、Android 支持弱 | 升级至 Tauri v2，原生插件体系 |
-| v1.0.0 | Rust + Tauri v2 + Vue 3 | — | 正式发布，代号 Avatar |
+| 版本 | 关键里程碑 |
+|------|------------|
+| v0.9.0 | 首个 Preview 版本，Tauri v2 + Vue 3 + Rust 基础架构确立 |
+| v0.9.6 | 修复消息历史回退遗留，指纹命令注册，APK 签名验证 |
+| v0.9.8 | 消息路由体系完善，SSE 生命周期管理，UI 架构重构 |
+| v0.9.10 ~ v0.9.12 | 同步 V2 协议实现，群组对话，附件分类与预览体系 |
+| v0.9.13 ~ v0.9.14 | 分布式节点模块，设备能力工具集，Model 管理器，WebGL 特效 |
+| v1.0.0 | Avatar 正式发布：Backend-Driven Streaming、Tarven 上下文注入、Semantic Z-Index、SlidePage 虚拟导航 |
 
-从 Node.js 迁移至 Rust 的动机非常直接：移动端的内存约束远比桌面端苛刻。在 Node.js 时代，一次大文件解析或内存中的 PDF 处理就可能触发 OOM 崩溃。Rust 的所有权模型和零成本抽象让我们在保持高性能的同时，获得了编译期内存安全保障。Tokio 的异步运行时则确保了网络 IO 不会阻塞主线程，这对流式聊天体验至关重要。
+项目从首个 commit 起即采用 Tauri v2 + Vue 3 + Rust 栈，不存在 Node.js / Electron 或 Tauri v1 的历史阶段。Rust 的所有权模型和零成本抽象为移动端提供了编译期内存安全保障，Tokio 异步运行时确保网络 IO 不阻塞主线程，这对流式聊天体验至关重要。
 
 ---
 
@@ -108,7 +111,10 @@
   - Android 原生 File Picker（常规文件）
   - 高速 TCP 通道（大文件分块上传）
 - `AttachmentViewer` 全屏查看器，挂载于语义化 `z-viewer` 层级
-- 内存安全限制：上传文件 ≤ 20 MB，Base64 读取 ≤ 50 MB
+- 文件上传：无大小限制，系统级 `rename` + SHA-256 流式哈希计算
+- 文本提取：50 MB 文件硬上限防 OOM，提取结果按 1000 万字符截断
+- 视频帧提取：Base64 累计 18 MB 动态截断，确保请求体在 20 MB 以内
+- 音频提取：3500 秒（约 58 分钟）时长硬截断
 
 ### 🎯 Model 管理与选择器
 
@@ -140,7 +146,7 @@
 - SlidePage 虚拟页面栈：非路由跳转，通过 `overlayStore` 管理，动态 Z-Index = `40 + stackIndex`
 - Operation Aegis 模态历史栈支持物理返回键 LIFO 消费
 
-### 🔧 14+ 设备能力工具（分布式节点）
+### 🔧 14+ 设备能力工具（分布式节点）— TODO
 
 `distributed/` 模块将手机转化为 AI 可直接调用的分布式计算节点，提供 14+ 原生设备能力：
 
@@ -163,11 +169,7 @@
 
 ### 🌊 WebGL 流体动态背景
 
-`WebGLFluidBackground.vue` 提供高性能流体模拟动态背景，用于：
-
-- 启动屏（BootScreen）视觉增强
-- 空态页（Empty State）氛围营造
-- 特定 Glassmorphism 主题的动态底纹
+`WebGLFluidBackground.vue` 提供高性能流体模拟动态背景，仅用于**关于界面（About Section）**的视觉特效。
 
 ### 🚀 OTA 热更新
 
@@ -407,7 +409,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 - **"Android lifecycle bridge 的事件流向？"** → `docs/plugins/...`
 - **"Attachment upload protocol 的分块策略？"** → `docs/modules/07_...`
 - **"UI Z-Index 层级语义化规范？"** → `docs/UI_LAYER_ARCHITECTURE.md`
-- **"Android 权限管理与前台服务血训？"** → `docs/ANDROID_PLUGIN_MANAGEMENT.md`
+- **"Android 权限管理与前台服务规范？"** → `docs/ANDROID_PLUGIN_MANAGEMENT.md`
 - **"Backend-Driven Streaming 的消息生命周期？"** → `docs/vue_docs/features/chat/...`
 - **"Release 构建优化配置详解？"** → `docs/modules/...`
 
@@ -445,7 +447,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 - Node.js (v22+) & pnpm (10.x)
 - Android Studio & Android NDK (`29.0.13846066`)
 - Java 17 (temurin)
-- Windows PowerShell 5.1（构建环境）
+- 支持 Windows / macOS / Linux 的开发环境
 
 **完整命令流：**
 
@@ -460,25 +462,18 @@ pnpm install
 # 3. Initialize Android (first time only)
 pnpm tauri android init
 
-# 4. Development server — WiFi mode
-pnpm dev:android
+# 4. Development server
+pnpm tauri android dev
 
-# 5. Development server — USB mode
-pnpm dev:usb
+# 5. Static check (TypeScript)
+vue-tsc --noEmit
 
-# 6. Static check
-pnpm check
+# 6. Static check (Rust)
+cd src-tauri && cargo check
 
 # 7. Build Release APK
 pnpm tauri android build --apk --target aarch64
 ```
-
-### 7.3 Android 调试双模式
-
-| 模式 | 命令 | 原理 | 适用场景 |
-|------|------|------|----------|
-| WiFi | `pnpm dev:android` | 自动探测物理局域网 IP，注入 `TAURI_DEV_HOST` | 同一局域网 |
-| USB | `pnpm dev:usb` | `adb reverse tcp:1420/1421`，使用 `127.0.0.1` | 无 WiFi 环境 |
 
 ---
 
@@ -489,12 +484,11 @@ pnpm tauri android build --apk --target aarch64
 | 脚本 | 命令 | 说明 |
 |------|------|------|
 | `pnpm dev` | `vite` | 前端开发服务器（端口 1420）|
-| `pnpm check` | `vue-tsc --noEmit && cd src-tauri && cargo check` | 完整静态检查 |
-| `pnpm dev:android` | `node scripts/tauri_android_dev.cjs` | WiFi 模式真机调试 |
-| `pnpm dev:usb` | `node scripts/tauri_android_dev.cjs --usb` | USB 模式真机调试 |
-| `pnpm memory:refresh` | `node scripts/refresh_manifest.cjs` | 刷新 `plans/` 知识图谱 |
-| `pnpm io:write` | `node scripts/nova_utils.cjs write` | 安全文件写入（UTF-8）|
-| `pnpm io:append` | `node scripts/nova_utils.cjs append` | 安全文件追加（UTF-8）|
+| `pnpm build` | `vue-tsc && vite build` | 前端生产构建 |
+| `pnpm tauri android dev` | — | Android 开发调试 |
+| `pnpm tauri android build --apk --target aarch64` | — | Release APK 构建 |
+
+项目同时提供了 `scripts/` 目录下的辅助脚本（如 WiFi/USB 双模式调试启动器），适用于内部开发流程。
 
 ### 8.2 Rust Release 优化
 
@@ -509,7 +503,7 @@ strip = true
 
 ### 8.3 测试策略
 
-- **前端**：无自动化测试。验证依赖 `pnpm check`（静态类型）+ 真机手动测试。
+- **前端**：无自动化测试。验证依赖 `vue-tsc --noEmit`（静态类型）+ 真机手动测试。
 - **Rust 单元测试**：
   - `vcp_modules/sync/sync_retry.rs`（5 个测试）
   - `vcp_modules/chat/context_sanitizer.rs`（3 个测试）
@@ -538,26 +532,22 @@ strip = true
 | `04_Logs/` | Bug 解剖、Magi 辩证记录 | 重大节点或调试后 |
 | `05_Sublimations/` | 固化真理、精炼标准 | 确立新架构模式时 |
 
-- 任何对 `plans/` 的修改必须立即执行 `pnpm memory:refresh`
+- 任何对 `plans/` 的修改建议同步更新索引文件
 
 ### 9.3 编码规范（精简版）
 
 - **前端**：`<script setup>` 强制、UnoCSS 优先、PascalCase 组件、Feature Co-location
 - **后端**：业务逻辑必须在 `vcp_modules/`；`lib.rs` 仅做路由；禁止 `unwrap()` / `expect()`；异步 IO 基于 Tokio
-- **跨层**：修改后必须运行 `pnpm check`；严禁全文件覆盖小修改；Windows Shell 安全（禁止 `&&` / `||`，禁止 `>` / `>>` 写 UTF-8）
+- **跨层**：修改后必须运行静态检查；严禁全文件覆盖小修改
 
 ### 9.4 Pull Request 流程
 
-1. **设计思辨**：重大变更前在 `plans/04_Logs/` 记录 Magi 三贤者思辨过程
-2. **静态检查**：提交前必须执行 `pnpm check`，确保 TS + Rust 无错误
+1. **设计思辨**：重大变更前进行技术评审，记录决策过程
+2. **静态检查**：提交前确保 `vue-tsc --noEmit` 与 `cargo check` 无错误
 3. **文档同步**：若修改跨层接口或新增模块，同步更新 `docs/` 对应文档
-4. **知识刷新**：若修改 `plans/` 目录，执行 `pnpm memory:refresh`
-5. **提交信息**：使用中文描述变更意图，重大变更附带 `plans/` 文档链接
+4. **提交信息**：使用中文描述变更意图，重大变更附带设计文档链接
 
-### 9.5 血训协议
 
-1. **重构前强制存档**：任何涉及新建/删除模块、拆分 500+ 行 God File、修改 `mod.rs` / `lib.rs` 前，必须先 `git add . && git commit -m "save"`
-2. **checkout 前看 git 状态**：任何 `git checkout` / `git restore` 前，必须先 `git status` 展示状态，得到用户明确同意，建议先 `git commit` 保存
 
 ---
 
@@ -567,9 +557,9 @@ strip = true
 
 A: 采用 Operation Aegis 模态历史栈，返回键按 LIFO 顺序消费：Modal Stack → 重置会话 → 双击退出到后台。
 
-**Q: 流式输出时前端为什么不预创建 thinking 消息了？**
+**Q: Agent 设置在哪？**
 
-A: 1.0 采用 Backend-Driven Streaming 架构，thinking 消息 ID 由后端生成并通过 `StreamEvent::thinking` 事件推送，前端不再预分配。
+A: 在主界面侧边栏长按任意 Agent 卡片，或左滑 Agent 卡片点击「编辑」图标，即可进入 AgentSettingsView。群组设置同理。
 
 **Q: 如何切换主题或壁纸？**
 
@@ -579,17 +569,20 @@ A: 进入 Settings → ThemePicker，选择主题即可实时切换。壁纸从 
 
 A: 检查 1) 手机与电脑是否同一局域网；2) 桌面端 VCPChat 是否启用同步插件；3) 查看 `docs/sync/15_开发指南与FAQ.md`。
 
-**Q: 大文件上传为什么不走 Tauri invoke？**
+**Q: 上下文注入规则在哪里设置？**
 
-A: 大文件通过高速 TCP 通道直接传输，绕过 IPC 序列化开销，详见 `docs/modules/07_高速上传协议.md`。
+A: 进入 Agent 或群组设置页面，找到「上下文注入」选项卡，可添加 `system_suffix`、`user_suffix`、`context_inject` 三种规则，支持 scope 分级与 sort_order 排序。
 
-**Q: Agent 侧边栏的拖拽排序如何保存？**
+**Q: Agent 排序如何改变？**
 
-A: SortableJS 触发 `onEnd` 后更新 `assistantStore.agentOrder`，通过 `update_settings` 增量保存到后端 SQLite。
+A: 在 Agent 侧边栏长按并拖拽 Agent 卡片即可调整顺序。排序状态通过 `update_settings` 增量保存到后端 SQLite。
 
-**Q: 如何为项目贡献代码？**
+**Q: 语音模式有哪些模式？**
 
-A: 遵循 Magi 三贤者协议进行设计思辨，在 `plans/` 中记录决策，修改后运行 `pnpm check`，提交前执行 `pnpm memory:refresh`。
+A: 输入栏提供三种语音交互方式：
+- **语音模式**（点击语音图标切换）：显示「按住 说话」大条，按住录音后作为音频附件发送
+- **STT 语音转文字**（在语音模式下按住说话）：实时识别为文字输入到文本框
+- **长按快速录音**（在非语音模式下长按语音图标）：直接录制音频附件，松手即发送
 
 **Q: 构建失败提示 NDK 版本不匹配？**
 

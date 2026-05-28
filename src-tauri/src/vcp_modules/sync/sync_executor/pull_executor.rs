@@ -86,7 +86,8 @@ async fn process_topic_messages<R: Runtime>(
                             att.src = format!("file://{}", path);
                         } else {
                             let default_path = format!("file://attachments/{}", hash);
-                            att.internal_path = default_path.trim_start_matches("file://").to_string();
+                            att.internal_path =
+                                default_path.trim_start_matches("file://").to_string();
                             att.src = default_path;
                         }
                     }
@@ -378,7 +379,11 @@ impl PullExecutor {
                 .await;
         }
 
-        crate::vcp_modules::sync::sync_service::emit_sync_log(app, "info", "[PullExecutor] Batch pull completed");
+        crate::vcp_modules::sync::sync_service::emit_sync_log(
+            app,
+            "info",
+            "[PullExecutor] Batch pull completed",
+        );
         Ok(())
     }
 
@@ -603,14 +608,22 @@ impl PullExecutor {
                         "[PullExecutor] Batch pull: topic {} completed ({}/{})",
                         result.topic_id, completed, total
                     );
-                    crate::vcp_modules::sync::sync_service::emit_sync_log(&app_receiver, "info", &msg);
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(
+                        &app_receiver,
+                        "info",
+                        &msg,
+                    );
                 } else {
                     let err = result.error.as_deref().unwrap_or("unknown");
                     let msg = format!(
                         "[PullExecutor] Batch pull: topic {} FAILED ({}/{}): {}",
                         result.topic_id, completed, total, err
                     );
-                    crate::vcp_modules::sync::sync_service::emit_sync_log(&app_receiver, "error", &msg);
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(
+                        &app_receiver,
+                        "error",
+                        &msg,
+                    );
                 }
                 results.push(result);
             }
@@ -654,7 +667,6 @@ impl PullExecutor {
                 let sem_clone = sem.clone();
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
-                let prerender_enabled = prerender_enabled; // Copy 捕获
 
                 let handle = tokio::spawn(async move {
                     let start_t = std::time::Instant::now();
@@ -663,14 +675,20 @@ impl PullExecutor {
                         Ok(f) => f,
                         Err(e) => {
                             let err_msg = format!("[PullExecutor] Malformed NDJSON frame: {}", e);
-                            crate::vcp_modules::sync::sync_service::emit_sync_log(&app_clone, "error", &err_msg);
+                            crate::vcp_modules::sync::sync_service::emit_sync_log(
+                                &app_clone, "error", &err_msg,
+                            );
                             return;
                         }
                     };
 
                     let topic_id = frame.topic_id;
                     if topic_id.is_empty() {
-                        crate::vcp_modules::sync::sync_service::emit_sync_log(&app_clone, "error", "[PullExecutor] Batch pull: empty topicId in NDJSON line, skipping");
+                        crate::vcp_modules::sync::sync_service::emit_sync_log(
+                            &app_clone,
+                            "error",
+                            "[PullExecutor] Batch pull: empty topicId in NDJSON line, skipping",
+                        );
                         return;
                     }
 
@@ -713,7 +731,15 @@ impl PullExecutor {
                             let sem_t = sem_start.elapsed();
                             let _permit = permit; // 持有 permit 直到任务完成
                             let proc_start = std::time::Instant::now();
-                            match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
+                            match process_topic_messages(
+                                &app_clone,
+                                &topic_id,
+                                messages,
+                                &wq_clone,
+                                prerender_enabled,
+                            )
+                            .await
+                            {
                                 Ok((parsed, failed)) => {
                                     let proc_t = proc_start.elapsed();
                                     let total_t = start_t.elapsed();
@@ -783,11 +809,23 @@ impl PullExecutor {
                                     Ok(permit) => {
                                         let _permit = permit;
                                         // 转换 DTO 到 ChatMessage 核心实体
-                                        let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> = pull_dtos
+                                        let messages: Vec<
+                                            crate::vcp_modules::chat_manager::ChatMessage,
+                                        > = pull_dtos
                                             .into_iter()
-                                            .map(crate::vcp_modules::chat_manager::ChatMessage::from)
+                                            .map(
+                                                crate::vcp_modules::chat_manager::ChatMessage::from,
+                                            )
                                             .collect();
-                                        match process_topic_messages(&app_clone, &topic_id, messages, &wq_clone, prerender_enabled).await {
+                                        match process_topic_messages(
+                                            &app_clone,
+                                            &topic_id,
+                                            messages,
+                                            &wq_clone,
+                                            prerender_enabled,
+                                        )
+                                        .await
+                                        {
                                             Ok((parsed, failed)) => {
                                                 let _ = tx_clone.send(BatchPullResult {
                                                     topic_id,

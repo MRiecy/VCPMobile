@@ -13,7 +13,6 @@ const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一
 const DEFAULT_SUMMARY_MODEL: &str = "gemini-3.1-flash-lite";
 
 /// 注：不主动发送 temperature 参数，以兼容 o1/Gemini thinking 等不支持该参数的模型
-
 /// AI 请求超时时间 (秒)
 const AI_REQUEST_TIMEOUT_SECS: u64 = 30;
 

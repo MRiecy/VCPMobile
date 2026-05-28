@@ -141,7 +141,7 @@ impl SyncFinalizer {
                         }
                     }
                 }
-                
+
                 let agent_count = affected_agents.len();
                 let group_count = affected_groups.len();
 
@@ -151,7 +151,7 @@ impl SyncFinalizer {
                 for gid in affected_groups {
                     let _ = HashAggregator::bubble_group_hash(&mut tx, &gid).await;
                 }
-                
+
                 match tx.commit().await {
                     Ok(_) => {
                         let elapsed = start_instant.elapsed();

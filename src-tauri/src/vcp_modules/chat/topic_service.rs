@@ -187,7 +187,11 @@ pub async fn create_topic(
     // 触发聚合哈希冒泡 (初始化 Topic Hash 并更新 Agent/Group 的 ContentHash)
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     if let Err(e) = HashAggregator::bubble_from_topic(&mut tx, &id).await {
-        log::error!("[CreateTopic] Failed to bubble hash for topic {}: {}", id, e);
+        log::error!(
+            "[CreateTopic] Failed to bubble hash for topic {}: {}",
+            id,
+            e
+        );
     }
     tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -308,7 +312,7 @@ pub async fn toggle_topic_lock(
             .fetch_one(&db_state.pool)
             .await
             .map_err(|e| e.to_string())?;
-        
+
         let hash: String = row.get("config_hash");
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
             data_type: SyncDataType::Topic,

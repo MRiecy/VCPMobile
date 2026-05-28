@@ -163,4 +163,3 @@ pub fn open_file_native<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(
     }
     Ok(())
 }
-

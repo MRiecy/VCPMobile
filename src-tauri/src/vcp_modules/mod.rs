@@ -28,6 +28,7 @@ pub use chat::aurora_pipeline;
 pub use chat::chat_manager;
 pub use chat::content_parser;
 pub use chat::context_assembler_utils;
+pub use chat::context_injection;
 pub use chat::context_sanitizer;
 pub use chat::emoticon_manager;
 pub use chat::message_service;
@@ -36,8 +37,6 @@ pub use chat::stream_block_parser;
 pub use chat::topic_service;
 pub use chat::topic_summary_service;
 pub use chat::topic_types;
-pub use chat::context_injection;
-
 
 // --- Sync 领域 ---
 pub use sync::sync_dto;
@@ -55,11 +54,11 @@ pub use persistence::message_repository;
 
 // --- Infra 领域 ---
 pub use infra::file_manager;
+pub use infra::high_speed_channel;
 pub use infra::lifecycle_manager;
 pub use infra::maintenance_manager;
 pub use infra::media_processor;
 pub use infra::model_manager;
-pub use infra::high_speed_channel;
 pub use infra::settings_manager;
 pub use infra::vcp_client;
 pub use infra::vcp_log_service;

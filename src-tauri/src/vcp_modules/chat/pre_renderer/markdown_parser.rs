@@ -179,7 +179,7 @@ pub(crate) fn trim_common_leading_indent(text: &str) -> String {
             let mut skipped = 0;
             let mut char_indices = line.char_indices();
             let mut skip_bytes = 0;
-            
+
             while skipped < min_indent {
                 if let Some((idx, c)) = char_indices.next() {
                     if c == ' ' {
@@ -203,7 +203,11 @@ pub(crate) fn trim_common_leading_indent(text: &str) -> String {
 }
 
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
-pub(crate) fn find_matching_close_tag(text: &str, start_pos: usize, tag: &str) -> Option<(usize, usize)> {
+pub(crate) fn find_matching_close_tag(
+    text: &str,
+    start_pos: usize,
+    tag: &str,
+) -> Option<(usize, usize)> {
     let mut depth = 1;
     let search_area = &text[start_pos..];
 
@@ -276,14 +280,13 @@ fn replace_container_placeholders(
 
 pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
     let raw_text = text.to_string();
-    let result = std::panic::catch_unwind(move || {
-        parse_markdown_to_ast_impl(&raw_text)
-    });
+    let result = std::panic::catch_unwind(move || parse_markdown_to_ast_impl(&raw_text));
     match result {
         Ok(nodes) => nodes,
         Err(e) => {
             log::error!("[PreRender] parse_markdown_to_ast panicked: {:?}", e);
-            let mut fallback_node = MarkdownNode::paragraph(vec![InlineNode::text(text.to_string())]);
+            let mut fallback_node =
+                MarkdownNode::paragraph(vec![InlineNode::text(text.to_string())]);
             fallback_node.compute_hashes_recursively();
             vec![fallback_node]
         }

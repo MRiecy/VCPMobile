@@ -79,10 +79,8 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage]) -> Vec<Value> {
                         } else {
                             att.src.clone()
                         };
-                        combined_text.push_str(&format!(
-                            "\n\n[附加文件: {}] (文件名: {})",
-                            path, att.name
-                        ));
+                        combined_text
+                            .push_str(&format!("\n\n[附加文件: {}] (文件名: {})", path, att.name));
                     }
                 }
             }

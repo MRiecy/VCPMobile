@@ -297,8 +297,6 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
     Ok(())
 }
 
-
-
 /// Internal message repository for DB operations
 pub struct MessageRepository;
 

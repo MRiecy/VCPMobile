@@ -220,7 +220,11 @@ async fn run_sync_session(
         .app_log_dir()
         .ok()
         .map(|d| d.join("sync_logs"));
-    let sync_logger = Arc::new(std::sync::Mutex::new(SyncLogger::new_session(sync_log_level, log_dir, Some(app_handle.clone()))));
+    let sync_logger = Arc::new(std::sync::Mutex::new(SyncLogger::new_session(
+        sync_log_level,
+        log_dir,
+        Some(app_handle.clone()),
+    )));
     {
         let sync_state = app_handle.state::<SyncState>();
         let log_path = {
@@ -258,7 +262,11 @@ async fn run_sync_session(
     let sync_logger_task = sync_logger.clone();
 
     loop {
-        if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+        if !handle_clone
+            .state::<SyncState>()
+            .is_syncing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             break;
         }
         let (ws_url, http_url) = {
@@ -998,11 +1006,19 @@ async fn run_sync_session(
                         backoff, retry_count, MAX_RETRIES
                     );
                     emit_sync_log(&handle_clone, "warn", &err_msg);
-                    if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                    if !handle_clone
+                        .state::<SyncState>()
+                        .is_syncing
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
                         break;
                     }
                     tokio::time::sleep(backoff).await;
-                    if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                    if !handle_clone
+                        .state::<SyncState>()
+                        .is_syncing
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
                         break;
                     }
                     continue; // 重新尝试连接
@@ -1024,11 +1040,19 @@ async fn run_sync_session(
                 }
                 let warn_msg = format!("连接失败，第 {} 次重试 | {}", retry_count, err_detail);
                 emit_sync_log(&handle_clone, "warning", &warn_msg);
-                if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                if !handle_clone
+                    .state::<SyncState>()
+                    .is_syncing
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     break;
                 }
                 tokio::time::sleep(retry_delay).await;
-                if !handle_clone.state::<SyncState>().is_syncing.load(std::sync::atomic::Ordering::SeqCst) {
+                if !handle_clone
+                    .state::<SyncState>()
+                    .is_syncing
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     break;
                 }
                 retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
@@ -1098,7 +1122,12 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
 
     // 整合：写入 log 文件和控制台！
     let sync_state = app_handle.state::<SyncState>();
-    if let Some(logger_arc) = sync_state.current_logger.read().ok().and_then(|guard| guard.clone()) {
+    if let Some(logger_arc) = sync_state
+        .current_logger
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
         if let Ok(mut logger) = logger_arc.lock() {
             let log_level = match level {
                 "error" => LogLevel::Error,
@@ -1114,7 +1143,9 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
 
 #[tauri::command]
 pub async fn stop_sync(state: State<'_, SyncState>) -> Result<(), String> {
-    state.is_syncing.store(false, std::sync::atomic::Ordering::SeqCst);
+    state
+        .is_syncing
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     {
         let mut guard = state.connection_status.write().await;
         *guard = "disconnected".to_string();

@@ -12,11 +12,11 @@ use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
 };
-use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::context_injection::{
-    get_tarven_rules, save_tarven_rule, delete_tarven_rule,
-    toggle_rule_enabled, reorder_rules, preview_tarven_injection,
+    delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
+    save_tarven_rule, toggle_rule_enabled,
 };
+use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 // use vcp_modules::db_manager::DbState;
 use tauri_plugin_log::{Target, TargetKind};
@@ -35,6 +35,7 @@ use vcp_modules::group_service::{
     create_group, delete_group, get_groups, read_group_config, save_group_config,
     update_group_config,
 };
+use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
 };
@@ -42,15 +43,12 @@ use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
     init_automatic_maintenance,
 };
-use vcp_modules::message_repository::{
-    process_message_content, rebuild_all_pre_renders,
-};
+use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     toggle_favorite_model,
 };
-use vcp_modules::high_speed_channel::prepare_vcp_upload;
 
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
@@ -69,8 +67,6 @@ use vcp_modules::vcp_client::{
 use vcp_modules::vcp_log_service::{
     init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
 };
-
-
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
