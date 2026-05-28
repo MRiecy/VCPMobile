@@ -64,7 +64,7 @@ impl DiffHandler {
                     "[{}] Diff: pull={} push={} delete={} push_delete={}",
                     data_type, pull_count, push_count, delete_count, push_delete_count
                 );
-                println!("[Sync] [{}] {}", phase_tag, msg);
+                log::info!("[Sync] [{}] {}", phase_tag, msg);
                 emit_sync_log(app_handle, "info", &msg);
 
                 if let Ok(mut l) = logger.lock() {
@@ -90,7 +90,7 @@ impl DiffHandler {
 
             if received == expected && (msg_phase == current_phase || msg_phase == 0) {
                 let current_pending = pending_tasks.load(Ordering::SeqCst);
-                println!(
+                log::info!(
                     "[SyncService] All manifests received for Phase {}: dataType={}, pending={}",
                     current_phase, data_type, current_pending
                 );
@@ -123,7 +123,7 @@ impl DiffHandler {
 
                             if current_pending == last_pending {
                                 stuck_count += 1;
-                                println!(
+                                log::warn!(
                                     "[SyncService] WATCHDOG: Phase {} pending count stuck at {} ({} ticks)",
                                     current_phase_wd, current_pending, stuck_count
                                 );
@@ -133,7 +133,7 @@ impl DiffHandler {
                             }
 
                             if stuck_count >= 6 {
-                                println!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
+                                log::error!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
                                 emit_sync_log(
                                     &handle_clone_wd,
                                     "error",
@@ -283,7 +283,7 @@ impl DiffHandler {
 
                     // 异步批量查询 Topic 元数据
                     for (id, _diff_owner_id, owner_type) in push_topics_to_fetch {
-                        println!("[SyncDebug] Fetching metadata for topic: {}", id);
+                        log::debug!("[SyncDebug] Fetching metadata for topic: {}", id);
                         let row_res = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?")
                             .bind(&id)
                             .fetch_optional(&db.pool)
@@ -293,7 +293,7 @@ impl DiffHandler {
                             Ok(Some(r)) => {
                                 let db_owner_id: String = r.get("owner_id");
                                 let tid: String = r.get("topic_id");
-                                println!(
+                                log::debug!(
                                     "[SyncDebug] Found topic {} (owner: {})",
                                     tid, db_owner_id
                                 );
@@ -312,17 +312,17 @@ impl DiffHandler {
                                     .push(json!({ "id": id, "type": type_str, "data": dto }));
                             }
                             Ok(None) => {
-                                println!("[SyncDebug] Topic NOT FOUND in database: {}", id);
+                                log::warn!("[SyncDebug] Topic NOT FOUND in database: {}", id);
                                 pending.fetch_sub(1, Ordering::SeqCst);
                             }
                             Err(e) => {
-                                println!("[SyncDebug] SQL ERROR fetching topic {}: {}", id, e);
+                                log::error!("[SyncDebug] SQL ERROR fetching topic {}: {}", id, e);
                                 pending.fetch_sub(1, Ordering::SeqCst);
                             }
                         }
                     }
 
-                    println!(
+                    log::debug!(
                         "[SyncDebug] Prepared {} metadata push requests",
                         batch_push_requests.len()
                     );
@@ -331,7 +331,7 @@ impl DiffHandler {
                     for chunk in batch_push_requests.chunks(1000) {
                         let sub_batch = chunk.to_vec();
                         let sub_count = sub_batch.len() as u32;
-                        println!(
+                        log::debug!(
                             "[SyncDebug] Sending batch of {} topics to desktop",
                             sub_count
                         );
@@ -341,11 +341,11 @@ impl DiffHandler {
                         )
                         .await;
                         match push_res {
-                            Ok(_) => println!(
+                            Ok(_) => log::debug!(
                                 "[SyncDebug] Successfully pushed metadata batch to desktop"
                             ),
                             Err(e) => {
-                                println!("[SyncDebug] FAILED to push metadata batch: {}", e)
+                                log::error!("[SyncDebug] FAILED to push metadata batch: {}", e)
                             }
                         }
 

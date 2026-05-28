@@ -23,7 +23,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
     let mut db_path = config_dir.clone();
     db_path.push("vcp_avatar.db");
 
-    println!("[DBManager] Initializing SQLite at: {:?}", db_path);
+    log::info!("[DBManager] Initializing SQLite at: {:?}", db_path);
 
     // 配置连接选项
     let mut connect_options = sqlx::sqlite::SqliteConnectOptions::new()

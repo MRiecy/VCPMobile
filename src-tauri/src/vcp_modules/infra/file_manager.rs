@@ -730,7 +730,7 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
         if temp_path.exists() {
             let _ = fs::remove_dir_all(&temp_path);
             let _ = fs::create_dir_all(&temp_path);
-            println!("[FileManager] Upload cache cleared.");
+            log::info!("[FileManager] Upload cache cleared.");
         }
     }
 }
@@ -765,7 +765,7 @@ pub async fn ensure_extracted_text(
         return None;
     }
 
-    println!(
+    log::debug!(
         "[FileManager] Self-Healing: Triggering real-time text extraction for hash={}",
         hash
     );

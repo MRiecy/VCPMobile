@@ -101,7 +101,7 @@ impl NetworkAwareSemaphore {
             .unwrap_or(4);
 
         let concurrency = ((cores as f32) * 1.5).clamp(6.0, 12.0) as usize;
-        println!(
+        log::info!(
             "[Sync] Auto-optimized concurrency set to {} (cores: {})",
             concurrency, cores
         );
@@ -590,7 +590,7 @@ async fn run_sync_session(
                                             let _ = ws_stream.send(Message::Text(msg.to_string().into())).await;
                                         }
                                         Err(e) => {
-                                            println!("[SyncService] Failed to get targeted topic hashes: {}", e);
+                                            log::error!("[SyncService] Failed to get targeted topic hashes: {}", e);
                                             let _ = tx_internal.send(SyncCommand::StartMessages);
                                         }
                                     }
@@ -632,7 +632,7 @@ async fn run_sync_session(
                                                 // 按消息数量分批，每批最多 10000 条消息，避免超大 WS payload
                                                 let batches = build_diff_batches(topic_states);
                                                 let batch_count = batches.len();
-                                                println!("[SyncService] Phase3 diff split into {} batches (max {} msgs/batch)", batch_count, MAX_MESSAGES_PER_BATCH);
+                                                log::info!("[SyncService] Phase3 diff split into {} batches (max {} msgs/batch)", batch_count, MAX_MESSAGES_PER_BATCH);
 
                                                 let mut first_batch = None;
                                                 {
@@ -652,7 +652,7 @@ async fn run_sync_session(
                                                 }
                                             }
                                             Err(e) => {
-                                                println!("[SyncService] Failed to get topic message hashes: {}", e);
+                                                log::error!("[SyncService] Failed to get topic message hashes: {}", e);
                                                 let _ = tx_internal.send(SyncCommand::Finalize);
                                             }
                                         }
@@ -774,7 +774,7 @@ async fn run_sync_session(
                                             &sync_logger_task,
                                             modified_topics,
                                         ).await {
-                                            println!("[SyncService] SyncFinalizer failed: {}", e);
+                                            log::error!("[SyncService] SyncFinalizer failed: {}", e);
                                         }
                                     }
                                 },
@@ -868,7 +868,7 @@ async fn run_sync_session(
                                         let message = payload["message"].as_str().unwrap_or("Unknown desktop error");
                                         let code = payload["code"].as_u64().unwrap_or(500);
                                         let err_msg = format!("Desktop Error ({}): {}", code, message);
-                                        println!("[SyncService] {}", err_msg);
+                                        log::error!("[SyncService] {}", err_msg);
                                         emit_sync_log(&handle_clone, "error", &err_msg);
                                         publish_sync_status(&handle_clone, &connection_status_for_task, "error", &err_msg).await;
                                         // 致命错误，建议断开或重试
@@ -892,7 +892,7 @@ async fn run_sync_session(
                                             &changed_owners,
                                             &sync_logger_task,
                                         ).await {
-                                            println!("[SyncService] DiffHandler failed: {}", e);
+                                            log::error!("[SyncService] DiffHandler failed: {}", e);
                                         }
                                     },
                                     Some("SYNC_DIFF_RESULTS_BATCH") => {
@@ -909,14 +909,14 @@ async fn run_sync_session(
                                             &pending_diff_batches,
                                             settings.sync_prerender_enabled,
                                         ).await {
-                                            println!("[SyncService] BatchDiffHandler failed: {}", e);
+                                            log::error!("[SyncService] BatchDiffHandler failed: {}", e);
                                         }
                                     },
                                     Some("SYNC_TOPIC_HASH_RESULTS") => {
                                         manifest_phase.store(3, Ordering::SeqCst); // 进入 Phase 2.5+，旧 Phase 2 看门狗失效
                                         if let Some(changed) = payload["changedTopics"].as_array() {
                                             let changed_ids: Vec<String> = changed.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                                            println!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_ids.len());
+                                            log::info!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_ids.len());
                                             {
                                                 let mut guard = changed_topics.lock().await;
                                                 *guard = changed_ids;
@@ -1152,7 +1152,12 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
             logger.log_direct(log_level, "sync", message);
         }
     } else {
-        println!("[Sync] [{}] {}", level, message);
+        let rust_log_level = match level {
+            "error" => log::Level::Error,
+            "warn" | "warning" => log::Level::Warn,
+            _ => log::Level::Info,
+        };
+        log::log!(rust_log_level, "[Sync] [{}] {}", level, message);
     }
 }
 

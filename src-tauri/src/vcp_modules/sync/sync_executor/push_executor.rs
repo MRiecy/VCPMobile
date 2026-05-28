@@ -260,7 +260,7 @@ impl PushExecutor {
             let data: serde_json::Value = match serde_json::from_str(line) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!(
+                    log::error!(
                         "[PushExecutor] Batch push: NDJSON parse error on line: {:.100}... ({})",
                         line, e
                     );
@@ -269,7 +269,7 @@ impl PushExecutor {
             };
             let tid = data["topicId"].as_str().unwrap_or("").to_string();
             if tid.is_empty() {
-                eprintln!(
+                log::error!(
                     "[PushExecutor] Batch push: NDJSON line missing topicId: {:.100}...",
                     line
                 );
@@ -334,7 +334,7 @@ impl PushExecutor {
         }
 
         let ok_count = results.iter().filter(|r| r.success).count();
-        println!(
+        log::info!(
             "[PushExecutor] Batch push completed: {}/{} topics",
             ok_count,
             topic_ids.len()

@@ -68,7 +68,7 @@ impl SyncLogger {
         log_dir: Option<PathBuf>,
         app_handle: Option<tauri::AppHandle>,
     ) -> Self {
-        println!("[Sync] Session started");
+        log::info!("[Sync] Session started");
 
         let (log_file, log_path) = if let Some(dir) = log_dir {
             if let Ok(()) = fs::create_dir_all(&dir) {
@@ -76,11 +76,11 @@ impl SyncLogger {
                 let path = dir.join(&filename);
                 match OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(file) => {
-                        println!("[SyncLogger] Logging to {:?}", path);
+                        log::info!("[SyncLogger] Logging to {:?}", path);
                         (Some(file), Some(path))
                     }
                     Err(e) => {
-                        println!("[SyncLogger] Failed to create log file: {}", e);
+                        log::error!("[SyncLogger] Failed to create log file: {}", e);
                         (None, None)
                     }
                 }
@@ -109,7 +109,12 @@ impl SyncLogger {
             phase,
             message
         );
-        println!("[Sync] [{}] {}", phase, message);
+        let rust_log_level = match level {
+            LogLevel::Debug => log::Level::Debug,
+            LogLevel::Info => log::Level::Info,
+            LogLevel::Error => log::Level::Error,
+        };
+        log::log!(rust_log_level, "[Sync] [{}] {}", phase, message);
 
         if let Some(ref mut file) = self.log_file {
             let _ = writeln!(file, "{}", line);
@@ -233,7 +238,7 @@ impl SyncLogger {
     }
 
     pub fn end_session(&mut self) {
-        println!("[Sync] Session ended");
+        log::info!("[Sync] Session ended");
         if let Some(ref mut file) = self.log_file {
             let _ = writeln!(
                 file,

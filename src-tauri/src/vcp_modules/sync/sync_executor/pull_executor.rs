@@ -145,7 +145,7 @@ async fn process_topic_messages<R: Runtime>(
                         match comp_res {
                             Ok(val) => val,
                             Err(_) => {
-                                println!(
+                                log::warn!(
                                     "[PullExecutor] Compile panicked for msg {} (topic {})",
                                     msg_id_log, topic_id_log
                                 );
@@ -184,7 +184,7 @@ async fn process_topic_messages<R: Runtime>(
 
     let t_total = t_start.elapsed();
     if parsed_count > 0 {
-        println!(
+        log::debug!(
             "[PullExecutor] [ProfileDetail] topic={} msgs={} | sql_att={:?} spawn_blocking={:?} submit_queue={:?} | total_proc={:?}",
             topic_id, parsed_count, t_att, t_block, t_submit, t_total
         );
@@ -299,7 +299,7 @@ impl PullExecutor {
         }
 
         let results: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
-        println!(
+        log::info!(
             "[PullExecutor] Received {} entities from server",
             results.len()
         );
@@ -357,7 +357,7 @@ impl PullExecutor {
         }
 
         if !agent_topics.is_empty() {
-            println!(
+            log::debug!(
                 "[PullExecutor] Submitting {} agent topics to write queue",
                 agent_topics.len()
             );
@@ -368,7 +368,7 @@ impl PullExecutor {
                 .await;
         }
         if !group_topics.is_empty() {
-            println!(
+            log::debug!(
                 "[PullExecutor] Submitting {} group topics to write queue",
                 group_topics.len()
             );
@@ -427,7 +427,7 @@ impl PullExecutor {
                                 })
                                 .await;
                             if retries > 0 {
-                                println!(
+                                log::info!(
                                     "[PullExecutor] Avatar {} {} succeeded after {} retries",
                                     owner_type, owner_id, retries
                                 );
@@ -436,7 +436,7 @@ impl PullExecutor {
                         }
                         Err(e) if retries < max_retries => {
                             retries += 1;
-                            println!("[PullExecutor] Avatar {} {} decode failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
+                            log::warn!("[PullExecutor] Avatar {} {} decode failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             delay_ms *= 2;
                         }
@@ -450,7 +450,7 @@ impl PullExecutor {
                 }
                 Err(e) if retries < max_retries => {
                     retries += 1;
-                    println!("[PullExecutor] Avatar {} {} request failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
+                    log::warn!("[PullExecutor] Avatar {} {} request failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     delay_ms *= 2;
                 }
@@ -743,7 +743,7 @@ impl PullExecutor {
                                 Ok((parsed, failed)) => {
                                     let proc_t = proc_start.elapsed();
                                     let total_t = start_t.elapsed();
-                                    println!(
+                                    log::debug!(
                                         "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} sem_wait={:?} process={:?} | total={:?}",
                                         topic_id, parsed, decode_t, sem_t, proc_t, total_t
                                     );

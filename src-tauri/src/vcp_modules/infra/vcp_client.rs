@@ -116,7 +116,7 @@ pub struct ActiveRequests(pub Arc<DashMap<String, oneshot::Sender<()>>>);
 
 impl Default for ActiveRequests {
     fn default() -> Self {
-        println!("[VCPClient] Initialized ActiveRequests successfully.");
+        log::info!("[VCPClient] Initialized ActiveRequests successfully.");
         Self(Arc::new(DashMap::new()))
     }
 }
@@ -148,7 +148,7 @@ pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
 
 impl Default for CancelledGroupTurns {
     fn default() -> Self {
-        println!("[VCPClient] Initialized CancelledGroupTurns successfully.");
+        log::info!("[VCPClient] Initialized CancelledGroupTurns successfully.");
         Self(Arc::new(DashSet::new()))
     }
 }
@@ -167,7 +167,7 @@ pub fn interruptGroupTurn(
     state: tauri::State<'_, CancelledGroupTurns>,
     topic_id: String,
 ) -> Result<Value, String> {
-    println!(
+    log::info!(
         "[VCPClient] interruptGroupTurn called for topicId: {}",
         topic_id
     );
@@ -223,7 +223,7 @@ pub async fn perform_vcp_request<R: Runtime>(
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
 ) -> Result<(Value, bool), String> {
-    println!(
+    log::info!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
         payload.message_id, payload.context
     );
@@ -295,13 +295,13 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             converted = true;
                                         }
                                         Ok(Err(e)) => {
-                                            println!(
+                                            log::warn!(
                                                 "[VCPClient] Image conversion failed for {:?}: {}",
                                                 path_buf, e
                                             );
                                         }
                                         Err(e) => {
-                                            println!(
+                                            log::warn!(
                                                 "[VCPClient] Image conversion task panicked: {}",
                                                 e
                                             );
@@ -323,10 +323,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             converted = true;
                                         }
                                         Ok(Err(e)) => {
-                                            println!("[VCPClient] Video frame extraction failed for {:?}: {}", path_buf, e);
+                                            log::warn!("[VCPClient] Video frame extraction failed for {:?}: {}", path_buf, e);
                                         }
                                         Err(e) => {
-                                            println!("[VCPClient] Video processing task panicked: {}", e);
+                                            log::warn!("[VCPClient] Video processing task panicked: {}", e);
                                         }
                                     }
                                 } else if mime == "audio" {
@@ -346,10 +346,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             converted = true;
                                         }
                                         Ok(Err(e)) => {
-                                            println!("[VCPClient] Audio extraction failed for {:?}: {}", path_buf, e);
+                                            log::warn!("[VCPClient] Audio extraction failed for {:?}: {}", path_buf, e);
                                         }
                                         Err(e) => {
-                                            println!("[VCPClient] Audio processing task panicked: {}", e);
+                                            log::warn!("[VCPClient] Audio processing task panicked: {}", e);
                                         }
                                     }
                                 }
@@ -550,8 +550,8 @@ pub async fn perform_vcp_request<R: Runtime>(
 
         tokio::select! {
             _ = &mut abort_rx => {
-                println!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
-                aurora_buffer.finalize();
+                                log::warn!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
+                                aurora_buffer.finalize();
                 send_aurora_update(&aurora_buffer, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
                 active_requests_inner.remove(&message_id_inner);
                 return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
@@ -568,7 +568,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 // 核心修复：即使在等待数据的间隙，也能捕获中断信号
                                 _ = &mut abort_rx => {
                                     is_aborted = true;
-                                    println!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
+                                    log::warn!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
                                     aurora_buffer.finalize();
                                     send_aurora_update(&aurora_buffer, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
 
@@ -583,7 +583,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             if line.starts_with("data: ") {
                                                 let data = line.trim_start_matches("data: ").trim();
                                                 if data == "[DONE]" {
-                                                    println!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
+                                                    log::debug!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
                                                     aurora_buffer.finalize();
                                                     send_aurora_update(&aurora_buffer, last_finish_reason.clone(), None);
                                                     break;
@@ -623,7 +623,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             }
                                         }
                                         Some(Err(e)) => {
-                                            println!("[VCPClient] Stream read error: {:?}", e);
+                                            log::error!("[VCPClient] Stream read error: {:?}", e);
                                             aurora_buffer.finalize();
                                             send_aurora_update(&aurora_buffer, Some("error".to_string()), Some(format!("流读取错误: {}", e)));
                                             send_stream_event(StreamEvent::error(
@@ -638,10 +638,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             // 修复：若此前已收到有效 chunk，则视为正常结束（对齐桌面端行为）
                                             aurora_buffer.finalize();
                                             if !full_content.is_empty() || last_finish_reason.is_some() {
-                                                println!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
+                                                log::debug!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
                                                 send_aurora_update(&aurora_buffer, last_finish_reason.clone(), None);
                                             } else {
-                                                println!("[VCPClient] Stream ended unexpectedly (None)");
+                                                log::warn!("[VCPClient] Stream ended unexpectedly (None)");
                                                 send_aurora_update(&aurora_buffer, Some("error".to_string()), Some("网络连接意外断开".to_string()));
                                                 send_stream_event(StreamEvent::error(
                                                     message_id_inner.clone(),
@@ -746,25 +746,25 @@ pub fn interruptRequest(
     state: tauri::State<'_, ActiveRequests>,
     message_id: String,
 ) -> Result<Value, String> {
-    println!(
+    log::info!(
         "[VCPClient] interruptRequest called for messageId: {}. Active requests: {}",
         message_id,
         state.0.len()
     );
     if let Some((_, sender)) = state.0.remove(&message_id) {
-        println!(
+        log::info!(
             "[VCPClient] Found AbortController for messageId: {}, aborting...",
             message_id
         );
         let _ = sender.send(());
-        println!(
+        log::info!(
             "[VCPClient] Request interrupted for messageId: {}. Remaining active requests: {}",
             message_id,
             state.0.len()
         );
         Ok(json!({"success": true, "message": format!("Request {} interrupted", message_id)}))
     } else {
-        println!(
+        log::warn!(
             "[VCPClient] No active request found for messageId: {}",
             message_id
         );
@@ -775,7 +775,7 @@ pub fn interruptRequest(
 /// 测试 VCP 后端连接状态并获取模型列表 (对齐桌面端 main.js fetchAndCacheModels 逻辑)
 #[tauri::command]
 pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result<Value, String> {
-    println!(
+    log::info!(
         "[VCPClient] test_vcp_connection called for URL: {}",
         vcp_url
     );
@@ -804,7 +804,7 @@ pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result
         format!("{}/v1/models", base_url)
     };
 
-    println!(
+    log::info!(
         "[VCPClient] Testing connection to (Original Logic): {}",
         models_url
     );

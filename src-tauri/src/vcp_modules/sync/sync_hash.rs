@@ -298,7 +298,7 @@ impl HashInitializer {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| e.to_string())?;
-                println!(
+                log::debug!(
                     "[HashInitializer] Initialized config_hash for Agent {}",
                     agent_id
                 );
@@ -329,7 +329,7 @@ impl HashInitializer {
                     .execute(&mut **tx)
                     .await
                     .map_err(|e| e.to_string())?;
-                println!(
+                log::debug!(
                     "[HashInitializer] Initialized config_hash for Group {}",
                     group_id
                 );
@@ -355,7 +355,7 @@ impl HashInitializer {
         for row in rows {
             let agent_id: String = row.get("agent_id");
             if let Err(e) = Self::ensure_agent_hashes(&mut tx, &agent_id).await {
-                println!(
+                log::error!(
                     "[HashInitializer] Failed to ensure hash for Agent {}: {}",
                     agent_id, e
                 );
@@ -363,7 +363,7 @@ impl HashInitializer {
         }
         tx.commit().await.map_err(|e| e.to_string())?;
 
-        println!("[HashInitializer] Ensured all Agent hashes");
+        log::info!("[HashInitializer] Ensured all Agent hashes");
         Ok(())
     }
 
@@ -383,7 +383,7 @@ impl HashInitializer {
         for row in rows {
             let group_id: String = row.get("group_id");
             if let Err(e) = Self::ensure_group_hashes(&mut tx, &group_id).await {
-                println!(
+                log::error!(
                     "[HashInitializer] Failed to ensure hash for Group {}: {}",
                     group_id, e
                 );
@@ -391,7 +391,7 @@ impl HashInitializer {
         }
         tx.commit().await.map_err(|e| e.to_string())?;
 
-        println!("[HashInitializer] Ensured all Group hashes");
+        log::info!("[HashInitializer] Ensured all Group hashes");
         Ok(())
     }
 

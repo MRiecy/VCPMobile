@@ -27,7 +27,7 @@ impl SyncFinalizer {
         // 2. 全局 Hash 冒泡
         if !modified_topics.is_empty() {
             let start_instant = std::time::Instant::now();
-            println!(
+            log::info!(
                 "[SyncFinalizer] Finalizing {} modified topics (recalculating hashes)...",
                 modified_topics.len()
             );
@@ -118,7 +118,7 @@ impl SyncFinalizer {
                         )
                         .await
                         {
-                            println!(
+                            log::error!(
                                 "[SyncFinalizer] bubble_topic_hash_with_meta failed for {}: {}",
                                 tid, e
                             );
@@ -159,12 +159,12 @@ impl SyncFinalizer {
                             "[SyncFinalizer] 一致性校验校验成功！耗时: {:?}. 冒泡话题: {}, 级联智能体: {}, 级联群组: {}.",
                             elapsed, bubbled_topics, agent_count, group_count
                         );
-                        println!("{}", success_msg);
+                        log::info!("{}", success_msg);
                         emit_sync_log(app_handle, "success", &success_msg);
                     }
                     Err(e) => {
                         let err_msg = format!("[SyncFinalizer] Transaction commit failed: {}", e);
-                        println!("{}", err_msg);
+                        log::error!("{}", err_msg);
                         emit_sync_log(app_handle, "error", &err_msg);
                         return Err(err_msg);
                     }

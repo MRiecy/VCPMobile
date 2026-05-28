@@ -135,7 +135,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            println!(
+            log::warn!(
                 "[FileExtractor] Failed to open DOCX: {:?}, error: {}",
                 path, e
             );
@@ -145,7 +145,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
     let mut archive = match zip::ZipArchive::new(file) {
         Ok(a) => a,
         Err(e) => {
-            println!(
+            log::warn!(
                 "[FileExtractor] Failed to read DOCX zip archive: {:?}, error: {}",
                 path, e
             );
@@ -155,7 +155,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
     let mut doc_file = match archive.by_name("word/document.xml") {
         Ok(f) => f,
         Err(e) => {
-            println!(
+            log::warn!(
                 "[FileExtractor] Failed to find word/document.xml in DOCX: {:?}, error: {}",
                 path, e
             );
@@ -165,7 +165,7 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
 
     let mut content = String::new();
     if let Err(e) = doc_file.read_to_string(&mut content) {
-        println!(
+        log::warn!(
             "[FileExtractor] Failed to read document.xml content: {:?}, error: {}",
             path, e
         );
@@ -687,7 +687,7 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
     let doc = match PdfDocument::open(path) {
         Ok(d) => d,
         Err(e) => {
-            println!(
+            log::warn!(
                 "[FileExtractor] Failed to open PDF (pdf_oxide): {:?}, error: {:?}",
                 path, e
             );
@@ -699,7 +699,7 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
     let pages_count = match doc.page_count() {
         Ok(count) => count,
         Err(e) => {
-            println!(
+            log::warn!(
                 "[FileExtractor] Failed to get page count (pdf_oxide): {:?}, error: {:?}",
                 path, e
             );
@@ -730,7 +730,7 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
                                 full_markdown.push_str("\n\n");
                             }
                             Err(e) => {
-                                println!(
+                                log::warn!(
                                     "[FileExtractor] Markdown conversion failed for page {}: {:?}",
                                     i, e
                                 );
@@ -738,7 +738,7 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
                         }
                     }
                     Err(e) => {
-                        println!(
+                        log::warn!(
                             "[FileExtractor] Reading order analysis failed for page {}: {:?}",
                             i, e
                         );
@@ -746,7 +746,7 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
                 }
             }
             Err(e) => {
-                println!(
+                log::warn!(
                     "[FileExtractor] Span extraction failed for page {}: {:?}",
                     i, e
                 );
@@ -762,7 +762,7 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
 }
 /// 物理文件多模态异步/同步提取文本主入口
 pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<String> {
-    println!(
+    log::info!(
         "[FileExtractor] Starting extraction for path: {:?}, mime: {}",
         path, mime_type
     );
@@ -811,7 +811,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         "xlsx" => extract_xlsx_text(path),
         "pdf" => extract_pdf_text(path),
         _ => {
-            println!(
+            log::warn!(
                 "[FileExtractor] No specialized extractor for extension: {}",
                 ext
             );
@@ -820,7 +820,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
     };
 
     if let Some(text) = doc_text {
-        println!(
+        log::info!(
             "[FileExtractor] Successfully extracted {} chars from structured doc: {:?}",
             text.chars().count(),
             path
@@ -833,7 +833,7 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         return Some(text);
     }
 
-    println!(
+    log::warn!(
         "[FileExtractor] Extraction failed or returned no content for path: {:?}",
         path
     );

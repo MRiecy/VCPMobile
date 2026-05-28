@@ -78,7 +78,7 @@ impl DbWriteQueue {
         let conn_holder: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(None));
 
         let worker = tokio::spawn(async move {
-            println!("[DbWriteQueue] Worker started (Turbo rusqlite Mode)");
+            log::info!("[DbWriteQueue] Worker started (Turbo rusqlite Mode)");
 
             let mut success_count = 0u32;
             let mut error_count = 0u32;
@@ -227,11 +227,11 @@ impl DbWriteQueue {
                     Ok(Ok(_)) => success_count += 1,
                     Ok(Err(e)) => {
                         error_count += 1;
-                        println!("[DbWriteQueue] rusqlite execution error: {}", e);
+                        log::error!("[DbWriteQueue] rusqlite execution error: {}", e);
                     }
                     Err(e) => {
                         error_count += 1;
-                        println!("[DbWriteQueue] spawn_blocking error: {}", e);
+                        log::error!("[DbWriteQueue] spawn_blocking error: {}", e);
                     }
                 }
 
@@ -240,7 +240,7 @@ impl DbWriteQueue {
                 }
             }
 
-            println!(
+            log::info!(
                 "[DbWriteQueue] Worker stopped. Total: success={}, errors={}",
                 success_count, error_count
             );
@@ -260,18 +260,18 @@ impl DbWriteQueue {
 
     pub async fn submit(&self, task: DbWriteTask) {
         if let Err(e) = self.sender.send(task).await {
-            println!("[DbWriteQueue] Submit error: {}", e);
+            log::error!("[DbWriteQueue] Submit error: {}", e);
         }
     }
 
     pub async fn flush(&self) {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self.sender.send(DbWriteTask::Flush { tx }).await {
-            println!("[DbWriteQueue] Flush submit error: {}", e);
+            log::error!("[DbWriteQueue] Flush submit error: {}", e);
             return;
         }
         let _ = rx.await;
-        println!("[DbWriteQueue] Flush completed");
+        log::debug!("[DbWriteQueue] Flush completed");
     }
 
     // --- rusqlite 事务级方法 ---

@@ -160,7 +160,7 @@ pub async fn cleanup_single_orphaned_attachment(
             .as_secs() as i64;
 
         if now_secs - created_secs < 300 {
-            println!(
+            log::debug!(
                 "[Maintenance] Safe-Shield: Hash {} was created recently ({} secs ago). Skipping targeted GC to prevent race condition.",
                 hash,
                 now_secs - created_secs
@@ -224,7 +224,7 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
     let three_days_secs = 3 * 24 * 60 * 60;
 
     if now - last_clear > three_days_secs {
-        println!("[Maintenance] Triggering scheduled maintenance (WebView & SQLite)...");
+        log::info!("[Maintenance] Triggering scheduled maintenance (WebView & SQLite)...");
 
         // 1. WebView 清理
         if let Some(webview) = app.get_webview_window("main") {
@@ -256,6 +256,6 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
             "lastWebviewCacheClear": now
         });
         let _ = update_settings(app.clone(), settings_state, updates).await;
-        println!("[Maintenance] Scheduled maintenance complete.");
+        log::info!("[Maintenance] Scheduled maintenance complete.");
     }
 }
