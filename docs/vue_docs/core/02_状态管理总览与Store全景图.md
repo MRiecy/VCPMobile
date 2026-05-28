@@ -1,7 +1,7 @@
 ---
 id: VUE-CORE-002
 title: 状态管理总览与Store全景图
-description: VCP Mobile 前端 18 个 Pinia Store 的职责分类、依赖关系与状态设计全景
+description: VCP Mobile 前端 17 个 Pinia Store 的职责分类、依赖关系与状态设计全景
 version: 0.9.14
 date: 2026-05-27
 ---
@@ -12,7 +12,7 @@ date: 2026-05-27
 
 ### 1.1 领域定位
 
-`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 18 个 Pinia Store。这些 Store 按领域边界划分为 5 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置与同步五大业务域。
+`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 17 个 Pinia Store。这些 Store 按领域边界划分为 5 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置与同步五大业务域。
 
 与 Rust 后端不同，前端 Store 不负责数据持久化（SQLite 由后端托管），而是承担以下职责：
 
@@ -26,7 +26,7 @@ date: 2026-05-27
 - HTTP 网络请求底层（由 Rust 后端 `vcp_client.rs` 负责）
 - 文件系统读写（由 Rust 后端 `file_manager.rs` 负责）
 
-### 1.2 模块构成表（18 个 Store）
+### 1.2 模块构成表（17 个 Store）
 
 | 分类 | 文件名 | Store 名 | 职责简述 | 持久化 |
 |------|--------|----------|----------|--------|
@@ -450,21 +450,63 @@ READY (应用可用)
 
 **增量更新**：`updateSettings` 调用后端 `update_settings`，支持 JSON Patch 风格的增量合并，避免前端构造完整配置对象。
 
-#### rebuildSession —— 预渲染重建
+#### rebuildSession —— 预渲染重建任务会话
 
 > 文件位置：`src/core/stores/rebuildSession.ts`
 
-`useRebuildSessionStore` 管理消息预渲染（Block 解析）的批量重建任务，通常在后端数据结构升级后触发。
+`useRebuildSessionStore` 管理消息预渲染（Block 解析）的批量重建任务会话，通常在后端消息存储结构升级或需要全量重新解析 Markdown Block 时触发。它是一个**自包含的状态机 Store**，不依赖任何其他业务 Store，与 `syncSessionStore` 处于同一设计范式。
 
-**核心状态**（5 个）：
+**核心状态**（7 个）：
 
 | 状态 | 类型 | 说明 |
 |------|------|------|
 | `isOpen` | `boolean` | 重建会话面板是否打开 |
+| `taskType` | `RebuildTaskType` | 当前重建任务类型，目前仅支持 `'preRender'`（预渲染重建），为未来扩展保留 |
 | `status` | `'idle' \| 'running' \| 'completed' \| 'error'` | 任务状态机 |
-| `progress` | `{ current: number; total: number }` | 进度计数 |
-| `needsReload` | `boolean` | 完成后是否需要刷新页面 |
-| `canDismiss` | `boolean` | 是否允许关闭面板（运行中禁止关闭） |
+| `progress` | `{ current: number; total: number }` | 进度计数，`current` 为已处理消息数，`total` 为总消息数 |
+| `needsReload` | `boolean` | 完成后是否需要刷新页面以应用新的渲染结果 |
+| `canDismiss` | `boolean` | 是否允许关闭面板；运行中置为 `false` 防止误关闭 |
+| `errorMessage` | `string` | 错误状态下的失败原因描述 |
+
+**关键方法**：
+
+- **`open(type)`**：初始化状态机（重置为 `idle`、清空进度与错误信息）、设置任务类型，并注册 Tauri 事件监听器。该方法通常由 `overlayStore.openRebuildSession()` 调用。
+- **`startRebuild()`**：状态机从 `idle` 推进到 `running`，调用 Rust 后端 `rebuild_all_pre_renders` 命令执行实际重建。执行期间：
+  - 通过 `withScreenKeep()` 锁定屏幕常亮，防止 Android 息屏中断长时任务
+  - 启动前台保活服务 `start_streaming_service`，以高优先级通知维持进程存活
+  - 监听 `render_rebuild_progress` 事件实时更新 `progress`
+  - 完成后（无论成功或失败）均安全释放前台服务 `stop_streaming_service`
+- **`close()`**：仅在 `canDismiss` 为 `true` 时关闭面板并清理监听器，防止运行中误操作
+- **`markReloaded()`**：用户完成页面刷新后调用，重置 `needsReload` 标志
+
+**事件监听与生命周期**：
+
+Store 在 `open()` 时注册对 `render_rebuild_progress` 事件的监听，在 `close()` 时调用 `cleanupListener()` 解注册。监听器引用以 `Promise<UnlistenFn>` 形式存储，确保异步注册完成后的正确清理，避免 HMR 或重复打开导致的内存泄漏与重复触发。
+
+**与 overlayStore 的托管关系**：
+
+与 `syncSessionStore` 类似，`rebuildSessionStore` 被 `overlayStore` 以相同模式托管：`overlayStore.openRebuildSession()` 调用 `rebuildStore.open()` 并将页面压入 `pageStack`，物理返回键触发 `close()` 与弹栈联动。这种设计使重建会话拥有独立的状态机，同时享受统一的页面生命周期管理。
+
+#### tarvenStore —— Tarven 注入规则管理
+
+> 文件位置：`src/core/stores/tarvenStore.ts`
+
+`useTarvenStore` 管理 Tarven 提示词注入规则的前端状态，包括规则的 CRUD、启用状态切换、拖拽排序与 WYSIWYG 预览。
+
+**核心状态**（2 个）：
+
+| 状态 | 类型 | 说明 |
+|------|------|------|
+| `rules` | `TarvenRule[]` | 全部注入规则列表（按 `sortOrder` 排序） |
+| `isSelectorOpen` | `boolean` | 规则选择器 BottomSheet 的开关状态 |
+
+**规则类型**：`TarvenRule` 支持三种 `ruleType`：
+- `system_suffix` / `user_suffix`：在系统或用户消息前后追加固定文本，支持 `prepend`/`append` 位置控制
+- `context_inject`：向上下文链中注入完整消息，支持指定 `role`（user/assistant）与 `depth`（插入深度）
+
+**乐观更新**：`toggleRule` 在调用后端前先翻转前端 `isEnabled` 状态，若后端失败则立即回滚，确保 UI 响应零延迟。
+
+**WYSIWYG 预览**：`previewInjection` 调用后端 `preview_tarven_injection`，在不实际发送消息的情况下模拟规则对指定消息列表的注入效果，用于规则编辑时的实时验证。
 
 ---
 
@@ -590,7 +632,7 @@ overlayStore.openSyncSession()
 
 ### 3.2 依赖方向说明（禁止循环依赖）
 
-当前 16 个 Store 的依赖图**无循环依赖**，方向始终为：
+当前 17 个 Store 的依赖图**无循环依赖**，方向始终为：
 
 ```
 notification → (被所有业务 Store 引用，但自身不引用任何 Store)
@@ -649,7 +691,7 @@ chatStreamStore → sessionStore / assistant / avatar / topicStore
 
 ### 4.1 Composition API 风格定义
 
-全部 16 个 Store 统一使用 Pinia 的 **Setup Store**（Composition API 风格）定义：
+全部 17 个 Store 统一使用 Pinia 的 **Setup Store**（Composition API 风格）定义：
 
 ```typescript
 export const useXxxStore = defineStore('storeId', () => {
@@ -676,7 +718,7 @@ export const useXxxStore = defineStore('storeId', () => {
 
 #### ref 与 reactive 的选择策略
 
-16 个 Store 在状态声明时混合使用了 `ref` 和 `reactive`，选择依据是数据结构的访问模式：
+17 个 Store 在状态声明时混合使用了 `ref` 和 `reactive`，选择依据是数据结构的访问模式：
 
 | 场景 | 推荐方案 | 典型 Store |
 |------|----------|-----------|
@@ -929,7 +971,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 ### 6.3 Store 分层的设计逻辑
 
-16 个 Store 并非随意拆分，而是遵循**领域边界 + 变化频率**双重标准：
+17 个 Store 并非随意拆分，而是遵循**领域边界 + 变化频率**双重标准：
 
 | 分层 | 变化频率 | 代表 Store |
 |------|----------|-----------|
@@ -981,7 +1023,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 - `package.json` 不含任何测试脚本（无 `test`、`test:unit`、`test:e2e`）
 - 未安装 Vitest、Jest、Cypress、Playwright 等测试框架
-- 16 个 Pinia Store 均无任何单元测试覆盖
+- 17 个 Pinia Store 均无任何单元测试覆盖
 
 **验证手段**：以 `pnpm check`（`vue-tsc --noEmit` 前端类型检查 + `cargo check` Rust 编译检查）和真机/模拟器手动测试为主。
 

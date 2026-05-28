@@ -53,6 +53,7 @@ temp
 .kilo
 .kilocode
 .kimi
+.antigravitycli
 
 # Tauri build output (copied from dist/ on each build)
 src-tauri/gen/android/app/src/main/assets/

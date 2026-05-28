@@ -480,6 +480,45 @@ pseudo:
 
 ---
 
+### 4.8 前端资源服务代理层 (`ota_assets.rs`)
+
+`ota_assets.rs`（67 行）是前端热更新的**资源服务代理层**，位于 `src-tauri/src/vcp_modules/updater/ota_assets.rs`。它通过实现 Tauri 的 `Assets<R: Runtime>` trait，在 WebView 请求静态资源时优先从文件系统读取 OTA 更新包，找不到时无缝回退到 APK 内置资源。
+
+#### 核心机制
+
+```rust
+pub struct OtaAssets<R: Runtime> {
+    embedded: Box<dyn Assets<R>>,
+    update_dir: PathBuf,
+}
+```
+
+`OtaAssets` 包装了两层资源：
+
+| 层级 | 来源 | 优先级 |
+|------|------|--------|
+| OTA 层 | `app_config_dir/frontend_updates/<version>/` | 高（优先命中） |
+| 内置层 | APK 打包时的 `EmbeddedAssets` | 低（fallback） |
+
+`get(&self, key: &AssetKey)` 的实现逻辑：
+1. 若 `update_dir` 非空，拼接 `update_dir.join(key.trim_start_matches('/'))`。
+2. 若该路径存在且为文件，执行 `std::fs::read` 返回内容。
+3. 否则回退到 `self.embedded.get(key)`，即 APK 内置资源。
+
+#### 为什么需要这一层？
+
+前端热更新写入的 `frontend_updates/<version>/` 目录中的资源，必须被 WebView 在 `https://tauri.localhost/` origin 下加载，且不能破坏 Tauri 的 IPC（`invoke`）通道。`OtaAssets` 以**透明代理**的方式拦截资源请求：
+
+- **Origin 不变**：WebView 仍停留在 `https://tauri.localhost/`，CORS 和 IPC 安全沙盒不受影响。
+- **前端零感知**：Vue 应用无需判断"当前是 OTA 版本还是内置版本"，所有路由和静态 import 行为不变。
+- **原子切换**：`active_version` 文件修改后，下次启动即生效；`iter()` 和 `csp_hashes()` 直接委托给内置层，确保 Tauri 内部行为一致。
+
+#### `EmptyAssets` 辅助实现
+
+同一文件内还提供了 `EmptyAssets` 结构体，作为 `set_assets` 操作时的临时占位符：在替换 `OtaAssets` 前，需先将旧 `embedded` 取出，此时用 `EmptyAssets` 填充，避免生命周期冲突。
+
+---
+
 ## 5. 公共基础设施
 
 两个 OTA 模块虽然职责不同，但共享多项底层机制。

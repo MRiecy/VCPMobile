@@ -249,7 +249,7 @@ Mobile                              Desktop
 
 ### 扩展说明：为什么不是 Hash 字典序仲裁
 
-早期设计文档（`SYNC_ARCHITECTURE.md`）曾提出以 hash 字符串字典序作为 tiebreaker：
+早期设计文档（`ARCHIVED_SYNC_ARCHITECTURE.md`）曾提出以 hash 字符串字典序作为 tiebreaker：
 
 ```rust
 if local.hash < remote.hash { Pull } else { Push }
