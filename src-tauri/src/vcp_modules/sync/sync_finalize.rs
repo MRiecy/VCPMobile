@@ -120,7 +120,8 @@ impl SyncFinalizer {
                         {
                             log::error!(
                                 "[SyncFinalizer] bubble_topic_hash_with_meta failed for {}: {}",
-                                tid, e
+                                tid,
+                                e
                             );
                             if let Ok(mut l) = logger.lock() {
                                 l.log(

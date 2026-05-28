@@ -242,7 +242,8 @@ impl DbWriteQueue {
 
             log::info!(
                 "[DbWriteQueue] Worker stopped. Total: success={}, errors={}",
-                success_count, error_count
+                success_count,
+                error_count
             );
         });
 

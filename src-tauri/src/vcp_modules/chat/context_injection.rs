@@ -76,11 +76,7 @@ pub async fn fetch_active_rules(
     Ok(rules)
 }
 
-fn format_system_metadata(
-    now_str: &str,
-    created_at_str: Option<&str>,
-    system_prompt: &mut String,
-) {
+fn format_system_metadata(now_str: &str, created_at_str: Option<&str>, system_prompt: &mut String) {
     let mut metadata = format!(
         "<system_metadata>\n\
          - 当前系统时间: {}\n\

@@ -137,7 +137,8 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
         Err(e) => {
             log::warn!(
                 "[FileExtractor] Failed to open DOCX: {:?}, error: {}",
-                path, e
+                path,
+                e
             );
             return None;
         }
@@ -147,7 +148,8 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
         Err(e) => {
             log::warn!(
                 "[FileExtractor] Failed to read DOCX zip archive: {:?}, error: {}",
-                path, e
+                path,
+                e
             );
             return None;
         }
@@ -157,7 +159,8 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
         Err(e) => {
             log::warn!(
                 "[FileExtractor] Failed to find word/document.xml in DOCX: {:?}, error: {}",
-                path, e
+                path,
+                e
             );
             return None;
         }
@@ -167,7 +170,8 @@ fn extract_docx_text(path: &std::path::Path) -> Option<String> {
     if let Err(e) = doc_file.read_to_string(&mut content) {
         log::warn!(
             "[FileExtractor] Failed to read document.xml content: {:?}, error: {}",
-            path, e
+            path,
+            e
         );
         return None;
     }
@@ -689,7 +693,8 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
         Err(e) => {
             log::warn!(
                 "[FileExtractor] Failed to open PDF (pdf_oxide): {:?}, error: {:?}",
-                path, e
+                path,
+                e
             );
             return None;
         }
@@ -701,7 +706,8 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
         Err(e) => {
             log::warn!(
                 "[FileExtractor] Failed to get page count (pdf_oxide): {:?}, error: {:?}",
-                path, e
+                path,
+                e
             );
             return None;
         }
@@ -732,7 +738,8 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
                             Err(e) => {
                                 log::warn!(
                                     "[FileExtractor] Markdown conversion failed for page {}: {:?}",
-                                    i, e
+                                    i,
+                                    e
                                 );
                             }
                         }
@@ -740,7 +747,8 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
                     Err(e) => {
                         log::warn!(
                             "[FileExtractor] Reading order analysis failed for page {}: {:?}",
-                            i, e
+                            i,
+                            e
                         );
                     }
                 }
@@ -748,7 +756,8 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
             Err(e) => {
                 log::warn!(
                     "[FileExtractor] Span extraction failed for page {}: {:?}",
-                    i, e
+                    i,
+                    e
                 );
             }
         }
@@ -764,7 +773,8 @@ fn extract_pdf_text(path: &std::path::Path) -> Option<String> {
 pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<String> {
     log::info!(
         "[FileExtractor] Starting extraction for path: {:?}, mime: {}",
-        path, mime_type
+        path,
+        mime_type
     );
     let ext = path
         .extension()

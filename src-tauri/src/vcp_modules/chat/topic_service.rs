@@ -369,7 +369,8 @@ pub async fn regenerate_topic_response(
 ) -> Result<Value, String> {
     log::info!(
         "[TopicService] Regenerating response for topic: {}, target msg: {}",
-        topic_id, target_user_msg_id
+        topic_id,
+        target_user_msg_id
     );
 
     // 1. 获取目标用户消息，确保内容完整

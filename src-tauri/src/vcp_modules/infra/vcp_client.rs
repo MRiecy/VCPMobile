@@ -225,7 +225,8 @@ pub async fn perform_vcp_request<R: Runtime>(
 ) -> Result<(Value, bool), String> {
     log::info!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
-        payload.message_id, payload.context
+        payload.message_id,
+        payload.context
     );
     let app_data_path = get_app_data_path(app).await;
 
@@ -297,7 +298,8 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         Ok(Err(e)) => {
                                             log::warn!(
                                                 "[VCPClient] Image conversion failed for {:?}: {}",
-                                                path_buf, e
+                                                path_buf,
+                                                e
                                             );
                                         }
                                         Err(e) => {

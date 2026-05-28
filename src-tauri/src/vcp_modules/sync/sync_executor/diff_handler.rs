@@ -92,7 +92,9 @@ impl DiffHandler {
                 let current_pending = pending_tasks.load(Ordering::SeqCst);
                 log::info!(
                     "[SyncService] All manifests received for Phase {}: dataType={}, pending={}",
-                    current_phase, data_type, current_pending
+                    current_phase,
+                    data_type,
+                    current_pending
                 );
 
                 if current_pending == 0 {
@@ -295,7 +297,8 @@ impl DiffHandler {
                                 let tid: String = r.get("topic_id");
                                 log::debug!(
                                     "[SyncDebug] Found topic {} (owner: {})",
-                                    tid, db_owner_id
+                                    tid,
+                                    db_owner_id
                                 );
 
                                 let type_str = if owner_type == "group" {

@@ -357,7 +357,8 @@ impl HashInitializer {
             if let Err(e) = Self::ensure_agent_hashes(&mut tx, &agent_id).await {
                 log::error!(
                     "[HashInitializer] Failed to ensure hash for Agent {}: {}",
-                    agent_id, e
+                    agent_id,
+                    e
                 );
             }
         }
@@ -385,7 +386,8 @@ impl HashInitializer {
             if let Err(e) = Self::ensure_group_hashes(&mut tx, &group_id).await {
                 log::error!(
                     "[HashInitializer] Failed to ensure hash for Group {}: {}",
-                    group_id, e
+                    group_id,
+                    e
                 );
             }
         }

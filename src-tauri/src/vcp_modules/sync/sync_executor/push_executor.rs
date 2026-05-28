@@ -262,7 +262,8 @@ impl PushExecutor {
                 Err(e) => {
                     log::error!(
                         "[PushExecutor] Batch push: NDJSON parse error on line: {:.100}... ({})",
-                        line, e
+                        line,
+                        e
                     );
                     continue;
                 }

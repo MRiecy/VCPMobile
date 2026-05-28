@@ -103,7 +103,8 @@ impl NetworkAwareSemaphore {
         let concurrency = ((cores as f32) * 1.5).clamp(6.0, 12.0) as usize;
         log::info!(
             "[Sync] Auto-optimized concurrency set to {} (cores: {})",
-            concurrency, cores
+            concurrency,
+            cores
         );
 
         Self {

@@ -429,7 +429,9 @@ impl PullExecutor {
                             if retries > 0 {
                                 log::info!(
                                     "[PullExecutor] Avatar {} {} succeeded after {} retries",
-                                    owner_type, owner_id, retries
+                                    owner_type,
+                                    owner_id,
+                                    retries
                                 );
                             }
                             return Ok(());

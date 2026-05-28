@@ -44,7 +44,8 @@ impl ContextSanitizer {
     pub fn new(capacity: usize, ttl_secs: u64) -> Self {
         log::info!(
             "[ContextSanitizer] Initializing Rust ContextSanitizer with capacity {} and TTL {}s",
-            capacity, ttl_secs
+            capacity,
+            ttl_secs
         );
         Self {
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),

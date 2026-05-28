@@ -350,7 +350,8 @@ pub async fn internal_process_group_chat_message(
         } else if let Err(e) = res_result {
             log::error!(
                 "[GroupChatAppService] Error during agent {} response: {}",
-                agent_id, e
+                agent_id,
+                e
             );
         }
     }
