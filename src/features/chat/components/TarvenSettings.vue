@@ -3,6 +3,7 @@ import { ref, onMounted, watch, computed } from 'vue';
 import { useTarvenStore, type TarvenRule } from '../../../core/stores/tarvenStore';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import SlidePage from '../../../components/ui/SlidePage.vue';
+import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -229,6 +230,16 @@ watch(currentView, (val) => {
   }
 });
 
+const enableSystemMetadata = computed({
+  get: () => tarvenStore.rules.find(r => r.id === 'system_meta_injection')?.isEnabled ?? true,
+  set: () => tarvenStore.toggleRule('system_meta_injection')
+});
+
+const enableTimeAnchoring = computed({
+  get: () => tarvenStore.rules.find(r => r.id === 'time_anchoring_v2')?.isEnabled ?? false,
+  set: () => tarvenStore.toggleRule('time_anchoring_v2')
+});
+
 onMounted(() => {
   if (props.isOpen) {
     tarvenStore.fetchRules();
@@ -267,6 +278,36 @@ watch(() => props.isOpen, (val) => {
         <!-- 视图 A: 规则列表 (按类型分区展示与排序) -->
         <div v-if="currentView === 'list'" class="flex flex-col gap-4 animate-fade-in pb-16">
           
+          <!-- 内置高级注入开关卡片 -->
+          <div class="flex flex-col p-4 rounded-2xl bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 gap-3.5">
+            <div class="flex items-center gap-2 border-b border-black/5 dark:border-white/5 pb-2">
+              <div class="w-1.5 h-4 bg-emerald-500 rounded-full"></div>
+              <span class="text-[12.5px] font-extrabold text-[var(--primary-text)] tracking-wide">系统内置高级注入开关</span>
+            </div>
+
+            <!-- 系统环境元数据注入 -->
+            <div class="flex items-center justify-between">
+              <div class="flex flex-col min-w-0 pr-4">
+                <span class="text-[13px] font-bold text-[var(--primary-text)]">系统环境元数据注入</span>
+                <span class="text-[10.5px] text-[var(--secondary-text)] mt-0.5 leading-normal font-medium">
+                  流式请求时在 System Prompt 顶部自动注入系统时间、运行环境及话题创建时间。
+                </span>
+              </div>
+              <SettingsSwitch v-model="enableSystemMetadata" class="shrink-0" />
+            </div>
+
+            <!-- 时间锚定机制 V2 -->
+            <div class="flex items-center justify-between border-t border-black/5 dark:border-white/5 pt-3.5">
+              <div class="flex flex-col min-w-0 pr-4">
+                <span class="text-[13px] font-bold text-[var(--primary-text)]">会话内时间锚定机制 V2</span>
+                <span class="text-[10.5px] text-[var(--secondary-text)] mt-0.5 leading-normal font-medium">
+                  为 Payload 每条消息动态注入分钟级时间戳，并建立物理 Token 隔离换行符，防止模型对物理时间产生幻觉。
+                </span>
+              </div>
+              <SettingsSwitch v-model="enableTimeAnchoring" class="shrink-0" />
+            </div>
+          </div>
+
           <!-- 创建新规则虚线按钮 -->
           <button @click="openForm()"
             class="flex items-center justify-center gap-2 p-3.5 rounded-xl border border-dashed border-black/15 dark:border-white/15 text-[var(--secondary-text)] hover:text-[var(--primary-text)] active:scale-[0.98] transition-all bg-black/5 dark:bg-white/5 w-full">

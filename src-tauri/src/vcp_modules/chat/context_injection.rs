@@ -144,8 +144,11 @@ pub async fn apply_tarven_pipeline(
         "".to_string()
     };
 
-    // 注入基础环境真理
-    inject_base_environment(pool, topic_id, &mut system_content).await;
+    // 检查是否启用了系统环境元数据注入
+    if rules.iter().any(|r| r.id == "system_meta_injection") {
+        // 注入基础环境真理
+        inject_base_environment(pool, topic_id, &mut system_content).await;
+    }
 
     // 过滤 system_suffix 规则并按位置拼接
     let system_rules: Vec<&TarvenRule> = rules
@@ -385,6 +388,10 @@ pub async fn save_tarven_rule(
 
 #[tauri::command]
 pub async fn delete_tarven_rule(db_state: State<'_, DbState>, id: String) -> Result<(), String> {
+    if id == "system_meta_injection" || id == "time_anchoring_v2" {
+        return Err("系统内置高级注入规则禁止被删除".to_string());
+    }
+
     sqlx::query("DELETE FROM tarven_rules WHERE id = ?")
         .bind(id)
         .execute(&db_state.pool)
@@ -458,9 +465,12 @@ pub async fn preview_tarven_injection(
         "".to_string()
     };
 
-    // 模拟环境注入
-    let mock_now = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
-    format_system_metadata(&mock_now, Some(&mock_now), &mut system_content);
+    // 检查是否启用了系统环境元数据注入
+    if rules.iter().any(|r| r.id == "system_meta_injection" && r.is_enabled) {
+        // 模拟环境注入
+        let mock_now = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+        format_system_metadata(&mock_now, Some(&mock_now), &mut system_content);
+    }
 
     // 过滤 system_suffix 规则并按位置拼接
     let system_rules: Vec<&TarvenRule> = rules
@@ -609,4 +619,67 @@ pub async fn preview_tarven_injection(
     }
 
     Ok(messages)
+}
+
+pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String> {
+    let now = chrono::Local::now().timestamp_millis();
+    let presets = vec![
+        (
+            "system_meta_injection",
+            "系统元数据注入",
+            "system_meta_injection",
+            1, // 默认开启
+            "包含当前系统时间、运行环境及话题创建时间元数据注入系统提示词。",
+        ),
+        (
+            "time_anchoring_v2",
+            "时间锚定机制 V2",
+            "time_anchoring_v2",
+            0, // 默认关闭
+            "在大模型 Payload 消息前部动态注入分钟级时间戳元数据并隔离防火墙，防止模型对物理时间产生幻觉。",
+        )
+    ];
+
+    for (id, name, rule_type, default_enabled, content) in presets {
+        let exists: Option<(i32,)> = sqlx::query_as("SELECT is_enabled FROM tarven_rules WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to query tarven_rules existence: {}", e))?;
+
+        if let Some((_is_enabled,)) = exists {
+            // 已存在，只热覆盖更新内容、名称、规则类型等，但不篡改用户的 is_enabled 状态
+            sqlx::query(
+                "UPDATE tarven_rules 
+                 SET name = ?, rule_type = ?, content = ?, updated_at = ? 
+                 WHERE id = ?"
+            )
+            .bind(name)
+            .bind(rule_type)
+            .bind(content)
+            .bind(now)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to update system preset rule: {}", e))?;
+        } else {
+            // 不存在，执行完整插入
+            sqlx::query(
+                "INSERT INTO tarven_rules (id, name, rule_type, is_enabled, content, scope, wrap, sort_order, created_at, updated_at) 
+                 VALUES (?, ?, ?, ?, ?, 'global', 0, -100, ?, ?)"
+            )
+            .bind(id)
+            .bind(name)
+            .bind(rule_type)
+            .bind(default_enabled)
+            .bind(content)
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to insert system preset rule: {}", e))?;
+        }
+    }
+
+    Ok(())
 }

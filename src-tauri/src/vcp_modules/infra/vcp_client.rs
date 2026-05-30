@@ -50,6 +50,7 @@ pub struct StreamEvent {
     pub error: Option<String>, // 错误信息 (仅 type="error" 时有效)
     pub aurora: Option<AuroraUpdate>, // Aurora 语义沉淀更新 (type="aurora" 时有效)
     pub blocks: Option<Vec<ContentBlock>>, // 持久化后的预渲染块 (仅 type="end" 时有效)
+    pub timestamp: Option<u64>,  // ⚡ 新增物理落笔时间戳
 }
 
 impl StreamEvent {
@@ -87,6 +88,7 @@ impl StreamEvent {
         context: Option<Value>,
         finish_reason: Option<String>,
         blocks: Option<Vec<ContentBlock>>,
+        timestamp: Option<u64>,
     ) -> Self {
         Self {
             r#type: "end".into(),
@@ -94,6 +96,7 @@ impl StreamEvent {
             context,
             finish_reason,
             blocks,
+            timestamp,
             ..Default::default()
         }
     }
@@ -204,11 +207,17 @@ pub async fn sendToVCP<R: Runtime>(
             res["finishReason"].as_str().map(|s| s.to_string())
         };
 
+        let final_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
         let _ = stream_channel.send(StreamEvent::end(
             message_id,
             context,
             Some(finish_reason.unwrap_or_else(|| "completed".to_string())),
             None,
+            Some(final_ts),
         ));
     }
 

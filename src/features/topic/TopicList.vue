@@ -7,7 +7,8 @@ import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useOverlayStore } from "../../core/stores/overlay";
-import { Edit3, Lock, LockOpen, CheckCircle, Trash2 } from "lucide-vue-next";
+import { useNotificationStore } from "../../core/stores/notification";
+import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Copy } from "lucide-vue-next";
 
 const emit = defineEmits<{
   (e: "select-topic"): void;
@@ -18,6 +19,7 @@ const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
+const notificationStore = useNotificationStore();
 const router = useRouter();
 
 type TopicViewModel = Topic & { pinned?: boolean; updatedAt?: number };
@@ -85,6 +87,29 @@ const showTopicContextMenu = (topicId: string) => {
             }
           },
         });
+      },
+    },
+    {
+      label: "复制 ID",
+      icon: Copy,
+      handler: async () => {
+        try {
+          await navigator.clipboard.writeText(topic.id);
+          notificationStore.addNotification({
+            type: "info",
+            title: "复制成功",
+            message: "话题 ID 已复制到剪贴板",
+            toastOnly: true,
+          });
+        } catch (err) {
+          console.error("Failed to copy ID:", err);
+          notificationStore.addNotification({
+            type: "error",
+            title: "复制失败",
+            message: "无法访问剪贴板",
+            toastOnly: true,
+          });
+        }
       },
     },
   ];

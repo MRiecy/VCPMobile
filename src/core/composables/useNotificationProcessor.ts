@@ -157,11 +157,19 @@ export function useNotificationProcessor() {
           ? 'error' 
           : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
         
-        title = `${vcpData.tool_name} ${vcpData.status}`;
+        const statusText = vcpData.status === 'success' ? '执行成功' : vcpData.status === 'error' ? '执行失败' : vcpData.status;
+        title = `${vcpData.tool_name} ${statusText}`;
 
         let rawContent = String(vcpData.content || '');
         message = rawContent;
-        isPreformatted = true;
+        
+        // 智能降维渲染：如果文本内容以 Emoji ✅/❌ 开头，或者是不含有换行与大括号的单行日常提示
+        // 则设为非 Preformatted，以便采用极致自然的原生排版呈现，剔除代码框的突兀感
+        isPreformatted = !(
+          rawContent.startsWith('✅') || 
+          rawContent.startsWith('❌') || 
+          (!rawContent.includes('\n') && !rawContent.includes('{'))
+        );
 
         // 处理错误模式: "执行错误: {"plugin_error": "..."}"
         if (vcpData.status === 'error' && rawContent.includes('{')) {

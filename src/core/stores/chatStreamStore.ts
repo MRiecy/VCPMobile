@@ -255,6 +255,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       if (msg) {
         msg!.isThinking = false;
+        if (event.timestamp) {
+          msg!.timestamp = event.timestamp;
+        }
         try {
           // 如果后端已经带回了预渲染好的 blocks，直接使用，跳过冗余解析
           if (event.blocks) {

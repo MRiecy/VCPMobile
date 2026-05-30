@@ -208,7 +208,17 @@ pub async fn internal_process_group_chat_message(
         }
 
         // 组装上下文（群聊需要添加发言人前缀以消歧）
-        let mut messages = assemble_history_for_vcp(&full_history_for_context, true);
+        let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
+            "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'"
+        )
+        .fetch_optional(&db_pool)
+        .await
+        {
+            Ok(Some(val)) => val != 0,
+            _ => false,
+        };
+
+        let mut messages = assemble_history_for_vcp(&full_history_for_context, true, enable_time_anchoring);
         if let Some(invite_prompt) = &group_config_inner.invite_prompt {
             let processed_invite = invite_prompt.replace("{{VCPChatAgentName}}", &agent_name);
             messages.push(json!({
@@ -286,15 +296,17 @@ pub async fn internal_process_group_chat_message(
                     res["finishReason"].as_str().map(|s| s.to_string())
                 };
 
+                let final_ts = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+
                 let ai_msg = ChatMessage {
                     id: message_id,
                     role: "assistant".to_string(),
                     name: Some(agent_name),
                     content: full_content.to_string(),
-                    timestamp: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
+                    timestamp: final_ts,
                     is_thinking: Some(false),
                     agent_id: Some(agent_id.clone()),
                     group_id: Some(group_id.clone()),
@@ -339,6 +351,7 @@ pub async fn internal_process_group_chat_message(
                         })),
                         ai_msg.finish_reason.clone(),
                         end_blocks,
+                        Some(final_ts),
                     ));
                 }
 

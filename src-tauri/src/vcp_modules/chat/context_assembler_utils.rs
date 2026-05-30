@@ -6,13 +6,31 @@ use serde_json::{json, Value};
 /// 1. 过滤掉正在思考中的消息 (is_thinking == true)
 /// 2. 提取附件中的文本内容 (extracted_text) 并拼接到文本中
 /// 3. 将多模态附件 (图片/音频/视频) 转换为 {"type": "local_file", "path": "..."} 结构
-pub fn assemble_history_for_vcp(history: &[ChatMessage], is_group: bool) -> Vec<Value> {
+pub fn assemble_history_for_vcp(
+    history: &[ChatMessage],
+    is_group: bool,
+    enable_time_anchoring: bool,
+) -> Vec<Value> {
     history
         .iter()
         .filter(|msg| !msg.is_thinking.unwrap_or(false))
         .map(|msg| {
-            let mut combined_text = if is_group {
-                // 提取发言人名字以构造前缀，若为空则安全降级到角色默认称谓以兼容历史脏数据
+            use chrono::TimeZone;
+            let formatted_time = if let Some(dt) = chrono::Local.timestamp_millis_opt(msg.timestamp as i64).single() {
+                dt.format("%Y-%m-%d %H:%M").to_string()
+            } else {
+                chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+            };
+
+            let mut combined_text = String::new();
+
+            // 1. 系统时间锚定前缀 (元数据 A) + 物理换行 1
+            if enable_time_anchoring {
+                combined_text.push_str(&format!("[Time: {}]\n", formatted_time));
+            }
+
+            // 2. 发言人消歧前缀 (元数据 B) + 物理换行 2
+            if is_group {
                 let speaker_name = msg
                     .name
                     .as_ref()
@@ -25,10 +43,11 @@ pub fn assemble_history_for_vcp(history: &[ChatMessage], is_group: bool) -> Vec<
                             "AI".to_string()
                         }
                     });
-                format!("[{}的发言]: \n{}", speaker_name, msg.content)
-            } else {
-                msg.content.clone()
-            };
+                combined_text.push_str(&format!("[{}的发言]:\n", speaker_name));
+            }
+
+            // 3. 核心消息正文
+            combined_text.push_str(&msg.content);
 
             let mut content_parts = Vec::new();
 

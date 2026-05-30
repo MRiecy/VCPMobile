@@ -235,25 +235,47 @@ pub async fn delete_topic(
 
 #[tauri::command]
 pub async fn update_topic_title(
-    _app_handle: AppHandle,
+    app_handle: AppHandle,
     db_state: State<'_, DbState>,
     _owner_id: String,
     _owner_type: String,
     topic_id: String,
     title: String,
 ) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
     sqlx::query("UPDATE topics SET title = ?, updated_at = ? WHERE topic_id = ?")
         .bind(&title)
-        .bind(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
-        )
+        .bind(now)
         .bind(&topic_id)
         .execute(&db_state.pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 1. 触发聚合哈希冒泡 (重算当前 topic 的哈希，并向上累加到 Agent/Group)
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    // 2. 发送同步通知给局域网同步网络
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let row = sqlx::query("SELECT config_hash FROM topics WHERE topic_id = ?")
+            .bind(&topic_id)
+            .fetch_one(&db_state.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let hash: String = row.get("config_hash");
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
+            data_type: SyncDataType::Topic,
+            id: topic_id,
+            hash,
+            ts: now,
+        });
+    }
 
     Ok(())
 }

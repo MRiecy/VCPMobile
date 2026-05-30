@@ -46,6 +46,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private var cameraTempFile: java.io.File? = null
 
     // ==================================================================
     // Permissions & App Control
@@ -261,14 +262,146 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun pickFile(invoke: Invoke) {
         try {
-            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                type = "*/*"
-                addCategory(Intent.CATEGORY_OPENABLE)
+            val args = invoke.parseArgs(PickFileArgs::class.java)
+            val mode = args.mode
+            Log.i(TAG, "[pickFile] Invoked with mode: $mode")
+
+            when (mode) {
+                "camera" -> {
+                    val tempFile = java.io.File(activity.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+                    cameraTempFile = tempFile
+                    
+                    val authority = "${activity.packageName}.fileprovider"
+                    val uri = try {
+                        FileProvider.getUriForFile(activity, authority, tempFile)
+                    } catch (e: Exception) {
+                        FileProvider.getUriForFile(activity, "${activity.packageName}.opener.fileprovider", tempFile)
+                    }
+                    
+                    val intent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                        putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+                        addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    }
+                    startActivityForResult(invoke, intent, "onCameraResult")
+                }
+                "gallery" -> {
+                    val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        type = "image/*"
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                    }
+                    startActivityForResult(invoke, intent, "onPickFileResult")
+                }
+                else -> {
+                    val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        type = "*/*"
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                    }
+                    startActivityForResult(invoke, intent, "onPickFileResult")
+                }
             }
-            startActivityForResult(invoke, intent, "onPickFileResult")
         } catch (e: Throwable) {
             Log.e(TAG, "[pickFile] Failed to start activity for result", e)
             invoke.reject("Failed to start native file picker: ${e.message}")
+        }
+    }
+
+    @ActivityCallback
+    fun onCameraResult(invoke: Invoke, result: ActivityResult) {
+        if (result.resultCode != Activity.RESULT_OK) {
+            Log.w(TAG, "[onCameraResult] Camera capture cancelled or failed")
+            cameraTempFile?.delete()
+            cameraTempFile = null
+            invoke.reject("Cancelled")
+            return
+        }
+
+        val photoFile = cameraTempFile
+        if (photoFile == null || !photoFile.exists()) {
+            Log.e(TAG, "[onCameraResult] Temporary photo file is null or does not exist")
+            invoke.reject("Capture failed: temp file not found")
+            return
+        }
+
+        cameraTempFile = null // reset
+
+        fileIoExecutor.execute {
+            try {
+                val context = activity
+                val originalName = "Camera_${System.currentTimeMillis()}.jpg"
+                val mimeType = "image/jpeg"
+                val size = photoFile.length()
+
+                Log.i(TAG, "[onCameraResult] Processing captured photo: $originalName (size=$size)")
+
+                // 发送预准备事件给前端，让前端立即创建进度卡片
+                val startDetail = JSObject().apply {
+                    put("name", originalName)
+                    put("size", size)
+                    put("mime", mimeType)
+                }
+                val safeStartDetail = escapeJsonForJsString(startDetail.toString())
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: JSON.parse(\"$safeStartDetail\") }))", null)
+                }
+
+                // 计算 SHA-256 哈希
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                java.io.FileInputStream(photoFile).use { fis ->
+                    val buffer = ByteArray(65536)
+                    var bytesRead: Int
+                    while (fis.read(buffer).also { bytesRead = it } != -1) {
+                        digest.update(buffer, 0, bytesRead)
+                    }
+                }
+                val hashBytes = digest.digest()
+                val hash = hashBytes.joinToString("") { "%02x".format(it) }
+
+                // 重命名去重
+                val finalTempFile = java.io.File(context.cacheDir, "$hash.jpg")
+                if (finalTempFile.exists()) {
+                    photoFile.delete() // 缓存去重，复用已有文件
+                } else {
+                    photoFile.renameTo(finalTempFile)
+                }
+
+                // 生成缩略图
+                val thumbnailPath = generateNativeThumbnail(context, finalTempFile, hash)
+
+                // 组装结果物理路径并回传给 Rust 桥接
+                val resultObject = JSObject()
+                resultObject.put("path", finalTempFile.absolutePath)
+                resultObject.put("name", originalName)
+                resultObject.put("mime", mimeType)
+                resultObject.put("size", finalTempFile.length())
+                resultObject.put("hash", hash)
+                if (thumbnailPath != null) {
+                    resultObject.put("thumbnailPath", thumbnailPath)
+                }
+
+                // 双轨通信：推送最终结果给前端，穿透 JNI 断裂层
+                val pickedDetail = JSObject().apply {
+                    put("path", finalTempFile.absolutePath)
+                    put("name", originalName)
+                    put("mime", mimeType)
+                    put("size", finalTempFile.length())
+                    put("hash", hash)
+                    if (thumbnailPath != null) {
+                        put("thumbnailPath", thumbnailPath)
+                    } else {
+                        put("thumbnailPath", org.json.JSONObject.NULL)
+                    }
+                }
+                val safePickedDetail = escapeJsonForJsString(pickedDetail.toString())
+                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: JSON.parse(\"$safePickedDetail\") }))"
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript(pickedScript, null)
+                }
+
+                invoke.resolve(resultObject)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[onCameraResult] Photo processing failed", e)
+                invoke.reject("Handling captured photo failed: ${e.message}")
+            }
         }
     }
 
@@ -569,4 +702,9 @@ class RequestPermissionArgs {
 @InvokeArg
 class OpenFileArgs {
     lateinit var path: String
+}
+
+@InvokeArg
+class PickFileArgs {
+    var mode: String = "file"
 }

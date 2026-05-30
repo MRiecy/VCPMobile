@@ -14,6 +14,10 @@ defineProps<{
 
 const overlayStore = useOverlayStore();
 
+const emit = defineEmits<{
+  (e: "save-request"): void;
+}>();
+
 const emoticonStatus = ref<{
   type: "success" | "error" | "loading" | null;
   message: string;
@@ -24,6 +28,7 @@ const startManualSync = () => {
 };
 
 const rebuildEmoticonLibrary = async () => {
+  emit("save-request");
   emoticonStatus.value = { type: "loading", message: "正在从远程服务器获取..." };
   try {
     const count = await invoke<number>("regenerate_emoticon_library");

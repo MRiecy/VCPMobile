@@ -53,7 +53,7 @@ const onTouchMove = (e: TouchEvent) => {
   if (!hasDeterminedDirection) {
     const absX = Math.abs(deltaX);
     const absY = Math.abs(deltaY);
-    if (absX > 5 || absY > 5) {
+    if (absX > 15 || absY > 15) { // 提高手势判定阈值，防止在滑动浏览历史时出现过敏性误触移位
       hasDeterminedDirection = true;
       if (absY / absX > 0.577) {
         isVerticalScroll = true;
@@ -90,9 +90,11 @@ const onTouchEnd = () => {
     @touchstart.stop="onTouchStart"
     @touchmove.stop="onTouchMove"
     @touchend.stop="onTouchEnd"
-    class="group relative px-3.5 py-2.5 border-b border-black/5 dark:border-white/5 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
-    :class="isDragging ? 'transition-none' : 'transition-transform duration-200 ease-out'"
-    :style="{ transform: `translateX(${swipeX}px)` }">
+    class="group relative px-3.5 py-2.5 border-b border-black/5 dark:border-white/5 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] select-none touch-pan-y"
+    :style="{ 
+      transform: `translateX(${swipeX}px)`,
+      transition: isDragging ? 'none' : 'transform 0.25s cubic-bezier(0.16, 1, 0.3, 1)' 
+    }">
     <div class="flex items-start gap-2.5">
       <component :is="getIcon(props.item.type)" :size="13" :class="getTypeColor(props.item.type)"
         class="mt-0.5 shrink-0 opacity-75" />
@@ -100,11 +102,12 @@ const onTouchEnd = () => {
       <div class="flex-1 min-w-0 flex flex-col">
         <span class="text-[10.5px] font-black tracking-wide opacity-80 leading-tight text-[var(--highlight-text)]">{{ props.item.title }}</span>
 
-        <div v-if="props.item.isPreformatted"
-          class="mt-1.5 p-1.5 bg-black/10 dark:bg-black/20 rounded text-[9px] max-h-[100px] overflow-y-auto whitespace-pre-wrap break-all font-mono opacity-70 text-primary-text leading-normal select-text">
-          {{ props.item.message }}
-        </div>
-        <div v-else class="text-[10.5px] leading-relaxed break-words text-primary-text opacity-65 mt-0.5 select-text">
+        <div 
+          :class="[
+            props.item.isPreformatted ? 'font-mono text-[9.5px] opacity-70 leading-normal bg-black/5 dark:bg-white/5 px-1.5 py-0.5 rounded mt-1.5' : 'text-[10.5px] opacity-65 leading-relaxed mt-0.5',
+            'break-words text-primary-text select-text'
+          ]"
+        >
           {{ props.item.message }}
         </div>
 

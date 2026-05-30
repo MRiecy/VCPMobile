@@ -365,5 +365,10 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC)").execute(pool).await.map_err(|e| e.to_string())?;
 
+    // 运行系统内置高级规则的多模态无损同步器
+    crate::vcp_modules::chat::context_injection::sync_system_preset_rules(pool)
+        .await
+        .map_err(|e| format!("[DBManager] Failed to sync preset rules: {}", e))?;
+
     Ok(())
 }

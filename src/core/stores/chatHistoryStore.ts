@@ -44,7 +44,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const ownerType = sessionStore.currentSelectedItem.type;
 
     const topic = topicStore.topics.find((t) => t.id === topicId);
-    const isDefaultName = topic && /^新话题 \d{2}:\d{2}:\d{2}$/.test(topic.name);
+    const isDefaultName = topic && /^(新话题|新会话) \d{2}:\d{2}:\d{2}$/.test(topic.name);
     const messageCount = currentChatHistory.value.filter(
       (m) => m.role !== "system",
     ).length;
@@ -224,7 +224,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         ownerId: sessionStore.currentSelectedItem.id,
         ownerType: sessionStore.currentSelectedItem.type,
         topicId,
-        message: userMsg,
+        message: {
+          ...userMsg,
+          blocks: undefined, // 强行设为 undefined，迫使后端执行真正的编译，生成 markdown AST 节点与表情包匹配
+        },
       });
 
       const targetIndex = currentChatHistory.value.findIndex(m => m.id === userMsg.id);

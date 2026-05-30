@@ -159,7 +159,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
             }
           }, 300000);
 
-          invoke<any>("plugin:vcp-mobile|pick_file").then((res) => {
+          invoke<any>("plugin:vcp-mobile|pick_file", { mode }).then((res) => {
             if (!resolved) {
               resolved = true;
               cleanup();

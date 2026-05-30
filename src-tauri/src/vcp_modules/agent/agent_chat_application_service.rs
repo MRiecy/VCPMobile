@@ -91,7 +91,17 @@ pub async fn internal_process_agent_chat_message(
     .await?;
 
     // 4. 使用公共工具组装上下文 (单聊不添加发言人前缀)
-    let mut messages = assemble_history_for_vcp(&history, false);
+    let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
+        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'"
+    )
+    .fetch_optional(&db_state.pool)
+    .await
+    {
+        Ok(Some(val)) => val != 0,
+        _ => false,
+    };
+
+    let mut messages = assemble_history_for_vcp(&history, false, enable_time_anchoring);
 
     // 5. 注入 System Prompt (优先使用移动端专用提示词) 并调用物理上下文与 Tarven 注入系统
     let effective_prompt = if !agent_config.mobile_system_prompt.is_empty() {
@@ -185,15 +195,17 @@ pub async fn internal_process_agent_chat_message(
                     res["finishReason"].as_str().map(|s| s.to_string())
                 };
 
+                let final_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+
                 let final_msg = ChatMessage {
                     id: thinking_id.clone(),
                     role: "assistant".to_string(),
                     name: Some(agent_config.name.clone()),
                     content: full_content.to_string(),
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
+                    timestamp: final_ts,
                     is_thinking: Some(false),
                     agent_id: Some(agent_id.clone()),
                     group_id: None,
@@ -235,6 +247,7 @@ pub async fn internal_process_agent_chat_message(
                     })),
                     finish_reason,
                     end_blocks,
+                    Some(final_ts),
                 ));
             }
         }

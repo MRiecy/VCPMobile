@@ -95,7 +95,10 @@ pub struct PickedFileInfo {
 }
 
 #[tauri::command]
-pub fn pick_file<R: Runtime>(app: AppHandle<R>) -> Result<PickedFileInfo, String> {
+pub fn pick_file<R: Runtime>(
+    app: AppHandle<R>,
+    mode: Option<String>,
+) -> Result<PickedFileInfo, String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
@@ -103,13 +106,19 @@ pub fn pick_file<R: Runtime>(app: AppHandle<R>) -> Result<PickedFileInfo, String
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         let file_info = plugin_handle
-            .run_mobile_plugin::<PickedFileInfo>("pickFile", serde_json::json!({}))
+            .run_mobile_plugin::<PickedFileInfo>(
+                "pickFile",
+                serde_json::json!({
+                    "mode": mode.unwrap_or_else(|| "file".to_string())
+                }),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
         Ok(file_info)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
+        let _ = mode;
         Err("该接口仅在 Android 物理端可用".to_string())
     }
 }

@@ -336,6 +336,7 @@ impl MessageRepository {
                 role = excluded.role,
                 name = excluded.name,
                 agent_id = excluded.agent_id,
+                timestamp = excluded.timestamp,
                 is_group_message = excluded.is_group_message,
                 group_id = excluded.group_id,
                 finish_reason = excluded.finish_reason,
