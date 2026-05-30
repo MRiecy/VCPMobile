@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::Error as IoError;
-use std::path::PathBuf;
+
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
@@ -156,12 +156,6 @@ impl Default for CancelledGroupTurns {
     }
 }
 
-/// 内部辅助函数：获取应用程序数据目录
-async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
-    app.path()
-        .app_data_dir()
-        .unwrap_or_else(|_| PathBuf::from("AppData"))
-}
 
 /// 中止群组的整个接力赛回合
 #[tauri::command]
@@ -207,18 +201,35 @@ pub async fn sendToVCP<R: Runtime>(
             res["finishReason"].as_str().map(|s| s.to_string())
         };
 
-        let final_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
+        // 从 context 解出 owner_id, owner_type, topic_id 并委派统一终结器
+        let ctx = context.as_ref();
+        let group_id = ctx.and_then(|c| c["groupId"].as_str());
+        let agent_id = ctx.and_then(|c| c["agentId"].as_str());
+        let topic_id = ctx.and_then(|c| c["topicId"].as_str()).unwrap_or("").to_string();
 
-        let _ = stream_channel.send(StreamEvent::end(
+        let (owner_id, owner_type) = if let Some(gid) = group_id {
+            (gid, "group")
+        } else if let Some(aid) = agent_id {
+            (aid, "agent")
+        } else {
+            ("", "agent")
+        };
+
+        let pool = app.state::<crate::vcp_modules::db_manager::DbState>().pool.clone();
+
+        crate::vcp_modules::chat::message_service::finalize_stream_message(
+            app.clone(),
+            &pool,
+            owner_id,
+            owner_type,
+            topic_id,
             message_id,
-            context,
-            Some(finish_reason.unwrap_or_else(|| "completed".to_string())),
-            None,
-            Some(final_ts),
-        ));
+            res["fullContent"].as_str().unwrap_or("").to_string(),
+            is_aborted,
+            finish_reason,
+            Some(stream_channel),
+        )
+        .await?;
     }
 
     Ok(res)
@@ -237,7 +248,7 @@ pub async fn perform_vcp_request<R: Runtime>(
         payload.message_id,
         payload.context
     );
-    let app_data_path = get_app_data_path(app).await;
+
 
     let send_stream_event = |event: StreamEvent| {
         if let Some(ref ch) = stream_channel {
@@ -396,21 +407,11 @@ pub async fn perform_vcp_request<R: Runtime>(
 
     // === 1. 读取设置与动态路由切换 ===
     let mut enable_vcp_tool_injection = false;
-    let mut agent_music_control = false;
-    let mut enable_agent_bubble_theme = false;
 
     if let Ok(settings) = load_app_settings(app).await {
         if let Some(extra) = settings.extra.as_object() {
             enable_vcp_tool_injection = extra
                 .get("enableVcpToolInjection")
-                .and_then(|v: &Value| v.as_bool())
-                .unwrap_or(false);
-            agent_music_control = extra
-                .get("agentMusicControl")
-                .and_then(|v: &Value| v.as_bool())
-                .unwrap_or(false);
-            enable_agent_bubble_theme = extra
-                .get("enableAgentBubbleTheme")
                 .and_then(|v: &Value| v.as_bool())
                 .unwrap_or(false);
         }
@@ -430,68 +431,6 @@ pub async fn perform_vcp_request<R: Runtime>(
     let has_system = messages.iter().any(|m| m["role"] == "system");
     if !has_system {
         messages.insert(0, json!({"role": "system", "content": ""}));
-    }
-
-    let mut top_parts = Vec::new();
-    let mut bottom_parts = Vec::new();
-
-    // 3.1 音乐状态注入
-    let music_state_path = app_data_path.join("music_state.json");
-    if let Ok(content) = tokio::fs::read_to_string(&music_state_path).await {
-        if let Ok(m_state) = serde_json::from_str::<Value>(&content) {
-            if let (Some(title), Some(artist)) =
-                (m_state["title"].as_str(), m_state["artist"].as_str())
-            {
-                let album = m_state["album"].as_str().unwrap_or("未知专辑");
-                bottom_parts.push(format!(
-                    "[当前播放音乐：{} - {} ({})]",
-                    title, artist, album
-                ));
-            }
-        }
-    }
-
-    // 3.2 播放列表与点歌台注入
-    if agent_music_control {
-        let songlist_path = app_data_path.join("songlist.json");
-        if let Ok(content) = tokio::fs::read_to_string(&songlist_path).await {
-            if let Ok(songlist) = serde_json::from_str::<Value>(&content) {
-                if let Some(songs) = songlist.as_array() {
-                    let titles: Vec<&str> =
-                        songs.iter().filter_map(|s| s["title"].as_str()).collect();
-                    if !titles.is_empty() {
-                        top_parts.push(format!("[播放列表——\n{}\n]", titles.join("\n")));
-                    }
-                }
-            }
-        }
-        bottom_parts.push("点歌台{{VCPMusicController}}".to_string());
-    }
-
-    // 3.3 UI 规范要求注入
-    if enable_agent_bubble_theme {
-        bottom_parts.push("输出规范要求：{{VarDivRender}}".to_string());
-    }
-
-    // 应用注入到 System Message
-    if !top_parts.is_empty() || !bottom_parts.is_empty() {
-        for m in messages.iter_mut() {
-            if m["role"] == "system" {
-                let original_content = m["content"].as_str().unwrap_or("");
-                let mut final_parts = Vec::new();
-                if !top_parts.is_empty() {
-                    final_parts.push(top_parts.join("\n"));
-                }
-                if !original_content.is_empty() {
-                    final_parts.push(original_content.to_string());
-                }
-                if !bottom_parts.is_empty() {
-                    final_parts.push(bottom_parts.join("\n"));
-                }
-                m["content"] = json!(final_parts.join("\n\n").trim());
-                break;
-            }
-        }
     }
 
     // === 4. 准备请求体 ===

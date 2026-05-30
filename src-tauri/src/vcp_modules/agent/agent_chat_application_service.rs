@@ -1,6 +1,5 @@
 use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigState};
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::context_assembler_utils::assemble_history_for_vcp;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{
@@ -90,40 +89,21 @@ pub async fn internal_process_agent_chat_message(
     )
     .await?;
 
-    // 4. 使用公共工具组装上下文 (单聊不添加发言人前缀)
-    let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
-        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'"
-    )
-    .fetch_optional(&db_state.pool)
-    .await
-    {
-        Ok(Some(val)) => val != 0,
-        _ => false,
-    };
-
-    let mut messages = assemble_history_for_vcp(&history, false, enable_time_anchoring);
-
-    // 5. 注入 System Prompt (优先使用移动端专用提示词) 并调用物理上下文与 Tarven 注入系统
+    // 4. 委派上下文级联装配外观中枢，完成微观编织与宏观 Tavern 规则流水线拦截
     let effective_prompt = if !agent_config.mobile_system_prompt.is_empty() {
         agent_config.mobile_system_prompt.clone()
     } else {
         agent_config.system_prompt.clone()
     };
 
-    messages.insert(
-        0,
-        json!({
-            "role": "system",
-            "content": effective_prompt
-        }),
-    );
-
-    crate::vcp_modules::chat::context_injection::apply_tarven_pipeline(
+    let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
         &db_state.pool,
+        &history,
         &topic_id,
         &agent_config.name,
         "agent",
-        &mut messages,
+        effective_prompt,
+        None,
     )
     .await?;
 
@@ -185,7 +165,7 @@ pub async fn internal_process_agent_chat_message(
         );
     }
 
-    // 8. 流式结束后（含中断），将最终内容预渲染并入库
+    // 8. 流式结束后（含中断），将最终内容委派统一的 Finalizer 进行存盘与事件分发
     match result {
         Ok((res, is_aborted)) => {
             if let Some(full_content) = res["fullContent"].as_str() {
@@ -195,60 +175,19 @@ pub async fn internal_process_agent_chat_message(
                     res["finishReason"].as_str().map(|s| s.to_string())
                 };
 
-                let final_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-
-                let final_msg = ChatMessage {
-                    id: thinking_id.clone(),
-                    role: "assistant".to_string(),
-                    name: Some(agent_config.name.clone()),
-                    content: full_content.to_string(),
-                    timestamp: final_ts,
-                    is_thinking: Some(false),
-                    agent_id: Some(agent_id.clone()),
-                    group_id: None,
-                    topic_id: Some(topic_id.clone()),
-                    is_group_message: Some(false),
-                    finish_reason: finish_reason.clone(),
-                    attachments: None,
-                    blocks: None,
-                    shell: None,
-                    content_hash: None,
-                };
-
-                let patch_result = message_service::patch_single_message(
+                message_service::finalize_stream_message(
                     app_handle.clone(),
                     &db_state.pool,
                     &agent_id,
                     "agent",
                     topic_id.clone(),
-                    final_msg,
-                    false,
-                )
-                .await;
-                let end_blocks = match &patch_result {
-                    Ok(blocks) => Some(blocks.clone()),
-                    Err(e) => {
-                        log::error!(
-                            "[AgentChatAppService] Failed to patch final message after stream: {}",
-                            e
-                        );
-                        None
-                    }
-                };
-                let _ = stream_channel.send(StreamEvent::end(
                     thinking_id.clone(),
-                    Some(json!({
-                        "agentId": agent_id,
-                        "topicId": topic_id,
-                        "agentName": agent_config.name
-                    })),
+                    full_content.to_string(),
+                    is_aborted,
                     finish_reason,
-                    end_blocks,
-                    Some(final_ts),
-                ));
+                    Some(stream_channel),
+                )
+                .await?;
             }
         }
         Err(e) => {

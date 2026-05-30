@@ -6,6 +6,7 @@ use crate::vcp_modules::message_repository::{ContentCompressor, MessageRenderCom
 use crate::vcp_modules::settings_manager;
 use sqlx::Row;
 use std::path::Path;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 use tokio::fs;
 
@@ -393,8 +394,8 @@ pub async fn load_chat_history_internal(
 }
 
 /// 核心：确保消息中的附件在手机本地物理存在，否则从电脑同步下载
-async fn ensure_attachments_locally(
-    app: &AppHandle,
+async fn ensure_attachments_locally<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     message: &mut ChatMessage,
 ) -> Result<(), String> {
     let attachments = match &mut message.attachments {
@@ -467,8 +468,8 @@ async fn ensure_attachments_locally(
     Ok(())
 }
 
-pub async fn append_single_message(
-    app_handle: AppHandle,
+pub async fn append_single_message<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
     _owner_id: &str,
     _owner_type: &str,
@@ -591,8 +592,8 @@ pub async fn re_render_message(
     }
 }
 
-pub async fn patch_single_message(
-    app_handle: AppHandle,
+pub async fn patch_single_message<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
     _owner_id: &str,
     _owner_type: &str,
@@ -745,4 +746,108 @@ fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Val
                 },
             )
     })
+}
+
+/// 统一的流式落盘与终结编排器
+pub async fn finalize_stream_message<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    owner_id: &str,
+    owner_type: &str, // "agent" | "group"
+    topic_id: String,
+    message_id: String,
+    full_content: String,
+    _is_aborted: bool,
+    finish_reason: Option<String>,
+    stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
+) -> Result<(), String> {
+    let final_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let is_group = owner_type == "group";
+    let final_msg = ChatMessage {
+        id: message_id.clone(),
+        role: "assistant".to_string(),
+        name: None,
+        content: full_content,
+        timestamp: final_ts,
+        is_thinking: Some(false),
+        agent_id: if is_group { None } else { Some(owner_id.to_string()) },
+        group_id: if is_group { Some(owner_id.to_string()) } else { None },
+        topic_id: Some(topic_id.clone()),
+        is_group_message: Some(is_group),
+        finish_reason: finish_reason.clone(),
+        attachments: None,
+        blocks: None,
+        shell: None,
+        content_hash: None,
+    };
+
+    let end_blocks = if owner_id.is_empty() || topic_id.is_empty() {
+        None
+    } else if !is_group {
+        match patch_single_message(
+            app_handle.clone(),
+            pool,
+            owner_id,
+            "agent",
+            topic_id.clone(),
+            final_msg,
+            false,
+        )
+        .await
+        {
+            Ok(blocks) => Some(blocks),
+            Err(e) => {
+                log::error!("[StreamFinalizer] Failed to patch agent message: {}", e);
+                None
+            }
+        }
+    } else {
+        match append_single_message(
+            app_handle.clone(),
+            pool,
+            owner_id,
+            "group",
+            topic_id.clone(),
+            final_msg,
+        )
+        .await
+        {
+            Ok(blocks) => Some(blocks),
+            Err(e) => {
+                log::error!("[StreamFinalizer] Failed to append group message: {}", e);
+                None
+            }
+        }
+    };
+
+    if let Some(chan) = stream_channel {
+        let context = if owner_id.is_empty() || topic_id.is_empty() {
+            None
+        } else if is_group {
+            Some(serde_json::json!({
+                "groupId": owner_id,
+                "topicId": topic_id,
+                "isGroupMessage": true,
+            }))
+        } else {
+            Some(serde_json::json!({
+                "agentId": owner_id,
+                "topicId": topic_id,
+            }))
+        };
+
+        let _ = chan.send(crate::vcp_modules::vcp_client::StreamEvent::end(
+            message_id,
+            context,
+            Some(finish_reason.unwrap_or_else(|| "completed".to_string())),
+            end_blocks,
+            Some(final_ts),
+        ));
+    }
+
+    Ok(())
 }

@@ -27,7 +27,7 @@ pub use group::group_types;
 pub use chat::aurora_pipeline;
 pub use chat::chat_manager;
 pub use chat::content_parser;
-pub use chat::context_assembler_utils;
+pub use chat::context_assembler;
 pub use chat::context_injection;
 pub use chat::context_sanitizer;
 pub use chat::emoticon_manager;

@@ -1,7 +1,7 @@
 pub mod aurora_pipeline;
 pub mod chat_manager;
 pub mod content_parser;
-pub mod context_assembler_utils;
+pub mod context_assembler;
 pub mod context_injection;
 pub mod context_sanitizer;
 pub mod emoticon_manager;
