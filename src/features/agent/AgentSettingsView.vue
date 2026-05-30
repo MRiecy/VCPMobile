@@ -50,7 +50,7 @@ const agentConfig = ref<AgentConfig>({
   contextTokenLimit: 1000000,
   maxOutputTokens: 32000,
   streamOutput: true,
-  useTemperature: true,
+  useTemperature: false,
 });
 
 // UI State

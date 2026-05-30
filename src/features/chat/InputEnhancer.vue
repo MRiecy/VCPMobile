@@ -379,7 +379,6 @@ const handleKeydown = (e: KeyboardEvent) => {
 
 const triggerFilePick = async (mode: 'camera' | 'gallery' | 'file') => {
   if (props.disabled) return;
-  showAttachMenu.value = false;
   emit('attach');
   await attachmentStore.handleAttachment(mode);
 };

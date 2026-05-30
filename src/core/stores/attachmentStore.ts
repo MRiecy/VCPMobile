@@ -90,9 +90,10 @@ export const useAttachmentStore = defineStore("attachment", () => {
       console.log(`[AttachmentStore] Android environment detected. Intercepting via native picker. Mode: ${mode}`);
       const notificationStore = useNotificationStore();
       
+      const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      
       try {
         // 1. 调用物理端原生 File Picker (双轨事件监听 + 5分钟熔断)
-        const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         
         const picked = await new Promise<any>((resolve, reject) => {
           let resolved = false;
@@ -245,12 +246,22 @@ export const useAttachmentStore = defineStore("attachment", () => {
         }
       } catch (err: any) {
         console.error("[AttachmentStore] Native file pick & registration failed:", err);
-        notificationStore.addNotification({
-          type: "warning",
-          title: "选取附件失败",
-          message: `❌ 异常捕获: ${err.message || String(err)}`,
-          toastOnly: true,
-        });
+        // 清理由于取消或失败而滞留的暂存卡片
+        const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
+        if (existingIdx !== -1) {
+          stagedAttachments.value.splice(existingIdx, 1);
+        }
+
+        const errMsg = err?.message || String(err);
+        const isCancelled = errMsg === "Cancelled" || errMsg.includes("Cancelled") || errMsg.includes("cancel");
+        if (!isCancelled) {
+          notificationStore.addNotification({
+            type: "warning",
+            title: "选取附件失败",
+            message: `❌ 异常捕获: ${errMsg}`,
+            toastOnly: true,
+          });
+        }
       }
       return;
     }

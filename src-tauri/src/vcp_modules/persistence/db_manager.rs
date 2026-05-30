@@ -113,7 +113,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             context_token_limit INTEGER NOT NULL DEFAULT 0,
             max_output_tokens INTEGER NOT NULL DEFAULT 0,
             stream_output INTEGER NOT NULL DEFAULT 1,
-            use_temperature INTEGER NOT NULL DEFAULT 1,
+            use_temperature INTEGER NOT NULL DEFAULT 0,
             config_hash TEXT NOT NULL DEFAULT '',  -- 配置内容指纹
             content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
             updated_at BIGINT NOT NULL,

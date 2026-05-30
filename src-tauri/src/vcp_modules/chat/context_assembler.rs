@@ -114,11 +114,6 @@ pub fn assemble_history_for_vcp(
 
             let mut combined_text = String::new();
 
-            // 1. 系统时间锚定前缀 (元数据 A) + 物理换行 1
-            if enable_time_anchoring {
-                combined_text.push_str(&format!("[Time: {}]\n", formatted_time));
-            }
-
             // 2. 发言人消歧前缀 (元数据 B) + 物理换行 2
             if is_group {
                 let speaker_name = msg
@@ -193,6 +188,11 @@ pub fn assemble_history_for_vcp(
                             .push_str(&format!("\n\n[附加文件: {}] (文件名: {})", path, att.name));
                     }
                 }
+            }
+
+            // 4. 追加末尾时间锚定 (元数据 A - XML 标签格式)
+            if enable_time_anchoring {
+                combined_text.push_str(&format!("\n<message_time>{}</message_time>", formatted_time));
             }
 
             if !combined_text.trim().is_empty() {

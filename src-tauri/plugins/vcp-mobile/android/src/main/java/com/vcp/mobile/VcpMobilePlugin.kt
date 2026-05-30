@@ -33,7 +33,8 @@ import com.vcp.mobile.service.StreamKeepaliveService
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
     Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE"], alias = "storageLegacy"),
-    Permission(strings = ["android.permission.RECORD_AUDIO"], alias = "microphone")
+    Permission(strings = ["android.permission.RECORD_AUDIO"], alias = "microphone"),
+    Permission(strings = ["android.permission.CAMERA"], alias = "camera")
 ])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -72,6 +73,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val cameraGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
 
@@ -79,6 +81,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         result.put("notification", notificationGranted)
         result.put("storage", storageGranted)
         result.put("microphone", microphoneGranted)
+        result.put("camera", cameraGranted)
         result.put("battery", batteryOptimizationIgnored)
         
         invoke.resolve(result)
@@ -105,6 +108,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             }
             "microphone" -> {
                 requestPermissionForAlias("microphone", invoke, "onPermissionResult")
+            }
+            "camera" -> {
+                requestPermissionForAlias("camera", invoke, "onPermissionResult")
             }
             "battery" -> {
                 try {
@@ -161,10 +167,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val cameraGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
 
-        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"battery":$batteryOptimizationIgnored}"""
+        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored}"""
         val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
         webViewRef?.evaluateJavascript(script, null)
     }
@@ -259,6 +266,39 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     // Scoped Storage File Picker & Native Thumbnail Generation (Scheme B)
     // ==================================================================
+    @PermissionCallback
+    fun onCameraPermissionResult(invoke: Invoke) {
+        if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            launchCameraIntent(invoke)
+        } else {
+            Log.w(TAG, "[onCameraPermissionResult] Camera permission denied")
+            invoke.reject("Camera permission denied")
+        }
+    }
+
+    private fun launchCameraIntent(invoke: Invoke) {
+        try {
+            val tempFile = java.io.File(activity.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+            cameraTempFile = tempFile
+            
+            val authority = "${activity.packageName}.fileprovider"
+            val uri = try {
+                FileProvider.getUriForFile(activity, authority, tempFile)
+            } catch (e: Exception) {
+                FileProvider.getUriForFile(activity, "${activity.packageName}.opener.fileprovider", tempFile)
+            }
+            
+            val intent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
+            startActivityForResult(invoke, intent, "onCameraResult")
+        } catch (e: Throwable) {
+            Log.e(TAG, "[launchCameraIntent] Failed to launch camera intent", e)
+            invoke.reject("Failed to launch camera: ${e.message}")
+        }
+    }
+
     @Command
     fun pickFile(invoke: Invoke) {
         try {
@@ -268,21 +308,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
             when (mode) {
                 "camera" -> {
-                    val tempFile = java.io.File(activity.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
-                    cameraTempFile = tempFile
-                    
-                    val authority = "${activity.packageName}.fileprovider"
-                    val uri = try {
-                        FileProvider.getUriForFile(activity, authority, tempFile)
-                    } catch (e: Exception) {
-                        FileProvider.getUriForFile(activity, "${activity.packageName}.opener.fileprovider", tempFile)
+                    if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                        requestPermissionForAlias("camera", invoke, "onCameraPermissionResult")
+                        return
                     }
-                    
-                    val intent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
-                        putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
-                        addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-                    }
-                    startActivityForResult(invoke, intent, "onCameraResult")
+                    launchCameraIntent(invoke)
                 }
                 "gallery" -> {
                     val intent = Intent(Intent.ACTION_GET_CONTENT).apply {

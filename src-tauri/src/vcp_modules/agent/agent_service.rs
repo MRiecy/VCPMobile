@@ -50,7 +50,7 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
         context_token_limit: 1000000,
         max_output_tokens: 64000,
         stream_output: true,
-        use_temperature: true,
+        use_temperature: false,
         avatar_calculated_color: None,
         topics: vec![],
     }
@@ -426,7 +426,7 @@ pub async fn create_agent(
             context_token_limit: 1000000,
             max_output_tokens: 60000,
             stream_output: true,
-            use_temperature: true,
+            use_temperature: false,
             avatar_calculated_color: None,
             topics: vec![Topic {
                 id: default_topic_id.clone(),

@@ -766,12 +766,33 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    let mut final_content = full_content;
+
+    // 1. 查询时间锚定机制 V2 的启用状态，仅在启用时才开启正则，避免不必要开销
+    let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
+        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'"
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(val)) => val != 0,
+        _ => false,
+    };
+
+    if enable_time_anchoring {
+        lazy_static::lazy_static! {
+            static ref TIME_XML_TAG_REGEX: fancy_regex::Regex = fancy_regex::Regex::new(r#"(?is)<message_time>.*?</message_time>"#).unwrap();
+        }
+        final_content = TIME_XML_TAG_REGEX.replace_all(&final_content, "").to_string();
+        final_content = final_content.trim_end().to_string();
+    }
+
     let is_group = owner_type == "group";
     let final_msg = ChatMessage {
         id: message_id.clone(),
         role: "assistant".to_string(),
         name: None,
-        content: full_content,
+        content: final_content,
         timestamp: final_ts,
         is_thinking: Some(false),
         agent_id: if is_group { None } else { Some(owner_id.to_string()) },
