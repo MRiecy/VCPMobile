@@ -3,43 +3,35 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 // =============================================================================
-// Android: embed ffmpeg/ffprobe binaries at compile time
+// Android: Native Library Directory Symlink寻址机制
 // =============================================================================
-#[cfg(target_os = "android")]
-mod android {
-    pub const FFMPEG_BINARY: &[u8] = include_bytes!("assets/ffmpeg_aarch64");
-    pub const FFPROBE_BINARY: &[u8] = include_bytes!("assets/ffprobe_aarch64");
-}
-
-#[cfg(target_os = "android")]
-fn extract_android_binary(name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    if bytes.len() < 1024 {
-        return Err(format!(
-            "Embedded {} binary is empty or too small ({} bytes). \
-             Please build the real ffmpeg binary for Android and place it at \
-             src-tauri/src/vcp_modules/media_processor/assets/{}_aarch64",
-            name,
-            bytes.len(),
-            name
-        ));
-    }
-
-    let cache_dir = std::env::temp_dir();
-    let path = cache_dir.join(name);
-
-    if !path.exists() {
-        std::fs::write(&path, bytes)
-            .map_err(|e| format!("Failed to write {} to cache: {}", name, e))?;
-    }
-
-    Ok(path)
-}
 
 /// 获取 ffmpeg 可执行文件路径
 pub fn get_ffmpeg_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
-        extract_android_binary("ffmpeg", android::FFMPEG_BINARY)
+        let temp_str = std::env::temp_dir().to_string_lossy().to_string();
+        let parts: Vec<&str> = temp_str.split('/').collect();
+        let mut package_name = "com.vcp.avatar".to_string();
+        for part in parts {
+            if part.starts_with("com.vcp.") {
+                package_name = part.to_string();
+                break;
+            }
+        }
+
+        // 优先尝试寻找被系统合法解压且赋予了可执行 (+x) 权限的 Native 库路径
+        for base_dir in &[
+            format!("/data/data/{}/lib", package_name),
+            format!("/data/user/0/{}/lib", package_name),
+        ] {
+            let path = PathBuf::from(base_dir).join("libffmpeg.so");
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        Err("libffmpeg.so not found in JNI dynamic library directories".to_string())
     }
 
     #[cfg(not(target_os = "android"))]
@@ -62,7 +54,28 @@ pub fn get_ffmpeg_path() -> Result<PathBuf, String> {
 pub fn get_ffprobe_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
-        extract_android_binary("ffprobe", android::FFPROBE_BINARY)
+        let temp_str = std::env::temp_dir().to_string_lossy().to_string();
+        let parts: Vec<&str> = temp_str.split('/').collect();
+        let mut package_name = "com.vcp.avatar".to_string();
+        for part in parts {
+            if part.starts_with("com.vcp.") {
+                package_name = part.to_string();
+                break;
+            }
+        }
+
+        // 优先尝试寻找被系统合法解压且赋予了可执行 (+x) 权限的 Native 库路径
+        for base_dir in &[
+            format!("/data/data/{}/lib", package_name),
+            format!("/data/user/0/{}/lib", package_name),
+        ] {
+            let path = PathBuf::from(base_dir).join("libffprobe.so");
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        Err("libffprobe.so not found in JNI dynamic library directories".to_string())
     }
 
     #[cfg(not(target_os = "android"))]
@@ -223,3 +236,73 @@ pub fn decode_avatar_to_rgba(image_bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     Ok(output.stdout)
 }
+
+// =============================================================================
+// 回归测试：多模态 JPG / PNG 压制抽帧 与 36MB 大 WAV 音频极速压制
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcp_modules::infra::media_processor::image_extractor::convert_local_image_for_multimodal;
+    use crate::vcp_modules::infra::media_processor::audio_extractor::process_audio_for_multimodal;
+    use std::path::Path;
+
+    #[test]
+    fn test_multimodal_image_processing() {
+        let test_dir = Path::new("G:\\VCPMobile\\scripts\\onimi-test");
+        if !test_dir.exists() {
+            println!("onimi-test assets folder not found, skipping.");
+            return;
+        }
+
+        // 1. JPG 压缩与等比例 WebP 转换测试
+        let jpg_path = test_dir.join("Screenshot_2026-05-22-18-28-35-35_8379d4c9027515b.jpg");
+        if jpg_path.exists() {
+            println!("Testing JPG compression for Screenshot...");
+            let res = convert_local_image_for_multimodal(&jpg_path);
+            assert!(res.is_ok(), "JPG scale and WebP convert failed: {:?}", res.err());
+            let b64 = res.unwrap();
+            assert!(b64.starts_with("data:image/webp;base64,"), "MIME type must be webp");
+            println!("JPG Success! WebP Base64 length: {}", b64.len());
+        } else {
+            println!("JPG test asset not found.");
+        }
+
+        // 2. PNG 压缩与等比例 WebP 转换测试
+        let png_path = test_dir.join("_G__VCPMobile_releases_v1.0.0_announcement.html.png");
+        if png_path.exists() {
+            println!("Testing PNG compression for Release announcement...");
+            let res = convert_local_image_for_multimodal(&png_path);
+            assert!(res.is_ok(), "PNG scale and WebP convert failed: {:?}", res.err());
+            let b64 = res.unwrap();
+            assert!(b64.starts_with("data:image/webp;base64,"), "MIME type must be webp");
+            println!("PNG Success! WebP Base64 length: {}", b64.len());
+        } else {
+            println!("PNG test asset not found.");
+        }
+    }
+
+    #[test]
+    fn test_multimodal_audio_processing() {
+        let test_dir = Path::new("G:\\VCPMobile\\scripts\\onimi-test");
+        if !test_dir.exists() {
+            println!("onimi-test assets folder not found, skipping.");
+            return;
+        }
+
+        // 3. 36MB 级长 WAV 音频转码压制为 16kHz Mono 32kbps MP3 测试
+        let wav_path = test_dir.join("llCIqeE8c_rUL1Kik5Fu8HfFeUyX.wav");
+        if wav_path.exists() {
+            println!("Testing 36MB WAV transcoding and mono resampling to MP3...");
+            let start = std::time::Instant::now();
+            let res = process_audio_for_multimodal(&wav_path);
+            assert!(res.is_ok(), "WAV to MP3 compression failed: {:?}", res.err());
+            let b64 = res.unwrap();
+            assert!(b64.starts_with("data:audio/mpeg;base64,"), "MIME type must be audio/mpeg");
+            println!("WAV Success! MP3 Base64 length: {}, Elapsed time: {:?}", b64.len(), start.elapsed());
+        } else {
+            println!("WAV test asset not found.");
+        }
+    }
+}
+
