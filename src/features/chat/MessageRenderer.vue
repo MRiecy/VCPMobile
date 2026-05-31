@@ -455,6 +455,8 @@ onUnmounted(() => {
                 :content="block.content || ''"
                 :highlighted-content="block.highlighted_content"
                 :message-id="message.id"
+                :is-streaming="isStreaming"
+                :is-active-stream="isMessageInActiveStream"
               />
             </div>
           </template>

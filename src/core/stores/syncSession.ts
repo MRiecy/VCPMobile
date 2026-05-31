@@ -42,6 +42,11 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     logs.value = [];
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
 
+    // 立即启动前台服务，实现瞬时响应通知栏，消除跨端 API 电量异步检测等待耗时
+    invoke('plugin:vcp-mobile|start_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
+    status.value = 'connecting';
+    acquireScreenKeep();
+
     // 原生设备电量与省电检测保障
     try {
       const battery = await invoke<{ level: number; isPowerSaveMode: boolean }>('plugin:vcp-mobile|get_battery_status');
@@ -53,12 +58,16 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
           pushLog('error', '当前设备处于系统省电模式，已智能拦截同步，请关闭省电模式或充电后重试。');
           status.value = 'error';
           canDismiss.value = true;
+          releaseScreenKeep();
+          invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
           return;
         }
         if (battery.level > 0 && battery.level < 30) {
           pushLog('error', `当前设备电量过低 (${battery.level}%)，低于 30% 限制，已智能拦截同步以保护电池与数据安全。`);
           status.value = 'error';
           canDismiss.value = true;
+          releaseScreenKeep();
+          invoke('plugin:vcp-mobile|stop_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
           return;
         }
       }
@@ -68,10 +77,6 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       console.warn('Get battery status failed, bypassing security block:', e);
     }
 
-    status.value = 'connecting';
-    acquireScreenKeep();
-    // 启动前台保活服务，显示“数据同步”通知
-    invoke('plugin:vcp-mobile|start_streaming_service', { agentName: '[数据同步] VCP Mobile' }).catch(() => {});
     invoke('start_manual_sync').catch((e: any) => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';

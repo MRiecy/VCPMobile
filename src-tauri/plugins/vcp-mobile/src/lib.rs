@@ -30,6 +30,10 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::pick_file,
             system::get_battery_status,
             system::open_file_native,
+            system::capture_window_snapshot,
+            system::save_image_to_gallery,
+            system::save_image_from_path,
+            system::write_temp_file,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

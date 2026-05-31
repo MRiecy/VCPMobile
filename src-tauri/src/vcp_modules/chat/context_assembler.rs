@@ -2,15 +2,15 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
 
-/// =================================================================
-/// vcp_modules/chat/context_assembler.rs - 上下文级联装配中枢
-/// =================================================================
-/// 本模块承载了整个 VCP 大模型会话上下文注入的核心生命周期：
-/// 1. 【微观编织阶段】(assemble_history_for_vcp)：逐条迭代 SQLite 强类型 ChatMessage，
-///    将分钟级时间戳 (带 \n 物理 Token 防火墙) 以及发言人前缀消歧编织进每条消息正文。
-/// 2. 【宏观拦截阶段】(apply_tarven_pipeline)：针对已序列化好的 messages 列表，
-///    进行 System Metadata 环境真理注入、System/User Tavern 规则终极前后拼接拼接与虚拟节点插入。
-/// 3. 【统一装配外观】(orchestrate_chat_context)：向单聊与群聊业务模块提供极度纯净的 Facade 入口。
+// =================================================================
+// vcp_modules/chat/context_assembler.rs - 上下文级联装配中枢
+// =================================================================
+// 本模块承载了整个 VCP 大模型会话上下文注入的核心生命周期：
+// 1. 【微观编织阶段】(assemble_history_for_vcp)：逐条迭代 SQLite 强类型 ChatMessage，
+//    将分钟级时间戳 (带 \n 物理 Token 防火墙) 以及发言人前缀消歧编织进每条消息正文。
+// 2. 【宏观拦截阶段】(apply_tarven_pipeline)：针对已序列化好的 messages 列表，
+//    进行 System Metadata 环境真理注入、System/User Tavern 规则终极前后拼接拼接与虚拟节点插入。
+// 3. 【统一装配外观】(orchestrate_chat_context)：向单聊与群聊业务模块提供极度纯净的 Facade 入口。
 
 /// 统一上下文级联装配外观入口 (Facade Orchestrator)
 pub async fn orchestrate_chat_context(
@@ -24,7 +24,7 @@ pub async fn orchestrate_chat_context(
 ) -> Result<Vec<Value>, String> {
     // 1. 快速查询会话内时间锚定机制 V2 的启用状态
     let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
-        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'"
+        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'",
     )
     .fetch_optional(pool)
     .await
@@ -76,14 +76,14 @@ pub async fn orchestrate_chat_context(
 /// =================================================================
 /// 该函数负责把扁平的、面向 SQLite 的强类型 ChatMessage 关系数据结构，
 /// 降维并映射为符合大模型 (LLM) Chat Completion API 规范的多模态 JSON Payload。
-/// 
+///
 /// 🛡️ 双重换行物理防火墙 (BPE Token Barrier) 设计：
 /// -------------------------------------------------------------
 /// 为了防范 LLM 的 BPE 分词器 (Tokenizer) 将 "元数据前缀" 与 "消息正文" 的首个单词
 /// 强行融合成单个不可预知的 Token，从而导致指示词语义降级甚至产生幻觉，
 /// 我们在 "时间元数据"、"发言人消歧元数据" 与 "消息内容正文" 之间，
 /// 强行硬编码级联插入了物理换行符 `\n`。这在字节层面上彻底切断了前缀与正文的融合通道。
-/// 
+///
 /// 格式示意：
 /// [Time: 2026-05-30 11:30]\n       <--- 物理换行 1：阻断时间与发言人特征融合
 /// [Sender的发言]:\n                <--- 物理换行 2：阻断发言人与正文特征融合
@@ -106,7 +106,10 @@ pub fn assemble_history_for_vcp(
         .filter(|msg| !msg.is_thinking.unwrap_or(false))
         .map(|msg| {
             use chrono::TimeZone;
-            let formatted_time = if let Some(dt) = chrono::Local.timestamp_millis_opt(msg.timestamp as i64).single() {
+            let formatted_time = if let Some(dt) = chrono::Local
+                .timestamp_millis_opt(msg.timestamp as i64)
+                .single()
+            {
                 dt.format("%Y-%m-%d %H:%M").to_string()
             } else {
                 chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
@@ -192,7 +195,10 @@ pub fn assemble_history_for_vcp(
 
             // 4. 追加末尾时间锚定 (元数据 A - XML 标签格式)
             if enable_time_anchoring {
-                combined_text.push_str(&format!("\n<message_time>{}</message_time>", formatted_time));
+                combined_text.push_str(&format!(
+                    "\n<message_time>{}</message_time>",
+                    formatted_time
+                ));
             }
 
             if !combined_text.trim().is_empty() {

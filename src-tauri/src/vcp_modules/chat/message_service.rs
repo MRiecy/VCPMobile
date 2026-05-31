@@ -749,6 +749,7 @@ fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Val
 }
 
 /// 统一的流式落盘与终结编排器
+#[allow(clippy::too_many_arguments)]
 pub async fn finalize_stream_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
@@ -770,7 +771,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
 
     // 1. 查询时间锚定机制 V2 的启用状态，仅在启用时才开启正则，避免不必要开销
     let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
-        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'"
+        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'",
     )
     .fetch_optional(pool)
     .await
@@ -783,7 +784,9 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         lazy_static::lazy_static! {
             static ref TIME_XML_TAG_REGEX: fancy_regex::Regex = fancy_regex::Regex::new(r#"(?is)<message_time>.*?</message_time>"#).unwrap();
         }
-        final_content = TIME_XML_TAG_REGEX.replace_all(&final_content, "").to_string();
+        final_content = TIME_XML_TAG_REGEX
+            .replace_all(&final_content, "")
+            .to_string();
         final_content = final_content.trim_end().to_string();
     }
 
@@ -795,8 +798,16 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         content: final_content,
         timestamp: final_ts,
         is_thinking: Some(false),
-        agent_id: if is_group { None } else { Some(owner_id.to_string()) },
-        group_id: if is_group { Some(owner_id.to_string()) } else { None },
+        agent_id: if is_group {
+            None
+        } else {
+            Some(owner_id.to_string())
+        },
+        group_id: if is_group {
+            Some(owner_id.to_string())
+        } else {
+            None
+        },
         topic_id: Some(topic_id.clone()),
         is_group_message: Some(is_group),
         finish_reason: finish_reason.clone(),

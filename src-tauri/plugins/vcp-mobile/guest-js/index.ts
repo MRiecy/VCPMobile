@@ -45,3 +45,22 @@ export function openFileNative(path: string): Promise<void> {
   return invoke('plugin:vcp-mobile|open_file_native', { path });
 }
 
+export interface GallerySaveResult {
+  uri: string;
+  displayName: string;
+  mimeType: string;
+  size: number;
+}
+
+export function saveImageToGallery(sourceUrl: string, fileName?: string): Promise<GallerySaveResult> {
+  return invoke<GallerySaveResult>('plugin:vcp-mobile|save_image_to_gallery', { sourceUrl, fileName });
+}
+
+export function saveImageFromPath(imagePath: string, fileName?: string): Promise<GallerySaveResult> {
+  return invoke<GallerySaveResult>('plugin:vcp-mobile|save_image_from_path', { imagePath, fileName });
+}
+
+export function writeTempFile(bytes: Uint8Array, fileName: string): Promise<string> {
+  return invoke<string>('plugin:vcp-mobile|write_temp_file', { bytes: Array.from(bytes), fileName });
+}
+

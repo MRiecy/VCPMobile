@@ -18,7 +18,44 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // 全局活跃流消息池：存储所有正在生成的响应对象 (messageId -> Reactive<ChatMessage>)
   // 无论是在前台还是后台，流式消息都从此池中获取，保证响应式链路不断裂
   const activeStreamMessages = reactive<Map<string, ChatMessage>>(new Map());
+
   const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  // ===== rAF 30Hz 帧合并直推暂存池 =====
+  // 记录每个消息最新的 Aurora 暂存数据，消灭定时器空转，硬件级防抖并实现30Hz降降基数
+  const rAFPendingUpdates = new Map<string, {
+    content: string | null;
+    blocks: any[] | null;
+    tailContent: string | null;
+    tailBlock: any | null;
+    animationFrameId: number | null;
+    lastRenderTime: number;
+  }>();
+  const MIN_RENDER_INTERVAL_MS = 33.3; // 限制最大刷新频率为 30Hz
+
+  /**
+   * 物理防线：强行中止、强制同步刷新并安全清理指定消息的 rAF 帧状态，杜绝任何泄漏与闪烁
+   */
+  const clearRAFUpdate = (messageId: string, forceFlush = false) => {
+    const up = rAFPendingUpdates.get(messageId);
+    if (up) {
+      if (up.animationFrameId !== null) {
+        cancelAnimationFrame(up.animationFrameId);
+        up.animationFrameId = null;
+      }
+      if (forceFlush) {
+        const msg = activeStreamMessages.get(messageId);
+        if (msg) {
+          if (up.content !== null) msg.content = up.content;
+          if (up.blocks !== null) msg.blocks = up.blocks;
+          // 漏洞 1 修复：同步强刷收尾时，必须将暂存池中的 tail 字段强刷，绝不允许丢字闪烁
+          if (up.tailContent !== null) msg.tailContent = up.tailContent;
+          if (up.tailBlock !== undefined) msg.tailBlock = up.tailBlock;
+        }
+      }
+      rAFPendingUpdates.delete(messageId);
+    }
+  };
 
   const sessionStore = useChatSessionStore();
   const assistantStore = useAssistantStore();
@@ -130,6 +167,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     const cleanupTimer = setTimeout(() => {
         if (!activeStreamingIds.value.has(messageId)) {
             activeStreamMessages.delete(messageId);
+            clearRAFUpdate(messageId, false); // 漏洞 2 修复：延迟清理时，强制安全注销 rAF 帧，杜绝句柄泄露
         }
     }, 1000);
     cleanupTimers.add(cleanupTimer);
@@ -229,10 +267,89 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     } else if (type === "aurora") {
       const aurora = event.aurora;
       if (aurora) {
-        msg!.content = aurora.content;
-        msg!.tailContent = aurora.tail;
-        msg!.blocks = (aurora.stableBlocks || []) as any;
-        msg!.tailBlock = aurora.tailBlock as any;
+        // === 🚀 开启流式时空录制（开发模式生效，Release 构建时自动摇树切除） ===
+        if (import.meta.env.DEV) {
+          if (!(window as any).__VCP_STREAM_TRACES__) {
+            (window as any).__VCP_STREAM_TRACES__ = [];
+          }
+          (window as any).__VCP_STREAM_TRACES__.push({
+            timestamp: performance.now(),
+            messageId: actualMessageId,
+            auroraPayload: {
+              stableChanged: aurora.stableChanged,
+              stableBlocksCount: aurora.stableBlocks?.length || 0,
+              stableBlocksHashes: aurora.stableBlocks?.map((b: any) => b.hash) || [],
+              tailChanged: aurora.tailChanged,
+              tailContent: aurora.tail || "",
+              tailBlockType: aurora.tailBlock?.type || null
+            },
+            msgSnapshot: msg ? {
+              content: msg.content,
+              blocksCount: msg.blocks?.length || 0,
+              tailContent: msg.tailContent,
+            } : null
+          });
+        }
+        // ==========================
+
+        // 1. 初始化或获取该 messageId 的帧合并状态
+        let update = rAFPendingUpdates.get(actualMessageId);
+        if (!update) {
+          update = {
+            content: null,
+            blocks: null,
+            tailContent: null,
+            tailBlock: null,
+            animationFrameId: null,
+            lastRenderTime: 0,
+          };
+          rAFPendingUpdates.set(actualMessageId, update);
+        }
+
+        // 2. 覆盖写入暂存数据（稀疏合并）
+        if (typeof aurora.content === "string") {
+          update.content = aurora.content;
+        }
+        if (aurora.stableChanged && aurora.stableBlocks) {
+          update.blocks = aurora.stableBlocks;
+        }
+        if (aurora.tailChanged) {
+          update.tailContent = aurora.tail || "";
+          update.tailBlock = (aurora.tailBlock as any) || null;
+        }
+
+        // 3. 申请硬件级 rAF 自适应阻尼渲染（最大 30Hz）
+        if (update.animationFrameId === null) {
+          const runRenderLoop = () => {
+            const up = rAFPendingUpdates.get(actualMessageId);
+            if (!up) return;
+
+            const now = performance.now();
+            const elapsed = now - up.lastRenderTime;
+
+            if (elapsed >= MIN_RENDER_INTERVAL_MS) {
+              // 满足约 30Hz 间隔，触发 Vue 响应式写入进行重绘
+              const m = activeStreamMessages.get(actualMessageId);
+              if (m) {
+                if (up.content !== null) m.content = up.content;
+                if (up.blocks !== null) m.blocks = up.blocks;
+                if (up.tailContent !== null) m.tailContent = up.tailContent;
+                if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
+              }
+              up.lastRenderTime = now;
+              // 重置当前帧内的合并暂存状态
+              up.content = null;
+              up.blocks = null;
+              up.tailContent = null;
+              up.tailBlock = null;
+              up.animationFrameId = null;
+            } else {
+              // 没到门槛，在下一屏幕物理刷新帧继续尝试
+              up.animationFrameId = requestAnimationFrame(runRenderLoop);
+            }
+          };
+          update.animationFrameId = requestAnimationFrame(runRenderLoop);
+        }
       }
       msg!.isThinking = false;
       addSessionStream(itemId, topicId, actualMessageId);
@@ -240,8 +357,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       const errorMsg = event.error;
       const finishReason = event.finishReason;
 
-      // 执行完成逻辑 (取代原 streamManager.finalizeStream)
-      msg!.tailContent = "";
+      // 漏洞 1 & 2 & 3 修复：同步强制秒结，防止 tailContent 闪烁回滚丢失
+      clearRAFUpdate(actualMessageId, true);
+
       if (finishReason) msg!.finishReason = finishReason;
 
       removeSessionStream(itemId, topicId, actualMessageId);
@@ -270,6 +388,26 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           }
         } catch (e) {
           console.error("[ChatStreamStore] process_message_content failed:", e);
+        } finally {
+          // 漏洞 1 终极解决：在最终编译树成功上屏后，才同步清空临时 tail，实现绝对零闪烁和无缝平滑交接
+          msg!.tailContent = "";
+          msg!.tailBlock = undefined;
+
+          // === 🚀 输出流式诊断提示与回放指南（开发模式生效，Release 构建时自动摇树切除） ===
+          if (import.meta.env.DEV) {
+            console.log(
+              `%c[VCP Stream Debugger] 🎉 流式传输结束！当前录制帧数: ${(window as any).__VCP_STREAM_TRACES__?.length || 0}`,
+              "color: #10b981; font-weight: bold; font-size: 13px;"
+            );
+            console.log(
+              `%c👉 运行指令 A 可一键获取帧轨迹总览:\n   console.table(window.__VCP_STREAM_TRACES__.map((t, idx) => ({ '帧号': idx, '相对时间(ms)': Math.round(t.timestamp - window.__VCP_STREAM_TRACES__[0].timestamp), 'Stable变动': t.auroraPayload.stableChanged, 'Stable块数': t.auroraPayload.stableBlocksCount, 'Tail变动': t.auroraPayload.tailChanged, 'Tail内容': t.auroraPayload.tailContent.substring(0, 15) })))`,
+              "color: #3b82f6;"
+            );
+            console.log(
+              `%c👉 运行指令 B 进行任意相邻帧 Diff 比对（如 12 帧与 13 帧）:\n   const fA = window.__VCP_STREAM_TRACES__[12]; const fB = window.__VCP_STREAM_TRACES__[13]; console.log("=== 帧12 Tail ===", fA.auroraPayload.tailContent); console.log("=== 帧13 Stable Hashes ===", fB.auroraPayload.stableBlocksHashes); console.log("=== 帧13 Tail ===", fB.auroraPayload.tailContent);`,
+              "color: #8b5cf6;"
+            );
+          }
         }
         
         if (callbacks?.onStreamFinished) {
@@ -295,6 +433,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         msg.isThinking = false;
         msg.finishReason = "interrupted";
       }
+
+      // 漏洞 2 修复：手动点击中止流时，瞬间强行注销 rAF 帧，防止后台句柄悬空空转泄漏
+      clearRAFUpdate(messageId, false);
 
       if (streamingMessageId.value === messageId) {
         streamingMessageId.value = null;
@@ -338,6 +479,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   onScopeDispose(() => {
     cleanupTimers.forEach(clearTimeout);
     cleanupTimers.clear();
+    rAFPendingUpdates.forEach((up) => {
+      if (up.animationFrameId !== null) {
+        cancelAnimationFrame(up.animationFrameId);
+      }
+    });
+    rAFPendingUpdates.clear();
   });
 
   return {

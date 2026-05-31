@@ -6,7 +6,7 @@ use regex::Regex;
 
 lazy_static! {
     static ref FENCE_RE: Regex =
-        Regex::new(r"(?m)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
+        Regex::new(r"(?m)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
 
     // 合并 LaTeX 匹配：[ ... ] 和 ( ... )
     static ref MATH_RE: Regex = Regex::new(r"(?s)\\\[(?P<display>.*?)\\\]|\\\((?P<inline>.*?)\\\)").unwrap();
@@ -18,6 +18,8 @@ lazy_static! {
         Regex::new(r"<!--VCP_HTML_CONTAINER:(\d+)-->").unwrap();
 
     static ref TAG_SCANNER: Regex = Regex::new(r"(?i)(</?)([a-z0-9\-]+)(\s[^>]*)?>").unwrap();
+
+    static ref INLINE_CODE_RE: Regex = Regex::new(r"(?m)`+[^`\n\r]+`+").unwrap();
 }
 
 fn preprocess_latex_math(text: &str) -> String {
@@ -87,11 +89,25 @@ fn extract_html_containers(text: &str) -> (String, Vec<(String, Vec<MarkdownNode
     let mut fence_cursor = 0;
     let mut in_fence = false;
 
+    // 预先收集所有内联反引号的范围以跳过误提取
+    let inline_codes: Vec<(usize, usize)> = INLINE_CODE_RE
+        .find_iter(text)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+
     for cap in crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE.captures_iter(text) {
         let m = cap.get(0).unwrap();
         let tag = cap.get(1).unwrap().as_str().to_lowercase();
 
         if m.start() < last_pos {
+            continue;
+        }
+
+        // 跳过被行内反引号包裹的标签（例如 `<div>`）
+        let is_in_inline = inline_codes
+            .iter()
+            .any(|&(start, end)| m.start() >= start && m.end() <= end);
+        if is_in_inline {
             continue;
         }
 
@@ -225,6 +241,14 @@ pub(crate) fn find_matching_close_tag(
     for cap in TAG_SCANNER.captures_iter(search_area) {
         let full_match = cap.get(0).unwrap();
         let cap_start = full_match.start();
+
+        // 跨越围栏防御：如果在开始标签之后、当前扫描标签之前横跨了代码围栏的起点，
+        // 说明已经穿透跨越了代码块边界，必须立即强行终止，防止吞噬黑洞
+        for range in &fence_ranges {
+            if range.start > 0 && range.start < cap_start {
+                return None;
+            }
+        }
 
         // 健壮性防御：如果当前扫描到的 HTML 标签处于代码块围栏内部，直接跳过
         if fence_ranges.iter().any(|range| range.contains(&cap_start)) {

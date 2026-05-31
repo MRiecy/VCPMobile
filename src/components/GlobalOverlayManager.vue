@@ -4,6 +4,7 @@ import VcpPrompt from './ui/VcpPrompt.vue';
 import ToastManager from './ui/ToastManager.vue';
 import ContextMenuSheet from './ui/ContextMenuSheet.vue';
 import FullScreenEditor from './ui/FullScreenEditor.vue';
+import RenderedImageViewer from './ui/RenderedImageViewer.vue';
 
 const overlayStore = useOverlayStore();
 
@@ -42,6 +43,7 @@ const handleEditorSave = async (newContent: string) => {
       @update:isOpen="!$event && overlayStore.closeEditor()" />
 
     <ToastManager class="pointer-events-auto" />
+    <RenderedImageViewer />
 
     <!-- 2. 业务 Feature 投射目标 -->
     <!-- 各 Feature 组件通过 <Teleport to="#vcp-feature-overlays"> 投射到此处 -->

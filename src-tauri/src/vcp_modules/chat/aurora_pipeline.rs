@@ -2,16 +2,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 
+/// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，防止流式热路径性能悬崖
+const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 8192;
+
 /// Aurora 语义沉淀更新，由 Rust 流式管道推送到前端
+/// 采用稀疏序列化：只在字段有变化时才包含在 JSON 中，减少 IPC payload
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuroraUpdate {
-    /// 流式增量块：已确认闭合的语义块
-    pub stable_blocks: Vec<StreamBlock>,
-    /// 推测块：当前正在增长的尾部，按 Markdown 预渲染
+    /// 流式增量块：已确认闭合的语义块（仅 stable_changed 时发送）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable_blocks: Option<Vec<StreamBlock>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stable_changed: bool,
+    /// 推测块：当前正在增长的尾部，按 Markdown 预渲染（仅 tail_changed 时发送）
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_block: Option<StreamBlock>,
-    pub tail: String,
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tail_changed: bool,
+    /// 全量内容（仅终结事件时发送，正常流式中省略）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Aurora 语义沉淀缓冲区
@@ -62,14 +79,22 @@ impl AuroraBuffer {
         self.tail_content = new_tail;
 
         // 2. 推测渲染 (Speculative Rendering)：将 tail 视为一个临时 Markdown 块
+        //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
+        //    避免在流式热路径上产生性能悬崖
         if !self.tail_content.is_empty() {
-            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&self.tail_content);
+            let nodes = if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
+                Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                    &self.tail_content,
+                ))
+            } else {
+                None
+            };
             let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(
                 &self.tail_content,
             );
             self.tail_block = Some(StreamBlock::markdown(
                 self.tail_content.clone(),
-                Some(nodes),
+                nodes,
                 hash,
             ));
         } else {
@@ -93,20 +118,5 @@ impl AuroraBuffer {
         self.stable_blocks.extend(final_new_blocks);
         self.tail_content.clear();
         self.tail_block = None;
-    }
-
-    /// 简单的 HTML 标签补全，防止流式输出截断导致 DOM 渲染异常
-    pub fn balance_html_tags(html: &str) -> String {
-        let tags = ["div", "pre", "code", "p", "span", "blockquote"];
-        let mut balanced = html.to_string();
-        for tag in tags {
-            let open_count = html.matches(&format!("<{tag}>")).count()
-                + html.matches(&format!("<{tag} ")).count();
-            let close_count = html.matches(&format!("</{tag}>")).count();
-            if open_count > close_count {
-                balanced.push_str(&format!("</{tag}>").repeat(open_count - close_count));
-            }
-        }
-        balanced
     }
 }

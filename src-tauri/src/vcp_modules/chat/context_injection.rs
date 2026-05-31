@@ -466,7 +466,10 @@ pub async fn preview_tarven_injection(
     };
 
     // 检查是否启用了系统环境元数据注入
-    if rules.iter().any(|r| r.id == "system_meta_injection" && r.is_enabled) {
+    if rules
+        .iter()
+        .any(|r| r.id == "system_meta_injection" && r.is_enabled)
+    {
         // 模拟环境注入
         let mock_now = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
         format_system_metadata(&mock_now, Some(&mock_now), &mut system_content);
@@ -641,18 +644,19 @@ pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String>
     ];
 
     for (id, name, rule_type, default_enabled, content) in presets {
-        let exists: Option<(i32,)> = sqlx::query_as("SELECT is_enabled FROM tarven_rules WHERE id = ?")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("Failed to query tarven_rules existence: {}", e))?;
+        let exists: Option<(i32,)> =
+            sqlx::query_as("SELECT is_enabled FROM tarven_rules WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| format!("Failed to query tarven_rules existence: {}", e))?;
 
         if let Some((_is_enabled,)) = exists {
             // 已存在，只热覆盖更新内容、名称、规则类型等，但不篡改用户的 is_enabled 状态
             sqlx::query(
                 "UPDATE tarven_rules 
                  SET name = ?, rule_type = ?, content = ?, updated_at = ? 
-                 WHERE id = ?"
+                 WHERE id = ?",
             )
             .bind(name)
             .bind(rule_type)

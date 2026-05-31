@@ -1,11 +1,36 @@
 use lazy_static::lazy_static;
 use syntect::highlighting::ThemeSet;
-use syntect::html::highlighted_html_for_string;
+use syntect::html::{highlighted_html_for_string, ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::SyntaxSet;
 
 lazy_static! {
     static ref SYNTAX_SET: SyntaxSet = SyntaxSet::load_defaults_newlines();
     static ref THEME_SET: ThemeSet = ThemeSet::load_defaults();
+}
+
+/// 专属 HTML 全预览卡片的高性能 Classed Syntect 高亮器
+/// 仅输出纯净的带语义类名的 DOM (DoubleMinus 模式，c--tag 等)，绝不硬编码任何 inline style！
+pub fn highlight_html_block(code: &str) -> Option<String> {
+    let syntax = SYNTAX_SET
+        .find_syntax_by_token("html")
+        .or_else(|| SYNTAX_SET.find_syntax_by_token("HTML"))
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+
+    let mut html_generator =
+        ClassedHTMLGenerator::new_with_class_style(syntax, &SYNTAX_SET, ClassStyle::Spaced);
+
+    for line in code.split('\n') {
+        let mut line_with_nl = line.to_string();
+        line_with_nl.push('\n');
+        let _ = html_generator.parse_html_for_line_which_includes_newline(&line_with_nl);
+    }
+
+    let html = html_generator.finalize();
+
+    Some(format!(
+        "<pre class=\"vcp-code-block vcp-html-block vcp-scrollable\"><code>{}</code></pre>",
+        html
+    ))
 }
 
 pub fn highlight_code_block(code: &str, lang: &str) -> Option<String> {

@@ -168,10 +168,12 @@ export interface StreamBlock {
  * Aurora 语义沉淀更新，由 Rust 流式管道推送
  */
 export interface AuroraUpdate {
-  stableBlocks: StreamBlock[];
+  stableBlocks?: StreamBlock[];
+  stableChanged?: boolean;
   tailBlock?: StreamBlock;
-  tail: string;
-  content: string;
+  tail?: string;
+  tailChanged?: boolean;
+  content?: string;
 }
 
 /**

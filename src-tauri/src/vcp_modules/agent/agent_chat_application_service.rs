@@ -63,6 +63,17 @@ pub async fn internal_process_agent_chat_message(
     let agent_config =
         read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
 
+    // 【优化点】：此时已拿到智能体配置，立即启动前台服务保活以抢先渲染通知卡片，
+    // 从而与接下来的追加消息 SQLite IO、长历史读取、Tavern上下文编织等重度异步准备并行重叠
+    if let Err(e) =
+        tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_config.name)
+    {
+        log::warn!(
+            "[AgentChatAppService] Failed to start streaming service early: {}",
+            e
+        );
+    }
+
     // 2. 只有在需要时才将用户消息追加到数据库 (重新生成时设为 false)
     if append_user_msg {
         message_service::append_single_message(
@@ -135,16 +146,6 @@ pub async fn internal_process_agent_chat_message(
 
     // 在发起 VCP 请求前，向前端发射 thinking 事件以初始化气泡
     let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context));
-
-    // 7. 启动前台服务保活
-    if let Err(e) =
-        tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_config.name)
-    {
-        log::warn!(
-            "[AgentChatAppService] Failed to start streaming service: {}",
-            e
-        );
-    }
 
     // 8. 发起请求
     let result = perform_vcp_request(

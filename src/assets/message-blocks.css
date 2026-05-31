@@ -426,3 +426,33 @@ html.dark .vcp-diary-maid-name {
     -webkit-overflow-scrolling: touch;
   }
 }
+
+/* === Classed Syntect 专属 HTML 代码预览块自适应高亮主题系统 (.vcp-html-block) === */
+
+/* 暗色主题高亮 (GitHub Dark 风格自适应) */
+html.dark .vcp-html-block .keyword,
+html.dark .vcp-html-block .storage,
+html.dark .vcp-html-block .tag,
+html.dark .vcp-html-block .name { color: #ff7b72 !important; }
+html.dark .vcp-html-block .attribute { color: #79c0ff !important; }
+html.dark .vcp-html-block .string { color: #a5d6ff !important; }
+html.dark .vcp-html-block .comment { color: #8b949e !important; font-style: italic !important; }
+html.dark .vcp-html-block .constant,
+html.dark .vcp-html-block .numeric { color: #d2a8ff !important; }
+html.dark .vcp-html-block .variable { color: #ffa657 !important; }
+html.dark .vcp-html-block .punctuation { color: #c9d1d9 !important; }
+
+/* 亮色主题高亮 (GitHub Light 风格自适应) */
+html:not(.dark) .vcp-html-block .keyword,
+html:not(.dark) .vcp-html-block .storage,
+html:not(.dark) .vcp-html-block .tag,
+html:not(.dark) .vcp-html-block .name { color: #d73a49 !important; }
+html:not(.dark) .vcp-html-block .attribute { color: #005cc5 !important; }
+html:not(.dark) .vcp-html-block .string { color: #032f62 !important; }
+html:not(.dark) .vcp-html-block .comment { color: #6a737d !important; font-style: italic !important; }
+html:not(.dark) .vcp-html-block .constant,
+html:not(.dark) .vcp-html-block .numeric { color: #005cc5 !important; }
+html:not(.dark) .vcp-html-block .variable { color: #e36209 !important; }
+html:not(.dark) .vcp-html-block .punctuation { color: #24292e !important; }
+
+

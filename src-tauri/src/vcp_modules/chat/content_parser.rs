@@ -161,9 +161,10 @@ impl ContentBlock {
     }
 
     pub fn html_preview(content: String) -> Self {
+        // 在流结束后沉淀或全量重新编译时，调用专属 HTML classed 高亮预渲染，生成不含 style 的 DOM
         let highlighted_content =
-            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(
-                &content, "html",
+            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_html_block(
+                &content,
             );
         Self::HtmlPreview {
             content,
@@ -255,8 +256,8 @@ lazy_static! {
 
     pub(crate) static ref KV_REGEX: Regex = Regex::new(r"^-\s*([^:]+):\s*(.*)").unwrap();
 
-    pub(crate) static ref HTML_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```html[ \t]*$").unwrap();
-    pub(crate) static ref HTML_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*$").unwrap();
+    pub(crate) static ref HTML_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```html[ \t]*\r?$").unwrap();
+    pub(crate) static ref HTML_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
 
     // 修复：强行增加行首锚定符 ^，防止正文中的内联 `<!DOCTYPE html>` 触发解析截断
     pub(crate) static ref HTML_DOC_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
@@ -269,8 +270,8 @@ lazy_static! {
     pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?i)<style\b[^>]*>").unwrap();
     pub(crate) static ref STYLE_TAG_END: Regex = Regex::new(r"(?i)</style>").unwrap();
 
-    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*$").unwrap();
-    pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*$").unwrap();
+    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
+    pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
 
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
@@ -292,22 +293,48 @@ fn is_vcp_marker(s: &str) -> bool {
 }
 
 pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
-    let mut in_fence = false;
+    let mut in_html = false;
     let mut result = String::with_capacity(text.len());
 
-    for (i, line) in text.lines().enumerate() {
+    // 预先检测所有代码围栏的行索引范围
+    let lines: Vec<&str> = text.lines().collect();
+    let num_lines = lines.len();
+    let mut is_inside_fence = vec![false; num_lines];
+    let mut temp_in_fence = false;
+
+    for i in 0..num_lines {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("```") {
+            temp_in_fence = !temp_in_fence;
+            is_inside_fence[i] = true; // 围栏行本身也算作围栏内
+        } else if temp_in_fence {
+            is_inside_fence[i] = true;
+        }
+    }
+
+    for (i, line) in lines.iter().enumerate() {
         if i > 0 {
             result.push('\n');
         }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            result.push_str(trimmed);
+
+        // 如果是代码围栏内部的行，绝对不进行任何去缩进清洗，原样保留
+        if is_inside_fence[i] {
+            result.push_str(line);
             continue;
         }
 
-        if in_fence {
+        let trimmed = line.trim_start();
+
+        // 裸 HTML 全页面虚拟代码围栏机制：对 <!doctype html> / <html> 开启免清洗保护，直到 </html>
+        let trimmed_lower = trimmed.to_lowercase();
+        if trimmed_lower.starts_with("<!doctype html>") || trimmed_lower.starts_with("<html") {
+            in_html = true;
+        }
+        if in_html {
             result.push_str(line);
+            if trimmed_lower.contains("</html>") {
+                in_html = false;
+            }
             continue;
         }
 

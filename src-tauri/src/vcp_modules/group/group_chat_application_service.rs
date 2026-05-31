@@ -177,6 +177,17 @@ pub async fn internal_process_group_chat_message(
                 .as_millis()
         );
 
+        // 【优化点】：此时已识别出当前轮次的发言者 agent_name，立即提前启动前台服务保活，
+        // 从而与接下来耗时的群组上下文组装、SQLite Tavern 级联编织等逻辑并行重叠。
+        if let Err(e) =
+            tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_name)
+        {
+            log::warn!(
+                "[GroupChatAppService] Failed to start streaming service early: {}",
+                e
+            );
+        }
+
         // 组装上下文
         let base_system_prompt =
             assemble_group_context(&speaker, &group_config_inner, &active_member_configs_inner)
@@ -207,7 +218,9 @@ pub async fn internal_process_group_chat_message(
         }
 
         // 组装上下文，委派上下文级联装配外观中枢，完成微观编织与宏观 Tavern 规则流水线拦截
-        let invite_prompt_processed = group_config_inner.invite_prompt.as_ref()
+        let invite_prompt_processed = group_config_inner
+            .invite_prompt
+            .as_ref()
             .map(|ip| ip.replace("{{VCPChatAgentName}}", &agent_name));
 
         let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
@@ -241,16 +254,6 @@ pub async fn internal_process_group_chat_message(
         // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
         if let Some(chan) = &stream_channel {
             let _ = chan.send(StreamEvent::thinking(message_id.clone(), context));
-        }
-
-        // 启动前台服务保活
-        if let Err(e) =
-            tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_name)
-        {
-            log::warn!(
-                "[GroupChatAppService] Failed to start streaming service: {}",
-                e
-            );
         }
 
         // 执行请求 (串行等待)

@@ -7,6 +7,8 @@ const props = defineProps<{
   content: string;
   messageId: string;
   highlightedContent?: string;
+  isStreaming?: boolean;
+  isActiveStream?: boolean;
 }>();
 
 const themeStore = useThemeStore();
@@ -165,12 +167,12 @@ onUnmounted(() => {
                 <div class="i-ph:copy-bold w-5 h-5 text-gray-400"></div>
               </button>
               
-              <div class="flex p-1 rounded-xl border" :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
+              <div class="flex p-1 rounded-xl border transition-colors duration-300" :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
                 <button @click="fullScreenTab = 'code'"
-                  :class="[fullScreenTab === 'code' ? 'bg-white/10 text-white shadow-lg' : themeStore.isDarkResolved ? 'text-gray-500' : 'text-gray-400']"
+                  :class="[fullScreenTab === 'code' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
                   class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all">代码</button>
                 <button @click="fullScreenTab = 'preview'"
-                  :class="[fullScreenTab === 'preview' ? 'bg-white/10 text-white shadow-lg' : themeStore.isDarkResolved ? 'text-gray-500' : 'text-gray-400']"
+                  :class="[fullScreenTab === 'preview' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
                   class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all">预览</button>
               </div>
             </div>
@@ -180,8 +182,13 @@ onUnmounted(() => {
           <div class="flex-1 overflow-hidden relative" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
             <div v-show="fullScreenTab === 'code'" 
               class="absolute inset-0 overflow-auto p-4 text-xs font-mono leading-relaxed vcp-scrollable"
-              :class="themeStore.isDarkResolved ? 'text-gray-300' : 'text-gray-700'">
-              <pre><code class="hljs" v-html="highlightedCode"></code></pre>
+              :class="[
+                themeStore.isDarkResolved 
+                  ? 'bg-[#0d1117] text-[#c9d1d9]' 
+                  : 'bg-[#f6f8fa] text-[#24292e]'
+              ]">
+              <div v-if="highlightedContent" class="vcp-html-highlighted-wrapper" v-html="highlightedCode"></div>
+              <pre v-else><code class="hljs" v-html="highlightedCode"></code></pre>
             </div>
             <iframe 
               v-show="fullScreenTab === 'preview'"
@@ -222,21 +229,27 @@ onUnmounted(() => {
         <div class="flex p-0.8 rounded-xl border transition-colors duration-300" 
           :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
           <button @click.stop="isPreviewing = false"
-            :class="[!isPreviewing ? 'bg-white/10 text-white shadow-md' : themeStore.isDarkResolved ? 'text-gray-500' : 'text-gray-400']"
+            :class="[!isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
             class="px-3 py-1 text-[10px] font-bold rounded-lg transition-all">代码</button>
           <button @click.stop="isPreviewing = true"
-            :class="[isPreviewing ? 'bg-white/10 text-white shadow-md' : themeStore.isDarkResolved ? 'text-gray-500' : 'text-gray-400']"
+            :class="[isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
             class="px-3 py-1 text-[10px] font-bold rounded-lg transition-all">预览</button>
         </div>
       </div>
     </div>
 
-    <!-- 普通视图内容 (修复消失问题：使用 h-固定高度) -->
-    <div class="relative h-[380px] transition-all duration-300 overflow-hidden no-swipe">
+    <!-- 普通视图内容 (自适应优化：预览时保持 380px，展示代码时根据内容自适应收缩) -->
+    <div class="relative transition-all duration-300 overflow-hidden no-swipe"
+      :class="[isPreviewing ? 'h-[380px]' : 'h-auto']">
       <div v-show="!isPreviewing"
-        class="absolute inset-0 overflow-auto p-3 text-[10px] font-mono leading-relaxed vcp-scrollable no-swipe"
-        :class="themeStore.isDarkResolved ? 'bg-[#0d1117] text-gray-400' : 'bg-[#fafafa] text-gray-600'">
-        <pre class="w-full min-w-max"><code class="hljs" v-html="highlightedCode"></code></pre>
+        class="w-full overflow-auto max-h-[380px] p-3 text-[10px] font-mono leading-relaxed vcp-scrollable no-swipe"
+        :class="[
+          themeStore.isDarkResolved 
+            ? 'bg-[#0d1117] text-[#c9d1d9]' 
+            : 'bg-[#f6f8fa] text-[#24292e]'
+        ]">
+        <div v-if="highlightedContent" class="vcp-html-highlighted-wrapper" v-html="highlightedCode"></div>
+        <pre v-else class="w-full min-w-max"><code class="hljs" v-html="highlightedCode"></code></pre>
       </div>
 
       <div v-if="isPreviewing" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
@@ -277,4 +290,27 @@ onUnmounted(() => {
 .bg-white .hljs-string { color: #032f62; }
 .bg-white .hljs-comment { color: #6a737d; font-style: italic; }
 .bg-white .hljs-meta { color: #d73a49; }
+
+/* 专属 vcp-html-block 样式隔离与重置 */
+.vcp-html-highlighted-wrapper :deep(pre),
+.vcp-html-highlighted-wrapper :deep(code) {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  font-size: inherit !important;
+  font-family: inherit !important;
+  line-height: inherit !important;
+  box-shadow: none !important;
+  white-space: pre !important;
+  overflow-x: auto !important;
+}
+.vcp-html-highlighted-wrapper :deep(span) {
+  display: inline !important;
+  white-space: pre !important;
+}
+.vcp-html-highlighted-wrapper :deep(code) {
+  padding: 0 !important;
+  background: transparent !important;
+}
 </style>
