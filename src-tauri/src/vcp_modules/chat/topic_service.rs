@@ -147,10 +147,7 @@ pub async fn create_topic(
     owner_type: String,
     name: String,
 ) -> Result<Topic, String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     let id = if owner_type == "group" {
         format!("group_topic_{}", now)
@@ -242,10 +239,7 @@ pub async fn update_topic_title(
     topic_id: String,
     title: String,
 ) -> Result<(), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     sqlx::query("UPDATE topics SET title = ?, updated_at = ? WHERE topic_id = ?")
         .bind(&title)
@@ -309,10 +303,7 @@ pub async fn toggle_topic_lock(
     topic_id: String,
     locked: bool,
 ) -> Result<(), String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     sqlx::query("UPDATE topics SET locked = ?, updated_at = ? WHERE topic_id = ?")
         .bind(locked)
@@ -359,12 +350,7 @@ pub async fn set_topic_unread(
     let unread_int = if unread { 1 } else { 0 };
     sqlx::query("UPDATE topics SET unread = ?, updated_at = ? WHERE topic_id = ?")
         .bind(unread_int)
-        .bind(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
-        )
+        .bind(crate::vcp_modules::infra::utils::now_millis())
         .bind(&topic_id)
         .execute(&db_state.pool)
         .await

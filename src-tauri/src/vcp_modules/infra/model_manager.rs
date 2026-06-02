@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::RwLock;
 use url::Url;
@@ -124,10 +124,7 @@ pub async fn refresh_models<R: Runtime>(
             let db_state = app.state::<DbState>();
             let pool = &db_state.pool;
             let json_str = serde_json::to_string(&models).unwrap_or_default();
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
+            let now = crate::vcp_modules::infra::utils::now_millis();
 
             let _ = sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('cached_models', ?, ?) 
                          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
@@ -219,10 +216,7 @@ pub async fn toggle_favorite_model<R: Runtime>(
             .map_err(|e| e.to_string())?;
         false
     } else {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = crate::vcp_modules::infra::utils::now_millis();
 
         sqlx::query("INSERT INTO model_favorites (model_id, created_at) VALUES (?, ?)")
             .bind(&model_id)
@@ -247,10 +241,7 @@ pub async fn record_model_usage<R: Runtime>(
     let db_state = app.state::<DbState>();
     let pool = &db_state.pool;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     sqlx::query(
         "INSERT INTO model_usage_stats (model_id, usage_count, updated_at) 

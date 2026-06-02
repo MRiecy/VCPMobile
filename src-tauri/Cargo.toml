@@ -10,6 +10,13 @@ edition = "2021"
 [workspace]
 members = [".", "plugins/vcp-mobile"]
 
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+jni = "0.21"
+tauri = { version = "2.11.1" }
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -29,7 +36,7 @@ tauri-plugin-opener = "2.5.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "net"] }
 futures-util = "0.3"
 url = "2"
 dashmap = "6"
@@ -37,13 +44,13 @@ tokio-util = { version = "0.7", features = ["codec"] }
 scraper = "0.19"
 ego-tree = "0.6"
 lru = "0.12"
-fancy-regex = "0.13"
+fancy-regex = "0.16"
 regex = "1"
 lazy_static = "1.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 log = "0.4"
-sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio", "macros"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "macros"] }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
@@ -53,7 +60,7 @@ infer = "0.15"
 tauri-plugin-log = "2.8.0"
 tauri-plugin-vcp-mobile = { path = "./plugins/vcp-mobile" }
 base64 = "0.22"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 pdf_oxide = { version = "0.3.55", default-features = false }
 tauri-utils = "2.9.1"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
@@ -61,10 +68,9 @@ async-trait = "0.1"
 libc = "0.2"
 percent-encoding = "2"
 urlencoding = "2"
-pulldown-cmark = "0.13.3"
+pulldown-cmark = { version = "0.13.3", default-features = false }
 syntect = { version = "5.3.0", default-features = false, features = ["html", "parsing", "regex-fancy", "default-syntaxes", "default-themes"] }
 memmap2 = "0.9"
-postcard = { version = "1", features = ["use-std"] }
 zstd = "0.13"
 encoding_rs = "0.8"
 chardetng = "0.1"

@@ -8,6 +8,22 @@ pub struct DbState {
     pub path: std::path::PathBuf,
 }
 
+impl DbState {
+    /// 执行 SQLite 物理页面碎片分批回收与查询规划器索引优化
+    pub async fn run_incremental_vacuum_optimize(&self, pages_to_vacuum: i32) -> Result<(), sqlx::Error> {
+        // 1. 分批页整理碎片，防堵大面积 I/O 阻塞
+        sqlx::query(&format!("PRAGMA incremental_vacuum({})", pages_to_vacuum))
+            .execute(&self.pool)
+            .await?;
+        // 2. 重构索引规划器
+        sqlx::query("PRAGMA optimize")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+
 pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path::PathBuf), String> {
     // 获取应用配置目录 (Android 下通常为 /data/user/0/com.vcp.avatar/files)
     let config_dir = app_handle

@@ -2,44 +2,43 @@ use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use tauri::{AppHandle, Emitter, Manager, State};
+
 
 /// =================================================================
 /// vcp_modules/file_manager.rs - 附件物理存储与分片上传管理
 /// =================================================================
+/// 核心路径解析：获取基础数据存储根目录
+/// Android: /storage/emulated/0/Android/data/<pkg>/files
+pub fn get_data_root_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
+    // document_dir 在 Android 上通常指向 .../files/documents
+    let mut path = app_handle
+        .path()
+        .document_dir()
+        .map_err(|e| format!("Failed to get document_dir: {}", e))?;
+    path.pop(); // 弹出 documents，留下 .../files
+    Ok(path)
+}
+
 /// 核心路径解析：获取附件存储根目录
 /// Android: /storage/emulated/0/Android/data/<pkg>/files/attachments
-/// Windows: %APPDATA%/<pkg>/data/attachments
 pub fn get_attachments_root_dir<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<std::path::PathBuf, String> {
-    #[cfg(target_os = "android")]
-    {
-        // document_dir 在 Android 上通常指向 .../files/documents
-        if let Ok(mut path) = app_handle.path().document_dir() {
-            path.pop(); // 弹出 documents
-            path.push("attachments");
-            return Ok(path);
-        }
-    }
-
-    // 桌面端或 Fallback: 使用内部配置目录下的 data/attachments
-    let mut path = app_handle
-        .path()
-        .app_config_dir()
-        .map_err(|e| format!("Failed to get app_config_dir: {}", e))?;
-    path.push("data");
+    let mut path = get_data_root_dir(app_handle)?;
     path.push("attachments");
     Ok(path)
 }
 
 /// 核心路径解析：获取缩略图存储根目录
+/// Android: /storage/emulated/0/Android/data/<pkg>/files/thumbnails
 pub fn get_thumbnails_root_dir<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<std::path::PathBuf, String> {
-    let mut path = get_attachments_root_dir(app_handle)?;
-    path.pop(); // 弹出 attachments
+    let mut path = get_data_root_dir(app_handle)?;
     path.push("thumbnails");
     Ok(path)
 }
@@ -298,10 +297,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     size: u64,
     internal_path: String,
 ) -> Result<AttachmentData, String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = crate::vcp_modules::infra::utils::now_secs() as u64;
 
     // 1. 更新数据库 (attachments)
     sqlx::query(
@@ -394,9 +390,7 @@ pub async fn store_file(
     }
 
     // 1. 计算 SHA256 哈希值
-    let mut hasher = Sha256::new();
-    hasher.update(&file_bytes);
-    let hash = hex::encode(hasher.finalize());
+    let hash = crate::vcp_modules::infra::utils::calculate_sha256(&file_bytes);
 
     let file_extension = std::path::Path::new(&original_name)
         .extension()
@@ -468,6 +462,13 @@ pub async fn register_local_file(
 
     // 1. 安全性检查，防止路径遍历攻击
     ensure_safe_path(&app_handle, &source_path)?;
+
+    // 1.5 强力防线：对外部注入的哈希指纹进行 Content-Addressable 强格式校验，阻断路径穿越与沙盒逃逸
+    if let Some(ref eh) = expected_hash {
+        if !crate::vcp_modules::infra::utils::is_valid_cas_hash(eh) {
+            return Err("非法的 Content-Addressable Storage (CAS) 哈希指纹格式".to_string());
+        }
+    }
 
     // 2. 异步读取元数据 (获取文件物理大小)
     let meta = tokio::fs::metadata(&source_path)
@@ -723,14 +724,58 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
     }
 }
 
-/// 清理上传缓存目录 (通常在启动时执行，清除上次闪退留下的僵尸文件)
+/// 清理上传缓存目录以及多媒体缓存碎片 (通常在启动时执行，清除上次闪退/强杀留下的僵尸文件)
 pub fn clear_upload_cache(app_handle: &AppHandle) {
-    if let Ok(mut temp_path) = app_handle.path().app_cache_dir() {
-        temp_path.push("uploads");
-        if temp_path.exists() {
-            let _ = fs::remove_dir_all(&temp_path);
-            let _ = fs::create_dir_all(&temp_path);
+    if let Ok(cache_dir) = app_handle.path().app_cache_dir() {
+        // 1. 清除上次上传未完成的分片临时目录
+        let uploads_path = cache_dir.join("uploads");
+        if uploads_path.exists() {
+            let _ = fs::remove_dir_all(&uploads_path);
+            let _ = fs::create_dir_all(&uploads_path);
             log::info!("[FileManager] Upload cache cleared.");
+        }
+
+        // 2. 🌟多媒体零拷贝转码垃圾碎片冷启动清理防线（Sweeper）🌟
+        // 遍历整个 cache_dir，只要文件/目录名匹配 img_*.webp、aud_*.aac 或以 vid_ 开头的一律物理抹除，彻底防止碎屑泄露
+        if cache_dir.exists() && cache_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&cache_dir) {
+                let mut cleared_files = 0;
+                let mut cleared_dirs = 0;
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                    if file_name.starts_with("img_") && file_name.ends_with(".webp") {
+                        if fs::remove_file(&path).is_ok() {
+                            cleared_files += 1;
+                        }
+                    } else if file_name.starts_with("aud_") && file_name.ends_with(".aac") {
+                        if fs::remove_file(&path).is_ok() {
+                            cleared_files += 1;
+                        }
+                    } else if file_name.starts_with("camera_") && file_name.ends_with(".jpg") {
+                        // 🌟 自愈升级：清除旧版本遗留在根目录的拍照临时原图 🌟
+                        if fs::remove_file(&path).is_ok() {
+                            cleared_files += 1;
+                        }
+                    } else if file_name.starts_with("pick_") && file_name.ends_with("_temp") {
+                        // 🌟 自愈升级：清除旧版本遗留在根目录的流拷贝临时大文件 🌟
+                        if fs::remove_file(&path).is_ok() {
+                            cleared_files += 1;
+                        }
+                    } else if file_name.starts_with("vid_") && path.is_dir() {
+                        if fs::remove_dir_all(&path).is_ok() {
+                            cleared_dirs += 1;
+                        }
+                    }
+                }
+                if cleared_files > 0 || cleared_dirs > 0 {
+                    log::info!(
+                        "[FileManager] Cold-boot GC: Swept {} media cache files and {} zombie video folders.",
+                        cleared_files,
+                        cleared_dirs
+                    );
+                }
+            }
         }
     }
 }
@@ -793,3 +838,32 @@ pub async fn ensure_extracted_text(
         None
     }
 }
+
+/// 强力物理删除指定的附件文件及其可能关联的原生硬解缩略图
+pub async fn delete_attachment_physical<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    hash: &str,
+    internal_path: &str,
+) -> std::io::Result<()> {
+    let path = std::path::Path::new(internal_path);
+    if path.exists() {
+        tokio::fs::remove_file(path).await?;
+    }
+
+    // 统一处理缩略图定位与删除
+    let thumb_path = match get_thumbnails_root_dir(app_handle) {
+        Ok(p) => p.join(format!("{}_thumb.webp", hash)),
+        Err(_) => path
+            .parent()
+            .unwrap_or(path)
+            .join("thumbnails")
+            .join(format!("{}_thumb.webp", hash)),
+    };
+    if thumb_path.exists() {
+        let _ = tokio::fs::remove_file(thumb_path).await;
+    }
+    Ok(())
+}
+
+
+

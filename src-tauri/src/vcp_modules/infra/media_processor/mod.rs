@@ -1,5 +1,4 @@
 pub mod audio_extractor;
-pub mod ffmpeg_cli;
 pub mod image_extractor;
 pub mod video_extractor;
 

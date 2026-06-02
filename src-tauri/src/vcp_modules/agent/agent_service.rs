@@ -10,7 +10,7 @@ use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
@@ -235,10 +235,7 @@ async fn internal_write_agent_config<R: Runtime>(
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
@@ -362,10 +359,7 @@ pub async fn delete_agent(
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     sqlx::query("UPDATE agents SET deleted_at = ? WHERE agent_id = ?")
         .bind(now)
@@ -395,10 +389,7 @@ pub async fn create_agent(
     name: String,
     initial_config: Option<serde_json::Value>,
 ) -> Result<AgentConfig, String> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let timestamp = crate::vcp_modules::infra::utils::now_millis();
 
     let base_id = name
         .chars()

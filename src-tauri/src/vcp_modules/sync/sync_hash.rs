@@ -2,7 +2,7 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_types::{compute_deterministic_hash, compute_merkle_root};
-use sha2::{Digest, Sha256};
+
 use sqlx::{Row, Sqlite, Transaction};
 
 pub struct HashAggregator;
@@ -70,9 +70,7 @@ impl HashAggregator {
     }
 
     pub fn compute_avatar_hash(bytes: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        crate::vcp_modules::infra::utils::calculate_sha256(bytes)
     }
 
     pub fn compute_content_hash(content: &str) -> String {

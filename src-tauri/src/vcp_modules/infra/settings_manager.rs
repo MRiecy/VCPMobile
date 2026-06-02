@@ -4,7 +4,7 @@
 use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
@@ -183,10 +183,7 @@ async fn internal_write_settings<R: Runtime>(
     let pool = &db_state.pool;
 
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('global', ?, ?)")
         .bind(&content)

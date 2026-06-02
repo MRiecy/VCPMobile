@@ -9,9 +9,7 @@ use std::fmt;
 pub fn compute_deterministic_hash<T: Serialize>(data: &T) -> String {
     if let Ok(val) = serde_json::to_value(data) {
         let json_str = stable_stringify(&val);
-        let mut hasher = Sha256::new();
-        hasher.update(json_str.as_bytes());
-        format!("{:x}", hasher.finalize())
+        crate::vcp_modules::infra::utils::calculate_sha256(json_str.as_bytes())
     } else {
         "".to_string()
     }

@@ -13,7 +13,7 @@ use crate::vcp_modules::vcp_client::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+
 use tauri::{ipc::Channel, AppHandle, Emitter, State};
 
 #[derive(Debug, Deserialize)]
@@ -171,10 +171,7 @@ pub async fn internal_process_group_chat_message(
             "msg_group_{}_{}_{}",
             user_message.id,
             agent_id,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis()
+            crate::vcp_modules::infra::utils::now_millis()
         );
 
         // 【优化点】：此时已识别出当前轮次的发言者 agent_name，立即提前启动前台服务保活，
@@ -299,10 +296,7 @@ pub async fn internal_process_group_chat_message(
                 .await?;
 
                 // 2. 将此棒生成的回复追加到内存上下文中，提供给接力赛的下一个 Agent
-                let final_ts = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64;
+                let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
                 let ai_msg = ChatMessage {
                     id: message_id,

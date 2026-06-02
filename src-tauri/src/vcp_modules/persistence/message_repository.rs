@@ -2,7 +2,7 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
 use crate::vcp_modules::sync_hash::HashAggregator;
 use serde::Serialize;
-use sha2::Digest;
+
 use sqlx::Row;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
@@ -420,9 +420,7 @@ impl MessageRepository {
 
         for (i, att) in attachments.iter().enumerate() {
             let hash = att.hash.clone().unwrap_or_else(|| {
-                let mut hasher = sha2::Sha256::new();
-                sha2::Digest::update(&mut hasher, att.src.as_bytes());
-                format!("{:x}", sha2::Digest::finalize(hasher))
+                crate::vcp_modules::infra::utils::calculate_sha256(att.src.as_bytes())
             });
 
             let image_frames = att

@@ -4,7 +4,6 @@ use crate::vcp_modules::group_service;
 use crate::vcp_modules::sync_dto::{
     AgentMessageSyncDTO, AgentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO, UserMessageSyncDTO,
 };
-use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -345,13 +344,14 @@ impl PushExecutor {
 }
 
 fn generate_idempotency_key(action: &str, entity_type: &str, id: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(action.as_bytes());
-    hasher.update(entity_type.as_bytes());
-    hasher.update(id.as_bytes());
     let now = chrono::Utc::now().timestamp() / 60;
-    hasher.update(now.to_string().as_bytes());
-    format!("{:x}", hasher.finalize())
+    let now_str = now.to_string();
+    crate::vcp_modules::infra::utils::calculate_sha256_slices(&[
+        action.as_bytes(),
+        entity_type.as_bytes(),
+        id.as_bytes(),
+        now_str.as_bytes(),
+    ])
 }
 
 async fn build_message_dtos<R: Runtime>(

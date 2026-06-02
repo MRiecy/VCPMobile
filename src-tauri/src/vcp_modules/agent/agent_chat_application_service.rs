@@ -53,10 +53,7 @@ pub async fn internal_process_agent_chat_message(
     let topic_id = payload.topic_id;
     let user_message = payload.user_message;
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let timestamp = crate::vcp_modules::infra::utils::now_millis();
     let thinking_id = format!("msg_{}_{}", agent_id, timestamp);
 
     // 1. 读取 Agent 配置

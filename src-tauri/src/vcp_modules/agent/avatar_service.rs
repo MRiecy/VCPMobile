@@ -1,8 +1,8 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+
 use tauri::{AppHandle, Manager, Runtime};
 
 /// Tauri IPC Command: 保存头像二进制数据到数据库
@@ -19,18 +19,13 @@ pub async fn save_avatar_data<R: Runtime>(
     let pool = &db_state.pool;
 
     // 1. 计算 SHA-256 哈希作为唯一标识
-    let mut hasher = Sha256::new();
-    hasher.update(&image_data);
-    let avatar_hash = format!("{:x}", hasher.finalize());
+    let avatar_hash = crate::vcp_modules::infra::utils::calculate_sha256(&image_data);
 
     // 2. 预计算主色调 (Dominant Color)
     // 统一转交前端懒加载计算，后端落库阶段初始化为 None 以提升同步/存储性能与避开权限隐患
     let dominant_color: Option<String> = None;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     // 3. 写入 avatars 表 (原子化 Upsert)
     sqlx::query(

@@ -368,7 +368,11 @@ pub async fn apply_frontend_update(
     let file = std::fs::File::open(&zip_path).map_err(|e| format!("打开 zip 失败: {}", e))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("读取 zip 失败: {}", e))?;
 
+    let mut yield_ctrl = crate::vcp_modules::infra::utils::YieldCounter::new(100);
+
     for i in 0..archive.len() {
+        yield_ctrl.tick().await;
+
         let mut file_in_zip = archive
             .by_index(i)
             .map_err(|e| format!("解压条目失败: {}", e))?;
@@ -447,10 +451,7 @@ pub async fn confirm_frontend_boot(app: AppHandle) -> Result<(), String> {
         serde_json::Map::new()
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = crate::vcp_modules::infra::utils::now_secs() as u64;
 
     manifest.insert(
         version.clone(),

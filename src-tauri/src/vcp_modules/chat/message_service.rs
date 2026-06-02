@@ -762,10 +762,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
 ) -> Result<(), String> {
-    let final_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
+    let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
     let mut final_content = full_content;
 
@@ -782,7 +779,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
 
     if enable_time_anchoring {
         lazy_static::lazy_static! {
-            static ref TIME_XML_TAG_REGEX: fancy_regex::Regex = fancy_regex::Regex::new(r#"(?is)<message_time>.*?</message_time>"#).unwrap();
+            static ref TIME_XML_TAG_REGEX: fancy_regex::Regex = fancy_regex::Regex::new(r#"(?is)<message_time\s*>.*?</\s*message_time\s*>"#).unwrap();
         }
         final_content = TIME_XML_TAG_REGEX
             .replace_all(&final_content, "")

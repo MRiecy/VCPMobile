@@ -307,8 +307,9 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 if mime == "image" {
                                     // 图片类型：长边 > 1120px 时缩放，避免多模态 payload 过大
                                     let path_buf_clone = path_buf.clone();
+                                    let app_clone = app.clone();
                                     match tokio::task::spawn_blocking(move || {
-                                        convert_local_image_for_multimodal(&path_buf_clone)
+                                        convert_local_image_for_multimodal(&app_clone, &path_buf_clone)
                                     })
                                     .await
                                     {
@@ -336,8 +337,9 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 } else if mime == "video" {
                                     // 视频：抽帧 → 每张帧作为 image_url
                                     let path_clone = path_buf.clone();
+                                    let app_clone = app.clone();
                                     match tokio::task::spawn_blocking(move || {
-                                        crate::vcp_modules::media_processor::process_video_for_multimodal(&path_clone)
+                                        crate::vcp_modules::media_processor::process_video_for_multimodal(&app_clone, &path_clone)
                                     }).await {
                                         Ok(Ok(frames)) => {
                                             for frame_url in frames {
@@ -356,17 +358,19 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         }
                                     }
                                 } else if mime == "audio" {
-                                    // 音频：提取为 MP3 (32kbps) -> input_audio
+                                    // 音频：提取为 MP3 (32kbps) 或 AAC (32kbps) -> input_audio
                                     let path_clone = path_buf.clone();
+                                    let app_clone = app.clone();
                                     match tokio::task::spawn_blocking(move || {
-                                        crate::vcp_modules::media_processor::process_audio_for_multimodal(&path_clone)
+                                        crate::vcp_modules::media_processor::process_audio_for_multimodal(&app_clone, &path_clone)
                                     }).await {
                                         Ok(Ok(audio_url)) => {
+                                            let format_str = if audio_url.starts_with("data:audio/aac") { "aac" } else { "mp3" };
                                             new_parts.push(json!({
                                                 "type": "input_audio",
                                                 "input_audio": { 
                                                     "data": audio_url, 
-                                                    "format": "mp3" // 修正为 mp3
+                                                    "format": format_str
                                                 }
                                             }));
                                             converted = true;

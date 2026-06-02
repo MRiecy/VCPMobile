@@ -219,10 +219,7 @@ pub async fn create_group(
     state: State<'_, GroupManagerState>,
     name: String,
 ) -> Result<GroupConfig, String> {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let timestamp = crate::vcp_modules::infra::utils::now_millis();
 
     let base_id = name
         .chars()
@@ -321,10 +318,7 @@ async fn internal_write_group_config<R: Runtime>(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
@@ -468,10 +462,7 @@ pub async fn delete_group(
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
 
     sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ?")
         .bind(now)

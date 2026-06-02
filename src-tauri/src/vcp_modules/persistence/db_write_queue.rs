@@ -4,7 +4,7 @@ use crate::vcp_modules::sync_dto::{
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
-use sha2::Digest;
+
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -566,9 +566,7 @@ impl DbWriteQueue {
             if let Some(ref attachments) = msg.attachments {
                 for (i, att) in attachments.iter().enumerate() {
                     let hash = att.hash.clone().unwrap_or_else(|| {
-                        let mut hasher = sha2::Sha256::new();
-                        hasher.update(att.src.as_bytes());
-                        format!("{:x}", hasher.finalize())
+                        crate::vcp_modules::infra::utils::calculate_sha256(att.src.as_bytes())
                     });
 
                     Self::rusqlite_upsert_attachment_core(tx, &hash, att, msg.timestamp as i64)?;

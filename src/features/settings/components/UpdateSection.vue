@@ -2,8 +2,7 @@
 import { ref, onMounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
-import { openUrl } from '@tauri-apps/plugin-opener';
-import { useUpdateDownloader } from '../../../core/composables/useUpdateDownloader';
+import { useUpdateStore } from '../../../core/stores/update';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsActionButton from '../../../components/settings/SettingsActionButton.vue';
 import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
@@ -18,25 +17,46 @@ interface UpdateInfo {
   apkSize: number | null;
 }
 
-type UpdateStatus =
+type LocalUpdateStatus =
   | { type: 'idle' }
   | { type: 'checking' }
   | { type: 'no-update' }
-  | { type: 'update-available'; info: UpdateInfo }
-  | { type: 'downloading'; progress: number; total: number | null }
-  | { type: 'downloaded' }
-  | { type: 'installing' }
-  | { type: 'error'; message: string };
+  | { type: 'update-available'; info: UpdateInfo };
 
 const currentVersion = ref('');
-const status = ref<UpdateStatus>({ type: 'idle' });
-const downloadUrlRef = ref<string | null>(null);
+const localStatus = ref<LocalUpdateStatus>({ type: 'idle' });
+
+const updateStore = useUpdateStore();
 
 const progressPercent = computed(() => {
-  if (status.value.type !== 'downloading') return 0;
-  const { progress, total } = status.value;
+  if (updateStore.status !== 'downloading') return 0;
+  const progress = updateStore.downloadProgress;
+  const total = updateStore.downloadTotal;
   if (!total || total === 0) return 0;
   return Math.min(100, Math.round((progress / total) * 100));
+});
+
+const rowDescription = computed(() => {
+  if (updateStore.status === 'downloading') {
+    return `正在下载: ${progressPercent.value}% (点击查看进度)`;
+  }
+  if (updateStore.status === 'installing') {
+    return '正在启动安装器...';
+  }
+  if (updateStore.status === 'error') {
+    return '更新出错 (点击查看详情)';
+  }
+  if (updateStore.latestVersion) {
+    return `发现新版本: v${updateStore.latestVersion} (点击查看)`;
+  }
+  return currentVersion.value ? `当前版本: v${currentVersion.value}` : '获取版本中...';
+});
+
+const rowClickable = computed(() => {
+  return !!updateStore.latestVersion ||
+         updateStore.status === 'downloading' ||
+         updateStore.status === 'installing' ||
+         updateStore.status === 'error';
 });
 
 onMounted(async () => {
@@ -47,64 +67,30 @@ onMounted(async () => {
   }
 });
 
-const formatBytes = (bytes: number) => {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-};
-
-const { downloadAndInstall: startDownload } = useUpdateDownloader();
-
 const checkUpdate = async () => {
-  status.value = { type: 'checking' };
+  localStatus.value = { type: 'checking' };
   try {
     const info: UpdateInfo = await invoke('check_for_update');
     if (!info.hasUpdate) {
-      status.value = { type: 'no-update' };
+      localStatus.value = { type: 'no-update' };
       setTimeout(() => {
-        if (status.value.type === 'no-update') {
-          status.value = { type: 'idle' };
+        if (localStatus.value.type === 'no-update') {
+          localStatus.value = { type: 'idle' };
         }
       }, 4000);
       return;
     }
-    downloadUrlRef.value = info.downloadUrl;
-    status.value = { type: 'update-available', info };
+    updateStore.openPrompt(info);
+    localStatus.value = { type: 'idle' };
   } catch (e: any) {
-    status.value = { type: 'error', message: String(e) };
+    localStatus.value = { type: 'idle' };
+    updateStore.setError(String(e));
   }
 };
 
-const downloadAndInstall = async () => {
-  const info = status.value.type === 'update-available' ? status.value.info : null;
-  if (!info?.downloadUrl) {
-    status.value = { type: 'error', message: '缺少下载链接' };
-    return;
-  }
-
-  status.value = { type: 'downloading', progress: 0, total: null };
-
-  try {
-    await startDownload(info.downloadUrl);
-    status.value = { type: 'idle' };
-  } catch (e: any) {
-    // 本地安装失败，尝试用浏览器打开直链或 Release 页面
-    try {
-      if (info.downloadUrl) {
-        await openUrl(info.downloadUrl);
-        status.value = { type: 'idle' };
-        return;
-      } else if (info.releasePageUrl) {
-        await openUrl(info.releasePageUrl);
-        status.value = { type: 'idle' };
-        return;
-      }
-    } catch {
-      // ignore
-    }
-    status.value = { type: 'error', message: `更新失败: ${e}` };
+const openPrompt = () => {
+  if (updateStore.updateInfo) {
+    updateStore.openPrompt(updateStore.updateInfo);
   }
 };
 </script>
@@ -113,15 +99,25 @@ const downloadAndInstall = async () => {
   <div class="space-y-2">
     <SettingsRow
       title="版本更新"
-      :description="currentVersion ? `当前版本: ${currentVersion}` : '获取版本中...'"
+      :description="rowDescription"
+      :clickable="rowClickable"
+      @click="openPrompt"
     >
       <template #action>
         <SettingsActionButton
+          v-if="updateStore.status === 'downloading' || updateStore.status === 'installing' || updateStore.status === 'error'"
           variant="secondary"
           size="sm"
-          :loading="status.type === 'checking'"
-          :disabled="status.type === 'downloading' || status.type === 'installing'"
-          @click="checkUpdate"
+          @click.stop="openPrompt"
+        >
+          查看进度
+        </SettingsActionButton>
+        <SettingsActionButton
+          v-else
+          variant="secondary"
+          size="sm"
+          :loading="localStatus.type === 'checking'"
+          @click.stop="checkUpdate"
         >
           检查更新
         </SettingsActionButton>
@@ -129,64 +125,11 @@ const downloadAndInstall = async () => {
     </SettingsRow>
 
     <!-- 状态反馈 -->
-    <div v-if="status.type === 'checking'" class="mt-2">
+    <div v-if="localStatus.type === 'checking'" class="mt-2">
       <SettingsInlineStatus type="loading" message="正在检查最新版本..." />
     </div>
-    <div v-else-if="status.type === 'no-update'" class="mt-2">
-      <SettingsInlineStatus type="success" :message="`当前已是最新版本 (${currentVersion})`" />
-    </div>
-    <div v-else-if="status.type === 'error'" class="mt-2">
-      <SettingsInlineStatus type="error" :message="status.message" multiline />
-    </div>
-
-    <!-- 发现更新 -->
-    <div
-      v-if="status.type === 'update-available'"
-      class="mt-3 p-3 bg-white/5 rounded-lg space-y-2"
-    >
-      <div class="text-sm font-bold">
-        发现新版本:
-        <span class="font-mono text-blue-400">{{ status.info.latestVersion }}</span>
-        <span v-if="status.info.apkSize" class="text-[10px] opacity-50 font-normal ml-2">
-          ({{ formatBytes(status.info.apkSize) }})
-        </span>
-      </div>
-      <div
-        v-if="status.info.releaseNotes"
-        class="text-xs opacity-60 max-h-32 overflow-y-auto whitespace-pre-wrap leading-relaxed"
-      >
-        {{ status.info.releaseNotes }}
-      </div>
-      <SettingsActionButton
-        variant="primary"
-        size="sm"
-        full-width
-        @click="downloadAndInstall"
-      >
-        下载并安装
-      </SettingsActionButton>
-    </div>
-
-    <!-- 下载中 -->
-    <div v-if="status.type === 'downloading'" class="mt-3 space-y-2">
-      <div class="h-1.5 bg-white/10 rounded-full overflow-hidden">
-        <div
-          class="h-full bg-blue-500 transition-all duration-200"
-          :style="{ width: progressPercent + '%' }"
-        />
-      </div>
-      <div class="flex justify-between text-[10px] font-mono opacity-50">
-        <span>{{ progressPercent }}%</span>
-        <span v-if="status.total">
-          {{ formatBytes(status.progress) }} / {{ formatBytes(status.total) }}
-        </span>
-        <span v-else>{{ formatBytes(status.progress) }}</span>
-      </div>
-    </div>
-
-    <!-- 安装中 -->
-    <div v-if="status.type === 'installing'" class="mt-2">
-      <SettingsInlineStatus type="loading" message="正在启动安装器..." />
+    <div v-else-if="localStatus.type === 'no-update' && updateStore.status === 'idle'" class="mt-2">
+      <SettingsInlineStatus type="success" :message="`当前已是最新版本 (v${currentVersion})`" />
     </div>
   </div>
 </template>

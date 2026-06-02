@@ -41,7 +41,7 @@ use vcp_modules::lifecycle_manager::{
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
-    init_automatic_maintenance,
+    init_automatic_maintenance, reconstruct_system_cache,
 };
 use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
 use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
@@ -133,6 +133,8 @@ pub fn run() {
 
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);
+
+
 
             // 2. 异步引导核心服务与系统维护
             tauri::async_runtime::spawn(async move {
@@ -238,6 +240,7 @@ pub fn run() {
             get_attachment_real_path,
             open_file,
             clear_webview_cache,
+            reconstruct_system_cache,
             cleanup_orphaned_attachments,
             cleanup_single_orphaned_attachment,
             get_cached_models,

@@ -8,3 +8,4 @@ pub mod model_manager;
 pub mod settings_manager;
 pub mod vcp_client;
 pub mod vcp_log_service;
+pub mod utils;

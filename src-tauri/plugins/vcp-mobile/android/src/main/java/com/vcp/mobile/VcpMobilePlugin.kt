@@ -26,6 +26,7 @@ import android.content.pm.PackageManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import app.tauri.plugin.JSObject
+import app.tauri.plugin.JSArray
 import app.tauri.plugin.Invoke
 import com.vcp.mobile.service.StreamKeepaliveService
 import android.graphics.Bitmap
@@ -260,6 +261,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     // Plugin Lifecycle
     // ==================================================================
+
     override fun load(webView: WebView) {
         super.load(webView)
         webViewRef = webView
@@ -296,7 +298,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun launchCameraIntent(invoke: Invoke) {
         try {
-            val tempFile = java.io.File(activity.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+            val uploadsDir = java.io.File(activity.cacheDir, "uploads").apply { mkdirs() }
+            val tempFile = java.io.File(uploadsDir, "camera_${System.currentTimeMillis()}.jpg")
             cameraTempFile = tempFile
             
             val authority = "${activity.packageName}.fileprovider"
@@ -405,7 +408,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 val hash = hashBytes.joinToString("") { "%02x".format(it) }
 
                 // 重命名去重
-                val finalTempFile = java.io.File(context.cacheDir, "$hash.jpg")
+                val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
+                val finalTempFile = java.io.File(uploadsDir, "$hash.jpg")
                 if (finalTempFile.exists()) {
                     photoFile.delete() // 缓存去重，复用已有文件
                 } else {
@@ -469,6 +473,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         fileIoExecutor.execute {
+            var currentTempFile: java.io.File? = null
             try {
                 val context = activity
                 val contentResolver = context.contentResolver
@@ -501,7 +506,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
-                val tempFile = java.io.File(context.cacheDir, "pick_${System.currentTimeMillis()}_temp")
+                val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
+                val tempFile = java.io.File(uploadsDir, "pick_${System.currentTimeMillis()}_temp")
+                currentTempFile = tempFile
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
                 
                 contentResolver.openInputStream(uri).use { inputStream ->
@@ -549,7 +556,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 val fileExtension = java.io.File(originalName).extension.let { 
                     if (it.isEmpty()) "" else ".$it" 
                 }
-                val finalTempFile = java.io.File(context.cacheDir, "$hash$fileExtension")
+                val finalTempFile = java.io.File(uploadsDir, "$hash$fileExtension")
                 
                 if (finalTempFile.exists()) {
                     tempFile.delete() // 缓存去重，复用已有文件
@@ -600,13 +607,17 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 invoke.resolve(resultObject)
             } catch (e: Throwable) {
                 Log.e(TAG, "[onPickFileResult] File pick handling failed", e)
+                try {
+                    currentTempFile?.delete()
+                } catch (_: Exception) {}
                 invoke.reject("Handling picked file failed: ${e.message}")
             }
         }
     }
 
     private fun generateNativeThumbnail(context: Context, originalFile: java.io.File, hash: String): String? {
-        val thumbDir = java.io.File(context.cacheDir, "thumbnails").apply { mkdirs() }
+        val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
+        val thumbDir = java.io.File(uploadsDir, "thumbnails").apply { mkdirs() }
         val thumbFile = java.io.File(thumbDir, "${hash}_thumb.webp")
         if (thumbFile.exists()) return thumbFile.absolutePath
 
@@ -1130,6 +1141,146 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             }
         }
     }
+
+    @Command
+    fun processImage(invoke: Invoke) {
+        val args = try {
+            invoke.parseArgs(ProcessImageArgs::class.java)
+        } catch (e: Throwable) {
+            invoke.reject("Invalid arguments: ${e.message}")
+            return
+        }
+
+        MediaBridge.processImageAsync(args.path, activity) { result ->
+            result.onSuccess { outputPath ->
+                val resObj = JSObject().apply {
+                    put("path", outputPath)
+                }
+                invoke.resolve(resObj)
+            }.onFailure { exception ->
+                invoke.reject(exception.message ?: "Failed to process image")
+            }
+        }
+    }
+
+    @Command
+    fun processVideo(invoke: Invoke) {
+        val args = try {
+            invoke.parseArgs(ProcessVideoArgs::class.java)
+        } catch (e: Throwable) {
+            invoke.reject("Invalid arguments: ${e.message}")
+            return
+        }
+
+        MediaBridge.processVideoAsync(args.path, activity) { result ->
+            result.onSuccess { framePaths ->
+                val arr = JSArray()
+                for (p in framePaths) {
+                    arr.put(p)
+                }
+                val resObj = JSObject().apply {
+                    put("paths", arr)
+                }
+                invoke.resolve(resObj)
+            }.onFailure { exception ->
+                invoke.reject(exception.message ?: "Failed to process video")
+            }
+        }
+    }
+
+    @Command
+    fun processAudio(invoke: Invoke) {
+        val args = try {
+            invoke.parseArgs(ProcessAudioArgs::class.java)
+        } catch (e: Throwable) {
+            invoke.reject("Invalid arguments: ${e.message}")
+            return
+        }
+
+        MediaBridge.processAudioAsync(args.path, activity) { result ->
+            result.onSuccess { outputPath ->
+                val resObj = JSObject().apply {
+                    put("path", outputPath)
+                }
+                invoke.resolve(resObj)
+            }.onFailure { exception ->
+                invoke.reject(exception.message ?: "Failed to process audio")
+            }
+        }
+    }
+
+    private var downloadNotificationBuilder: androidx.core.app.NotificationCompat.Builder? = null
+    private val DOWNLOAD_NOTIF_ID = 0x53545209
+    private val DOWNLOAD_CHANNEL_ID = "apk_download"
+
+    private fun createDownloadNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "应用更新下载"
+            val descriptionText = "显示 APK 安装包的下载进度"
+            val importance = android.app.NotificationManager.IMPORTANCE_LOW
+            val channel = android.app.NotificationChannel(DOWNLOAD_CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+            }
+            val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    @Command
+    fun startDownloadNotification(invoke: Invoke) {
+        try {
+            createDownloadNotificationChannel()
+            val builder = androidx.core.app.NotificationCompat.Builder(activity, DOWNLOAD_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("正在下载 VCP Mobile 更新...")
+                .setContentText("已下载 0%")
+                .setOngoing(true)
+                .setProgress(100, 0, false)
+                .setOnlyAlertOnce(true)
+
+            val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            notificationManager.notify(DOWNLOAD_NOTIF_ID, builder.build())
+            downloadNotificationBuilder = builder
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "startDownloadNotification failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun updateDownloadNotification(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(UpdateDownloadNotifArgs::class.java)
+            val progress = args.progress
+            val text = args.text ?: "正在下载..."
+            
+            val builder = downloadNotificationBuilder
+            if (builder != null) {
+                builder.setProgress(100, progress, false)
+                    .setContentText(text)
+                val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                notificationManager.notify(DOWNLOAD_NOTIF_ID, builder.build())
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "updateDownloadNotification failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun cancelDownloadNotification(invoke: Invoke) {
+        try {
+            val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            notificationManager.cancel(DOWNLOAD_NOTIF_ID)
+            downloadNotificationBuilder = null
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "cancelDownloadNotification failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
 }
 
 @InvokeArg
@@ -1169,3 +1320,25 @@ class CaptureWindowSnapshotArgs {
     var maxWidth: Int = 200 // 与 Rust 侧默认参数对齐
     var quality: Int = 64  // 与 Rust 侧默认参数对齐
 }
+
+@InvokeArg
+class ProcessImageArgs {
+    lateinit var path: String
+}
+
+@InvokeArg
+class ProcessVideoArgs {
+    lateinit var path: String
+}
+
+@InvokeArg
+class ProcessAudioArgs {
+    lateinit var path: String
+}
+
+@InvokeArg
+class UpdateDownloadNotifArgs {
+    var progress: Int = 0
+    var text: String? = null
+}
+
