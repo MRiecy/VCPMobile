@@ -301,7 +301,7 @@ fn is_natural_language_line_start(c: char) -> bool {
             '\u{201C}' | '\u{201D}' | // " "
             '\u{2018}' | '\u{2019}' | // ' '
             '\u{2026}' | // …
-            '\u{2014}'   // —
+            '\u{2014}' // —
         )
 }
 
@@ -351,7 +351,10 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
             if LIST_REGEX.is_match(line) {
                 result.push_str(line);
             } else if (trimmed.starts_with('<') && HTML_TAG_REGEX.is_match(trimmed))
-                || trimmed.chars().next().is_some_and(is_natural_language_line_start)
+                || trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(is_natural_language_line_start)
                 || is_vcp_marker(trimmed)
                 || trimmed.starts_with("<!--")
             {
