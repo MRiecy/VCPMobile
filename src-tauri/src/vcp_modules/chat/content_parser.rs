@@ -278,9 +278,31 @@ lazy_static! {
     static ref HTML_TAG_REGEX: Regex = Regex::new(r"(?i)^[ \t]*</?[a-zA-Z][a-zA-Z0-9]*[\s>/]").unwrap();
 }
 
+/// 检测字符是否为自然语言的起始字符（CJK / 日文 / 韩文 / 标点）。
+///
+/// 覆盖以下 Unicode 区块：
+///   U+2E80..U+9FFF  CJK Radicals → Unified Ideographs（大部分东亚文字）
+///   U+AC00..U+D7AF  Hangul Syllables（韩文）
+///   U+F900..U+FAFF  CJK Compatibility Ideographs
+///   U+FE30..U+FE4F  CJK Compatibility Forms
+///   U+FF01..U+FF60  Fullwidth Forms（全角标点+字母）
+///   U+FFE0..U+FFE6  Fullwidth Signs
+///   若干常用 Curly Quotes / Em-Dash / Ellipsis
 #[inline]
-fn is_chinese_char(c: char) -> bool {
-    ('\u{4e00}'..='\u{9fa5}').contains(&c)
+fn is_natural_language_line_start(c: char) -> bool {
+    ('\u{2E80}'..='\u{9FFF}').contains(&c)
+        || ('\u{AC00}'..='\u{D7AF}').contains(&c)
+        || ('\u{F900}'..='\u{FAFF}').contains(&c)
+        || ('\u{FE30}'..='\u{FE4F}').contains(&c)
+        || ('\u{FF01}'..='\u{FF60}').contains(&c)
+        || ('\u{FFE0}'..='\u{FFE6}').contains(&c)
+        || matches!(
+            c,
+            '\u{201C}' | '\u{201D}' | // " "
+            '\u{2018}' | '\u{2019}' | // ' '
+            '\u{2026}' | // …
+            '\u{2014}'   // —
+        )
 }
 
 #[inline]
@@ -293,7 +315,6 @@ fn is_vcp_marker(s: &str) -> bool {
 }
 
 pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
-    let mut in_html = false;
     let mut result = String::with_capacity(text.len());
 
     // 预先检测所有代码围栏的行索引范围
@@ -325,25 +346,12 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
 
         let trimmed = line.trim_start();
 
-        // 裸 HTML 全页面虚拟代码围栏机制：对 <!doctype html> / <html> 开启免清洗保护，直到 </html>
-        let trimmed_lower = trimmed.to_lowercase();
-        if trimmed_lower.starts_with("<!doctype html>") || trimmed_lower.starts_with("<html") {
-            in_html = true;
-        }
-        if in_html {
-            result.push_str(line);
-            if trimmed_lower.contains("</html>") {
-                in_html = false;
-            }
-            continue;
-        }
-
         let has_indentation = line.len() > trimmed.len();
         if has_indentation {
             if LIST_REGEX.is_match(line) {
                 result.push_str(line);
             } else if (trimmed.starts_with('<') && HTML_TAG_REGEX.is_match(trimmed))
-                || trimmed.chars().next().is_some_and(is_chinese_char)
+                || trimmed.chars().next().is_some_and(is_natural_language_line_start)
                 || is_vcp_marker(trimmed)
                 || trimmed.starts_with("<!--")
             {

@@ -51,7 +51,7 @@ import kotlin.math.roundToInt
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
-    Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE"], alias = "storageLegacy"),
+    Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"], alias = "storageLegacy"),
     Permission(strings = ["android.permission.RECORD_AUDIO"], alias = "microphone"),
     Permission(strings = ["android.permission.CAMERA"], alias = "camera")
 ])
@@ -86,7 +86,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun checkAllPermissions(invoke: Invoke) {
         val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
-        
+
         val notificationGranted = if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         } else {
@@ -99,8 +99,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             hasAll || hasVisualSelected
         } else if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-        } else {
+        } else if (Build.VERSION.SDK_INT >= 29) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
 
         val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
@@ -195,8 +198,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             hasAll || hasVisualSelected
         } else if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-        } else {
+        } else if (Build.VERSION.SDK_INT >= 29) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
         }
 
         val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
