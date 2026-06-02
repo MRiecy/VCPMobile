@@ -2,7 +2,9 @@ mod distributed;
 mod vcp_modules;
 
 use tauri::Manager;
-use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
+use vcp_modules::agent_chat_application_service::{
+    handle_agent_chat_message, handle_assistant_chat_stream,
+};
 use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, read_agent_config, save_agent_config,
     update_agent_config,
@@ -37,7 +39,8 @@ use vcp_modules::group_service::{
 };
 use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
-    bootstrap, get_core_status, get_last_error, get_system_snapshot, LifecycleState,
+    bootstrap, get_core_status, get_last_error, get_system_snapshot, reconcile_local_server_cmd,
+    LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
@@ -55,9 +58,9 @@ use vcp_modules::sync_service::{
     read_sync_log_file, start_manual_sync, stop_sync,
 };
 use vcp_modules::topic_service::{
-    create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
-    regenerate_topic_response, set_topic_unread, summarize_topic, toggle_topic_lock,
-    update_topic_title,
+    archive_assistant_chat, create_topic, delete_topic, get_topics, get_topics_streamed,
+    get_unread_counts, regenerate_topic_response, set_topic_unread, summarize_topic,
+    toggle_topic_lock, update_topic_title,
 };
 use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
@@ -134,8 +137,6 @@ pub fn run() {
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);
 
-
-
             // 2. 异步引导核心服务与系统维护
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = bootstrap(&handle).await {
@@ -195,6 +196,7 @@ pub fn run() {
             interruptGroupTurn,
             test_vcp_connection,
             handle_agent_chat_message,
+            handle_assistant_chat_stream,
             load_chat_history,
             load_chat_history_streamed,
             append_single_message,
@@ -266,6 +268,8 @@ pub fn run() {
             list_sync_log_files,
             read_sync_log_file,
             clear_old_sync_logs,
+            archive_assistant_chat,
+            reconcile_local_server_cmd,
             distributed::start_distributed_node,
             distributed::stop_distributed_node,
             distributed::get_distributed_status,

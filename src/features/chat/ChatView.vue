@@ -13,13 +13,16 @@ import TarvenSelector from "./components/TarvenSelector.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import CoreStatusIndicator from "../../components/ui/CoreStatusIndicator.vue";
 import { ArrowDown } from "lucide-vue-next";
+import { useAttachmentStore } from "../../core/stores/attachmentStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useChatScroll } from "../../core/composables/useChatScroll";
+import { convertFileSrc } from "@tauri-apps/api/core";
 
 const sessionStore = useChatSessionStore();
 const historyStore = useChatHistoryStore();
 const topicStore = useTopicStore();
 const streamStore = useChatStreamStore();
+const attachmentStore = useAttachmentStore();
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
@@ -104,6 +107,38 @@ const handleVcpButtonClick = (e: any) => {
 watch(isStreamingActive, (active) => {
   active ? startAutoScroll() : stopAutoScroll();
 });
+
+// 外部分享意图：将已处理的文件挂载到附件栏
+watch(
+  () => sessionStore.sharePrefillFiles,
+  (files) => {
+    if (!files || files.length === 0) return;
+
+    for (const file of files) {
+      const stableId = `share_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      let displaySrc = "";
+      if (file.thumbnailPath) {
+        displaySrc = convertFileSrc(file.thumbnailPath);
+      } else if (file.mime?.startsWith("image/")) {
+        displaySrc = convertFileSrc(file.path);
+      }
+
+      attachmentStore.stagedAttachments.unshift({
+        id: stableId,
+        type: file.mime || "application/octet-stream",
+        src: displaySrc,
+        name: file.name,
+        size: file.size,
+        hash: file.hash,
+        status: "done",
+      });
+    }
+
+    // 消费后清空
+    sessionStore.sharePrefillFiles = [];
+  },
+  { deep: true },
+);
 
 // --- Keyboard Offset & Inset Handler ---
 watch(keyboardHeight, (height) => {

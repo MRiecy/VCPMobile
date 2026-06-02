@@ -5,7 +5,6 @@ use std::fs;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
-
 /// =================================================================
 /// vcp_modules/file_manager.rs - 附件物理存储与分片上传管理
 /// =================================================================
@@ -744,28 +743,19 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-                    if file_name.starts_with("img_") && file_name.ends_with(".webp") {
+                    if (file_name.starts_with("img_") && file_name.ends_with(".webp"))
+                        || (file_name.starts_with("aud_") && file_name.ends_with(".aac"))
+                        || (file_name.starts_with("camera_") && file_name.ends_with(".jpg"))
+                        || (file_name.starts_with("pick_") && file_name.ends_with("_temp"))
+                    {
                         if fs::remove_file(&path).is_ok() {
                             cleared_files += 1;
                         }
-                    } else if file_name.starts_with("aud_") && file_name.ends_with(".aac") {
-                        if fs::remove_file(&path).is_ok() {
-                            cleared_files += 1;
-                        }
-                    } else if file_name.starts_with("camera_") && file_name.ends_with(".jpg") {
-                        // 🌟 自愈升级：清除旧版本遗留在根目录的拍照临时原图 🌟
-                        if fs::remove_file(&path).is_ok() {
-                            cleared_files += 1;
-                        }
-                    } else if file_name.starts_with("pick_") && file_name.ends_with("_temp") {
-                        // 🌟 自愈升级：清除旧版本遗留在根目录的流拷贝临时大文件 🌟
-                        if fs::remove_file(&path).is_ok() {
-                            cleared_files += 1;
-                        }
-                    } else if file_name.starts_with("vid_") && path.is_dir() {
-                        if fs::remove_dir_all(&path).is_ok() {
-                            cleared_dirs += 1;
-                        }
+                    } else if file_name.starts_with("vid_")
+                        && path.is_dir()
+                        && fs::remove_dir_all(&path).is_ok()
+                    {
+                        cleared_dirs += 1;
                     }
                 }
                 if cleared_files > 0 || cleared_dirs > 0 {
@@ -864,6 +854,3 @@ pub async fn delete_attachment_physical<R: tauri::Runtime>(
     }
     Ok(())
 }
-
-
-

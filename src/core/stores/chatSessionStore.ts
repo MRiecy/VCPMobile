@@ -3,12 +3,78 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "./assistant";
 
+export interface PickedFileInfo {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  hash: string;
+  thumbnailPath?: string;
+}
+
 export const useChatSessionStore = defineStore("chatSession", () => {
   const currentSelectedItem = ref<any>(null);
   const currentTopicId = ref<string | null>(null);
   const lastActiveTopicMap = ref<Record<string, string>>({});
 
+  // Share intent prefill state
+  const sharePrefillText = ref("");
+  const sharePrefillFiles = ref<PickedFileInfo[]>([]);
+
   const assistantStore = useAssistantStore();
+
+  /**
+   * 从外部分享意图启动会话
+   * 1. 选择 Agent → 创建话题 → 切换到聊天 → 预填输入
+   */
+  const startShareSession = async (
+    agentId: string,
+    sharedText: string,
+    sharedFiles: PickedFileInfo[],
+  ) => {
+    // 1. 查找并选中 agent
+    const agent = assistantStore.agents.find((a) => a.id === agentId);
+    if (!agent) {
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    // 2. 创建新话题（复用 TopicCreator 默认命名逻辑）
+    const newTopicName = `新话题 ${new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })}`;
+
+    const newTopic = await invoke<any>("create_topic", {
+      ownerId: agentId,
+      ownerType: "agent",
+      name: newTopicName,
+    });
+
+    if (!newTopic?.id) {
+      throw new Error("Failed to create topic");
+    }
+
+    // 3. 选择 topic（设置 currentSelectedItem 和 currentTopicId）
+    await selectTopicById(agentId, newTopic.id);
+
+    // 4. 存储预填数据（由 ChatView/InputEnhancer 消费后清空）
+    sharePrefillText.value = sharedText;
+    sharePrefillFiles.value = sharedFiles;
+
+    return { topicId: newTopic.id, agentId };
+  };
+
+  /**
+   * 消费分享预填数据（调用后清空）
+   */
+  const consumeSharePrefill = () => {
+    const text = sharePrefillText.value;
+    const files = sharePrefillFiles.value;
+    sharePrefillText.value = "";
+    sharePrefillFiles.value = [];
+    return { text, files };
+  };
 
   /**
    * 选择一个助手或群组，并自动跳转到最近的话题
@@ -93,6 +159,10 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     currentSelectedItem,
     currentTopicId,
     lastActiveTopicMap,
+    sharePrefillText,
+    sharePrefillFiles,
+    startShareSession,
+    consumeSharePrefill,
     selectTopicById,
     selectItem,
   };

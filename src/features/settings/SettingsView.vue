@@ -9,6 +9,7 @@ import UserProfileSection from "./components/UserProfileSection.vue";
 import SyncSettingsSection from "./components/SyncSettingsSection.vue";
 import VcpCoreSettingsSection from "./components/VcpCoreSettingsSection.vue";
 import TopicSummarySection from "./components/TopicSummarySection.vue";
+import AssistantSettingsSection from "./components/AssistantSettingsSection.vue";
 import MaintenanceSection from "./components/MaintenanceSection.vue";
 import AboutSection from "./components/AboutSection.vue";
 import ThemePicker from "./ThemePicker.vue";
@@ -55,6 +56,8 @@ const settings = ref<AppSettings>({
   groupOrder: [],
   topicSummaryModel: "gemini-2.5-flash",
   syncLogLevel: "INFO",
+  enableAssistant: false,
+  assistantAgentId: "",
 });
 
 const loading = ref(true);
@@ -267,6 +270,12 @@ watch(currentSubPage, (val) => {
               <!-- 高级功能 -->
               <template v-if="currentSubPage === 'advanced'">
                 <div class="space-y-6">
+                  <div>
+                    <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">划词悬浮助手</h3>
+                    <SettingsCard>
+                      <AssistantSettingsSection :settings="settings" />
+                    </SettingsCard>
+                  </div>
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">话题总结</h3>
                     <SettingsCard>

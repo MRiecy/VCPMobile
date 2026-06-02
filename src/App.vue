@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref } from "vue";
+import { onMounted, onUnmounted, computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSidebarSwipe } from "./core/composables/useSidebarSwipe";
 import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
@@ -14,6 +14,8 @@ import { useNotificationProcessor } from "./core/composables/useNotificationProc
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
+import { useAssistantStore } from "./core/stores/assistant";
+import { useSettingsStore } from "./core/stores/settings";
 import { reapplyScreenKeepIfActive, suspendPhysicalScreenKeep } from "./core/composables/useScreenKeeper";
 
 // Layout Components
@@ -24,12 +26,36 @@ import RightSidebar from "./components/layout/RightSidebar.vue";
 import GlobalOverlayManager from "./components/GlobalOverlayManager.vue";
 import FeatureOverlays from "./components/FeatureOverlays.vue";
 import UpdatePrompt from "./components/ui/UpdatePrompt.vue";
+import ShareAgentSelector from "./features/chat/components/ShareAgentSelector.vue";
+
+interface SharedFileEntry {
+  cachePath: string;
+  mimeType: string;
+  fileName: string;
+  size: number;
+}
+
+interface SharedContentData {
+  text: string;
+  files: SharedFileEntry[];
+}
+
+interface PickedFileInfo {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  hash: string;
+  thumbnailPath?: string;
+}
 
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
 const sessionStore = useChatSessionStore();
+const assistantStore = useAssistantStore();
+const settingsStore = useSettingsStore();
 const { processPayload } = useNotificationProcessor();
 const { initGlobalFixer } = useEmoticonFixer();
 const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
@@ -37,12 +63,110 @@ const router = useRouter();
 
 const { initRootHistory } = useModalHistory();
 
+const isAssistant = ref(false);
+
+// --- Share Intent State ---
+const sharedContent = ref<SharedContentData>({ text: "", files: [] });
+const showShareSelector = ref(false);
+const pendingSharedFiles = ref<PickedFileInfo[]>([]);
+
+const processSharedIntent = async (detail: any) => {
+  console.log("[App] Share intent received:", detail);
+
+  const text = typeof detail?.text === "string" ? detail.text : "";
+  const files: SharedFileEntry[] = Array.isArray(detail?.files) ? detail.files : [];
+
+  sharedContent.value = { text, files };
+
+  // Wait for core to be ready, then process files
+  if (lifecycleStore.state !== "READY") {
+    console.log("[App] Core not ready yet, deferring share intent processing...");
+    const unwatch = watch(
+      () => lifecycleStore.state,
+      async (state) => {
+        if (state === "READY") {
+          unwatch();
+          await prepareShareFiles();
+        }
+      },
+    );
+    return;
+  }
+
+  await prepareShareFiles();
+};
+
+const prepareShareFiles = async () => {
+  const files = sharedContent.value.files;
+  if (files.length > 0) {
+    try {
+      console.log(`[App] Registering ${files.length} shared file(s)...`);
+      const results = await invoke<PickedFileInfo[]>("plugin:vcp-mobile|register_shared_files", {
+        files: files.map((f) => ({
+          cachePath: f.cachePath,
+          mimeType: f.mimeType,
+          fileName: f.fileName,
+        })),
+      });
+      pendingSharedFiles.value = results;
+      console.log("[App] Shared files registered:", results);
+    } catch (err) {
+      console.error("[App] Failed to register shared files:", err);
+      pendingSharedFiles.value = [];
+    }
+  } else {
+    pendingSharedFiles.value = [];
+  }
+
+  // Ensure agents are loaded
+  if (assistantStore.agents.length === 0) {
+    try {
+      await assistantStore.fetchAgents();
+    } catch (e) {
+      console.error("[App] Failed to fetch agents for share selector:", e);
+    }
+  }
+
+  showShareSelector.value = true;
+};
+
+const handleShareAgentSelected = async (agent: any) => {
+  showShareSelector.value = false;
+
+  try {
+    await sessionStore.startShareSession(
+      agent.id,
+      sharedContent.value.text,
+      pendingSharedFiles.value,
+    );
+  } catch (err) {
+    console.error("[App] Failed to start share session:", err);
+  }
+
+  // Clear share state
+  sharedContent.value = { text: "", files: [] };
+  pendingSharedFiles.value = [];
+};
+
+const handleShareSelectorClose = () => {
+  showShareSelector.value = false;
+};
+
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
 useSidebarSwipe(appRootRef, { type: "global" });
 
 const bootstrapApp = async () => {
   try {
+    if (isAssistant.value) {
+      // 划词助手窗口：采用静默快速启动，跳过权限检查和核心就绪等待（假设主窗口已完成）
+      lifecycleStore.state = "READY";
+      // 仅后台静默同步必要的 UI 资源
+      await themeStore.initTheme();
+      // 异步拉取配置，不阻塞渲染
+      settingsStore.fetchSettings().catch(() => {});
+      return;
+    }
     await lifecycleStore.bootstrap();
   } catch (error) {
     console.error("[App] Bootstrap failed:", error);
@@ -156,37 +280,83 @@ const handleVisibilityChange = () => {
   }
 };
 
-const handleVcpLifecycle = async (e: Event) => {
+const handleVcpLifecycle = (e: Event) => {
+  if (isAssistant.value) return;
+
   const detail = (e as CustomEvent).detail;
   const state = detail?.state;
   
   if (state === "stop" || state === "pause") {
     console.log("[Lifecycle] App moved to background, tuning heartbeat to 120s...");
     suspendPhysicalScreenKeep(); // 休眠物理亮屏，达到省电效果
-    try {
-      await invoke("set_vcp_log_heartbeat", { intervalMs: 120000 });
-    } catch (err) {
+    invoke("set_vcp_log_heartbeat", { intervalMs: 120000 }).catch((err) => {
       console.error("[Lifecycle] Failed to set background heartbeat:", err);
-    }
+    });
   } else if (state === "resume") {
     console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
     reapplyScreenKeepIfActive(); // 唤醒时自动校准和恢复可能丢失的物理亮屏 FLAG
-    try {
-      await invoke("set_vcp_log_heartbeat", { intervalMs: 15000 });
-      // 唤醒时主动校准系统最新状态快照
-      await lifecycleStore.hydrateSystemStatus();
-    } catch (err) {
+    invoke("set_vcp_log_heartbeat", { intervalMs: 15000 }).catch((err) => {
       console.error("[Lifecycle] Failed to restore foreground heartbeat:", err);
+    });
+    lifecycleStore.hydrateSystemStatus().catch((err) => {
+      console.error("[Lifecycle] Failed to hydrate system status:", err);
+    });
+  }
+};
+
+const handleFloatingBallClick = async () => {
+  console.log("[App] Floating ball clicked. Resolving assistant window...");
+  try {
+    let win = await WebviewWindow.getByLabel("assistant");
+    if (win) {
+      console.log("[App] Assistant window already exists, showing and focusing...");
+      await win.show();
+      await win.setFocus();
+      return;
     }
+
+    const newWin = new WebviewWindow("assistant", {
+      url: "/#/assistant",
+      title: "VCP 划词助手",
+      transparent: true,
+      decorations: false,
+      visible: true,
+    });
+
+    newWin.once("tauri://created", () => {
+      console.log("[App] Assistant window created successfully!");
+    });
+
+    newWin.once("tauri://error", (e) => {
+      console.error("[App] Failed to create assistant window:", e);
+    });
+  } catch (err) {
+    console.error("[App] Failed to resolve assistant window:", err);
   }
 };
 
 onMounted(async () => {
+  // 环境探测：若是原生悬浮窗模式，Tauri API 可能不可用，优先通过 URL 判断
+  isAssistant.value = window.location.search.includes("mode=floating");
+
+  if (!isAssistant.value) {
+    try {
+      const win = getCurrentWebviewWindow();
+      isAssistant.value = win.label === "assistant";
+    } catch (e) {
+      // 忽略非 Tauri 环境下的错误
+    }
+  }
+
   // 1. 同步挂载基础物理按键与系统事件监听 (混合应用黄金铁律：物理拦截最优先挂载，杜绝初始化阻塞失效)
   window.addEventListener("vcp-exit-requested", handleExitRequest);
   window.addEventListener("vcp-hardware-back", handleExitRequest);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
+  window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
+  window.addEventListener("vcp-share-intent", (e: Event) => {
+    processSharedIntent((e as CustomEvent).detail);
+  });
 
   // 初始化全局表情包修复器
   initGlobalFixer();
@@ -220,6 +390,7 @@ onUnmounted(() => {
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("vcp-lifecycle", handleVcpLifecycle);
+  window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
 });
 </script>
 
@@ -265,7 +436,16 @@ onUnmounted(() => {
     <!-- 6. 业务 Feature 视图挂载点 -->
     <FeatureOverlays />
 
-    <!-- 7. 自动更新提示弹窗 -->
+    <!-- 7. 分享意图 Agent 选择器 -->
+    <ShareAgentSelector
+      :is-open="showShareSelector"
+      :shared-text="sharedContent.text"
+      :shared-file-count="sharedContent.files.length"
+      @close="handleShareSelectorClose"
+      @selected="handleShareAgentSelected"
+    />
+
+    <!-- 8. 自动更新提示弹窗 -->
     <UpdatePrompt
       v-model:is-open="isPromptOpen"
       :version="updateInfo?.latestVersion || ''"

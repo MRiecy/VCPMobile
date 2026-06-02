@@ -25,4 +25,8 @@ app.mount("#app");
 
 // 标记前端启动成功（用于 OTA 回滚保护）
 import { invoke } from '@tauri-apps/api/core';
-invoke('confirm_frontend_boot').catch(() => {});
+import { getCurrentWindow } from '@tauri-apps/api/window';
+const currentWin = getCurrentWindow();
+if (currentWin.label === 'main') {
+  invoke('confirm_frontend_boot').catch(() => {});
+}

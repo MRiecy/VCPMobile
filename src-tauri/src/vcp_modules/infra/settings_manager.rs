@@ -67,6 +67,12 @@ pub struct Settings {
     #[serde(default)]
     pub sync_prerender_enabled: bool,
 
+    #[serde(default)]
+    pub enable_assistant: bool,
+
+    #[serde(default)]
+    pub assistant_agent_id: String,
+
     /// 仅保留此字段用于前端未来扩展的透参
     #[serde(flatten)]
     #[serde(default)]
@@ -103,6 +109,8 @@ pub fn create_default_settings() -> Settings {
         topic_summary_model: "gemini-2.5-flash".to_string(),
         sync_log_level: "INFO".to_string(),
         sync_prerender_enabled: false,
+        enable_assistant: false,
+        assistant_agent_id: "".to_string(),
         agent_order: vec![],
         group_order: vec![],
         current_theme_mode: Some("dark".to_string()),

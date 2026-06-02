@@ -9,6 +9,7 @@ use crate::vcp_modules::db_manager::{init_db, DbState};
 use crate::vcp_modules::emoticon_manager::{
     internal_load_library, refresh_emoticon_library_internal, EmoticonManagerState,
 };
+use crate::vcp_modules::infra::local_server::{self, ServerHandle};
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::sync_service::init_sync_service;
@@ -26,6 +27,8 @@ pub enum CoreStatus {
 pub struct LifecycleState {
     pub status: Arc<RwLock<CoreStatus>>,
     pub last_error: Arc<RwLock<Option<String>>>,
+    /// 划词助手本地服务器句柄：用于根据设置动态启停
+    pub local_server_handle: Arc<tokio::sync::Mutex<Option<ServerHandle>>>,
 }
 
 impl LifecycleState {
@@ -33,6 +36,33 @@ impl LifecycleState {
         Self {
             status: Arc::new(RwLock::new(CoreStatus::Initializing)),
             last_error: Arc::new(RwLock::new(None)),
+            local_server_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+}
+
+/// 根据设置决定启动或停止划词助手本地服务器
+pub async fn reconcile_local_server(
+    app_handle: &AppHandle,
+    lifecycle: &LifecycleState,
+    enable_assistant: bool,
+) {
+    let mut handle_lock = lifecycle.local_server_handle.lock().await;
+    let has_server = handle_lock.is_some();
+
+    match (enable_assistant, has_server) {
+        (true, false) => {
+            log::info!("[Lifecycle] enableAssistant=true, starting local server...");
+            *handle_lock = Some(local_server::start_server(app_handle.clone()));
+        }
+        (false, true) => {
+            log::info!("[Lifecycle] enableAssistant=false, stopping local server...");
+            if let Some(h) = handle_lock.take() {
+                h.shutdown();
+            }
+        }
+        _ => {
+            // 无需变更
         }
     }
 }
@@ -104,6 +134,16 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             return Err(err_msg);
         }
     };
+
+    // 3.5 根据设置决定是否启动划词助手本地服务器 (Beta)
+    {
+        let enable = settings.enable_assistant;
+        log::info!(
+            "[Lifecycle] enableAssistant={}, reconciling local server...",
+            enable
+        );
+        reconcile_local_server(&handle, &lifecycle, enable).await;
+    }
 
     // 初始化同步服务
     let sync_state = init_sync_service(handle.clone());
@@ -263,6 +303,22 @@ pub async fn get_system_snapshot(
     };
 
     Ok(SystemSnapshot { core, log, sync })
+}
+
+/// 前端保存设置后调用，即时生效启用/停用划词助手本地服务器
+#[tauri::command]
+pub async fn reconcile_local_server_cmd(
+    app_handle: AppHandle,
+    state: State<'_, LifecycleState>,
+    enable: bool,
+) -> Result<bool, String> {
+    log::info!(
+        "[Lifecycle] reconcile_local_server_cmd called: enable={}",
+        enable
+    );
+    let lifecycle = &*state;
+    reconcile_local_server(&app_handle, lifecycle, enable).await;
+    Ok(enable)
 }
 
 #[tauri::command]

@@ -2,6 +2,7 @@
 import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
+import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../core/stores/notification';
@@ -37,6 +38,7 @@ watch(showAttachMenu, (val) => {
   emit('toggle-menu', val);
 });
 const historyStore = useChatHistoryStore();
+const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
 const notificationStore = useNotificationStore();
@@ -339,12 +341,26 @@ const isGenerating = computed(() => streamStore.activeStreamingIds.size > 0);
 // 是否有内容可发送
 const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.stagedAttachments.length > 0);
 
-// 监听并接收外部注入的“编辑消息”内容
+// 监听并接收外部注入的”编辑消息”内容
 watch(() => historyStore.editMessageContent, async (newContent) => {
   if (newContent) {
     input.value = newContent;
     historyStore.editMessageContent = ''; // 消费掉
     isAudioMode.value = false; // 强行切回键盘输入态
+    await nextTick();
+    if (textareaRef.value) {
+      textareaRef.value.focus();
+      textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+});
+
+// 监听外部分享意图预填文本
+watch(() => sessionStore.sharePrefillText, async (newText) => {
+  if (newText) {
+    input.value = newText;
+    sessionStore.sharePrefillText = "";
+    isAudioMode.value = false;
     await nextTick();
     if (textareaRef.value) {
       textareaRef.value.focus();

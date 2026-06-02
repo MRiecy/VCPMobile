@@ -359,6 +359,158 @@ pub async fn set_topic_unread(
     Ok(())
 }
 
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct TempMessage {
+    pub role: String,
+    pub name: Option<String>,
+    pub content: String,
+    pub timestamp: u64,
+}
+
+#[tauri::command]
+pub async fn archive_assistant_chat(
+    app_handle: AppHandle,
+    db_state: State<'_, DbState>,
+    owner_id: String,
+    owner_type: String,
+    temp_messages: Vec<TempMessage>,
+) -> Result<String, String> {
+    if temp_messages.is_empty() {
+        return Err("No messages to archive".to_string());
+    }
+
+    let now_millis = crate::vcp_modules::infra::utils::now_millis();
+
+    // 1. 创建默认名称的话题
+    let formatted_time = chrono::Local::now().format("%m-%d %H:%M").to_string();
+    let default_title = format!("划词助手 {}", formatted_time);
+
+    let topic = create_topic(
+        app_handle.clone(),
+        db_state.clone(),
+        owner_id.clone(),
+        owner_type.clone(),
+        default_title,
+    )
+    .await?;
+
+    let new_topic_id = topic.id;
+
+    // 2. 在事务中批量写入消息
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+
+    for (index, temp_msg) in temp_messages.iter().enumerate() {
+        let msg_id = format!("assistant_msg_{}_{}", now_millis, index);
+
+        // 编译 AST 块并序列化
+        let blocks =
+            crate::vcp_modules::persistence::message_repository::MessageRenderCompiler::compile(
+                &temp_msg.content,
+            );
+        let render_content =
+            crate::vcp_modules::persistence::message_repository::MessageRenderCompiler::serialize(
+                &blocks,
+            )?;
+
+        let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {
+            id: msg_id,
+            role: temp_msg.role.clone(),
+            name: temp_msg.name.clone(),
+            content: temp_msg.content.clone(),
+            timestamp: temp_msg.timestamp,
+            is_thinking: Some(false),
+            agent_id: if owner_type == "agent" {
+                Some(owner_id.clone())
+            } else {
+                None
+            },
+            group_id: if owner_type == "group" {
+                Some(owner_id.clone())
+            } else {
+                None
+            },
+            topic_id: Some(new_topic_id.clone()),
+            is_group_message: Some(owner_type == "group"),
+            finish_reason: None,
+            attachments: None,
+            blocks: None,
+            shell: None,
+            content_hash: None,
+        };
+
+        crate::vcp_modules::persistence::message_repository::MessageRepository::upsert_message(
+            &mut tx,
+            &chat_msg,
+            &new_topic_id,
+            &render_content,
+            true, // 循环中先不重算全局 Topic 聚合哈希以加速入库
+        )
+        .await?;
+    }
+
+    // 3. 提交事务前冒泡重算当前 Topic 聚合哈希
+    crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &new_topic_id)
+        .await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    // 4. 更新数据库中话题的消息计数
+    sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
+        .bind(temp_messages.len() as i32)
+        .bind(&new_topic_id)
+        .execute(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 5. 异步调用总结标题服务并更新标题
+    let app_handle_clone = app_handle.clone();
+    let owner_id_clone = owner_id.clone();
+    let owner_type_clone = owner_type.clone();
+    let new_topic_id_clone = new_topic_id.clone();
+    let pool_clone = db_state.pool.clone();
+
+    tauri::async_runtime::spawn(async move {
+        // 获取 Agent 名字以传入总结服务
+        let agent_name = if owner_type_clone == "agent" {
+            if let Ok(row) = sqlx::query("SELECT name FROM agents WHERE agent_id = ?")
+                .bind(&owner_id_clone)
+                .fetch_one(&pool_clone)
+                .await
+            {
+                use sqlx::Row;
+                row.get::<String, _>("name")
+            } else {
+                "Agent".to_string()
+            }
+        } else {
+            "Group".to_string()
+        };
+
+        if let Ok(title) = crate::vcp_modules::chat::topic_summary_service::summarize_topic(
+            app_handle_clone.clone(),
+            app_handle_clone.state::<SettingsState>(),
+            owner_id_clone.clone(),
+            owner_type_clone.clone(),
+            new_topic_id_clone.clone(),
+            agent_name,
+        )
+        .await
+        {
+            // 调用已有接口更新标题以同步哈希至局域网
+            let _ = update_topic_title(
+                app_handle_clone.clone(),
+                app_handle_clone.state::<DbState>(),
+                owner_id_clone,
+                owner_type_clone,
+                new_topic_id_clone,
+                title,
+            )
+            .await;
+        }
+    });
+
+    Ok(new_topic_id)
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn regenerate_topic_response(

@@ -11,7 +11,10 @@ pub struct YieldCounter {
 impl YieldCounter {
     /// 创建一个新的协作出让挂起计数器，指定出让阈值（默认推荐 150 - 200）
     pub fn new(threshold: u32) -> Self {
-        Self { count: 0, threshold }
+        Self {
+            count: 0,
+            threshold,
+        }
     }
 
     /// 推进计数，并在达到阈值时自动挂起出让当前 CPU 时间片
@@ -24,8 +27,6 @@ impl YieldCounter {
         }
     }
 }
-
-
 
 /// 校验字符串是否为合法的 Content-Addressable Storage (CAS) 的 64位 SHA-256 哈希指纹
 #[inline]

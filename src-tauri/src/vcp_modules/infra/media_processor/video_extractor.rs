@@ -11,13 +11,15 @@ pub fn process_video_for_multimodal<R: Runtime>(
 ) -> Result<Vec<String>, String> {
     #[cfg(target_os = "android")]
     {
+        use base64::Engine as _;
         use tauri::Manager;
         use tauri_plugin_vcp_mobile::VcpMobileState;
-        use base64::Engine as _;
 
         let state = app.state::<VcpMobileState<R>>();
         let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("VCP Mobile Plugin handle not initialized")?;
+        let plugin_handle = handle
+            .as_ref()
+            .ok_or("VCP Mobile Plugin handle not initialized")?;
 
         #[derive(serde::Deserialize)]
         struct ProcessVideoResult {
@@ -25,7 +27,10 @@ pub fn process_video_for_multimodal<R: Runtime>(
         }
 
         let input_str = path.to_str().ok_or("Invalid video path")?;
-        log::info!("[VideoExtractor] Invoking Kotlin processVideo for: {}", input_str);
+        log::info!(
+            "[VideoExtractor] Invoking Kotlin processVideo for: {}",
+            input_str
+        );
 
         // 调用 Kotlin 侧的高并发异步视频帧提取与 JPEG 压缩 (1280x720包络, 步长采样, 降采样截断 300)
         let res = plugin_handle
@@ -35,7 +40,10 @@ pub fn process_video_for_multimodal<R: Runtime>(
             )
             .map_err(|e| format!("Kotlin processVideo failed: {}", e))?;
 
-        log::info!("[VideoExtractor] Kotlin processVideo success, extracted {} frame paths", res.paths.len());
+        log::info!(
+            "[VideoExtractor] Kotlin processVideo success, extracted {} frame paths",
+            res.paths.len()
+        );
 
         let mut results = Vec::new();
         let mut total_b64_size = 0;
@@ -53,7 +61,11 @@ pub fn process_video_for_multimodal<R: Runtime>(
                             results.push(data_url);
                         }
                         Err(e) => {
-                            log::warn!("[VideoExtractor] Failed to read frame {}: {}", frame_path_str, e);
+                            log::warn!(
+                                "[VideoExtractor] Failed to read frame {}: {}",
+                                frame_path_str,
+                                e
+                            );
                         }
                     }
                 } else {

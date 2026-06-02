@@ -19,7 +19,9 @@ pub fn process_audio_for_multimodal<R: Runtime>(
         let state = app.state::<VcpMobileState<R>>();
         match (|| -> Result<String, String> {
             let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle.as_ref().ok_or("VCP Mobile Plugin handle not initialized")?;
+            let plugin_handle = handle
+                .as_ref()
+                .ok_or("VCP Mobile Plugin handle not initialized")?;
 
             #[derive(serde::Deserialize)]
             struct ProcessAudioResult {
@@ -27,7 +29,10 @@ pub fn process_audio_for_multimodal<R: Runtime>(
             }
 
             let input_str = path.to_str().ok_or("Invalid audio path")?;
-            log::info!("[AudioExtractor] Invoking Kotlin processAudio for: {}", input_str);
+            log::info!(
+                "[AudioExtractor] Invoking Kotlin processAudio for: {}",
+                input_str
+            );
 
             let res = plugin_handle
                 .run_mobile_plugin::<ProcessAudioResult>(
@@ -36,7 +41,10 @@ pub fn process_audio_for_multimodal<R: Runtime>(
                 )
                 .map_err(|e| format!("Kotlin processAudio failed: {}", e))?;
 
-            log::info!("[AudioExtractor] Kotlin processAudio success, output: {}", res.path);
+            log::info!(
+                "[AudioExtractor] Kotlin processAudio success, output: {}",
+                res.path
+            );
             let output_path = Path::new(&res.path);
 
             let aac_bytes = std::fs::read(output_path)
@@ -53,7 +61,10 @@ pub fn process_audio_for_multimodal<R: Runtime>(
         })() {
             Ok(data_url) => return Ok(data_url),
             Err(e) => {
-                log::warn!("[AudioExtractor] Native processing failed: {}. Falling back if < 5MB.", e);
+                log::warn!(
+                    "[AudioExtractor] Native processing failed: {}. Falling back if < 5MB.",
+                    e
+                );
                 process_err = Some(e);
             }
         }
@@ -83,7 +94,8 @@ pub fn process_audio_for_multimodal<R: Runtime>(
         process_err, file_size
     );
 
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read raw audio bytes: {}", e))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read raw audio bytes: {}", e))?;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())

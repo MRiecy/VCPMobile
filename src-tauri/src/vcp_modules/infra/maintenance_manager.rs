@@ -5,7 +5,7 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_manager::{
     delete_attachment_physical, get_attachments_root_dir, get_thumbnails_root_dir,
 };
-use crate::vcp_modules::infra::utils::{is_valid_cas_hash, YieldCounter, now_secs};
+use crate::vcp_modules::infra::utils::{is_valid_cas_hash, now_secs, YieldCounter};
 use crate::vcp_modules::settings_manager::{read_settings, update_settings, SettingsState};
 use tauri::{AppHandle, Manager, State};
 
@@ -56,7 +56,7 @@ pub async fn clear_webview_cache(app: AppHandle) -> Result<String, String> {
         if http_cache_dir.exists() {
             // 在物理删除前先统计大小
             freed_size = calculate_dir_size(&http_cache_dir).await;
-            
+
             if tokio::fs::remove_dir_all(&http_cache_dir).await.is_ok() {
                 cleared_details.push_str("物理 HTTP Cache 已抹除；");
             } else {
@@ -152,10 +152,8 @@ pub async fn cleanup_orphaned_attachments(
         .fetch_all(&db_state.pool)
         .await
         .unwrap_or_default();
-    let current_in_db_hashes: std::collections::HashSet<String> = db_hashes_rows
-        .into_iter()
-        .map(|(h,)| h)
-        .collect();
+    let current_in_db_hashes: std::collections::HashSet<String> =
+        db_hashes_rows.into_iter().map(|(h,)| h).collect();
 
     // 2. 双向物理校验：清理无主物理附件
     let mut file_yield = YieldCounter::new(200);
@@ -168,18 +166,23 @@ pub async fn cleanup_orphaned_attachments(
                 let path = entry.path();
                 if path.is_file() {
                     let file_name = entry.file_name().to_string_lossy().to_string();
-                    let hash = file_name.split('.').next().unwrap_or(&file_name).to_string();
-                    
+                    let hash = file_name
+                        .split('.')
+                        .next()
+                        .unwrap_or(&file_name)
+                        .to_string();
+
                     // 64位十六进制哈希强校验，保障删除安全
-                    if is_valid_cas_hash(&hash) {
-                        if !current_in_db_hashes.contains(&hash) {
-                            if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                ghost_freed_size += meta.len();
-                            }
-                            if tokio::fs::remove_file(&path).await.is_ok() {
-                                ghost_deleted_count += 1;
-                                log::info!("[Maintenance] GC swept ghost attachment file: {}", file_name);
-                            }
+                    if is_valid_cas_hash(&hash) && !current_in_db_hashes.contains(&hash) {
+                        if let Ok(meta) = tokio::fs::metadata(&path).await {
+                            ghost_freed_size += meta.len();
+                        }
+                        if tokio::fs::remove_file(&path).await.is_ok() {
+                            ghost_deleted_count += 1;
+                            log::info!(
+                                "[Maintenance] GC swept ghost attachment file: {}",
+                                file_name
+                            );
                         }
                     }
                 }
@@ -208,7 +211,10 @@ pub async fn cleanup_orphaned_attachments(
                                 }
                                 if tokio::fs::remove_file(&path).await.is_ok() {
                                     ghost_deleted_count += 1;
-                                    log::info!("[Maintenance] GC swept ghost thumbnail file: {}", file_name);
+                                    log::info!(
+                                        "[Maintenance] GC swept ghost thumbnail file: {}",
+                                        file_name
+                                    );
                                 }
                             }
                         }
@@ -255,7 +261,10 @@ pub async fn reconstruct_system_cache(
     let _ = db_state.run_incremental_vacuum_optimize(500).await;
     cleared_details.push_str("SQLite 空间碎片整理与索引规划器重构已执行；");
 
-    Ok(format!("系统缓存重建与数据库真空物理收缩完成 ({})", cleared_details.trim_end_matches('；')))
+    Ok(format!(
+        "系统缓存重建与数据库真空物理收缩完成 ({})",
+        cleared_details.trim_end_matches('；')
+    ))
 }
 
 /// 2.5 精准清理单个孤儿附件 (供前端取消暂存时调用)

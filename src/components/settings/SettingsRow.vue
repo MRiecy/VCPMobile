@@ -27,8 +27,9 @@ const slots = useSlots();
         <component :is="icon" :size="18" />
       </div>
       <div class="flex flex-col min-w-0">
-        <span class="text-[14px] font-semibold truncate" :class="danger ? 'text-red-500' : 'text-primary-text'">
+        <span class="text-[14px] font-semibold truncate inline-flex items-center gap-1.5" :class="danger ? 'text-red-500' : 'text-primary-text'">
           {{ title }}
+          <slot name="title-suffix" />
         </span>
         <span v-if="description" class="text-[10px] opacity-40 leading-tight mt-0.5">
           {{ description }}

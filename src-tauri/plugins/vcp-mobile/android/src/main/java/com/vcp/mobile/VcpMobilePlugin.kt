@@ -57,14 +57,26 @@ import kotlin.math.roundToInt
 ])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
-    private companion object {
-        const val TAG = "VcpMobilePlugin"
+    init {
+        instanceRef = java.lang.ref.WeakReference(this)
     }
 
-    private var webViewRef: WebView? = null
+    companion object {
+        const val TAG = "VcpMobilePlugin"
+        private var instanceRef: java.lang.ref.WeakReference<VcpMobilePlugin>? = null
+
+        fun getInstance(): VcpMobilePlugin? {
+            return instanceRef?.get()
+        }
+    }
+
+    val pluginActivity: Activity get() = activity
+    var webViewRef: WebView? = null
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
+    private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
+    private val shareIntentHandler = ShareIntentHandler(this)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var cameraTempFile: java.io.File? = null
 
@@ -95,6 +107,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         val cameraGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
         val result = JSObject()
         result.put("notification", notificationGranted)
@@ -102,6 +115,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         result.put("microphone", microphoneGranted)
         result.put("camera", cameraGranted)
         result.put("battery", batteryOptimizationIgnored)
+        result.put("overlay", overlayGranted)
         
         invoke.resolve(result)
     }
@@ -189,10 +203,26 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         val cameraGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
-        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored}"""
+        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"overlay":$overlayGranted}"""
         val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
         webViewRef?.evaluateJavascript(script, null)
+    }
+
+    @Command
+    fun requestOverlayPermission(invoke: Invoke) {
+        floatingWindowManager.requestOverlayPermission()
+        invoke.resolve()
+    }
+
+    @Command
+    fun toggleFloatingBall(invoke: Invoke) {
+        val args = invoke.parseArgs(ToggleFloatingBallArgs::class.java)
+        val success = floatingWindowManager.toggleFloatingBall(args.show)
+        val result = JSObject()
+        result.put("success", success)
+        invoke.resolve(result)
     }
 
     // ==================================================================
@@ -268,6 +298,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         keyboardInsetsManager.attach(webView)
         lifecycleBridge.attach(activity, webView)
+
+        // 冷启动：处理传递给 Activity 的初始 intent
+        shareIntentHandler.handleShareIntent(activity.intent)
+        shareIntentHandler.injectShareData(webView)
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
@@ -281,6 +315,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         lifecycleBridge.onConfigurationChanged(newConfig)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        shareIntentHandler.handleShareIntent(intent)
     }
 
     // ==================================================================
@@ -686,6 +725,133 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             .replace("\'", "\\'")
             .replace("\n", "\\n")
             .replace("\r", "\\r")
+    }
+
+    // ==================================================================
+    // External Share File Processor (no chooser, processes cached file)
+    // ==================================================================
+    @Command
+    fun processSharedFile(invoke: Invoke) {
+        val args = invoke.parseArgs(ProcessSharedFileArgs::class.java)
+        val cachePath = args.cachePath
+        val rawMimeType = args.mimeType
+        val originalName = args.fileName
+
+        if (cachePath.isEmpty()) {
+            invoke.reject("cachePath is empty")
+            return
+        }
+
+        fileIoExecutor.execute {
+            var currentTempFile: java.io.File? = null
+            try {
+                val context = activity
+                val sourceFile = java.io.File(cachePath)
+                if (!sourceFile.exists()) {
+                    invoke.reject("Shared file not found at cache path: $cachePath")
+                    return@execute
+                }
+
+                val size = sourceFile.length()
+                var mimeType = rawMimeType
+                if (mimeType.isNullOrBlank()) {
+                    val ext = sourceFile.extension.lowercase()
+                    mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+                }
+
+                Log.i(TAG, "[processSharedFile] Processing shared file: $originalName (size=$size, mime=$mimeType)")
+
+                // 发送预准备事件
+                val startDetail = JSObject().apply {
+                    put("name", originalName)
+                    put("size", size)
+                    put("mime", mimeType)
+                }
+                val safeStartDetail = escapeJsonForJsString(startDetail.toString())
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: JSON.parse(\"$safeStartDetail\") }))", null)
+                }
+
+                // 计算 SHA-256 哈希 (复用现有 pickFile 的流式拷贝+哈希模式)
+                val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
+                val tempFile = java.io.File(uploadsDir, "shared_${System.currentTimeMillis()}_temp")
+                currentTempFile = tempFile
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+
+                sourceFile.inputStream().use { inputStream ->
+                    java.io.FileOutputStream(tempFile).use { outputStream ->
+                        val buffer = ByteArray(65536)
+                        var bytesRead = inputStream.read(buffer)
+                        while (bytesRead != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            digest.update(buffer, 0, bytesRead)
+                            bytesRead = inputStream.read(buffer)
+                        }
+                    }
+                }
+
+                val hashBytes = digest.digest()
+                val hash = hashBytes.joinToString("") { "%02x".format(it) }
+
+                // 内容寻址哈希重命名去重
+                val fileExtension = java.io.File(originalName).extension.let {
+                    if (it.isEmpty()) "" else ".$it"
+                }
+                val finalTempFile = java.io.File(uploadsDir, "$hash$fileExtension")
+
+                if (finalTempFile.exists()) {
+                    tempFile.delete()
+                } else {
+                    tempFile.renameTo(finalTempFile)
+                }
+
+                // 缩略图生成（仅图片）
+                var thumbnailPath: String? = null
+                if (mimeType.startsWith("image/")) {
+                    thumbnailPath = generateNativeThumbnail(context, finalTempFile, hash)
+                }
+
+                // 组装结果
+                val resultObject = JSObject()
+                resultObject.put("path", finalTempFile.absolutePath)
+                resultObject.put("name", originalName)
+                resultObject.put("mime", mimeType)
+                resultObject.put("size", finalTempFile.length())
+                resultObject.put("hash", hash)
+                if (thumbnailPath != null) {
+                    resultObject.put("thumbnailPath", thumbnailPath)
+                }
+
+                Log.i(TAG, "[processSharedFile] Complete: path=${finalTempFile.absolutePath}, hash=$hash")
+
+                // 双轨推送
+                val pickedDetail = JSObject().apply {
+                    put("path", finalTempFile.absolutePath)
+                    put("name", originalName)
+                    put("mime", mimeType)
+                    put("size", finalTempFile.length())
+                    put("hash", hash)
+                    if (thumbnailPath != null) {
+                        put("thumbnailPath", thumbnailPath)
+                    } else {
+                        put("thumbnailPath", org.json.JSONObject.NULL)
+                    }
+                }
+                val safePickedDetail = escapeJsonForJsString(pickedDetail.toString())
+                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: JSON.parse(\"$safePickedDetail\") }))"
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript(pickedScript, null)
+                }
+
+                invoke.resolve(resultObject)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[processSharedFile] Failed", e)
+                try {
+                    currentTempFile?.delete()
+                } catch (_: Exception) {}
+                invoke.reject("Processing shared file failed: ${e.message}")
+            }
+        }
     }
 
     @Command
@@ -1340,5 +1506,17 @@ class ProcessAudioArgs {
 class UpdateDownloadNotifArgs {
     var progress: Int = 0
     var text: String? = null
+}
+
+@InvokeArg
+class ToggleFloatingBallArgs {
+    var show: Boolean = false
+}
+
+@InvokeArg
+class ProcessSharedFileArgs {
+    lateinit var cachePath: String
+    var mimeType: String? = null
+    lateinit var fileName: String
 }
 

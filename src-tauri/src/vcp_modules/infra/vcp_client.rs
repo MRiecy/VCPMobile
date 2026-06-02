@@ -309,7 +309,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     let path_buf_clone = path_buf.clone();
                                     let app_clone = app.clone();
                                     match tokio::task::spawn_blocking(move || {
-                                        convert_local_image_for_multimodal(&app_clone, &path_buf_clone)
+                                        convert_local_image_for_multimodal(
+                                            &app_clone,
+                                            &path_buf_clone,
+                                        )
                                     })
                                     .await
                                     {

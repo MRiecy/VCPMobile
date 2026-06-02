@@ -21,6 +21,8 @@ export interface AppSettings {
   groupOrder: string[];
   currentThemeMode?: string;
   syncPrerenderEnabled?: boolean;
+  enableAssistant?: boolean;
+  assistantAgentId?: string;
   [key: string]: any;
 }
 
