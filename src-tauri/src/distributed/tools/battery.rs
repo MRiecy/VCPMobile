@@ -49,13 +49,22 @@ impl BatteryInfoTool {
     }
 }
 
+use crate::distributed::types::CommType;
+
 impl StreamingTool for BatteryInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileBatteryInfo".to_string(),
-            description: "移动设备电池状态(电量/充放电状态/温度)".to_string(),
+            description: "监控实时电量、充电状态、电池健康度及是否处于省电模式。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "电池状态".to_string(),
+            icon: "i-lucide-battery".to_string(),
+            placeholder: Some("{{MobileBattery}}".to_string()),
+            communication: CommType::Ipc {
+                command: "plugin:vcp-mobile|get_battery_status".to_string(),
+                args: None,
+            },
         }
     }
 
@@ -67,7 +76,8 @@ impl StreamingTool for BatteryInfoTool {
         60
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         let capacity = self.read_capacity();
         let status = self.read_status();
         let temp = self.read_temp();

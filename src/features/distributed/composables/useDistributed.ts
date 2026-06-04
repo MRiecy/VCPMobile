@@ -33,6 +33,7 @@ async function setupListener() {
   unlisten = await listen<DistributedStatus>(
     "vcp-distributed-status",
     (event) => {
+      console.log("[Distributed] State transition:", JSON.stringify(event.payload));
       status.value = event.payload;
     },
   );
@@ -67,13 +68,16 @@ export function useDistributed() {
   ): Promise<void> {
     loading.value = true;
     status.value.last_error = null;
+    console.log("[Distributed] invoke start_distributed_node triggered. URL:", wsUrl, "device:", deviceName);
     try {
       await invoke("start_distributed_node", {
         wsUrl,
         vcpKey,
         deviceName,
       });
+      console.log("[Distributed] invoke start_distributed_node returned Ok.");
     } catch (e: any) {
+      console.error("[Distributed] Invoke start_distributed_node failed:", e);
       status.value.last_error = e.toString();
       throw e;
     } finally {

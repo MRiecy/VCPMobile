@@ -173,13 +173,19 @@ impl GpuInfoTool {
     }
 }
 
+use crate::distributed::types::CommType;
+
 impl StreamingTool for GpuInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileGPUInfo".to_string(),
-            description: "移动设备GPU状态(使用率/频率/温度)".to_string(),
+            description: "显示 GPU 核心渲染器厂商、显存使用率及 API 性能指标。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "GPU算力监控".to_string(),
+            icon: "i-lucide-zap".to_string(),
+            placeholder: Some("{{MobileGPU}}".to_string()),
+            communication: CommType::Mock,
         }
     }
 
@@ -191,7 +197,8 @@ impl StreamingTool for GpuInfoTool {
         15
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         let paths = match self.get_paths() {
             Some(p) => p,
             None => {

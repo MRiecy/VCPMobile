@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed } from "vue";
 import type { AppSettings } from "../../core/stores/settings";
 import { useDistributed } from "./composables/useDistributed";
+import { useNotificationStore } from "../../core/stores/notification";
 
 import SettingsTextField from "../../components/settings/SettingsTextField.vue";
 import SettingsSwitch from "../../components/settings/SettingsSwitch.vue";
-import SettingsActionButton from "../../components/settings/SettingsActionButton.vue";
 import SettingsInlineStatus from "../../components/settings/SettingsInlineStatus.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 
@@ -59,12 +59,21 @@ const statusDisplay = computed(() => {
   return { type: null, message: "未连接" };
 });
 
+const notificationStore = useNotificationStore();
+
 const toggleConnection = async () => {
-  if (status.value.connected) {
-    await stop();
+  if (enabled.value) {
     enabled.value = false;
+    emit("save-request");
+    await stop();
   } else {
     if (!derivedWsUrl.value || !derivedVcpKey.value) {
+      notificationStore.addNotification({
+        type: "warning",
+        title: "配置缺失",
+        message: "请先在服务器连接中配置 VCPLog/WebSocket 地址和密钥",
+        toastOnly: true
+      });
       return;
     }
     enabled.value = true;
@@ -76,21 +85,6 @@ const toggleConnection = async () => {
     }
   }
 };
-
-// Auto-connect on mount if enabled was persisted
-watch(
-  () => props.settings.distributedEnabled,
-  async (val) => {
-    if (val && !status.value.connected && derivedWsUrl.value && derivedVcpKey.value) {
-      try {
-        await start(derivedWsUrl.value, derivedVcpKey.value, deviceName.value);
-      } catch (e) {
-        console.error("[Distributed] Auto-connect failed:", e);
-      }
-    }
-  },
-  { immediate: true },
-);
 </script>
 
 <template>
@@ -99,9 +93,9 @@ watch(
     <SettingsRow title="分布式节点" :description="statusDisplay.message">
       <template #action>
         <SettingsSwitch
-          :model-value="status.connected"
+          :model-value="enabled"
           active-color="bg-purple-500"
-          :disabled="loading || (!derivedWsUrl && !status.connected)"
+          :disabled="loading || (!derivedWsUrl && !enabled)"
           @update:model-value="toggleConnection"
         />
       </template>
@@ -119,6 +113,7 @@ watch(
       v-model="deviceName"
       label="节点名称"
       placeholder="VCPMobile"
+      @blur="emit('save-request')"
     />
 
     <!-- 连接信息（只读，派生自 VCPLog 配置） -->
@@ -129,19 +124,6 @@ watch(
       <div class="font-mono">
         Key: {{ derivedVcpKey ? "●●●●●●●●" : "未配置" }}
       </div>
-    </div>
-
-    <!-- 手动重连按钮 -->
-    <div class="pt-2 flex justify-end">
-      <SettingsActionButton
-        variant="secondary"
-        size="sm"
-        :loading="loading"
-        :disabled="!derivedWsUrl || !derivedVcpKey"
-        @click="toggleConnection"
-      >
-        {{ status.connected ? "断开连接" : "连接" }}
-      </SettingsActionButton>
     </div>
   </div>
 </template>

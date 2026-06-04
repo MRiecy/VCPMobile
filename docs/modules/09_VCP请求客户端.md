@@ -1,7 +1,7 @@
 ---
 id: MOD-VCP-CLI-009
-version: "1.0"
-date: 2026-05-24
+version: "1.0.3"
+date: 2026-06-04
 module: vcp_client.rs
 scope: src-tauri/src/vcp_modules/
 related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs]
@@ -578,4 +578,4 @@ const handleVcpLifecycle = async (e: Event) => {
 
 ---
 
-*最后更新：2026-05-24 | VCP Mobile v0.9.14*
+*最后更新：2026-06-04 | VCP Mobile v1.0.3*

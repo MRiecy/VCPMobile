@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../../core/stores/settings";
 import { useAssistantStore } from "../../../core/stores/assistant";
@@ -8,6 +8,10 @@ import SettingsRow from "../../../components/settings/SettingsRow.vue";
 
 const props = defineProps<{
   settings: AppSettings;
+}>();
+
+const emit = defineEmits<{
+  (e: "save-request"): void;
 }>();
 
 const assistantStore = useAssistantStore();
@@ -53,7 +57,16 @@ const handleToggle = async (val: boolean) => {
   } catch (e) {
     console.error("[AssistantSettings] Failed to toggle assistant:", e);
   }
+
+  emit("save-request");
 };
+
+watch(
+  () => props.settings.assistantAgentId,
+  () => {
+    emit("save-request");
+  }
+);
 
 onMounted(async () => {
   try {

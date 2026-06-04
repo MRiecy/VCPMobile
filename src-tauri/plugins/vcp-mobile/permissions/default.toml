@@ -22,5 +22,8 @@ commands.allow = [
     "request_overlay_permission",
     "register_shared_files",
     "toggle_floating_ball",
+    "start_sensor_collection",
+    "stop_sensor_collection",
+    "get_sensor_data",
 ]
 

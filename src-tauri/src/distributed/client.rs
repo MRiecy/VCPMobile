@@ -36,6 +36,8 @@ pub struct DistributedClient {
     status: Arc<RwLock<DistributedStatus>>,
     /// Handle to the background connection task.
     task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Channel sender to trigger tool re-registration.
+    re_register_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
 }
 
 impl DistributedClient {
@@ -45,6 +47,7 @@ impl DistributedClient {
             shutdown_tx,
             status: Arc::new(RwLock::new(DistributedStatus::default())),
             task_handle: Mutex::new(None),
+            re_register_tx: Mutex::new(None),
         }
     }
 
@@ -62,6 +65,10 @@ impl DistributedClient {
     ) -> Result<(), String> {
         // If already running, stop first.
         self.stop().await;
+
+        // Create re-registration channel.
+        let (re_register_tx, re_register_rx) = tokio::sync::mpsc::channel(1);
+        *self.re_register_tx.lock().await = Some(re_register_tx);
 
         // Reset shutdown signal.
         let _ = self.shutdown_tx.send(false);
@@ -83,6 +90,7 @@ impl DistributedClient {
             shutdown_rx,
             status,
             registry,
+            re_register_rx,
         ));
 
         *self.task_handle.lock().await = Some(handle);
@@ -100,11 +108,24 @@ impl DistributedClient {
         s.connected = false;
         s.server_id = None;
         s.client_id = None;
+        *self.re_register_tx.lock().await = None;
     }
 
     /// Get current status snapshot.
     pub async fn get_status(&self) -> DistributedStatus {
         self.status.read().await.clone()
+    }
+
+    /// Check if the distributed client is connected.
+    pub async fn is_connected(&self) -> bool {
+        self.status.read().await.connected
+    }
+
+    /// Trigger re-registration of tools.
+    pub async fn re_register_tools(&self) {
+        if let Some(tx) = self.re_register_tx.lock().await.as_ref() {
+            let _ = tx.send(()).await;
+        }
     }
 
     // ================================================================
@@ -119,9 +140,11 @@ impl DistributedClient {
         mut shutdown_rx: watch::Receiver<bool>,
         status: Arc<RwLock<DistributedStatus>>,
         registry: Arc<ToolRegistry>,
+        re_register_rx: tokio::sync::mpsc::Receiver<()>,
     ) {
         let mut reconnect_interval = Duration::from_secs(5);
         let max_reconnect_interval = Duration::from_secs(60);
+        let re_register_rx = Arc::new(Mutex::new(re_register_rx));
 
         loop {
             // Check shutdown before connecting.
@@ -147,13 +170,14 @@ impl DistributedClient {
                     reconnect_interval = Duration::from_secs(5); // Reset backoff on success.
 
                     // Run the session until it ends.
-                    Self::run_session(
+                    let exit_reason = Self::run_session(
                         &app,
                         ws_stream,
                         &device_name,
                         &mut shutdown_rx,
                         &status,
                         &registry,
+                        re_register_rx.clone(),
                     )
                     .await;
 
@@ -163,6 +187,7 @@ impl DistributedClient {
                         s.connected = false;
                         s.server_id = None;
                         s.client_id = None;
+                        s.last_error = Some(exit_reason);
                     }
                     Self::emit_status(&app, &status).await;
                 }
@@ -214,8 +239,14 @@ impl DistributedClient {
         shutdown_rx: &mut watch::Receiver<bool>,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
-    ) {
+        re_register_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<()>>>,
+    ) -> String {
         use tokio_tungstenite::tungstenite::Message;
+
+        #[cfg(target_os = "android")]
+        if let Err(e) = tauri_plugin_vcp_mobile::system::start_sensor_collection(app.clone()) {
+            log::warn!("[Distributed] Failed to start native sensor collection: {}", e);
+        }
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
 
@@ -226,6 +257,9 @@ impl DistributedClient {
         let mut placeholder_interval = time::interval(Duration::from_secs(30));
         // Skip the first immediate tick; we do an initial push below after registration.
         placeholder_interval.tick().await;
+
+        #[allow(unused_assignments)]
+        let mut exit_reason = "Connection closed normally".to_string();
 
         loop {
             tokio::select! {
@@ -246,25 +280,40 @@ impl DistributedClient {
                             let mut tx = ws_tx.lock().await;
                             let _ = tx.send(Message::Pong(data)).await;
                         }
-                        Some(Ok(Message::Close(_))) => {
-                            log::info!("[Distributed] Server sent close frame.");
+                        Some(Ok(Message::Close(reason))) => {
+                            let r_str = reason.map(|r| format!("{} (code: {})", r.reason, r.code)).unwrap_or_else(|| "No reason provided".to_string());
+                            log::info!("[Distributed] Server sent close frame: {}", r_str);
+                            exit_reason = format!("Server closed connection: {}", r_str);
                             break;
                         }
                         Some(Err(e)) => {
                             log::warn!("[Distributed] WS error: {}", e);
+                            exit_reason = format!("WebSocket error: {}", e);
                             break;
                         }
                         None => {
                             log::info!("[Distributed] WS stream ended.");
+                            exit_reason = "WS stream ended (server disconnected)".to_string();
                             break;
                         }
                         _ => {} // Binary, Pong — ignore
                     }
                 }
 
+                // --- Out-of-band re-registration request ---
+                opt = async {
+                    let mut rx = re_register_rx.lock().await;
+                    rx.recv().await
+                } => {
+                    if opt.is_some() {
+                        log::info!("[Distributed] Re-registering tools due to configuration change.");
+                        Self::register_tools(device_name, &ws_tx, registry, status).await;
+                    }
+                }
+
                 // --- Periodic static placeholder push ---
                 _ = placeholder_interval.tick() => {
-                    Self::push_static_placeholders(device_name, &ws_tx, registry).await;
+                    Self::push_static_placeholders(app, device_name, &ws_tx, registry).await;
                 }
 
                 // --- Shutdown signal ---
@@ -273,11 +322,19 @@ impl DistributedClient {
                         log::info!("[Distributed] Shutdown signal received, closing session.");
                         let mut tx = ws_tx.lock().await;
                         let _ = tx.close().await;
+                        exit_reason = "Client requested shutdown".to_string();
                         break;
                     }
                 }
             }
         }
+
+        #[cfg(target_os = "android")]
+        if let Err(e) = tauri_plugin_vcp_mobile::system::stop_sensor_collection(app.clone()) {
+            log::warn!("[Distributed] Failed to stop native sensor collection: {}", e);
+        }
+
+        exit_reason
     }
 
     // ================================================================
@@ -325,10 +382,14 @@ impl DistributedClient {
                 Self::register_tools(device_name, ws_tx, registry, status).await;
 
                 // Report IP — mirrors reportIPAddress()
-                Self::report_ip(device_name, ws_tx).await;
+                let device_name_clone = device_name.to_string();
+                let ws_tx_clone = ws_tx.clone();
+                tokio::spawn(async move {
+                    Self::report_ip(&device_name_clone, &ws_tx_clone).await;
+                });
 
                 // Initial static placeholder push (2s delay in VCPChat, do it immediately here)
-                Self::push_static_placeholders(device_name, ws_tx, registry).await;
+                Self::push_static_placeholders(app, device_name, ws_tx, registry).await;
             }
 
             IncomingMessage::ExecuteTool {
@@ -395,23 +456,33 @@ impl DistributedClient {
         // Collect local IPv4 addresses (simplified — no external crate needed)
         let local_ips = Vec::new(); // TODO: enumerate network interfaces in Phase 2
 
-        // Optional: fetch public IP
-        let public_ip: Option<String> =
-            match reqwest::get("https://api.ipify.org?format=json").await {
-                Ok(resp) => {
-                    if let Ok(data) = resp.json::<Value>().await {
-                        data.get("ip")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    } else {
+        // Optional: fetch public IP with a 5-second timeout
+        let public_ip: Option<String> = {
+            let fetch_fut = async {
+                match reqwest::get("https://api.ipify.org?format=json").await {
+                    Ok(resp) => {
+                        if let Ok(data) = resp.json::<Value>().await {
+                            data.get("ip")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[Distributed] Could not fetch public IP: {}", e);
                         None
                     }
                 }
-                Err(e) => {
-                    log::warn!("[Distributed] Could not fetch public IP: {}", e);
+            };
+            match tokio::time::timeout(Duration::from_secs(5), fetch_fut).await {
+                Ok(val) => val,
+                Err(_) => {
+                    log::warn!("[Distributed] Fetching public IP timed out");
                     None
                 }
-            };
+            }
+        };
 
         let msg = OutgoingMessage::ReportIp {
             server_name: device_name.to_string(),
@@ -425,11 +496,12 @@ impl DistributedClient {
     /// Push static placeholder values.
     /// VCPChat ref: pushStaticPlaceholderValues() line 374-398
     async fn push_static_placeholders(
+        app: &AppHandle,
         device_name: &str,
         ws_tx: &WsSink,
         registry: &Arc<ToolRegistry>,
     ) {
-        let placeholders = registry.get_all_placeholder_values();
+        let placeholders = registry.get_all_placeholder_values(app);
 
         if placeholders.is_empty() {
             return;

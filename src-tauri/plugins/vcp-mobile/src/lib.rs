@@ -40,6 +40,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::request_overlay_permission,
             system::register_shared_files,
             system::toggle_floating_ball,
+            system::start_sensor_collection,
+            system::stop_sensor_collection,
+            system::get_sensor_data,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

@@ -16,7 +16,6 @@ mod sysfs_utils;
 
 mod ambient_sensor;
 mod device_status_summary;
-pub(crate) mod frontend_bridge;
 mod location;
 mod motion_sensor;
 

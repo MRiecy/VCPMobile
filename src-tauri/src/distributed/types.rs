@@ -151,6 +151,18 @@ impl IncomingEnvelope {
 // Tool manifest (registered with main server)
 // ============================================================
 
+/// Dynamic communication protocol for frontend visualization binding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", content = "payload")]
+pub enum CommType {
+    Ipc {
+        command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
+    },
+    Mock,
+}
+
 /// Tool manifest matching VCPToolBox's plugin manifest format.
 /// VCPChat ref: Plugin.js getAllPluginManifests()
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +174,15 @@ pub struct ToolManifest {
     /// "service" | "hybridservice" | "static" | "mobile" — VCPMobile tools use "mobile"
     #[serde(rename = "type", default = "default_tool_type")]
     pub tool_type: String,
+    
+    // UI Metadata for Zero-Preset Frontend Visualizer
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    pub communication: CommType,
 }
 
 fn default_tool_type() -> String {

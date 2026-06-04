@@ -53,6 +53,7 @@ const openRebuildSession = () => {
       :status-type="gcStatus.type"
       :status-message="gcStatus.message"
       status-mono
+      status-multiline
       @action-click="cleanupAttachments"
     />
 
@@ -67,6 +68,7 @@ const openRebuildSession = () => {
         :status-type="cacheStatus.type"
         :status-message="cacheStatus.message"
         status-mono
+        status-multiline
         @action-click="clearSystemCache"
       />
     </div>

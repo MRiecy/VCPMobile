@@ -7,7 +7,6 @@ use serde_json::json;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-use super::frontend_bridge;
 use super::sysfs_utils::{find_thermal_zone, read_sysfs};
 
 pub struct DeviceStatusSummaryTool;
@@ -136,42 +135,21 @@ impl DeviceStatusSummaryTool {
         }
         "离线".to_string()
     }
-
-    /// Location: brief from frontend bridge
-    fn location_brief(&self) -> Option<String> {
-        frontend_bridge::read_sensor("location", 300).map(|val| {
-            // Extract just the coordinate portion if available
-            if val.starts_with("坐标:") {
-                // Take up to first " | " for brevity
-                val.split(" | ").next().unwrap_or(&val).to_string()
-            } else {
-                val
-            }
-        })
-    }
-
-    /// Motion: brief state from frontend bridge
-    fn motion_brief(&self) -> Option<String> {
-        frontend_bridge::read_sensor("motion", 120).and_then(|val| {
-            // Extract just the state, e.g. "步行中"
-            if val.starts_with("状态: ") {
-                val.strip_prefix("状态: ")
-                    .and_then(|s| s.split(" | ").next())
-                    .map(|s| s.to_string())
-            } else {
-                Some(val)
-            }
-        })
-    }
 }
+
+use crate::distributed::types::CommType;
 
 impl StreamingTool for DeviceStatusSummaryTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileStatusSummary".to_string(),
-            description: "移动设备状态聚合摘要(CPU/GPU/内存/电池/网络/位置/运动)".to_string(),
+            description: "分布式节点专属大图，整合电池、CPU、内存及核心遥测状态，向外部提供一键摘要。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "整机状态摘要".to_string(),
+            icon: "i-lucide-gauge".to_string(),
+            placeholder: Some("{{MobileStatus}}".to_string()),
+            communication: CommType::Mock,
         }
     }
 
@@ -183,7 +161,8 @@ impl StreamingTool for DeviceStatusSummaryTool {
         60
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         let mut parts = Vec::with_capacity(8);
 
         parts.push(self.cpu_brief());
@@ -193,11 +172,42 @@ impl StreamingTool for DeviceStatusSummaryTool {
         parts.push(self.mem_brief());
         parts.push(self.battery_brief());
         parts.push(self.net_brief());
-        if let Some(loc) = self.location_brief() {
-            parts.push(loc);
+
+        // 读取原生传感器数据
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            if let Some(state) = app.try_state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>() {
+                if let Ok(handle_guard) = state.plugin_handle.lock() {
+                    if let Some(plugin_handle) = handle_guard.as_ref() {
+                        #[derive(serde::Deserialize)]
+                        struct AllSensorResponse {
+                            location: String,
+                            motion: String,
+                        }
+                        if let Ok(res) = plugin_handle.run_mobile_plugin::<AllSensorResponse>(
+                            "getSensorData",
+                            serde_json::json!({ "type": "all" }),
+                        ) {
+                            if res.location.starts_with("坐标:") {
+                                if let Some(coords) = res.location.split(" | ").next() {
+                                    parts.push(coords.to_string());
+                                }
+                            }
+                            if res.motion.starts_with("状态: ") {
+                                if let Some(motion_state) = res.motion.strip_prefix("状态: ").and_then(|s| s.split(" | ").next()) {
+                                    parts.push(motion_state.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        if let Some(motion) = self.motion_brief() {
-            parts.push(motion);
+        #[cfg(not(target_os = "android"))]
+        {
+            parts.push("坐标: 39.9000°N, 116.4000°E (模拟)".to_string());
+            parts.push("静止 (模拟)".to_string());
         }
 
         Ok(format!("[手机状态] {}", parts.join(" | ")))

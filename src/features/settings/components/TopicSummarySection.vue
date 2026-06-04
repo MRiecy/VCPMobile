@@ -1,22 +1,31 @@
 <script setup lang="ts">
+import { watch } from "vue";
 import type { AppSettings } from "../../../core/stores/settings";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
 import SettingsActionButton from "../../../components/settings/SettingsActionButton.vue";
 
-defineProps<{
+const props = defineProps<{
   settings: AppSettings;
 }>();
 
 const emit = defineEmits<{
   (e: "open-model-selector"): void;
+  (e: "save-request"): void;
 }>();
+
+watch(
+  () => props.settings.topicSummaryModel,
+  () => {
+    emit("save-request");
+  }
+);
 </script>
 
 <template>
   <div class="flex gap-3 items-end px-1">
     <div class="flex-1">
       <SettingsTextField v-model="settings.topicSummaryModel" label="总结专用模型"
-        placeholder="默认: gemini-3.1-flash-lite-preview" mono />
+        placeholder="默认: gemini-3.1-flash-lite-preview" mono @blur="emit('save-request')" />
     </div>
     <SettingsActionButton variant="secondary" @click="emit('open-model-selector')" class="!p-3.5 !rounded-2xl">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"

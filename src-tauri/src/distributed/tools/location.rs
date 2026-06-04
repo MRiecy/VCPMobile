@@ -1,13 +1,11 @@
 // distributed/tools/location.rs
-// [Streaming] MobileLocation — GPS position from frontend geolocation API.
-// Frontend pushes via Tauri command → read_current() returns cached value.
+// [Streaming] MobileLocation — GPS position from Android native LocationManager.
 
 use serde_json::json;
+use tauri::AppHandle;
 
 use crate::distributed::tool_registry::StreamingTool;
-use crate::distributed::types::ToolManifest;
-
-use super::frontend_bridge;
+use crate::distributed::types::{ToolManifest, CommType};
 
 pub struct LocationTool;
 
@@ -15,9 +13,16 @@ impl StreamingTool for LocationTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileLocation".to_string(),
-            description: "移动设备GPS位置信息(坐标/地址/精度)".to_string(),
+            description: "获取当前的经纬度高精度坐标、移动速度、海拔高度及定位源精度。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "GPS 地理定位".to_string(),
+            icon: "i-lucide-map-pin".to_string(),
+            placeholder: Some("{{MobileLocation}}".to_string()),
+            communication: CommType::Ipc {
+                command: "plugin:vcp-mobile|get_sensor_data".to_string(),
+                args: Some(json!({ "sensorType": "location" })),
+            },
         }
     }
 
@@ -29,11 +34,31 @@ impl StreamingTool for LocationTool {
         120
     }
 
-    fn read_current(&self) -> Result<String, String> {
-        // Max staleness: 5 minutes (GPS may update slowly or be unavailable indoors)
-        match frontend_bridge::read_sensor("location", 300) {
-            Some(val) => Ok(val),
-            None => Ok("位置信息: 等待前端采集...".to_string()),
+    fn read_current(&self, app: &AppHandle) -> Result<String, String> {
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
+            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
+            
+            #[derive(serde::Deserialize)]
+            struct SensorResponse {
+                value: String,
+            }
+            
+            let res = plugin_handle
+                .run_mobile_plugin::<SensorResponse>(
+                    "getSensorData",
+                    serde_json::json!({ "type": "location" }),
+                )
+                .map_err(|e| format!("JNI call failed: {}", e))?;
+            Ok(res.value)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = app;
+            Ok("坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m (模拟)".to_string())
         }
     }
 }

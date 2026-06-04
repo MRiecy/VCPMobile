@@ -68,13 +68,19 @@ impl MemoryInfoTool {
     }
 }
 
+use crate::distributed::types::CommType;
+
 impl StreamingTool for MemoryInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileMemoryInfo".to_string(),
-            description: "移动设备内存使用状态(总量/可用/Swap)".to_string(),
+            description: "监控总内存容量、当前可用空间及系统的虚拟内存/Swap 缓存分布。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "内存监控".to_string(),
+            icon: "i-lucide-cpu".to_string(),
+            placeholder: Some("{{MobileMemory}}".to_string()),
+            communication: CommType::Mock,
         }
     }
 
@@ -86,7 +92,8 @@ impl StreamingTool for MemoryInfoTool {
         15
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         let info = match self.parse_meminfo() {
             Some(i) => i,
             None => return Ok("内存信息不可用".to_string()),

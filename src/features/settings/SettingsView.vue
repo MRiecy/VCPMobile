@@ -79,6 +79,7 @@ const subPageTitle = computed(() => {
 
 const onSummaryModelSelect = (modelId: string) => {
   settings.value.topicSummaryModel = modelId;
+  saveSettings();
 };
 
 const closeSettings = () => {
@@ -273,7 +274,7 @@ watch(currentSubPage, (val) => {
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">划词悬浮助手</h3>
                     <SettingsCard>
-                      <AssistantSettingsSection :settings="settings" />
+                      <AssistantSettingsSection :settings="settings" @save-request="saveSettings" />
                     </SettingsCard>
                   </div>
                   <div>
@@ -282,6 +283,7 @@ watch(currentSubPage, (val) => {
                       <TopicSummarySection
                         :settings="settings"
                         @open-model-selector="showSummaryModelSelector = true"
+                        @save-request="saveSettings"
                       />
                     </SettingsCard>
                   </div>

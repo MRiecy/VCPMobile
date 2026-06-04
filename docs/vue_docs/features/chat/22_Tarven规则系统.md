@@ -2,8 +2,8 @@
 id: VUE-CHAT-022
 title: Tarven规则系统
 description: VCP Mobile 前端 Tarven 注入规则的状态管理、选择器 UI 与规则编辑面板
-version: 0.9.14
-date: 2026-05-27
+version: 1.0.3
+date: 2026-06-04
 ---
 
 # 22. Tarven 规则系统
@@ -936,4 +936,4 @@ ON tarven_rules(rule_type, is_enabled, sort_order ASC);
 | 长按触发 | Long-press Trigger | 按住按钮 350ms 以上触发 TarvenSelector 的交互方式 | `InputEnhancer.vue` |
 
 ---
-*最后更新：2026-05-27 | VCP Mobile v0.9.14*
+*最后更新：2026-06-04 | VCP Mobile v1.0.3*

@@ -9,6 +9,8 @@ use tauri::{AppHandle, Emitter};
 use crate::distributed::tool_registry::OneShotTool;
 use crate::distributed::types::ToolManifest;
 
+use crate::distributed::types::CommType;
+
 pub struct NotificationTool;
 
 #[async_trait]
@@ -16,9 +18,7 @@ impl OneShotTool for NotificationTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileNotification".to_string(),
-            description:
-                "在移动设备上发送本地通知。Send a local notification on the mobile device."
-                    .to_string(),
+            description: "代理可在移动端系统的状态栏发布/取消进度通知或重要弹窗提醒。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -34,6 +34,10 @@ impl OneShotTool for NotificationTool {
                 "required": ["title", "body"]
             }),
             tool_type: "mobile".to_string(),
+            display_name: "通知中心".to_string(),
+            icon: "i-lucide-bell".to_string(),
+            placeholder: None,
+            communication: CommType::Mock,
         }
     }
 

@@ -61,13 +61,19 @@ impl StorageInfoTool {
     }
 }
 
+use crate::distributed::types::CommType;
+
 impl StreamingTool for StorageInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileStorageInfo".to_string(),
-            description: "移动设备存储空间使用状态".to_string(),
+            description: "监控系统分区与用户分区的空闲/已用空间大小，预估磁盘健康度。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "磁盘存储监控".to_string(),
+            icon: "i-lucide-hard-drive".to_string(),
+            placeholder: Some("{{MobileStorage}}".to_string()),
+            communication: CommType::Mock,
         }
     }
 
@@ -79,7 +85,8 @@ impl StreamingTool for StorageInfoTool {
         300
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         // C2: Self-throttle — only refresh every 300s even though called every 30s
         Ok(self.cache.get_or_refresh(|| self.read_storage()))
     }

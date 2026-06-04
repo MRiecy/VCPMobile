@@ -461,7 +461,7 @@ onUnmounted(() => {
             </div>
           </template>
         </template>
-        <template v-else-if="message.content">
+        <template v-else-if="message.content && (!isStreaming || !message.tailBlock)">
           <div class="vcp-markdown-block select-text">
             <p>{{ message.content }}</p>
           </div>
@@ -479,7 +479,7 @@ onUnmounted(() => {
             :message-id="message.id"
           />
         </div>
-        <div v-else-if="isStreaming && message.tailContent" class="opacity-70 italic animate-pulse">
+        <div v-else-if="isStreaming && message.tailContent && message.blocks && message.blocks.length > 0" class="opacity-70 italic animate-pulse">
           {{ message.tailContent }}
         </div>
       </div>

@@ -135,13 +135,19 @@ impl CpuInfoTool {
     }
 }
 
+use crate::distributed::types::CommType;
+
 impl StreamingTool for CpuInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileCPUInfo".to_string(),
-            description: "移动设备CPU状态(使用率/频率/温度)".to_string(),
+            description: "显示多核 CPU 拓扑、当前主频、核心温度及整机 CPU 占用率。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "CPU核心监控".to_string(),
+            icon: "i-lucide-activity".to_string(),
+            placeholder: Some("{{MobileCPU}}".to_string()),
+            communication: CommType::Mock,
         }
     }
 
@@ -153,7 +159,8 @@ impl StreamingTool for CpuInfoTool {
         15
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         let usage = self.read_usage();
         let freq = self.read_freq();
         let temp = self.read_temp();

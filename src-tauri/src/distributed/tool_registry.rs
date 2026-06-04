@@ -3,8 +3,8 @@
 // Mirrors VCPChat/VCPDistributedServer/Plugin.js (class PluginManager)
 // Self-contained — does NOT import anything from vcp_modules/.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -47,7 +47,7 @@ pub trait StreamingTool: Send + Sync {
     #[allow(dead_code)]
     fn poll_interval_secs(&self) -> u64;
     /// Read current snapshot value (must be fast/non-blocking)
-    fn read_current(&self) -> Result<String, String>;
+    fn read_current(&self, app: &AppHandle) -> Result<String, String>;
 }
 
 // ============================================================
@@ -78,12 +78,30 @@ impl ToolEntry {
 
 pub struct ToolRegistry {
     tools: HashMap<String, ToolEntry>,
+    disabled_names: RwLock<HashSet<String>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            disabled_names: RwLock::new(HashSet::new()),
+        }
+    }
+
+    /// Sync disabled tools list from frontend.
+    pub fn update_disabled(&self, names: Vec<String>) {
+        if let Ok(mut guard) = self.disabled_names.write() {
+            *guard = names.into_iter().collect();
+        }
+    }
+
+    /// Check if a tool is enabled.
+    pub fn is_enabled(&self, name: &str) -> bool {
+        if let Ok(guard) = self.disabled_names.read() {
+            !guard.contains(name)
+        } else {
+            true
         }
     }
 
@@ -111,17 +129,44 @@ impl ToolRegistry {
     /// Get all tool manifests for register_tools message.
     /// Mirrors Plugin.js getAllPluginManifests()
     pub fn get_all_manifests(&self) -> Vec<ToolManifest> {
-        self.tools.values().map(|e| e.manifest()).collect()
+        self.tools
+            .iter()
+            .filter(|(name, _)| self.is_enabled(name))
+            .map(|(_, e)| e.manifest())
+            .collect()
+    }
+
+    /// Get all tool metadata with categories and placeholders for the frontend config.
+    pub fn get_tools_metadata(&self) -> Vec<serde_json::Value> {
+        self.tools
+            .iter()
+            .map(|(name, entry)| {
+                let manifest = entry.manifest();
+                let mut val = serde_json::to_value(&manifest).unwrap_or(serde_json::Value::Null);
+                if val.is_object() {
+                    let category = match entry {
+                        ToolEntry::OneShot(_) => "oneshot",
+                        ToolEntry::Interactive(_) => "interactive",
+                        ToolEntry::Streaming(_) => "streaming",
+                    };
+                    val["category"] = serde_json::json!(category);
+                    val["enabled"] = serde_json::json!(self.is_enabled(name));
+                }
+                val
+            })
+            .collect()
     }
 
     /// Get all streaming placeholder values for update_static_placeholders.
     /// Mirrors Plugin.js getAllPlaceholderValues()
-    pub fn get_all_placeholder_values(&self) -> HashMap<String, String> {
+    pub fn get_all_placeholder_values(&self, app: &AppHandle) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        for entry in self.tools.values() {
-            if let ToolEntry::Streaming(tool) = entry {
-                if let Ok(value) = tool.read_current() {
-                    map.insert(tool.placeholder_key().to_string(), value);
+        for (name, entry) in self.tools.iter() {
+            if self.is_enabled(name) {
+                if let ToolEntry::Streaming(tool) = entry {
+                    if let Ok(value) = tool.read_current(app) {
+                        map.insert(tool.placeholder_key().to_string(), value);
+                    }
                 }
             }
         }
@@ -136,6 +181,13 @@ impl ToolRegistry {
         args: Value,
         app: &AppHandle,
     ) -> Result<Value, String> {
+        if !self.is_enabled(tool_name) {
+            return Err(format!(
+                "Tool '{}' is currently disabled on this mobile node.",
+                tool_name
+            ));
+        }
+
         let entry = self
             .tools
             .get(tool_name)
@@ -146,7 +198,7 @@ impl ToolRegistry {
             ToolEntry::Interactive(tool) => tool.execute(args, app).await,
             ToolEntry::Streaming(tool) => {
                 // For streaming tools, execute_tool returns a current snapshot.
-                tool.read_current().map(serde_json::Value::String)
+                tool.read_current(app).map(serde_json::Value::String)
             }
         }
     }

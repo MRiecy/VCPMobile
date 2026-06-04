@@ -100,13 +100,19 @@ impl NetworkInfoTool {
     }
 }
 
+use crate::distributed::types::CommType;
+
 impl StreamingTool for NetworkInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileNetworkInfo".to_string(),
-            description: "移动设备网络状态(类型/IP/流量)".to_string(),
+            description: "检测当前连接网络介质（WIFI/蜂窝）、局域网 IP、延迟及当前吞吐速度。".to_string(),
             parameters: json!({}),
             tool_type: "mobile".to_string(),
+            display_name: "网络带宽监控".to_string(),
+            icon: "i-lucide-wifi".to_string(),
+            placeholder: Some("{{MobileNetwork}}".to_string()),
+            communication: CommType::Mock,
         }
     }
 
@@ -118,7 +124,8 @@ impl StreamingTool for NetworkInfoTool {
         30
     }
 
-    fn read_current(&self) -> Result<String, String> {
+    fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
+        let _ = app;
         let iface = match self.find_default_iface() {
             Some(i) => i,
             None => return Ok("网络: 未连接".to_string()),

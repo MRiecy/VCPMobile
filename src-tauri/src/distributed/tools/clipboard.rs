@@ -9,6 +9,8 @@ use tauri::{AppHandle, Emitter};
 use crate::distributed::tool_registry::OneShotTool;
 use crate::distributed::types::ToolManifest;
 
+use crate::distributed::types::CommType;
+
 pub struct ClipboardTool;
 
 #[async_trait]
@@ -16,9 +18,7 @@ impl OneShotTool for ClipboardTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileClipboard".to_string(),
-            description:
-                "读取或写入移动设备的系统剪贴板。Read or write the mobile device system clipboard."
-                    .to_string(),
+            description: "允许 AI Agent 安全读取和向移动端系统剪贴板写入文本数据。".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -35,6 +35,10 @@ impl OneShotTool for ClipboardTool {
                 "required": ["action"]
             }),
             tool_type: "mobile".to_string(),
+            display_name: "系统剪贴板".to_string(),
+            icon: "i-lucide-clipboard".to_string(),
+            placeholder: None,
+            communication: CommType::Mock,
         }
     }
 

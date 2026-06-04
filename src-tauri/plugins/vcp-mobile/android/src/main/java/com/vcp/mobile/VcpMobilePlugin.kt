@@ -53,7 +53,8 @@ import kotlin.math.roundToInt
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
     Permission(strings = ["android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE"], alias = "storageLegacy"),
     Permission(strings = ["android.permission.RECORD_AUDIO"], alias = "microphone"),
-    Permission(strings = ["android.permission.CAMERA"], alias = "camera")
+    Permission(strings = ["android.permission.CAMERA"], alias = "camera"),
+    Permission(strings = ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"], alias = "location")
 ])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
@@ -76,6 +77,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
     private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
+    private val sensorStatusManager = SensorStatusManager(activity)
     private val shareIntentHandler = ShareIntentHandler(this)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var cameraTempFile: java.io.File? = null
@@ -108,6 +110,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val cameraGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val locationGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
         val overlayGranted = floatingWindowManager.hasOverlayPermission()
@@ -117,6 +121,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         result.put("storage", storageGranted)
         result.put("microphone", microphoneGranted)
         result.put("camera", cameraGranted)
+        result.put("location", locationGranted)
         result.put("battery", batteryOptimizationIgnored)
         result.put("overlay", overlayGranted)
         
@@ -147,6 +152,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             }
             "camera" -> {
                 requestPermissionForAlias("camera", invoke, "onPermissionResult")
+            }
+            "location" -> {
+                requestPermissionForAlias("location", invoke, "onPermissionResult")
             }
             "battery" -> {
                 try {
@@ -207,11 +215,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         val microphoneGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val cameraGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val locationGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
         val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
-        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"overlay":$overlayGranted}"""
+        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"overlay":$overlayGranted,"location":$locationGranted}"""
         val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
         webViewRef?.evaluateJavascript(script, null)
     }
@@ -290,6 +300,40 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "stopStreamingService failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun startSensorCollection(invoke: Invoke) {
+        try {
+            sensorStatusManager.start()
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "startSensorCollection failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun stopSensorCollection(invoke: Invoke) {
+        try {
+            sensorStatusManager.stop()
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "stopSensorCollection failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getSensorData(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(GetSensorDataArgs::class.java)
+            val result = sensorStatusManager.getSensorData(args.type)
+            invoke.resolve(result)
+        } catch (e: Exception) {
+            Log.e(TAG, "getSensorData failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
     }
@@ -1524,5 +1568,10 @@ class ProcessSharedFileArgs {
     lateinit var cachePath: String
     var mimeType: String? = null
     lateinit var fileName: String
+}
+
+@InvokeArg
+class GetSensorDataArgs {
+    lateinit var type: String
 }
 

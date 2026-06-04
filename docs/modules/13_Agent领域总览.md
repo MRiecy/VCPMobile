@@ -2,8 +2,8 @@
 id: MOD-AGENT-013
 title: Agent 服务与类型系统
 description: Agent 领域总览——CRUD 服务、类型契约、头像颜色生成、应用层服务
-version: 0.9.14
-date: 2026-05-24
+version: 1.0.3
+date: 2026-06-04
 ---
 
 # 13. Agent 服务与类型系统
@@ -521,12 +521,13 @@ WHERE owner_type = ? AND owner_id = ?
 #### 4.5.2 自适应分辨率降采样
 
 ```rust
-let rgba_data = crate::vcp_modules::media_processor::ffmpeg_cli::decode_avatar_to_rgba(data)
-    .map_err(|e| format!("FFmpeg decode failed: {}", e))?;
+let rgba_data = crate::vcp_modules::media_processor::image_extractor::decode_avatar_to_rgba(data)
+    .map_err(|e| format!("Image decode failed: {}", e))?;
 ```
 
-- 调用 `media_processor` 领域的 FFmpeg CLI 工具
+- 调用 `media_processor` 领域的纯 Rust `image` crate 直接解码
 - 大图限制为 128×128，小图保持原样
+- 采用降级策略：优先尝试 native decoder，无法处理时返回错误
 - 输出为 Raw RGBA 字节流，避免写入临时文件
 
 #### 4.5.3 512-bin 直方图峰值检测
@@ -805,7 +806,7 @@ let patch_result = message_service::patch_single_message(...).await;
 - **`agent_types`**：零依赖，仅被其他 3 个模块引用，是领域的"公共词汇表"
 - **`agent_service`**：依赖 `agent_types`，消费 `sync_dto`、`sync_hash`、`sync_service`、`sync_types`、`topic_types`、`db_manager`
 - **`avatar_service`**：不依赖 `agent_types`（其数据结构自包含），消费 `db_manager`、`sync_service`、`sync_types`、`media_processor`
-- **`agent_chat_application_service`**：依赖 `agent_service`（读取配置）、`chat_manager`（`ChatMessage`）、`context_assembler_utils`、`db_manager`、`message_service`、`vcp_client`，并直接调用 `tauri_plugin_vcp_mobile` 插件
+- **`agent_chat_application_service`**：依赖 `agent_service`（读取配置）、`chat_manager`（`ChatMessage`）、`context_assembler`、`db_manager`、`message_service`、`vcp_client`，并直接调用 `tauri_plugin_vcp_mobile` 插件
 
 ### 6.2 与外部模块的依赖
 
@@ -819,9 +820,9 @@ let patch_result = message_service::patch_single_message(...).await;
 | `sync_hash.rs` | `agent_service` | `HashAggregator` 哈希计算 |
 | `message_service.rs` | `agent_chat_application_service` | 消息追加、历史加载、后渲染补丁 |
 | `chat_manager.rs` | `agent_chat_application_service` | `ChatMessage` 类型定义 |
-| `context_assembler_utils.rs` | `agent_chat_application_service` | 历史记录 → VCP messages 组装 |
+| `context_assembler.rs` | `agent_chat_application_service` | 历史记录 → VCP messages 组装（含群聊上下文组装 `assemble_group_context`） |
 | `vcp_client.rs` | `agent_chat_application_service` | `perform_vcp_request`、SSE 流式请求 |
-| `media_processor/ffmpeg_cli.rs` | `avatar_service` | 头像图片自适应降采样解码 |
+| `media_processor/image_extractor.rs` | `avatar_service` | 头像图片自适应降采样解码（纯 Rust image crate，含降级策略） |
 | `tauri_plugin_vcp_mobile::stream` | `agent_chat_application_service` | Android 前台服务启动/停止 |
 | `context_injection.rs` | `agent_chat_application_service` | Tarven 规则注入，对 messages 进行后处理 |
 
@@ -924,7 +925,7 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 | 聚合哈希冒泡 | Hash Bubble | 将子级变更的哈希向上汇总到父级，供同步协议快速判断变更范围 | `agent_service` |
 | DashMap | — | 无锁并发哈希表，用于 `AgentConfigState` 的内存缓存 | `agent_service` |
 | 按 ID 隔离锁 | Per-ID Mutex | 每个 Agent ID 拥有独立的 `Arc<Mutex<()>>`，避免全局写锁瓶颈 | `agent_service` |
-| FFmpeg 降采样 | FFmpeg Downsampling | 调用 FFmpeg 将大图自适应缩放到 ≤128×128，减少颜色计算量 | `avatar_service` |
+| 降采样解码 | Image Downsampling | 使用纯 Rust `image` crate 将大图自适应缩放到 ≤128×128，含降级策略（native 优先，失败则报错）| `avatar_service` |
 | 流式输出 | Stream Output | SSE（Server-Sent Events）协议下的逐字返回模式，由 `stream_output` 字段控制 | `agent_types`, `agent_chat_application_service` |
 | VCP 请求载荷 | VcpRequestPayload | 构造完成后发往 VCP 服务器的完整请求体，含 messages、model_config 等 | `agent_chat_application_service` |
 | 后渲染 | Post-Render | 流式结束后将完整内容解析为结构化 Block（如代码块、思考块）并入库 | `agent_chat_application_service` |

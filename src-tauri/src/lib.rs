@@ -40,7 +40,7 @@ use vcp_modules::group_service::{
 use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot, reconcile_local_server_cmd,
-    LifecycleState,
+    reconcile_distributed_node_cmd, LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
@@ -270,10 +270,12 @@ pub fn run() {
             clear_old_sync_logs,
             archive_assistant_chat,
             reconcile_local_server_cmd,
+            reconcile_distributed_node_cmd,
             distributed::start_distributed_node,
             distributed::stop_distributed_node,
             distributed::get_distributed_status,
-            distributed::update_sensor_data,
+            distributed::get_registered_tools_metadata,
+            distributed::update_disabled_tools,
             check_for_update,
             download_update,
             install_update,

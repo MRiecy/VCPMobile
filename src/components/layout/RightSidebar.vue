@@ -6,6 +6,7 @@ import { useNotificationProcessor } from '../../core/composables/useNotification
 import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
 import NotificationStatusBar from '../../features/notification/NotificationStatusBar.vue';
 import NotificationList from '../../features/notification/NotificationList.vue';
+import { useOverlayStore } from '../../core/stores/overlay';
 
 const props = defineProps<{ isOpen: boolean }>();
 
@@ -15,6 +16,11 @@ const emit = defineEmits<{
 
 const store = useNotificationStore();
 const { processPayload } = useNotificationProcessor();
+const overlayStore = useOverlayStore();
+
+const openDistributedView = () => {
+  overlayStore.openDistributed();
+};
 
 const sidebarRef = ref<HTMLElement | null>(null);
 useSidebarSwipe(sidebarRef, { type: 'right' });
@@ -151,7 +157,38 @@ watch(
     </div>
 
     <NotificationStatusBar />
-    <NotificationList :items="store.historyList" />
+    
+    <div class="flex-1 overflow-y-auto">
+      <NotificationList :items="store.historyList" />
+    </div>
+
+    <!-- 底部：工具按钮 2x2 网格区 -->
+    <div class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 pb-[calc(var(--vcp-safe-bottom,16px)+8px)]">
+      <div class="grid grid-cols-2 gap-2">
+        <button
+          class="col-span-1 py-3 px-4 rounded-full transition-all text-white flex items-center justify-center gap-2 hover:opacity-90 active:scale-95 shadow-md border border-black/5 dark:border-white/5"
+          style="background-color: var(--highlight-text)"
+          @click="openDistributedView"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+            <polyline points="2 17 12 22 22 17"></polyline>
+            <polyline points="2 12 12 17 22 12"></polyline>
+          </svg>
+          <span class="font-bold text-[11px] leading-none">插件中心</span>
+        </button>
+        
+        <div class="col-span-1 border border-dashed border-black/10 dark:border-white/10 rounded-full flex items-center justify-center text-[10px] opacity-25 text-primary-text py-3">
+          <span>待开发</span>
+        </div>
+        <div class="col-span-1 border border-dashed border-black/10 dark:border-white/10 rounded-full flex items-center justify-center text-[10px] opacity-25 text-primary-text py-3">
+          <span>待开发</span>
+        </div>
+        <div class="col-span-1 border border-dashed border-black/10 dark:border-white/10 rounded-full flex items-center justify-center text-[10px] opacity-25 text-primary-text py-3">
+          <span>待开发</span>
+        </div>
+      </div>
+    </div>
   </aside>
 </template>
 
@@ -162,7 +199,7 @@ watch(
   bottom: 0;
   width: 82vw;
   max-width: 340px;
-  background-color: color-mix(in srgb, var(--secondary-bg) 95%, transparent);
+  background-color: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
   transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
   z-index: var(--layer-drawer);
 }

@@ -1,9 +1,9 @@
 ---
 id: VUE-CORE-002
 title: 状态管理总览与Store全景图
-description: VCP Mobile 前端 17 个 Pinia Store 的职责分类、依赖关系与状态设计全景
-version: 0.9.14
-date: 2026-05-27
+description: VCP Mobile 前端 18 个 Pinia Store 的职责分类、依赖关系与状态设计全景
+version: 1.0.3
+date: 2026-06-04
 ---
 
 # 02. 状态管理总览与Store全景图
@@ -12,7 +12,7 @@ date: 2026-05-27
 
 ### 1.1 领域定位
 
-`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 17 个 Pinia Store。这些 Store 按领域边界划分为 5 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置与同步五大业务域。
+`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 18 个 Pinia Store。这些 Store 按领域边界划分为 6 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式、浮动助手六大业务域。
 
 与 Rust 后端不同，前端 Store 不负责数据持久化（SQLite 由后端托管），而是承担以下职责：
 
@@ -26,7 +26,7 @@ date: 2026-05-27
 - HTTP 网络请求底层（由 Rust 后端 `vcp_client.rs` 负责）
 - 文件系统读写（由 Rust 后端 `file_manager.rs` 负责）
 
-### 1.2 模块构成表（17 个 Store）
+### 1.2 模块构成表（18 个 Store）
 
 | 分类 | 文件名 | Store 名 | 职责简述 | 持久化 |
 |------|--------|----------|----------|--------|
@@ -47,6 +47,7 @@ date: 2026-05-27
 | 系统与设置 | `rebuildSession.ts` | `useRebuildSessionStore` | 预渲染重建任务会话（状态机 + 进度监听） | ❌ |
 | 同步与分布式 | `syncSession.ts` | `useSyncSessionStore` | 手动同步会话（WebSocket 连接、日志、进度） | ❌ |
 | 系统与设置 | `tarvenStore.ts` | `useTarvenStore` | Tarven 注入规则列表、启用状态、选择器开关 | ❌ |
+| 浮动助手 | `floatingAssistant.ts` | `useFloatingAssistantStore` | 浮动窗口 WebSocket IPC、消息队列、剪贴板、双模发送 | ❌ |
 
 > **持久化说明**：
 > - ✅ = `pinia-plugin-persistedstate` 自动持久化到 `localStorage`
@@ -561,6 +562,81 @@ overlayStore.openSyncSession()
 
 ---
 
+### 2.6 浮动助手类
+
+#### floatingAssistant —— 浮动窗口 WebSocket IPC
+
+> 文件位置：`src/core/stores/floatingAssistant.ts`（~352 行）
+
+`useFloatingAssistantStore` 是 VCP Mobile 浮动助手 **Mini-App 的唯一 Pinia Store**。它为 Android 悬浮 WebView 提供完整的消息管理、WebSocket IPC、剪贴板读取、设置镜像与内置 Toast 系统。
+
+**核心设计原则**：**自包含**。该 Store 不依赖任何其他 Pinia Store，不使用 Tauri `invoke()`（浮动模式下不可用），而是通过原生 `WebSocket` 连接本地 axum HTTP 服务器完成所有后端通信。
+
+**核心状态**（10 个）：
+
+| 状态 | 类型 | 说明 |
+|------|------|------|
+| `messages` | `ChatMessage[]` | 当前临时会话的消息列表（不持久化） |
+| `inputText` | `string` | 输入框绑定文本 |
+| `isGenerating` | `boolean` | 是否正在流式生成中 |
+| `currentStreamingMessageId` | `string \| null` | 当前流式输出的消息 ID |
+| `internalSettings` | `AppSettings \| null` | 内部镜像的应用设置（来自 WebSocket initial_config） |
+| `toasts` | `Toast[]` | 内置 Toast 通知列表（上限 5 条，3s 自动清除） |
+| `isFloatingMode` | `boolean` | 是否为浮动模式（通过 `location.pathname` 检测） |
+| `ws` | `WebSocket \| null` | WebSocket 连接实例（仅浮动模式） |
+| `wsReady` | `boolean` | WebSocket onopen 已触发 |
+| `wsConfigured` | `boolean` | `initial_config` 已收到且设置加载完成 |
+
+**双模式操作**：
+
+Store 通过 `isFloatingMode` 标志在两种运行模式间自动切换：
+
+| 特性 | 浮动模式 | 主应用模式（Fallback） |
+|------|----------|----------------------|
+| 检测条件 | `pathname.includes("floating")` 或 `search.includes("mode=floating")` | 其他 |
+| IPC 方式 | `WebSocket` 文本帧 (`ws://127.0.0.1:14202/ws`) | `invoke("handle_assistant_chat_stream", ...)` + `Channel` |
+| 设置获取 | WebSocket `get_initial_config` → `internalSettings` | `invoke("read_settings")` → `internalSettings` |
+| 消息归档 | WebSocket `archive_assistant_chat` → 等待回调 | `invoke("archive_assistant_chat")` → Promise |
+| Toast 系统 | 内置 `toasts` ref（`addToast()`） | 同（始终使用内置系统，不依赖 notificationStore） |
+
+**WebSocket 消息处理（`handleWsMessage`）**：
+
+| `data.type` | 行为 |
+|-------------|------|
+| `initial_config` | 将 `data.settings` 写入 `internalSettings`，设置 `wsConfigured = true` |
+| `thinking` | 查找以 `_assistant_temp` 结尾的占位消息，替换为后端返回的正式 `messageId` |
+| `data` | 查找 `currentStreamingMessageId` 或 `isThinking` 的消息，追加 `chunk` 内容 |
+| `end` | 清除 `isGenerating`、`isThinking`、`currentStreamingMessageId` |
+| `error` | 清除生成状态，向消息内容追加 `[错误]` 提示 |
+| `archive_success` | 弹出成功 Toast，调用 `clearSession()` 清空消息列表 |
+
+**发送消息流程（`sendMessage`）**：
+
+```
+sendMessage(content)
+  → resolveSettings()         // 浮动模式: internalSettings，主应用: invoke("read_settings")
+  → 校验 agentId / vcpUrl / vcpApiKey
+  → 创建 userMsg + assistantMsg (带 isThinking)
+  → isGenerating = true
+  → 选择通道:
+      isFloatingMode → ws.send({ action: "handle_assistant_chat_stream", payload })
+      否则            → invoke("handle_assistant_chat_stream", { payload, streamChannel })
+```
+
+**会话归档（`archiveSession`）**：
+
+- 过滤有效消息（`role` 为 user/assistant 且 `content` 非空）
+- 浮动模式：通过 WebSocket 发送 `archive_assistant_chat`，返回 `"WS_PENDING"` 等待回调
+- 主应用模式：直接 `invoke("archive_assistant_chat")` 获取 `topicId`
+
+**与主应用 Store 的关系**：
+
+`floatingAssistant` 是唯一的**零依赖 + 零被依赖** Store。它不引用任何其他 Store，也不被任何其他 Store 引用。这使其可以独立运行在浮动 WebView 的 Vue 实例中，不与主应用的 Pinia 状态共享内存。
+
+在主应用中（非浮动模式），`AssistantView.vue` 直接使用 `useFloatingAssistantStore()`，由于 `isFloatingMode === false`，所有操作自动回退到 Tauri IPC。这使得同一套 AssistantView UI 组件和 business logic 在两套完全不同的运行时中共存。
+
+---
+
 ## 3. Store 间依赖关系
 
 ### 3.1 依赖关系图（ASCII）
@@ -627,12 +703,19 @@ overlayStore.openSyncSession()
 │  │syncSession  │  │rebuildSession│   (被 overlayStore 直接托管)  │
 │  │(自包含状态机)│  │(自包含状态机)│                                │
 │  └─────────────┘  └─────────────┘                                │
+│                                                                  │
+│  ┌──────────────────────┐                                        │
+│  │  floatingAssistant   │   (Mini-App 独立 Store)                 │
+│  │  (零依赖 + 零被依赖) │   浮动 WebView 唯一 Store               │
+│  │  WebSocket → Tauri   │   双模 IPC 驱动                        │
+│  │  invoke 自动回退     │                                        │
+│  └──────────────────────┘                                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ### 3.2 依赖方向说明（禁止循环依赖）
 
-当前 17 个 Store 的依赖图**无循环依赖**，方向始终为：
+当前 18 个 Store 的依赖图**无循环依赖**，方向始终为：
 
 ```
 notification → (被所有业务 Store 引用，但自身不引用任何 Store)
@@ -656,6 +739,7 @@ chatStreamStore → sessionStore / assistant / avatar / topicStore
 | `chatStreamStore` ↔ `chatHistoryStore` | History → Stream（调用 `processStreamEvent`） | ✅ 单向 |
 | `overlayStore` ↔ `syncSession`/`rebuildSession` | Overlay → Sync/Rebuild（打开时托管） | ✅ 单向 |
 | `assistantStore` ↔ `topicListManager` | Topic → Assistant（通过 `combinedItems` 不直接引用） | ✅ 无直接依赖 |
+| `floatingAssistant` ↔ 任意 Store | 无任何依赖关系，Complete Isolation | ✅ 完全隔离 |
 | `notification` ↔ 任意 Store | 全部单向指向 Notification | ✅ 单向 |
 
 **overlayStore 的独立性**：`overlayStore` 不依赖任何其他业务 Store（除 `syncSessionStore` 和 `rebuildSessionStore` 的托管关系外），也不被任何业务 Store 依赖。它是纯 UI 层基础设施，与业务状态完全解耦。这种设计确保了无论聊天状态如何变化，页面栈和模态框的管理始终稳定可靠。
@@ -680,6 +764,7 @@ chatStreamStore → sessionStore / assistant / avatar / topicStore
 | `modelStore` | 1 | 0 | 模型数据源 |
 | `syncSession` | 0 | 1 | 同步状态机 |
 | `rebuildSession` | 0 | 1 | 重建状态机 |
+| `floatingAssistant` | 0 | 0 | Mini-App 独立 Store（完全隔离） |
 
 > *`attachmentStore` 仅在 Android 文件选择分支中局部创建 `useNotificationStore`，非顶部依赖。
 
@@ -691,7 +776,7 @@ chatStreamStore → sessionStore / assistant / avatar / topicStore
 
 ### 4.1 Composition API 风格定义
 
-全部 17 个 Store 统一使用 Pinia 的 **Setup Store**（Composition API 风格）定义：
+全部 18 个 Store 统一使用 Pinia 的 **Setup Store**（Composition API 风格）定义：
 
 ```typescript
 export const useXxxStore = defineStore('storeId', () => {
@@ -718,7 +803,7 @@ export const useXxxStore = defineStore('storeId', () => {
 
 #### ref 与 reactive 的选择策略
 
-17 个 Store 在状态声明时混合使用了 `ref` 和 `reactive`，选择依据是数据结构的访问模式：
+18 个 Store 在状态声明时混合使用了 `ref` 和 `reactive`，选择依据是数据结构的访问模式：
 
 | 场景 | 推荐方案 | 典型 Store |
 |------|----------|-----------|
@@ -753,6 +838,7 @@ export const useXxxStore = defineStore('storeId', () => {
 | `topicListManager` | 话题列表按需加载，持久化无意义 |
 | `notification` | Toast 和通知历史是易失的会话级信息 |
 | `settings` | 后端 `settings_manager` 已将配置写入 SQLite，前端仅做镜像 |
+| `floatingAssistant` | 浮动窗口为临时会话（不持久化）；主应用模式为增强便利性复用的迂回通道，非持久化源 |
 
 `themeStore` 不使用 Pinia 持久化插件，而是直接操作 `localStorage`，原因是：
 - 主题需要在 HTML `<html>` 标签渲染前即生效（防止 FOUC——Flash of Unstyled Content）
@@ -971,7 +1057,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 ### 6.3 Store 分层的设计逻辑
 
-17 个 Store 并非随意拆分，而是遵循**领域边界 + 变化频率**双重标准：
+18 个 Store 并非随意拆分，而是遵循**领域边界 + 变化频率**双重标准：
 
 | 分层 | 变化频率 | 代表 Store |
 |------|----------|-----------|
@@ -980,6 +1066,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 | **资产层** | 中（上传附件、切换头像） | `attachmentStore`、`avatarStore` |
 | **配置层** | 低（应用设置变更） | `settings`、`theme` |
 | **基础设施层** | 极低（应用启动一次） | `appLifecycle` |
+| **浮动助手层** | 中（每次打开悬浮窗） | `floatingAssistant` |
 
 将 `chatSessionStore` 从 `chatHistoryStore` 中独立出来，是因为会话选择（"看哪个 Agent"）与消息内容（"看到了什么"）是两个完全不同的变化频率和作用域。分离后，话题切换时只需重置 `currentTopicId`，而不影响历史加载的分页状态。
 
@@ -1004,6 +1091,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 - `notification.historyList` 上限 100 条，超出时从尾部弹出
 - `syncSession.logs` 上限 200 条，超出时从头部 shift（保留最新日志）
 - `avatar.cache` 上限 50 条，超出时按 FIFO 清理并 `URL.revokeObjectURL()` 释放物理内存
+- `floatingAssistant.toasts` 上限 5 条，超出时 `shift()` 移除最旧记录；每条 3 秒后自动过滤移除
 
 **shallowRef 的使用**：`overlayStore.contextMenuConfig` 使用 `shallowRef` 而非 `ref`。因为上下文菜单的配置对象（含 `actions` 数组）不会被深层修改，使用 `shallowRef` 可避免 Vue 对整个数组进行深层响应式代理，减少运行时开销。
 
@@ -1023,7 +1111,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 - `package.json` 不含任何测试脚本（无 `test`、`test:unit`、`test:e2e`）
 - 未安装 Vitest、Jest、Cypress、Playwright 等测试框架
-- 17 个 Pinia Store 均无任何单元测试覆盖
+- 18 个 Pinia Store 均无任何单元测试覆盖
 
 **验证手段**：以 `pnpm check`（`vue-tsc --noEmit` 前端类型检查 + `cargo check` Rust 编译检查）和真机/模拟器手动测试为主。
 
@@ -1063,7 +1151,11 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 | 智能话题恢复 | Smart Topic Recovery | 启动时优先使用缓存的 `lastActiveTopicMap` 恢复上次话题 | `chatSessionStore` |
 | 流式分块 | Streamed Chunk | 通过 Tauri `Channel` 分批次接收的大量数据（历史消息、话题列表） | `chatHistoryStore`、`topicListManager` |
 | 锁频防护 | Debounce Guard | 防止并发重复触发同一异步请求的状态检查（如 `isLoading`） | `modelStore` |
+| Mini-App 模式 | Mini-App Pattern | 浮动 WebView 独立 Vue 实例，仅加载单一 Pinia Store，无主应用 Store 污染 | `floatingAssistant` |
+| 双模 IPC | Dual-Mode IPC | `floatingAssistant` 在浮动模式走 WebSocket、主应用模式走 Tauri invoke 的自动切换机制 | `floatingAssistant` |
+| 零依赖隔离 | Zero-Dependency Isolation | Store 既不依赖也不被依赖的设计模式，允许该 Store 独立运行在非主应用上下文 | `floatingAssistant` |
+| AndroidBridge | — | 原生 Android `@JavascriptInterface` 桥接对象，提供 `closeWindow()` / `getClipboard()` 给浮动 WebView | `floatingAssistant` |
 
 ---
 
-*最后更新：2026-05-27 | VCP Mobile v0.9.14*
+*最后更新：2026-06-04 | VCP Mobile v1.0.3*

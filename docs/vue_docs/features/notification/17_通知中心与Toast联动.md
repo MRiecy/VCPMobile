@@ -2,8 +2,8 @@
 id: VUE-NOTI-017
 title: 通知中心与Toast联动
 description: VCP Mobile 前端通知列表、Toast 气泡、剪贴板联动与 VCP System Event 处理
-version: 0.9.14
-date: 2026-05-27
+version: 1.0.3
+date: 2026-06-04
 ---
 
 # 17. 通知中心与Toast联动
@@ -616,4 +616,4 @@ notificationStore.executeAction(notificationId, action)
 | `POST_NOTIFICATIONS` | Android 13+ 必需权限，由 `tauri-plugin-vcp-mobile` 管理 |
 
 ---
-*最后更新：2026-05-27 | VCP Mobile v0.9.14*
+*最后更新：2026-06-04 | VCP Mobile v1.0.3*

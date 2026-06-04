@@ -2,8 +2,8 @@
 id: VUE-AGEN-012
 title: Agent侧边栏与列表交互
 description: VCP Mobile 前端 AgentSidebar 布局、AgentList 拖拽排序、Swipe 手势与搜索过滤的交互设计
-version: 0.9.14
-date: 2026-05-27
+version: 1.0.3
+date: 2026-06-04
 ---
 
 # 12. Agent侧边栏与列表交互
@@ -1007,4 +1007,4 @@ SortableJS onEnd
 | ToastOnly | — | 通知配置项，仅显示 Toast 浮层，不写入通知中心历史 | `notificationStore.ts` |
 
 ---
-*最后更新：2026-05-27 | VCP Mobile v0.9.14*
+*最后更新：2026-06-04 | VCP Mobile v1.0.3*

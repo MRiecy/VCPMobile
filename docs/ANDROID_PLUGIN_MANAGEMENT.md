@@ -1,7 +1,7 @@
 # Android 插件管理体系规范
 
 > **文档编号**: ARCH-ANDROID-001  
-> **版本**: 0.9.14-a2
+> **版本**: 1.0.3
 > **附录新增**: 2026-05-19 | 附录 A（插件生态速查）+ 附录 B（权限实战手册）  
 > **状态**: 已迁移至 `tauri-plugin-vcp-mobile`  
 > **适用范围**: `src-tauri/plugins/vcp-mobile` 及 Android 原生层全部自定义代码

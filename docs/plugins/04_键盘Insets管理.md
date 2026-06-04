@@ -2,8 +2,8 @@
 id: PLUGIN-KEYBOARD-004
 title: 键盘 Insets 管理
 description: 通过 WindowInsetsCompat 监听键盘状态并实时推送到前端
-version: 0.9.14
-date: 2026-05-21
+version: 1.0.3
+date: 2026-06-04
 related_files:
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/KeyboardInsetsManager.kt
 ---

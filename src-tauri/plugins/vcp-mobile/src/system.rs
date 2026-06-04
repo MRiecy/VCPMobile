@@ -471,3 +471,81 @@ pub fn toggle_floating_ball<R: Runtime>(app: AppHandle<R>, show: bool) -> Result
         Ok(false)
     }
 }
+
+#[tauri::command]
+pub fn start_sensor_collection<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("startSensorCollection", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_sensor_collection<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("stopSensorCollection", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_sensor_data<R: Runtime>(
+    app: AppHandle<R>,
+    sensor_type: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let data = plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "getSensorData",
+                serde_json::json!({ "type": sensor_type }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(data)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let dummy = match sensor_type.as_str() {
+            "location" => "坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m",
+            "motion" => "状态: 静止 | 平均加速度: 9.80m/s² | 峰值: 9.80m/s²",
+            "ambient" => "环境光: 150 lux (室内) | 气压: 1013 hPa",
+            _ => "{}",
+        };
+        if sensor_type == "all" {
+            Ok(serde_json::json!({
+                "location": "坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m",
+                "motion": "状态: 静止 | 平均加速度: 9.80m/s² | 峰值: 9.80m/s²",
+                "ambient": "环境光: 150 lux (室内) | 气压: 1013 hPa",
+            }))
+        } else {
+            Ok(serde_json::json!({ "value": dummy }))
+        }
+    }
+}

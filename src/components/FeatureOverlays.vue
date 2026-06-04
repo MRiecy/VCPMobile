@@ -19,12 +19,12 @@ import SettingsView from '../features/settings/SettingsView.vue';
 import AgentSettingsView from '../features/agent/AgentSettingsView.vue';
 import GroupSettingsView from '../features/agent/GroupSettingsView.vue';
 import TarvenSettingsView from '../features/chat/components/TarvenSettings.vue';
-import SensorCollector from '../features/distributed/SensorCollector.vue';
 import ToolInteractionOverlay from '../features/distributed/ToolInteractionOverlay.vue';
 
 // SyncSessionView / RebuildSessionView 按需异步加载，状态由 Store 完全托管
 const SyncSessionView = defineAsyncComponent(() => import('../features/sync/SyncSessionView.vue'));
 const RebuildSessionView = defineAsyncComponent(() => import('../features/settings/components/RebuildSessionView.vue'));
+const DistributedView = defineAsyncComponent(() => import('../features/distributed/DistributedView.vue'));
 
 const overlayStore = useOverlayStore();
 const isMounted = ref(false);
@@ -71,7 +71,11 @@ onMounted(() => {
       :z-index="overlayStore.getPageZIndex('rebuildSession')"
     />
 
-    <SensorCollector />
+    <DistributedView
+      :is-open="overlayStore.isDistributedOpen"
+      :z-index="overlayStore.getPageZIndex('distributed')"
+      @close="overlayStore.closeDistributed()"
+    />
     <ToolInteractionOverlay />
   </div>
 </template>
