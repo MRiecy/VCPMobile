@@ -81,6 +81,7 @@ impl StreamingTool for MemoryInfoTool {
             icon: "i-lucide-cpu".to_string(),
             placeholder: Some("{{MobileMemory}}".to_string()),
             communication: CommType::Mock,
+            requires_root: false,
         }
     }
 

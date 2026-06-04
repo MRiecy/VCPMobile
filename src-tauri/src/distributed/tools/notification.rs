@@ -38,6 +38,7 @@ impl OneShotTool for NotificationTool {
             icon: "i-lucide-bell".to_string(),
             placeholder: None,
             communication: CommType::Mock,
+            requires_root: false,
         }
     }
 

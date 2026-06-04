@@ -47,6 +47,7 @@ import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import com.topjohnwu.superuser.Shell
 
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
@@ -76,6 +77,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
+    private val networkStatusManager = NetworkStatusManager(activity)
+    private val cpuStatusManager = CpuStatusManager(activity)
+    private val gpuStatusManager = GpuStatusManager(activity)
     private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
     private val sensorStatusManager = SensorStatusManager(activity)
     private val shareIntentHandler = ShareIntentHandler(this)
@@ -264,6 +268,119 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             Log.e(TAG, "getBatteryStatus failed", e)
             invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getNetworkStatus(invoke: Invoke) {
+        try {
+            val status = networkStatusManager.getNetworkStatus()
+            invoke.resolve(status)
+        } catch (e: Exception) {
+            Log.e(TAG, "getNetworkStatus failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getCpuThermalStatus(invoke: Invoke) {
+        try {
+            val status = cpuStatusManager.getThermalStatus()
+            invoke.resolve(status)
+        } catch (e: Exception) {
+            Log.e(TAG, "getCpuThermalStatus failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getGpuStatus(invoke: Invoke) {
+        try {
+            val status = gpuStatusManager.getGpuStatusJson()
+            invoke.resolve(status)
+        } catch (e: Exception) {
+            Log.e(TAG, "getGpuStatus failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun checkRootAccess(invoke: Invoke) {
+        fileIoExecutor.execute {
+            try {
+                val isRoot = Shell.getShell().isRoot
+                val result = JSObject()
+                result.put("isRoot", isRoot)
+                invoke.resolve(result)
+            } catch (e: Exception) {
+                val result = JSObject()
+                result.put("isRoot", false)
+                invoke.resolve(result)
+            }
+        }
+    }
+
+    @Command
+    fun runRootCommand(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(RunRootCommandArgs::class.java)
+            fileIoExecutor.execute {
+                try {
+                    val output = Shell.cmd(args.command).exec().out
+                    val result = JSObject().apply {
+                        put("success", true)
+                        put("output", output.joinToString("\n"))
+                    }
+                    invoke.resolve(result)
+                } catch (e: Exception) {
+                    val result = JSObject().apply {
+                        put("success", false)
+                        put("output", e.message ?: "Unknown Shell execution error")
+                    }
+                    invoke.resolve(result)
+                }
+            }
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: "Args parsing error")
+        }
+    }
+
+    @Command
+    fun launchRootManager(invoke: Invoke) {
+        try {
+            val managers = listOf(
+                "com.topjohnwu.magisk" to "Magisk",
+                "me.weishu.kernelsu" to "KernelSU",
+                "me.tool.apatch" to "APatch"
+            )
+            var launched = false
+            for ((pkg, name) in managers) {
+                try {
+                    val intent = activity.packageManager.getLaunchIntentForPackage(pkg)
+                    if (intent != null) {
+                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        activity.startActivity(intent)
+                        launched = true
+                        val result = JSObject().apply {
+                            put("success", true)
+                            put("manager", name)
+                        }
+                        invoke.resolve(result)
+                        break
+                    }
+                } catch (e: Exception) {
+                    // Continue checking next package
+                }
+            }
+            if (!launched) {
+                val result = JSObject().apply {
+                    put("success", false)
+                    put("message", "未找到支持的 Root 管理器 (Magisk, KernelSU, APatch)。")
+                }
+                invoke.resolve(result)
+            }
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: "启动 Root 管理器失败")
         }
     }
 
@@ -1573,5 +1690,10 @@ class ProcessSharedFileArgs {
 @InvokeArg
 class GetSensorDataArgs {
     lateinit var type: String
+}
+
+@InvokeArg
+class RunRootCommandArgs {
+    lateinit var command: String
 }
 

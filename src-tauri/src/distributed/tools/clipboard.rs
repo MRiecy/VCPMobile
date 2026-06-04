@@ -39,6 +39,7 @@ impl OneShotTool for ClipboardTool {
             icon: "i-lucide-clipboard".to_string(),
             placeholder: None,
             communication: CommType::Mock,
+            requires_root: false,
         }
     }
 

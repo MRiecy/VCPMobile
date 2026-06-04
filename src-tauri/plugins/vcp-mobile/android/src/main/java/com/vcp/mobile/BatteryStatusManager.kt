@@ -85,12 +85,48 @@ class BatteryStatusManager(private val context: Context) {
     }
 
     /**
-     * 导出电量百分比与省电模式状态的 JSObject
+     * 导出电量百分比、充电状态、电池温度与省电模式状态的 JSObject
      */
     fun getStatusJson(): JSObject {
         val result = JSObject()
-        result.put("level", getBatteryLevel())
-        result.put("isPowerSaveMode", isPowerSaveMode())
+        try {
+            val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            val batteryStatus: Intent? = context.registerReceiver(null, filter)
+            
+            // 1. 电量百分比
+            val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val pct = if (level >= 0 && scale > 0) {
+                ((level.toFloat() / scale.toFloat()) * 100).toInt()
+            } else {
+                -1
+            }
+            result.put("level", pct)
+            
+            // 2. 充电状态
+            val status = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val statusStr = when (status) {
+                BatteryManager.BATTERY_STATUS_CHARGING -> "充电中"
+                BatteryManager.BATTERY_STATUS_DISCHARGING -> "放电中"
+                BatteryManager.BATTERY_STATUS_FULL -> "已充满"
+                BatteryManager.BATTERY_STATUS_NOT_CHARGING -> "未充电"
+                else -> "未知"
+            }
+            result.put("status", statusStr)
+            
+            // 3. 电池温度 (单位为 0.1 摄氏度，例如 320 代表 32.0°C)
+            val temp = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+            val tempDouble = if (temp >= 0) temp.toDouble() / 10.0 else -1.0
+            result.put("temperature", tempDouble)
+            
+            // 4. 是否省电模式
+            result.put("isPowerSaveMode", isPowerSaveMode())
+        } catch (e: Exception) {
+            result.put("level", getBatteryLevel())
+            result.put("status", "未知")
+            result.put("temperature", -1.0)
+            result.put("isPowerSaveMode", isPowerSaveMode())
+        }
         return result
     }
 }

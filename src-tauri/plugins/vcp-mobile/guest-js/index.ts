@@ -64,3 +64,30 @@ export function writeTempFile(bytes: Uint8Array, fileName: string): Promise<stri
   return invoke<string>('plugin:vcp-mobile|write_temp_file', { bytes: Array.from(bytes), fileName });
 }
 
+export interface RootAccessStatus {
+  isRoot: boolean;
+}
+
+export function checkRootAccess(): Promise<RootAccessStatus> {
+  return invoke<RootAccessStatus>('plugin:vcp-mobile|check_root_access');
+}
+
+export interface RootCommandResult {
+  success: boolean;
+  output: string;
+}
+
+export function runRootCommand(command: string): Promise<RootCommandResult> {
+  return invoke<RootCommandResult>('plugin:vcp-mobile|run_root_command', { command });
+}
+
+export interface LaunchRootManagerResult {
+  success: boolean;
+  manager?: string;
+  message?: string;
+}
+
+export function launchRootManager(): Promise<LaunchRootManagerResult> {
+  return invoke<LaunchRootManagerResult>('plugin:vcp-mobile|launch_root_manager');
+}
+

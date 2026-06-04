@@ -134,6 +134,8 @@ pub fn pick_file<R: Runtime>(
 pub struct BatteryStatus {
     pub level: i32,
     pub is_power_save_mode: bool,
+    pub status: Option<String>,
+    pub temperature: Option<f64>,
 }
 
 #[tauri::command]
@@ -155,6 +157,44 @@ pub fn get_battery_status<R: Runtime>(app: AppHandle<R>) -> Result<BatteryStatus
         Ok(BatteryStatus {
             level: 100,
             is_power_save_mode: false,
+            status: Some("未充电".to_string()),
+            temperature: Some(25.0),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkStatus {
+    pub connected: bool,
+    pub r#type: String,
+    pub down_speed_kbps: i32,
+    pub up_speed_kbps: i32,
+    pub ip: String,
+}
+
+#[tauri::command]
+pub fn get_network_status<R: Runtime>(app: AppHandle<R>) -> Result<NetworkStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let status = plugin_handle
+            .run_mobile_plugin::<NetworkStatus>("getNetworkStatus", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(status)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(NetworkStatus {
+            connected: true,
+            r#type: "以太网".to_string(),
+            down_speed_kbps: 100000,
+            up_speed_kbps: 100000,
+            ip: "127.0.0.1".to_string(),
         })
     }
 }
@@ -549,5 +589,154 @@ pub fn get_sensor_data<R: Runtime>(
         } else {
             Ok(serde_json::json!({ "value": dummy }))
         }
+    }
+}
+
+#[tauri::command]
+pub fn get_cpu_thermal_status<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        #[derive(Deserialize)]
+        struct ThermalResponse {
+            status: String,
+        }
+        let res = plugin_handle
+            .run_mobile_plugin::<ThermalResponse>("getCpuThermalStatus", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(res.status)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok("正常".to_string())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuStatus {
+    pub renderer: String,
+    pub restricted: bool,
+}
+
+#[tauri::command]
+pub fn get_gpu_status<R: Runtime>(app: AppHandle<R>) -> Result<GpuStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let status = plugin_handle
+            .run_mobile_plugin::<GpuStatus>("getGpuStatus", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(status)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(GpuStatus {
+            renderer: "PC Mock GPU".to_string(),
+            restricted: true,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootAccessStatus {
+    pub is_root: bool,
+}
+
+#[tauri::command]
+pub fn check_root_access<R: Runtime>(app: AppHandle<R>) -> Result<RootAccessStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let status = plugin_handle
+            .run_mobile_plugin::<RootAccessStatus>("checkRootAccess", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(status)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(RootAccessStatus { is_root: false })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RootCommandResult {
+    pub success: bool,
+    pub output: String,
+}
+
+#[tauri::command]
+pub fn run_root_command<R: Runtime>(app: AppHandle<R>, command: String) -> Result<RootCommandResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let res = plugin_handle
+            .run_mobile_plugin::<RootCommandResult>(
+                "runRootCommand",
+                serde_json::json!({ "command": command }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = command;
+        Ok(RootCommandResult {
+            success: false,
+            output: "非Android物理端无法运行Root指令".to_string(),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchRootManagerResult {
+    pub success: bool,
+    pub manager: Option<String>,
+    pub message: Option<String>,
+}
+
+#[tauri::command]
+pub fn launch_root_manager<R: Runtime>(app: AppHandle<R>) -> Result<LaunchRootManagerResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let res = plugin_handle
+            .run_mobile_plugin::<LaunchRootManagerResult>(
+                "launchRootManager",
+                serde_json::json!({}),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(LaunchRootManagerResult {
+            success: false,
+            manager: None,
+            message: Some("该接口仅在 Android 物理端可用".to_string()),
+        })
     }
 }

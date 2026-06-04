@@ -183,6 +183,8 @@ pub struct ToolManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
     pub communication: CommType,
+    #[serde(rename = "requiresRoot", default)]
+    pub requires_root: bool,
 }
 
 fn default_tool_type() -> String {

@@ -42,27 +42,59 @@ class SensorStatusManager(private val context: Context) {
 
     // Sensor instances
     private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+    private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val magneticField = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
     private val lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
     private val pressureSensor = sensorManager.getDefaultSensor(Sensor.TYPE_PRESSURE)
 
     // Temporary storage for burst sampling
-    private val burstSamples = ArrayList<Double>()
+    private val burstAccelSamples = ArrayList<Double>()
+    private val burstGyroSamples = ArrayList<Double>()
+    private val burstMagSamples = ArrayList<Double>()
 
     // Motion Sensor Listener for Burst
     private val motionListener = object : SensorEventListener {
-        private var lastSampleTime = 0L
-        override fun onSensorChanged(event: SensorEvent?) {
-            if (event == null || event.sensor.type != Sensor.TYPE_ACCELEROMETER) return
-            val now = System.currentTimeMillis()
-            if (now - lastSampleTime < 100) return // Limit to ~10Hz
-            lastSampleTime = now
+        private var lastAccelTime = 0L
+        private var lastGyroTime = 0L
+        private var lastMagTime = 0L
 
-            val x = event.values[0]
-            val y = event.values[1]
-            val z = event.values[2]
-            val magnitude = sqrt((x * x + y * y + z * z).toDouble())
-            synchronized(burstSamples) {
-                burstSamples.add(magnitude)
+        override fun onSensorChanged(event: SensorEvent?) {
+            if (event == null) return
+            val now = System.currentTimeMillis()
+            when (event.sensor.type) {
+                Sensor.TYPE_ACCELEROMETER -> {
+                    if (now - lastAccelTime < 100) return
+                    lastAccelTime = now
+                    val x = event.values[0]
+                    val y = event.values[1]
+                    val z = event.values[2]
+                    val magnitude = sqrt((x * x + y * y + z * z).toDouble())
+                    synchronized(burstAccelSamples) {
+                        burstAccelSamples.add(magnitude)
+                    }
+                }
+                Sensor.TYPE_GYROSCOPE -> {
+                    if (now - lastGyroTime < 100) return
+                    lastGyroTime = now
+                    val x = event.values[0]
+                    val y = event.values[1]
+                    val z = event.values[2]
+                    val magnitude = sqrt((x * x + y * y + z * z).toDouble())
+                    synchronized(burstGyroSamples) {
+                        burstGyroSamples.add(magnitude)
+                    }
+                }
+                Sensor.TYPE_MAGNETIC_FIELD -> {
+                    if (now - lastMagTime < 100) return
+                    lastMagTime = now
+                    val x = event.values[0]
+                    val y = event.values[1]
+                    val z = event.values[2]
+                    val magnitude = sqrt((x * x + y * y + z * z).toDouble())
+                    synchronized(burstMagSamples) {
+                        burstMagSamples.add(magnitude)
+                    }
+                }
             }
         }
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -245,15 +277,21 @@ class SensorStatusManager(private val context: Context) {
             return
         }
         
-        synchronized(burstSamples) {
-            burstSamples.clear()
-        }
+        synchronized(burstAccelSamples) { burstAccelSamples.clear() }
+        synchronized(burstGyroSamples) { burstGyroSamples.clear() }
+        synchronized(burstMagSamples) { burstMagSamples.clear() }
         
         sensorManager.registerListener(motionListener, accelerometer, SAMPLING_PERIOD_US)
+        if (gyroscope != null) {
+            sensorManager.registerListener(motionListener, gyroscope, SAMPLING_PERIOD_US)
+        }
+        if (magneticField != null) {
+            sensorManager.registerListener(motionListener, magneticField, SAMPLING_PERIOD_US)
+        }
         
         // Stop burst sampling after 2 seconds
         mainHandler.postDelayed({
-            sensorManager.unregisterListener(motionListener, accelerometer)
+            sensorManager.unregisterListener(motionListener)
             processMotionBurstData()
             
             // Schedule next burst after 28 seconds sleep
@@ -266,28 +304,51 @@ class SensorStatusManager(private val context: Context) {
     }
 
     private fun processMotionBurstData() {
-        val samples = synchronized(burstSamples) {
-            ArrayList(burstSamples)
-        }
+        val accelList = synchronized(burstAccelSamples) { ArrayList(burstAccelSamples) }
+        val gyroList = synchronized(burstGyroSamples) { ArrayList(burstGyroSamples) }
+        val magList = synchronized(burstMagSamples) { ArrayList(burstMagSamples) }
 
-        if (samples.isEmpty()) return
+        if (accelList.isEmpty()) return
 
-        val avg = samples.average()
-        val max = samples.maxOrNull() ?: 0.0
+        val accelAvg = accelList.average()
+        val accelMax = accelList.maxOrNull() ?: 0.0
+
+        val gyroAvg = if (gyroList.isNotEmpty()) gyroList.average() else 0.0
+        val gyroMax = if (gyroList.isNotEmpty()) gyroList.maxOrNull() ?: 0.0 else 0.0
+
+        val magAvg = if (magList.isNotEmpty()) magList.average() else 0.0
 
         var state = "静止"
-        if (avg > 12.0) {
+        if (accelAvg > 12.0 || gyroAvg > 1.5) {
             state = "运动中"
-        } else if (avg > 10.5) {
+        } else if (accelAvg > 10.5 || gyroAvg > 0.5) {
             state = "步行中"
-        } else if (avg > 9.5) {
+        } else if (accelAvg > 9.5 || gyroAvg > 0.1) {
             state = "轻微移动"
         }
 
+        val gyroStr = if (gyroscope != null) {
+            String.format(Locale.US, " | 旋转角速度: %.2frad/s (峰值: %.2f)", gyroAvg, gyroMax)
+        } else {
+            " | 旋转角速度: 设备不支持"
+        }
+
+        val magStr = if (magneticField != null) {
+            String.format(Locale.US, " | 磁场强度: %.1fμT", magAvg)
+        } else {
+            " | 磁场强度: 设备不支持"
+        }
+
+        val briefStr = String.format(Locale.US, "状态: %s", state)
+        val detailStr = String.format(
+            Locale.US,
+            "状态: %s | 平均加速度: %.2fm/s² (峰值: %.2fm/s²)%s%s",
+            state, accelAvg, accelMax, gyroStr, magStr
+        )
         latestMotionStr = String.format(
             Locale.US,
-            "状态: %s | 平均加速度: %.2fm/s² | 峰值: %.2fm/s²",
-            state, avg, max
+            "[===vcp_fold: 0.0 ::desc: 物理运动姿态粗略状态(静止、步行、步行中或剧烈移动)===]\n%s\n\n[===vcp_fold: 0.50 ::desc: 九轴高频遥测指标、旋转角速度、加速度峰值、三轴磁敏度物理强度===]\n%s",
+            briefStr, detailStr
         )
     }
 
@@ -295,25 +356,38 @@ class SensorStatusManager(private val context: Context) {
     // Ambient Helpers
     // ==================================================================
     private fun updateAmbientString() {
-        if (lastLux < 0.0 && lastPressure < 0.0) {
-            latestAmbientStr = "环境传感器: 设备不支持或权限未授予"
-            return
-        }
-
-        val parts = ArrayList<String>()
-        if (lastLux >= 0.0) {
-            var desc = "未知"
-            if (lastLux < 50.0) desc = "暗"
-            else if (lastLux < 200.0) desc = "室内"
-            else if (lastLux < 1000.0) desc = "明亮"
-            else desc = "户外"
-            parts.add(String.format(Locale.US, "环境光: %.0f lux (%s)", lastLux, desc))
+        val lightStr = if (lightSensor != null) {
+            if (lastLux >= 0.0) {
+                var desc = "未知"
+                if (lastLux < 50.0) desc = "暗"
+                else if (lastLux < 200.0) desc = "室内"
+                else if (lastLux < 1000.0) desc = "明亮"
+                else desc = "户外"
+                String.format(Locale.US, "环境光: %.0f lux (%s)", lastLux, desc)
+            } else {
+                "环境光: 采集中..."
+            }
+        } else {
+            "环境光: 设备不支持"
         }
         
-        if (lastPressure >= 0.0) {
-            parts.add(String.format(Locale.US, "气压: %.0f hPa", lastPressure))
+        val pressureStr = if (pressureSensor != null) {
+            if (lastPressure >= 0.0) {
+                String.format(Locale.US, "气压: %.0f hPa", lastPressure)
+            } else {
+                "气压: 采集中..."
+            }
+        } else {
+            "气压: 设备不支持"
         }
 
-        latestAmbientStr = parts.joinToString(" | ")
+        val briefStr = lightStr
+        val detailStr = "$lightStr | $pressureStr"
+
+        latestAmbientStr = String.format(
+            Locale.US,
+            "[===vcp_fold: 0.0 ::desc: 当前所处的物理环境光照度大体描述(如暗、室内、户外)===]\n%s\n\n[===vcp_fold: 0.45 ::desc: 物理环境大气压强、精确光照度数值与场景气压监测===]\n%s",
+            briefStr, detailStr
+        )
     }
 }

@@ -2,7 +2,6 @@
 // Shared utilities for reading Android sysfs/procfs safely.
 // All functions are non-panicking — return empty/default on failure.
 
-use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -19,14 +18,10 @@ pub fn read_sysfs_u64(path: &str) -> Option<u64> {
     read_sysfs(path).parse::<u64>().ok()
 }
 
-/// Read a sysfs file and parse as i64. Returns None on any failure.
-pub fn read_sysfs_i64(path: &str) -> Option<i64> {
-    read_sysfs(path).parse::<i64>().ok()
-}
-
 /// Scan /sys/class/thermal/thermal_zone*/type to find a zone whose type
 /// contains the given keyword (case-insensitive). Returns the zone path
 /// (e.g. "/sys/class/thermal/thermal_zone0") or None.
+#[allow(dead_code)]
 pub fn find_thermal_zone(keyword: &str) -> Option<String> {
     let keyword_lower = keyword.to_lowercase();
     let thermal_base = "/sys/class/thermal";
@@ -51,15 +46,6 @@ pub fn find_thermal_zone(keyword: &str) -> Option<String> {
     None
 }
 
-/// Read temperature from a thermal zone path (milli-degrees Celsius → °C string).
-/// Returns "N/A" on failure.
-pub fn read_thermal_temp(zone_path: &str) -> String {
-    match read_sysfs_i64(&format!("{}/temp", zone_path)) {
-        Some(millideg) => format!("{}°C", millideg / 1000),
-        None => "N/A".to_string(),
-    }
-}
-
 /// Format bytes into human-readable string (e.g. "5.2GB").
 pub fn format_bytes(bytes: u64) -> String {
     const GB: u64 = 1024 * 1024 * 1024;
@@ -74,60 +60,6 @@ pub fn format_bytes(bytes: u64) -> String {
 /// Format kB (from /proc/meminfo) into human-readable string.
 pub fn format_kb(kb: u64) -> String {
     format_bytes(kb * 1024)
-}
-
-/// Probe: try multiple paths, return the first one that exists.
-pub fn probe_path(candidates: &[&str]) -> Option<String> {
-    for path in candidates {
-        if Path::new(path).exists() {
-            return Some(path.to_string());
-        }
-    }
-    None
-}
-
-/// Probe using glob-like patterns with a single `*` wildcard.
-/// Returns the first existing path that matches.
-pub fn probe_glob(pattern: &str) -> Option<String> {
-    // Split pattern at '*'
-    let parts: Vec<&str> = pattern.splitn(2, '*').collect();
-    if parts.len() != 2 {
-        // No wildcard, just check existence
-        return if Path::new(pattern).exists() {
-            Some(pattern.to_string())
-        } else {
-            None
-        };
-    }
-
-    let (dir_prefix, suffix) = (parts[0], parts[1]);
-    // Find the parent directory to scan
-    let parent = Path::new(dir_prefix).parent()?;
-    let prefix_name = Path::new(dir_prefix)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let entries = match std::fs::read_dir(parent) {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(&prefix_name) {
-            let candidate = format!(
-                "{}{}{}",
-                dir_prefix.trim_end_matches(&prefix_name),
-                name,
-                suffix
-            );
-            if Path::new(&candidate).exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 /// Self-throttling cache for low-frequency sensors.
@@ -177,5 +109,47 @@ impl ThrottledCache {
             self.update(value);
         }
         self.get()
+    }
+}
+
+/// 辅助方法：通过 JNI 接口尝试以 Root 执行命令并获取输出。
+/// 如果获取失败、未授权或不是 Android 平台，返回 None
+pub fn execute_root_command_safe(app: &tauri::AppHandle, command: &str) -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        let result: Result<String, String> = (|| {
+            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
+            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
+            
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct RootResult {
+                success: bool,
+                output: String,
+            }
+            
+            let res = plugin_handle
+                .run_mobile_plugin::<RootResult>(
+                    "runRootCommand",
+                    serde_json::json!({ "command": command }),
+                )
+                .map_err(|e| format!("JNI call failed: {}", e))?;
+
+            if res.success && !res.output.trim().is_empty() {
+                Ok(res.output)
+            } else {
+                Err("Root command returned failure or empty output".to_string())
+            }
+        })();
+
+        result.ok()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = command;
+        None
     }
 }

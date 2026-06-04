@@ -23,6 +23,7 @@ impl StreamingTool for AmbientSensorTool {
                 command: "plugin:vcp-mobile|get_sensor_data".to_string(),
                 args: Some(json!({ "sensorType": "ambient" })),
             },
+            requires_root: false,
         }
     }
 
@@ -58,7 +59,13 @@ impl StreamingTool for AmbientSensorTool {
         #[cfg(not(target_os = "android"))]
         {
             let _ = app;
-            Ok("环境光: 150 lux (室内) | 气压: 1013 hPa (模拟)".to_string())
+            let brief = "环境光: 150 lux (室内) (模拟)";
+            let detail = "环境光: 150 lux (室内) | 气压: 1013 hPa (模拟)";
+            let folded = format!(
+                "[===vcp_fold: 0.0 ::desc: 当前所处的物理环境光照度大体描述(如暗、室内、户外)===]\n{}\n\n[===vcp_fold: 0.45 ::desc: 物理环境大气压强、精确光照度数值与场景气压监测===]\n{}",
+                brief, detail
+            );
+            Ok(folded)
         }
     }
 }

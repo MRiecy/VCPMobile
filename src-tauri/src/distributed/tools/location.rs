@@ -23,6 +23,7 @@ impl StreamingTool for LocationTool {
                 command: "plugin:vcp-mobile|get_sensor_data".to_string(),
                 args: Some(json!({ "sensorType": "location" })),
             },
+            requires_root: false,
         }
     }
 

@@ -7,47 +7,8 @@ use serde_json::json;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-use super::sysfs_utils::read_sysfs;
-
-const BATTERY_BASE: &str = "/sys/class/power_supply/battery";
 
 pub struct BatteryInfoTool;
-
-impl BatteryInfoTool {
-    fn read_capacity(&self) -> String {
-        let raw = read_sysfs(&format!("{}/capacity", BATTERY_BASE));
-        if raw.is_empty() {
-            return "N/A".to_string();
-        }
-        format!("{}%", raw)
-    }
-
-    fn read_status(&self) -> String {
-        let raw = read_sysfs(&format!("{}/status", BATTERY_BASE));
-        if raw.is_empty() {
-            return "未知".to_string();
-        }
-        match raw.as_str() {
-            "Charging" => "充电中".to_string(),
-            "Discharging" => "放电中".to_string(),
-            "Full" => "已充满".to_string(),
-            "Not charging" => "未充电".to_string(),
-            other => other.to_string(),
-        }
-    }
-
-    fn read_temp(&self) -> String {
-        // Battery temp is in units of 0.1°C (e.g. 320 = 32.0°C)
-        let raw = read_sysfs(&format!("{}/temp", BATTERY_BASE));
-        match raw.parse::<i64>() {
-            Ok(t) => {
-                let deg = t as f64 / 10.0;
-                format!("{:.0}°C", deg)
-            }
-            Err(_) => "N/A".to_string(),
-        }
-    }
-}
 
 use crate::distributed::types::CommType;
 
@@ -65,6 +26,7 @@ impl StreamingTool for BatteryInfoTool {
                 command: "plugin:vcp-mobile|get_battery_status".to_string(),
                 args: None,
             },
+            requires_root: false,
         }
     }
 
@@ -77,19 +39,46 @@ impl StreamingTool for BatteryInfoTool {
     }
 
     fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
-        let _ = app;
-        let capacity = self.read_capacity();
-        let status = self.read_status();
-        let temp = self.read_temp();
+        #[cfg(target_os = "android")]
+        {
+            use tauri::Manager;
+            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
+            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
+            
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct BatteryResponse {
+                level: i32,
+                is_power_save_mode: bool,
+                status: Option<String>,
+                temperature: Option<f64>,
+            }
+            
+            let res = plugin_handle
+                .run_mobile_plugin::<BatteryResponse>(
+                    "getBatteryStatus",
+                    serde_json::json!({}),
+                )
+                .map_err(|e| format!("JNI call failed: {}", e))?;
 
-        // If all values are N/A, the sysfs path likely doesn't exist
-        if capacity == "N/A" && status == "未知" && temp == "N/A" {
-            return Ok("电池信息不可用".to_string());
+            let status_str = res.status.unwrap_or_else(|| "未知".to_string());
+            let temp_str = match res.temperature {
+                Some(t) if t >= 0.0 => format!("{:.1}°C", t),
+                _ => "N/A".to_string(),
+            };
+            
+            let pwr_save = if res.is_power_save_mode { " (低功耗模式)" } else { "" };
+            
+            Ok(format!(
+                "电量: {}%{} | 状态: {} | 温度: {}",
+                res.level, pwr_save, status_str, temp_str
+            ))
         }
-
-        Ok(format!(
-            "电量: {} | 状态: {} | 温度: {}",
-            capacity, status, temp
-        ))
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = app;
+            Ok("电池信息不可用".to_string())
+        }
     }
 }

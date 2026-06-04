@@ -74,6 +74,7 @@ impl StreamingTool for StorageInfoTool {
             icon: "i-lucide-hard-drive".to_string(),
             placeholder: Some("{{MobileStorage}}".to_string()),
             communication: CommType::Mock,
+            requires_root: false,
         }
     }
 

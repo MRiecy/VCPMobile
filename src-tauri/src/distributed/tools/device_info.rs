@@ -29,6 +29,7 @@ impl OneShotTool for DeviceInfoTool {
             icon: "i-lucide-smartphone".to_string(),
             placeholder: None,
             communication: CommType::Mock,
+            requires_root: false,
         }
     }
 

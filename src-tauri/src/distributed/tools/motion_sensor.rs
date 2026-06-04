@@ -23,6 +23,7 @@ impl StreamingTool for MotionSensorTool {
                 command: "plugin:vcp-mobile|get_sensor_data".to_string(),
                 args: Some(json!({ "sensorType": "motion" })),
             },
+            requires_root: false,
         }
     }
 
@@ -58,7 +59,13 @@ impl StreamingTool for MotionSensorTool {
         #[cfg(not(target_os = "android"))]
         {
             let _ = app;
-            Ok("状态: 静止 | 平均加速度: 9.80m/s² | 峰值: 9.80m/s² (模拟)".to_string())
+            let brief = "状态: 静止 (模拟)";
+            let detail = "状态: 静止 | 平均加速度: 9.80m/s² (峰值: 9.80m/s²) (模拟)";
+            let folded = format!(
+                "[===vcp_fold: 0.0 ::desc: 物理运动姿态粗略状态(静止、步行、步行中或剧烈移动)===]\n{}\n\n[===vcp_fold: 0.50 ::desc: 九轴高频遥测指标、旋转角速度、加速度峰值、三轴磁敏度物理强度===]\n{}",
+                brief, detail
+            );
+            Ok(folded)
         }
     }
 }

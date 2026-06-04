@@ -8,6 +8,7 @@ import SlidePage from "../../components/ui/SlidePage.vue";
 // Atomic settings UI components
 import SettingsTextField from "../../components/settings/SettingsTextField.vue";
 import SettingsCard from "../../components/settings/SettingsCard.vue";
+import { checkRootAccess, launchRootManager } from "../../../src-tauri/plugins/vcp-mobile/guest-js";
 
 const props = withDefaults(
   defineProps<{
@@ -53,6 +54,7 @@ interface PluginItem {
     };
   };
   enabled: boolean;
+  requiresRoot: boolean;
 }
 
 interface PlaceholderItem {
@@ -176,7 +178,8 @@ const loadPluginsMetadata = async () => {
         placeholder: tool.placeholder || undefined,
         icon: tool.icon || "i-lucide-toy-brick",
         communication: tool.communication,
-        enabled: tool.enabled !== undefined ? tool.enabled : true
+        enabled: tool.enabled !== undefined ? tool.enabled : true,
+        requiresRoot: !!tool.requiresRoot
       };
     });
 
@@ -201,6 +204,42 @@ const loadPluginsMetadata = async () => {
 const expandedPluginId = ref<string | null>(null);
 const pluginLoading = ref<Record<string, boolean>>({});
 const pluginData = ref<Record<string, string>>({});
+
+// Contextual folding block states (Scheme B)
+interface FoldBlock {
+  threshold: number;
+  desc: string;
+  content: string;
+}
+
+const pluginFoldBlocks = ref<Record<string, FoldBlock[]>>({});
+const selectedFoldBlockIdx = ref<Record<string, number>>({});
+
+const parseFoldBlocks = (raw: string): FoldBlock[] => {
+  if (!raw.includes("[===vcp_fold:")) return [];
+
+  const blockRegex = /\[===vcp_fold:\s*([\d.]+)(?:\s*::desc:\s*([^\]]+))?===\]\n?([\s\S]*?)(?=\n?\[===vcp_fold:|$)/g;
+  const blocks: FoldBlock[] = [];
+  let match;
+  
+  while ((match = blockRegex.exec(raw)) !== null) {
+    const threshold = parseFloat(match[1]);
+    const rawDesc = match[2] || "";
+    const content = match[3].trim();
+    const desc = rawDesc.trim() || `层级 ${threshold}`;
+    blocks.push({ threshold, desc, content });
+  }
+  
+  return blocks;
+};
+
+const selectTab = (pluginId: string, index: number) => {
+  selectedFoldBlockIdx.value[pluginId] = index;
+  const blocks = pluginFoldBlocks.value[pluginId];
+  if (blocks && blocks[index]) {
+    pluginData.value[pluginId] = blocks[index].content;
+  }
+};
 
 // Loading settings from main settings store
 const loadSettings = async () => {
@@ -290,22 +329,79 @@ const togglePlugin = async (plugin: PluginItem) => {
     const { invoke } = await import("@tauri-apps/api/core");
     const res = await invoke<string>("execute_distributed_tool", { name: plugin.id });
     
-    // 如果返回的值可以解析为 JSON 对象，我们对其进行排版美化
-    try {
-      const parsed = JSON.parse(res);
-      if (parsed && typeof parsed === "object") {
-        pluginData.value[plugin.id] = JSON.stringify(parsed, null, 2);
-      } else {
+    // 解析是否含有折叠块协议
+    const blocks = parseFoldBlocks(res);
+    if (blocks.length > 0) {
+      pluginFoldBlocks.value[plugin.id] = blocks;
+      selectedFoldBlockIdx.value[plugin.id] = 0; // 默认选中首个 Tab (通常是 0.0 极简级)
+      pluginData.value[plugin.id] = blocks[0].content;
+    } else {
+      pluginFoldBlocks.value[plugin.id] = [];
+      // 如果返回的值可以解析为 JSON 对象，我们对其进行排版美化
+      try {
+        const parsed = JSON.parse(res);
+        if (parsed && typeof parsed === "object") {
+          pluginData.value[plugin.id] = JSON.stringify(parsed, null, 2);
+        } else {
+          pluginData.value[plugin.id] = res;
+        }
+      } catch {
         pluginData.value[plugin.id] = res;
       }
-    } catch {
-      pluginData.value[plugin.id] = res;
     }
   } catch (e: any) {
     console.error(`[DistributedView] Failed to pull native sensor telemetry for ${plugin.id}:`, e);
     pluginData.value[plugin.id] = `遥测读取异常:\n${e.toString()}\n(请检查移动端传感器硬件模块是否正常运行或对应的 JNI 权限是否已授予)`;
   } finally {
     pluginLoading.value[plugin.id] = false;
+  }
+};
+
+// Root Access States & Functions
+const isRootGranted = ref<boolean | null>(null);
+
+const checkRootState = async () => {
+  console.log("[DistributedView] checkRootState checking system root access...");
+  try {
+    const res = await checkRootAccess();
+    console.log("[DistributedView] checkRootState result:", JSON.stringify(res));
+    isRootGranted.value = res.isRoot;
+  } catch (e) {
+    console.error("[DistributedView] Failed to check root access:", e);
+    isRootGranted.value = false;
+  }
+};
+
+const handleLaunchRootManager = async () => {
+  console.log("[DistributedView] handleLaunchRootManager triggered, attempting JNI redirect...");
+  try {
+    const res = await launchRootManager();
+    console.log("[DistributedView] launchRootManager JNI result:", JSON.stringify(res));
+    if (res.success) {
+      notificationStore.addNotification({
+        type: "success",
+        title: "启动成功",
+        message: `已成功启动 ${res.manager || 'Root管理器'}。请在其中授予 VCPMobile 的超级用户权限，然后返回应用重新检测。`,
+        toastOnly: true
+      });
+      // 3秒后自动检测一次
+      setTimeout(checkRootState, 3000);
+    } else {
+      notificationStore.addNotification({
+        type: "warning",
+        title: "未找到授权管理器",
+        message: res.message || "未在设备上检测到 Magisk、KernelSU 或 APatch 管理器应用。",
+        toastOnly: true
+      });
+    }
+  } catch (e: any) {
+    console.error("[DistributedView] Failed to launch root manager:", e);
+    notificationStore.addNotification({
+      type: "error",
+      title: "启动管理器失败",
+      message: e.toString(),
+      toastOnly: true
+    });
   }
 };
 
@@ -354,9 +450,9 @@ watch(
     <div class="distributed-view flex flex-col h-full w-full bg-secondary-bg text-primary-text pointer-events-auto">
       <!-- Header -->
       <header class="px-4 py-3 flex items-center justify-between border-b border-black/5 dark:border-white/5 pt-[calc(var(--vcp-safe-top,24px)+12px)] pb-3 shrink-0">
-        <div class="flex flex-col">
-          <h2 class="text-xl font-bold tracking-tight text-primary-text">分布式设备面板</h2>
-          <span class="text-[8px] font-mono opacity-40 uppercase tracking-[0.2em]">Distributed Panel // Client V2</span>
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <h2 class="text-xl font-bold tracking-tight text-primary-text shrink-0">分布式设备面板</h2>
+          <span class="text-[8px] font-mono opacity-40 uppercase tracking-wider shrink-0">Distributed Panel // Client V2</span>
         </div>
         <button
           @click="emit('close')"
@@ -411,9 +507,9 @@ watch(
                   :class="status.connected ? 'bg-emerald-500' : (status.state === 'connecting' || status.state === 'disconnecting') ? 'bg-amber-500' : 'bg-rose-500'"
                 ></span>
               </span>
-              <div class="flex flex-col">
-                <span class="text-xs font-bold">连接状态</span>
-                <span class="text-[8px] opacity-50 font-mono uppercase tracking-wider">{{ status.connected ? 'Connected' : (status.state === 'connecting' ? 'Connecting...' : status.state === 'disconnecting' ? 'Disconnecting...' : 'Disconnected') }}</span>
+              <div class="flex items-baseline gap-1.5 flex-wrap">
+                <span class="text-xs font-bold shrink-0">连接状态</span>
+                <span class="text-[8px] opacity-50 font-mono uppercase tracking-wider shrink-0">{{ status.connected ? 'Connected' : (status.state === 'connecting' ? 'Connecting...' : status.state === 'disconnecting' ? 'Disconnecting...' : 'Disconnected') }}</span>
               </div>
             </div>
             <div class="flex gap-2">
@@ -435,6 +531,71 @@ watch(
                 {{ status.state === 'connecting' ? '连接中...' : '连接' }}
               </button>
             </div>
+          </div>
+
+          <!-- Root Status Card -->
+          <div class="bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/5 p-4 rounded-2xl space-y-3">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="h-8 w-8 rounded-xl bg-black/5 dark:bg-white/5 flex items-center justify-center">
+                  <svg v-if="isRootGranted === true" class="text-emerald-500" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    <path d="m9 11 2 2 4-4"/>
+                  </svg>
+                  <svg v-else-if="isRootGranted === false" class="text-rose-500" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    <line x1="12" y1="8" x2="12" y2="12"/>
+                    <line x1="12" y1="16" x2="12.01" y2="16"/>
+                  </svg>
+                  <svg v-else class="text-primary-text/40" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    <circle cx="12" cy="12" r="1"/>
+                  </svg>
+                </div>
+                <div class="flex items-baseline gap-1.5 flex-wrap">
+                  <span class="text-xs font-bold shrink-0">超级用户 Root 状态</span>
+                  <span class="text-[8px] opacity-50 font-mono uppercase tracking-wider shrink-0">
+                    {{ isRootGranted === true ? 'ROOT ACCESS GRANTED' : isRootGranted === false ? 'ROOT ACCESS DENIED' : 'ROOT STATUS UNCHECKED' }}
+                  </span>
+                </div>
+              </div>
+              <div class="flex gap-2">
+                <button
+                  v-if="isRootGranted === null"
+                  @click="checkRootState"
+                  class="px-3 py-1 text-white text-[10px] font-bold rounded-xl active:scale-95 transition-all"
+                  style="background-color: var(--highlight-text)"
+                >
+                  检测 Root
+                </button>
+                <template v-else>
+                  <button
+                    @click="checkRootState"
+                    class="px-2.5 py-1 bg-black/10 dark:bg-white/10 text-primary-text text-[10px] font-bold rounded-xl active:scale-95 transition-all hover:bg-black/20"
+                  >
+                    重新检测
+                  </button>
+                  <button
+                    v-if="isRootGranted === false"
+                    @click="handleLaunchRootManager"
+                    class="px-2.5 py-1 text-white text-[10px] font-bold rounded-xl active:scale-95 transition-all"
+                    style="background-color: var(--highlight-text)"
+                  >
+                    一键授权
+                  </button>
+                </template>
+              </div>
+            </div>
+            
+            <p v-if="isRootGranted === false" class="text-[10px] opacity-60 leading-relaxed">
+              * 检测到未获得 Root 权限。由于 Android 系统的 SELinux 安全沙盒机制，没有 Root 权限时，诸如 CPU/GPU 实时负载及温度等核心物理遥测指标将不可用或信息降级。请在 Magisk/KernelSU 中通过授权。
+            </p>
+            <p v-else-if="isRootGranted === true" class="text-[10px] opacity-60 leading-relaxed">
+              * 已成功取得系统级超级用户权限。所有底层的 sysfs / procfs 接口通道已解锁，分布式遥测数据将以最高精度输出。
+            </p>
+            <p v-else class="text-[10px] opacity-60 leading-relaxed">
+              * 超级用户权限未检测。点击“检测 Root”将发起授权验证（可能触发系统的 Magisk/KernelSU 授权弹窗）。如果您不需要 CPU/GPU 核心占用等物理监控指标，可保持未检测状态。
+            </p>
           </div>
 
           <!-- Configuration Fields -->
@@ -541,14 +702,70 @@ watch(
                 @click="togglePlugin(plugin)"
                 class="p-4 flex items-center justify-between cursor-pointer select-none active:bg-black/5 dark:active:bg-white/5"
               >
-                <div class="flex items-center gap-3">
-                  <div class="h-8 w-8 rounded-xl bg-black/5 dark:bg-white/5 flex items-center justify-center text-primary-text">
-                    <span class="text-xs uppercase font-mono font-bold opacity-75">{{ plugin.englishName.substring(0, 2) }}</span>
+                <div class="flex items-center gap-2.5">
+                  <div class="w-5 h-5 shrink-0 flex items-center justify-center text-primary-text opacity-70">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                      <template v-if="plugin.id.includes('CPU')">
+                        <rect x="4" y="4" width="16" height="16" rx="2" />
+                        <rect x="9" y="9" width="6" height="6" />
+                        <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('GPU')">
+                        <rect x="2" y="2" width="20" height="20" rx="2" />
+                        <path d="M6 14h12M6 10h12M10 6v12M14 6v12" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Battery')">
+                        <rect x="2" y="7" width="16" height="10" rx="2" ry="2" />
+                        <line x1="22" y1="11" x2="22" y2="13" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Location')">
+                        <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+                        <circle cx="12" cy="10" r="3" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Network')">
+                        <path d="M5 12.55a11 11 0 0 1 14.08 0" />
+                        <path d="M1.42 9a16 16 0 0 1 21.16 0" />
+                        <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+                        <line x1="12" y1="20" x2="12.01" y2="20" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Notification')">
+                        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Clipboard')">
+                        <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+                        <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Memory') || plugin.id.includes('Storage')">
+                        <rect x="2" y="2" width="20" height="20" rx="2" />
+                        <path d="M2 14h20M6 18h.01M10 18h.01" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Ambient')">
+                        <circle cx="12" cy="12" r="4" />
+                        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('Motion')">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('DeviceInfo')">
+                        <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+                        <line x1="12" y1="18" x2="12.01" y2="18" />
+                      </template>
+                      <template v-else-if="plugin.id.includes('StatusSummary')">
+                        <line x1="18" y1="20" x2="18" y2="10" />
+                        <line x1="12" y1="20" x2="12" y2="4" />
+                        <line x1="6" y1="20" x2="6" y2="14" />
+                      </template>
+                      <template v-else>
+                        <rect x="3" y="3" width="18" height="18" rx="2" />
+                        <path d="M21 12H3M12 3v18" />
+                      </template>
+                    </svg>
                   </div>
                   <div class="flex flex-col">
-                    <div class="flex items-center gap-1.5">
-                      <span class="text-xs font-bold">{{ plugin.name }}</span>
-                      <span class="text-[8px] font-mono opacity-40 uppercase tracking-wider">{{ plugin.englishName }}</span>
+                    <div class="flex items-baseline gap-1.5 flex-wrap">
+                      <span class="text-xs font-bold shrink-0">{{ plugin.name }}</span>
+                      <span class="text-[8px] font-mono opacity-40 uppercase tracking-wider shrink-0">{{ plugin.englishName }}</span>
                     </div>
                     <span class="text-[10px] opacity-50 mt-0.5 line-clamp-1 pr-4">{{ plugin.description }}</span>
                   </div>
@@ -584,6 +801,12 @@ watch(
 
               <!-- Collapsible Content -->
               <div v-if="expandedPluginId === plugin.id" class="border-t border-black/5 dark:border-white/5 p-4 bg-black/10 dark:bg-white/10 space-y-3">
+                <!-- Plugin Description Area -->
+                <div class="text-[10px] opacity-70 leading-relaxed text-primary-text border-b border-black/5 dark:border-white/5 pb-2.5">
+                  <span class="font-bold opacity-50 text-[8px] uppercase tracking-wider block mb-1">功能描述 / Description</span>
+                  {{ plugin.description }}
+                </div>
+
                 <div class="flex justify-between items-center text-[9px] uppercase font-bold opacity-40 tracking-wider">
                   <span>实时遥测数据 / Realtime Telemetry</span>
                   <button
@@ -591,6 +814,42 @@ watch(
                     class="px-2 py-0.5 bg-black/10 dark:bg-white/10 rounded-md hover:bg-black/20 flex items-center gap-1 active:scale-95 transition-all text-[8px]"
                   >
                     刷新读取
+                  </button>
+                </div>
+
+                <!-- Root status unchecked banner for system telemetries -->
+                <div v-if="isRootGranted === null && plugin.requiresRoot" class="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 p-2.5 rounded-xl flex items-center justify-between text-[10px]">
+                  <div class="flex items-center gap-1.5 opacity-60">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0">
+                      <circle cx="12" cy="12" r="10"/>
+                      <path d="M12 16v-4"/>
+                      <path d="M12 8h.01"/>
+                    </svg>
+                    <span>此工具需要 Root 权限以读取实时物理遥测</span>
+                  </div>
+                  <button 
+                    @click.stop="checkRootState"
+                    class="px-2 py-0.5 bg-black/10 hover:bg-black/20 dark:bg-white/10 dark:hover:bg-white/20 text-primary-text rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
+                  >
+                    检测 Root
+                  </button>
+                </div>
+
+                <!-- Root warning banner for system telemetries -->
+                <div v-if="isRootGranted === false && plugin.requiresRoot" class="bg-amber-50/70 dark:bg-amber-400/5 border border-amber-200 dark:border-amber-400/10 p-2.5 rounded-xl flex items-center justify-between text-[10px]">
+                  <div class="flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0">
+                      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+                      <line x1="12" y1="9" x2="12" y2="13"/>
+                      <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <span>未获得 Root 权限，部分遥测参数已使用标准 API 降级</span>
+                  </div>
+                  <button 
+                    @click.stop="handleLaunchRootManager"
+                    class="px-2 py-0.5 bg-amber-100 hover:bg-amber-200 dark:bg-amber-400/20 dark:hover:bg-amber-400/30 text-amber-700 dark:text-amber-400 rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
+                  >
+                    跳转授权
                   </button>
                 </div>
 
@@ -602,8 +861,31 @@ watch(
                   <span class="font-mono text-[10px]">JNI 物理通道拉取中...</span>
                 </div>
 
-                <div v-else class="rounded-xl bg-black/20 dark:bg-black/40 border border-black/10 dark:border-white/5 p-3.5">
-                  <pre class="text-[10px] font-mono text-primary-text/90 whitespace-pre-wrap leading-relaxed break-all">{{ pluginData[plugin.id] || '无物理遥测数据' }}</pre>
+                <div v-else class="space-y-2">
+                  <!-- 方案 B: 动态层级 Tabs 切换 -->
+                  <div v-if="pluginFoldBlocks[plugin.id] && pluginFoldBlocks[plugin.id].length > 0" class="flex flex-wrap gap-1.5 pb-1 border-b border-black/5 dark:border-white/5">
+                    <button
+                      v-for="(block, index) in pluginFoldBlocks[plugin.id]"
+                      :key="index"
+                      @click.stop="selectTab(plugin.id, index)"
+                      class="px-2.5 py-1 text-[9px] font-bold rounded-lg transition-all active:scale-95 border"
+                      :class="selectedFoldBlockIdx[plugin.id] === index
+                        ? 'text-[var(--highlight-text)]'
+                        : 'bg-black/5 dark:bg-white/5 border-transparent opacity-60 text-primary-text hover:opacity-100'"
+                      :style="selectedFoldBlockIdx[plugin.id] === index
+                        ? {
+                            backgroundColor: 'color-mix(in srgb, var(--highlight-text) 15%, transparent)',
+                            borderColor: 'color-mix(in srgb, var(--highlight-text) 30%, transparent)'
+                          }
+                        : {}"
+                    >
+                      {{ block.desc }} ({{ block.threshold }})
+                    </button>
+                  </div>
+
+                  <div class="rounded-xl bg-black/3 dark:bg-black/40 border border-black/5 dark:border-white/5 p-3.5">
+                    <pre class="text-[10px] font-mono text-primary-text/90 whitespace-pre-wrap leading-relaxed break-all">{{ pluginData[plugin.id] || '无物理遥测数据' }}</pre>
+                  </div>
                 </div>
 
                 <div v-if="plugin.placeholder" class="flex justify-between items-center text-[10px] text-primary-text pt-1">
