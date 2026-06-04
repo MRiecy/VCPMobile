@@ -818,36 +818,36 @@ watch(
                 </div>
 
                 <!-- Root status unchecked banner for system telemetries -->
-                <div v-if="isRootGranted === null && plugin.requiresRoot" class="bg-warning/8 dark:bg-warning/4 border border-warning/15 p-2.5 rounded-xl flex items-center justify-between text-[10px] gap-2.5">
-                  <div class="flex items-center gap-1.5 min-w-0">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-warning">
+                <div v-if="isRootGranted === null && plugin.requiresRoot" class="bg-amber-500/10 dark:bg-amber-400/5 border border-amber-500/20 dark:border-amber-400/10 p-2.5 rounded-xl flex items-center justify-between text-[10px]">
+                  <div class="flex items-center gap-1.5 text-amber-800 dark:text-amber-400">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="shrink-0">
                       <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
                       <line x1="12" y1="9" x2="12" y2="13"/>
                       <line x1="12" y1="17" x2="12.01" y2="17"/>
                     </svg>
-                    <span class="truncate font-medium text-primary-text opacity-90">此插件需要 Root 权限以读取物理遥测</span>
+                    <span>此工具需要 Root 权限以读取实时物理遥测</span>
                   </div>
                   <button 
                     @click.stop="checkRootState"
-                    class="px-2 py-0.5 bg-warning/15 hover:bg-warning/25 text-warning rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
+                    class="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 dark:bg-amber-400/20 dark:hover:bg-amber-400/30 text-amber-800 dark:text-amber-400 rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
                   >
                     检测 Root
                   </button>
                 </div>
 
                 <!-- Root warning banner for system telemetries -->
-                <div v-if="isRootGranted === false && plugin.requiresRoot" class="bg-warning/10 dark:bg-warning/5 border border-warning/20 p-2.5 rounded-xl flex items-center justify-between text-[10px] text-warning dark:text-warning/90 gap-2.5">
-                  <div class="flex items-center gap-1.5 min-w-0">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-warning">
+                <div v-if="isRootGranted === false && plugin.requiresRoot" class="bg-amber-500/10 dark:bg-amber-400/5 border border-amber-500/20 dark:border-amber-400/10 p-2.5 rounded-xl flex items-center justify-between text-[10px]">
+                  <div class="flex items-center gap-1.5 text-amber-800 dark:text-amber-400">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="shrink-0">
                       <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
                       <line x1="12" y1="9" x2="12" y2="13"/>
                       <line x1="12" y1="17" x2="12.01" y2="17"/>
                     </svg>
-                    <span class="truncate">未获得 Root 权限，部分遥测参数已使用标准 API 降级</span>
+                    <span>未获得 Root 权限，部分遥测参数已使用标准 API 降级</span>
                   </div>
                   <button 
                     @click.stop="handleLaunchRootManager"
-                    class="px-2 py-0.5 bg-warning/20 hover:bg-warning/30 text-warning rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
+                    class="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 dark:bg-amber-400/20 dark:hover:bg-amber-400/30 text-amber-800 dark:text-amber-400 rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
                   >
                     跳转授权
                   </button>
