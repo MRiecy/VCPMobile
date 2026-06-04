@@ -2,7 +2,6 @@
 // [Streaming] MobileGPUInfo — GPU chip information and status.
 // Uses OpenGL ES renderer info via native Android JNI and Root for real-time load.
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
@@ -30,23 +29,16 @@ impl GpuInfoTool {
     }
 }
 
-use crate::distributed::types::CommType;
+
 
 impl StreamingTool for GpuInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileGPUInfo".to_string(),
             description: "显示 GPU 核心渲染器厂商、显存使用率及 API 性能指标。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "GPU算力监控".to_string(),
-            icon: "i-lucide-zap".to_string(),
             placeholder: Some("{{MobileGPU}}".to_string()),
-            communication: CommType::Ipc {
-                command: "plugin:vcp-mobile|get_gpu_status".to_string(),
-                args: None,
-            },
-            requires_root: true,
+            invocation_commands: vec![],
         }
     }
 

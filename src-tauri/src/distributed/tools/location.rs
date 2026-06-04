@@ -1,11 +1,11 @@
 // distributed/tools/location.rs
 // [Streaming] MobileLocation — GPS position from Android native LocationManager.
 
-use serde_json::json;
 use tauri::AppHandle;
 
 use crate::distributed::tool_registry::StreamingTool;
-use crate::distributed::types::{ToolManifest, CommType};
+use crate::distributed::types::ToolManifest;
+
 
 pub struct LocationTool;
 
@@ -14,16 +14,9 @@ impl StreamingTool for LocationTool {
         ToolManifest {
             name: "MobileLocation".to_string(),
             description: "获取当前的经纬度高精度坐标、移动速度、海拔高度及定位源精度。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "GPS 地理定位".to_string(),
-            icon: "i-lucide-map-pin".to_string(),
             placeholder: Some("{{MobileLocation}}".to_string()),
-            communication: CommType::Ipc {
-                command: "plugin:vcp-mobile|get_sensor_data".to_string(),
-                args: Some(json!({ "sensorType": "location" })),
-            },
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

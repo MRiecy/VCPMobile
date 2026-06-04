@@ -276,6 +276,7 @@ pub fn run() {
             distributed::get_registered_tools_metadata,
             distributed::update_disabled_tools,
             distributed::execute_distributed_tool,
+            distributed::reconnect_distributed_client,
             check_for_update,
             download_update,
             install_update,

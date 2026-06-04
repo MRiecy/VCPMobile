@@ -1,11 +1,11 @@
 // distributed/tools/motion_sensor.rs
 // [Streaming] MobileMotion — device motion state from Android native accelerometer sensors.
 
-use serde_json::json;
 use tauri::AppHandle;
 
 use crate::distributed::tool_registry::StreamingTool;
-use crate::distributed::types::{ToolManifest, CommType};
+use crate::distributed::types::ToolManifest;
+
 
 pub struct MotionSensorTool;
 
@@ -14,16 +14,9 @@ impl StreamingTool for MotionSensorTool {
         ToolManifest {
             name: "MobileMotion".to_string(),
             description: "采集设备的三轴加速度、陀螺仪旋转向量与磁力计取向，识别物理运动姿态。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "九轴运动传感器".to_string(),
-            icon: "i-lucide-compass".to_string(),
             placeholder: Some("{{MobileMotion}}".to_string()),
-            communication: CommType::Ipc {
-                command: "plugin:vcp-mobile|get_sensor_data".to_string(),
-                args: Some(json!({ "sensorType": "motion" })),
-            },
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

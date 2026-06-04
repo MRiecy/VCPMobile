@@ -2,7 +2,6 @@
 // [Streaming] MobileStorageInfo — internal storage space via statvfs.
 // Uses ThrottledCache (C2) to avoid redundant disk queries every 30s.
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
@@ -61,20 +60,16 @@ impl StorageInfoTool {
     }
 }
 
-use crate::distributed::types::CommType;
+
 
 impl StreamingTool for StorageInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileStorageInfo".to_string(),
             description: "监控系统分区与用户分区的空闲/已用空间大小，预估磁盘健康度。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "磁盘存储监控".to_string(),
-            icon: "i-lucide-hard-drive".to_string(),
             placeholder: Some("{{MobileStorage}}".to_string()),
-            communication: CommType::Mock,
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

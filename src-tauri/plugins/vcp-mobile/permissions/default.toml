@@ -31,5 +31,7 @@ commands.allow = [
     "check_root_access",
     "run_root_command",
     "launch_root_manager",
+    "acquire_wake_lock",
+    "release_wake_lock",
 ]
 

@@ -1,7 +1,6 @@
 // distributed/tools/memory_info.rs
 // [Streaming] MobileMemoryInfo — RAM and Swap usage from /proc/meminfo
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
@@ -68,20 +67,16 @@ impl MemoryInfoTool {
     }
 }
 
-use crate::distributed::types::CommType;
+
 
 impl StreamingTool for MemoryInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileMemoryInfo".to_string(),
             description: "监控总内存容量、当前可用空间及系统的虚拟内存/Swap 缓存分布。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "内存监控".to_string(),
-            icon: "i-lucide-cpu".to_string(),
             placeholder: Some("{{MobileMemory}}".to_string()),
-            communication: CommType::Mock,
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

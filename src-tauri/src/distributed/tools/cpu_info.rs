@@ -6,7 +6,6 @@
 
 use std::sync::Mutex;
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
@@ -169,20 +168,16 @@ impl CpuInfoTool {
     }
 }
 
-use crate::distributed::types::CommType;
+
 
 impl StreamingTool for CpuInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileCPUInfo".to_string(),
             description: "显示多核 CPU 拓扑、当前主频、核心温度及整机 CPU 占用率。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "CPU核心监控".to_string(),
-            icon: "i-lucide-activity".to_string(),
             placeholder: Some("{{MobileCPU}}".to_string()),
-            communication: CommType::Mock,
-            requires_root: true,
+            invocation_commands: vec![],
         }
     }
 

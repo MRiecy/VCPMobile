@@ -2,7 +2,6 @@
 // [Streaming] MobileStatus — aggregates all Phase 1 & 2 sensor data into a one-line summary.
 // Reads from other StreamingTools' data sources directly for minimal overhead.
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
@@ -138,20 +137,16 @@ impl DeviceStatusSummaryTool {
     }
 }
 
-use crate::distributed::types::CommType;
+
 
 impl StreamingTool for DeviceStatusSummaryTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileStatusSummary".to_string(),
             description: "分布式节点专属大图，整合电池、CPU、内存及核心遥测状态，向外部提供一键摘要。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "整机状态摘要".to_string(),
-            icon: "i-lucide-gauge".to_string(),
             placeholder: Some("{{MobileStatus}}".to_string()),
-            communication: CommType::Mock,
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

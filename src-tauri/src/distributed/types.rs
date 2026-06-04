@@ -151,45 +151,98 @@ impl IncomingEnvelope {
 // Tool manifest (registered with main server)
 // ============================================================
 
-/// Dynamic communication protocol for frontend visualization binding
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "mode", content = "payload")]
-pub enum CommType {
-    Ipc {
-        command: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        args: Option<serde_json::Value>,
-    },
-    Mock,
+/// 单条可调用命令的完整描述，严格对应 VCPChat Plugin.js 标准 manifest 格式。
+/// capabilities.invocationCommands[] 的每一个元素。
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvocationCommand {
+    /// 命令唯一标识符（通常与工具名相同）
+    pub command_identifier: String,
+    /// 完整的调用说明，包含参数列表和 VCP 语法示例
+    pub description: String,
+    /// 完整的 <<<[TOOL_REQUEST]>>> 示例块
+    pub example: String,
 }
 
 /// Tool manifest matching VCPToolBox's plugin manifest format.
 /// VCPChat ref: Plugin.js getAllPluginManifests()
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ToolManifest {
     pub name: String,
     pub description: String,
-    #[serde(default)]
-    pub parameters: Value,
-    /// "service" | "hybridservice" | "static" | "mobile" — VCPMobile tools use "mobile"
-    #[serde(rename = "type", default = "default_tool_type")]
-    pub tool_type: String,
-    
-    // UI Metadata for Zero-Preset Frontend Visualizer
+
+    // UI Metadata（仅前端消费，Serialize 实现中不发往服务端的字段在此注明）
     #[serde(default)]
     pub display_name: String,
-    #[serde(default)]
-    pub icon: String,
+    /// 有 placeholder 的工具走静态占位符管道（Streaming），否则走可执行管道（OneShot）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
-    pub communication: CommType,
-    #[serde(rename = "requiresRoot", default)]
-    pub requires_root: bool,
+
+    /// OneShot 工具的完整调用命令描述；Streaming 工具留空 Vec
+    #[serde(default)]
+    pub invocation_commands: Vec<InvocationCommand>,
 }
 
-fn default_tool_type() -> String {
-    "mobile".to_string()
+impl Serialize for ToolManifest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        // 动态分流：有 placeholder 的是静态占位符工具（传感器类），
+        // 无 placeholder 的是可执行工具（OneShot/Interactive）
+        let is_static = self.placeholder.is_some();
+        let plugin_type = if is_static { "static" } else { "synchronous" };
+
+        let mut map = serializer.serialize_map(None)?;
+
+        // ── 顶层标准字段（服务端强校验） ──────────────────────────────────────
+        map.serialize_entry("manifestVersion", "1.0.0")?;
+        map.serialize_entry("name", &self.name)?;
+        map.serialize_entry("version", "1.0.0")?;
+        map.serialize_entry("displayName", &self.display_name)?;
+        map.serialize_entry("description", &self.description)?;
+        map.serialize_entry("author", "VCPMobile")?;
+        map.serialize_entry("pluginType", plugin_type)?;
+        map.serialize_entry("entryPoint", &serde_json::json!({
+            "type": "mobile",
+            "command": "native"
+        }))?;
+        map.serialize_entry("communication", &serde_json::json!({
+            "protocol": "mobile",
+            "timeout": 10000
+        }))?;
+
+        // ── capabilities 双轨分流 ─────────────────────────────────────────────
+        if is_static {
+            // 静态工具：走 systemPromptPlaceholders 管道
+            let placeholder_key = self.placeholder.as_deref().unwrap_or_default();
+            map.serialize_entry("capabilities", &serde_json::json!({
+                "systemPromptPlaceholders": [{
+                    "placeholder": placeholder_key,
+                    "description": self.description
+                }],
+                "invocationCommands": []
+            }))?;
+        } else {
+            // 可执行工具：走 invocationCommands 管道，使用完整标准格式
+            let commands: Vec<serde_json::Value> = self.invocation_commands.iter().map(|cmd| {
+                serde_json::json!({
+                    "commandIdentifier": cmd.command_identifier,
+                    "description": cmd.description,
+                    "example": cmd.example
+                })
+            }).collect();
+            map.serialize_entry("capabilities", &serde_json::json!({
+                "systemPromptPlaceholders": [],
+                "invocationCommands": commands
+            }))?;
+        }
+
+        map.end()
+    }
 }
+
 
 // ============================================================
 // Connection / status types

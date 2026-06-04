@@ -1,11 +1,11 @@
 // distributed/tools/ambient_sensor.rs
 // [Streaming] MobileAmbient — ambient light and barometer from Android native sensors.
 
-use serde_json::json;
 use tauri::AppHandle;
 
 use crate::distributed::tool_registry::StreamingTool;
-use crate::distributed::types::{ToolManifest, CommType};
+use crate::distributed::types::ToolManifest;
+
 
 pub struct AmbientSensorTool;
 
@@ -14,16 +14,9 @@ impl StreamingTool for AmbientSensorTool {
         ToolManifest {
             name: "MobileAmbient".to_string(),
             description: "读取设备所处的物理环境光照度 (Lux) 与气压值 (hPa)，推算环境场景。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "物理环境传感器".to_string(),
-            icon: "i-lucide-sun".to_string(),
             placeholder: Some("{{MobileAmbient}}".to_string()),
-            communication: CommType::Ipc {
-                command: "plugin:vcp-mobile|get_sensor_data".to_string(),
-                args: Some(json!({ "sensorType": "ambient" })),
-            },
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

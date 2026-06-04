@@ -9,7 +9,7 @@ use tauri::AppHandle;
 use crate::distributed::tool_registry::OneShotTool;
 use crate::distributed::types::ToolManifest;
 
-use crate::distributed::types::CommType;
+use crate::distributed::types::InvocationCommand;
 
 pub struct DeviceInfoTool;
 
@@ -19,19 +19,22 @@ impl OneShotTool for DeviceInfoTool {
         ToolManifest {
             name: "MobileDeviceInfo".to_string(),
             description: "提供物理设备的基础硬件信息，包括品牌、型号、系统版本及 ABI 架构。".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-            tool_type: "mobile".to_string(),
             display_name: "设备信息".to_string(),
-            icon: "i-lucide-smartphone".to_string(),
             placeholder: None,
-            communication: CommType::Mock,
-            requires_root: false,
+            invocation_commands: vec![
+                InvocationCommand {
+                    command_identifier: "MobileDeviceInfo".to_string(),
+                    description: "查询当前连接的移动设备的基础硬件信息，包括操作系统类型、CPU 架构和系统家族。无需任何参数。\n\
+调用格式:\n\
+<<<[TOOL_REQUEST]>>>\n\
+tool_name:「始」MobileDeviceInfo「末」\n\
+<<<[END_TOOL_REQUEST]>>>".to_string(),
+                    example: "<<<[TOOL_REQUEST]>>>\ntool_name:「始」MobileDeviceInfo「末」\n<<<[END_TOOL_REQUEST]>>>".to_string(),
+                },
+            ],
         }
     }
+
 
     async fn execute(&self, _args: Value, _app: &AppHandle) -> Result<Value, String> {
         Ok(json!({

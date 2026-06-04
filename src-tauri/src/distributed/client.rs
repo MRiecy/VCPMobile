@@ -38,6 +38,8 @@ pub struct DistributedClient {
     task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Channel sender to trigger tool re-registration.
     re_register_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
+    /// Channel sender to trigger immediate reconnect.
+    reconnect_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
 }
 
 impl DistributedClient {
@@ -48,6 +50,7 @@ impl DistributedClient {
             status: Arc::new(RwLock::new(DistributedStatus::default())),
             task_handle: Mutex::new(None),
             re_register_tx: Mutex::new(None),
+            reconnect_tx: Mutex::new(None),
         }
     }
 
@@ -84,6 +87,10 @@ impl DistributedClient {
         let (re_register_tx, re_register_rx) = tokio::sync::mpsc::channel(1);
         *self.re_register_tx.lock().await = Some(re_register_tx);
 
+        // Create reconnect channel.
+        let (reconnect_tx, reconnect_rx) = tokio::sync::mpsc::channel(1);
+        *self.reconnect_tx.lock().await = Some(reconnect_tx);
+
         // Reset shutdown signal.
         let _ = self.shutdown_tx.send(false);
         let shutdown_rx = self.shutdown_tx.subscribe();
@@ -100,6 +107,7 @@ impl DistributedClient {
             status,
             registry,
             re_register_rx,
+            reconnect_rx,
         ));
 
         *self.task_handle.lock().await = Some(handle);
@@ -130,6 +138,7 @@ impl DistributedClient {
             s.server_id = None;
             s.client_id = None;
             *self.re_register_tx.lock().await = None;
+            *self.reconnect_tx.lock().await = None;
         }
     }
 
@@ -155,6 +164,13 @@ impl DistributedClient {
         }
     }
 
+    /// Trigger immediate reconnection.
+    pub async fn trigger_reconnect(&self) {
+        if let Some(tx) = self.reconnect_tx.lock().await.as_ref() {
+            let _ = tx.send(()).await;
+        }
+    }
+
     // ================================================================
     // Connection loop — mirrors DistributedServer.connect() + scheduleReconnect()
     // ================================================================
@@ -168,6 +184,7 @@ impl DistributedClient {
         status: Arc<RwLock<DistributedStatus>>,
         registry: Arc<ToolRegistry>,
         re_register_rx: tokio::sync::mpsc::Receiver<()>,
+        mut reconnect_rx: tokio::sync::mpsc::Receiver<()>,
     ) {
         let mut reconnect_interval = Duration::from_secs(5);
         let max_reconnect_interval = Duration::from_secs(60);
@@ -191,7 +208,11 @@ impl DistributedClient {
                 connection_url.replace(&vcp_key, "***")
             );
 
-            match tokio_tungstenite::connect_async(&connection_url).await {
+            acquire_wake_lock_helper(&app);
+            let connect_result = tokio_tungstenite::connect_async(&connection_url).await;
+            release_wake_lock_helper(&app);
+
+            match connect_result {
                 Ok((ws_stream, _response)) => {
                     log::info!("[Distributed] WebSocket connected.");
                     reconnect_interval = Duration::from_secs(5); // Reset backoff on success.
@@ -248,6 +269,9 @@ impl DistributedClient {
 
             tokio::select! {
                 _ = time::sleep(reconnect_interval) => {},
+                _ = reconnect_rx.recv() => {
+                    log::info!("[Distributed] Triggering immediate reconnect due to network restore event.");
+                }
                 _ = shutdown_rx.changed() => {
                     break;
                 }
@@ -355,7 +379,9 @@ impl DistributedClient {
 
                 // --- Periodic static placeholder push ---
                 _ = placeholder_interval.tick() => {
+                    acquire_wake_lock_helper(app);
                     Self::push_static_placeholders(app, device_name, &ws_tx, registry).await;
+                    release_wake_lock_helper(app);
                 }
 
                 // --- Shutdown signal ---
@@ -448,9 +474,11 @@ impl DistributedClient {
                 );
 
                 // Execute and return result.
+                acquire_wake_lock_helper(app);
                 let response =
                     Self::execute_tool(app, &request_id, &tool_name, tool_args, registry).await;
                 Self::send_message(ws_tx, &response).await;
+                release_wake_lock_helper(app);
             }
 
             IncomingMessage::Unknown(msg_type) => {
@@ -621,3 +649,23 @@ impl DistributedClient {
         Self::emit_status(app, status).await;
     }
 }
+
+#[cfg(target_os = "android")]
+fn acquire_wake_lock_helper(app: &tauri::AppHandle) {
+    if let Err(e) = tauri_plugin_vcp_mobile::system::acquire_wake_lock(app.clone()) {
+        log::warn!("[Distributed] Failed to acquire native wake lock: {}", e);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn release_wake_lock_helper(app: &tauri::AppHandle) {
+    if let Err(e) = tauri_plugin_vcp_mobile::system::release_wake_lock(app.clone()) {
+        log::warn!("[Distributed] Failed to release native wake lock: {}", e);
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn acquire_wake_lock_helper(_app: &tauri::AppHandle) {}
+
+#[cfg(not(target_os = "android"))]
+fn release_wake_lock_helper(_app: &tauri::AppHandle) {}

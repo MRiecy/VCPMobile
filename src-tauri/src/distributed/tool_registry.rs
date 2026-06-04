@@ -138,6 +138,8 @@ impl ToolRegistry {
 
     /// Get all tool manifests for register_tools message.
     /// Mirrors Plugin.js getAllPluginManifests()
+    /// 上报全部已注册工具（OneShot/Interactive/Streaming），
+    /// 服务端通过 pluginType 字段区分可执行与静态占位符类型。
     pub fn get_all_manifests(&self) -> Vec<ToolManifest> {
         self.tools
             .iter()

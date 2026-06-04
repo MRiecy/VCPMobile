@@ -2,7 +2,6 @@
 // [Streaming] MobileBatteryInfo — battery level, charging status, temperature.
 // Reads /sys/class/power_supply/battery/{capacity, status, temp}
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
@@ -10,23 +9,15 @@ use crate::distributed::types::ToolManifest;
 
 pub struct BatteryInfoTool;
 
-use crate::distributed::types::CommType;
 
 impl StreamingTool for BatteryInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileBatteryInfo".to_string(),
             description: "监控实时电量、充电状态、电池健康度及是否处于省电模式。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "电池状态".to_string(),
-            icon: "i-lucide-battery".to_string(),
             placeholder: Some("{{MobileBattery}}".to_string()),
-            communication: CommType::Ipc {
-                command: "plugin:vcp-mobile|get_battery_status".to_string(),
-                args: None,
-            },
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

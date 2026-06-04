@@ -1,30 +1,22 @@
 // distributed/tools/network_info.rs
 // [Streaming] MobileNetworkInfo — network type, IP, traffic stats.
 
-use serde_json::json;
 
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
 pub struct NetworkInfoTool;
 
-use crate::distributed::types::CommType;
+
 
 impl StreamingTool for NetworkInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileNetworkInfo".to_string(),
             description: "检测当前连接网络介质（WIFI/蜂窝）、局域网 IP、延迟及当前吞吐速度。".to_string(),
-            parameters: json!({}),
-            tool_type: "mobile".to_string(),
             display_name: "网络带宽监控".to_string(),
-            icon: "i-lucide-wifi".to_string(),
             placeholder: Some("{{MobileNetwork}}".to_string()),
-            communication: CommType::Ipc {
-                command: "plugin:vcp-mobile|get_network_status".to_string(),
-                args: None,
-            },
-            requires_root: false,
+            invocation_commands: vec![],
         }
     }
 

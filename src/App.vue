@@ -335,6 +335,22 @@ const handleFloatingBallClick = async () => {
   }
 };
 
+const handleNetworkStatusChange = async (e: Event) => {
+  const detail = (e as CustomEvent).detail;
+  console.log("[Network] Status changed:", detail);
+  if (detail?.connected) {
+    try {
+      const status = await invoke<any>("get_distributed_status");
+      if (status?.state !== "Disconnected" && !status?.connected) {
+        console.log("[Network] Restored! Triggering immediate distributed reconnect...");
+        await invoke("reconnect_distributed_client");
+      }
+    } catch (err) {
+      console.warn("[Network] Failed to trigger distributed client reconnect:", err);
+    }
+  }
+};
+
 onMounted(async () => {
   // 环境探测：若是原生悬浮窗模式，Tauri API 可能不可用，优先通过 URL 判断
   isAssistant.value = window.location.search.includes("mode=floating");
@@ -354,6 +370,7 @@ onMounted(async () => {
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
   window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
+  window.addEventListener("vcp-network-status-changed", handleNetworkStatusChange);
   window.addEventListener("vcp-share-intent", (e: Event) => {
     processSharedIntent((e as CustomEvent).detail);
   });
@@ -391,6 +408,7 @@ onUnmounted(() => {
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("vcp-lifecycle", handleVcpLifecycle);
   window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
+  window.removeEventListener("vcp-network-status-changed", handleNetworkStatusChange);
 });
 </script>
 

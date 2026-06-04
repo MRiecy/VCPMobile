@@ -84,3 +84,13 @@ pub async fn execute_distributed_tool(
     }
 }
 
+/// Trigger immediate reconnect of the distributed client.
+#[tauri::command]
+pub async fn reconnect_distributed_client(
+    state: State<'_, DistributedState>,
+) -> Result<(), String> {
+    let client = state.client.read().await;
+    client.trigger_reconnect().await;
+    Ok(())
+}
+

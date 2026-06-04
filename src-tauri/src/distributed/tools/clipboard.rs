@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use crate::distributed::tool_registry::OneShotTool;
 use crate::distributed::types::ToolManifest;
 
-use crate::distributed::types::CommType;
+use crate::distributed::types::InvocationCommand;
 
 pub struct ClipboardTool;
 
@@ -19,29 +19,27 @@ impl OneShotTool for ClipboardTool {
         ToolManifest {
             name: "MobileClipboard".to_string(),
             description: "允许 AI Agent 安全读取和向移动端系统剪贴板写入文本数据。".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["read", "write"],
-                        "description": "操作类型：read 读取剪贴板，write 写入剪贴板 / Action: read or write clipboard"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "写入剪贴板的内容（action=write 时必填） / Content to write (required when action=write)"
-                    }
-                },
-                "required": ["action"]
-            }),
-            tool_type: "mobile".to_string(),
             display_name: "系统剪贴板".to_string(),
-            icon: "i-lucide-clipboard".to_string(),
             placeholder: None,
-            communication: CommType::Mock,
-            requires_root: false,
+            invocation_commands: vec![
+                InvocationCommand {
+                    command_identifier: "MobileClipboard".to_string(),
+                    description: "操作移动端系统剪贴板，支持读取当前内容或写入新内容。\n\
+参数:\n\
+- action (字符串, 必需): 操作类型，可选值: \"read\"（读取剪贴板）| \"write\"（写入剪贴板）\n\
+- content (字符串, write 时必需): 需要写入剪贴板的文本内容\n\
+调用格式:\n\
+<<<[TOOL_REQUEST]>>>\n\
+tool_name:「始」MobileClipboard「末」\n\
+action:「始」write「末」\n\
+content:「始」需要写入的内容「末」\n\
+<<<[END_TOOL_REQUEST]>>>".to_string(),
+                    example: "<<<[TOOL_REQUEST]>>>\ntool_name:「始」MobileClipboard「末」\naction:「始」read「末」\n<<<[END_TOOL_REQUEST]>>>".to_string(),
+                },
+            ],
         }
     }
+
 
     async fn execute(&self, args: Value, app: &AppHandle) -> Result<Value, String> {
         let action = args

@@ -85,6 +85,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val shareIntentHandler = ShareIntentHandler(this)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var cameraTempFile: java.io.File? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
 
     // ==================================================================
     // Permissions & App Control
@@ -190,7 +193,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @ActivityCallback
-    fun onBatteryOptimizationResult(invoke: Invoke, result: ActivityResult) {
+    fun onBatteryOptimizationResult(invoke: Invoke, @Suppress("UNUSED_PARAMETER") result: ActivityResult) {
         emitPermissionsToWebView()
         invoke.resolve()
     }
@@ -391,7 +394,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun startStreamingService(invoke: Invoke) {
         try {
             val args = invoke.parseArgs(StartStreamArgs::class.java)
-            val intent = StreamKeepaliveService.createIntent(activity, args.agentName)
+            val intent = StreamKeepaliveService.createIntent(activity, args.agentName, args.isKeepaliveMode)
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     activity.startForegroundService(intent)
@@ -417,6 +420,59 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "stopStreamingService failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun acquireWakeLock(invoke: Invoke) {
+        try {
+            val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VcpMobile:WakeLock")
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire(5 * 60 * 1000L) // 最大持有5分钟安全限制
+            }
+
+            try {
+                val wm = activity.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                if (wifiLock == null) {
+                    @Suppress("DEPRECATION")
+                    wifiLock = wm.createWifiLock(
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
+                            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        else
+                            android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                        "VcpMobile:WifiLock"
+                    )
+                }
+                if (wifiLock?.isHeld == false) {
+                    wifiLock?.acquire()
+                }
+            } catch (wifiEx: Exception) {
+                Log.w(TAG, "Failed to acquire WiFi Lock: ${wifiEx.message}")
+            }
+
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "acquireWakeLock failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun releaseWakeLock(invoke: Invoke) {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "releaseWakeLock failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
     }
@@ -459,6 +515,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // Plugin Lifecycle
     // ==================================================================
 
+    private fun emitNetworkStatusToWebView() {
+        val status = networkStatusManager.getNetworkStatus()
+        val script = "window.dispatchEvent(new CustomEvent('vcp-network-status-changed', { detail: $status }))"
+        activity.runOnUiThread {
+            webViewRef?.evaluateJavascript(script, null)
+        }
+    }
+
     override fun load(webView: WebView) {
         super.load(webView)
         webViewRef = webView
@@ -469,10 +533,42 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         // 冷启动：处理传递给 Activity 的初始 intent
         shareIntentHandler.handleShareIntent(activity.intent)
         shareIntentHandler.injectShareData(webView)
+
+        // 注册网络变更监听
+        try {
+            val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+            val request = android.net.NetworkRequest.Builder()
+                .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            networkCallback = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    emitNetworkStatusToWebView()
+                }
+                override fun onLost(network: android.net.Network) {
+                    emitNetworkStatusToWebView()
+                }
+                override fun onCapabilitiesChanged(network: android.net.Network, networkCapabilities: android.net.NetworkCapabilities) {
+                    emitNetworkStatusToWebView()
+                }
+            }
+            cm.registerNetworkCallback(request, networkCallback!!)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register network callback", e)
+        }
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
         webViewRef = null
+        try {
+            if (networkCallback != null) {
+                val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                cm.unregisterNetworkCallback(networkCallback!!)
+            }
+        } catch (_: Exception) {}
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {}
         try {
             fileIoExecutor.shutdown()
         } catch (_: Exception) {}
@@ -1619,6 +1715,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 @InvokeArg
 class StartStreamArgs {
     lateinit var agentName: String
+    var isKeepaliveMode: Boolean? = null
 }
 
 @InvokeArg
