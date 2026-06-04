@@ -13,6 +13,7 @@ pub struct PermissionStatus {
     pub microphone: bool,
     pub camera: bool,
     pub overlay: bool,
+    pub location: bool,
 }
 
 #[tauri::command]
@@ -38,6 +39,7 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
             microphone: true,
             camera: true,
             overlay: true,
+            location: true,
         })
     }
 }

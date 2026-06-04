@@ -193,12 +193,29 @@ fn default_tool_type() -> String {
 // Connection / status types
 // ============================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Disconnecting,
+}
+
+impl Default for ConnectionState {
+    fn default() -> Self {
+        Self::Disconnected
+    }
+}
+
 /// Connection status emitted to the Vue frontend via Tauri events.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DistributedStatus {
+    pub state: ConnectionState,
     pub connected: bool,
     pub server_id: Option<String>,
     pub client_id: Option<String>,
     pub registered_tools: usize,
     pub last_error: Option<String>,
 }
+

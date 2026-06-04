@@ -26,7 +26,7 @@ const emit = defineEmits<{
 
 const settingsStore = useSettingsStore();
 const notificationStore = useNotificationStore();
-const { status, loading, start, stop } = useDistributed();
+const { status } = useDistributed();
 
 const activeTab = ref<"connection" | "plugins" | "placeholders">("connection");
 const searchQuery = ref("");
@@ -68,21 +68,6 @@ const placeholdersList = ref<PlaceholderItem[]>([]);
 
 
 
-const getInitialDisabledTools = () => {
-  const stored = localStorage.getItem("disabled_tools");
-  return stored ? JSON.parse(stored) : [];
-};
-
-const disabledTools = ref<string[]>(getInitialDisabledTools());
-
-const syncDisabledToolsToBackend = async () => {
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("update_disabled_tools", { disabledNames: disabledTools.value });
-  } catch (e) {
-    console.error("[DistributedView] Failed to sync disabled tools to backend:", e);
-  }
-};
 
 const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
   if (event) {
@@ -105,6 +90,12 @@ const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
         const { invoke } = await import("@tauri-apps/api/core");
         // A. 检测权限状态
         const perms: any = await invoke("plugin:vcp-mobile|check_all_permissions");
+        if (!perms || typeof perms !== "object") {
+          throw new Error("返回的权限状态格式错误");
+        }
+        if (perms[requiredAlias] === undefined) {
+          throw new Error(`权限对象中缺少 '${requiredAlias}' 字段。可用字段: ${Object.keys(perms).join(", ")}`);
+        }
         const hasPermission = perms[requiredAlias];
 
         if (!hasPermission) {
@@ -119,6 +110,9 @@ const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
 
           // C. 再次检查，核实用户是否同意
           const permsRetry: any = await invoke("plugin:vcp-mobile|check_all_permissions");
+          if (!permsRetry || typeof permsRetry !== "object" || permsRetry[requiredAlias] === undefined) {
+            throw new Error("重新校验权限时返回的数据错误");
+          }
           if (!permsRetry[requiredAlias]) {
             notificationStore.addNotification({
               type: "warning",
@@ -129,27 +123,35 @@ const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
             return; // 中断开启，开关继续保持为 false
           }
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error("[DistributedView] Failed to verify system permissions:", err);
+        notificationStore.addNotification({
+          type: "error",
+          title: "权限校验失败",
+          message: `错误: ${err.toString()}`,
+          toastOnly: true
+        });
+        return; // 出错时也中断开启，避免状态不一致
       }
     }
   }
   
   plugin.enabled = targetState;
   
-  if (!targetState) {
-    if (!disabledTools.value.includes(plugin.id)) {
-      disabledTools.value.push(plugin.id);
-    }
-  } else {
-    disabledTools.value = disabledTools.value.filter(id => id !== plugin.id);
-  }
-  
-  localStorage.setItem("disabled_tools", JSON.stringify(disabledTools.value));
-  await syncDisabledToolsToBackend();
-  
   if (!targetState && expandedPluginId.value === plugin.id) {
     expandedPluginId.value = null;
+  }
+
+  // 实时提取当前所有被禁用插件的 ID (排除当前被启用的，或加入被禁用的)
+  const currentDisabled = pluginsList.value
+    .filter(p => p.id === plugin.id ? !targetState : !p.enabled)
+    .map(p => p.id);
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("update_disabled_tools", { disabledNames: currentDisabled });
+  } catch (e) {
+    console.error("[DistributedView] Failed to sync disabled tools to backend:", e);
   }
   
   await loadPluginsMetadata();
@@ -161,14 +163,7 @@ const loadPluginsMetadata = async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const rawTools = await invoke<any[]>("get_registered_tools_metadata");
 
-    // 如果是首次初始化且 localStorage 中无已禁用记录，则默认禁用所有工具以省电
-    const stored = localStorage.getItem("disabled_tools");
-    if (!stored) {
-      const allNames = rawTools.map(tool => tool.name);
-      disabledTools.value = allNames;
-      localStorage.setItem("disabled_tools", JSON.stringify(allNames));
-      await syncDisabledToolsToBackend();
-    }
+
     
     // Map backend registered tools to frontend list with visual decorator
     pluginsList.value = rawTools.map(tool => {
@@ -212,8 +207,8 @@ const loadSettings = async () => {
   try {
     await settingsStore.fetchSettings();
     if (settingsStore.settings) {
-      wsUrl.value = settingsStore.settings.vcpLogUrl || settingsStore.settings.vcpServerUrl || "";
-      vcpKey.value = settingsStore.settings.vcpLogKey || settingsStore.settings.vcpApiKey || "";
+      wsUrl.value = settingsStore.settings.distributedWsUrl || settingsStore.settings.vcpLogUrl || settingsStore.settings.vcpServerUrl || "";
+      vcpKey.value = settingsStore.settings.distributedVcpKey || settingsStore.settings.vcpLogKey || settingsStore.settings.vcpApiKey || "";
       deviceName.value = settingsStore.settings.distributedDeviceName ?? "VCPMobile";
     }
     // Pull registered tools dynamically
@@ -223,26 +218,17 @@ const loadSettings = async () => {
   }
 };
 
-const saveSettings = async () => {
-  if (settingsStore.settings) {
-    const updates = {
-      vcpLogUrl: wsUrl.value,
-      vcpLogKey: vcpKey.value,
-      distributedDeviceName: deviceName.value,
-    };
-    await settingsStore.updateSettings(updates);
-  }
-};
-
 const handleConnect = async () => {
   if (!wsUrl.value || !vcpKey.value) return;
   try {
-    await saveSettings();
-    await start(wsUrl.value, vcpKey.value, deviceName.value);
-    
-    // Once started, update the connection state inside settings too
     if (settingsStore.settings) {
-      await settingsStore.updateSettings({ distributedEnabled: true });
+      const updates = {
+        distributedWsUrl: wsUrl.value,
+        distributedVcpKey: vcpKey.value,
+        distributedDeviceName: deviceName.value,
+        distributedEnabled: true
+      };
+      await settingsStore.updateSettings(updates);
     }
   } catch (e: any) {
     console.error("[DistributedView] Connection start failed:", e);
@@ -251,7 +237,6 @@ const handleConnect = async () => {
 
 const handleDisconnect = async () => {
   try {
-    await stop();
     if (settingsStore.settings) {
       await settingsStore.updateSettings({ distributedEnabled: false });
     }
@@ -302,26 +287,19 @@ const togglePlugin = async (plugin: PluginItem) => {
   pluginLoading.value[plugin.id] = true;
 
   try {
-    const comm = plugin.communication;
-    if (comm && comm.mode === "Ipc" && comm.payload) {
-      // 1. Dynamic JNI/IPC execution channel
-      const { invoke } = await import("@tauri-apps/api/core");
-      const res = await invoke<any>(comm.payload.command, comm.payload.args || {});
-      
-      if (res && typeof res === "object") {
-        if (res.value !== undefined) {
-          pluginData.value[plugin.id] = String(res.value);
-        } else if (res.level !== undefined) {
-          pluginData.value[plugin.id] = `剩余电量: ${res.level}%\n状态类型: ${res.charging ? "充电中 (Charging)" : "放电中 (Discharging)"}\n省电模式: ${res.isPowerSaveMode ? "已开启" : "未开启"}`;
-        } else {
-          pluginData.value[plugin.id] = JSON.stringify(res, null, 2);
-        }
+    const { invoke } = await import("@tauri-apps/api/core");
+    const res = await invoke<string>("execute_distributed_tool", { name: plugin.id });
+    
+    // 如果返回的值可以解析为 JSON 对象，我们对其进行排版美化
+    try {
+      const parsed = JSON.parse(res);
+      if (parsed && typeof parsed === "object") {
+        pluginData.value[plugin.id] = JSON.stringify(parsed, null, 2);
       } else {
-        pluginData.value[plugin.id] = String(res);
+        pluginData.value[plugin.id] = res;
       }
-    } else {
-      // 2. Mock mode: notify user there is no JNI channel
-      pluginData.value[plugin.id] = "此分布式工具在当前物理节点上无需/无 JNI 物理遥测通道。";
+    } catch {
+      pluginData.value[plugin.id] = res;
     }
   } catch (e: any) {
     console.error(`[DistributedView] Failed to pull native sensor telemetry for ${plugin.id}:`, e);
@@ -355,7 +333,6 @@ const filteredPlaceholders = computed(() => {
 // Initialization
 onMounted(async () => {
   if (props.isOpen) {
-    await syncDisabledToolsToBackend();
     loadSettings();
   }
 });
@@ -364,7 +341,6 @@ watch(
   () => props.isOpen,
   async (val: boolean) => {
     if (val) {
-      await syncDisabledToolsToBackend();
       loadSettings();
       expandedPluginId.value = null;
       searchQuery.value = "";
@@ -428,23 +404,23 @@ watch(
               <span class="relative flex h-3 w-3">
                 <span
                   class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
-                  :class="status.connected ? 'bg-emerald-400' : loading ? 'bg-amber-400' : 'bg-rose-400'"
+                  :class="status.connected ? 'bg-emerald-400' : (status.state === 'connecting' || status.state === 'disconnecting') ? 'bg-amber-400' : 'bg-rose-400'"
                 ></span>
                 <span
                   class="relative inline-flex rounded-full h-3 w-3"
-                  :class="status.connected ? 'bg-emerald-500' : loading ? 'bg-amber-500' : 'bg-rose-500'"
+                  :class="status.connected ? 'bg-emerald-500' : (status.state === 'connecting' || status.state === 'disconnecting') ? 'bg-amber-500' : 'bg-rose-500'"
                 ></span>
               </span>
               <div class="flex flex-col">
                 <span class="text-xs font-bold">连接状态</span>
-                <span class="text-[8px] opacity-50 font-mono uppercase tracking-wider">{{ status.connected ? 'Connected' : loading ? 'Connecting...' : 'Disconnected' }}</span>
+                <span class="text-[8px] opacity-50 font-mono uppercase tracking-wider">{{ status.connected ? 'Connected' : (status.state === 'connecting' ? 'Connecting...' : status.state === 'disconnecting' ? 'Disconnecting...' : 'Disconnected') }}</span>
               </div>
             </div>
             <div class="flex gap-2">
               <button
                 v-if="status.connected"
                 @click="handleDisconnect"
-                :disabled="loading"
+                :disabled="status.state === 'disconnecting'"
                 class="px-4 py-1.5 bg-red-500/20 text-red-500 text-xs font-bold rounded-xl active:scale-95 transition-all hover:bg-red-500/30 disabled:opacity-50"
               >
                 断开连接
@@ -452,11 +428,11 @@ watch(
               <button
                 v-else
                 @click="handleConnect"
-                :disabled="loading || !wsUrl || !vcpKey"
+                :disabled="status.state === 'connecting' || !wsUrl || !vcpKey"
                 class="px-4 py-1.5 text-white text-xs font-bold rounded-xl active:scale-95 transition-all disabled:opacity-50"
                 style="background-color: var(--highlight-text)"
               >
-                {{ loading ? '连接中...' : '连接' }}
+                {{ status.state === 'connecting' ? '连接中...' : '连接' }}
               </button>
             </div>
           </div>
@@ -468,21 +444,21 @@ watch(
                 v-model="deviceName"
                 label="节点名称 / Device Name"
                 placeholder="例如 VCPMobile"
-                :disabled="loading || status.connected"
+                :disabled="status.state !== 'disconnected'"
               />
               <SettingsTextField
                 v-model="wsUrl"
                 label="WS 服务地址 / WebSocket URL"
                 placeholder="ws://192.168.x.x:port"
                 mono
-                :disabled="loading || status.connected"
+                :disabled="status.state !== 'disconnected'"
               />
               <SettingsTextField
                 v-model="vcpKey"
                 label="VCP 鉴权密钥 / VCP API Key"
                 placeholder="授权校验密钥"
                 is-secure
-                :disabled="loading || status.connected"
+                :disabled="status.state !== 'disconnected'"
               />
             </div>
           </SettingsCard>
@@ -634,7 +610,8 @@ watch(
                   <span class="opacity-50">内置占位符：</span>
                   <span
                     @click="copyPlaceholder(plugin.placeholder)"
-                    class="font-mono bg-[var(--highlight-text)]/10 text-[var(--highlight-text)] px-1.5 py-0.5 rounded border border-[var(--highlight-text)]/20 active:scale-95 transition-all cursor-pointer font-semibold text-[9px]"
+                    class="font-mono px-1.5 py-0.5 rounded border border-[var(--highlight-text)]/20 active:scale-95 transition-all cursor-pointer font-semibold text-[9px]"
+                    style="background-color: color-mix(in srgb, var(--highlight-text) 10%, transparent); color: var(--highlight-text);"
                   >
                     {{ plugin.placeholder }}
                   </span>
@@ -663,6 +640,16 @@ watch(
                 Clear
               </span>
             </div>
+          </div>
+
+          <!-- Micro Tips for copy action -->
+          <div class="px-4 py-1.5 shrink-0 bg-black/2 dark:bg-white/2 border-b border-black/5 dark:border-white/5 flex items-center gap-1.5">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: var(--highlight-text);" class="opacity-70">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="16" x2="12" y2="12"/>
+              <line x1="12" y1="8" x2="12.01" y2="8"/>
+            </svg>
+            <span class="text-[10px] opacity-60">* 点击任意占位符卡片即可快速复制到剪贴板</span>
           </div>
 
           <!-- Placeholders layout -->

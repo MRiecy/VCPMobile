@@ -71,6 +71,7 @@ pub async fn reconcile_local_server(
 pub async fn reconcile_distributed_node(
     app_handle: &AppHandle,
     distributed_enabled: bool,
+    force_reconnect: bool,
 ) {
     let distributed_state = match app_handle.try_state::<crate::distributed::DistributedState>() {
         Some(s) => s,
@@ -91,17 +92,22 @@ pub async fn reconcile_distributed_node(
         }
     };
 
-    let ws_url = settings.vcp_log_url.clone();
-    let vcp_key = settings.vcp_log_key.clone();
-    let device_name = settings.extra
-        .get("distributedDeviceName")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "VCPMobile".to_string());
+    let ws_url = settings.distributed_ws_url.clone();
+    let vcp_key = settings.distributed_vcp_key.clone();
+    let device_name = if settings.distributed_device_name.is_empty() {
+        "VCPMobile".to_string()
+    } else {
+        settings.distributed_device_name.clone()
+    };
 
-    let is_connected = client.is_connected().await;
+    let mut is_running = client.is_running().await;
+    if force_reconnect && is_running {
+        log::info!("[Lifecycle] Connection settings changed, stopping existing connection for reconnect...");
+        client.stop().await;
+        is_running = false;
+    }
 
-    match (distributed_enabled, is_connected) {
+    match (distributed_enabled, is_running) {
         (true, false) => {
             if ws_url.is_empty() || vcp_key.is_empty() {
                 log::warn!("[Lifecycle] distributedEnabled=true but ws_url/vcp_key is empty, skipping auto-connect");
@@ -115,6 +121,7 @@ pub async fn reconcile_distributed_node(
             let device_name_clone = device_name.clone();
             tauri::async_runtime::spawn(async move {
                 let dist_state = app_clone.state::<crate::distributed::DistributedState>();
+                dist_state.registry.load_disabled_config(&app_clone);
                 let client_guard = dist_state.client.read().await;
                 if let Err(e) = client_guard.start(app_clone.clone(), ws_url_clone, vcp_key_clone, device_name_clone, dist_state.registry.clone()).await {
                     log::error!("[Lifecycle] Auto-start distributed node failed: {}", e);
@@ -209,15 +216,12 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     // 3.6 根据设置决定是否启动分布式节点 (自动重连)
     {
-        let enable_dist = settings.extra
-            .get("distributedEnabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let enable_dist = settings.distributed_enabled;
         log::info!(
             "[Lifecycle] distributedEnabled={}, reconciling distributed node...",
             enable_dist
         );
-        reconcile_distributed_node(&handle, enable_dist).await;
+        reconcile_distributed_node(&handle, enable_dist, false).await;
     }
 
     // 初始化同步服务
@@ -405,7 +409,7 @@ pub async fn reconcile_distributed_node_cmd(
         "[Lifecycle] reconcile_distributed_node_cmd called: enable={}",
         enable
     );
-    reconcile_distributed_node(&app_handle, enable).await;
+    reconcile_distributed_node(&app_handle, enable, false).await;
     Ok(enable)
 }
 

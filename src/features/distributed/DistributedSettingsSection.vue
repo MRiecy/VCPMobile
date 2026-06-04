@@ -17,7 +17,7 @@ const emit = defineEmits<{
   (e: "save-request"): void;
 }>();
 
-const { status, loading, start, stop } = useDistributed();
+const { status, loading } = useDistributed();
 
 // Local toggle state — bound to settings for persistence
 const enabled = computed({
@@ -46,7 +46,8 @@ const derivedVcpKey = computed(() => {
 });
 
 const statusDisplay = computed(() => {
-  if (loading.value) return { type: "loading" as const, message: "连接中..." };
+  if (status.value.state === "connecting") return { type: "loading" as const, message: "连接中..." };
+  if (status.value.state === "disconnecting") return { type: "loading" as const, message: "断开中..." };
   if (status.value.connected) {
     return {
       type: "success" as const,
@@ -65,7 +66,6 @@ const toggleConnection = async () => {
   if (enabled.value) {
     enabled.value = false;
     emit("save-request");
-    await stop();
   } else {
     if (!derivedWsUrl.value || !derivedVcpKey.value) {
       notificationStore.addNotification({
@@ -76,13 +76,12 @@ const toggleConnection = async () => {
       });
       return;
     }
+    // 同步到设置的分布式专用字段，让后端能拿到最新配置并连接
+    props.settings.distributedWsUrl = derivedWsUrl.value;
+    props.settings.distributedVcpKey = derivedVcpKey.value;
+    props.settings.distributedDeviceName = deviceName.value;
     enabled.value = true;
     emit("save-request");
-    try {
-      await start(derivedWsUrl.value, derivedVcpKey.value, deviceName.value);
-    } catch (e) {
-      console.error("[Distributed] Start failed:", e);
-    }
   }
 };
 </script>

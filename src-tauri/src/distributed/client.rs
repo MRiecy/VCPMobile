@@ -63,8 +63,22 @@ impl DistributedClient {
         device_name: String,
         registry: Arc<ToolRegistry>,
     ) -> Result<(), String> {
-        // If already running, stop first.
-        self.stop().await;
+        // Prevent duplicate activation using ConnectionState.
+        {
+            let mut s = self.status.write().await;
+            if s.state == ConnectionState::Connected || s.state == ConnectionState::Connecting {
+                log::info!(
+                    "[Distributed] Connection is already running or connecting ({:?}), skipping start request.",
+                    s.state
+                );
+                return Ok(());
+            }
+            s.state = ConnectionState::Connecting;
+            s.connected = false;
+            s.server_id = None;
+            s.client_id = None;
+            s.last_error = None;
+        }
 
         // Create re-registration channel.
         let (re_register_tx, re_register_rx) = tokio::sync::mpsc::channel(1);
@@ -75,11 +89,6 @@ impl DistributedClient {
         let shutdown_rx = self.shutdown_tx.subscribe();
         let status = self.status.clone();
 
-        // Clear any previous error
-        {
-            let mut s = status.write().await;
-            *s = DistributedStatus::default();
-        }
         Self::emit_status(&app, &status).await;
 
         let handle = tokio::spawn(Self::connection_loop(
@@ -99,16 +108,29 @@ impl DistributedClient {
 
     /// Stop the distributed node.
     pub async fn stop(&self) {
+        {
+            let mut s = self.status.write().await;
+            if s.state == ConnectionState::Disconnected || s.state == ConnectionState::Disconnecting {
+                log::info!("[Distributed] Already disconnected or disconnecting, skipping stop request.");
+                return;
+            }
+            s.state = ConnectionState::Disconnecting;
+        }
+
         let _ = self.shutdown_tx.send(true);
         if let Some(handle) = self.task_handle.lock().await.take() {
             handle.abort();
             let _ = handle.await;
         }
-        let mut s = self.status.write().await;
-        s.connected = false;
-        s.server_id = None;
-        s.client_id = None;
-        *self.re_register_tx.lock().await = None;
+
+        {
+            let mut s = self.status.write().await;
+            s.state = ConnectionState::Disconnected;
+            s.connected = false;
+            s.server_id = None;
+            s.client_id = None;
+            *self.re_register_tx.lock().await = None;
+        }
     }
 
     /// Get current status snapshot.
@@ -119,6 +141,11 @@ impl DistributedClient {
     /// Check if the distributed client is connected.
     pub async fn is_connected(&self) -> bool {
         self.status.read().await.connected
+    }
+
+    /// Check if the connection task is running (connecting, connected, or disconnecting).
+    pub async fn is_running(&self) -> bool {
+        self.status.read().await.state != ConnectionState::Disconnected
     }
 
     /// Trigger re-registration of tools.
@@ -184,6 +211,9 @@ impl DistributedClient {
                     // Session ended — update status.
                     {
                         let mut s = status.write().await;
+                        if s.state != ConnectionState::Disconnecting {
+                            s.state = ConnectionState::Connecting;
+                        }
                         s.connected = false;
                         s.server_id = None;
                         s.client_id = None;
@@ -195,6 +225,9 @@ impl DistributedClient {
                     log::warn!("[Distributed] Connection failed: {}", e);
                     {
                         let mut s = status.write().await;
+                        if s.state != ConnectionState::Disconnecting {
+                            s.state = ConnectionState::Connecting;
+                        }
                         s.connected = false;
                         s.last_error = Some(format!("Connection failed: {}", e));
                     }
@@ -223,6 +256,14 @@ impl DistributedClient {
             reconnect_interval = std::cmp::min(reconnect_interval * 2, max_reconnect_interval);
         }
 
+        {
+            let mut s = status.write().await;
+            s.state = ConnectionState::Disconnected;
+            s.connected = false;
+            s.server_id = None;
+            s.client_id = None;
+        }
+        Self::emit_status(&app, &status).await;
         log::info!("[Distributed] Connection loop exited.");
     }
 
@@ -308,6 +349,7 @@ impl DistributedClient {
                     if opt.is_some() {
                         log::info!("[Distributed] Re-registering tools due to configuration change.");
                         Self::register_tools(device_name, &ws_tx, registry, status).await;
+                        Self::emit_status_with_app(&app, status).await;
                     }
                 }
 
@@ -371,6 +413,7 @@ impl DistributedClient {
                 // Update status
                 {
                     let mut s = status.write().await;
+                    s.state = ConnectionState::Connected;
                     s.connected = true;
                     s.server_id = Some(server_id.clone());
                     s.client_id = Some(client_id.clone());
@@ -380,6 +423,7 @@ impl DistributedClient {
 
                 // Register tools — mirrors registerTools()
                 Self::register_tools(device_name, ws_tx, registry, status).await;
+                Self::emit_status_with_app(app, status).await;
 
                 // Report IP — mirrors reportIPAddress()
                 let device_name_clone = device_name.to_string();

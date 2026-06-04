@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface DistributedStatus {
+  state: 'disconnected' | 'connecting' | 'connected' | 'disconnecting';
   connected: boolean;
   server_id: string | null;
   client_id: string | null;
@@ -16,6 +17,7 @@ export interface DistributedStatus {
 }
 
 const status = ref<DistributedStatus>({
+  state: 'disconnected',
   connected: false,
   server_id: null,
   client_id: null,
@@ -61,48 +63,6 @@ export function useDistributed() {
     }
   });
 
-  async function start(
-    wsUrl: string,
-    vcpKey: string,
-    deviceName: string,
-  ): Promise<void> {
-    loading.value = true;
-    status.value.last_error = null;
-    console.log("[Distributed] invoke start_distributed_node triggered. URL:", wsUrl, "device:", deviceName);
-    try {
-      await invoke("start_distributed_node", {
-        wsUrl,
-        vcpKey,
-        deviceName,
-      });
-      console.log("[Distributed] invoke start_distributed_node returned Ok.");
-    } catch (e: any) {
-      console.error("[Distributed] Invoke start_distributed_node failed:", e);
-      status.value.last_error = e.toString();
-      throw e;
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  async function stop(): Promise<void> {
-    loading.value = true;
-    try {
-      await invoke("stop_distributed_node");
-      status.value = {
-        connected: false,
-        server_id: null,
-        client_id: null,
-        registered_tools: 0,
-        last_error: null,
-      };
-    } catch (e: any) {
-      status.value.last_error = e.toString();
-    } finally {
-      loading.value = false;
-    }
-  }
-
   async function refreshStatus(): Promise<void> {
     try {
       const s = await invoke<DistributedStatus>("get_distributed_status");
@@ -115,8 +75,6 @@ export function useDistributed() {
   return {
     status: readonly(status),
     loading: readonly(loading),
-    start,
-    stop,
     refreshStatus,
   };
 }

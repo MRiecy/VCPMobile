@@ -114,6 +114,7 @@ pub fn run() {
     builder
         .setup(|app| {
             // 2. 初始化核心状态
+            app.manage(app.handle().clone());
             app.manage(LifecycleState::new());
             app.manage(ActiveRequests::default());
             app.manage(CancelledGroupTurns::default());
@@ -271,11 +272,10 @@ pub fn run() {
             archive_assistant_chat,
             reconcile_local_server_cmd,
             reconcile_distributed_node_cmd,
-            distributed::start_distributed_node,
-            distributed::stop_distributed_node,
             distributed::get_distributed_status,
             distributed::get_registered_tools_metadata,
             distributed::update_disabled_tools,
+            distributed::execute_distributed_tool,
             check_for_update,
             download_update,
             install_update,

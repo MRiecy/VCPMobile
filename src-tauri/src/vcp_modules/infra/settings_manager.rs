@@ -18,6 +18,16 @@ pub struct Settings {
     #[serde(default)]
     pub user_name: String,
 
+    // 分布式设置
+    #[serde(default)]
+    pub distributed_enabled: bool,
+    #[serde(default)]
+    pub distributed_ws_url: String,
+    #[serde(default)]
+    pub distributed_vcp_key: String,
+    #[serde(default)]
+    pub distributed_device_name: String,
+
     // VCP 核心服务器
     #[serde(default)]
     pub vcp_server_url: String,
@@ -96,6 +106,10 @@ impl SettingsState {
 pub fn create_default_settings() -> Settings {
     Settings {
         user_name: "用户".to_string(),
+        distributed_enabled: false,
+        distributed_ws_url: "".to_string(),
+        distributed_vcp_key: "".to_string(),
+        distributed_device_name: "VCPMobile".to_string(),
         vcp_server_url: "".to_string(),
         vcp_api_key: "".to_string(),
         vcp_log_url: "".to_string(),
@@ -210,6 +224,23 @@ async fn internal_write_settings<R: Runtime>(
         }
     };
 
+    // 判断分布式设置是否发生改变
+    let (should_reconcile_dist, force_reconnect_dist) = {
+        let old_cache = state.cache.lock().await;
+        if let Some(ref old) = *old_cache {
+            let enabled_changed = old.distributed_enabled != settings.distributed_enabled;
+            let params_changed = old.distributed_ws_url != settings.distributed_ws_url
+                || old.distributed_vcp_key != settings.distributed_vcp_key
+                || old.distributed_device_name != settings.distributed_device_name;
+
+            let should = enabled_changed || (params_changed && settings.distributed_enabled);
+            let force = params_changed && settings.distributed_enabled;
+            (should, force)
+        } else {
+            (settings.distributed_enabled, false)
+        }
+    };
+
     *state.cache.lock().await = Some(settings.clone());
 
     // [强耦合联动] 仅当 VCPLog 连接参数实际变化时，才通知 VCP Log 服务更新连接状态
@@ -220,6 +251,20 @@ async fn internal_write_settings<R: Runtime>(
         tauri::async_runtime::spawn(async move {
             let _ = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
                 h, log_url, log_key,
+            )
+            .await;
+        });
+    }
+
+    // 分布式生命周期自动联动
+    if should_reconcile_dist {
+        let concrete_app = app_handle.state::<tauri::AppHandle>().inner().clone();
+        let enabled = settings.distributed_enabled;
+        tauri::async_runtime::spawn(async move {
+            crate::vcp_modules::infra::lifecycle_manager::reconcile_distributed_node(
+                &concrete_app,
+                enabled,
+                force_reconnect_dist,
             )
             .await;
         });

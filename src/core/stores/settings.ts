@@ -23,6 +23,10 @@ export interface AppSettings {
   syncPrerenderEnabled?: boolean;
   enableAssistant?: boolean;
   assistantAgentId?: string;
+  distributedEnabled?: boolean;
+  distributedWsUrl?: string;
+  distributedVcpKey?: string;
+  distributedDeviceName?: string;
   [key: string]: any;
 }
 

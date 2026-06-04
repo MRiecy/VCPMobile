@@ -4,11 +4,13 @@
 // Self-contained — does NOT import anything from vcp_modules/.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 use super::types::ToolManifest;
 
@@ -89,10 +91,18 @@ impl ToolRegistry {
         }
     }
 
-    /// Sync disabled tools list from frontend.
-    pub fn update_disabled(&self, names: Vec<String>) {
+    /// Sync disabled tools list from frontend. Returns true if the set changed.
+    pub fn update_disabled(&self, names: Vec<String>) -> bool {
         if let Ok(mut guard) = self.disabled_names.write() {
-            *guard = names.into_iter().collect();
+            let new_set: HashSet<String> = names.into_iter().collect();
+            if *guard != new_set {
+                *guard = new_set;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
         }
     }
 
@@ -206,5 +216,51 @@ impl ToolRegistry {
     /// Number of registered tools.
     pub fn tool_count(&self) -> usize {
         self.tools.len()
+    }
+
+    /// Load disabled tools list from local JSON config file and populate memory state.
+    pub fn load_disabled_config(&self, app: &AppHandle) {
+        if let Some(config_dir) = app.path().app_config_dir().ok() {
+            let config_path = config_dir.join("distributed_tools.json");
+            if config_path.exists() {
+                if let Ok(mut file) = File::open(&config_path) {
+                    let mut content = String::new();
+                    if file.read_to_string(&mut content).is_ok() {
+                        if let Ok(names) = serde_json::from_str::<Vec<String>>(&content) {
+                            if let Ok(mut guard) = self.disabled_names.write() {
+                                *guard = names.into_iter().collect();
+                                log::info!("[Distributed] Loaded disabled tools config: {:?}", guard);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // 如果配置文件不存在（通常是首次运行），默认将所有已注册的工具标记为禁用（关闭），符合默认禁用插件的要求
+                if let Ok(mut guard) = self.disabled_names.write() {
+                    *guard = self.tools.keys().cloned().collect();
+                    log::info!("[Distributed] Config file not found, defaulting all tools to disabled: {:?}", guard);
+                }
+                let _ = self.save_disabled_config(app);
+            }
+        }
+    }
+
+    /// Save current disabled tools list to local JSON config file.
+    pub fn save_disabled_config(&self, app: &AppHandle) -> Result<(), String> {
+        if let Some(config_dir) = app.path().app_config_dir().ok() {
+            // Ensure directory exists
+            let _ = std::fs::create_dir_all(&config_dir);
+            let config_path = config_dir.join("distributed_tools.json");
+            let names: Vec<String> = if let Ok(guard) = self.disabled_names.read() {
+                guard.iter().cloned().collect()
+            } else {
+                Vec::new()
+            };
+            let content = serde_json::to_string_pretty(&names).map_err(|e| e.to_string())?;
+            let mut file = File::create(&config_path).map_err(|e| e.to_string())?;
+            file.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+            log::info!("[Distributed] Saved disabled tools config: {:?}", names);
+        }
+        Ok(())
     }
 }

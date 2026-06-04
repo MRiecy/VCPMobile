@@ -298,7 +298,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
       // 同步状态不再渲染到全局状态栏（同步已改为完全手动触发）
 
-      console.log('[Lifecycle] Snapshot hydrated:', snapshot);
+      console.log('[Lifecycle] Snapshot hydrated:', JSON.stringify(snapshot));
     } catch (e) {
       console.error('[Lifecycle] Failed to hydrate status snapshot:', e);
     }
