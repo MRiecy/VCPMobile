@@ -535,9 +535,9 @@ watch(
 
           <!-- Root Status Card -->
           <div class="bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/5 p-4 rounded-2xl space-y-3">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-3">
-                <div class="h-8 w-8 rounded-xl bg-black/5 dark:bg-white/5 flex items-center justify-center">
+            <div class="flex items-center justify-between gap-3">
+              <div class="flex items-center gap-3 min-w-0">
+                <div class="h-8 w-8 rounded-xl bg-black/5 dark:bg-white/5 flex items-center justify-center shrink-0">
                   <svg v-if="isRootGranted === true" class="text-emerald-500" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                     <path d="m9 11 2 2 4-4"/>
@@ -552,18 +552,18 @@ watch(
                     <circle cx="12" cy="12" r="1"/>
                   </svg>
                 </div>
-                <div class="flex items-baseline gap-1.5 flex-wrap">
-                  <span class="text-xs font-bold shrink-0">超级用户 Root 状态</span>
-                  <span class="text-[8px] opacity-50 font-mono uppercase tracking-wider shrink-0">
+                <div class="flex flex-col min-w-0">
+                  <span class="text-xs font-bold text-primary-text truncate">超级用户 Root 状态</span>
+                  <span class="text-[7px] opacity-40 font-mono uppercase tracking-wider truncate">
                     {{ isRootGranted === true ? 'ROOT ACCESS GRANTED' : isRootGranted === false ? 'ROOT ACCESS DENIED' : 'ROOT STATUS UNCHECKED' }}
                   </span>
                 </div>
               </div>
-              <div class="flex gap-2">
+              <div class="flex gap-1.5 shrink-0">
                 <button
                   v-if="isRootGranted === null"
                   @click="checkRootState"
-                  class="px-3 py-1 text-white text-[10px] font-bold rounded-xl active:scale-95 transition-all"
+                  class="px-2.5 py-1 text-white text-[9px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   style="background-color: var(--highlight-text)"
                 >
                   检测 Root
@@ -571,14 +571,14 @@ watch(
                 <template v-else>
                   <button
                     @click="checkRootState"
-                    class="px-2.5 py-1 bg-black/10 dark:bg-white/10 text-primary-text text-[10px] font-bold rounded-xl active:scale-95 transition-all hover:bg-black/20"
+                    class="px-2.5 py-1 bg-black/10 dark:bg-white/10 text-primary-text text-[9px] font-bold rounded-lg active:scale-95 transition-all hover:bg-black/20 shrink-0"
                   >
                     重新检测
                   </button>
                   <button
                     v-if="isRootGranted === false"
                     @click="handleLaunchRootManager"
-                    class="px-2.5 py-1 text-white text-[10px] font-bold rounded-xl active:scale-95 transition-all"
+                    class="px-2.5 py-1 text-white text-[9px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                     style="background-color: var(--highlight-text)"
                   >
                     一键授权
@@ -818,36 +818,36 @@ watch(
                 </div>
 
                 <!-- Root status unchecked banner for system telemetries -->
-                <div v-if="isRootGranted === null && plugin.requiresRoot" class="bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 p-2.5 rounded-xl flex items-center justify-between text-[10px]">
-                  <div class="flex items-center gap-1.5 opacity-60">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0">
-                      <circle cx="12" cy="12" r="10"/>
-                      <path d="M12 16v-4"/>
-                      <path d="M12 8h.01"/>
+                <div v-if="isRootGranted === null && plugin.requiresRoot" class="bg-warning/8 dark:bg-warning/4 border border-warning/15 p-2.5 rounded-xl flex items-center justify-between text-[10px] gap-2.5">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-warning">
+                      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+                      <line x1="12" y1="9" x2="12" y2="13"/>
+                      <line x1="12" y1="17" x2="12.01" y2="17"/>
                     </svg>
-                    <span>此工具需要 Root 权限以读取实时物理遥测</span>
+                    <span class="truncate font-medium text-primary-text opacity-90">此插件需要 Root 权限以读取物理遥测</span>
                   </div>
                   <button 
                     @click.stop="checkRootState"
-                    class="px-2 py-0.5 bg-black/10 hover:bg-black/20 dark:bg-white/10 dark:hover:bg-white/20 text-primary-text rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
+                    class="px-2 py-0.5 bg-warning/15 hover:bg-warning/25 text-warning rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
                   >
                     检测 Root
                   </button>
                 </div>
 
                 <!-- Root warning banner for system telemetries -->
-                <div v-if="isRootGranted === false && plugin.requiresRoot" class="bg-amber-50/70 dark:bg-amber-400/5 border border-amber-200 dark:border-amber-400/10 p-2.5 rounded-xl flex items-center justify-between text-[10px]">
-                  <div class="flex items-center gap-1.5 text-amber-700 dark:text-amber-400">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0">
+                <div v-if="isRootGranted === false && plugin.requiresRoot" class="bg-warning/10 dark:bg-warning/5 border border-warning/20 p-2.5 rounded-xl flex items-center justify-between text-[10px] text-warning dark:text-warning/90 gap-2.5">
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="shrink-0 text-warning">
                       <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
                       <line x1="12" y1="9" x2="12" y2="13"/>
                       <line x1="12" y1="17" x2="12.01" y2="17"/>
                     </svg>
-                    <span>未获得 Root 权限，部分遥测参数已使用标准 API 降级</span>
+                    <span class="truncate">未获得 Root 权限，部分遥测参数已使用标准 API 降级</span>
                   </div>
                   <button 
                     @click.stop="handleLaunchRootManager"
-                    class="px-2 py-0.5 bg-amber-100 hover:bg-amber-200 dark:bg-amber-400/20 dark:hover:bg-amber-400/30 text-amber-700 dark:text-amber-400 rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
+                    class="px-2 py-0.5 bg-warning/20 hover:bg-warning/30 text-warning rounded active:scale-95 transition-all text-[8px] font-bold shrink-0"
                   >
                     跳转授权
                   </button>
@@ -926,12 +926,11 @@ watch(
 
           <!-- Micro Tips for copy action -->
           <div class="px-4 py-1.5 shrink-0 bg-black/2 dark:bg-white/2 border-b border-black/5 dark:border-white/5 flex items-center gap-1.5">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="color: var(--highlight-text);" class="opacity-70">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="16" x2="12" y2="12"/>
-              <line x1="12" y1="8" x2="12.01" y2="8"/>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-[var(--highlight-text)] opacity-70">
+              <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+              <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
             </svg>
-            <span class="text-[10px] opacity-60">* 点击任意占位符卡片即可快速复制到剪贴板</span>
+            <span class="text-[10px] text-primary-text opacity-60">点击任意占位符卡片即可快速复制到剪贴板</span>
           </div>
 
           <!-- Placeholders layout -->

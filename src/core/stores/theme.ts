@@ -256,13 +256,17 @@ export const useThemeStore = defineStore('theme', () => {
 
   // Vite HMR: 当主题 TS 文件修改时，Vite 会热更新该模块并冒泡到 theme.ts。
   // 我们通过拦截更新并重新执行 applyThemeFile 来实现样式的实时无刷新生效。
+  // 通过 import.meta.hot.data.isHMR 区分首次初始化与后续热重载，防止在普通启动时与生命周期并行竞争
   if (import.meta.hot) {
-    setTimeout(() => {
-      console.log('[themeStore] HMR reload triggered, re-applying theme:', currentTheme.value);
-      if (currentTheme.value) {
-        applyThemeFile(currentTheme.value);
-      }
-    }, 100);
+    if (import.meta.hot.data.isHMR) {
+      setTimeout(() => {
+        console.log('[themeStore] HMR reload triggered, re-applying theme:', currentTheme.value);
+        if (currentTheme.value) {
+          applyThemeFile(currentTheme.value);
+        }
+      }, 100);
+    }
+    import.meta.hot.data.isHMR = true;
   }
 
   return {
