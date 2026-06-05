@@ -1,19 +1,17 @@
 // distributed/tools/network_info.rs
 // [Streaming] MobileNetworkInfo — network type, IP, traffic stats.
 
-
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
 pub struct NetworkInfoTool;
 
-
-
 impl StreamingTool for NetworkInfoTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileNetworkInfo".to_string(),
-            description: "检测当前连接网络介质（WIFI/蜂窝）、局域网 IP、延迟及当前吞吐速度。".to_string(),
+            description: "检测当前连接网络介质（WIFI/蜂窝）、局域网 IP、延迟及当前吞吐速度。"
+                .to_string(),
             display_name: "网络带宽监控".to_string(),
             placeholder: Some("{{MobileNetwork}}".to_string()),
             invocation_commands: vec![],
@@ -34,8 +32,10 @@ impl StreamingTool for NetworkInfoTool {
             use tauri::Manager;
             let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
             let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
-            
+            let plugin_handle = handle_guard
+                .as_ref()
+                .ok_or("VcpMobile plugin not initialized")?;
+
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct NetworkResponse {
@@ -45,12 +45,9 @@ impl StreamingTool for NetworkInfoTool {
                 up_speed_kbps: i32,
                 ip: String,
             }
-            
+
             let res = plugin_handle
-                .run_mobile_plugin::<NetworkResponse>(
-                    "getNetworkStatus",
-                    serde_json::json!({}),
-                )
+                .run_mobile_plugin::<NetworkResponse>("getNetworkStatus", serde_json::json!({}))
                 .map_err(|e| format!("JNI call failed: {}", e))?;
 
             if !res.connected {

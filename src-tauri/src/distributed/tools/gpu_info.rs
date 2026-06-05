@@ -2,7 +2,6 @@
 // [Streaming] MobileGPUInfo — GPU chip information and status.
 // Uses OpenGL ES renderer info via native Android JNI and Root for real-time load.
 
-
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
@@ -28,8 +27,6 @@ impl GpuInfoTool {
         None
     }
 }
-
-
 
 impl StreamingTool for GpuInfoTool {
     fn manifest(&self) -> ToolManifest {
@@ -58,26 +55,29 @@ impl StreamingTool for GpuInfoTool {
             let gpu_renderer = (|| -> Result<String, String> {
                 let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
                 let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-                let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
+                let plugin_handle = handle_guard
+                    .as_ref()
+                    .ok_or("VcpMobile plugin not initialized")?;
 
                 #[derive(serde::Deserialize)]
                 struct GpuResponse {
                     renderer: String,
                 }
-                
+
                 let res = plugin_handle
-                    .run_mobile_plugin::<GpuResponse>(
-                        "getGpuStatus",
-                        serde_json::json!({}),
-                    )
+                    .run_mobile_plugin::<GpuResponse>("getGpuStatus", serde_json::json!({}))
                     .map_err(|e| format!("JNI call failed: {}", e))?;
-                
+
                 Ok(res.renderer)
-            })().unwrap_or_else(|_| "Unknown GPU".to_string());
+            })()
+            .unwrap_or_else(|_| "Unknown GPU".to_string());
 
             // 2. 尝试利用 Root 提权获取实时 GPU 负载
             // === Adreno gpubusy ===
-            if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(app, "cat /sys/class/kgsl/kgsl-3d0/gpubusy") {
+            if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(
+                app,
+                "cat /sys/class/kgsl/kgsl-3d0/gpubusy",
+            ) {
                 if let Some(load) = self.parse_adreno_gpubusy(&raw_busy) {
                     return Ok(format!("GPU: {} | 使用率: {}%", gpu_renderer, load));
                 }

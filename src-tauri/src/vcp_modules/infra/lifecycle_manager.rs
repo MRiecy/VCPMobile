@@ -87,7 +87,10 @@ pub async fn reconcile_distributed_node(
     let settings = match read_settings(app_handle.clone(), settings_state).await {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[Lifecycle] Failed to read settings for distributed reconnect: {}", e);
+            log::error!(
+                "[Lifecycle] Failed to read settings for distributed reconnect: {}",
+                e
+            );
             return;
         }
     };
@@ -103,7 +106,7 @@ pub async fn reconcile_distributed_node(
     let mut is_running = client.is_running().await;
     if force_reconnect && is_running {
         log::info!("[Lifecycle] Connection settings changed, stopping existing connection for reconnect...");
-        client.stop().await;
+        client.stop(app_handle).await;
         is_running = false;
     }
 
@@ -113,7 +116,9 @@ pub async fn reconcile_distributed_node(
                 log::warn!("[Lifecycle] distributedEnabled=true but ws_url/vcp_key is empty, skipping auto-connect");
                 return;
             }
-            log::info!("[Lifecycle] distributedEnabled=true, starting distributed node connection...");
+            log::info!(
+                "[Lifecycle] distributedEnabled=true, starting distributed node connection..."
+            );
             // 异步启动连接，不阻塞主引导流程
             let app_clone = app_handle.clone();
             let ws_url_clone = ws_url.clone();
@@ -123,14 +128,25 @@ pub async fn reconcile_distributed_node(
                 let dist_state = app_clone.state::<crate::distributed::DistributedState>();
                 dist_state.registry.load_disabled_config(&app_clone);
                 let client_guard = dist_state.client.read().await;
-                if let Err(e) = client_guard.start(app_clone.clone(), ws_url_clone, vcp_key_clone, device_name_clone, dist_state.registry.clone()).await {
+                if let Err(e) = client_guard
+                    .start(
+                        app_clone.clone(),
+                        ws_url_clone,
+                        vcp_key_clone,
+                        device_name_clone,
+                        dist_state.registry.clone(),
+                    )
+                    .await
+                {
                     log::error!("[Lifecycle] Auto-start distributed node failed: {}", e);
                 }
             });
         }
         (false, true) => {
-            log::info!("[Lifecycle] distributedEnabled=false, stopping distributed node connection...");
-            client.stop().await;
+            log::info!(
+                "[Lifecycle] distributedEnabled=false, stopping distributed node connection..."
+            );
+            client.stop(app_handle).await;
         }
         _ => {}
     }
@@ -298,6 +314,18 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     );
 
     info!("[Lifecycle] Bootstrap complete. Core is READY.");
+
+    // 6. 核心就绪后，安全地激活安卓原生网络监听，彻底规避冷启动 JNI WebView 未就绪的死锁与崩塌
+    let handle_net = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        log::info!("[Lifecycle] Activating Android native network status monitoring...");
+        if let Err(e) = tauri_plugin_vcp_mobile::system::start_network_monitoring(handle_net) {
+            log::error!(
+                "[Lifecycle] Failed to start native network status monitoring: {}",
+                e
+            );
+        }
+    });
 
     // 6. 后台静默检查前端热更新（完全非阻塞）
     {

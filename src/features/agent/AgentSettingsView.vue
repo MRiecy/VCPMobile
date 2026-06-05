@@ -171,7 +171,7 @@ const autoSave = async () => {
 watch(
   agentConfig,
   () => {
-    if (!originalConfig.value) return;
+    if (!originalConfig.value || !props.isOpen) return;
     // 只有与原始快照不同时才触发保存，避免无意义的后端调用
     if (JSON.stringify(agentConfig.value) === JSON.stringify(originalConfig.value)) {
       return;

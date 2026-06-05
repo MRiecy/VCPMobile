@@ -1,7 +1,7 @@
 mod distributed;
 mod vcp_modules;
 
-use tauri::Manager;
+use tauri::{Listener, Manager};
 use vcp_modules::agent_chat_application_service::{
     handle_agent_chat_message, handle_assistant_chat_stream,
 };
@@ -39,8 +39,8 @@ use vcp_modules::group_service::{
 };
 use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
-    bootstrap, get_core_status, get_last_error, get_system_snapshot, reconcile_local_server_cmd,
-    reconcile_distributed_node_cmd, LifecycleState,
+    bootstrap, get_core_status, get_last_error, get_system_snapshot,
+    reconcile_distributed_node_cmd, reconcile_local_server_cmd, LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
@@ -150,6 +150,23 @@ pub fn run() {
                         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                         init_automatic_maintenance(h_maintenance).await;
                     });
+                }
+            });
+
+            // 3. 监听安卓原生网络状态变更，实现分布式连接的自主重连
+            let handle_net = app.handle().clone();
+            app.listen_any("vcp-network-status-changed", move |event| {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                    if payload.get("connected").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let h = handle_net.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(state) = h.try_state::<distributed::DistributedState>() {
+                                log::info!("[Distributed] Network restored! Triggering immediate reconnect in Rust backend.");
+                                let client = state.client.read().await;
+                                client.trigger_reconnect().await;
+                            }
+                        });
+                    }
                 }
             });
 

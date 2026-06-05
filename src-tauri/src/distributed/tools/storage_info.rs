@@ -2,7 +2,6 @@
 // [Streaming] MobileStorageInfo — internal storage space via statvfs.
 // Uses ThrottledCache (C2) to avoid redundant disk queries every 30s.
 
-
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
@@ -59,8 +58,6 @@ impl StorageInfoTool {
         "存储信息不可用(非Unix平台)".to_string()
     }
 }
-
-
 
 impl StreamingTool for StorageInfoTool {
     fn manifest(&self) -> ToolManifest {

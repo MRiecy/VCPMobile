@@ -204,63 +204,73 @@ impl Serialize for ToolManifest {
         map.serialize_entry("description", &self.description)?;
         map.serialize_entry("author", "VCPMobile")?;
         map.serialize_entry("pluginType", plugin_type)?;
-        map.serialize_entry("entryPoint", &serde_json::json!({
-            "type": "mobile",
-            "command": "native"
-        }))?;
-        map.serialize_entry("communication", &serde_json::json!({
-            "protocol": "mobile",
-            "timeout": 10000
-        }))?;
+        map.serialize_entry(
+            "entryPoint",
+            &serde_json::json!({
+                "type": "mobile",
+                "command": "native"
+            }),
+        )?;
+        map.serialize_entry(
+            "communication",
+            &serde_json::json!({
+                "protocol": "mobile",
+                "timeout": 10000
+            }),
+        )?;
 
         // ── capabilities 双轨分流 ─────────────────────────────────────────────
         if is_static {
             // 静态工具：走 systemPromptPlaceholders 管道
             let placeholder_key = self.placeholder.as_deref().unwrap_or_default();
-            map.serialize_entry("capabilities", &serde_json::json!({
-                "systemPromptPlaceholders": [{
-                    "placeholder": placeholder_key,
-                    "description": self.description
-                }],
-                "invocationCommands": []
-            }))?;
+            map.serialize_entry(
+                "capabilities",
+                &serde_json::json!({
+                    "systemPromptPlaceholders": [{
+                        "placeholder": placeholder_key,
+                        "description": self.description
+                    }],
+                    "invocationCommands": []
+                }),
+            )?;
         } else {
             // 可执行工具：走 invocationCommands 管道，使用完整标准格式
-            let commands: Vec<serde_json::Value> = self.invocation_commands.iter().map(|cmd| {
-                serde_json::json!({
-                    "commandIdentifier": cmd.command_identifier,
-                    "description": cmd.description,
-                    "example": cmd.example
+            let commands: Vec<serde_json::Value> = self
+                .invocation_commands
+                .iter()
+                .map(|cmd| {
+                    serde_json::json!({
+                        "commandIdentifier": cmd.command_identifier,
+                        "description": cmd.description,
+                        "example": cmd.example
+                    })
                 })
-            }).collect();
-            map.serialize_entry("capabilities", &serde_json::json!({
-                "systemPromptPlaceholders": [],
-                "invocationCommands": commands
-            }))?;
+                .collect();
+            map.serialize_entry(
+                "capabilities",
+                &serde_json::json!({
+                    "systemPromptPlaceholders": [],
+                    "invocationCommands": commands
+                }),
+            )?;
         }
 
         map.end()
     }
 }
 
-
 // ============================================================
 // Connection / status types
 // ============================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ConnectionState {
+    #[default]
     Disconnected,
     Connecting,
     Connected,
     Disconnecting,
-}
-
-impl Default for ConnectionState {
-    fn default() -> Self {
-        Self::Disconnected
-    }
 }
 
 /// Connection status emitted to the Vue frontend via Tauri events.
@@ -273,4 +283,3 @@ pub struct DistributedStatus {
     pub registered_tools: usize,
     pub last_error: Option<String>,
 }
-

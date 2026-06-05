@@ -6,14 +6,14 @@ use tauri::AppHandle;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-
 pub struct MotionSensorTool;
 
 impl StreamingTool for MotionSensorTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileMotion".to_string(),
-            description: "采集设备的三轴加速度、陀螺仪旋转向量与磁力计取向，识别物理运动姿态。".to_string(),
+            description: "采集设备的三轴加速度、陀螺仪旋转向量与磁力计取向，识别物理运动姿态。"
+                .to_string(),
             display_name: "九轴运动传感器".to_string(),
             placeholder: Some("{{MobileMotion}}".to_string()),
             invocation_commands: vec![],
@@ -34,13 +34,15 @@ impl StreamingTool for MotionSensorTool {
             use tauri::Manager;
             let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
             let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
-            
+            let plugin_handle = handle_guard
+                .as_ref()
+                .ok_or("VcpMobile plugin not initialized")?;
+
             #[derive(serde::Deserialize)]
             struct SensorResponse {
                 value: String,
             }
-            
+
             let res = plugin_handle
                 .run_mobile_plugin::<SensorResponse>(
                     "getSensorData",

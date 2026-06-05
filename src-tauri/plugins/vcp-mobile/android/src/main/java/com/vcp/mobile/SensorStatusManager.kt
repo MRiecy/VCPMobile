@@ -37,7 +37,6 @@ class SensorStatusManager(private val context: Context) {
     @Volatile private var latestAmbientStr = "环境传感器: 设备不支持或权限未授予"
 
     private var isRunning = false
-    private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Sensor instances

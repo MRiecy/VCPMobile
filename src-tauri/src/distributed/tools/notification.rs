@@ -40,7 +40,6 @@ body:「始」通知内容「末」\n\
         }
     }
 
-
     async fn execute(&self, args: Value, app: &AppHandle) -> Result<Value, String> {
         let title = args
             .get("title")

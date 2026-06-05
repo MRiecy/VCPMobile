@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
@@ -179,7 +179,7 @@ const autoSave = async () => {
 watch(
   groupConfig,
   () => {
-    if (!originalConfig.value) return;
+    if (!originalConfig.value || !props.isOpen) return;
     // 只有与原始快照不同时才触发保存，避免无意义的后端调用
     if (JSON.stringify(groupConfig.value) === JSON.stringify(originalConfig.value)) {
       return;

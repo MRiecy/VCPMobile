@@ -28,6 +28,7 @@ import FeatureOverlays from "./components/FeatureOverlays.vue";
 import UpdatePrompt from "./components/ui/UpdatePrompt.vue";
 import ShareAgentSelector from "./features/chat/components/ShareAgentSelector.vue";
 
+
 interface SharedFileEntry {
   cachePath: string;
   mimeType: string;
@@ -69,6 +70,10 @@ const isAssistant = ref(false);
 const sharedContent = ref<SharedContentData>({ text: "", files: [] });
 const showShareSelector = ref(false);
 const pendingSharedFiles = ref<PickedFileInfo[]>([]);
+
+const handleShareIntent = (e: Event) => {
+  processSharedIntent((e as CustomEvent).detail);
+};
 
 const processSharedIntent = async (detail: any) => {
   console.log("[App] Share intent received:", detail);
@@ -280,6 +285,8 @@ const handleVisibilityChange = () => {
   }
 };
 
+let isAppBackground = false;
+
 const handleVcpLifecycle = (e: Event) => {
   if (isAssistant.value) return;
 
@@ -287,12 +294,16 @@ const handleVcpLifecycle = (e: Event) => {
   const state = detail?.state;
   
   if (state === "stop" || state === "pause") {
+    if (isAppBackground) return;
+    isAppBackground = true;
     console.log("[Lifecycle] App moved to background, tuning heartbeat to 120s...");
     suspendPhysicalScreenKeep(); // 休眠物理亮屏，达到省电效果
     invoke("set_vcp_log_heartbeat", { intervalMs: 120000 }).catch((err) => {
       console.error("[Lifecycle] Failed to set background heartbeat:", err);
     });
   } else if (state === "resume") {
+    if (!isAppBackground) return;
+    isAppBackground = false;
     console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
     reapplyScreenKeepIfActive(); // 唤醒时自动校准和恢复可能丢失的物理亮屏 FLAG
     invoke("set_vcp_log_heartbeat", { intervalMs: 15000 }).catch((err) => {
@@ -335,22 +346,6 @@ const handleFloatingBallClick = async () => {
   }
 };
 
-const handleNetworkStatusChange = async (e: Event) => {
-  const detail = (e as CustomEvent).detail;
-  console.log("[Network] Status changed:", detail);
-  if (detail?.connected) {
-    try {
-      const status = await invoke<any>("get_distributed_status");
-      if (status?.state !== "Disconnected" && !status?.connected) {
-        console.log("[Network] Restored! Triggering immediate distributed reconnect...");
-        await invoke("reconnect_distributed_client");
-      }
-    } catch (err) {
-      console.warn("[Network] Failed to trigger distributed client reconnect:", err);
-    }
-  }
-};
-
 onMounted(async () => {
   // 环境探测：若是原生悬浮窗模式，Tauri API 可能不可用，优先通过 URL 判断
   isAssistant.value = window.location.search.includes("mode=floating");
@@ -370,10 +365,7 @@ onMounted(async () => {
   document.addEventListener("visibilitychange", handleVisibilityChange);
   window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
   window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
-  window.addEventListener("vcp-network-status-changed", handleNetworkStatusChange);
-  window.addEventListener("vcp-share-intent", (e: Event) => {
-    processSharedIntent((e as CustomEvent).detail);
-  });
+  window.addEventListener("vcp-share-intent", handleShareIntent);
 
   // 初始化全局表情包修复器
   initGlobalFixer();
@@ -408,7 +400,7 @@ onUnmounted(() => {
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   window.removeEventListener("vcp-lifecycle", handleVcpLifecycle);
   window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
-  window.removeEventListener("vcp-network-status-changed", handleNetworkStatusChange);
+  window.removeEventListener("vcp-share-intent", handleShareIntent);
 });
 </script>
 
@@ -444,18 +436,18 @@ onUnmounted(() => {
     </Transition>
 
     <!-- 4. 左右抽屉在遮罩之后声明，不写 z-index 也能稳定压过主内容 -->
-    <AgentSidebar />
-    <RightSidebar class="pointer-events-auto shrink-0" :is-open="layoutStore.rightDrawerOpen"
+    <AgentSidebar v-if="lifecycleStore.state === 'READY'" />
+    <RightSidebar v-if="lifecycleStore.state === 'READY'" class="pointer-events-auto shrink-0" :is-open="layoutStore.rightDrawerOpen"
       @close="layoutStore.setRightDrawer(false)" />
 
     <!-- 5. 全局覆盖层管理器 -->
-    <GlobalOverlayManager />
+    <GlobalOverlayManager v-if="lifecycleStore.state === 'READY'" />
 
     <!-- 6. 业务 Feature 视图挂载点 -->
-    <FeatureOverlays />
+    <FeatureOverlays v-if="lifecycleStore.state === 'READY'" />
 
     <!-- 7. 分享意图 Agent 选择器 -->
-    <ShareAgentSelector
+    <ShareAgentSelector v-if="lifecycleStore.state === 'READY'"
       :is-open="showShareSelector"
       :shared-text="sharedContent.text"
       :shared-file-count="sharedContent.files.length"

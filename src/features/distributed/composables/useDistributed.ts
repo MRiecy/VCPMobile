@@ -3,7 +3,7 @@
 // Does NOT import chatManager, assistant, or any other existing store.
 // Only reads 2 fields from settings (vcpLogUrl, vcpLogKey) for server URL reuse.
 
-import { ref, readonly, onMounted, onUnmounted } from "vue";
+import { ref, readonly, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -49,17 +49,29 @@ function teardownListener() {
 }
 
 export function useDistributed() {
-  onMounted(() => {
-    listenerCount++;
-    setupListener();
-    // Fetch initial status
-    refreshStatus();
-  });
+  const isThisInstanceActive = ref(false);
 
-  onUnmounted(() => {
+  async function activate() {
+    if (isThisInstanceActive.value) return;
+    isThisInstanceActive.value = true;
+    listenerCount++;
+    await setupListener();
+    // Fetch initial status
+    await refreshStatus();
+  }
+
+  function deactivate() {
+    if (!isThisInstanceActive.value) return;
+    isThisInstanceActive.value = false;
     listenerCount--;
     if (listenerCount <= 0) {
       teardownListener();
+    }
+  }
+
+  onUnmounted(() => {
+    if (isThisInstanceActive.value) {
+      deactivate();
     }
   });
 
@@ -75,6 +87,8 @@ export function useDistributed() {
   return {
     status: readonly(status),
     loading: readonly(loading),
+    activate,
+    deactivate,
     refreshStatus,
   };
 }

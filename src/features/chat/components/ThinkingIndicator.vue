@@ -17,6 +17,9 @@
   background-color: currentColor;
   opacity: 0.2;
   animation: vcp-dot-pulse 1.4s infinite ease-in-out;
+  /* 提升至 GPU 独立合成层 */
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
 }
 
 .thinking-dots span:nth-child(2) {
@@ -31,12 +34,12 @@
 
   0%,
   100% {
-    transform: scale(0.8);
+    transform: scale(0.8) translate3d(0, 0, 0);
     opacity: 0.2;
   }
 
   50% {
-    transform: scale(1.2);
+    transform: scale(1.2) translate3d(0, 0, 0);
     opacity: 1;
   }
 }

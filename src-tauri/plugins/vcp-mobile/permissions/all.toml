@@ -33,5 +33,6 @@ commands.allow = [
     "launch_root_manager",
     "acquire_wake_lock",
     "release_wake_lock",
+    "start_network_monitoring",
 ]
 

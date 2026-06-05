@@ -81,10 +81,14 @@ export const useAssistantStore = defineStore("assistant", () => {
   const fetchAgents = async () => {
     loading.value = true;
     error.value = null;
+    const startTime = Date.now();
     try {
+      console.log("[Profile] invoke('get_agents') starting...");
       const fetchedAgents = await invoke<AgentConfig[]>("get_agents");
+      console.log(`[Profile] invoke('get_agents') resolved in ${Date.now() - startTime}ms`);
       agents.value = fetchedAgents;
       refreshUnreadCounts();
+      console.log(`[Profile] fetchAgents finished in ${Date.now() - startTime}ms`);
     } catch (e: any) {
       const msg = e.toString();
       error.value = msg;
@@ -106,6 +110,34 @@ export const useAssistantStore = defineStore("assistant", () => {
       const msg = e.toString();
       error.value = msg;
       console.error("[AssistantStore] fetchGroups failed:", e);
+      throw e;
+    } finally {
+      loading.value = false;
+    }
+  };
+
+  const fetchAgentsAndGroups = async () => {
+    loading.value = true;
+    error.value = null;
+    const startTime = Date.now();
+    try {
+      console.log("[Profile] invoke('get_agents'), invoke('get_groups'), and invoke('get_unread_counts') concurrently starting...");
+      const [fetchedAgents, fetchedGroups, fetchedUnread] = await Promise.all([
+        invoke<AgentConfig[]>("get_agents"),
+        invoke<GroupConfig[]>("get_groups"),
+        invoke<Record<string, number>>("get_unread_counts")
+      ]);
+      console.log(`[Profile] Concurrent fetches resolved in ${Date.now() - startTime}ms`);
+      
+      // 在同一次 tick 中合并赋值，触发 Vue 3 渲染的批处理更新
+      agents.value = fetchedAgents;
+      groups.value = fetchedGroups;
+      unreadCounts.value = fetchedUnread;
+      
+      console.log(`[Profile] fetchAgentsAndGroups finished in ${Date.now() - startTime}ms`);
+    } catch (e: any) {
+      error.value = e.toString();
+      console.error("[AssistantStore] fetchAgentsAndGroups failed:", e);
       throw e;
     } finally {
       loading.value = false;
@@ -249,6 +281,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     unreadCounts,
     fetchAgents,
     fetchGroups,
+    fetchAgentsAndGroups,
     createAgent,
     deleteAgent,
     createGroup,

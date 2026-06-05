@@ -27,7 +27,7 @@ export function useNotificationPresentation() {
   const getActionButtonClass = (action: { label: string; color: string }) => {
     const isGreen = action.label === '允许' || action.label === 'Approve' || action.color?.includes('green');
     const isRed = action.label === '拒绝' || action.label === 'Deny' || action.color?.includes('red');
-    const toneClass = isGreen ? 'bg-green-600' : isRed ? 'bg-red-600' : action.color;
+    const toneClass = action.color || (isGreen ? 'bg-green-500' : isRed ? 'bg-red-500' : '');
 
     return [
       toneClass,

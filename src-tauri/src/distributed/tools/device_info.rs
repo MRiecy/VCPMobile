@@ -35,7 +35,6 @@ tool_name:「始」MobileDeviceInfo「末」\n\
         }
     }
 
-
     async fn execute(&self, _args: Value, _app: &AppHandle) -> Result<Value, String> {
         Ok(json!({
             "os": std::env::consts::OS,

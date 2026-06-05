@@ -163,23 +163,108 @@ pub async fn get_groups(
     app_handle: AppHandle,
     state: State<'_, GroupManagerState>,
 ) -> Result<Vec<GroupConfig>, String> {
+    let start_total = std::time::Instant::now();
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let rows: Vec<sqlx::sqlite::SqliteRow> =
-        sqlx::query("SELECT group_id FROM groups WHERE deleted_at IS NULL")
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    let start_groups = std::time::Instant::now();
+    // 1. 查询所有未删除群组的基础配置及 avatars 主色
+    let group_rows = sqlx::query(
+        "SELECT g.group_id, g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
+         FROM groups g
+         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
+         WHERE g.deleted_at IS NULL"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let duration_groups = start_groups.elapsed();
 
-    let mut groups = Vec::new();
-    for row in rows {
+    if group_rows.is_empty() {
+        log::info!(
+            "[Profile] get_groups total: {}ms (empty)",
+            start_total.elapsed().as_millis()
+        );
+        return Ok(Vec::new());
+    }
+
+    let start_members = std::time::Instant::now();
+    // 2. 一次性查询所有群组成员
+    let member_rows = sqlx::query(
+        "SELECT group_id, agent_id, member_tag 
+         FROM group_members 
+         ORDER BY group_id, sort_order ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let duration_members = start_members.elapsed();
+
+    let start_mapping = std::time::Instant::now();
+    use std::collections::HashMap;
+
+    // 分组整理 members 与 member_tags
+    let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
+    let mut group_member_tags: HashMap<String, serde_json::Map<String, serde_json::Value>> =
+        HashMap::new();
+
+    for mr in member_rows {
         use sqlx::Row;
-        let group_id: String = row.get("group_id");
-        if let Ok(config) = read_group_config(app_handle.clone(), state.clone(), group_id).await {
-            groups.push(config);
+        let gid: String = mr.get("group_id");
+        let aid: String = mr.get("agent_id");
+        let tag: Option<String> = mr.get("member_tag");
+
+        group_members
+            .entry(gid.clone())
+            .or_default()
+            .push(aid.clone());
+        if let Some(t) = tag {
+            group_member_tags
+                .entry(gid)
+                .or_default()
+                .insert(aid, serde_json::Value::String(t));
         }
     }
+
+    // 组装并预存缓存
+    let mut groups = Vec::new();
+    for row in group_rows {
+        use sqlx::Row;
+        let group_id: String = row.get("group_id");
+        let avatar_calculated_color: Option<String> = row.get("dominant_color");
+
+        let members = group_members.remove(&group_id).unwrap_or_default();
+        let member_tags_map = group_member_tags.remove(&group_id).unwrap_or_default();
+
+        let config = GroupConfig {
+            id: group_id.clone(),
+            name: row.get("name"),
+            avatar_calculated_color,
+            members,
+            mode: row.get("mode"),
+            member_tags: Some(serde_json::Value::Object(member_tags_map)),
+            group_prompt: row.get("group_prompt"),
+            invite_prompt: row.get("invite_prompt"),
+            use_unified_model: row.get::<i32, _>("use_unified_model") != 0,
+            unified_model: row.get("unified_model"),
+            topics: vec![], // 优化：话题改为前端选中时流式懒加载，初始置为空
+            tag_match_mode: row.get("tag_match_mode"),
+            created_at: row.get("created_at"),
+        };
+
+        // 预热内存缓存，供后续 read_group_config_internal 内存级调用
+        state.caches.insert(group_id, config.clone());
+        groups.push(config);
+    }
+    let duration_mapping = start_mapping.elapsed();
+
+    log::info!(
+        "[Profile] get_groups finished. Total: {}ms | SQL Groups: {}ms | SQL Members: {}ms | Map & Cache: {}ms",
+        start_total.elapsed().as_millis(),
+        duration_groups.as_millis(),
+        duration_members.as_millis(),
+        duration_mapping.as_millis()
+    );
 
     Ok(groups)
 }

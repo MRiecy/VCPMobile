@@ -98,6 +98,14 @@ impl DistributedClient {
 
         Self::emit_status(&app, &status).await;
 
+        #[cfg(target_os = "android")]
+        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode(&app, true) {
+            log::warn!(
+                "[Distributed] Failed to start keepalive foreground service: {}",
+                e
+            );
+        }
+
         let handle = tokio::spawn(Self::connection_loop(
             app,
             ws_url,
@@ -115,11 +123,22 @@ impl DistributedClient {
     }
 
     /// Stop the distributed node.
-    pub async fn stop(&self) {
+    pub async fn stop(&self, _app: &AppHandle) {
+        #[cfg(target_os = "android")]
+        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode(_app, false) {
+            log::warn!(
+                "[Distributed] Failed to stop keepalive foreground service: {}",
+                e
+            );
+        }
+
         {
             let mut s = self.status.write().await;
-            if s.state == ConnectionState::Disconnected || s.state == ConnectionState::Disconnecting {
-                log::info!("[Distributed] Already disconnected or disconnecting, skipping stop request.");
+            if s.state == ConnectionState::Disconnected || s.state == ConnectionState::Disconnecting
+            {
+                log::info!(
+                    "[Distributed] Already disconnected or disconnecting, skipping stop request."
+                );
                 return;
             }
             s.state = ConnectionState::Disconnecting;
@@ -175,6 +194,7 @@ impl DistributedClient {
     // Connection loop — mirrors DistributedServer.connect() + scheduleReconnect()
     // ================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn connection_loop(
         app: AppHandle,
         ws_url: String,
@@ -310,7 +330,10 @@ impl DistributedClient {
 
         #[cfg(target_os = "android")]
         if let Err(e) = tauri_plugin_vcp_mobile::system::start_sensor_collection(app.clone()) {
-            log::warn!("[Distributed] Failed to start native sensor collection: {}", e);
+            log::warn!(
+                "[Distributed] Failed to start native sensor collection: {}",
+                e
+            );
         }
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
@@ -373,7 +396,7 @@ impl DistributedClient {
                     if opt.is_some() {
                         log::info!("[Distributed] Re-registering tools due to configuration change.");
                         Self::register_tools(device_name, &ws_tx, registry, status).await;
-                        Self::emit_status_with_app(&app, status).await;
+                        Self::emit_status_with_app(app, status).await;
                     }
                 }
 
@@ -399,7 +422,10 @@ impl DistributedClient {
 
         #[cfg(target_os = "android")]
         if let Err(e) = tauri_plugin_vcp_mobile::system::stop_sensor_collection(app.clone()) {
-            log::warn!("[Distributed] Failed to stop native sensor collection: {}", e);
+            log::warn!(
+                "[Distributed] Failed to stop native sensor collection: {}",
+                e
+            );
         }
 
         exit_reason

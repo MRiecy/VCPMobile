@@ -77,5 +77,8 @@ const mergedStyle = computed(() => {
   pointer-events: none;
   z-index: 1;
   opacity: 0.6; /* 降低透明度 */
+  /* 强制提升为独立的 GPU 合成层，阻断重绘污染 */
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
 }
 </style>

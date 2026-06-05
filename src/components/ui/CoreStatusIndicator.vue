@@ -61,16 +61,19 @@ const statusConfig = computed(() => {
 <style scoped>
 .vcp-core-pulse {
   animation: vcpCorePulse 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  /* 提升至 GPU 合成层 */
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
 }
 
 @keyframes vcpCorePulse {
   0%, 100% {
     opacity: 1;
-    transform: scale(1.1);
+    transform: scale(1.1) translate3d(0, 0, 0);
   }
   50% {
     opacity: 0.6;
-    transform: scale(0.9);
+    transform: scale(0.9) translate3d(0, 0, 0);
   }
 }
 </style>

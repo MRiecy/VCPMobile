@@ -33,8 +33,8 @@ export function useSidebarSwipe(target: Ref<HTMLElement | null>, options: Sideba
       if (!isHorizontal) return;
 
       if (options.type === 'global') {
-        // 避开滚动区域以防跟页面内滚动冲突
-        if (e.target instanceof Element && e.target.closest('.vcp-scrollable')) return;
+        // 避开滚动区域以防跟页面内滚动冲突，同时避开侧边栏内部以防跟侧边栏自身的手势发生事件冒泡冲突
+        if (e.target instanceof Element && (e.target.closest('.vcp-scrollable') || e.target.closest('.vcp-drawer'))) return;
 
         if (!layoutStore.leftDrawerOpen && !layoutStore.rightDrawerOpen) {
           // 从左往右划 -> 开启左侧边栏 (需要一定位移以防误触)

@@ -31,7 +31,7 @@ function escapeHtml(text: string): string {
       <span class="vcp-thought-icon">🧠</span>
       <span class="vcp-thought-label flex items-center gap-1">
         {{ block.theme || "元思考链" }}
-        <Loader2 v-if="!block.is_complete" :size="10" class="animate-spin" />
+        <Loader2 v-if="!block.is_complete" :size="10" class="custom-spin" />
       </span>
       <component :is="isExpanded ? ChevronUp : ChevronDown" :size="14" class="opacity-40 ml-auto" />
     </div>
@@ -118,6 +118,23 @@ html.dark .vcp-thought-block {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+.custom-spin {
+  animation: vcp-spin 1s linear infinite;
+  /* 提升至 GPU 合成层 */
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+@keyframes vcp-spin {
+  from {
+    transform: rotate(0deg) translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: rotate(360deg) translate3d(0, 0, 0);
   }
 }
 </style>

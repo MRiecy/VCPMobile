@@ -158,9 +158,7 @@ watch(
 
     <NotificationStatusBar />
     
-    <div class="flex-1 overflow-y-auto">
-      <NotificationList :items="store.historyList" />
-    </div>
+    <NotificationList :items="store.historyList" />
 
     <!-- 底部：工具按钮 2x2 网格区 -->
     <div class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 pb-[calc(var(--vcp-safe-bottom,16px)+8px)]">

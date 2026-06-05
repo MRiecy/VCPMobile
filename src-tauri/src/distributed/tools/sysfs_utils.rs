@@ -121,15 +121,17 @@ pub fn execute_root_command_safe(app: &tauri::AppHandle, command: &str) -> Optio
         let result: Result<String, String> = (|| {
             let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
             let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
-            
+            let plugin_handle = handle_guard
+                .as_ref()
+                .ok_or("VcpMobile plugin not initialized")?;
+
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct RootResult {
                 success: bool,
                 output: String,
             }
-            
+
             let res = plugin_handle
                 .run_mobile_plugin::<RootResult>(
                     "runRootCommand",

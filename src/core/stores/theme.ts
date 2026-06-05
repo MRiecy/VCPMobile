@@ -37,25 +37,16 @@ interface ThemeModule {
   extraCss?: string;
 }
 
-// Vite dynamic imports for TS theme modules (one per theme, lazy-loaded)
-const themeModules = import.meta.glob('../../assets/themes/*.ts') as Record<string, () => Promise<ThemeModule>>;
+// Vite dynamic imports for TS theme modules (one per theme, static pre-compiled)
+const themeModules = import.meta.glob('../../assets/themes/*.ts', { eager: true }) as Record<string, ThemeModule>;
 
-const fileNameToLoader = new Map<string, () => Promise<ThemeModule>>();
-
-const findThemeLoader = (fileName: string): (() => Promise<ThemeModule>) | undefined => {
+const findThemeModule = (fileName: string): ThemeModule | undefined => {
   const tsFileName = fileName.replace('.css', '.ts');
 
-  // Dev mode: always scan fresh — Vite may have swapped the loader under the hood
-  if (!import.meta.hot) {
-    const cached = fileNameToLoader.get(tsFileName);
-    if (cached) return cached;
-  }
-
-  for (const [path, loader] of Object.entries(themeModules)) {
+  for (const [path, mod] of Object.entries(themeModules)) {
     const keyFileName = path.split(/[\\/]/).pop() || '';
     if (keyFileName === tsFileName) {
-      fileNameToLoader.set(tsFileName, loader);
-      return loader;
+      return mod;
     }
   }
 
@@ -95,14 +86,9 @@ export const useThemeStore = defineStore('theme', () => {
   const fetchThemes = async () => {
     const themes: ThemeInfo[] = [];
 
-    for (const [path, loadModule] of Object.entries(themeModules)) {
+    for (const [path, mod] of Object.entries(themeModules)) {
       try {
-        const mod = await loadModule();
         const fileName = path.split(/[\\/]/).pop() || '';
-
-        if (fileName) {
-          fileNameToLoader.set(fileName, loadModule);
-        }
 
         themes.push({
           fileName,
@@ -142,13 +128,11 @@ export const useThemeStore = defineStore('theme', () => {
       currentTheme.value = fileName;
       localStorage.setItem('vcp-theme-name', fileName);
 
-      const loadModule = findThemeLoader(fileName);
-      if (!loadModule) {
+      const mod = findThemeModule(fileName);
+      if (!mod) {
         console.warn('Theme module not found:', fileName);
         return;
       }
-
-      const mod = await loadModule();
       console.log('[themeStore] Loaded module for', fileName, mod.meta.name);
 
       currentThemeModule = mod;

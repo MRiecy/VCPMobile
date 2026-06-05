@@ -26,7 +26,7 @@ const handleStopAll = () => {
          class="absolute -top-12 left-1/2 -translate-x-1/2 z-local">
       <button 
         @click="handleStopAll"
-        class="flex items-center gap-2 px-3.5 py-1.5 bg-black/75 backdrop-blur-md border border-red-500/30 rounded text-red-400 text-xs font-semibold tracking-wide shadow-[0_0_15px_rgba(239,68,68,0.12)] active:scale-[0.97] transition-all duration-200"
+        class="flex items-center gap-2 px-3.5 py-1.5 bg-zinc-900 dark:bg-black border border-red-500/30 rounded text-red-400 text-xs font-semibold tracking-wide shadow-[0_0_15px_rgba(239,68,68,0.12)] active:scale-[0.97] transition-all duration-200"
       >
         <Octagon :size="12" class="animate-pulse text-red-500" />
         <span class="uppercase tracking-wider font-medium">停止群组发言</span>

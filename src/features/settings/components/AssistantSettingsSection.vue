@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, watch, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../../core/stores/settings";
 import { useAssistantStore } from "../../../core/stores/assistant";
@@ -68,6 +68,18 @@ watch(
   }
 );
 
+const handleLifecycleEvent = async (e: any) => {
+  if (e.detail?.state === "resume") {
+    await checkPermission();
+    if (props.settings.enableAssistant && hasOverlayPermission.value) {
+      try {
+        await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: true });
+        await invoke("reconcile_local_server_cmd", { enable: true });
+      } catch (_) {}
+    }
+  }
+};
+
 onMounted(async () => {
   try {
     await assistantStore.fetchAgents();
@@ -81,19 +93,14 @@ onMounted(async () => {
       await invoke("reconcile_local_server_cmd", { enable: true });
     } catch (_) {}
   }
+
+  // 监听生命周期 resume 事件以刷新权限状态
+  window.addEventListener("vcp-lifecycle", handleLifecycleEvent);
 });
 
-// 监听生命周期 resume 事件以刷新权限状态
-window.addEventListener("vcp-lifecycle", async (e: any) => {
-  if (e.detail?.state === "resume") {
-    await checkPermission();
-    if (props.settings.enableAssistant && hasOverlayPermission.value) {
-      try {
-        await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: true });
-        await invoke("reconcile_local_server_cmd", { enable: true });
-      } catch (_) {}
-    }
-  }
+onUnmounted(() => {
+  // 组件解卸时必须销毁全局监听器，以防内存泄露和重复挂载
+  window.removeEventListener("vcp-lifecycle", handleLifecycleEvent);
 });
 </script>
 

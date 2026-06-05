@@ -2,7 +2,6 @@
 // [Streaming] MobileStatus — aggregates all Phase 1 & 2 sensor data into a one-line summary.
 // Reads from other StreamingTools' data sources directly for minimal overhead.
 
-
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
@@ -137,13 +136,13 @@ impl DeviceStatusSummaryTool {
     }
 }
 
-
-
 impl StreamingTool for DeviceStatusSummaryTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "MobileStatusSummary".to_string(),
-            description: "分布式节点专属大图，整合电池、CPU、内存及核心遥测状态，向外部提供一键摘要。".to_string(),
+            description:
+                "分布式节点专属大图，整合电池、CPU、内存及核心遥测状态，向外部提供一键摘要。"
+                    .to_string(),
             display_name: "整机状态摘要".to_string(),
             placeholder: Some("{{MobileStatus}}".to_string()),
             invocation_commands: vec![],
@@ -162,7 +161,9 @@ impl StreamingTool for DeviceStatusSummaryTool {
         #[cfg(target_os = "android")]
         {
             // 1. 获取 CPU 使用率与温度快照
-            let cpu_usage = if let Some(out) = super::sysfs_utils::execute_root_command_safe(app, "cat /proc/stat") {
+            let cpu_usage = if let Some(out) =
+                super::sysfs_utils::execute_root_command_safe(app, "cat /proc/stat")
+            {
                 if let Some(line) = out.lines().next() {
                     let vals: Vec<u64> = line
                         .split_whitespace()
@@ -187,7 +188,10 @@ impl StreamingTool for DeviceStatusSummaryTool {
                 "受系统安全限制".to_string()
             };
 
-            let cpu_temp = if let Some(raw_temp) = super::sysfs_utils::execute_root_command_safe(app, "cat /sys/class/thermal/thermal_zone0/temp") {
+            let cpu_temp = if let Some(raw_temp) = super::sysfs_utils::execute_root_command_safe(
+                app,
+                "cat /sys/class/thermal/thermal_zone0/temp",
+            ) {
                 if let Ok(t) = raw_temp.trim().parse::<i64>() {
                     format!("{}°C", t / 1000)
                 } else {
@@ -208,10 +212,15 @@ impl StreamingTool for DeviceStatusSummaryTool {
                 Err(_) => "Unknown GPU".to_string(),
             };
 
-            if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(app, "cat /sys/class/kgsl/kgsl-3d0/gpubusy") {
+            if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(
+                app,
+                "cat /sys/class/kgsl/kgsl-3d0/gpubusy",
+            ) {
                 let raw_parts: Vec<&str> = raw_busy.split_whitespace().collect();
                 if raw_parts.len() >= 2 {
-                    if let (Ok(busy), Ok(total)) = (raw_parts[0].parse::<u64>(), raw_parts[1].parse::<u64>()) {
+                    if let (Ok(busy), Ok(total)) =
+                        (raw_parts[0].parse::<u64>(), raw_parts[1].parse::<u64>())
+                    {
                         if total > 0 {
                             let pct = (busy as f64 / total as f64) * 100.0;
                             gpu_load_str = format!("{}%", pct.round() as u64);
@@ -228,7 +237,8 @@ impl StreamingTool for DeviceStatusSummaryTool {
                     "cat /sys/devices/platform/mali/utilization",
                 ];
                 for path in &mali_paths {
-                    if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(app, path) {
+                    if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(app, path)
+                    {
                         let clean = raw_busy.trim().trim_end_matches('%');
                         if let Ok(load) = clean.parse::<u64>() {
                             gpu_load_str = format!("{}%", load);
@@ -242,7 +252,8 @@ impl StreamingTool for DeviceStatusSummaryTool {
             let mem_str = self.mem_brief();
 
             // 4. 电量及充电状态 (利用 JNI API)
-            let battery_str = match tauri_plugin_vcp_mobile::system::get_battery_status(app.clone()) {
+            let battery_str = match tauri_plugin_vcp_mobile::system::get_battery_status(app.clone())
+            {
                 Ok(bat) => {
                     let suffix = match bat.status.as_deref() {
                         Some("充电中") => "充电中",
@@ -269,9 +280,11 @@ impl StreamingTool for DeviceStatusSummaryTool {
             // 6. 物理传感器数据 (位置、九轴运动状态)
             let mut coords = "位置信息: 等待数据采集...".to_string();
             let mut motion_state = "静止".to_string();
-            
+
             use tauri::Manager;
-            if let Some(state) = app.try_state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>() {
+            if let Some(state) =
+                app.try_state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>()
+            {
                 if let Ok(handle_guard) = state.plugin_handle.lock() {
                     if let Some(plugin_handle) = handle_guard.as_ref() {
                         #[derive(serde::Deserialize)]
@@ -289,7 +302,11 @@ impl StreamingTool for DeviceStatusSummaryTool {
                                 }
                             }
                             if res.motion.starts_with("状态: ") {
-                                if let Some(m) = res.motion.strip_prefix("状态: ").and_then(|s| s.split(" | ").next()) {
+                                if let Some(m) = res
+                                    .motion
+                                    .strip_prefix("状态: ")
+                                    .and_then(|s| s.split(" | ").next())
+                                {
                                     motion_state = m.to_string();
                                 }
                             }
@@ -300,8 +317,15 @@ impl StreamingTool for DeviceStatusSummaryTool {
 
             // 7. 组装折叠块文本协议 (高包含低累加逻辑)
             let brief_str = format!(
-                "{} | {} | 网络:{} | CPU温度:{}", 
-                battery_str, mem_str, net_str, if cpu_temp.is_empty() { "正常".to_string() } else { cpu_temp.clone() }
+                "{} | {} | 网络:{} | CPU温度:{}",
+                battery_str,
+                mem_str,
+                net_str,
+                if cpu_temp.is_empty() {
+                    "正常".to_string()
+                } else {
+                    cpu_temp.clone()
+                }
             );
 
             let cpu_block = if cpu_temp.is_empty() {
@@ -314,10 +338,7 @@ impl StreamingTool for DeviceStatusSummaryTool {
                 battery_str, mem_str, net_str, cpu_block, gpu_renderer, gpu_load_str
             );
 
-            let full_str = format!(
-                "{} | {} | 运动:{}",
-                perf_str, coords, motion_state
-            );
+            let full_str = format!("{} | {} | 运动:{}", perf_str, coords, motion_state);
 
             let folded = format!(
                 "[===vcp_fold: 0.0 ::desc: 设备基本电量网络和内存占用概要===]\n[手机状态] {}\n\n[===vcp_fold: 0.35 ::desc: 手机性能规格与运行负载===]\n[手机状态] {}\n\n[===vcp_fold: 0.45 ::desc: 手机物理传感器和详细定位状态===]\n[手机状态] {}",
@@ -331,7 +352,9 @@ impl StreamingTool for DeviceStatusSummaryTool {
         {
             let _ = app;
             let cpu_b = self.cpu_brief();
-            let gpu_b = self.gpu_brief().unwrap_or_else(|| "GPU:信息不可用".to_string());
+            let gpu_b = self
+                .gpu_brief()
+                .unwrap_or_else(|| "GPU:信息不可用".to_string());
             let mem_b = self.mem_brief();
             let battery_b = self.battery_brief();
             let net_b = self.net_brief();
@@ -339,7 +362,10 @@ impl StreamingTool for DeviceStatusSummaryTool {
             let motion_b = "静止 (模拟)";
 
             let brief_str = format!("{} | {} | 网络:{} | CPU温度:正常", battery_b, mem_b, net_b);
-            let perf_str = format!("{} | {} | 网络:{} | {} | {}", battery_b, mem_b, net_b, cpu_b, gpu_b);
+            let perf_str = format!(
+                "{} | {} | 网络:{} | {} | {}",
+                battery_b, mem_b, net_b, cpu_b, gpu_b
+            );
             let full_str = format!("{} | {} | 运动:{}", perf_str, coords_b, motion_b);
 
             let folded = format!(

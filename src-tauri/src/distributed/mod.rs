@@ -77,7 +77,10 @@ pub async fn execute_distributed_tool(
     state: State<'_, DistributedState>,
     name: String,
 ) -> Result<String, String> {
-    let res = state.registry.execute(&name, serde_json::Value::Null, &app).await?;
+    let res = state
+        .registry
+        .execute(&name, serde_json::Value::Null, &app)
+        .await?;
     match res {
         serde_json::Value::String(s) => Ok(s),
         other => Ok(other.to_string()),
@@ -93,4 +96,3 @@ pub async fn reconnect_distributed_client(
     client.trigger_reconnect().await;
     Ok(())
 }
-

@@ -7,6 +7,7 @@ import { useTopicStore } from "../../core/stores/topicListManager";
 import { useThemeStore } from "../../core/stores/theme";
 import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
 import { useLayoutStore } from "../../core/stores/layout";
+import { useNotificationStore } from "../../core/stores/notification";
 import MessageRenderer from "./MessageRenderer.vue";
 import InputEnhancer from "./InputEnhancer.vue";
 import TarvenSelector from "./components/TarvenSelector.vue";
@@ -26,6 +27,7 @@ const attachmentStore = useAttachmentStore();
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
+const notificationStore = useNotificationStore();
 const { keyboardHeight, forceRecalculate } = useKeyboardInsets();
 
 // 跟踪输入增强组件底部的扩展菜单状态
@@ -241,12 +243,16 @@ onUnmounted(() => {
         </button>
         <!-- 通知中心按钮 -->
         <button @click="layoutStore.toggleRightDrawer()"
-          class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5">
+          class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5 relative">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
             <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
           </svg>
+          <!-- 当有未读通知时显示绿色指示点 -->
+          <div v-if="notificationStore.unreadCount > 0" 
+            class="absolute top-1.5 right-1.5 w-2 h-2 bg-emerald-500 rounded-full border-2 border-[var(--secondary-bg)] shadow-[0_0_8px_rgba(16,185,129,0.5)]">
+          </div>
         </button>
       </div>
     </header>

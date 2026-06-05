@@ -51,6 +51,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::launch_root_manager,
             system::acquire_wake_lock,
             system::release_wake_lock,
+            system::start_network_monitoring,
         ])
         .setup(|app, _api| {
             #[cfg(target_os = "android")]

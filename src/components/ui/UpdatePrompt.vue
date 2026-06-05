@@ -209,7 +209,6 @@ const progressPercent = computed(() => {
 .prompt-fade-enter-from,
 .prompt-fade-leave-to {
   opacity: 0;
-  backdrop-filter: blur(0px);
 }
 .prompt-fade-enter-from > div {
   transform: scale(0.9) translateY(20px);

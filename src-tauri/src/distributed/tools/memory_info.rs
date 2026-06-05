@@ -1,7 +1,6 @@
 // distributed/tools/memory_info.rs
 // [Streaming] MobileMemoryInfo — RAM and Swap usage from /proc/meminfo
 
-
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
@@ -66,8 +65,6 @@ impl MemoryInfoTool {
         })
     }
 }
-
-
 
 impl StreamingTool for MemoryInfoTool {
     fn manifest(&self) -> ToolManifest {

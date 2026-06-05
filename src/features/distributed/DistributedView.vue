@@ -27,7 +27,7 @@ const emit = defineEmits<{
 
 const settingsStore = useSettingsStore();
 const notificationStore = useNotificationStore();
-const { status } = useDistributed();
+const { status, activate, deactivate } = useDistributed();
 
 const activeTab = ref<"connection" | "plugins" | "placeholders">("connection");
 const searchQuery = ref("");
@@ -359,6 +359,7 @@ const togglePlugin = async (plugin: PluginItem) => {
 
 // Root Access States & Functions
 const isRootGranted = ref<boolean | null>(null);
+let rootCheckTimer: ReturnType<typeof setTimeout> | null = null;
 
 const checkRootState = async () => {
   console.log("[DistributedView] checkRootState checking system root access...");
@@ -384,8 +385,9 @@ const handleLaunchRootManager = async () => {
         message: `已成功启动 ${res.manager || 'Root管理器'}。请在其中授予 VCPMobile 的超级用户权限，然后返回应用重新检测。`,
         toastOnly: true
       });
-      // 3秒后自动检测一次
-      setTimeout(checkRootState, 3000);
+      // 3秒后自动检测一次（存储引用以便面板关闭时取消）
+      if (rootCheckTimer) clearTimeout(rootCheckTimer);
+      rootCheckTimer = setTimeout(checkRootState, 3000);
     } else {
       notificationStore.addNotification({
         type: "warning",
@@ -429,6 +431,7 @@ const filteredPlaceholders = computed(() => {
 // Initialization
 onMounted(async () => {
   if (props.isOpen) {
+    activate();
     loadSettings();
   }
 });
@@ -437,9 +440,19 @@ watch(
   () => props.isOpen,
   async (val: boolean) => {
     if (val) {
+      activate();
       loadSettings();
       expandedPluginId.value = null;
       searchQuery.value = "";
+    } else {
+      deactivate();
+      // 取消未完成的 root 检测定时器
+      if (rootCheckTimer) { clearTimeout(rootCheckTimer); rootCheckTimer = null; }
+      // 释放内存与清理大对象
+      pluginsList.value = [];
+      pluginData.value = {};
+      pluginFoldBlocks.value = {};
+      placeholdersList.value = [];
     }
   }
 );

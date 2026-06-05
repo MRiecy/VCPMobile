@@ -40,7 +40,6 @@ content:「始」需要写入的内容「末」\n\
         }
     }
 
-
     async fn execute(&self, args: Value, app: &AppHandle) -> Result<Value, String> {
         let action = args
             .get("action")

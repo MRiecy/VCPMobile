@@ -88,6 +88,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var lastConnected: Boolean? = null
+    private var isNetworkMonitoringStarted = false
 
     // ==================================================================
     // Permissions & App Control
@@ -480,8 +482,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun startSensorCollection(invoke: Invoke) {
         try {
-            sensorStatusManager.start()
-            invoke.resolve()
+            activity.runOnUiThread {
+                sensorStatusManager.start()
+                invoke.resolve()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "startSensorCollection failed", e)
             invoke.reject(e.message ?: "Unknown error")
@@ -491,8 +495,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun stopSensorCollection(invoke: Invoke) {
         try {
-            sensorStatusManager.stop()
-            invoke.resolve()
+            activity.runOnUiThread {
+                sensorStatusManager.stop()
+                invoke.resolve()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "stopSensorCollection failed", e)
             invoke.reject(e.message ?: "Unknown error")
@@ -517,24 +523,19 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun emitNetworkStatusToWebView() {
         val status = networkStatusManager.getNetworkStatus()
-        val script = "window.dispatchEvent(new CustomEvent('vcp-network-status-changed', { detail: $status }))"
-        activity.runOnUiThread {
-            webViewRef?.evaluateJavascript(script, null)
+        val connected = status.optBoolean("connected", false)
+        if (connected != lastConnected) {
+            lastConnected = connected
+            trigger("vcp-network-status-changed", status)
         }
     }
 
-    override fun load(webView: WebView) {
-        super.load(webView)
-        webViewRef = webView
-
-        keyboardInsetsManager.attach(webView)
-        lifecycleBridge.attach(activity, webView)
-
-        // 冷启动：处理传递给 Activity 的初始 intent
-        shareIntentHandler.handleShareIntent(activity.intent)
-        shareIntentHandler.injectShareData(webView)
-
-        // 注册网络变更监听
+    @Command
+    fun startNetworkMonitoring(invoke: Invoke) {
+        if (isNetworkMonitoringStarted) {
+            invoke.resolve()
+            return
+        }
         try {
             val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
             val request = android.net.NetworkRequest.Builder()
@@ -552,9 +553,25 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
             }
             cm.registerNetworkCallback(request, networkCallback!!)
+            isNetworkMonitoringStarted = true
+            Log.i(TAG, "[Network] Native network status monitoring started successfully.")
+            invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register network callback", e)
+            invoke.reject(e.message ?: "Failed to register network callback")
         }
+    }
+
+    override fun load(webView: WebView) {
+        super.load(webView)
+        webViewRef = webView
+
+        keyboardInsetsManager.attach(webView)
+        lifecycleBridge.attach(activity, webView)
+
+        // 冷启动：处理传递给 Activity 的初始 intent
+        shareIntentHandler.handleShareIntent(activity.intent)
+        shareIntentHandler.injectShareData(webView)
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
@@ -563,6 +580,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             if (networkCallback != null) {
                 val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
                 cm.unregisterNetworkCallback(networkCallback!!)
+                networkCallback = null
+                isNetworkMonitoringStarted = false
             }
         } catch (_: Exception) {}
         try {

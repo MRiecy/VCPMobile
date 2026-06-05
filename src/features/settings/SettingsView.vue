@@ -1,24 +1,25 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from "vue";
+import { ref, onMounted, watch, computed, defineAsyncComponent } from "vue";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import { useSettingsStore, type AppSettings } from "../../core/stores/settings";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
-import BatteryOptimizationGuide from "./components/BatteryOptimizationGuide.vue";
+// 原子组件与高频子页面：静态 import，无需等待
 import UserProfileSection from "./components/UserProfileSection.vue";
 import SyncSettingsSection from "./components/SyncSettingsSection.vue";
 import VcpCoreSettingsSection from "./components/VcpCoreSettingsSection.vue";
-import TopicSummarySection from "./components/TopicSummarySection.vue";
-import AssistantSettingsSection from "./components/AssistantSettingsSection.vue";
-import MaintenanceSection from "./components/MaintenanceSection.vue";
-import AboutSection from "./components/AboutSection.vue";
 import ThemePicker from "./ThemePicker.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
-import DistributedSettingsSection from "../distributed/DistributedSettingsSection.vue";
-
-// 原子组件
 import SettingsCard from "../../components/settings/SettingsCard.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
+import AboutSection from "./components/AboutSection.vue"; // 实测解析延迟明显，保持静态
+
+// 低频子页面（advanced / power）：懒加载，用户点进子页面时才解析
+const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
+const TopicSummarySection = defineAsyncComponent(() => import("./components/TopicSummarySection.vue"));
+const DistributedSettingsSection = defineAsyncComponent(() => import("../distributed/DistributedSettingsSection.vue"));
+const MaintenanceSection = defineAsyncComponent(() => import("./components/MaintenanceSection.vue"));
+const BatteryOptimizationGuide = defineAsyncComponent(() => import("./components/BatteryOptimizationGuide.vue"));
 
 
 const props = withDefaults(
@@ -63,6 +64,7 @@ const settings = ref<AppSettings>({
 const loading = ref(true);
 const showSummaryModelSelector = ref(false);
 const currentSubPage = ref<string | null>(null);
+const visibleSubPage = ref<string | null>(null);
 
 const categories = [
   { id: "identity", title: "用户身份", description: "头像、用户名与管理员账号" },
@@ -134,13 +136,27 @@ watch(
   },
 );
 
+// 纯展示型子页面：无可编辑内容，物理返回时跳过 saveSettings
+const READ_ONLY_SUBPAGES = new Set(['about', 'power']);
+
 watch(currentSubPage, (val) => {
   if (val) {
+    visibleSubPage.value = val;
     registerModal(SUBPAGE_MODAL_ID, () => {
-      goBack();
+      if (READ_ONLY_SUBPAGES.has(currentSubPage.value ?? '')) {
+        currentSubPage.value = null;
+      } else {
+        goBack();
+      }
     });
   } else {
     unregisterModal(SUBPAGE_MODAL_ID);
+    // 延迟清空子页面，防止与外层 SlidePage 的退场 Transition 动画（0.3s-0.35s）产生 DOM 突兀卸载冲突
+    setTimeout(() => {
+      if (!currentSubPage.value) {
+        visibleSubPage.value = null;
+      }
+    }, 350);
   }
 });
 </script>
@@ -231,12 +247,12 @@ watch(currentSubPage, (val) => {
               :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pt-6 pb-5 space-y-6 no-rubber-band'"
             >
               <!-- 用户身份 -->
-              <template v-if="currentSubPage === 'identity'">
+              <template v-if="visibleSubPage === 'identity'">
                 <UserProfileSection :settings="settings" />
               </template>
 
               <!-- 服务器连接 -->
-              <template v-if="currentSubPage === 'connection'">
+              <template v-if="visibleSubPage === 'connection'">
                 <div class="space-y-6">
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">核心连接</h3>
@@ -260,7 +276,7 @@ watch(currentSubPage, (val) => {
               </template>
 
               <!-- 主题切换 -->
-              <template v-if="currentSubPage === 'theme'">
+              <template v-if="visibleSubPage === 'theme'">
                 <SettingsCard no-padding>
                   <div class="p-4">
                     <ThemePicker />
@@ -269,7 +285,7 @@ watch(currentSubPage, (val) => {
               </template>
 
               <!-- 高级功能 -->
-              <template v-if="currentSubPage === 'advanced'">
+              <template v-if="visibleSubPage === 'advanced'">
                 <div class="space-y-6">
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">划词悬浮助手</h3>
@@ -306,12 +322,12 @@ watch(currentSubPage, (val) => {
               </template>
 
               <!-- 后台保活 -->
-              <template v-if="currentSubPage === 'power'">
+              <template v-if="visibleSubPage === 'power'">
                 <BatteryOptimizationGuide />
               </template>
 
               <!-- 关于 -->
-              <template v-if="currentSubPage === 'about'">
+              <template v-if="visibleSubPage === 'about'">
                 <AboutSection @back="currentSubPage = null" />
               </template>
             </div>

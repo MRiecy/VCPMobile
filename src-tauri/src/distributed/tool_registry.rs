@@ -222,7 +222,7 @@ impl ToolRegistry {
 
     /// Load disabled tools list from local JSON config file and populate memory state.
     pub fn load_disabled_config(&self, app: &AppHandle) {
-        if let Some(config_dir) = app.path().app_config_dir().ok() {
+        if let Ok(config_dir) = app.path().app_config_dir() {
             let config_path = config_dir.join("distributed_tools.json");
             if config_path.exists() {
                 if let Ok(mut file) = File::open(&config_path) {
@@ -231,7 +231,10 @@ impl ToolRegistry {
                         if let Ok(names) = serde_json::from_str::<Vec<String>>(&content) {
                             if let Ok(mut guard) = self.disabled_names.write() {
                                 *guard = names.into_iter().collect();
-                                log::info!("[Distributed] Loaded disabled tools config: {:?}", guard);
+                                log::info!(
+                                    "[Distributed] Loaded disabled tools config: {:?}",
+                                    guard
+                                );
                             }
                         }
                     }
@@ -249,7 +252,7 @@ impl ToolRegistry {
 
     /// Save current disabled tools list to local JSON config file.
     pub fn save_disabled_config(&self, app: &AppHandle) -> Result<(), String> {
-        if let Some(config_dir) = app.path().app_config_dir().ok() {
+        if let Ok(config_dir) = app.path().app_config_dir() {
             // Ensure directory exists
             let _ = std::fs::create_dir_all(&config_dir);
             let config_path = config_dir.join("distributed_tools.json");
@@ -260,7 +263,8 @@ impl ToolRegistry {
             };
             let content = serde_json::to_string_pretty(&names).map_err(|e| e.to_string())?;
             let mut file = File::create(&config_path).map_err(|e| e.to_string())?;
-            file.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+            file.write_all(content.as_bytes())
+                .map_err(|e| e.to_string())?;
             log::info!("[Distributed] Saved disabled tools config: {:?}", names);
         }
         Ok(())

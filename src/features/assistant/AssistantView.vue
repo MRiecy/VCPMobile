@@ -82,7 +82,7 @@ onMounted(() => {
   >
     <!-- Header -->
     <div
-      class="flex items-center justify-between px-4 py-3 border-b border-black/5 dark:border-white/5 shrink-0 bg-white/50 dark:bg-zinc-900/50 backdrop-blur-md"
+      class="flex items-center justify-between px-4 py-3 border-b border-black/5 dark:border-white/5 shrink-0 bg-white dark:bg-zinc-900"
     >
       <div class="flex items-center gap-2">
         <div

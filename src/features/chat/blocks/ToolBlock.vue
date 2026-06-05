@@ -61,7 +61,7 @@ const isImageValue = (key: string, value: string): boolean => {
         <div>
           <span class="tool-label text-[10px] font-bold block leading-none mb-1 flex items-center gap-1">
             {{ type === 'tool-use' ? 'VCP-ToolUse' : 'VCP-ToolResult' }}
-            <Loader2 v-if="type === 'tool-use' && !block.is_complete" :size="10" class="animate-spin" />
+            <Loader2 v-if="type === 'tool-use' && !block.is_complete" :size="10" class="custom-spin" />
           </span>
           <span class="tool-name text-xs font-bold font-mono">
             {{ block.tool_name || 'Unknown Tool' }}
@@ -138,11 +138,11 @@ const isImageValue = (key: string, value: string): boolean => {
 
 @keyframes vcp-icon-rotate {
   0% {
-    transform: rotate(0deg);
+    transform: rotate(0deg) translate3d(0, 0, 0);
   }
 
   100% {
-    transform: rotate(360deg);
+    transform: rotate(360deg) translate3d(0, 0, 0);
   }
 }
 
@@ -177,6 +177,9 @@ const isImageValue = (key: string, value: string): boolean => {
   color: #ffffff !important;
   border: none !important;
   position: relative;
+  /* GPU 硬件加速与合成层隔离 */
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
 }
 
 .vcp-tool-block.is-tool-use::after {
@@ -198,6 +201,9 @@ const isImageValue = (key: string, value: string): boolean => {
   mask-composite: exclude;
   z-index: 0;
   pointer-events: none;
+  /* 隔离复杂的遮罩平移重绘污染 */
+  will-change: transform, opacity;
+  transform: translate3d(0, 0, 0);
 }
 
 .vcp-tool-block.is-tool-use .tool-header-content {
@@ -209,6 +215,26 @@ const isImageValue = (key: string, value: string): boolean => {
   background: transparent !important;
   color: rgba(255, 255, 255, 0.9) !important;
   animation: vcp-icon-rotate 4s linear infinite;
+  /* 图标高频旋转开启硬件加速 */
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+.custom-spin {
+  animation: vcp-spin 1s linear infinite;
+  /* 提升至 GPU 合成层 */
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+@keyframes vcp-spin {
+  from {
+    transform: rotate(0deg) translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: rotate(360deg) translate3d(0, 0, 0);
+  }
 }
 
 .vcp-tool-block.is-tool-use .tool-label {

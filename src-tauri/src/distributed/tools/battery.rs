@@ -2,13 +2,10 @@
 // [Streaming] MobileBatteryInfo — battery level, charging status, temperature.
 // Reads /sys/class/power_supply/battery/{capacity, status, temp}
 
-
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-
 pub struct BatteryInfoTool;
-
 
 impl StreamingTool for BatteryInfoTool {
     fn manifest(&self) -> ToolManifest {
@@ -35,8 +32,10 @@ impl StreamingTool for BatteryInfoTool {
             use tauri::Manager;
             let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
             let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard.as_ref().ok_or("VcpMobile plugin not initialized")?;
-            
+            let plugin_handle = handle_guard
+                .as_ref()
+                .ok_or("VcpMobile plugin not initialized")?;
+
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct BatteryResponse {
@@ -45,12 +44,9 @@ impl StreamingTool for BatteryInfoTool {
                 status: Option<String>,
                 temperature: Option<f64>,
             }
-            
+
             let res = plugin_handle
-                .run_mobile_plugin::<BatteryResponse>(
-                    "getBatteryStatus",
-                    serde_json::json!({}),
-                )
+                .run_mobile_plugin::<BatteryResponse>("getBatteryStatus", serde_json::json!({}))
                 .map_err(|e| format!("JNI call failed: {}", e))?;
 
             let status_str = res.status.unwrap_or_else(|| "未知".to_string());
@@ -58,9 +54,13 @@ impl StreamingTool for BatteryInfoTool {
                 Some(t) if t >= 0.0 => format!("{:.1}°C", t),
                 _ => "N/A".to_string(),
             };
-            
-            let pwr_save = if res.is_power_save_mode { " (低功耗模式)" } else { "" };
-            
+
+            let pwr_save = if res.is_power_save_mode {
+                " (低功耗模式)"
+            } else {
+                ""
+            };
+
             Ok(format!(
                 "电量: {}%{} | 状态: {} | 温度: {}",
                 res.level, pwr_save, status_str, temp_str
