@@ -568,6 +568,35 @@ Android 11 (API 30) 引入了包可见性限制，默认情况下应用无法查
 
 6. **桌面端安全降级**：所有 Root 和管理器相关命令在桌面端返回安全默认值（`isRoot: false`、`success: false`、错误提示消息），不暴露任何实际系统能力。
 
+## 8. WakeLock/WifiLock 保活机制（交叉引用）
+
+> **注意**：WakeLock/WifiLock 双锁保活机制的完整文档（包含 `acquire_wake_lock`、`release_wake_lock` 的 Kotlin 实现细节、超时安全策略及生命周期清理）已统一收录于 [06_权限与系统控制.md](./06_权限与系统控制.md) 第 15 节「WakeLock/WifiLock 保活机制」。
+
+### 8.1 概述
+
+`acquire_wake_lock` / `release_wake_lock` 是防止 Android 设备在长连接场景下进入深度休眠的保活指令：
+
+| 命令 | Rust 接口 | 锁类型 | 用途 |
+|------|-----------|--------|------|
+| `acquire_wake_lock` | `system.rs :: acquire_wake_lock()` | CPU WakeLock (`PARTIAL_WAKE_LOCK`) + WifiLock (`WIFI_MODE_FULL_LOW_LATENCY`) | 防止 CPU 休眠与 WiFi 断开 |
+| `release_wake_lock` | `system.rs :: release_wake_lock()` | — (释放上述双锁) | 成对释放，恢复系统正常休眠策略 |
+
+这两个命令在分布式计算节点（`distributed/client.rs`）中被自动成对调用，覆盖 WebSocket 连接、工具执行、占位推送三个关键阶段：
+
+| 阶段 | 位置 | 锁持有时长 |
+|------|------|------------|
+| TCP 连接 | `connect_async` 前后 | 毫秒级 |
+| 工具执行 | `execute_tool` 前后 | 取决于工具耗时（硬上限 5 分钟） |
+| 占位推送 | `push_static_placeholders` 前后 | 毫秒级 |
+
+前端一般无需直接调用这两个命令，它们由 Rust 后端在 `DistributedNode` 生命周期中自动管理。
+
+### 8.2 交叉引用
+
+- **完整实现**：[06_权限与系统控制.md 第 15 节](./06_权限与系统控制.md) — 含 Kotlin 源码、双锁参数详情、`onDestroy()` 清理逻辑
+- **使用场景**：[03_流式前台保活服务.md](./03_流式前台保活服务.md) — 前台 Service + WakeLock 双重保活在流式对话中的应用
+- **调用模式**：`src-tauri/src/distributed/client.rs` (`acquire_wake_lock_helper` / `release_wake_lock_helper` 在 connect / tool_exec / placeholder_push 三个 phase 中成对调用)
+
 ---
 
 *最后更新：2026-06-05 | VCP Mobile v1.0.3*
