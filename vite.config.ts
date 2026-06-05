@@ -70,7 +70,7 @@ export default defineConfig(async () => ({
   ],
 
   esbuild: {
-    pure: process.env.NODE_ENV === "production" ? ["console.log", "console.debug"] : [],
+    pure: process.env.NODE_ENV === "production" ? ["console.log", "console.debug", "console.info"] : [],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
