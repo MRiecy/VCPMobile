@@ -3,7 +3,7 @@ id: VUE-CORE-002
 title: 状态管理总览与Store全景图
 description: VCP Mobile 前端 18 个 Pinia Store 的职责分类、依赖关系与状态设计全景
 version: 1.0.3
-date: 2026-06-04
+date: 2026-06-05
 ---
 
 # 02. 状态管理总览与Store全景图
@@ -1158,4 +1158,4 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 ---
 
-*最后更新：2026-06-04 | VCP Mobile v1.0.3*
+*最后更新：2026-06-05 | VCP Mobile v1.0.3*

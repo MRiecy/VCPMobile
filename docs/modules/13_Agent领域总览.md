@@ -3,7 +3,7 @@ id: MOD-AGENT-013
 title: Agent 服务与类型系统
 description: Agent 领域总览——CRUD 服务、类型契约、头像颜色生成、应用层服务
 version: 1.0.3
-date: 2026-06-04
+date: 2026-06-05
 ---
 
 # 13. Agent 服务与类型系统

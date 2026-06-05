@@ -3,7 +3,7 @@ id: PLUGIN-GUESTJS-007
 title: Guest JS API
 description: tauri-plugin-vcp-mobile 的前端调用封装层
 version: 1.0.3
-date: 2026-06-04
+date: 2026-06-05
 related_files:
   - src-tauri/plugins/vcp-mobile/guest-js/index.ts
   - src-tauri/plugins/vcp-mobile/src/lib.rs

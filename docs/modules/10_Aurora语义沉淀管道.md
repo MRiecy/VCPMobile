@@ -1,7 +1,7 @@
 ---
 id: MOD-AURORA-010
 version: "1.0.3"
-date: 2026-06-04
+date: 2026-06-05
 module: aurora_pipeline.rs
 scope: src-tauri/src/vcp_modules/
 related: [vcp_client.rs, stream_block_parser.rs, pre_renderer, sync_hash.rs]
@@ -347,4 +347,4 @@ pub fn balance_html_tags(html: &str) -> String {
 
 ---
 
-*最后更新：2026-06-04 | VCP Mobile v1.0.3*
+*最后更新：2026-06-05 | VCP Mobile v1.0.3*

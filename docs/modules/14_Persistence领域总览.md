@@ -1,7 +1,7 @@
 ---
 id: MOD-PERSISTENCE-014
 version: "1.0.3"
-date: 2026-06-04
+date: 2026-06-05
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
 related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs]
@@ -844,7 +844,7 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 
 ---
 
-*最后更新：2026-06-04 | VCP Mobile v1.0.3*
+*最后更新：2026-06-05 | VCP Mobile v1.0.3*
 
 > **关键设计决策备忘**
 >

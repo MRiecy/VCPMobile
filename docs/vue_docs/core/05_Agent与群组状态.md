@@ -3,7 +3,7 @@ id: VUE-CORE-005
 title: Agent与群组状态
 description: VCP Mobile 前端 Agent/群组 列表管理、配置缓存与话题联动的状态设计
 version: 1.0.3
-date: 2026-06-04
+date: 2026-06-05
 ---
 
 # 05. Agent与群组状态
@@ -764,4 +764,4 @@ watch(agentConfig, () => {
 | 流式加载 | Streaming Load | 通过 Channel 分块接收话题数据，前端渐进式渲染 | `topicListManager.ts` |
 
 ---
-*最后更新：2026-06-04 | VCP Mobile v1.0.3*
+*最后更新：2026-06-05 | VCP Mobile v1.0.3*

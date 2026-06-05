@@ -3,7 +3,7 @@ id: VUE-AGEN-013
 title: Agent与群组设置面板
 description: VCP Mobile 前端 AgentSettingsView 与 GroupSettingsView 的表单设计、头像裁剪与配置持久化
 version: 1.0.3
-date: 2026-06-04
+date: 2026-06-05
 ---
 
 # 13. Agent与群组设置面板
@@ -707,4 +707,4 @@ if (!groupConfig.value.memberTags[agentId]) {
 | **JSON Patch 风格** | `update_agent_config` 的更新方式：读取 → 合并 → 写入 | `agent_service.rs:193` |
 
 ---
-*最后更新：2026-06-04 | VCP Mobile v1.0.3*
+*最后更新：2026-06-05 | VCP Mobile v1.0.3*
