@@ -197,6 +197,12 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         return Ok(());
     }
 
+    #[cfg(target_os = "android")]
+    let _ = tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
+        &app_handle,
+        "[预渲染重建] VCP Mobile",
+    );
+
     let (tx_compiler, rx_compiler) = mpsc::channel::<(String, String, String)>(1000);
     let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, String, Vec<u8>)>>(100);
     let total_count = total as usize;
@@ -284,7 +290,15 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
     let _ = futures_util::future::join_all(compiler_handles).await;
     drop(tx_writer);
 
-    writer_handle.await.map_err(|e| e.to_string())??;
+    let write_res = writer_handle.await.map_err(|e| e.to_string());
+
+    #[cfg(target_os = "android")]
+    let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
+        &app_handle,
+        "[预渲染重建] VCP Mobile",
+    );
+
+    write_res??;
 
     // 补偿 100% 进度
     let _ = app_handle.emit(

@@ -24,12 +24,14 @@ struct AppState {
 /// 服务器句柄：持有此句柄可触发优雅关闭
 pub struct ServerHandle {
     shutdown_tx: watch::Sender<bool>,
+    join_handle: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl ServerHandle {
-    /// 发送关闭信号，服务器将优雅退出
-    pub fn shutdown(self) {
+    /// 发送关闭信号，服务器将优雅退出，并等待任务结束释放端口
+    pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
+        let _ = self.join_handle.await;
     }
 }
 
@@ -39,7 +41,7 @@ pub fn start_server(app_handle: AppHandle) -> ServerHandle {
     let addr = SocketAddr::from(([127, 0, 0, 1], 14202));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    tauri::async_runtime::spawn(async move {
+    let join_handle = tauri::async_runtime::spawn(async move {
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .route("/", get(index_handler))
@@ -79,7 +81,10 @@ pub fn start_server(app_handle: AppHandle) -> ServerHandle {
         log::info!("[LocalServer] Server stopped.");
     });
 
-    ServerHandle { shutdown_tx }
+    ServerHandle {
+        shutdown_tx,
+        join_handle,
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {

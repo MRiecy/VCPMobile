@@ -92,3 +92,8 @@ export function useDistributed() {
     refreshStatus,
   };
 }
+
+export function updateDistributedState(state: DistributedStatus['state']) {
+  status.value.state = state;
+  status.value.connected = state === 'connected';
+}

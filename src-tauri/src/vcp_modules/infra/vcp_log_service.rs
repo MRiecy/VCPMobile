@@ -232,7 +232,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 Ok((ws_stream, _)) => {
                     retry_delay = Duration::from_millis(1000);
                     {
-                        *CURRENT_LOG_STATUS.write().await = "open".to_string();
+                        *CURRENT_LOG_STATUS.write().await = "connected".to_string();
                     }
                     log::info!("[VCPLog] Connected successfully to {}", masked_url);
 
@@ -242,7 +242,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         "vcp-system-event",
                         serde_json::json!({
                             "type": "vcp-log-status",
-                            "status": "open",
+                            "status": "connected",
                             "message": "已连接",
                             "source": "VCPLog"
                         }),

@@ -9,9 +9,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 
 use super::tool_registry::ToolRegistry;
 use super::types::*;
@@ -28,29 +29,42 @@ type WsSink = Arc<
     >,
 >;
 
+/// Immutable configuration for a single connection lifecycle.
+struct ConnectionConfig {
+    ws_url: String,
+    vcp_key: String,
+    device_name: String,
+}
+
+/// Runtime context for a single connection lifecycle (channel receivers).
+struct SessionContext {
+    status: Arc<RwLock<DistributedStatus>>,
+    registry: Arc<ToolRegistry>,
+    re_register_rx: tokio::sync::mpsc::Receiver<()>,
+    reconnect_rx: tokio::sync::mpsc::Receiver<()>,
+}
+
+/// Handle to an active connection session — created by start(), dropped by stop().
+struct ConnectionSession {
+    cancel_token: CancellationToken,
+    re_register_tx: tokio::sync::mpsc::Sender<()>,
+    reconnect_tx: tokio::sync::mpsc::Sender<()>,
+    task_handle: tokio::task::JoinHandle<()>,
+}
+
 /// Distributed node state, shared across async tasks.
 pub struct DistributedClient {
-    /// Signal to stop all background tasks.
-    shutdown_tx: watch::Sender<bool>,
     /// Current connection status.
     status: Arc<RwLock<DistributedStatus>>,
-    /// Handle to the background connection task.
-    task_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Channel sender to trigger tool re-registration.
-    re_register_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
-    /// Channel sender to trigger immediate reconnect.
-    reconnect_tx: Mutex<Option<tokio::sync::mpsc::Sender<()>>>,
+    /// Active session handle — None when disconnected.
+    session: Mutex<Option<ConnectionSession>>,
 }
 
 impl DistributedClient {
     pub fn new() -> Self {
-        let (shutdown_tx, _) = watch::channel(false);
         Self {
-            shutdown_tx,
             status: Arc::new(RwLock::new(DistributedStatus::default())),
-            task_handle: Mutex::new(None),
-            re_register_tx: Mutex::new(None),
-            reconnect_tx: Mutex::new(None),
+            session: Mutex::new(None),
         }
     }
 
@@ -83,17 +97,16 @@ impl DistributedClient {
             s.last_error = None;
         }
 
-        // Create re-registration channel.
+        // Gracefully shut down any existing session before creating a new one.
+        if let Some(old_session) = self.session.lock().await.take() {
+            old_session.cancel_token.cancel();
+            let _ = old_session.task_handle.await;
+        }
+
+        // Create fresh channels and cancellation token — no state reuse from previous cycles.
+        let cancel_token = CancellationToken::new();
         let (re_register_tx, re_register_rx) = tokio::sync::mpsc::channel(1);
-        *self.re_register_tx.lock().await = Some(re_register_tx);
-
-        // Create reconnect channel.
         let (reconnect_tx, reconnect_rx) = tokio::sync::mpsc::channel(1);
-        *self.reconnect_tx.lock().await = Some(reconnect_tx);
-
-        // Reset shutdown signal.
-        let _ = self.shutdown_tx.send(false);
-        let shutdown_rx = self.shutdown_tx.subscribe();
         let status = self.status.clone();
 
         Self::emit_status(&app, &status).await;
@@ -106,19 +119,27 @@ impl DistributedClient {
             );
         }
 
-        let handle = tokio::spawn(Self::connection_loop(
-            app,
+        let config = ConnectionConfig {
             ws_url,
             vcp_key,
             device_name,
-            shutdown_rx,
+        };
+        let ctx = SessionContext {
             status,
             registry,
             re_register_rx,
             reconnect_rx,
-        ));
+        };
+        let loop_token = cancel_token.clone();
 
-        *self.task_handle.lock().await = Some(handle);
+        let task_handle = tokio::spawn(Self::connection_loop(app, config, loop_token, ctx));
+
+        *self.session.lock().await = Some(ConnectionSession {
+            cancel_token,
+            re_register_tx,
+            reconnect_tx,
+            task_handle,
+        });
         Ok(())
     }
 
@@ -144,21 +165,26 @@ impl DistributedClient {
             s.state = ConnectionState::Disconnecting;
         }
 
-        let _ = self.shutdown_tx.send(true);
-        if let Some(handle) = self.task_handle.lock().await.take() {
-            handle.abort();
-            let _ = handle.await;
+        // Take the session out and gracefully shut it down.
+        // cancel() signals the connection_loop to exit; task_handle.await waits for
+        // the loop's tail cleanup (which sets Disconnected + emits status).
+        if let Some(session) = self.session.lock().await.take() {
+            session.cancel_token.cancel();
+            let _ = session.task_handle.await;
+            // session drops here → re_register_tx, reconnect_tx naturally close
         }
 
+        // Safety net: ensure final Disconnected state if loop didn't clean up properly.
         {
             let mut s = self.status.write().await;
-            s.state = ConnectionState::Disconnected;
-            s.connected = false;
-            s.server_id = None;
-            s.client_id = None;
-            *self.re_register_tx.lock().await = None;
-            *self.reconnect_tx.lock().await = None;
+            if s.state == ConnectionState::Disconnecting {
+                s.state = ConnectionState::Disconnected;
+                s.connected = false;
+                s.server_id = None;
+                s.client_id = None;
+            }
         }
+        Self::emit_status(_app, &self.status).await;
     }
 
     /// Get current status snapshot.
@@ -178,15 +204,15 @@ impl DistributedClient {
 
     /// Trigger re-registration of tools.
     pub async fn re_register_tools(&self) {
-        if let Some(tx) = self.re_register_tx.lock().await.as_ref() {
-            let _ = tx.send(()).await;
+        if let Some(session) = self.session.lock().await.as_ref() {
+            let _ = session.re_register_tx.send(()).await;
         }
     }
 
     /// Trigger immediate reconnection.
     pub async fn trigger_reconnect(&self) {
-        if let Some(tx) = self.reconnect_tx.lock().await.as_ref() {
-            let _ = tx.send(()).await;
+        if let Some(session) = self.session.lock().await.as_ref() {
+            let _ = session.reconnect_tx.send(()).await;
         }
     }
 
@@ -194,46 +220,47 @@ impl DistributedClient {
     // Connection loop — mirrors DistributedServer.connect() + scheduleReconnect()
     // ================================================================
 
-    #[allow(clippy::too_many_arguments)]
     async fn connection_loop(
         app: AppHandle,
-        ws_url: String,
-        vcp_key: String,
-        device_name: String,
-        mut shutdown_rx: watch::Receiver<bool>,
-        status: Arc<RwLock<DistributedStatus>>,
-        registry: Arc<ToolRegistry>,
-        re_register_rx: tokio::sync::mpsc::Receiver<()>,
-        mut reconnect_rx: tokio::sync::mpsc::Receiver<()>,
+        config: ConnectionConfig,
+        cancel_token: CancellationToken,
+        ctx: SessionContext,
     ) {
         let mut reconnect_interval = Duration::from_secs(5);
         let max_reconnect_interval = Duration::from_secs(60);
-        let re_register_rx = Arc::new(Mutex::new(re_register_rx));
+        let re_register_rx = Arc::new(Mutex::new(ctx.re_register_rx));
+        let mut reconnect_rx = ctx.reconnect_rx;
+        let status = ctx.status;
+        let registry = ctx.registry;
 
         loop {
-            // Check shutdown before connecting.
-            if *shutdown_rx.borrow() {
+            // Check cancellation before connecting.
+            if cancel_token.is_cancelled() {
                 break;
             }
 
             // Build connection URL: ws://host:port/vcp-distributed-server/VCP_Key=<key>
             let connection_url = format!(
                 "{}/vcp-distributed-server/VCP_Key={}",
-                ws_url.trim_end_matches('/'),
-                vcp_key
+                config.ws_url.trim_end_matches('/'),
+                config.vcp_key
             );
 
             log::info!(
                 "[Distributed] Connecting to main server: {}",
-                connection_url.replace(&vcp_key, "***")
+                connection_url.replace(&config.vcp_key, "***")
             );
 
+            // Connect with cancellation support — avoids blocking on TCP timeout during shutdown.
             acquire_wake_lock_helper(&app);
-            let connect_result = tokio_tungstenite::connect_async(&connection_url).await;
+            let connect_result = tokio::select! {
+                result = tokio_tungstenite::connect_async(&connection_url) => Some(result),
+                _ = cancel_token.cancelled() => None,
+            };
             release_wake_lock_helper(&app);
 
             match connect_result {
-                Ok((ws_stream, _response)) => {
+                Some(Ok((ws_stream, _response))) => {
                     log::info!("[Distributed] WebSocket connected.");
                     reconnect_interval = Duration::from_secs(5); // Reset backoff on success.
 
@@ -241,8 +268,8 @@ impl DistributedClient {
                     let exit_reason = Self::run_session(
                         &app,
                         ws_stream,
-                        &device_name,
-                        &mut shutdown_rx,
+                        &config.device_name,
+                        &cancel_token,
                         &status,
                         &registry,
                         re_register_rx.clone(),
@@ -262,7 +289,7 @@ impl DistributedClient {
                     }
                     Self::emit_status(&app, &status).await;
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     log::warn!("[Distributed] Connection failed: {}", e);
                     {
                         let mut s = status.write().await;
@@ -274,10 +301,14 @@ impl DistributedClient {
                     }
                     Self::emit_status(&app, &status).await;
                 }
+                None => {
+                    // Cancelled during connect — exit loop immediately.
+                    break;
+                }
             }
 
-            // Check shutdown before waiting.
-            if *shutdown_rx.borrow() {
+            // Check cancellation before waiting.
+            if cancel_token.is_cancelled() {
                 break;
             }
 
@@ -292,7 +323,7 @@ impl DistributedClient {
                 _ = reconnect_rx.recv() => {
                     log::info!("[Distributed] Triggering immediate reconnect due to network restore event.");
                 }
-                _ = shutdown_rx.changed() => {
+                _ = cancel_token.cancelled() => {
                     break;
                 }
             }
@@ -321,7 +352,7 @@ impl DistributedClient {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
         device_name: &str,
-        shutdown_rx: &mut watch::Receiver<bool>,
+        cancel_token: &CancellationToken,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
         re_register_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<()>>>,
@@ -407,15 +438,13 @@ impl DistributedClient {
                     release_wake_lock_helper(app);
                 }
 
-                // --- Shutdown signal ---
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
-                        log::info!("[Distributed] Shutdown signal received, closing session.");
-                        let mut tx = ws_tx.lock().await;
-                        let _ = tx.close().await;
-                        exit_reason = "Client requested shutdown".to_string();
-                        break;
-                    }
+                // --- Cancellation signal ---
+                _ = cancel_token.cancelled() => {
+                    log::info!("[Distributed] Shutdown signal received, closing session.");
+                    let mut tx = ws_tx.lock().await;
+                    let _ = tx.close().await;
+                    exit_reason = "Client requested shutdown".to_string();
+                    break;
                 }
             }
         }

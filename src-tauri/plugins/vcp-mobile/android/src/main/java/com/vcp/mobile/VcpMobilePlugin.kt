@@ -397,20 +397,44 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         try {
             val args = invoke.parseArgs(StartStreamArgs::class.java)
             val intent = StreamKeepaliveService.createIntent(activity, args.agentName, args.isKeepaliveMode)
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    activity.startForegroundService(intent)
+            val hasKeepaliveParam = args.isKeepaliveMode != null
+            val isKeepalive = args.isKeepaliveMode ?: false
+
+            if (args.agentName.isEmpty()) {
+                if (hasKeepaliveParam) {
+                    if (!isKeepalive) {
+                        Log.i(TAG, "startStreamingService: both agentName and keepaliveMode are inactive. Stopping service directly.")
+                        activity.stopService(intent)
+                        invoke.resolve()
+                        return
+                    }
                 } else {
-                    activity.startService(intent)
+                    if (StreamKeepaliveService.isServiceRunning) {
+                        startServiceCompatible(intent)
+                    }
+                    invoke.resolve()
+                    return
                 }
-            } catch (e: SecurityException) {
-                Log.w(TAG, "POST_NOTIFICATIONS permission denied, degrading to normal service", e)
-                activity.startService(intent) // 静默降级为普通 Service，防止闪退崩溃
             }
+
+            startServiceCompatible(intent)
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "startStreamingService failed", e)
             invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    private fun startServiceCompatible(intent: Intent) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(intent)
+            } else {
+                activity.startService(intent)
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "POST_NOTIFICATIONS permission denied, degrading to normal service", e)
+            activity.startService(intent)
         }
     }
 

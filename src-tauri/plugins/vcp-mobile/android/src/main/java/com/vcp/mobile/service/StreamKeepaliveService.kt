@@ -36,6 +36,9 @@ class StreamKeepaliveService : Service() {
         const val EXTRA_IS_KEEPALIVE_MODE = "is_keepalive_mode"
         private const val TAG = "VcpMobileService"
 
+        @Volatile
+        var isServiceRunning = false
+
         /**
          * 构造启动该服务的 Intent
          */
@@ -52,6 +55,7 @@ class StreamKeepaliveService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isServiceRunning = true
         createNotificationChannel()
     }
 
@@ -66,7 +70,21 @@ class StreamKeepaliveService : Service() {
         }
 
         if (!isKeepaliveModeActive && currentStreamName.isEmpty()) {
-            Log.i(TAG, "No active streams and keepalive mode is inactive. Stopping service.")
+            Log.i(TAG, "No active streams and keepalive mode is inactive. Stopping service safely.")
+            val notification = buildNotification("", false)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to startForeground during shutdown fallback", e)
+            }
             stopSelf()
             return START_NOT_STICKY
         }
@@ -89,6 +107,17 @@ class StreamKeepaliveService : Service() {
         }
 
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        isServiceRunning = false
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

@@ -1,4 +1,7 @@
 <script setup lang="ts">
+defineOptions({
+  inheritAttrs: false
+});
 import { ref, onMounted, nextTick, watch } from 'vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 
@@ -56,7 +59,7 @@ onMounted(() => {
 <template>
   <Teleport to="body">
     <Transition name="fade">
-      <div v-if="isOpen"
+      <div v-if="isOpen" v-bind="$attrs"
         class="fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] bg-black/40"
         @click.self="handleCancel">
         <div

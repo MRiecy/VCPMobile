@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { AppSettings } from "../../core/stores/settings";
+import { computed, onMounted, onUnmounted } from "vue";
+import { useSettingsStore, type AppSettings } from "../../core/stores/settings";
 import { useDistributed } from "./composables/useDistributed";
 import { useNotificationStore } from "../../core/stores/notification";
 
@@ -17,7 +17,16 @@ const emit = defineEmits<{
   (e: "save-request"): void;
 }>();
 
-const { status, loading } = useDistributed();
+const settingsStore = useSettingsStore();
+const { status, activate, deactivate } = useDistributed();
+
+onMounted(() => {
+  activate();
+});
+
+onUnmounted(() => {
+  deactivate();
+});
 
 // Local toggle state — bound to settings for persistence
 const enabled = computed({
@@ -94,7 +103,7 @@ const toggleConnection = async () => {
         <SettingsSwitch
           :model-value="enabled"
           active-color="bg-purple-500"
-          :disabled="loading || (!derivedWsUrl && !enabled)"
+          :disabled="settingsStore.loading || (!derivedWsUrl && !enabled)"
           @update:model-value="toggleConnection"
         />
       </template>

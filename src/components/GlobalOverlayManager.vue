@@ -26,7 +26,7 @@ const handleEditorSave = async (newContent: string) => {
 <template>
   <div class="fixed inset-0 pointer-events-none z-toast">
     <!-- 1. 全局基础 UI (Prompt/Toast) -->
-    <VcpPrompt v-if="overlayStore.promptConfig" class="pointer-events-auto" :is-open="!!overlayStore.promptConfig"
+    <VcpPrompt v-if="overlayStore.promptConfig" :is-open="!!overlayStore.promptConfig"
       :title="overlayStore.promptConfig.title" :initial-value="overlayStore.promptConfig.initialValue"
       :placeholder="overlayStore.promptConfig.placeholder" @confirm="handlePromptConfirm"
       @cancel="overlayStore.closePrompt()" @update:isOpen="!$event && overlayStore.closePrompt()" />

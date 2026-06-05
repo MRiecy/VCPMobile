@@ -260,14 +260,12 @@ async fn internal_write_settings<R: Runtime>(
     if should_reconcile_dist {
         let concrete_app = app_handle.state::<tauri::AppHandle>().inner().clone();
         let enabled = settings.distributed_enabled;
-        tauri::async_runtime::spawn(async move {
-            crate::vcp_modules::infra::lifecycle_manager::reconcile_distributed_node(
-                &concrete_app,
-                enabled,
-                force_reconnect_dist,
-            )
-            .await;
-        });
+        crate::vcp_modules::infra::lifecycle_manager::reconcile_distributed_node(
+            &concrete_app,
+            enabled,
+            force_reconnect_dist,
+        )
+        .await;
     }
 
     Ok(true)

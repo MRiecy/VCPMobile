@@ -35,6 +35,7 @@ class FloatingWindowManager(private val activity: Activity) {
     
     private var windowManager: WindowManager? = null
     private var ballLayoutParams: WindowManager.LayoutParams? = null
+    private var currentAnimator: ValueAnimator? = null
 
     companion object {
         private const val TAG = "FloatingWindowManager"
@@ -113,6 +114,8 @@ class FloatingWindowManager(private val activity: Activity) {
     }
 
     private fun hideFloatingBall() {
+        currentAnimator?.cancel()
+        currentAnimator = null
         floatingBallView?.let { view ->
             try { windowManager?.removeView(view) } catch (e: Exception) {}
             finally { floatingBallView = null; ballLayoutParams = null }
@@ -151,7 +154,8 @@ class FloatingWindowManager(private val activity: Activity) {
         val wm = windowManager ?: return
         val dm = context.resources.displayMetrics
         val targetX = if (params.x + view.width / 2 < dm.widthPixels / 2) 0 else dm.widthPixels - view.width
-        ValueAnimator.ofInt(params.x, targetX).apply {
+        currentAnimator?.cancel()
+        val animator = ValueAnimator.ofInt(params.x, targetX).apply {
             duration = 300
             interpolator = DecelerateInterpolator()
             addUpdateListener { animation ->
@@ -160,8 +164,17 @@ class FloatingWindowManager(private val activity: Activity) {
                     try { wm.updateViewLayout(view, params) } catch (_: Exception) {}
                 }
             }
-            addListener(object : AnimatorListenerAdapter() { override fun onAnimationEnd(a: Animator) { view.alpha = 0.5f } })
-        }.start()
+            addListener(object : AnimatorListenerAdapter() { 
+                override fun onAnimationEnd(a: Animator) { 
+                    view.alpha = 0.5f 
+                    if (currentAnimator === a) {
+                        currentAnimator = null
+                    }
+                } 
+            })
+        }
+        animator.start()
+        currentAnimator = animator
     }
 
     private fun onFloatingBallClick() {

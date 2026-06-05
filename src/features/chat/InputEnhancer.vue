@@ -29,6 +29,7 @@ const emit = defineEmits<{
   (e: 'send', content: string): void;
   (e: 'attach'): void;
   (e: 'toggle-menu', visible: boolean): void;
+  (e: 'focus-input'): void;
 }>();
 
 const input = ref('');
@@ -320,6 +321,13 @@ const handleIconTouchCancel = (e: TouchEvent) => {
   isIconLongPress = false;
 };
 
+const handleFocus = () => {
+  showAttachMenu.value = false;
+  if (!props.disabled && historyStore.currentChatHistory.length > 0) {
+    emit('focus-input');
+  }
+};
+
 // 自动调整输入框高度
 const autoResize = () => {
   if (textareaRef.value) {
@@ -492,7 +500,7 @@ onUnmounted(() => {
             v-if="!isAudioMode && !isLongPressRecording"
             ref="textareaRef" 
             v-model="input" 
-            @focus="showAttachMenu = false"
+            @focus="handleFocus"
             @keydown="handleKeydown" 
             @paste="handlePaste" 
             @beforeinput="handleBeforeInput" 

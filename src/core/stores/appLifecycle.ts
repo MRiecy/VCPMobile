@@ -5,6 +5,7 @@ import { useAssistantStore } from './assistant';
 import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
 import { useNotificationStore } from './notification';
+import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
 
 export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR';
 
@@ -204,7 +205,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const hydrateSystemStatus = async () => {
     try {
       console.log('[Lifecycle] Fetching system status snapshot...');
-      const snapshot = await invoke<{ core: string; log: string; sync: string }>('get_system_snapshot');
+      const snapshot = await invoke<{ core: string; log: string; sync: string; distributed: string }>('get_system_snapshot');
       
       // 同步到 Notification Store (唯一真相源)
       notificationStore.updateCoreStatus({
@@ -215,11 +216,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
       notificationStore.updateStatus({
         status: snapshot.log as any,
-        message: snapshot.log === 'open' ? '已连接' : '正在连接...',
+        message: snapshot.log === 'connected' ? '已连接' : '正在连接...',
         source: 'VCPLog'
       });
 
-      // 同步状态不再渲染到全局状态栏（同步已改为完全手动触发）
+      // 同步分布式连接状态到专有的 Distributed Composable
+      updateDistributedState(snapshot.distributed as any);
 
       console.log('[Lifecycle] Snapshot hydrated:', JSON.stringify(snapshot));
     } catch (e) {

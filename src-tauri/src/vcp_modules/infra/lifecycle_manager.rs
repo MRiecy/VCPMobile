@@ -58,7 +58,7 @@ pub async fn reconcile_local_server(
         (false, true) => {
             log::info!("[Lifecycle] enableAssistant=false, stopping local server...");
             if let Some(h) = handle_lock.take() {
-                h.shutdown();
+                h.shutdown().await;
             }
         }
         _ => {
@@ -119,28 +119,19 @@ pub async fn reconcile_distributed_node(
             log::info!(
                 "[Lifecycle] distributedEnabled=true, starting distributed node connection..."
             );
-            // 异步启动连接，不阻塞主引导流程
-            let app_clone = app_handle.clone();
-            let ws_url_clone = ws_url.clone();
-            let vcp_key_clone = vcp_key.clone();
-            let device_name_clone = device_name.clone();
-            tauri::async_runtime::spawn(async move {
-                let dist_state = app_clone.state::<crate::distributed::DistributedState>();
-                dist_state.registry.load_disabled_config(&app_clone);
-                let client_guard = dist_state.client.read().await;
-                if let Err(e) = client_guard
-                    .start(
-                        app_clone.clone(),
-                        ws_url_clone,
-                        vcp_key_clone,
-                        device_name_clone,
-                        dist_state.registry.clone(),
-                    )
-                    .await
-                {
-                    log::error!("[Lifecycle] Auto-start distributed node failed: {}", e);
-                }
-            });
+            distributed_state.registry.load_disabled_config(app_handle);
+            if let Err(e) = client
+                .start(
+                    app_handle.clone(),
+                    ws_url,
+                    vcp_key,
+                    device_name,
+                    distributed_state.registry.clone(),
+                )
+                .await
+            {
+                log::error!("[Lifecycle] Auto-start distributed node failed: {}", e);
+            }
         }
         (false, true) => {
             log::info!(
@@ -391,6 +382,7 @@ pub struct SystemSnapshot {
     pub core: CoreStatus,
     pub log: String,
     pub sync: String,
+    pub distributed: String,
 }
 
 #[tauri::command]
@@ -409,7 +401,26 @@ pub async fn get_system_snapshot(
         None => "closed".to_string(),
     };
 
-    Ok(SystemSnapshot { core, log, sync })
+    // 获取分布式连接状态
+    let distributed = match app.try_state::<crate::distributed::DistributedState>() {
+        Some(s) => {
+            let client = s.client.read().await;
+            let status = client.get_status().await;
+            serde_json::to_value(status.state)
+                .unwrap_or_else(|_| serde_json::json!("disconnected"))
+                .as_str()
+                .unwrap_or("disconnected")
+                .to_string()
+        }
+        None => "disconnected".to_string(),
+    };
+
+    Ok(SystemSnapshot {
+        core,
+        log,
+        sync,
+        distributed,
+    })
 }
 
 /// 前端保存设置后调用，即时生效启用/停用划词助手本地服务器

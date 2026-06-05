@@ -242,6 +242,12 @@ async fn run_sync_session(
     write_queue.set_logger(sync_logger.clone());
     let write_queue = Arc::new(write_queue);
 
+    #[cfg(target_os = "android")]
+    let _ = tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
+        &app_handle,
+        "[数据同步] VCP Mobile",
+    );
+
     let network_semaphore = Arc::new(NetworkAwareSemaphore::new());
     let (pipeline_tx, mut pipeline_rx) =
         mpsc::unbounded_channel::<crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand>();
@@ -1082,6 +1088,12 @@ async fn run_sync_session(
         let mut logger_guard = sync_state.current_logger.write().unwrap();
         *logger_guard = None;
     }
+
+    #[cfg(target_os = "android")]
+    let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
+        &app_handle,
+        "[数据同步] VCP Mobile",
+    );
 }
 
 /// 每批最多包含的消息数，控制单次 WS payload 大小（约 10000 条消息 ≈ 1.5-2MB JSON）

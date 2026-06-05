@@ -148,7 +148,7 @@ function renderBlockHtml(block: ContentBlock): string {
 
 function getBlockKey(block: ContentBlock, index: number): string {
   if (block.hash !== undefined && block.hash !== null) {
-    return `${block.type}-${String(block.hash)}`;
+    return `${block.type}-${String(block.hash)}-${index}`;
   }
   // Fallback for legacy data (index-based)
   return `${block.type}-idx-${index}`;

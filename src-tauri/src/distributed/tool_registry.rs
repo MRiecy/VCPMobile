@@ -155,14 +155,24 @@ impl ToolRegistry {
             .map(|(name, entry)| {
                 let manifest = entry.manifest();
                 let mut val = serde_json::to_value(&manifest).unwrap_or(serde_json::Value::Null);
-                if val.is_object() {
+                if let Some(obj) = val.as_object_mut() {
                     let category = match entry {
                         ToolEntry::OneShot(_) => "oneshot",
                         ToolEntry::Interactive(_) => "interactive",
                         ToolEntry::Streaming(_) => "streaming",
                     };
-                    val["category"] = serde_json::json!(category);
-                    val["enabled"] = serde_json::json!(self.is_enabled(name));
+                    obj.insert("category".to_string(), serde_json::json!(category));
+                    obj.insert(
+                        "enabled".to_string(),
+                        serde_json::json!(self.is_enabled(name)),
+                    );
+                    if let Some(ref p) = manifest.placeholder {
+                        obj.insert("placeholder".to_string(), serde_json::json!(p));
+                    }
+                    obj.insert(
+                        "display_name".to_string(),
+                        serde_json::json!(manifest.display_name),
+                    );
                 }
                 val
             })

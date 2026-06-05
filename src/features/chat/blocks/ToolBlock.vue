@@ -1,15 +1,87 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
-import { ChevronDown, ChevronUp, Settings, Loader2 } from 'lucide-vue-next';
+import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ChevronDown, ChevronUp, Settings, Loader2, Maximize2, Copy, X } from 'lucide-vue-next';
 import type { ContentBlock } from '../../../core/types/chat';
+import { marked } from 'marked';
+import { useNotificationStore } from '../../../core/stores/notification';
+import { useModalHistory } from '../../../core/composables/useModalHistory';
 
-defineProps<{
+const notificationStore = useNotificationStore();
+
+// Configure marked to support Github Flavored Markdown & breaks
+marked.setOptions({
+  gfm: true,
+  breaks: true,
+});
+
+const renderMarkdown = (text: string): string => {
+  if (!text) return '';
+  try {
+    return marked.parse(text) as string;
+  } catch (e) {
+    console.error('[ToolBlock] marked parse failed:', e);
+    return text;
+  }
+};
+
+const props = defineProps<{
   type: 'tool-use' | 'tool-result';
   content?: string;
   block: ContentBlock;
 }>();
 
 const isExpanded = ref(false);
+const isFullScreen = ref(false);
+
+const { registerModal, unregisterModal } = useModalHistory();
+const modalId = `ToolBlockFullScreen_${Math.random().toString(36).substring(2, 9)}`;
+
+watch(isFullScreen, (newVal) => {
+  if (newVal) {
+    registerModal(modalId, () => {
+      isFullScreen.value = false;
+    });
+  } else {
+    unregisterModal(modalId);
+  }
+});
+
+const copyDetailValue = (key: string, value: string) => {
+  if (!value) return;
+  navigator.clipboard.writeText(value)
+    .then(() => {
+      notificationStore.addNotification({
+        type: "success",
+        title: "复制成功",
+        message: `${key} 已复制到剪贴板`,
+        toastOnly: true
+      });
+    })
+    .catch((err) => {
+      console.error('[ToolBlock] Copy failed:', err);
+    });
+};
+
+const copyAllDetails = () => {
+  const detailsText = props.block.details
+    ?.map((item: any) => `${item.key}: ${item.value}`)
+    .join('\n') || '';
+  const footerText = props.block.footer ? `\n\n${props.block.footer}` : '';
+  const fullText = `${detailsText}${footerText}`;
+  if (!fullText) return;
+  navigator.clipboard.writeText(fullText)
+    .then(() => {
+      notificationStore.addNotification({
+        type: "success",
+        title: "复制全部成功",
+        message: "所有工具返回结果已复制到剪贴板",
+        toastOnly: true
+      });
+    })
+    .catch((err) => {
+      console.error('[ToolBlock] Copy all failed:', err);
+    });
+};
 const toolBlockRef = ref<HTMLElement | null>(null);
 let observer: IntersectionObserver | null = null;
 
@@ -28,6 +100,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  unregisterModal(modalId);
   observer?.disconnect();
 });
 
@@ -73,6 +146,13 @@ const isImageValue = (key: string, value: string): boolean => {
         <span v-if="block.status" class="tool-status text-[10px] px-1.5 py-0.5 rounded font-bold">
           {{ block.status }}
         </span>
+        <button 
+          v-if="isExpanded && type === 'tool-result'"
+          @click.stop="isFullScreen = true"
+          class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 active:scale-90 transition-transform opacity-60 hover:opacity-100 flex items-center justify-center mr-0.5"
+        >
+          <Maximize2 :size="13" />
+        </button>
         <component :is="isExpanded ? ChevronUp : ChevronDown" :size="16" class="opacity-50" />
       </div>
     </div>
@@ -84,26 +164,105 @@ const isImageValue = (key: string, value: string): boolean => {
         <pre class="text-[11px] font-mono whitespace-pre-wrap break-words">{{ content }}</pre>
       </template>
       <template v-else>
-        <div class="space-y-2">
-          <div v-for="item in block.details" :key="item.key" class="text-xs flex flex-col sm:flex-row sm:items-start">
-            <span class="detail-key font-bold mr-2 whitespace-nowrap mt-0.5">{{ item.key }}:</span>
-            <div class="mt-1 sm:mt-0 flex-1 min-w-0">
+        <div class="space-y-3">
+          <div v-for="(item, index) in block.details" :key="item.key" 
+            class="text-xs flex flex-col"
+            :class="[index > 0 ? 'border-t border-black/5 dark:border-white/5 pt-3 mt-3' : '']"
+          >
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="detail-key font-bold font-mono text-[11px] opacity-80">{{ item.key }}:</span>
+              <button 
+                v-if="item.value"
+                @click="copyDetailValue(item.key, item.value)"
+                class="p-1 rounded hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all opacity-60 hover:opacity-100 flex items-center justify-center gap-1 text-[10px]"
+              >
+                <Copy :size="10" />
+                <span>复制</span>
+              </button>
+            </div>
+            <div class="min-w-0">
               <!-- 图片值直接渲染为 img，其他值走 Markdown 管线 -->
               <template v-if="item.value && isImageValue(item.key, item.value)">
                 <a :href="item.value" target="_blank" rel="noopener noreferrer" class="block">
                   <img :src="item.value" class="max-w-full rounded-lg" loading="lazy" alt="Generated Image" />
                 </a>
               </template>
-              <div v-else class="text-xs opacity-90 whitespace-pre-wrap">{{ item.value || '' }}</div>
+              <div v-else class="text-xs opacity-90 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(item.value || '')"></div>
             </div>
           </div>
-          <div v-if="block.footer" class="mt-2 pt-2 border-t border-black/10 dark:border-white/10 text-xs opacity-70 whitespace-pre-wrap">
-            {{ block.footer }}
-          </div>
+          <div v-if="block.footer" class="mt-2.5 pt-2.5 border-t border-black/10 dark:border-white/10 text-xs opacity-70 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(block.footer)"></div>
         </div>
       </template>
     </div>
   </div>
+
+  <!-- Fullscreen Viewer Drawer -->
+  <Teleport to="body">
+    <Transition name="fade-slide">
+      <div v-if="isFullScreen" 
+        class="vcp-fullscreen-tool-panel fixed inset-0 z-viewer flex flex-col"
+        :class="[type === 'tool-result' ? 'is-tool-result' : '']"
+      >
+        <!-- Fullscreen Header -->
+        <div class="vcp-fullscreen-header flex items-center justify-between pb-3 mb-4 border-b">
+          <div class="flex items-center gap-2">
+            <span class="text-lg leading-none">📊</span>
+            <div>
+              <span class="text-[10px] font-bold block opacity-60 leading-none mb-1">
+                {{ block.tool_name || 'Unknown Tool' }} - 详细结果
+              </span>
+              <span class="text-xs font-mono font-bold">全屏浏览</span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button 
+              @click="copyAllDetails"
+              class="px-2.5 py-1.5 text-xs rounded-lg bg-black/5 dark:bg-white/5 hover:bg-black/10 dark:hover:bg-white/10 active:scale-95 transition-all opacity-80 hover:opacity-100 flex items-center gap-1.5 font-bold"
+            >
+              <Copy :size="12" />
+              <span>复制全部</span>
+            </button>
+            <button 
+              @click="isFullScreen = false"
+              class="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 active:scale-90 transition-transform opacity-70 hover:opacity-100 flex items-center justify-center"
+            >
+              <X :size="16" />
+            </button>
+          </div>
+        </div>
+
+        <!-- Fullscreen Scrollable Content -->
+        <div class="flex-1 overflow-y-auto vcp-scrollable space-y-4 pr-1">
+          <div v-for="(item, index) in block.details" :key="item.key" 
+            class="flex flex-col"
+            :class="[index > 0 ? 'border-t border-black/5 dark:border-white/5 pt-4 mt-4' : '']"
+          >
+            <div class="flex items-center justify-between mb-2">
+              <span class="detail-key font-bold font-mono text-xs opacity-90">{{ item.key }}:</span>
+              <button 
+                v-if="item.value"
+                @click="copyDetailValue(item.key, item.value)"
+                class="px-2 py-1 rounded hover:bg-black/5 dark:hover:bg-white/5 active:scale-95 transition-all opacity-70 hover:opacity-100 flex items-center justify-center gap-1 text-[11px]"
+              >
+                <Copy :size="11" />
+                <span>复制</span>
+              </button>
+            </div>
+            <div class="min-w-0">
+              <template v-if="item.value && isImageValue(item.key, item.value)">
+                <a :href="item.value" target="_blank" rel="noopener noreferrer" class="block">
+                  <img :src="item.value" class="max-w-full rounded-lg" loading="lazy" alt="Generated Image" />
+                </a>
+              </template>
+              <div v-else class="text-sm opacity-95 vcp-markdown-block select-text" v-html="renderMarkdown(item.value || '')"></div>
+            </div>
+          </div>
+          
+          <div v-if="block.footer" class="mt-4 pt-4 border-t border-black/10 dark:border-white/10 text-xs opacity-70 vcp-markdown-block select-text" v-html="renderMarkdown(block.footer)"></div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -256,6 +415,8 @@ const isImageValue = (key: string, value: string): boolean => {
 
 /* 修复：将亮色模式设为默认基础样式 */
 .vcp-tool-block.is-tool-result {
+  background: linear-gradient(145deg, #f9f9fb, #f2f2f7);
+  border: 1px solid rgba(0, 0, 0, 0.06);
   color: #333;
 }
 
@@ -314,5 +475,43 @@ html.dark .vcp-tool-block.is-tool-result .detail-key {
 .tool-content-scrollable {
   max-height: 400px;
   overflow-y: auto;
+}
+
+/* --- Fullscreen Panel Styles (No glassmorphism, matching is-tool-result) --- */
+.vcp-fullscreen-tool-panel {
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+  padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+}
+
+.vcp-fullscreen-tool-panel.is-tool-result {
+  background: linear-gradient(145deg, #f9f9fb, #f2f2f7);
+  color: #333;
+}
+
+.vcp-fullscreen-tool-panel.is-tool-result .vcp-fullscreen-header {
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+html.dark .vcp-fullscreen-tool-panel.is-tool-result {
+  background: linear-gradient(145deg, #1c1c1e, #2c2c2e);
+  color: #f2f2f7;
+}
+
+html.dark .vcp-fullscreen-tool-panel.is-tool-result .vcp-fullscreen-header {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* --- Transitions --- */
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1), transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.fade-slide-enter-from,
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(20px);
 }
 </style>

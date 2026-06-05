@@ -147,12 +147,12 @@ const close = () => emit("close");
   <Transition name="viewer-fade">
     <div
       v-show="isOpen && file"
-      class="vcp-attachment-viewer fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] pointer-events-auto"
+      class="vcp-attachment-viewer fixed inset-0 z-viewer flex flex-col pointer-events-auto"
       @click.self="close"
     >
       <!-- Toolbar -->
       <div
-        class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10"
+        class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 border-b border-black/5 dark:border-white/5 shrink-0 z-10"
       >
         <div class="flex flex-col overflow-hidden mr-4 min-w-0">
           <span class="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{{
@@ -209,7 +209,7 @@ const close = () => emit("close");
           <!-- Text content container -->
           <pre
             v-else
-            class="flex-1 font-mono text-[13px] whitespace-pre-wrap select-text leading-relaxed opacity-90 p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-black/5 dark:border-white/5 break-all overflow-x-auto"
+            class="flex-1 font-mono text-[13px] whitespace-pre-wrap select-text leading-relaxed opacity-90 p-4 break-all overflow-x-auto"
           >{{ previewText }}</pre>
         </div>
 
@@ -232,6 +232,16 @@ const close = () => emit("close");
 </template>
 
 <style scoped>
+.vcp-attachment-viewer {
+  background: linear-gradient(145deg, #f9f9fb, #f2f2f7);
+  color: #333;
+}
+
+html.dark .vcp-attachment-viewer {
+  background: linear-gradient(145deg, #1c1c1e, #2c2c2e);
+  color: #f2f2f7;
+}
+
 .viewer-fade-enter-active,
 .viewer-fade-leave-active {
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);

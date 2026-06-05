@@ -324,12 +324,6 @@ onUnmounted(() => {
     boundParent.removeEventListener('touchstart', trackInteraction);
   }
 
-  if (gl && program) {
-    const ext = gl.getExtension('WEBGL_lose_context');
-    if (ext) {
-      ext.loseContext(); // Release GPU memory instantly
-    }
-  }
   gl = null;
   program = null;
 });

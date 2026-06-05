@@ -7,7 +7,6 @@ const store = useNotificationStore();
 const statusClass = computed(() => {
   switch (store.vcpStatus.status) {
     case 'connected':
-    case 'open':
       return 'bg-[#2e7d32] text-white';
     case 'disconnected':
     case 'closed':
