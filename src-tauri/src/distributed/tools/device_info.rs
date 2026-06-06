@@ -32,6 +32,7 @@ tool_name:「始」MobileDeviceInfo「末」\n\
                     example: "<<<[TOOL_REQUEST]>>>\ntool_name:「始」MobileDeviceInfo「末」\n<<<[END_TOOL_REQUEST]>>>".to_string(),
                 },
             ],
+            web_socket_push: None,
         }
     }
 

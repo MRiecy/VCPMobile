@@ -76,10 +76,11 @@ pub async fn execute_distributed_tool(
     app: tauri::AppHandle,
     state: State<'_, DistributedState>,
     name: String,
+    args: Option<serde_json::Value>,
 ) -> Result<String, String> {
     let res = state
         .registry
-        .execute(&name, serde_json::Value::Null, &app)
+        .execute(&name, args.unwrap_or(serde_json::Value::Null), &app)
         .await?;
     match res {
         serde_json::Value::String(s) => Ok(s),

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-acquire-wake-lock"
+description = "Enables the acquire_wake_lock command without any pre-configured scope."
+commands.allow = ["acquire_wake_lock"]
+
+[[permission]]
+identifier = "deny-acquire-wake-lock"
+description = "Denies the acquire_wake_lock command without any pre-configured scope."
+commands.deny = ["acquire_wake_lock"]

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-start-download-notification"
+description = "Enables the start_download_notification command without any pre-configured scope."
+commands.allow = ["start_download_notification"]
+
+[[permission]]
+identifier = "deny-start-download-notification"
+description = "Denies the start_download_notification command without any pre-configured scope."
+commands.deny = ["start_download_notification"]

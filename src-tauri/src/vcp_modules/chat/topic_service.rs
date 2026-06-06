@@ -347,14 +347,38 @@ pub async fn set_topic_unread(
     topic_id: String,
     unread: bool,
 ) -> Result<(), String> {
+    set_topic_unread_in_pool(
+        &db_state.pool,
+        &topic_id,
+        unread,
+        crate::vcp_modules::infra::utils::now_millis(),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn set_topic_unread_in_pool(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    topic_id: &str,
+    unread: bool,
+    updated_at: i64,
+) -> Result<(), String> {
     let unread_int = if unread { 1 } else { 0 };
-    sqlx::query("UPDATE topics SET unread = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(unread_int)
-        .bind(crate::vcp_modules::infra::utils::now_millis())
-        .bind(&topic_id)
-        .execute(&db_state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE topics
+         SET unread = ?,
+             unread_count = CASE WHEN ? = 0 THEN 0 ELSE unread_count END,
+             updated_at = ?
+         WHERE topic_id = ?",
+    )
+    .bind(unread_int)
+    .bind(unread_int)
+    .bind(updated_at)
+    .bind(topic_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -509,6 +533,86 @@ pub async fn archive_assistant_chat(
     });
 
     Ok(new_topic_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::SqlitePool;
+
+    #[tokio::test]
+    async fn marking_topic_read_clears_unread_count() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY,
+                unread INTEGER NOT NULL,
+                unread_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO topics (topic_id, unread, unread_count, updated_at)
+             VALUES ('topic_1', 1, 3, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        set_topic_unread_in_pool(&pool, "topic_1", false, 2)
+            .await
+            .unwrap();
+
+        let row = sqlx::query(
+            "SELECT unread, unread_count, updated_at FROM topics WHERE topic_id = 'topic_1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<i32, _>("unread"), 0);
+        assert_eq!(row.get::<i32, _>("unread_count"), 0);
+        assert_eq!(row.get::<i64, _>("updated_at"), 2);
+    }
+
+    #[tokio::test]
+    async fn marking_topic_unread_preserves_existing_count() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY,
+                unread INTEGER NOT NULL,
+                unread_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO topics (topic_id, unread, unread_count, updated_at)
+             VALUES ('topic_1', 0, 5, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        set_topic_unread_in_pool(&pool, "topic_1", true, 2)
+            .await
+            .unwrap();
+
+        let row = sqlx::query(
+            "SELECT unread, unread_count, updated_at FROM topics WHERE topic_id = 'topic_1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.get::<i32, _>("unread"), 1);
+        assert_eq!(row.get::<i32, _>("unread_count"), 5);
+        assert_eq!(row.get::<i64, _>("updated_at"), 2);
+    }
 }
 
 #[tauri::command]

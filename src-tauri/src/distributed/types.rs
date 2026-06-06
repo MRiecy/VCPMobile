@@ -57,6 +57,14 @@ pub enum OutgoingMessage {
         server_name: String,
         placeholders: HashMap<String, String>,
     },
+
+    /// Forward a plugin callback payload so VCPToolBox can reuse existing
+    /// webSocketPush routing for distributed tools.
+    #[serde(rename = "plugin_callback_forward")]
+    PluginCallbackForward {
+        #[serde(rename = "callbackData")]
+        callback_data: Value,
+    },
 }
 
 // ============================================================
@@ -163,6 +171,26 @@ pub struct InvocationCommand {
     pub example: String,
 }
 
+/// Optional VCPToolBox websocket push config from plugin-manifest.json.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebSocketPushConfig {
+    pub enabled: bool,
+    #[serde(rename = "usePluginResultAsMessage", default)]
+    pub use_plugin_result_as_message: bool,
+    #[serde(
+        rename = "targetClientType",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_client_type: Option<String>,
+    #[serde(
+        rename = "messageType",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub message_type: Option<String>,
+}
+
 /// Tool manifest matching VCPToolBox's plugin manifest format.
 /// VCPChat ref: Plugin.js getAllPluginManifests()
 #[derive(Debug, Clone, Deserialize)]
@@ -180,6 +208,14 @@ pub struct ToolManifest {
     /// OneShot 工具的完整调用命令描述；Streaming 工具留空 Vec
     #[serde(default)]
     pub invocation_commands: Vec<InvocationCommand>,
+
+    /// 兼容旧 VCPToolBox 插件 manifest 的 WebSocket 推送配置。
+    #[serde(
+        default,
+        rename = "webSocketPush",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub web_socket_push: Option<WebSocketPushConfig>,
 }
 
 impl Serialize for ToolManifest {
@@ -218,6 +254,9 @@ impl Serialize for ToolManifest {
                 "timeout": 10000
             }),
         )?;
+        if let Some(web_socket_push) = &self.web_socket_push {
+            map.serialize_entry("webSocketPush", web_socket_push)?;
+        }
 
         // ── capabilities 双轨分流 ─────────────────────────────────────────────
         if is_static {

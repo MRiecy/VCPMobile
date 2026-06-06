@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-register-shared-files"
+description = "Enables the register_shared_files command without any pre-configured scope."
+commands.allow = ["register_shared_files"]
+
+[[permission]]
+identifier = "deny-register-shared-files"
+description = "Denies the register_shared_files command without any pre-configured scope."
+commands.deny = ["register_shared_files"]

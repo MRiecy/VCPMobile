@@ -9,7 +9,7 @@ import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
 import { useLayoutStore } from "./core/stores/layout";
 import { useModalHistory } from "./core/composables/useModalHistory";
-import { useNotificationStore } from "./core/stores/notification";
+import { useNotificationStore, type VcpNotification } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
@@ -17,6 +17,7 @@ import { useChatSessionStore } from "./core/stores/chatSessionStore";
 import { useAssistantStore } from "./core/stores/assistant";
 import { useSettingsStore } from "./core/stores/settings";
 import { reapplyScreenKeepIfActive, suspendPhysicalScreenKeep } from "./core/composables/useScreenKeeper";
+import { findAgentMessagePayload } from "./core/utils/agentMessagePayload";
 
 // Layout Components
 import PermissionGate from "./components/layout/PermissionGate.vue";
@@ -65,6 +66,29 @@ const router = useRouter();
 const { initRootHistory } = useModalHistory();
 
 const isAssistant = ref(false);
+
+const pushAgentSystemNotification = async (
+  notification: Partial<VcpNotification>,
+  rawPayload?: any
+) => {
+  const agentPayload = findAgentMessagePayload(rawPayload ?? notification.rawPayload);
+  if (!agentPayload && notification.type !== "agent") return;
+  if (agentPayload?.androidNotification?.delivered === true) return;
+
+  const title = String(
+    agentPayload?.title ||
+    (agentPayload?.recipient ? `${agentPayload.recipient} 的消息` : notification.title || "Agent 消息")
+  );
+  const body = String(agentPayload?.originalContent || agentPayload?.message || notification.message || "");
+  if (!body.trim()) return;
+
+  try {
+    await invoke("plugin:vcp-mobile|show_system_notification", { title, body });
+    console.info("[App] Agent system notification submitted:", { title, bodyLength: body.length });
+  } catch (err) {
+    console.warn("[App] Agent system notification push failed:", err);
+  }
+};
 
 // --- Share Intent State ---
 const sharedContent = ref<SharedContentData>({ text: "", files: [] });
@@ -376,6 +400,7 @@ onMounted(async () => {
     const processed = processPayload(payload);
 
     if (processed && !processed.silent) {
+      void pushAgentSystemNotification(processed, payload);
       notificationStore.addNotification(processed);
     }
   });

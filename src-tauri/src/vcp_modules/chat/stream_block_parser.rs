@@ -739,12 +739,23 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_code_block_precipitation_failure() {
-        let file_path = "g:\\VCPMobile\\scripts\\tail-test\\测试文档.txt";
-        let mut text = fs::read_to_string(file_path).expect("Failed to read test document");
+        let mut text = r#"### 代码块沉淀回归
+
+下面是一段 HTML fence，曾经触发尾部沉淀失败:
+
+```html
+<section class="demo">
+  <h1>Hello</h1>
+  <p>inside fenced html</p>
+</section>
+```
+
+闭合代码块之后继续输出 Markdown。
+"#
+        .to_string();
 
         // 兼容处理：如果是转义过的 JSON Payload，使用 serde_json 进行 unescape
         if text.contains("\\n") || text.contains("\\\"") {

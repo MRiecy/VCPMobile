@@ -2,9 +2,12 @@
 // Tool registration. Add new tools here.
 // To add a tool: 1) create the .rs file, 2) add `mod` + `use`, 3) register in build_registry().
 
+mod agent_message;
 mod clipboard;
 mod device_info;
 mod notification;
+mod topic_memo;
+mod topic_sponsor;
 
 mod battery;
 mod cpu_info;
@@ -30,6 +33,10 @@ pub fn build_registry() -> ToolRegistry {
     registry.register_oneshot(device_info::DeviceInfoTool);
     registry.register_oneshot(notification::NotificationTool);
     registry.register_oneshot(clipboard::ClipboardTool);
+    registry.register_oneshot(agent_message::AgentMessageTool);
+    registry.register_oneshot(agent_message::MobileAgentMessageTool);
+    registry.register_oneshot(topic_memo::TopicMemoTool);
+    registry.register_oneshot(topic_sponsor::TopicSponsorTool);
 
     // Streaming tools — hardware monitoring (Phase 1)
     registry.register_streaming(battery::BatteryInfoTool);

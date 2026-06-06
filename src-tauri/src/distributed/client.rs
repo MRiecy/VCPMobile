@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time;
@@ -530,9 +530,12 @@ impl DistributedClient {
 
                 // Execute and return result.
                 acquire_wake_lock_helper(app);
-                let response =
+                let (response, callback) =
                     Self::execute_tool(app, &request_id, &tool_name, tool_args, registry).await;
                 Self::send_message(ws_tx, &response).await;
+                if let Some(callback) = callback {
+                    Self::send_message(ws_tx, &callback).await;
+                }
                 release_wake_lock_helper(app);
             }
 
@@ -641,7 +644,7 @@ impl DistributedClient {
         Self::send_message(ws_tx, &msg).await;
     }
 
-    /// Execute a tool and return the result message.
+    /// Execute a tool and return the result message plus optional callback push.
     /// VCPChat ref: handleToolExecutionRequest() line 428-649
     async fn execute_tool(
         app: &AppHandle,
@@ -649,27 +652,67 @@ impl DistributedClient {
         tool_name: &str,
         tool_args: Value,
         registry: &Arc<ToolRegistry>,
-    ) -> OutgoingMessage {
+    ) -> (OutgoingMessage, Option<OutgoingMessage>) {
+        let manifest = registry.get_manifest(tool_name);
         match registry.execute(tool_name, tool_args, app).await {
             Ok(result) => {
                 log::info!("[Distributed] Tool '{}' executed successfully.", tool_name);
-                OutgoingMessage::ToolResult {
-                    request_id: request_id.to_string(),
-                    status: "success".to_string(),
-                    result: Some(result),
-                    error: None,
-                }
+                let callback =
+                    Self::build_plugin_callback_forward(request_id, tool_name, &result, &manifest);
+                (
+                    OutgoingMessage::ToolResult {
+                        request_id: request_id.to_string(),
+                        status: "success".to_string(),
+                        result: Some(result),
+                        error: None,
+                    },
+                    callback,
+                )
             }
             Err(e) => {
                 log::warn!("[Distributed] Tool '{}' failed: {}", tool_name, e);
-                OutgoingMessage::ToolResult {
-                    request_id: request_id.to_string(),
-                    status: "error".to_string(),
-                    result: None,
-                    error: Some(e),
-                }
+                (
+                    OutgoingMessage::ToolResult {
+                        request_id: request_id.to_string(),
+                        status: "error".to_string(),
+                        result: None,
+                        error: Some(e),
+                    },
+                    None,
+                )
             }
         }
+    }
+
+    fn build_plugin_callback_forward(
+        request_id: &str,
+        tool_name: &str,
+        result: &Value,
+        manifest: &Option<ToolManifest>,
+    ) -> Option<OutgoingMessage> {
+        let push = manifest.as_ref()?.web_socket_push.as_ref()?;
+        if !push.enabled {
+            return None;
+        }
+
+        let mut callback_data = if push.use_plugin_result_as_message {
+            match result {
+                Value::Object(map) => Value::Object(map.clone()),
+                other => json!({ "message": other }),
+            }
+        } else {
+            json!({ "result": result })
+        };
+
+        if let Value::Object(map) = &mut callback_data {
+            map.insert(
+                "pluginName".to_string(),
+                Value::String(tool_name.to_string()),
+            );
+            map.insert("taskId".to_string(), Value::String(request_id.to_string()));
+        }
+
+        Some(OutgoingMessage::PluginCallbackForward { callback_data })
     }
 
     // ================================================================

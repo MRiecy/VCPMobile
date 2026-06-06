@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-toggle-floating-ball"
+description = "Enables the toggle_floating_ball command without any pre-configured scope."
+commands.allow = ["toggle_floating_ball"]
+
+[[permission]]
+identifier = "deny-toggle-floating-ball"
+description = "Denies the toggle_floating_ball command without any pre-configured scope."
+commands.deny = ["toggle_floating_ball"]

@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
+    "qa:regression": "bash qa/regression.sh",
+    "qa:robustness": "bash qa/robustness.sh",
     "tauri": "tauri",
     "io:write": "node scripts/nova_utils.cjs write",
     "io:append": "node scripts/nova_utils.cjs append",
