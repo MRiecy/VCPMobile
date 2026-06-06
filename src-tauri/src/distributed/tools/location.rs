@@ -16,6 +16,7 @@ impl StreamingTool for LocationTool {
             display_name: "GPS 地理定位".to_string(),
             placeholder: Some("{{MobileLocation}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

@@ -37,6 +37,7 @@ content:「始」需要写入的内容「末」\n\
                     example: "<<<[TOOL_REQUEST]>>>\ntool_name:「始」MobileClipboard「末」\naction:「始」read「末」\n<<<[END_TOOL_REQUEST]>>>".to_string(),
                 },
             ],
+            web_socket_push: None,
         }
     }
 

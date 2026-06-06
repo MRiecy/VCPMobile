@@ -22,6 +22,127 @@ export interface FilterRule {
   duration?: number;
 }
 
+function findAgentMessagePayload(value: any, depth = 0): any | null {
+  if (!value || depth > 6) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return findAgentMessagePayload(parsed, depth + 1) || findAgentMessageToolPayload(parsed, depth + 1);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== 'object') return null;
+  if (value.type === 'agent_message') return value;
+  if (isAgentMessageToolObject(value)) {
+    const built = buildAgentMessagePayloadFromToolObject(value, depth);
+    if (built) return built;
+  }
+
+  for (const key of ['data', 'callbackData', 'result', 'payload', 'message', 'content', 'original_plugin_output', 'raw', 'details']) {
+    const found = findAgentMessagePayload(value[key], depth + 1);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function findAgentMessageToolPayload(value: any, depth = 0): any | null {
+  if (!value || depth > 6) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return findAgentMessagePayload(parsed, depth + 1) || findAgentMessageToolPayload(parsed, depth + 1);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== 'object') return null;
+
+  if (isAgentMessageToolObject(value)) {
+    const built = buildAgentMessagePayloadFromToolObject(value, depth);
+    if (built) return built;
+  }
+
+  for (const key of ['data', 'callbackData', 'result', 'payload', 'message', 'content', 'original_plugin_output', 'raw', 'details']) {
+    const found = findAgentMessageToolPayload(value[key], depth + 1);
+    if (found) return found;
+  }
+
+  return null;
+}
+
+function isAgentMessageToolObject(value: any): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return ['tool_name', 'toolName', 'pluginName', 'PLUGIN_NAME_FOR_CALLBACK', 'name']
+    .some((key) => isAgentMessageToolName(value[key]));
+}
+
+function isAgentMessageToolName(value: any): boolean {
+  if (typeof value !== 'string') return false;
+  const normalized = value.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return normalized === 'agentmessage'
+    || normalized === 'mobileagentmessage'
+    || normalized.startsWith('agentmessage');
+}
+
+function buildAgentMessagePayloadFromToolObject(value: any, depth = 0): any | null {
+  for (const key of ['result', 'payload', 'original_plugin_output', 'content', 'message', 'body', 'data']) {
+    const nested = value?.[key];
+    const found = findAgentMessagePayload(nested, depth + 1);
+    if (found) return found;
+  }
+
+  const body = firstToolBodyString(value, depth + 1);
+  if (!body) return null;
+
+  const recipient = firstString(value, ['recipient', 'Maid', 'maid', 'MaidName', 'sender_name']);
+  return {
+    type: 'agent_message',
+    title: firstString(value, ['title']) || (recipient ? `${recipient} 的消息` : 'Agent 消息'),
+    message: body,
+    originalContent: body,
+    recipient,
+    androidNotification: value?.androidNotification
+  };
+}
+
+function firstToolBodyString(value: any, depth = 0): string | null {
+  if (!value || depth > 7) return null;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const agentPayload = findAgentMessagePayload(parsed, depth + 1);
+      if (agentPayload?.originalContent || agentPayload?.message) {
+        return String(agentPayload.originalContent || agentPayload.message);
+      }
+      const nested = firstToolBodyString(parsed, depth + 1);
+      if (nested) return nested;
+    } catch { }
+    return trimmed;
+  }
+
+  if (typeof value !== 'object') return null;
+
+  for (const key of ['originalContent', 'body', 'message', 'content', 'result', 'original_plugin_output']) {
+    const text = firstToolBodyString(value[key], depth + 1);
+    if (text) return text;
+  }
+
+  return null;
+}
+
+function firstString(value: any, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const item = value?.[key];
+    if (typeof item === 'string' && item.trim()) return item.trim();
+  }
+  return undefined;
+}
+
 export function useNotificationProcessor() {
   const store = useNotificationStore();
 
@@ -138,6 +259,7 @@ export function useNotificationProcessor() {
     let actions: VcpNotification['actions'] = [];
     let notificationId: string | undefined = undefined;
     let historyOnly = false;
+    const agentPayload = findAgentMessagePayload(payload);
 
     // --- 核心协议解析层 (对标桌面端 notificationRenderer.js) ---
 
@@ -152,7 +274,13 @@ export function useNotificationProcessor() {
         }
       }
 
-      if (vcpData.tool_name && vcpData.status) {
+      if (agentPayload && (agentPayload.message || agentPayload.originalContent)) {
+        type = 'agent';
+        title = agentPayload.title || (agentPayload.recipient ? `${agentPayload.recipient} 的消息` : 'Agent 消息');
+        message = String(agentPayload.message || agentPayload.originalContent);
+        isPreformatted = message.includes('\n');
+        duration = 10000;
+      } else if (vcpData.tool_name && vcpData.status) {
         type = vcpData.status === 'error' 
           ? 'error' 
           : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
@@ -258,7 +386,15 @@ export function useNotificationProcessor() {
       message = String(payload.message);
       isPreformatted = false;
     }
-    // 5. tool_approval_request: 审核请求
+    // 5. agent_message: 移动端本机 AgentMessage 推送
+    else if (agentPayload && (agentPayload.message || agentPayload.originalContent)) {
+      type = 'agent';
+      title = agentPayload.title || (agentPayload.recipient ? `${agentPayload.recipient} 的消息` : 'Agent 消息');
+      message = String(agentPayload.message || agentPayload.originalContent);
+      isPreformatted = message.includes('\n');
+      duration = 10000;
+    }
+    // 6. tool_approval_request: 审核请求
     else if (payload.type === 'tool_approval_request' && payload.data) {
       const approvalData = payload.data;
       type = 'warning';
@@ -271,7 +407,7 @@ export function useNotificationProcessor() {
         { label: '拒绝', value: false, color: 'bg-red-500 shadow-lg shadow-red-500/20' }
       ];
     }
-    // 6. 默认回退 (Generic fallback)
+    // 7. 默认回退 (Generic fallback)
     else {
       if (typeof payload === 'object' && payload !== null) {
         title = payload.type ? `类型: ${payload.type}` : 'VCP 消息';

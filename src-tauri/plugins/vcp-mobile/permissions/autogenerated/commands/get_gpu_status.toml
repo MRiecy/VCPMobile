@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-gpu-status"
+description = "Enables the get_gpu_status command without any pre-configured scope."
+commands.allow = ["get_gpu_status"]
+
+[[permission]]
+identifier = "deny-get-gpu-status"
+description = "Denies the get_gpu_status command without any pre-configured scope."
+commands.deny = ["get_gpu_status"]

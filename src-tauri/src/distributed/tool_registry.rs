@@ -148,6 +148,14 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Get one enabled tool manifest by name.
+    pub fn get_manifest(&self, name: &str) -> Option<ToolManifest> {
+        if !self.is_enabled(name) {
+            return None;
+        }
+        self.tools.get(name).map(ToolEntry::manifest)
+    }
+
     /// Get all tool metadata with categories and placeholders for the frontend config.
     pub fn get_tools_metadata(&self) -> Vec<serde_json::Value> {
         self.tools

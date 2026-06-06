@@ -36,6 +36,7 @@ impl StreamingTool for GpuInfoTool {
             display_name: "GPU算力监控".to_string(),
             placeholder: Some("{{MobileGPU}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

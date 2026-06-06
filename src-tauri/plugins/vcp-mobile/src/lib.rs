@@ -38,6 +38,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::start_download_notification,
             system::update_download_notification,
             system::cancel_download_notification,
+            system::show_system_notification,
             system::request_overlay_permission,
             system::register_shared_files,
             system::toggle_floating_ball,

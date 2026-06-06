@@ -9,7 +9,7 @@ import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
 import { useLayoutStore } from "./core/stores/layout";
 import { useModalHistory } from "./core/composables/useModalHistory";
-import { useNotificationStore } from "./core/stores/notification";
+import { useNotificationStore, type VcpNotification } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
@@ -65,6 +65,149 @@ const router = useRouter();
 const { initRootHistory } = useModalHistory();
 
 const isAssistant = ref(false);
+
+const findAgentMessagePayload = (value: any, depth = 0): any | null => {
+  if (!value || depth > 6) return null;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return findAgentMessagePayload(parsed, depth + 1) || findAgentMessageToolPayload(parsed, depth + 1);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== "object") return null;
+  if (value.type === "agent_message") return value;
+  if (isAgentMessageToolObject(value)) {
+    const built = buildAgentMessagePayloadFromToolObject(value, depth);
+    if (built) return built;
+  }
+
+  for (const key of ["data", "callbackData", "result", "payload", "message", "content", "original_plugin_output", "raw", "details"]) {
+    const found = findAgentMessagePayload(value[key], depth + 1);
+    if (found) return found;
+  }
+
+  return null;
+};
+
+const findAgentMessageToolPayload = (value: any, depth = 0): any | null => {
+  if (!value || depth > 6) return null;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return findAgentMessagePayload(parsed, depth + 1) || findAgentMessageToolPayload(parsed, depth + 1);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== "object") return null;
+
+  if (isAgentMessageToolObject(value)) {
+    const built = buildAgentMessagePayloadFromToolObject(value, depth);
+    if (built) return built;
+  }
+
+  for (const key of ["data", "callbackData", "result", "payload", "message", "content", "original_plugin_output", "raw", "details"]) {
+    const found = findAgentMessageToolPayload(value[key], depth + 1);
+    if (found) return found;
+  }
+
+  return null;
+};
+
+const isAgentMessageToolObject = (value: any): boolean => {
+  if (!value || typeof value !== "object") return false;
+  return ["tool_name", "toolName", "pluginName", "PLUGIN_NAME_FOR_CALLBACK", "name"]
+    .some((key) => isAgentMessageToolName(value[key]));
+};
+
+const isAgentMessageToolName = (value: any): boolean => {
+  if (typeof value !== "string") return false;
+  const normalized = value.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  return normalized === "agentmessage"
+    || normalized === "mobileagentmessage"
+    || normalized.startsWith("agentmessage");
+};
+
+const buildAgentMessagePayloadFromToolObject = (value: any, depth = 0): any | null => {
+  for (const key of ["result", "payload", "original_plugin_output", "content", "message", "body", "data"]) {
+    const found = findAgentMessagePayload(value?.[key], depth + 1);
+    if (found) return found;
+  }
+
+  const body = firstToolBodyString(value, depth + 1);
+  if (!body) return null;
+
+  const recipient = firstString(value, ["recipient", "Maid", "maid", "MaidName", "sender_name"]);
+  return {
+    type: "agent_message",
+    title: firstString(value, ["title"]) || (recipient ? `${recipient} 的消息` : "Agent 消息"),
+    message: body,
+    originalContent: body,
+    recipient,
+    androidNotification: value?.androidNotification,
+  };
+};
+
+const firstToolBodyString = (value: any, depth = 0): string | null => {
+  if (!value || depth > 7) return null;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      const agentPayload = findAgentMessagePayload(parsed, depth + 1);
+      if (agentPayload?.originalContent || agentPayload?.message) {
+        return String(agentPayload.originalContent || agentPayload.message);
+      }
+      const nested = firstToolBodyString(parsed, depth + 1);
+      if (nested) return nested;
+    } catch { }
+    return trimmed;
+  }
+
+  if (typeof value !== "object") return null;
+
+  for (const key of ["originalContent", "body", "message", "content", "result", "original_plugin_output"]) {
+    const text = firstToolBodyString(value[key], depth + 1);
+    if (text) return text;
+  }
+
+  return null;
+};
+
+const firstString = (value: any, keys: string[]): string | undefined => {
+  for (const key of keys) {
+    const item = value?.[key];
+    if (typeof item === "string" && item.trim()) return item.trim();
+  }
+  return undefined;
+};
+
+const pushAgentSystemNotification = async (
+  notification: Partial<VcpNotification>,
+  rawPayload?: any
+) => {
+  const agentPayload = findAgentMessagePayload(rawPayload ?? notification.rawPayload);
+  if (!agentPayload && notification.type !== "agent") return;
+  if (agentPayload?.androidNotification?.delivered === true) return;
+
+  const title = String(
+    agentPayload?.title ||
+    (agentPayload?.recipient ? `${agentPayload.recipient} 的消息` : notification.title || "Agent 消息")
+  );
+  const body = String(agentPayload?.originalContent || agentPayload?.message || notification.message || "");
+  if (!body.trim()) return;
+
+  try {
+    await invoke("plugin:vcp-mobile|show_system_notification", { title, body });
+    console.info("[App] Agent system notification submitted:", { title, bodyLength: body.length });
+  } catch (err) {
+    console.warn("[App] Agent system notification push failed:", err);
+  }
+};
 
 // --- Share Intent State ---
 const sharedContent = ref<SharedContentData>({ text: "", files: [] });
@@ -376,6 +519,7 @@ onMounted(async () => {
     const processed = processPayload(payload);
 
     if (processed && !processed.silent) {
+      void pushAgentSystemNotification(processed, payload);
       notificationStore.addNotification(processed);
     }
   });

@@ -15,6 +15,7 @@ impl StreamingTool for BatteryInfoTool {
             display_name: "电池状态".to_string(),
             placeholder: Some("{{MobileBattery}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

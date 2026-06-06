@@ -146,6 +146,7 @@ impl StreamingTool for DeviceStatusSummaryTool {
             display_name: "整机状态摘要".to_string(),
             placeholder: Some("{{MobileStatus}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

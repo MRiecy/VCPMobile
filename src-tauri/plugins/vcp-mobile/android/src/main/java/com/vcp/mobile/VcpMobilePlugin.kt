@@ -1684,6 +1684,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private var downloadNotificationBuilder: androidx.core.app.NotificationCompat.Builder? = null
     private val DOWNLOAD_NOTIF_ID = 0x53545209
     private val DOWNLOAD_CHANNEL_ID = "apk_download"
+    private val AGENT_MESSAGE_CHANNEL_ID = "agent_message"
+    private val AGENT_MESSAGE_NOTIF_BASE_ID = 0x41474D00
+    private var lastAgentNotificationKey: String? = null
+    private var lastAgentNotificationAt: Long = 0
 
     private fun createDownloadNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1695,6 +1699,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             }
             val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
             notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun createAgentMessageNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Agent 消息"
+            val descriptionText = "显示分布式 AgentMessage 插件推送的消息"
+            val importance = android.app.NotificationManager.IMPORTANCE_HIGH
+            val channel = android.app.NotificationChannel(AGENT_MESSAGE_CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+            }
+            val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            notificationManager.createNotificationChannel(channel)
+            Log.i(TAG, "AgentMessage notification channel ready: id=$AGENT_MESSAGE_CHANNEL_ID importance=$importance")
         }
     }
 
@@ -1737,6 +1755,76 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "updateDownloadNotification failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun showSystemNotification(invoke: Invoke) {
+        try {
+            if (!androidx.core.app.NotificationManagerCompat.from(activity).areNotificationsEnabled()) {
+                Log.w(TAG, "showSystemNotification rejected: notifications disabled for package ${activity.packageName}")
+                invoke.reject("Notifications are disabled for this app")
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= 33 &&
+                ContextCompat.checkSelfPermission(activity, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+            ) {
+                Log.w(TAG, "showSystemNotification rejected: POST_NOTIFICATIONS permission is not granted")
+                invoke.reject("POST_NOTIFICATIONS permission is not granted")
+                return
+            }
+
+            val args = invoke.parseArgs(ShowSystemNotificationArgs::class.java)
+            val title = args.title.ifBlank { "Agent 消息" }.take(120)
+            val body = args.body.ifBlank { "收到一条新消息" }.take(3000)
+            val now = System.currentTimeMillis()
+            val notificationKey = "$title\n$body"
+            if (notificationKey == lastAgentNotificationKey && now - lastAgentNotificationAt < 5000) {
+                Log.i(TAG, "showSystemNotification skipped duplicate AgentMessage within 5s")
+                invoke.resolve()
+                return
+            }
+            createAgentMessageNotificationChannel()
+
+            val launchIntent = activity.packageManager.getLaunchIntentForPackage(activity.packageName)?.apply {
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+            } else {
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = launchIntent?.let {
+                android.app.PendingIntent.getActivity(activity, 0, it, pendingIntentFlags)
+            }
+
+            val builder = androidx.core.app.NotificationCompat.Builder(activity, AGENT_MESSAGE_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(androidx.core.app.NotificationCompat.BigTextStyle().bigText(body))
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                .setCategory(androidx.core.app.NotificationCompat.CATEGORY_MESSAGE)
+                .setVisibility(androidx.core.app.NotificationCompat.VISIBILITY_PRIVATE)
+                .setAutoCancel(true)
+                .setWhen(now)
+                .setShowWhen(true)
+
+            if (pendingIntent != null) {
+                builder.setContentIntent(pendingIntent)
+            }
+
+            val notificationManager = activity.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val notificationId = AGENT_MESSAGE_NOTIF_BASE_ID + (now.toInt() and 0x00FFFFFF)
+            notificationManager.notify(notificationId, builder.build())
+            lastAgentNotificationKey = notificationKey
+            lastAgentNotificationAt = now
+            Log.i(TAG, "showSystemNotification posted id=$notificationId channel=$AGENT_MESSAGE_CHANNEL_ID title=$title bodyLength=${body.length}")
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "showSystemNotification failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
     }
@@ -1816,6 +1904,12 @@ class UpdateDownloadNotifArgs {
 }
 
 @InvokeArg
+class ShowSystemNotificationArgs {
+    lateinit var title: String
+    lateinit var body: String
+}
+
+@InvokeArg
 class ToggleFloatingBallArgs {
     var show: Boolean = false
 }
@@ -1836,4 +1930,3 @@ class GetSensorDataArgs {
 class RunRootCommandArgs {
     lateinit var command: String
 }
-

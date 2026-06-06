@@ -180,6 +180,7 @@ impl StreamingTool for CpuInfoTool {
             display_name: "CPU核心监控".to_string(),
             placeholder: Some("{{MobileCPU}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

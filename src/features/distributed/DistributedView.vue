@@ -43,8 +43,14 @@ interface PluginItem {
   name: string;
   englishName: string;
   description: string;
-  type: "oneshot" | "streaming";
+  type: "oneshot" | "interactive" | "streaming";
   placeholder?: string;
+  invocationCommands: Array<{
+    commandIdentifier?: string;
+    command_identifier?: string;
+    description?: string;
+    example?: string;
+  }>;
   icon: string;
   communication: {
     mode: "Ipc" | "Mock";
@@ -166,9 +172,10 @@ const loadPluginsMetadata = async () => {
     const rawTools = await invoke<any[]>("get_registered_tools_metadata");
 
 
-    
+
     // Map backend registered tools to frontend list with visual decorator
     pluginsList.value = rawTools.map(tool => {
+      const invocationCommands = tool.capabilities?.invocationCommands || tool.invocation_commands || [];
       return {
         id: tool.name,
         name: tool.display_name || tool.name,
@@ -176,6 +183,7 @@ const loadPluginsMetadata = async () => {
         description: tool.description || "",
         type: tool.category || "oneshot",
         placeholder: tool.placeholder || undefined,
+        invocationCommands,
         icon: tool.icon || "i-lucide-toy-brick",
         communication: tool.communication,
         enabled: tool.enabled !== undefined ? tool.enabled : true,
@@ -238,6 +246,72 @@ const selectTab = (pluginId: string, index: number) => {
   const blocks = pluginFoldBlocks.value[pluginId];
   if (blocks && blocks[index]) {
     pluginData.value[pluginId] = blocks[index].content;
+  }
+};
+
+const formatInvocationGuide = (plugin: PluginItem) => {
+  const commands = plugin.invocationCommands || [];
+  const header = [
+    `${plugin.englishName} 是 ${plugin.type} 工具。`,
+    "该类型不提供实时物理遥测快照，需要由分布式主服务器按 manifest 参数发起调用。"
+  ];
+
+  if (!commands.length) {
+    return header.join("\n");
+  }
+
+  const body = commands.map((command, index) => {
+    const identifier = command.commandIdentifier || command.command_identifier || plugin.englishName;
+    return [
+      `命令 ${index + 1}: ${identifier}`,
+      command.description ? `说明:\n${command.description}` : "",
+      command.example ? `示例:\n${command.example}` : ""
+    ].filter(Boolean).join("\n");
+  });
+
+  return [...header, "", ...body].join("\n\n");
+};
+
+const loadPluginDetails = async (plugin: PluginItem) => {
+  pluginFoldBlocks.value[plugin.id] = [];
+  selectedFoldBlockIdx.value[plugin.id] = 0;
+
+  if (plugin.type !== "streaming") {
+    pluginLoading.value[plugin.id] = false;
+    pluginData.value[plugin.id] = formatInvocationGuide(plugin);
+    return;
+  }
+
+  pluginLoading.value[plugin.id] = true;
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const res = await invoke<string>("execute_distributed_tool", { name: plugin.id });
+
+    // 解析是否含有折叠块协议
+    const blocks = parseFoldBlocks(res);
+    if (blocks.length > 0) {
+      pluginFoldBlocks.value[plugin.id] = blocks;
+      selectedFoldBlockIdx.value[plugin.id] = 0; // 默认选中首个 Tab (通常是 0.0 极简级)
+      pluginData.value[plugin.id] = blocks[0].content;
+    } else {
+      // 如果返回的值可以解析为 JSON 对象，我们对其进行排版美化
+      try {
+        const parsed = JSON.parse(res);
+        if (parsed && typeof parsed === "object") {
+          pluginData.value[plugin.id] = JSON.stringify(parsed, null, 2);
+        } else {
+          pluginData.value[plugin.id] = res;
+        }
+      } catch {
+        pluginData.value[plugin.id] = res;
+      }
+    }
+  } catch (e: any) {
+    console.error(`[DistributedView] Failed to pull native sensor telemetry for ${plugin.id}:`, e);
+    pluginData.value[plugin.id] = `遥测读取异常:\n${e.toString()}\n(请检查移动端传感器硬件模块是否正常运行或对应的 JNI 权限是否已授予)`;
+  } finally {
+    pluginLoading.value[plugin.id] = false;
   }
 };
 
@@ -305,13 +379,13 @@ const copyPlaceholder = (macro: string) => {
   copyText(macro, "占位符宏已复制");
 };
 
-// Toggle plugin fold and load JNI sensor/battery data on-demand (Fully dynamic binding)
+// Toggle plugin fold and load streaming telemetry on-demand.
 const togglePlugin = async (plugin: PluginItem) => {
   if (!plugin.enabled) {
     notificationStore.addNotification({
       type: "warning",
       title: "插件已被禁用",
-      message: `${plugin.name} 当前处于关闭状态，无法读取其实时物理遥测。`,
+      message: `${plugin.name} 当前处于关闭状态，无法查看详情。`,
       toastOnly: true
     });
     return;
@@ -323,38 +397,7 @@ const togglePlugin = async (plugin: PluginItem) => {
   }
 
   expandedPluginId.value = plugin.id;
-  pluginLoading.value[plugin.id] = true;
-
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const res = await invoke<string>("execute_distributed_tool", { name: plugin.id });
-    
-    // 解析是否含有折叠块协议
-    const blocks = parseFoldBlocks(res);
-    if (blocks.length > 0) {
-      pluginFoldBlocks.value[plugin.id] = blocks;
-      selectedFoldBlockIdx.value[plugin.id] = 0; // 默认选中首个 Tab (通常是 0.0 极简级)
-      pluginData.value[plugin.id] = blocks[0].content;
-    } else {
-      pluginFoldBlocks.value[plugin.id] = [];
-      // 如果返回的值可以解析为 JSON 对象，我们对其进行排版美化
-      try {
-        const parsed = JSON.parse(res);
-        if (parsed && typeof parsed === "object") {
-          pluginData.value[plugin.id] = JSON.stringify(parsed, null, 2);
-        } else {
-          pluginData.value[plugin.id] = res;
-        }
-      } catch {
-        pluginData.value[plugin.id] = res;
-      }
-    }
-  } catch (e: any) {
-    console.error(`[DistributedView] Failed to pull native sensor telemetry for ${plugin.id}:`, e);
-    pluginData.value[plugin.id] = `遥测读取异常:\n${e.toString()}\n(请检查移动端传感器硬件模块是否正常运行或对应的 JNI 权限是否已授予)`;
-  } finally {
-    pluginLoading.value[plugin.id] = false;
-  }
+  await loadPluginDetails(plugin);
 };
 
 // Root Access States & Functions
@@ -821,9 +864,10 @@ watch(
                 </div>
 
                 <div class="flex justify-between items-center text-[9px] uppercase font-bold opacity-40 tracking-wider">
-                  <span>实时遥测数据 / Realtime Telemetry</span>
+                  <span>{{ plugin.type === 'streaming' ? '实时遥测数据 / Realtime Telemetry' : '调用说明 / Invocation Guide' }}</span>
                   <button
-                    @click.stop="togglePlugin(plugin)"
+                    v-if="plugin.type === 'streaming'"
+                    @click.stop="loadPluginDetails(plugin)"
                     class="px-2 py-0.5 bg-black/10 dark:bg-white/10 rounded-md hover:bg-black/20 flex items-center gap-1 active:scale-95 transition-all text-[8px]"
                   >
                     刷新读取

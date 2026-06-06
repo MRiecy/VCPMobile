@@ -15,6 +15,7 @@ impl StreamingTool for NetworkInfoTool {
             display_name: "网络带宽监控".to_string(),
             placeholder: Some("{{MobileNetwork}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 
