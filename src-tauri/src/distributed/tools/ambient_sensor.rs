@@ -17,6 +17,7 @@ impl StreamingTool for AmbientSensorTool {
             display_name: "物理环境传感器".to_string(),
             placeholder: Some("{{MobileAmbient}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

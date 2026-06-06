@@ -5,6 +5,8 @@
 
 import { ref, onMounted, onUnmounted } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { findAgentMessagePayload } from "../../core/utils/agentMessagePayload";
 
 interface ToolUiRequest {
   tool: string;
@@ -32,15 +34,22 @@ let unlistenNotification: UnlistenFn | null = null;
 onMounted(async () => {
   unlistenNotification = await listen<{ title: string; body: string }>(
     "distributed-notification",
-    (event) => {
-      // Use browser Notification API or fallback
-      if ("Notification" in window && Notification.permission === "granted") {
-        new Notification(event.payload.title, { body: event.payload.body });
-      } else {
-        console.log(
-          `[Distributed Notification] ${event.payload.title}: ${event.payload.body}`,
-        );
+    async (event) => {
+      const delivered =
+        findAgentMessagePayload(event.payload)?.androidNotification?.delivered === true;
+      if (!delivered) {
+        try {
+          await invoke("plugin:vcp-mobile|show_system_notification", {
+            title: event.payload.title,
+            body: event.payload.body,
+          });
+        } catch (error) {
+          console.warn("[Distributed Notification] Native notification failed:", error);
+        }
       }
+      console.log(
+        `[Distributed Notification] ${event.payload.title}: ${event.payload.body}`,
+      );
     },
   );
 });

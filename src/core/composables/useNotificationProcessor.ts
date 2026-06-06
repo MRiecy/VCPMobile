@@ -1,4 +1,5 @@
 import { VcpNotification, useNotificationStore, VcpStatus } from '../stores/notification';
+import { findAgentMessagePayload } from '../utils/agentMessagePayload';
 
 /**
  * 过滤结果接口
@@ -138,6 +139,7 @@ export function useNotificationProcessor() {
     let actions: VcpNotification['actions'] = [];
     let notificationId: string | undefined = undefined;
     let historyOnly = false;
+    const agentPayload = findAgentMessagePayload(payload);
 
     // --- 核心协议解析层 (对标桌面端 notificationRenderer.js) ---
 
@@ -152,7 +154,13 @@ export function useNotificationProcessor() {
         }
       }
 
-      if (vcpData.tool_name && vcpData.status) {
+      if (agentPayload && (agentPayload.message || agentPayload.originalContent)) {
+        type = 'agent';
+        title = agentPayload.title || (agentPayload.recipient ? `${agentPayload.recipient} 的消息` : 'Agent 消息');
+        message = String(agentPayload.message || agentPayload.originalContent);
+        isPreformatted = message.includes('\n');
+        duration = 10000;
+      } else if (vcpData.tool_name && vcpData.status) {
         type = vcpData.status === 'error' 
           ? 'error' 
           : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
@@ -258,7 +266,15 @@ export function useNotificationProcessor() {
       message = String(payload.message);
       isPreformatted = false;
     }
-    // 5. tool_approval_request: 审核请求
+    // 5. agent_message: 移动端本机 AgentMessage 推送
+    else if (agentPayload && (agentPayload.message || agentPayload.originalContent)) {
+      type = 'agent';
+      title = agentPayload.title || (agentPayload.recipient ? `${agentPayload.recipient} 的消息` : 'Agent 消息');
+      message = String(agentPayload.message || agentPayload.originalContent);
+      isPreformatted = message.includes('\n');
+      duration = 10000;
+    }
+    // 6. tool_approval_request: 审核请求
     else if (payload.type === 'tool_approval_request' && payload.data) {
       const approvalData = payload.data;
       type = 'warning';
@@ -271,7 +287,7 @@ export function useNotificationProcessor() {
         { label: '拒绝', value: false, color: 'bg-red-500 shadow-lg shadow-red-500/20' }
       ];
     }
-    // 6. 默认回退 (Generic fallback)
+    // 7. 默认回退 (Generic fallback)
     else {
       if (typeof payload === 'object' && payload !== null) {
         title = payload.type ? `类型: ${payload.type}` : 'VCP 消息';

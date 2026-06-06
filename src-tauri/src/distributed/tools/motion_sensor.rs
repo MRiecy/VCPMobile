@@ -17,6 +17,7 @@ impl StreamingTool for MotionSensorTool {
             display_name: "九轴运动传感器".to_string(),
             placeholder: Some("{{MobileMotion}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

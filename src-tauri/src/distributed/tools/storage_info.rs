@@ -67,6 +67,7 @@ impl StreamingTool for StorageInfoTool {
             display_name: "磁盘存储监控".to_string(),
             placeholder: Some("{{MobileStorage}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 
