@@ -302,11 +302,35 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                                             let text = msg.to_text().unwrap_or_default();
                                             match serde_json::from_str::<Value>(text) {
                                                 Ok(payload) => {
-                                                    if let Err(e) = app_handle.emit("vcp-system-event", payload) {
-                                                        log::error!("[VCPLog] Failed to emit event to frontend: {}", e);
+                                                    if payload_has_agent_message_hint(&payload, 0)
+                                                    {
+                                                        log::info!(
+                                                            "[VCPLog] Incoming AgentMessage-related payload summary: {}",
+                                                            summarize_agent_message_payload(&payload)
+                                                        );
+                                                    }
+                                                    maybe_push_agent_message_notification(
+                                                        &app_handle,
+                                                        &payload,
+                                                    );
+                                                    if let Err(e) =
+                                                        app_handle.emit("vcp-system-event", payload)
+                                                    {
+                                                        log::error!(
+                                                            "[VCPLog] Failed to emit event to frontend: {}",
+                                                            e
+                                                        );
                                                     }
                                                 }
                                                 Err(_) => {
+                                                    let raw_payload = serde_json::json!({
+                                                        "type": "raw_text",
+                                                        "data": text
+                                                    });
+                                                    maybe_push_agent_message_notification(
+                                                        &app_handle,
+                                                        &raw_payload,
+                                                    );
                                                     let _ = app_handle.emit("vcp-system-event", serde_json::json!({
                                                         "type": "raw_text",
                                                         "data": text
@@ -431,4 +455,499 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
     }
     LOG_CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
     log::info!("[VCPLog] Listener task terminated, connection flag reset.");
+}
+
+fn maybe_push_agent_message_notification<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    payload: &Value,
+) {
+    if let Some((title, body)) = extract_agent_message_notification(payload) {
+        log::info!(
+            "[VCPLog] AgentMessage payload matched for Android notification (title_len={}, body_len={}).",
+            title.chars().count(),
+            body.chars().count()
+        );
+        if let Err(e) = tauri_plugin_vcp_mobile::system::show_system_notification(
+            app_handle.clone(),
+            title,
+            body,
+        ) {
+            log::warn!("[VCPLog] Failed to push agent_message notification: {}", e);
+        } else {
+            log::info!("[VCPLog] Android notification request submitted for AgentMessage.");
+        }
+    } else if payload_has_agent_message_hint(payload, 0) {
+        if agent_message_was_delivered_locally(payload) {
+            log::info!(
+                "[VCPLog] AgentMessage notification already delivered locally; skipping duplicate Android notification."
+            );
+            return;
+        }
+        log::warn!(
+            "[VCPLog] AgentMessage hint found but no notification body extracted. summary={}",
+            summarize_agent_message_payload(payload)
+        );
+    }
+}
+
+fn extract_agent_message_notification(payload: &Value) -> Option<(String, String)> {
+    let agent_data = find_agent_message_payload(payload, 0)
+        .or_else(|| find_agent_message_tool_payload(payload, 0))?;
+
+    if agent_data
+        .get("androidNotification")
+        .and_then(|v| v.get("delivered"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    if agent_data.get("type").and_then(Value::as_str) != Some("agent_message") {
+        return None;
+    }
+
+    let body = get_non_empty_string(&agent_data, "originalContent")
+        .or_else(|| get_non_empty_string(&agent_data, "message"))?;
+    let title = get_non_empty_string(&agent_data, "title")
+        .or_else(|| {
+            get_non_empty_string(&agent_data, "recipient").map(|name| format!("{} 的消息", name))
+        })
+        .unwrap_or_else(|| "Agent 消息".to_string());
+
+    Some((title, body))
+}
+
+fn find_agent_message_tool_payload(value: &Value, depth: usize) -> Option<Value> {
+    if depth > 6 {
+        return None;
+    }
+
+    if let Some(text) = value.as_str() {
+        let parsed = serde_json::from_str::<Value>(text).ok()?;
+        return find_agent_message_payload(&parsed, depth + 1)
+            .or_else(|| find_agent_message_tool_payload(&parsed, depth + 1));
+    }
+
+    let object = value.as_object()?;
+
+    if is_agent_message_tool_object(object) {
+        if let Some(agent_payload) = build_agent_message_payload_from_tool_object(value, depth) {
+            return Some(agent_payload);
+        }
+    }
+
+    for key in [
+        "data",
+        "callbackData",
+        "result",
+        "payload",
+        "message",
+        "content",
+        "original_plugin_output",
+        "raw",
+        "details",
+    ] {
+        if let Some(nested) = object.get(key) {
+            if let Some(found) = find_agent_message_tool_payload(nested, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+fn build_agent_message_payload_from_tool_object(value: &Value, depth: usize) -> Option<Value> {
+    let object = value.as_object()?;
+
+    for key in [
+        "result",
+        "payload",
+        "original_plugin_output",
+        "content",
+        "message",
+        "body",
+        "data",
+    ] {
+        if let Some(nested) = object.get(key) {
+            if let Some(found) = find_agent_message_payload(nested, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+
+    let body = first_tool_body_string(value, depth + 1)?;
+    let title = get_non_empty_string(value, "title")
+        .or_else(|| sender_name_from_tool_object(value).map(|name| format!("{} 的消息", name)))
+        .unwrap_or_else(|| "Agent 消息".to_string());
+
+    Some(serde_json::json!({
+        "type": "agent_message",
+        "title": title,
+        "message": body,
+        "originalContent": body,
+        "recipient": sender_name_from_tool_object(value),
+        "androidNotification": value.get("androidNotification").cloned().unwrap_or(Value::Null)
+    }))
+}
+
+fn first_tool_body_string(value: &Value, depth: usize) -> Option<String> {
+    if depth > 7 {
+        return None;
+    }
+
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            if let Some((_, body)) = extract_agent_message_notification(&parsed) {
+                return Some(body);
+            }
+            if let Some(text) = first_tool_body_string(&parsed, depth + 1) {
+                return Some(text);
+            }
+        }
+        return Some(trimmed.to_string());
+    }
+
+    let object = value.as_object()?;
+    for key in [
+        "originalContent",
+        "body",
+        "message",
+        "content",
+        "result",
+        "original_plugin_output",
+    ] {
+        if let Some(nested) = object.get(key) {
+            if let Some(text) = first_tool_body_string(nested, depth + 1) {
+                return Some(text);
+            }
+        }
+    }
+
+    None
+}
+
+fn find_agent_message_payload(value: &Value, depth: usize) -> Option<Value> {
+    if depth > 6 {
+        return None;
+    }
+
+    if let Some(text) = value.as_str() {
+        let parsed = serde_json::from_str::<Value>(text).ok()?;
+        return find_agent_message_payload(&parsed, depth + 1);
+    }
+
+    let object = value.as_object()?;
+    if object.get("type").and_then(Value::as_str) == Some("agent_message") {
+        return Some(value.clone());
+    }
+
+    // VCPToolBox may wrap plugin results as:
+    // { type, data }, { callbackData }, or { status, result } depending on
+    // whether the source is a local plugin callback or a distributed callback.
+    for key in [
+        "data",
+        "callbackData",
+        "result",
+        "payload",
+        "message",
+        "content",
+        "original_plugin_output",
+    ] {
+        if let Some(nested) = object.get(key) {
+            if let Some(found) = find_agent_message_payload(nested, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+fn is_agent_message_tool_object(object: &serde_json::Map<String, Value>) -> bool {
+    for key in [
+        "tool_name",
+        "toolName",
+        "pluginName",
+        "PLUGIN_NAME_FOR_CALLBACK",
+        "name",
+    ] {
+        if object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(is_agent_message_tool_name)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_agent_message_tool_name(value: &str) -> bool {
+    let normalized: String = value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect();
+    normalized == "agentmessage"
+        || normalized == "mobileagentmessage"
+        || normalized.starts_with("agentmessage")
+}
+
+fn sender_name_from_tool_object(value: &Value) -> Option<String> {
+    for key in ["recipient", "Maid", "maid", "MaidName", "sender_name"] {
+        if let Some(name) = get_non_empty_string(value, key) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn get_non_empty_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn agent_message_was_delivered_locally(payload: &Value) -> bool {
+    find_agent_message_payload(payload, 0)
+        .or_else(|| find_agent_message_tool_payload(payload, 0))
+        .and_then(|agent_data| agent_data.get("androidNotification").cloned())
+        .and_then(|notification| notification.get("delivered").cloned())
+        .and_then(|delivered| delivered.as_bool())
+        .unwrap_or(false)
+}
+
+fn payload_has_agent_message_hint(value: &Value, depth: usize) -> bool {
+    if depth > 4 {
+        return false;
+    }
+
+    if let Some(text) = value.as_str() {
+        return text.contains("AgentMessage") || text.contains("agent_message");
+    }
+
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+
+    if object.get("type").and_then(Value::as_str) == Some("agent_message")
+        || is_agent_message_tool_object(object)
+    {
+        return true;
+    }
+
+    for key in [
+        "data",
+        "callbackData",
+        "result",
+        "payload",
+        "message",
+        "content",
+        "original_plugin_output",
+        "raw",
+        "details",
+    ] {
+        if object
+            .get(key)
+            .map(|nested| payload_has_agent_message_hint(nested, depth + 1))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn summarize_agent_message_payload(value: &Value) -> String {
+    let root_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("<none>");
+    let data = value.get("data").unwrap_or(value);
+    let data_type = data.get("type").and_then(Value::as_str).unwrap_or("<none>");
+    let tool_name = [
+        "tool_name",
+        "toolName",
+        "pluginName",
+        "PLUGIN_NAME_FOR_CALLBACK",
+        "name",
+    ]
+    .iter()
+    .find_map(|key| data.get(*key).and_then(Value::as_str))
+    .unwrap_or("<none>");
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("<none>");
+    let content_len = data
+        .get("content")
+        .and_then(Value::as_str)
+        .map(|s| s.chars().count())
+        .unwrap_or(0);
+
+    format!(
+        "root_type={}, data_type={}, tool={}, status={}, content_len={}",
+        root_type, data_type, tool_name, status, content_len
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_agent_message_from_vcp_log_payload() {
+        let payload = json!({
+            "type": "vcp_log",
+            "data": {
+                "type": "agent_message",
+                "recipient": "小克",
+                "message": "2026-06-06 18:00:00 - 小克\n格式化消息",
+                "originalContent": "格式化消息"
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some(("小克 的消息".to_string(), "格式化消息".to_string()))
+        );
+    }
+
+    #[test]
+    fn extracts_agent_message_from_callback_result_payload() {
+        let payload = json!({
+            "type": "plugin_callback_notification",
+            "data": {
+                "status": "success",
+                "result": {
+                    "type": "agent_message",
+                    "recipient": "小克",
+                    "message": "2026-06-06 18:00:00 - 小克\n格式化消息"
+                }
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some((
+                "小克 的消息".to_string(),
+                "2026-06-06 18:00:00 - 小克\n格式化消息".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn extracts_agent_message_from_callback_data_payload() {
+        let payload = json!({
+            "type": "vcp_log",
+            "data": {
+                "callbackData": {
+                    "type": "agent_message",
+                    "recipient": "小克",
+                    "originalContent": "只推送原始内容"
+                }
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some(("小克 的消息".to_string(), "只推送原始内容".to_string()))
+        );
+    }
+
+    #[test]
+    fn extracts_agent_message_from_json_string_payload() {
+        let payload = json!({
+            "type": "vcp_log",
+            "data": {
+                "content": "{\"type\":\"agent_message\",\"recipient\":\"小克\",\"originalContent\":\"字符串包裹消息\"}"
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some(("小克 的消息".to_string(), "字符串包裹消息".to_string()))
+        );
+    }
+
+    #[test]
+    fn skips_agent_message_already_delivered_locally() {
+        let payload = json!({
+            "type": "vcp_log",
+            "data": {
+                "type": "agent_message",
+                "message": "已推送",
+                "androidNotification": { "delivered": true }
+            }
+        });
+
+        assert_eq!(extract_agent_message_notification(&payload), None);
+    }
+
+    #[test]
+    fn extracts_agent_message_from_tool_executor_log_content() {
+        let payload = json!({
+            "type": "vcp_log",
+            "data": {
+                "tool_name": "AgentMessage",
+                "status": "success",
+                "content": "{\n  \"type\": \"agent_message\",\n  \"recipient\": \"小克\",\n  \"message\": \"2026-06-06 19:28:00 - 小克\\n提醒内容\",\n  \"originalContent\": \"提醒内容\"\n}"
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some(("小克 的消息".to_string(), "提醒内容".to_string()))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_agent_message_tool_content_text() {
+        let payload = json!({
+            "type": "vcp_log",
+            "data": {
+                "tool_name": "AgentMessage",
+                "status": "success",
+                "content": "提醒内容"
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some(("Agent 消息".to_string(), "提醒内容".to_string()))
+        );
+    }
+
+    #[test]
+    fn extracts_agent_message_from_distributed_callback_tool_payload() {
+        let payload = json!({
+            "type": "plugin_callback_notification",
+            "data": {
+                "pluginName": "AgentMessage",
+                "taskId": "abc",
+                "result": {
+                    "type": "agent_message",
+                    "recipient": "小克",
+                    "originalContent": "分布式回调内容"
+                }
+            }
+        });
+
+        assert_eq!(
+            extract_agent_message_notification(&payload),
+            Some(("小克 的消息".to_string(), "分布式回调内容".to_string()))
+        );
+    }
 }

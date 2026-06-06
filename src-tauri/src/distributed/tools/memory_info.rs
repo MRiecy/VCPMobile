@@ -74,6 +74,7 @@ impl StreamingTool for MemoryInfoTool {
             display_name: "内存监控".to_string(),
             placeholder: Some("{{MobileMemory}}".to_string()),
             invocation_commands: vec![],
+            web_socket_push: None,
         }
     }
 

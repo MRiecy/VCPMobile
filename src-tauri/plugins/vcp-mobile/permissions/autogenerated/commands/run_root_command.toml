@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-run-root-command"
+description = "Enables the run_root_command command without any pre-configured scope."
+commands.allow = ["run_root_command"]
+
+[[permission]]
+identifier = "deny-run-root-command"
+description = "Denies the run_root_command command without any pre-configured scope."
+commands.deny = ["run_root_command"]

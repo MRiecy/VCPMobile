@@ -20,6 +20,7 @@ commands.allow = [
     "start_download_notification",
     "update_download_notification",
     "cancel_download_notification",
+    "show_system_notification",
     "request_overlay_permission",
     "register_shared_files",
     "toggle_floating_ball",
@@ -35,4 +36,3 @@ commands.allow = [
     "release_wake_lock",
     "start_network_monitoring",
 ]
-

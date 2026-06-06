@@ -9,10 +9,34 @@ use std::io::{Read, Write};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
 use super::types::ToolManifest;
+
+const DISABLED_CONFIG_SCHEMA_VERSION: u32 = 1;
+const DEFAULT_DISABLED_ON_LEGACY_CONFIG: &[&str] = &["TopicMemo", "TopicSponsor"];
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DisabledToolsConfigRead {
+    #[serde(default)]
+    disabled_names: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisabledToolsConfigWrite {
+    schema_version: u32,
+    disabled_names: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LoadedDisabledToolsConfig {
+    disabled_names: Vec<String>,
+    migrated_from_legacy_array: bool,
+}
 
 // ============================================================
 // Tool traits — three execution modes
@@ -71,6 +95,36 @@ impl ToolEntry {
             ToolEntry::Streaming(t) => t.manifest(),
         }
     }
+}
+
+fn parse_disabled_config(content: &str) -> Result<LoadedDisabledToolsConfig, serde_json::Error> {
+    let value: Value = serde_json::from_str(content)?;
+    if value.is_array() {
+        let disabled_names = serde_json::from_value::<Vec<String>>(value)?;
+        return Ok(LoadedDisabledToolsConfig {
+            disabled_names,
+            migrated_from_legacy_array: true,
+        });
+    }
+
+    let config = serde_json::from_value::<DisabledToolsConfigRead>(value)?;
+    Ok(LoadedDisabledToolsConfig {
+        disabled_names: config.disabled_names,
+        migrated_from_legacy_array: false,
+    })
+}
+
+fn migrate_legacy_disabled_names(
+    disabled_names: Vec<String>,
+    registered_names: &[&str],
+) -> HashSet<String> {
+    let mut disabled_set: HashSet<String> = disabled_names.into_iter().collect();
+    for name in DEFAULT_DISABLED_ON_LEGACY_CONFIG {
+        if registered_names.contains(name) {
+            disabled_set.insert((*name).to_string());
+        }
+    }
+    disabled_set
 }
 
 // ============================================================
@@ -146,6 +200,14 @@ impl ToolRegistry {
             .filter(|(name, _)| self.is_enabled(name))
             .map(|(_, e)| e.manifest())
             .collect()
+    }
+
+    /// Get one enabled tool manifest by name.
+    pub fn get_manifest(&self, name: &str) -> Option<ToolManifest> {
+        if !self.is_enabled(name) {
+            return None;
+        }
+        self.tools.get(name).map(ToolEntry::manifest)
     }
 
     /// Get all tool metadata with categories and placeholders for the frontend config.
@@ -238,13 +300,32 @@ impl ToolRegistry {
                 if let Ok(mut file) = File::open(&config_path) {
                     let mut content = String::new();
                     if file.read_to_string(&mut content).is_ok() {
-                        if let Ok(names) = serde_json::from_str::<Vec<String>>(&content) {
+                        if let Ok(config) = parse_disabled_config(&content) {
+                            let registered_names: Vec<&str> =
+                                self.tools.keys().map(String::as_str).collect();
+                            let migrated_from_legacy = config.migrated_from_legacy_array;
+                            let disabled_names = if migrated_from_legacy {
+                                migrate_legacy_disabled_names(
+                                    config.disabled_names,
+                                    &registered_names,
+                                )
+                            } else {
+                                config.disabled_names.into_iter().collect()
+                            };
                             if let Ok(mut guard) = self.disabled_names.write() {
-                                *guard = names.into_iter().collect();
+                                *guard = disabled_names;
                                 log::info!(
                                     "[Distributed] Loaded disabled tools config: {:?}",
                                     guard
                                 );
+                            }
+                            if migrated_from_legacy {
+                                if let Err(err) = self.save_disabled_config(app) {
+                                    log::warn!(
+                                        "[Distributed] Failed to migrate disabled tools config: {}",
+                                        err
+                                    );
+                                }
                             }
                         }
                     }
@@ -267,16 +348,52 @@ impl ToolRegistry {
             let _ = std::fs::create_dir_all(&config_dir);
             let config_path = config_dir.join("distributed_tools.json");
             let names: Vec<String> = if let Ok(guard) = self.disabled_names.read() {
-                guard.iter().cloned().collect()
+                let mut names: Vec<String> = guard.iter().cloned().collect();
+                names.sort();
+                names
             } else {
                 Vec::new()
             };
-            let content = serde_json::to_string_pretty(&names).map_err(|e| e.to_string())?;
+            let content = serde_json::to_string_pretty(&DisabledToolsConfigWrite {
+                schema_version: DISABLED_CONFIG_SCHEMA_VERSION,
+                disabled_names: names.clone(),
+            })
+            .map_err(|e| e.to_string())?;
             let mut file = File::create(&config_path).map_err(|e| e.to_string())?;
             file.write_all(content.as_bytes())
                 .map_err(|e| e.to_string())?;
             log::info!("[Distributed] Saved disabled tools config: {:?}", names);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_disabled_config_disables_new_topic_tools() {
+        let loaded = parse_disabled_config(r#"["MobileDeviceInfo"]"#).unwrap();
+        assert!(loaded.migrated_from_legacy_array);
+
+        let disabled = migrate_legacy_disabled_names(
+            loaded.disabled_names,
+            &["MobileDeviceInfo", "TopicMemo", "TopicSponsor"],
+        );
+
+        assert!(disabled.contains("MobileDeviceInfo"));
+        assert!(disabled.contains("TopicMemo"));
+        assert!(disabled.contains("TopicSponsor"));
+    }
+
+    #[test]
+    fn schema_disabled_config_preserves_explicit_topic_enablement() {
+        let loaded =
+            parse_disabled_config(r#"{"schemaVersion":1,"disabledNames":["MobileDeviceInfo"]}"#)
+                .unwrap();
+
+        assert!(!loaded.migrated_from_legacy_array);
+        assert_eq!(loaded.disabled_names, vec!["MobileDeviceInfo"]);
     }
 }

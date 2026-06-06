@@ -301,6 +301,42 @@
           "markdownDescription": "Allow all commands in vcp-mobile plugin"
         },
         {
+          "description": "Enables the acquire_wake_lock command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-acquire-wake-lock",
+          "markdownDescription": "Enables the acquire_wake_lock command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the acquire_wake_lock command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-acquire-wake-lock",
+          "markdownDescription": "Denies the acquire_wake_lock command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the cancel_download_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-download-notification",
+          "markdownDescription": "Enables the cancel_download_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_download_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-download-notification",
+          "markdownDescription": "Denies the cancel_download_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the capture_window_snapshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-capture-window-snapshot",
+          "markdownDescription": "Enables the capture_window_snapshot command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the capture_window_snapshot command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-capture-window-snapshot",
+          "markdownDescription": "Denies the capture_window_snapshot command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_all_permissions command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-all-permissions",
@@ -311,6 +347,18 @@
           "type": "string",
           "const": "deny-check-all-permissions",
           "markdownDescription": "Denies the check_all_permissions command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the check_root_access command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-root-access",
+          "markdownDescription": "Enables the check_root_access command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_root_access command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-root-access",
+          "markdownDescription": "Denies the check_root_access command without any pre-configured scope."
         },
         {
           "description": "Enables the clear_keep_screen_on command without any pre-configured scope.",
@@ -337,6 +385,66 @@
           "markdownDescription": "Denies the get_battery_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_cpu_thermal_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-cpu-thermal-status",
+          "markdownDescription": "Enables the get_cpu_thermal_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_cpu_thermal_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-cpu-thermal-status",
+          "markdownDescription": "Denies the get_cpu_thermal_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_gpu_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-gpu-status",
+          "markdownDescription": "Enables the get_gpu_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_gpu_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-gpu-status",
+          "markdownDescription": "Denies the get_gpu_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_network_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-network-status",
+          "markdownDescription": "Enables the get_network_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_network_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-network-status",
+          "markdownDescription": "Denies the get_network_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_sensor_data command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-sensor-data",
+          "markdownDescription": "Enables the get_sensor_data command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_sensor_data command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-sensor-data",
+          "markdownDescription": "Denies the get_sensor_data command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the launch_root_manager command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-launch-root-manager",
+          "markdownDescription": "Enables the launch_root_manager command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the launch_root_manager command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-launch-root-manager",
+          "markdownDescription": "Denies the launch_root_manager command without any pre-configured scope."
+        },
+        {
           "description": "Enables the move_task_to_back command without any pre-configured scope.",
           "type": "string",
           "const": "allow-move-task-to-back",
@@ -347,6 +455,18 @@
           "type": "string",
           "const": "deny-move-task-to-back",
           "markdownDescription": "Denies the move_task_to_back command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open_file_native command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-file-native",
+          "markdownDescription": "Enables the open_file_native command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open_file_native command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-file-native",
+          "markdownDescription": "Denies the open_file_native command without any pre-configured scope."
         },
         {
           "description": "Enables the pick_file command without any pre-configured scope.",
@@ -361,6 +481,30 @@
           "markdownDescription": "Denies the pick_file command without any pre-configured scope."
         },
         {
+          "description": "Enables the register_shared_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-register-shared-files",
+          "markdownDescription": "Enables the register_shared_files command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the register_shared_files command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-register-shared-files",
+          "markdownDescription": "Denies the register_shared_files command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the release_wake_lock command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-release-wake-lock",
+          "markdownDescription": "Enables the release_wake_lock command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the release_wake_lock command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-release-wake-lock",
+          "markdownDescription": "Denies the release_wake_lock command without any pre-configured scope."
+        },
+        {
           "description": "Enables the request_android_permission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-request-android-permission",
@@ -373,6 +517,54 @@
           "markdownDescription": "Denies the request_android_permission command without any pre-configured scope."
         },
         {
+          "description": "Enables the request_overlay_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-overlay-permission",
+          "markdownDescription": "Enables the request_overlay_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_overlay_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-overlay-permission",
+          "markdownDescription": "Denies the request_overlay_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the run_root_command command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-run-root-command",
+          "markdownDescription": "Enables the run_root_command command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the run_root_command command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-run-root-command",
+          "markdownDescription": "Denies the run_root_command command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_image_from_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-image-from-path",
+          "markdownDescription": "Enables the save_image_from_path command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_image_from_path command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-image-from-path",
+          "markdownDescription": "Denies the save_image_from_path command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_image_to_gallery command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-image-to-gallery",
+          "markdownDescription": "Enables the save_image_to_gallery command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_image_to_gallery command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-image-to-gallery",
+          "markdownDescription": "Denies the save_image_to_gallery command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_keep_screen_on command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-keep-screen-on",
@@ -383,6 +575,54 @@
           "type": "string",
           "const": "deny-set-keep-screen-on",
           "markdownDescription": "Denies the set_keep_screen_on command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the show_system_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-show-system-notification",
+          "markdownDescription": "Enables the show_system_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the show_system_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-show-system-notification",
+          "markdownDescription": "Denies the show_system_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_download_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-download-notification",
+          "markdownDescription": "Enables the start_download_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_download_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-download-notification",
+          "markdownDescription": "Denies the start_download_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_network_monitoring command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-network-monitoring",
+          "markdownDescription": "Enables the start_network_monitoring command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_network_monitoring command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-network-monitoring",
+          "markdownDescription": "Denies the start_network_monitoring command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_sensor_collection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-sensor-collection",
+          "markdownDescription": "Enables the start_sensor_collection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_sensor_collection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-sensor-collection",
+          "markdownDescription": "Denies the start_sensor_collection command without any pre-configured scope."
         },
         {
           "description": "Enables the start_stream_service command without any pre-configured scope.",
@@ -409,6 +649,18 @@
           "markdownDescription": "Denies the start_streaming_service command without any pre-configured scope."
         },
         {
+          "description": "Enables the stop_sensor_collection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-stop-sensor-collection",
+          "markdownDescription": "Enables the stop_sensor_collection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_sensor_collection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-stop-sensor-collection",
+          "markdownDescription": "Denies the stop_sensor_collection command without any pre-configured scope."
+        },
+        {
           "description": "Enables the stop_stream_service command without any pre-configured scope.",
           "type": "string",
           "const": "allow-stop-stream-service",
@@ -431,6 +683,42 @@
           "type": "string",
           "const": "deny-stop-streaming-service",
           "markdownDescription": "Denies the stop_streaming_service command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the toggle_floating_ball command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-toggle-floating-ball",
+          "markdownDescription": "Enables the toggle_floating_ball command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the toggle_floating_ball command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-toggle-floating-ball",
+          "markdownDescription": "Denies the toggle_floating_ball command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the update_download_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-update-download-notification",
+          "markdownDescription": "Enables the update_download_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the update_download_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-update-download-notification",
+          "markdownDescription": "Denies the update_download_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the write_temp_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-write-temp-file",
+          "markdownDescription": "Enables the write_temp_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the write_temp_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-write-temp-file",
+          "markdownDescription": "Denies the write_temp_file command without any pre-configured scope."
         },
         {
           "description": "Default permission for VCP Mobile plugin",

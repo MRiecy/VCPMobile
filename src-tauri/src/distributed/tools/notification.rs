@@ -37,6 +37,7 @@ body:「始」通知内容「末」\n\
                     example: "<<<[TOOL_REQUEST]>>>\ntool_name:「始」MobileNotification「末」\ntitle:「始」任务完成「末」\nbody:「始」您请求的文件已处理完毕，请查收。「末」\n<<<[END_TOOL_REQUEST]>>>".to_string(),
                 },
             ],
+            web_socket_push: None,
         }
     }
 
@@ -52,17 +53,40 @@ body:「始」通知内容「末」\n\
             .unwrap_or("")
             .to_string();
 
-        // Emit to Vue frontend to show the notification via system API.
-        // The frontend listens for "distributed-notification" and calls the native notification API.
+        let notification_result = tauri_plugin_vcp_mobile::system::show_system_notification(
+            app.clone(),
+            title.clone(),
+            body.clone(),
+        );
+        let notification_delivered = notification_result.is_ok();
+        let notification_error = notification_result.err();
+        if let Some(error) = &notification_error {
+            log::warn!("[MobileNotification] Android notification push failed: {error}");
+        }
+
+        // Keep the frontend event for in-app UI/diagnostics. Android delivery is
+        // handled here so it does not depend on WebView Notification support.
         app.emit(
             "distributed-notification",
-            json!({ "title": title, "body": body }),
+            json!({
+                "title": title,
+                "body": body,
+                "androidNotification": {
+                    "attempted": true,
+                    "delivered": notification_delivered,
+                    "error": notification_error,
+                },
+            }),
         )
         .map_err(|e| format!("Failed to emit notification event: {}", e))?;
 
         Ok(json!({
             "status": "success",
-            "message": format!("Notification sent: {}", title)
+            "message": format!("Notification sent: {}", title),
+            "androidNotification": {
+                "attempted": true,
+                "delivered": notification_delivered
+            }
         }))
     }
 }

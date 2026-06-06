@@ -421,6 +421,34 @@ pub fn cancel_download_notification<R: Runtime>(app: AppHandle<R>) -> Result<(),
 }
 
 #[tauri::command]
+pub fn show_system_notification<R: Runtime>(
+    app: AppHandle<R>,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "showSystemNotification",
+                serde_json::json!({ "title": title, "body": body }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = title;
+        let _ = body;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn request_overlay_permission<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-capture-window-snapshot"
+description = "Enables the capture_window_snapshot command without any pre-configured scope."
+commands.allow = ["capture_window_snapshot"]
+
+[[permission]]
+identifier = "deny-capture-window-snapshot"
+description = "Denies the capture_window_snapshot command without any pre-configured scope."
+commands.deny = ["capture_window_snapshot"]

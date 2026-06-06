@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-release-wake-lock"
+description = "Enables the release_wake_lock command without any pre-configured scope."
+commands.allow = ["release_wake_lock"]
+
+[[permission]]
+identifier = "deny-release-wake-lock"
+description = "Denies the release_wake_lock command without any pre-configured scope."
+commands.deny = ["release_wake_lock"]

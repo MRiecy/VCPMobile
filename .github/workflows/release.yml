@@ -87,23 +87,40 @@ jobs:
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > "${ANDROID_KEYSTORE_PATH}"
           test -s "${ANDROID_KEYSTORE_PATH}"
 
+      - name: Resolve Android signing alias
+        shell: bash
+        run: |
+          KEYTOOL_OUTPUT=$(printf '%s\n' "${ANDROID_KEYSTORE_PASSWORD}" | keytool -list -v -keystore "${ANDROID_KEYSTORE_PATH}")
+          mapfile -t KEY_ALIASES < <(printf '%s\n' "${KEYTOOL_OUTPUT}" | awk -F': ' '/^Alias name: / {print $2}')
+
+          if [[ "${#KEY_ALIASES[@]}" -eq 0 ]]; then
+            echo "No key aliases found in Android keystore" >&2
+            exit 1
+          fi
+
+          RESOLVED_ALIAS=""
+          if [[ -n "${ANDROID_KEY_ALIAS:-}" ]] && printf '%s\n' "${KEY_ALIASES[@]}" | grep -Fxq -- "${ANDROID_KEY_ALIAS}"; then
+            RESOLVED_ALIAS="${ANDROID_KEY_ALIAS}"
+          elif [[ "${#KEY_ALIASES[@]}" -eq 1 ]]; then
+            RESOLVED_ALIAS="${KEY_ALIASES[0]}"
+            echo "ANDROID_KEY_ALIAS secret does not match the keystore; using the only alias in the restored keystore."
+          else
+            echo "ANDROID_KEY_ALIAS secret does not match any keystore alias, and the keystore contains multiple aliases." >&2
+            exit 1
+          fi
+
+          echo "::add-mask::${RESOLVED_ALIAS}"
+          echo "ANDROID_KEY_ALIAS=${RESOLVED_ALIAS}" >> "${GITHUB_ENV}"
+
       - name: Build Android APKs
         shell: bash
         env:
           NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
-          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ env.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ env.ANDROID_KEY_PASSWORD }}
         run: |
           pnpm tauri android build --apk --target aarch64
 
       - name: Verify APK signature
         shell: bash
-        env:
-          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
-          ANDROID_KEY_ALIAS: ${{ env.ANDROID_KEY_ALIAS }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ env.ANDROID_KEYSTORE_PASSWORD }}
         run: |
           # 定位 apksigner（Android build-tools 中）
           APK_SIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -n 1)
@@ -183,4 +200,3 @@ jobs:
           files: |
             ${{ steps.artifacts.outputs.artifact_dir }}/*.apk
             ${{ steps.artifacts.outputs.artifact_dir }}/frontend-dist-*.zip
-
