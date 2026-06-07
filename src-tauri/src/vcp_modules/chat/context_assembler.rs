@@ -217,11 +217,20 @@ pub fn assemble_history_for_vcp(
                 json!(content_parts)
             };
 
-            json!({
+            let mut val = json!({
                 "role": msg.role,
                 "name": msg.name,
                 "content": final_content
-            })
+            });
+            if !msg.id.is_empty() {
+                val["__vcpchatTimestampMeta"] = json!({
+                    "messageId": msg.id,
+                    "role": msg.role,
+                    "timestamp": msg.timestamp,
+                    "contentHash": msg.content_hash
+                });
+            }
+            val
         })
         .collect()
 }
