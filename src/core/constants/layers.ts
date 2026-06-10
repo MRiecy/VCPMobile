@@ -12,9 +12,11 @@
  *   page     (40+) → SlidePage 页面栈（40 + stackIndex）
  *   toast    (50)  → Toast 通知
  *   dialog   (60)  → Prompt、UpdatePrompt、ContextMenu
- *   sheet    (70)  → BottomSheet、ModelSelector
+ *   sheet    (50)  → BottomSheet、ModelSelector
+ *   dialog   (60)  → Prompt、UpdatePrompt、ContextMenu
+ *   editor   (70)  → HtmlPreviewBlock（全屏HTML）
  *   viewer   (80)  → AttachmentViewer、FullScreenEditor、AvatarCropper
- *   editor   (90)  → HtmlPreviewBlock（全屏HTML）
+ *   toast    (90)  → Toast 通知
  *   boot     (100) → BootScreen（启动屏）
  */
 
@@ -25,8 +27,8 @@ export const LAYER_OVERLAY = 30;
 export const LAYER_PAGE_BASE = 40;
 export const LAYER_SHEET = 50;
 export const LAYER_DIALOG = 60;
-export const LAYER_VIEWER = 70;
-export const LAYER_EDITOR = 80;
+export const LAYER_EDITOR = 70;
+export const LAYER_VIEWER = 80;
 export const LAYER_TOAST = 90;
 export const LAYER_BOOT = 100;
 export const LAYER_GATE = 110;

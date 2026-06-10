@@ -28,6 +28,8 @@ const SyncSessionView = defineAsyncComponent(() => import('../features/sync/Sync
 const RebuildSessionView = defineAsyncComponent(() => import('../features/settings/components/RebuildSessionView.vue'));
 const DistributedView = defineAsyncComponent(() => import('../features/distributed/DistributedView.vue'));
 const SettingsView = defineAsyncComponent(() => import('../features/settings/SettingsView.vue'));
+const RagObserverView = defineAsyncComponent(() => import('../features/rag/RagObserver.vue'));
+
 
 const overlayStore = useOverlayStore();
 const settingsStore = useSettingsStore();
@@ -80,6 +82,13 @@ onMounted(() => {
       :z-index="overlayStore.getPageZIndex('distributed')"
       @close="overlayStore.closeDistributed()"
     />
+
+    <RagObserverView
+      :is-open="overlayStore.isRagObserverOpen"
+      :z-index="overlayStore.getPageZIndex('ragObserver')"
+      @close="overlayStore.closeRagObserver()"
+    />
+
     <!-- 仅当用户已启用分布式计算时才挂载事件监听器，避免常驻不必要的后台监听 -->
     <ToolInteractionOverlay v-if="settingsStore.settings?.distributedEnabled" />
   </div>

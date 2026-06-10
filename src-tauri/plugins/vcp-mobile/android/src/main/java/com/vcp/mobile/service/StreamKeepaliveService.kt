@@ -166,12 +166,17 @@ class StreamKeepaliveService : Service() {
         }
         val cleanTitle = agentName.replace("[数据同步]", "").replace("[预渲染重建]", "").trim()
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(if (cleanTitle.isEmpty()) "VCP Mobile" else cleanTitle)
             .setContentText(contentText)
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
             .setContentIntent(openPendingIntent)
-            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+        }
+
+        return builder.build()
     }
 }

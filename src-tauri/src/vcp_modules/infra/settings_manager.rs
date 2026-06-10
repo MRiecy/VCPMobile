@@ -250,10 +250,15 @@ async fn internal_write_settings<R: Runtime>(
         let log_key = settings.vcp_log_key.clone();
         tauri::async_runtime::spawn(async move {
             let _ = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
+                h.clone(), log_url.clone(), log_key.clone(),
+            )
+            .await;
+            let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
                 h, log_url, log_key,
             )
             .await;
         });
+
     }
 
     // 分布式生命周期自动联动

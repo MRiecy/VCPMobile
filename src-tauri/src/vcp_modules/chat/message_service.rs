@@ -421,6 +421,153 @@ pub async fn load_chat_history_internal(
     Ok(history)
 }
 
+/// 为 Agent 和 Group 组装大模型上下文提供专用的轻量历史查询。
+/// 只查询消息纯文本和附件（在需要时提取文本），完全跳过 render_content 反序列化和 UI shell 预计算。
+pub async fn load_chat_text_history_for_context(
+    app_handle: &AppHandle,
+    topic_id: &str,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    include_extracted_text: bool,
+) -> Result<Vec<ChatMessage>, String> {
+    let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
+    let pool = &db_state.pool;
+
+    let offset = offset.unwrap_or(0);
+
+    // 彻底剥离了对 render_cache 联表查询，仅拉取核心文本和配置字段
+    let query_str = if limit.is_some() {
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
+         FROM messages m
+         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         ORDER BY m.timestamp DESC, m.rowid DESC 
+         LIMIT ? OFFSET ?"
+    } else {
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
+         FROM messages m
+         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         ORDER BY m.timestamp DESC, m.rowid DESC"
+    };
+
+    let mut q = sqlx::query(query_str).bind(topic_id);
+    if let Some(l) = limit {
+        q = q.bind(l as i64);
+        q = q.bind(offset as i64);
+    }
+    let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
+
+    // 收集所有 msg_id，用于查询附件
+    let mut msg_ids = Vec::new();
+    for row in &rows {
+        let msg_id: String = row.get("msg_id");
+        msg_ids.push(msg_id);
+    }
+
+    let mut att_map: std::collections::HashMap<String, Vec<Attachment>> =
+        std::collections::HashMap::new();
+    if !msg_ids.is_empty() {
+        let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let extracted_text_column = if include_extracted_text {
+            "a.extracted_text"
+        } else {
+            "NULL"
+        };
+        let att_query = format!(
+            "SELECT a.hash, a.mime_type, a.size, a.internal_path, {} as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
+                    ma.msg_id, ma.display_name, ma.src, ma.status
+             FROM message_attachments ma
+             JOIN attachments a ON ma.hash = a.hash
+             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) 
+             ORDER BY ma.msg_id, ma.attachment_order ASC",
+            extracted_text_column, placeholders
+        );
+        let mut q = sqlx::query(&att_query).bind(topic_id);
+        for id in &msg_ids {
+            q = q.bind(id);
+        }
+        let att_rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
+
+        for ar in att_rows {
+            let msg_id: String = ar.get("msg_id");
+            let hash: String = ar.get("hash");
+            let mime_type: String = ar.get("mime_type");
+            let internal_path: String = ar.get("internal_path");
+            let display_name: String = ar.get("display_name");
+            let size_i64: i64 = ar.get("size");
+            let created_at_i64: i64 = ar.get("created_at");
+            let mut extracted_text: Option<String> = ar.get("extracted_text");
+
+            if include_extracted_text && extracted_text.is_none() {
+                extracted_text = crate::vcp_modules::infra::file_manager::ensure_extracted_text(
+                    pool,
+                    &hash,
+                    &internal_path,
+                    &mime_type,
+                )
+                .await;
+            }
+
+            att_map.entry(msg_id).or_default().push(Attachment {
+                r#type: mime_type,
+                src: ar.get("src"),
+                name: display_name,
+                size: size_i64 as u64,
+                hash: Some(hash),
+                status: Some(ar.get("status")),
+                internal_path,
+                extracted_text,
+                image_frames: ar
+                    .get::<Option<String>, _>("image_frames")
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                thumbnail_path: ar.get("thumbnail_path"),
+                created_at: Some(created_at_i64 as u64),
+            });
+        }
+    }
+
+    let mut history = Vec::new();
+    for row in rows {
+        let msg_id: String = row.get("msg_id");
+        let role: String = row.get("role");
+        let name: Option<String> = row.get("name");
+
+        let content_bytes: Vec<u8> = row.get("content");
+        let content = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
+
+        let content_hash_raw: String = row.get("content_hash");
+        let content_hash = if content_hash_raw.is_empty() {
+            None
+        } else {
+            Some(content_hash_raw)
+        };
+
+        let timestamp: i64 = row.get("timestamp");
+        let attachments = att_map.remove(&msg_id);
+
+        let message = ChatMessage {
+            id: msg_id,
+            role,
+            name,
+            content,
+            timestamp: timestamp as u64,
+            is_thinking: Some(false),
+            agent_id: row.get("agent_id"),
+            group_id: row.get("group_id"),
+            topic_id: Some(topic_id.to_string()),
+            is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
+            finish_reason: row.get("finish_reason"),
+            attachments,
+            blocks: None,      // 彻底不加载和反序列化渲染 cache 块
+            shell: None,       // 彻底不预计算 UI 头像、边框背景等外壳属性
+            content_hash,
+        };
+        history.push(message);
+    }
+
+    history.reverse();
+    Ok(history)
+}
+
 /// 核心：确保消息中的附件在手机本地物理存在，否则从电脑同步下载
 async fn ensure_attachments_locally<R: tauri::Runtime>(
     app: &AppHandle<R>,

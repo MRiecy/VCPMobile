@@ -260,8 +260,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             // 自动连接 VCP Log
             if !s_url.is_empty() && !s_key.is_empty() {
                 info!("[Lifecycle] Auto-connecting VCP Log...");
-                let _ = init_vcp_log_connection_internal(h.clone(), s_url, s_key).await;
+                let _ = init_vcp_log_connection_internal(h.clone(), s_url.clone(), s_key.clone()).await;
+                info!("[Lifecycle] Auto-connecting VCP Info...");
+                let _ = super::vcp_info_service::init_vcp_info_connection(h.clone(), s_url, s_key).await;
             }
+
         });
     }
 

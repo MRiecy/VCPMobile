@@ -71,6 +71,34 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
       }
       return;
     }
+
+    // 4. 气泡内普通图片点击劫持 (排除带有 vcp-emoticon 的表情包)
+    if (target.tagName.toLowerCase() === "img") {
+      const isEmoticon = target.classList.contains("vcp-emoticon");
+      if (!isEmoticon) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const src = target.getAttribute("src") || "";
+        const alt = target.getAttribute("alt") || "";
+        const title = target.getAttribute("title") || "";
+
+        // 动态引入查看器 Composable，消灭潜在的 Vue 组件循环引用
+        import("./useRenderedImageViewer")
+          .then(({ openRenderedImageViewer }) => {
+            openRenderedImageViewer({
+              src,
+              alt,
+              title,
+              sourceLabel: "聊天图片",
+            });
+          })
+          .catch((err) => {
+            console.error("[useMessageEvents] Failed to open RenderedImageViewer:", err);
+          });
+        return;
+      }
+    }
   };
 
   onMounted(() => {

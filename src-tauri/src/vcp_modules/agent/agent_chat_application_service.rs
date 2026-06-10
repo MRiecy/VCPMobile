@@ -84,15 +84,12 @@ pub async fn internal_process_agent_chat_message(
         .await?;
     }
 
-    // 3. 加载完整历史记录用于上下文组装
-    let history = message_service::load_chat_history_internal(
+    // 3. 加载轻量级纯文本和附件历史记录用于大模型上下文组装 (从底层隔离 UI 渲染反序列化和 Shell 计算)
+    let history = message_service::load_chat_text_history_for_context(
         &app_handle,
-        &agent_id,
-        "agent",
         &topic_id,
-        None, // 加载全部（或按需限制）
         None,
-        true,
+        None,
         true, // include_extracted_text: 组装上下文发送给 VCP 时需要包含附件提取文本内容
     )
     .await?;

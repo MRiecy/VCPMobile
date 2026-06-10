@@ -33,8 +33,8 @@
 | L4 | `page` | 40–49 | 页面栈（SlidePage） | `SettingsView`, `AgentSettingsView`, `SyncSessionView`… |
 | L5 | `sheet` | 50 | 底部弹层 | `BottomSheet`, `ModelSelector` |
 | L6 | `dialog` | 60 | 对话框 / 提示 | `VcpPrompt`, `UpdatePrompt`, `ContextMenu` |
-| L7 | `viewer` | 70 | 全屏查看器 / 编辑器 | `AttachmentViewer`, `FullScreenEditor`, `AvatarCropper` |
-| L8 | `editor` | 80 | 最高级全屏编辑器 | `HtmlPreviewBlock` (fullscreen) |
+| L7 | `editor` | 70 | 最高级全屏编辑器 | `HtmlPreviewBlock` (fullscreen) |
+| L8 | `viewer` | 80 | 全屏查看器 / 编辑器 | `AttachmentViewer`, `FullScreenEditor`, `AvatarCropper` |
 | L9 | `toast` | 90 | Toast 通知 | `ToastManager` |
 | L10 | `boot` | 100 | 启动屏 | `BootScreen` |
 | L11 | `gate` | 110 | 权限门禁页 | `PermissionGate` |
@@ -64,8 +64,8 @@
   --layer-page: 40;
   --layer-sheet: 50;
   --layer-dialog: 60;
-  --layer-viewer: 70;
-  --layer-editor: 80;
+  --layer-editor: 70;
+  --layer-viewer: 80;
   --layer-toast: 90;
   --layer-boot: 100;
   --layer-gate: 110;
@@ -88,8 +88,8 @@ theme: {
     page: '40',
     sheet: '50',
     dialog: '60',
-    viewer: '70',
-    editor: '80',
+    editor: '70',
+    viewer: '80',
     toast: '90',
     boot: '100',
     gate: '110',
@@ -112,8 +112,8 @@ export const LAYER_OVERLAY = 30;
 export const LAYER_PAGE_BASE = 40;
 export const LAYER_SHEET = 50;
 export const LAYER_DIALOG = 60;
-export const LAYER_VIEWER = 70;
-export const LAYER_EDITOR = 80;
+export const LAYER_EDITOR = 70;
+export const LAYER_VIEWER = 80;
 export const LAYER_TOAST = 90;
 export const LAYER_BOOT = 100;
 export const LAYER_GATE = 110;
@@ -275,7 +275,7 @@ const zIndex = getPageZIndex(stackIndex); // 40 + min(index, 9)
 
 **问题**：`BottomSheet`、`ModelSelector` 使用 `z-[999]`/`z-[1000]`，`HtmlPreviewBlock` 使用 `z-[10000]`。这不是"足够高"，而是"放弃思考"。
 
-**修复**：全部归入语义化层级。`HtmlPreviewBlock` 从 10000 降至 `editor(90)`，由于 `BootScreen` 只在启动时存在，两者不会同时出现，90 已足够保证其最高优先级。
+**修复**：全部归入语义化层级。`HtmlPreviewBlock` 从 10000 降至 `editor(70)`，由于 `BootScreen` 只在启动时存在，两者不会同时出现，70 已足够保证其最高优先级。
 
 ---
 
