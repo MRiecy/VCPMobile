@@ -362,7 +362,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       if (finishReason) msg!.finishReason = finishReason;
 
-      removeSessionStream(itemId, topicId, actualMessageId);
       if (streamingMessageId.value === actualMessageId) streamingMessageId.value = null;
 
       if (type === "error" && errorMsg && errorMsg !== "请求已中止") {
@@ -376,43 +375,39 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (event.timestamp) {
           msg!.timestamp = event.timestamp;
         }
+
+        // 定义闭环终结函数，保证在 blocks 赋值完成后才移除活动流状态
+        const finalizeStream = () => {
+          msg!.tailContent = "";
+          msg!.tailBlock = undefined;
+          removeSessionStream(itemId, topicId, actualMessageId);
+          if (callbacks?.onStreamFinished) {
+            callbacks.onStreamFinished(actualMessageId, topicId);
+          }
+        };
+
         try {
           // 如果后端已经带回了预渲染好的 blocks，直接使用，跳过冗余解析
           if (event.blocks) {
             msg.blocks = event.blocks as any;
+            finalizeStream();
           } else {
-            const compiledBlocks = await invoke("process_message_content", {
+            invoke<any>("process_message_content", {
               content: msg!.content || "",
+            }).then((compiledBlocks) => {
+              msg.blocks = compiledBlocks as any;
+              finalizeStream();
+            }).catch((e) => {
+              console.error("[ChatStreamStore] process_message_content failed:", e);
+              finalizeStream();
             });
-            msg.blocks = compiledBlocks as any;
           }
         } catch (e) {
           console.error("[ChatStreamStore] process_message_content failed:", e);
-        } finally {
-          // 漏洞 1 终极解决：在最终编译树成功上屏后，才同步清空临时 tail，实现绝对零闪烁和无缝平滑交接
-          msg!.tailContent = "";
-          msg!.tailBlock = undefined;
-
-          // === 🚀 输出流式诊断提示与回放指南（开发模式生效，Release 构建时自动摇树切除） ===
-          if (import.meta.env.DEV) {
-            console.log(
-              `%c[VCP Stream Debugger] 🎉 流式传输结束！当前录制帧数: ${(window as any).__VCP_STREAM_TRACES__?.length || 0}`,
-              "color: #10b981; font-weight: bold; font-size: 13px;"
-            );
-            console.log(
-              `%c👉 运行指令 A 可一键获取帧轨迹总览:\n   console.table(window.__VCP_STREAM_TRACES__.map((t, idx) => ({ '帧号': idx, '相对时间(ms)': Math.round(t.timestamp - window.__VCP_STREAM_TRACES__[0].timestamp), 'Stable变动': t.auroraPayload.stableChanged, 'Stable块数': t.auroraPayload.stableBlocksCount, 'Tail变动': t.auroraPayload.tailChanged, 'Tail内容': t.auroraPayload.tailContent.substring(0, 15) })))`,
-              "color: #3b82f6;"
-            );
-            console.log(
-              `%c👉 运行指令 B 进行任意相邻帧 Diff 比对（如 12 帧与 13 帧）:\n   const fA = window.__VCP_STREAM_TRACES__[12]; const fB = window.__VCP_STREAM_TRACES__[13]; console.log("=== 帧12 Tail ===", fA.auroraPayload.tailContent); console.log("=== 帧13 Stable Hashes ===", fB.auroraPayload.stableBlocksHashes); console.log("=== 帧13 Tail ===", fB.auroraPayload.tailContent);`,
-              "color: #8b5cf6;"
-            );
-          }
+          finalizeStream();
         }
-        
-        if (callbacks?.onStreamFinished) {
-          callbacks.onStreamFinished(actualMessageId, topicId);
-        }
+      } else {
+        removeSessionStream(itemId, topicId, actualMessageId);
       }
     }
   };

@@ -2,7 +2,9 @@
 import { computed, watch, ref } from "vue";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { X, ExternalLink } from "lucide-vue-next";
+import { X, ExternalLink, Download } from "lucide-vue-next";
+import { saveImageToGallery } from "tauri-plugin-vcp-mobile";
+import { useNotificationStore } from "../../../core/stores/notification";
 
 interface Attachment {
   type: string;
@@ -22,6 +24,7 @@ const emit = defineEmits(["close", "open-external"]);
 
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = 'AttachmentViewer';
+const notificationStore = useNotificationStore();
 
 const previewText = ref("");
 const isTextTruncated = ref(false);
@@ -141,6 +144,37 @@ const renderSrc = computed(() => {
 });
 
 const close = () => emit("close");
+
+const isSaving = ref(false);
+
+const saveToAlbum = async () => {
+  if (!props.file || isSaving.value) return;
+  isSaving.value = true;
+  try {
+    const sourceUrl = props.file.internalPath || props.file.src;
+    if (!sourceUrl) {
+      throw new Error("图片路径为空");
+    }
+    await saveImageToGallery(sourceUrl, props.file.name);
+    notificationStore.addNotification({
+      type: "success",
+      title: "保存成功",
+      message: "图片已保存到相册",
+      toastOnly: true,
+    });
+  } catch (err) {
+    console.error("[AttachmentViewer] Failed to save image:", err);
+    const isAndroid = navigator.userAgent.toLowerCase().includes("android");
+    notificationStore.addNotification({
+      type: "error",
+      title: "保存失败",
+      message: isAndroid ? String(err) : "非 Android 环境，暂不支持保存到相册",
+      toastOnly: true,
+    });
+  } finally {
+    isSaving.value = false;
+  }
+};
 </script>
 
 <template>
@@ -163,6 +197,15 @@ const close = () => emit("close");
           }}</span>
         </div>
         <div class="flex items-center gap-1">
+          <button
+            v-if="isImage"
+            @click="saveToAlbum"
+            :disabled="isSaving"
+            class="p-2 -mr-1 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5 disabled:opacity-40"
+            title="保存到相册"
+          >
+            <Download :size="20" />
+          </button>
           <button
             @click="$emit('open-external', file?.internalPath || file?.src)"
             class="p-2 -mr-1 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5"

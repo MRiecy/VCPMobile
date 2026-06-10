@@ -261,15 +261,8 @@ fn extract_text_for_hash(content: &Value) -> String {
     String::new()
 }
 
-fn get_or_calculate_message_hash(content_hash_opt: Option<&str>, content: &Value) -> String {
-    use crate::vcp_modules::infra::utils::{calculate_sha256, is_valid_cas_hash};
-
-    if let Some(raw_hash) = content_hash_opt {
-        let clean_hash = raw_hash.trim_start_matches("sha256:");
-        if is_valid_cas_hash(clean_hash) {
-            return format!("sha256:{}", clean_hash);
-        }
-    }
+fn get_or_calculate_message_hash(content: &Value) -> String {
+    use crate::vcp_modules::infra::utils::calculate_sha256;
 
     let text = extract_text_for_hash(content);
     let hash = calculate_sha256(text.as_bytes());
@@ -297,21 +290,14 @@ pub async fn perform_vcp_request<R: Runtime>(
     };
 
     // === 0. 数据验证和规范化 ===
-    let mut message_timestamp_bindings = Vec::new();
     let mut messages: Vec<Value> = Vec::new();
-    for (index, msg_val) in payload.messages.into_iter().enumerate() {
+    for msg_val in payload.messages.into_iter() {
         if !msg_val.is_object() {
             messages.push(json!({"role": "system", "content": "[Invalid message]"}));
             continue;
         }
 
         let mut msg = msg_val.clone();
-        let mut timestamp_meta = None;
-        if let Some(obj) = msg.as_object_mut() {
-            if let Some(meta) = obj.remove("__vcpchatTimestampMeta") {
-                timestamp_meta = Some(meta);
-            }
-        }
         let content = msg.get("content").cloned().unwrap_or(Value::Null);
 
         // 处理多模态或复杂内容数组
@@ -457,37 +443,6 @@ pub async fn perform_vcp_request<R: Runtime>(
             msg["content"] = json!(content.to_string());
         }
 
-        if let Some(meta) = timestamp_meta {
-            if let (Some(message_id), Some(role), Some(timestamp)) = (
-                meta.get("messageId").and_then(|id| id.as_str()),
-                meta.get("role").and_then(|r| r.as_str()),
-                meta.get("timestamp").and_then(|t| t.as_u64()),
-            ) {
-                use chrono::TimeZone;
-                let timestamp_iso =
-                    if let Some(dt) = chrono::Utc.timestamp_millis_opt(timestamp as i64).single() {
-                        dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                    } else {
-                        "".to_string()
-                    };
-
-                let content_hash_opt = meta.get("contentHash").and_then(|h| h.as_str());
-                let final_content_val = msg.get("content").unwrap_or(&Value::Null);
-                let sent_message_hash =
-                    get_or_calculate_message_hash(content_hash_opt, final_content_val);
-
-                message_timestamp_bindings.push(json!({
-                    "messageId": message_id,
-                    "role": role,
-                    "timestamp": timestamp,
-                    "timestampIso": timestamp_iso,
-                    "source": "client_history",
-                    "sentMessageHash": sent_message_hash,
-                    "sentMessageIndex": index
-                }));
-            }
-        }
-
         messages.push(msg);
     }
 
@@ -515,37 +470,62 @@ pub async fn perform_vcp_request<R: Runtime>(
 
     // === 2. 上下文注入 ===
     let has_system = messages.iter().any(|m| m["role"] == "system");
-    let system_inserted = !has_system;
     if !has_system {
         messages.insert(0, json!({"role": "system", "content": ""}));
     }
 
     // === 4. 准备请求体 ===
     let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
+    let mut message_timestamp_bindings = Vec::new();
+    for (index, msg) in messages.iter_mut().enumerate() {
+        let mut timestamp_meta = None;
+        if let Some(obj) = msg.as_object_mut() {
+            if let Some(meta) = obj.remove("__vcpchatTimestampMeta") {
+                timestamp_meta = Some(meta);
+            }
+        }
+        if let Some(meta) = timestamp_meta {
+            if let (Some(message_id), Some(role), Some(timestamp)) = (
+                meta.get("messageId").and_then(|id| id.as_str()),
+                meta.get("role").and_then(|r| r.as_str()),
+                meta.get("timestamp").and_then(|t| t.as_u64()),
+            ) {
+                use chrono::TimeZone;
+                let timestamp_iso =
+                    if let Some(dt) = chrono::Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                    } else {
+                        "".to_string()
+                    };
+
+                let final_content_val = msg.get("content").unwrap_or(&Value::Null);
+                let sent_message_hash = get_or_calculate_message_hash(final_content_val);
+
+                message_timestamp_bindings.push(json!({
+                    "messageId": message_id,
+                    "role": role,
+                    "timestamp": timestamp,
+                    "timestampIso": timestamp_iso,
+                    "source": "client_history",
+                    "sentMessageHash": sent_message_hash,
+                    "sentMessageIndex": index
+                }));
+            }
+        }
+    }
+
     let mut request_body = payload.model_config.clone();
     if let Some(obj) = request_body.as_object_mut() {
         obj.insert("messages".to_string(), json!(messages));
         obj.insert("requestId".to_string(), json!(payload.message_id));
         obj.insert("stream".to_string(), json!(is_stream));
         if !message_timestamp_bindings.is_empty() {
-            let mut final_bindings = message_timestamp_bindings.clone();
-            if system_inserted {
-                for binding in final_bindings.iter_mut() {
-                    if let Some(binding_obj) = binding.as_object_mut() {
-                        if let Some(idx_val) = binding_obj.get_mut("sentMessageIndex") {
-                            if let Some(idx) = idx_val.as_u64() {
-                                *idx_val = json!(idx + 1);
-                            }
-                        }
-                    }
-                }
-            }
             obj.insert(
                 "vcpchatExtensions".to_string(),
                 json!({
                     "schemaVersion": 1,
                     "messageMetadataMode": "hash_only",
-                    "messageTimestampBindings": final_bindings
+                    "messageTimestampBindings": message_timestamp_bindings
                 }),
             );
         }

@@ -212,7 +212,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             is_group_message INTEGER NOT NULL DEFAULT 0,
             group_id TEXT,
             finish_reason TEXT,
-            content_hash TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',  -- 消息内容指纹 (用于快速 Diff 和聚合指纹计算,包含附件指纹)
             created_at BIGINT NOT NULL,
             updated_at BIGINT NOT NULL,
             deleted_at BIGINT,

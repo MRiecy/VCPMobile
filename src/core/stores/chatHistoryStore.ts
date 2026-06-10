@@ -25,6 +25,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   // 用于标记当前是否正在“编辑重发”某条历史消息
   const editingOriginalMessageId = ref<string | null>(null);
 
+  // 用于防止并发加载与话题切换导致竞态的消息拉取中止控制器 (AbortController)
+  let currentLoadAbortController: AbortController | null = null;
+
   const sessionStore = useChatSessionStore();
   const streamStore = useChatStreamStore();
   const attachmentStore = useAttachmentStore();
@@ -93,8 +96,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     );
     loading.value = true;
     isLoadingHistory.value = true;
+
+    if (currentLoadAbortController) {
+      currentLoadAbortController.abort();
+    }
+    const controller = new AbortController();
+    currentLoadAbortController = controller;
+    const { signal } = controller;
+
     try {
-      const requestedTopicId = sessionStore.currentTopicId;
       const channel = new Channel<HistoryChunk>();
       const buffer: ChatMessage[] = [];
       let receivedCount = 0;
@@ -102,8 +112,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       const completePromise = new Promise<void>((resolve) => { resolveComplete = resolve; });
 
       channel.onmessage = (chunk) => {
-        // 1. 会话一致性校验：如果用户在加载中途切换了话题，丢弃后续消息
-        if (sessionStore.currentTopicId !== requestedTopicId && requestedTopicId !== null) {
+        // 1. 唯一性与话题一致性防御性校验：若请求已中止，或当前话题已被切换，直接丢弃该过时流数据
+        if (signal.aborted || sessionStore.currentTopicId !== topicId) {
           return;
         }
 
@@ -167,8 +177,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         `[ChatHistoryStore] Loaded ${loadedCount} messages [${loadType}] for ${ownerId}, topic: ${topicId}`,
       );
 
-      if (sessionStore.currentTopicId !== requestedTopicId && requestedTopicId !== null) {
-        console.warn(`[ChatHistoryStore] Topic changed during load, discarding results.`);
+      if (signal.aborted || sessionStore.currentTopicId !== topicId) {
+        console.warn(`[ChatHistoryStore] Topic changed or request aborted during load, discarding results.`);
         return;
       }
 
@@ -181,6 +191,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     } catch (e) {
       console.error("[ChatHistoryStore] Failed to stream history:", e);
     } finally {
+      if (currentLoadAbortController === controller) {
+        currentLoadAbortController = null;
+      }
       loading.value = false;
       isLoadingHistory.value = false;
     }
