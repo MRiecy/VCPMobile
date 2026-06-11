@@ -1,5 +1,5 @@
-use std::fs;
 use serde_json::Value;
+use std::fs;
 
 fn main() {
     let dir = "G:\\VCPMobile\\scripts\\info-test\\";
@@ -41,28 +41,53 @@ fn main() {
     let dialog_size = dialog_bytes.len();
     println!("\n=== 模拟一次对话的 100% 真实认知数据 ===");
     println!("总字符数: {}", dialog_json.chars().count());
-    println!("原始 JSON 大小: {} 字节 ({:.2} KB)", dialog_size, dialog_size as f64 / 1024.0);
+    println!(
+        "原始 JSON 大小: {} 字节 ({:.2} KB)",
+        dialog_size,
+        dialog_size as f64 / 1024.0
+    );
 
     // 1. ZSTD 压缩测试 (Level 3 - 默认)
     let zstd_compressed = zstd::bulk::compress(dialog_bytes, 3).unwrap();
     let zstd_size = zstd_compressed.len();
     println!("\n[ZSTD (Level 3)]");
-    println!("压缩后大小: {} 字节 ({:.2} KB)", zstd_size, zstd_size as f64 / 1024.0);
-    println!("压缩比: {:.2}%", (zstd_size as f64 / dialog_size as f64) * 100.0);
+    println!(
+        "压缩后大小: {} 字节 ({:.2} KB)",
+        zstd_size,
+        zstd_size as f64 / 1024.0
+    );
+    println!(
+        "压缩比: {:.2}%",
+        (zstd_size as f64 / dialog_size as f64) * 100.0
+    );
 
     // 2. ZSTD 压缩测试 (Level 7 - 高压缩率)
     let zstd_compressed_7 = zstd::bulk::compress(dialog_bytes, 7).unwrap();
     let zstd_size_7 = zstd_compressed_7.len();
     println!("\n[ZSTD (Level 7)]");
-    println!("压缩后大小: {} 字节 ({:.2} KB)", zstd_size_7, zstd_size_7 as f64 / 1024.0);
-    println!("压缩比: {:.2}%", (zstd_size_7 as f64 / dialog_size as f64) * 100.0);
+    println!(
+        "压缩后大小: {} 字节 ({:.2} KB)",
+        zstd_size_7,
+        zstd_size_7 as f64 / 1024.0
+    );
+    println!(
+        "压缩比: {:.2}%",
+        (zstd_size_7 as f64 / dialog_size as f64) * 100.0
+    );
 
     // 3. ZSTD 压缩测试 (Level 11)
     let zstd_compressed_11 = zstd::bulk::compress(dialog_bytes, 11).unwrap();
     let zstd_size_11 = zstd_compressed_11.len();
     println!("\n[ZSTD (Level 11)]");
-    println!("压缩后大小: {} 字节 ({:.2} KB)", zstd_size_11, zstd_size_11 as f64 / 1024.0);
-    println!("压缩比: {:.2}%", (zstd_size_11 as f64 / dialog_size as f64) * 100.0);
+    println!(
+        "压缩后大小: {} 字节 ({:.2} KB)",
+        zstd_size_11,
+        zstd_size_11 as f64 / 1024.0
+    );
+    println!(
+        "压缩比: {:.2}%",
+        (zstd_size_11 as f64 / dialog_size as f64) * 100.0
+    );
 
     // 内存规模估算
     println!("\n=== 500 条历史记录 (等同于 100 次完整对话) 纯内存缓存估算 ===");

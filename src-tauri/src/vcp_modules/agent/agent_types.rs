@@ -75,4 +75,3 @@ pub struct AgentListItem {
     pub model: String,
     pub avatar_calculated_color: Option<String>,
 }
-

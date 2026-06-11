@@ -61,9 +61,8 @@ pub use infra::media_processor;
 pub use infra::model_manager;
 pub use infra::settings_manager;
 pub use infra::vcp_client;
-pub use infra::vcp_log_service;
 pub use infra::vcp_info_service;
-
+pub use infra::vcp_log_service;
 
 // --- Updater 领域 ---
 pub use updater::frontend_update_manager;

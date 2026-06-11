@@ -349,19 +349,16 @@ pub fn write_temp_file<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn delete_temp_file<R: Runtime>(
-    app: AppHandle<R>,
-    file_path: String,
-) -> Result<(), String> {
+pub fn delete_temp_file<R: Runtime>(app: AppHandle<R>, file_path: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         use std::path::Path;
         let path = Path::new(&file_path);
-        
+
         // 安全防护：限制仅允许删除 App 自身的 cache_dir 缓存目录下的文件，防路径遍历越权
         use tauri::Manager;
         let cache_dir = app.path().cache_dir().map_err(|e| e.to_string())?;
-        
+
         if path.starts_with(&cache_dir) && path.exists() && path.is_file() {
             std::fs::remove_file(path).map_err(|e| e.to_string())?;
         }

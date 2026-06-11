@@ -27,17 +27,17 @@ fn next_id_counter() -> u64 {
 fn parse_info_url(url: &str, key: &str) -> Result<Url, String> {
     let base_url_trimmed = url.trim().trim_end_matches('/');
     let mut ws_url = Url::parse(base_url_trimmed).map_err(|e| format!("Invalid URL: {}", e))?;
-    
+
     // 将路径替换为 /vcpinfo
     ws_url.set_path("/vcpinfo");
     let url_str = ws_url.to_string();
-    
+
     let url_with_key = if url_str.contains("VCP_Key=") {
         url_str
     } else {
         format!("{}/VCP_Key={}", url_str.trim_end_matches('/'), key)
     };
-    
+
     Url::parse(&url_with_key).map_err(|e| format!("Invalid URL with Key: {}", e))
 }
 
@@ -60,8 +60,10 @@ pub async fn get_vcp_info_metadata_list() -> Result<Vec<Value>, String> {
 pub async fn get_vcp_info_payload(_app: AppHandle, id: String) -> Result<String, String> {
     let compressed_map = COMPRESSED_PAYLOADS.read().await;
     if let Some(compressed) = compressed_map.get(&id) {
-        let decompressed_bytes = zstd::decode_all(&compressed[..]).map_err(|e| format!("Zstd decompress failed: {}", e))?;
-        let decompressed_str = String::from_utf8(decompressed_bytes).map_err(|e| format!("Invalid UTF-8 after decompress: {}", e))?;
+        let decompressed_bytes = zstd::decode_all(&compressed[..])
+            .map_err(|e| format!("Zstd decompress failed: {}", e))?;
+        let decompressed_str = String::from_utf8(decompressed_bytes)
+            .map_err(|e| format!("Invalid UTF-8 after decompress: {}", e))?;
         Ok(decompressed_str)
     } else {
         Err("Payload not found in memory cache".to_string())
@@ -390,22 +392,28 @@ async fn process_incoming_vcp_info<R: tauri::Runtime>(
 
 fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
     let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let timestamp = val.get("timestamp").and_then(|t| t.as_str())
-        .unwrap_or(&chrono::Utc::now().to_rfc3339()).to_string();
+    let timestamp = val
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .unwrap_or(&chrono::Utc::now().to_rfc3339())
+        .to_string();
 
     let (title, subtitle, summary, has_details) = match msg_type {
         "AGENT_PRIVATE_CHAT_PREVIEW" => {
-            let agent_name = val.get("agentName").and_then(|a| a.as_str()).unwrap_or("Unknown");
+            let agent_name = val
+                .get("agentName")
+                .and_then(|a| a.as_str())
+                .unwrap_or("Unknown");
             let session_id = val.get("sessionId").and_then(|s| s.as_str()).unwrap_or("");
             let query = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
             let response = val.get("response").and_then(|r| r.as_str()).unwrap_or("");
-            
+
             let sub = if !session_id.is_empty() {
                 Some(format!("Session: {}", session_id))
             } else {
                 None
             };
-            
+
             let mut sum = format!("💬 [USER]: {} | [AI]: {}", query, response);
             if sum.chars().count() > 50 {
                 sum = sum.chars().take(50).collect::<String>() + "...";
@@ -413,14 +421,33 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
             (format!("Agent 私聊: {}", agent_name), sub, sum, true)
         }
         "META_THINKING_CHAIN" => {
-            let chain_name = val.get("chainName").and_then(|c| c.as_str()).unwrap_or("未知");
+            let chain_name = val
+                .get("chainName")
+                .and_then(|c| c.as_str())
+                .unwrap_or("未知");
             let query = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
             let total_stages = val.get("totalStages").and_then(|s| s.as_u64()).unwrap_or(0);
-            let k_seq = val.get("kSequence").and_then(|k| k.as_array())
-                .map(|arr| format!("{:?}", arr.iter().map(|v| v.as_u64().unwrap_or(0)).collect::<Vec<_>>()))
+            let k_seq = val
+                .get("kSequence")
+                .and_then(|k| k.as_array())
+                .map(|arr| {
+                    format!(
+                        "{:?}",
+                        arr.iter()
+                            .map(|v| v.as_u64().unwrap_or(0))
+                            .collect::<Vec<_>>()
+                    )
+                })
                 .unwrap_or_else(|| "[]".to_string());
-            let activated = val.get("activatedGroups").and_then(|g| g.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+            let activated = val
+                .get("activatedGroups")
+                .and_then(|g| g.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
                 .unwrap_or_default();
 
             let sub = Some(format!("阶段: {} | K序列: {}", total_stages, k_seq));
@@ -437,13 +464,22 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
         "AI_MEMO_RETRIEVAL" => {
             let diary_count = val.get("diaryCount").and_then(|c| c.as_u64()).unwrap_or(0);
             let file_count = val.get("fileCount").and_then(|f| f.as_u64()).unwrap_or(0);
-            let mode = val.get("mode").and_then(|m| m.as_str()).unwrap_or("Unknown");
-            let chunk_count = val.get("tagMemoChunkCount").and_then(|c| c.as_u64()).unwrap_or(0);
-            let memo = val.get("extractedMemories").and_then(|m| m.as_str()).unwrap_or("");
+            let mode = val
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown");
+            let chunk_count = val
+                .get("tagMemoChunkCount")
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0);
+            let memo = val
+                .get("extractedMemories")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
             let error = val.get("error").and_then(|e| e.as_str());
 
             let sub = Some(format!("模式: {} | 扫描: {}文件", mode, file_count));
-            
+
             let mut sum = if let Some(err_msg) = error {
                 format!("[Error] {}", err_msg)
             } else {
@@ -461,12 +497,27 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
         }
         "DailyNote" => {
             let db_name = val.get("dbName").and_then(|d| d.as_str()).unwrap_or("未知");
-            let action = val.get("action").and_then(|a| a.as_str()).unwrap_or("DirectRecall");
-            let summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-            (format!("日记直接召回: {}", db_name), Some(format!("模式: {}", action)), summary, false)
+            let action = val
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("DirectRecall");
+            let summary = val
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            (
+                format!("日记直接召回: {}", db_name),
+                Some(format!("模式: {}", action)),
+                summary,
+                false,
+            )
         }
         t if t.starts_with("AGENT_DREAM_") => {
-            let agent_name = val.get("agentName").and_then(|a| a.as_str()).unwrap_or("Unknown");
+            let agent_name = val
+                .get("agentName")
+                .and_then(|a| a.as_str())
+                .unwrap_or("Unknown");
             let title = format!("Agent梦境: {}", agent_name);
             let summary;
             let subtitle;
@@ -475,26 +526,54 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
             match t {
                 "AGENT_DREAM_START" => {
                     subtitle = Some("[入梦开始]".to_string());
-                    summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    summary = val
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     has_details = false;
                 }
                 "AGENT_DREAM_ASSOCIATIONS" => {
                     let seed_count = val.get("seedCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                    let assoc_count = val.get("associationCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                    subtitle = Some(format!("[共鸣联想] 种子数: {} | 联想数: {}", seed_count, assoc_count));
-                    
-                    let recent = val.get("recentSeedsCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                    let mid = val.get("midSeedsCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                    let deep = val.get("deepRecallsCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                    summary = format!("种子: {} (近:{} | 中:{} | 深:{}) ➜ 联想: {}", seed_count, recent, mid, deep, assoc_count);
+                    let assoc_count = val
+                        .get("associationCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0);
+                    subtitle = Some(format!(
+                        "[共鸣联想] 种子数: {} | 联想数: {}",
+                        seed_count, assoc_count
+                    ));
+
+                    let recent = val
+                        .get("recentSeedsCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0);
+                    let mid = val
+                        .get("midSeedsCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0);
+                    let deep = val
+                        .get("deepRecallsCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0);
+                    summary = format!(
+                        "种子: {} (近:{} | 中:{} | 深:{}) ➜ 联想: {}",
+                        seed_count, recent, mid, deep, assoc_count
+                    );
                     has_details = true;
                 }
                 "AGENT_DREAM_NARRATIVE" => {
-                    let full_length = val.get("fullLength").and_then(|l| l.as_u64())
-                        .or_else(|| val.get("narrative").and_then(|n| n.as_str()).map(|s| s.chars().count() as u64))
+                    let full_length = val
+                        .get("fullLength")
+                        .and_then(|l| l.as_u64())
+                        .or_else(|| {
+                            val.get("narrative")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.chars().count() as u64)
+                        })
                         .unwrap_or(0);
                     subtitle = Some(format!("[梦叙事] 字数: {}", full_length));
-                    
+
                     let narrative = val.get("narrative").and_then(|n| n.as_str()).unwrap_or("");
                     let mut s = narrative.to_string();
                     if s.chars().count() > 50 {
@@ -504,10 +583,19 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
                     has_details = true;
                 }
                 "AGENT_DREAM_OPERATIONS" => {
-                    let operation_count = val.get("operationCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                    let log_file = val.get("logFile").and_then(|l| l.as_str()).unwrap_or("None");
-                    subtitle = Some(format!("[梦操作] 数量: {} | 日志: {}", operation_count, log_file));
-                    
+                    let operation_count = val
+                        .get("operationCount")
+                        .and_then(|c| c.as_u64())
+                        .unwrap_or(0);
+                    let log_file = val
+                        .get("logFile")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("None");
+                    subtitle = Some(format!(
+                        "[梦操作] 数量: {} | 日志: {}",
+                        operation_count, log_file
+                    ));
+
                     let mut merge = 0;
                     let mut delete = 0;
                     let mut insight = 0;
@@ -521,21 +609,39 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
                             }
                         }
                     }
-                    summary = format!("[操作 {} 项] 待审核: {}合并, {}删除, {}感悟", 
-                        val.get("operations").and_then(|o| o.as_array()).map(|a| a.len()).unwrap_or(0),
-                        merge, delete, insight
+                    summary = format!(
+                        "[操作 {} 项] 待审核: {}合并, {}删除, {}感悟",
+                        val.get("operations")
+                            .and_then(|o| o.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0),
+                        merge,
+                        delete,
+                        insight
                     );
                     has_details = true;
                 }
                 "AGENT_DREAM_END" => {
-                    let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let status = val
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unknown");
                     subtitle = Some(format!("[出梦 ({})]", status));
-                    summary = val.get("message").or_else(|| val.get("error")).and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    summary = val
+                        .get("message")
+                        .or_else(|| val.get("error"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     has_details = false;
                 }
                 _ => {
                     subtitle = Some(t.replace("AGENT_DREAM_", ""));
-                    summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    summary = val
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     has_details = true;
                 }
             }
@@ -544,15 +650,22 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
         "AGENT_DREAM_SCHEDULE" => {
             let message = val.get("message").and_then(|m| m.as_str()).unwrap_or("");
             let hour = val.get("currentHour").and_then(|h| h.as_u64()).unwrap_or(0);
-            let agents = val.get("agents").and_then(|a| a.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+            let agents = val
+                .get("agents")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
                 .unwrap_or_default();
 
             (
                 "梦境自动调度".to_string(),
                 Some(format!("时间: {}点", hour)),
                 format!("准备入梦: {} | {}", agents, message),
-                false
+                false,
             )
         }
         _ => {
@@ -560,41 +673,72 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
             if val.get("dbName").is_some() && val.get("results").is_some() {
                 let db_name = val.get("dbName").and_then(|d| d.as_str()).unwrap_or("未知");
                 let k = val.get("k").and_then(|k| k.as_u64()).unwrap_or(0);
-                
+
                 // 解析是否启用时间过滤 (布尔值)
-                let use_time = val.get("useTime").and_then(|v| v.as_bool()).unwrap_or(false);
+                let use_time = val
+                    .get("useTime")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 // 解析策略标签
                 let mut strategies: Vec<String> = Vec::new();
                 if use_time {
                     strategies.push("Time".to_string());
                 }
-                if val.get("useRerankPlus").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if val
+                    .get("useRerankPlus")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     strategies.push("Rerank+".to_string());
-                } else if val.get("useRerank").and_then(|v| v.as_bool()).unwrap_or(false) {
+                } else if val
+                    .get("useRerank")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     strategies.push("Rerank".to_string());
                 }
-                if val.get("useTagMemo").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if val
+                    .get("useTagMemo")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     let weight = val.get("tagWeight").and_then(|w| w.as_f64()).unwrap_or(0.0);
                     strategies.push(format!("TagMemo({:.2})", weight));
                 }
-                if val.get("useGeodesicRerank").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if val
+                    .get("useGeodesicRerank")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     strategies.push("GeoRerank".to_string());
                 }
-                if val.get("useAssociate").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if val
+                    .get("useAssociate")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     strategies.push("Associate".to_string());
                 }
-                if val.get("useGroup").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if val
+                    .get("useGroup")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
                     strategies.push("Group".to_string());
                 }
-                
+
                 let sub = if strategies.is_empty() {
                     Some(format!("K: {}", k))
                 } else {
                     Some(format!("K: {} | [{}]", k, strategies.join(" | ")))
                 };
 
-                let results_len = val.get("results").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
+                let results_len = val
+                    .get("results")
+                    .and_then(|r| r.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
                 let query = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
                 let mut sum = format!("[召回 {} 项] {}", results_len, query);
                 if sum.chars().count() > 50 {

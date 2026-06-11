@@ -814,7 +814,10 @@ mod tests {
         let padding = "这里是一段用来填充文本长度以达到测试新设定之八百字节双换行沉淀阈值物理条件的垫片数据。".repeat(10);
 
         // 模拟第 1 帧：输出到代码块开头，未闭合
-        let frame_1 = format!("{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust", padding);
+        let frame_1 = format!(
+            "{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust",
+            padding
+        );
         let (blocks_1, tail_1) = parser.process(&frame_1);
         println!("Frame 1 - Blocks: {}, Tail: {:?}", blocks_1.len(), tail_1);
         // 应该成功沉淀出前面的两个 Markdown 块（因 \n\n 物理分段），且 tail 只包含 ```rust
@@ -822,7 +825,10 @@ mod tests {
         assert_eq!(tail_1, "```rust");
 
         // 模拟第 2 帧：代码块流式增量增长，仍未闭合
-        let frame_2 = format!("{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n", padding);
+        let frame_2 = format!(
+            "{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n",
+            padding
+        );
         let (blocks_2, tail_2) = parser.process(&frame_2);
         println!("Frame 2 - Blocks: {}, Tail: {:?}", blocks_2.len(), tail_2);
         // 应该没有任何新的 blocks（因为前段已经沉淀，后段未闭合），且 tail 应该是增量代码块且去掉了前段
@@ -830,7 +836,10 @@ mod tests {
         assert_eq!(tail_2, "```rust\nuse tokio;\n");
 
         // 模拟第 3 帧：流式代码块闭合
-        let frame_3 = format!("{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n```", padding);
+        let frame_3 = format!(
+            "{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n```",
+            padding
+        );
         let (blocks_3, tail_3) = parser.process(&frame_3);
         println!("Frame 3 - Blocks: {}, Tail: {:?}", blocks_3.len(), tail_3);
         // 应该成功闭合代码块并将其沉淀，且 tail 为空

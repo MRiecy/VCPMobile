@@ -557,8 +557,8 @@ pub async fn load_chat_text_history_for_context(
             is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
             finish_reason: row.get("finish_reason"),
             attachments,
-            blocks: None,      // 彻底不加载和反序列化渲染 cache 块
-            shell: None,       // 彻底不预计算 UI 头像、边框背景等外壳属性
+            blocks: None, // 彻底不加载和反序列化渲染 cache 块
+            shell: None,  // 彻底不预计算 UI 头像、边框背景等外壳属性
             content_hash,
         };
         history.push(message);

@@ -66,4 +66,3 @@ pub struct GroupListItem {
     pub avatar_calculated_color: Option<String>,
     pub members: Vec<String>,
 }
-

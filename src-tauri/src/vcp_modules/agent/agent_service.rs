@@ -2,9 +2,9 @@
 // 职责: 作为应用层 Facade，协调数据库存储与业务逻辑，完全面向 SQLite 存储。
 
 use crate::vcp_modules::agent_types::{AgentConfig, AgentListItem};
-use crate::vcp_modules::group::group_types::GroupListItem;
-use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::group::group_service::GroupManagerState;
+use crate::vcp_modules::group::group_types::GroupListItem;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
-
 
 /// AgentConfigState 的全局状态
 pub struct AgentConfigState {
@@ -68,7 +67,8 @@ pub async fn read_agent_config<R: Runtime>(
     agent_id: String,
     allow_default: Option<bool>,
 ) -> Result<AgentConfig, String> {
-    let mut config = read_agent_config_internal(&app_handle, &state, &agent_id, allow_default).await?;
+    let mut config =
+        read_agent_config_internal(&app_handle, &state, &agent_id, allow_default).await?;
     config.system_prompt = String::new();
     Ok(config)
 }
@@ -170,7 +170,9 @@ pub async fn save_agent_config(
     if let Some(cached) = state.caches.get(&agent_id) {
         agent.system_prompt = cached.value().system_prompt.clone();
     } else {
-        if let Ok(db_config) = read_agent_config_internal(&app_handle, &state, &agent_id, Some(false)).await {
+        if let Ok(db_config) =
+            read_agent_config_internal(&app_handle, &state, &agent_id, Some(false)).await
+        {
             agent.system_prompt = db_config.system_prompt;
         }
     }
@@ -301,11 +303,13 @@ async fn internal_write_agent_config<R: Runtime>(
         if let Some(cached) = state.caches.get(agent_id) {
             final_config.system_prompt = cached.value().system_prompt.clone();
         } else {
-            let row = sqlx::query("SELECT system_prompt FROM agents WHERE agent_id = ? AND deleted_at IS NULL")
-                .bind(agent_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| e.to_string())?;
+            let row = sqlx::query(
+                "SELECT system_prompt FROM agents WHERE agent_id = ? AND deleted_at IS NULL",
+            )
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
             if let Some(r) = row {
                 use sqlx::Row;
                 final_config.system_prompt = r.get("system_prompt");
@@ -618,7 +622,7 @@ pub async fn get_assistants_snapshot(
 
         // 预热内存缓存，供后续 read_agent_config 调用
         agent_state.caches.insert(agent_id.clone(), config);
-        
+
         agents_list.push(AgentListItem {
             id: agent_id,
             name,
@@ -648,7 +652,8 @@ pub async fn get_assistants_snapshot(
     .map_err(|e| e.to_string())?;
 
     let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
-    let mut group_member_tags: HashMap<String, serde_json::Map<String, serde_json::Value>> = HashMap::new();
+    let mut group_member_tags: HashMap<String, serde_json::Map<String, serde_json::Value>> =
+        HashMap::new();
 
     for mr in member_rows {
         use sqlx::Row;
@@ -656,9 +661,15 @@ pub async fn get_assistants_snapshot(
         let aid: String = mr.get("agent_id");
         let tag: Option<String> = mr.get("member_tag");
 
-        group_members.entry(gid.clone()).or_default().push(aid.clone());
+        group_members
+            .entry(gid.clone())
+            .or_default()
+            .push(aid.clone());
         if let Some(t) = tag {
-            group_member_tags.entry(gid).or_default().insert(aid, serde_json::Value::String(t));
+            group_member_tags
+                .entry(gid)
+                .or_default()
+                .insert(aid, serde_json::Value::String(t));
         }
     }
 
@@ -745,4 +756,3 @@ pub async fn get_assistants_snapshot(
         unread_counts,
     })
 }
-
