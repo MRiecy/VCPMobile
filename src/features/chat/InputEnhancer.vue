@@ -545,7 +545,8 @@ onUnmounted(() => {
             </div>
           </div>
           
-          <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-gradient-to-b from-[var(--secondary-bg)] to-transparent opacity-90"></div>
+          <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-[var(--secondary-bg)] opacity-90"
+            style="mask-image: linear-gradient(to bottom, black, transparent); -webkit-mask-image: linear-gradient(to bottom, black, transparent);"></div>
         </div>
 
         <!-- 右侧动态操作区 (始终正常、平静地保留，保证视觉绝无抖动！) -->

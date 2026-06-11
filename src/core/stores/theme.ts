@@ -57,7 +57,7 @@ export const useThemeStore = defineStore('theme', () => {
   const mode = ref<ThemeMode>((localStorage.getItem('vcp-theme-mode') as ThemeMode) || 'dark');
   const isDarkResolved = ref(true);
   const lastModeSwitchAt = ref(0);
-  const MODE_SWITCH_DEBOUNCE_MS = 100;
+  const MODE_SWITCH_DEBOUNCE_MS = 420;
 
   let initialTheme = localStorage.getItem('vcp-theme-name');
   if (initialTheme && LEGACY_THEME_MAP[initialTheme]) {
@@ -71,6 +71,16 @@ export const useThemeStore = defineStore('theme', () => {
   const currentThemeInfo = ref<ThemeInfo | null>(null);
   const lastAppliedVarKeys = ref<string[]>([]);
   let currentThemeModule: ThemeModule | null = null;
+  let isInitializing = true;
+
+  const triggerThemeSwitchTransition = () => {
+    if (isInitializing) return;
+    document.documentElement.classList.add('theme-switching');
+    setTimeout(() => {
+      document.documentElement.classList.remove('theme-switching');
+    }, 400);
+  };
+
 
   const injectVariables = (vars: Record<string, string>) => {
     // Clear stale variables from previous theme to avoid mixed state
@@ -125,6 +135,7 @@ export const useThemeStore = defineStore('theme', () => {
 
   const applyThemeFile = async (fileName: string) => {
     try {
+      triggerThemeSwitchTransition();
       currentTheme.value = fileName;
       localStorage.setItem('vcp-theme-name', fileName);
 
@@ -170,9 +181,12 @@ export const useThemeStore = defineStore('theme', () => {
     idleCallback(() => {
       fetchThemes().catch(console.error);
     });
+
+    isInitializing = false;
   };
 
   const applyTheme = (newMode: ThemeMode) => {
+    triggerThemeSwitchTransition();
     const isDark =
       newMode === 'dark' ||
       (newMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);

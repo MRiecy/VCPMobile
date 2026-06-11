@@ -416,7 +416,7 @@ onUnmounted(() => {
     <Transition name="bg-fade">
       <div :key="backgroundStyle.backgroundImage" class="vcp-background-layer" :style="backgroundStyle"></div>
     </Transition>
-    <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors duration-700"
+    <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors" style="transition-duration: 350ms;"
       :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
 
     <!-- 2. 主内容区先渲染，抽屉与遮罩在后声明，靠 DOM 顺位自然覆盖 -->
@@ -496,7 +496,7 @@ body,
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  transition: background-image 0.8s ease-in-out;
+  transition: none;
 }
 
 /* Transitions */
@@ -512,7 +512,7 @@ body,
 
 .bg-fade-enter-active,
 .bg-fade-leave-active {
-  transition: opacity 0.8s ease-in-out;
+  transition: opacity 0.35s ease-in-out;
 }
 
 .bg-fade-enter-from,

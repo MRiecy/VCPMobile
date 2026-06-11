@@ -129,3 +129,14 @@ body {
   color: var(--agent-text) !important;
   border-bottom-left-radius: 4px !important;
 }
+
+/* 切换主题时的平滑过渡保护，避免突兀的闪烁，且不在平时影响性能 */
+.theme-switching,
+.theme-switching * {
+  transition: background-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
+              color 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
+              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
+              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
