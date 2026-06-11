@@ -933,13 +933,16 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     topic_id: String,
     message_id: String,
     full_content: String,
-    _is_aborted: bool,
+    is_aborted: bool,
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
 ) -> Result<(), String> {
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
     let mut final_content = full_content;
+    if is_aborted {
+        final_content.push_str("\n\n> VCP流式错误: 请求已中止");
+    }
 
     // 1. 查询时间锚定机制 V2 的启用状态，仅在启用时才开启正则，避免不必要开销
     let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(

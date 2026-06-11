@@ -364,10 +364,15 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       if (streamingMessageId.value === actualMessageId) streamingMessageId.value = null;
 
-      if (type === "error" && errorMsg && errorMsg !== "请求已中止") {
+      if (type === "error" && errorMsg) {
         const errorText = `\n\n> VCP流式错误: ${errorMsg}`;
-        msg!.content += errorText;
-        msg!.finishReason = "error";
+        if (msg) {
+          const currentContent = msg.content || "";
+          if (!currentContent.endsWith(errorText)) {
+            msg.content = currentContent + errorText;
+          }
+          msg.finishReason = "error";
+        }
       }
 
       if (msg) {
@@ -427,6 +432,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (msg) {
         msg.isThinking = false;
         msg.finishReason = "interrupted";
+        const errorText = `\n\n> VCP流式错误: 请求已中止`;
+        const currentContent = msg.content || "";
+        if (!currentContent.endsWith(errorText)) {
+          msg.content = currentContent + errorText;
+        }
       }
 
       // 漏洞 2 修复：手动点击中止流时，瞬间强行注销 rAF 帧，防止后台句柄悬空空转泄漏

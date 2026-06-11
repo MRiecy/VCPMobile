@@ -121,18 +121,19 @@ export const useAssistantStore = defineStore("assistant", () => {
     error.value = null;
     const startTime = Date.now();
     try {
-      console.log("[Profile] invoke('get_agents'), invoke('get_groups'), and invoke('get_unread_counts') concurrently starting...");
-      const [fetchedAgents, fetchedGroups, fetchedUnread] = await Promise.all([
+      console.log("[Profile] invoke('get_agents') and invoke('get_groups') concurrently starting...");
+      const [fetchedAgents, fetchedGroups] = await Promise.all([
         invoke<AgentConfig[]>("get_agents"),
-        invoke<GroupConfig[]>("get_groups"),
-        invoke<Record<string, number>>("get_unread_counts")
+        invoke<GroupConfig[]>("get_groups")
       ]);
       console.log(`[Profile] Concurrent fetches resolved in ${Date.now() - startTime}ms`);
       
       // 在同一次 tick 中合并赋值，触发 Vue 3 渲染的批处理更新
       agents.value = fetchedAgents;
       groups.value = fetchedGroups;
-      unreadCounts.value = fetchedUnread;
+      
+      // 后台静默刷新未读计数，不阻塞 READY 流程
+      refreshUnreadCounts();
       
       console.log(`[Profile] fetchAgentsAndGroups finished in ${Date.now() - startTime}ms`);
     } catch (e: any) {

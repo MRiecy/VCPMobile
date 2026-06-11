@@ -17,6 +17,7 @@ use tauri::{ipc::Channel, AppHandle, Manager, State};
 pub async fn get_unread_counts(
     db_state: State<'_, DbState>,
 ) -> Result<HashMap<String, i32>, String> {
+    let start_time = std::time::Instant::now();
     let pool = &db_state.pool;
     let rows = sqlx::query(
         "SELECT owner_id, 
@@ -48,6 +49,11 @@ pub async fn get_unread_counts(
             result.insert(owner_id, value);
         }
     }
+
+    log::info!(
+        "[Profile] get_unread_counts finished. Total: {}ms",
+        start_time.elapsed().as_millis()
+    );
 
     Ok(result)
 }

@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import android.os.PowerManager
 
 /**
  * 流式响应前台保活服务
@@ -28,6 +29,7 @@ class StreamKeepaliveService : Service() {
 
     private var isKeepaliveModeActive = false
     private var currentStreamName = ""
+    private var wakeLock: PowerManager.WakeLock? = null
 
     companion object {
         const val CHANNEL_ID = "vcp_stream_keepalive"
@@ -106,6 +108,19 @@ class StreamKeepaliveService : Service() {
             Log.e(TAG, "Failed to startForeground, falling back to basic background service", e)
         }
 
+        if (isKeepaliveModeActive || currentStreamName.isNotEmpty()) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (wakeLock == null) {
+                wakeLock = powerManager.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "VcpMobile::StreamWakeLock"
+                ).apply {
+                    acquire(10 * 60 * 1000L) // 限制最大超时 10 分钟以防电池耗尽
+                }
+                Log.i(TAG, "WakeLock acquired for stream: $currentStreamName")
+            }
+        }
+
         return START_STICKY
     }
 
@@ -116,6 +131,12 @@ class StreamKeepaliveService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+            }
+        }
+        wakeLock = null
         isServiceRunning = false
         super.onDestroy()
     }
@@ -171,6 +192,7 @@ class StreamKeepaliveService : Service() {
             .setContentText(contentText)
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(openPendingIntent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

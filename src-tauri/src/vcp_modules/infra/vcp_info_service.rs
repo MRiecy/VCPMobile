@@ -41,15 +41,8 @@ fn parse_info_url(url: &str, key: &str) -> Result<Url, String> {
     Url::parse(&url_with_key).map_err(|e| format!("Invalid URL with Key: {}", e))
 }
 
-fn compress_payload(val: &Value) -> Result<Vec<u8>, String> {
-    let payload_str = serde_json::to_string(val).map_err(|e| e.to_string())?;
+fn compress_payload(payload_str: &str) -> Result<Vec<u8>, String> {
     zstd::encode_all(payload_str.as_bytes(), 3).map_err(|e| format!("Zstd compress failed: {}", e))
-}
-
-fn decompress_payload(compressed: &[u8]) -> Result<Value, String> {
-    let decompressed_bytes = zstd::decode_all(compressed).map_err(|e| format!("Zstd decompress failed: {}", e))?;
-    let decompressed_str = String::from_utf8(decompressed_bytes).map_err(|e| format!("Invalid UTF-8 after decompress: {}", e))?;
-    serde_json::from_str(&decompressed_str).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -64,10 +57,12 @@ pub async fn get_vcp_info_metadata_list() -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
-pub async fn get_vcp_info_payload(_app: AppHandle, id: String) -> Result<Value, String> {
+pub async fn get_vcp_info_payload(_app: AppHandle, id: String) -> Result<String, String> {
     let compressed_map = COMPRESSED_PAYLOADS.read().await;
     if let Some(compressed) = compressed_map.get(&id) {
-        decompress_payload(compressed)
+        let decompressed_bytes = zstd::decode_all(&compressed[..]).map_err(|e| format!("Zstd decompress failed: {}", e))?;
+        let decompressed_str = String::from_utf8(decompressed_bytes).map_err(|e| format!("Invalid UTF-8 after decompress: {}", e))?;
+        Ok(decompressed_str)
     } else {
         Err("Payload not found in memory cache".to_string())
     }
@@ -274,7 +269,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                                             let text = msg.to_text().unwrap_or_default();
                                             if let Ok(payload) = serde_json::from_str::<Value>(text) {
                                                 // 提取、缓存并推送消息
-                                                process_incoming_vcp_info(&app_handle, payload).await;
+                                                process_incoming_vcp_info(&app_handle, payload, text).await;
                                             }
                                         }
                                     }
@@ -346,14 +341,18 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
     }
 }
 
-async fn process_incoming_vcp_info<R: tauri::Runtime>(app_handle: &AppHandle<R>, payload: Value) {
+async fn process_incoming_vcp_info<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    payload: Value,
+    raw_text: &str,
+) {
     let timestamp_ms = chrono::Utc::now().timestamp_millis();
     let msg_id = format!("vcp_info_{}_{}", timestamp_ms, next_id_counter());
 
     // 1. 尝试提取 Metadata 索引，过滤掉无用消息
     if let Some(metadata) = extract_metadata(&msg_id, &payload) {
         // 2. 将原始 payload 使用 Zstd 压缩
-        match compress_payload(&payload) {
+        match compress_payload(raw_text) {
             Ok(compressed_data) => {
                 // 3. 压入内存列表与哈希表
                 let mut list = METADATA_LIST.write().await;
@@ -363,11 +362,13 @@ async fn process_incoming_vcp_info<R: tauri::Runtime>(app_handle: &AppHandle<R>,
                 list.push_front(metadata.clone());
 
                 // 4. 超出 500 条进行 FIFO 淘汰
-                if list.len() > 500 {
+                while list.len() > 500 {
                     if let Some(popped) = list.pop_back() {
                         if let Some(popped_id) = popped.get("id").and_then(|id| id.as_str()) {
                             compressed_map.remove(popped_id);
                         }
+                    } else {
+                        break;
                     }
                 }
 
@@ -395,78 +396,213 @@ fn extract_metadata(msg_id: &str, val: &Value) -> Option<Value> {
     let (title, subtitle, summary, has_details) = match msg_type {
         "AGENT_PRIVATE_CHAT_PREVIEW" => {
             let agent_name = val.get("agentName").and_then(|a| a.as_str()).unwrap_or("Unknown");
+            let session_id = val.get("sessionId").and_then(|s| s.as_str()).unwrap_or("");
             let query = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
             let response = val.get("response").and_then(|r| r.as_str()).unwrap_or("");
-            let mut summary = format!("问: {} | 答: {}", query, response);
-            if summary.chars().count() > 120 {
-                summary = summary.chars().take(120).collect::<String>() + "...";
+            
+            let sub = if !session_id.is_empty() {
+                Some(format!("Session: {}", session_id))
+            } else {
+                None
+            };
+            
+            let mut sum = format!("💬 [USER]: {} | [AI]: {}", query, response);
+            if sum.chars().count() > 50 {
+                sum = sum.chars().take(50).collect::<String>() + "...";
             }
-            (format!("Agent 私聊: {}", agent_name), None, summary, true)
+            (format!("Agent 私聊: {}", agent_name), sub, sum, true)
         }
         "META_THINKING_CHAIN" => {
             let chain_name = val.get("chainName").and_then(|c| c.as_str()).unwrap_or("未知");
             let query = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
-            let mut summary = query.to_string();
-            if summary.chars().count() > 120 {
-                summary = summary.chars().take(120).collect::<String>() + "...";
+            let total_stages = val.get("totalStages").and_then(|s| s.as_u64()).unwrap_or(0);
+            let k_seq = val.get("kSequence").and_then(|k| k.as_array())
+                .map(|arr| format!("{:?}", arr.iter().map(|v| v.as_u64().unwrap_or(0)).collect::<Vec<_>>()))
+                .unwrap_or_else(|| "[]".to_string());
+            let activated = val.get("activatedGroups").and_then(|g| g.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+                .unwrap_or_default();
+
+            let sub = Some(format!("阶段: {} | K序列: {}", total_stages, k_seq));
+            let mut sum = if activated.is_empty() {
+                query.to_string()
+            } else {
+                format!("[激活分组: {}] {}", activated, query)
+            };
+            if sum.chars().count() > 50 {
+                sum = sum.chars().take(50).collect::<String>() + "...";
             }
-            (format!("元思考链: {}", chain_name), None, summary, true)
+            (format!("元思考链: {}", chain_name), sub, sum, true)
         }
         "AI_MEMO_RETRIEVAL" => {
-            let count = val.get("diaryCount").and_then(|c| c.as_u64()).unwrap_or(0);
+            let diary_count = val.get("diaryCount").and_then(|c| c.as_u64()).unwrap_or(0);
+            let file_count = val.get("fileCount").and_then(|f| f.as_u64()).unwrap_or(0);
+            let mode = val.get("mode").and_then(|m| m.as_str()).unwrap_or("Unknown");
+            let chunk_count = val.get("tagMemoChunkCount").and_then(|c| c.as_u64()).unwrap_or(0);
             let memo = val.get("extractedMemories").and_then(|m| m.as_str()).unwrap_or("");
-            let mut summary = memo.to_string();
-            if summary.chars().count() > 120 {
-                summary = summary.chars().take(120).collect::<String>() + "...";
+            let error = val.get("error").and_then(|e| e.as_str());
+
+            let sub = Some(format!("模式: {} | 扫描: {}文件", mode, file_count));
+            
+            let mut sum = if let Some(err_msg) = error {
+                format!("[Error] {}", err_msg)
+            } else {
+                let prefix = if chunk_count > 0 {
+                    format!("[TagMemo 召回 {} Chunks] ", chunk_count)
+                } else {
+                    "".to_string()
+                };
+                format!("{}{}", prefix, memo)
+            };
+            if sum.chars().count() > 50 {
+                sum = sum.chars().take(50).collect::<String>() + "...";
             }
-            (format!("记忆回溯 ({})", count), None, summary, true)
+            (format!("记忆回溯 ({})", diary_count), sub, sum, true)
         }
         "DailyNote" => {
             let db_name = val.get("dbName").and_then(|d| d.as_str()).unwrap_or("未知");
             let action = val.get("action").and_then(|a| a.as_str()).unwrap_or("DirectRecall");
             let summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-            (format!("日记召回: {}", db_name), Some(format!("模式: {}", action)), summary, false)
+            (format!("日记直接召回: {}", db_name), Some(format!("模式: {}", action)), summary, false)
         }
         t if t.starts_with("AGENT_DREAM_") => {
             let agent_name = val.get("agentName").and_then(|a| a.as_str()).unwrap_or("Unknown");
             let title = format!("Agent梦境: {}", agent_name);
-            let subtitle = Some(t.replace("AGENT_DREAM_", ""));
             let summary;
+            let subtitle;
             let has_details;
-            if t == "AGENT_DREAM_START" || t == "AGENT_DREAM_END" {
-                summary = val.get("message").or_else(|| val.get("error")).and_then(|m| m.as_str()).unwrap_or("").to_string();
-                has_details = false;
-            } else if t == "AGENT_DREAM_ASSOCIATIONS" {
-                let seed_count = val.get("seedCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                let assoc_count = val.get("associationCount").and_then(|c| c.as_u64()).unwrap_or(0);
-                summary = format!("种子数量: {} | 联想数量: {}", seed_count, assoc_count);
-                has_details = true;
-            } else if t == "AGENT_DREAM_NARRATIVE" {
-                let narrative = val.get("narrative").and_then(|n| n.as_str()).unwrap_or("");
-                let mut s = narrative.to_string();
-                if s.chars().count() > 120 {
-                    s = s.chars().take(120).collect::<String>() + "...";
+
+            match t {
+                "AGENT_DREAM_START" => {
+                    subtitle = Some("[入梦开始]".to_string());
+                    summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    has_details = false;
                 }
-                summary = s;
-                has_details = true;
-            } else {
-                summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-                has_details = true;
+                "AGENT_DREAM_ASSOCIATIONS" => {
+                    let seed_count = val.get("seedCount").and_then(|c| c.as_u64()).unwrap_or(0);
+                    let assoc_count = val.get("associationCount").and_then(|c| c.as_u64()).unwrap_or(0);
+                    subtitle = Some(format!("[共鸣联想] 种子数: {} | 联想数: {}", seed_count, assoc_count));
+                    
+                    let recent = val.get("recentSeedsCount").and_then(|c| c.as_u64()).unwrap_or(0);
+                    let mid = val.get("midSeedsCount").and_then(|c| c.as_u64()).unwrap_or(0);
+                    let deep = val.get("deepRecallsCount").and_then(|c| c.as_u64()).unwrap_or(0);
+                    summary = format!("种子: {} (近:{} | 中:{} | 深:{}) ➜ 联想: {}", seed_count, recent, mid, deep, assoc_count);
+                    has_details = true;
+                }
+                "AGENT_DREAM_NARRATIVE" => {
+                    let full_length = val.get("fullLength").and_then(|l| l.as_u64())
+                        .or_else(|| val.get("narrative").and_then(|n| n.as_str()).map(|s| s.chars().count() as u64))
+                        .unwrap_or(0);
+                    subtitle = Some(format!("[梦叙事] 字数: {}", full_length));
+                    
+                    let narrative = val.get("narrative").and_then(|n| n.as_str()).unwrap_or("");
+                    let mut s = narrative.to_string();
+                    if s.chars().count() > 50 {
+                        s = s.chars().take(50).collect::<String>() + "...";
+                    }
+                    summary = s;
+                    has_details = true;
+                }
+                "AGENT_DREAM_OPERATIONS" => {
+                    let operation_count = val.get("operationCount").and_then(|c| c.as_u64()).unwrap_or(0);
+                    let log_file = val.get("logFile").and_then(|l| l.as_str()).unwrap_or("None");
+                    subtitle = Some(format!("[梦操作] 数量: {} | 日志: {}", operation_count, log_file));
+                    
+                    let mut merge = 0;
+                    let mut delete = 0;
+                    let mut insight = 0;
+                    if let Some(ops) = val.get("operations").and_then(|o| o.as_array()) {
+                        for op in ops {
+                            match op.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                                "merge" => merge += 1,
+                                "delete" => delete += 1,
+                                "insight" => insight += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                    summary = format!("[操作 {} 项] 待审核: {}合并, {}删除, {}感悟", 
+                        val.get("operations").and_then(|o| o.as_array()).map(|a| a.len()).unwrap_or(0),
+                        merge, delete, insight
+                    );
+                    has_details = true;
+                }
+                "AGENT_DREAM_END" => {
+                    let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    subtitle = Some(format!("[出梦 ({})]", status));
+                    summary = val.get("message").or_else(|| val.get("error")).and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    has_details = false;
+                }
+                _ => {
+                    subtitle = Some(t.replace("AGENT_DREAM_", ""));
+                    summary = val.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    has_details = true;
+                }
             }
             (title, subtitle, summary, has_details)
         }
+        "AGENT_DREAM_SCHEDULE" => {
+            let message = val.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            let hour = val.get("currentHour").and_then(|h| h.as_u64()).unwrap_or(0);
+            let agents = val.get("agents").and_then(|a| a.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","))
+                .unwrap_or_default();
+
+            (
+                "梦境自动调度".to_string(),
+                Some(format!("时间: {}点", hour)),
+                format!("准备入梦: {} | {}", agents, message),
+                false
+            )
+        }
         _ => {
+            // 兜底处理 RAG_RETRIEVAL_DETAILS 以及未匹配的自定义 RAG 事件
             if val.get("dbName").is_some() && val.get("results").is_some() {
                 let db_name = val.get("dbName").and_then(|d| d.as_str()).unwrap_or("未知");
                 let k = val.get("k").and_then(|k| k.as_u64()).unwrap_or(0);
-                let use_time = val.get("useTime").and_then(|t| t.as_str()).unwrap_or("N/A");
-                let mut summary = val.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string();
-                if summary.chars().count() > 120 {
-                    summary = summary.chars().take(120).collect::<String>() + "...";
+                
+                // 解析是否启用时间过滤 (布尔值)
+                let use_time = val.get("useTime").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                // 解析策略标签
+                let mut strategies: Vec<String> = Vec::new();
+                if use_time {
+                    strategies.push("Time".to_string());
                 }
-                (format!("RAG知识库: {}", db_name), Some(format!("K: {} | Time: {}", k, use_time)), summary, true)
+                if val.get("useRerankPlus").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    strategies.push("Rerank+".to_string());
+                } else if val.get("useRerank").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    strategies.push("Rerank".to_string());
+                }
+                if val.get("useTagMemo").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let weight = val.get("tagWeight").and_then(|w| w.as_f64()).unwrap_or(0.0);
+                    strategies.push(format!("TagMemo({:.2})", weight));
+                }
+                if val.get("useGeodesicRerank").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    strategies.push("GeoRerank".to_string());
+                }
+                if val.get("useAssociate").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    strategies.push("Associate".to_string());
+                }
+                if val.get("useGroup").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    strategies.push("Group".to_string());
+                }
+                
+                let sub = if strategies.is_empty() {
+                    Some(format!("K: {}", k))
+                } else {
+                    Some(format!("K: {} | [{}]", k, strategies.join(" | ")))
+                };
+
+                let results_len = val.get("results").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0);
+                let query = val.get("query").and_then(|q| q.as_str()).unwrap_or("");
+                let mut sum = format!("[召回 {} 项] {}", results_len, query);
+                if sum.chars().count() > 50 {
+                    sum = sum.chars().take(50).collect::<String>() + "...";
+                }
+                (format!("RAG知识库: {}", db_name), sub, sum, true)
             } else {
-                // 不属于 AI 认知相关事件，直接阻断
+                // 不属于 AI 认知相关事件，直接过滤
                 return None;
             }
         }

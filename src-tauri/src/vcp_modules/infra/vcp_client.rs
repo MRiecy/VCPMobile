@@ -534,8 +534,8 @@ pub async fn perform_vcp_request<R: Runtime>(
     // === 5. 配置网络请求 ===
     let client = Client::builder()
         // 不设 read_timeout：数小时自循环中，任何 read_timeout 都是定时炸弹
-        // tcp_keepalive(60s) 维持 TCP 层活性，防止 NAT/防火墙静默丢弃空闲连接
-        .tcp_keepalive(Duration::from_secs(60))
+        // tcp_keepalive(20s) 维持 TCP 层活性，防止 NAT/防火墙静默丢弃空闲连接
+        .tcp_keepalive(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -624,7 +624,13 @@ pub async fn perform_vcp_request<R: Runtime>(
                         let reader = StreamReader::new(stream);
                         let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 1024));
 
+                        let mut last_activity = std::time::Instant::now();
+                        let timeout_duration = Duration::from_secs(25);
+
                         loop {
+                            let sleep_future = tokio::time::sleep_until(tokio::time::Instant::from_std(last_activity + timeout_duration));
+                            tokio::pin!(sleep_future);
+
                             tokio::select! {
                                 // 核心修复：即使在等待数据的间隙，也能捕获中断信号
                                 _ = &mut abort_rx => {
@@ -637,7 +643,19 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     active_requests_inner.remove(&message_id_inner);
                                     break;
                                 }
+                                _ = &mut sleep_future => {
+                                    log::warn!("[VCPClient] Stream idle timeout (25s) reached for message: {}", message_id_inner);
+                                    aurora_buffer.finalize();
+                                    send_aurora_update(&aurora_buffer, true, true, Some("error".to_string()), Some("连接超时：超过 25 秒未收到服务器响应，自动关闭连接".to_string()));
+                                    send_stream_event(StreamEvent::error(
+                                        message_id_inner.clone(),
+                                        context_inner.clone(),
+                                        "连接超时：超过 25 秒未收到服务器响应，自动关闭连接".to_string(),
+                                    ));
+                                    break;
+                                }
                                 line_res = lines.next() => {
+                                    last_activity = std::time::Instant::now();
                                     match line_res {
                                         Some(Ok(line)) => {
                                             if line.trim().is_empty() { continue; }

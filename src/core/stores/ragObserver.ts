@@ -21,6 +21,7 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
   const triggerSpectrumAnimation = ref(false);
   
   let unlistenFn: UnlistenFn | null = null;
+  let listenerSessionId = 0;
 
   // 从后端初始化拉取历史 metadata
   const fetchMetadataList = async () => {
@@ -45,7 +46,8 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
   // 根据 id 按需拉取 Payload 详情
   const fetchPayload = async (id: string): Promise<any> => {
     try {
-      return await invoke<any>('get_vcp_info_payload', { id });
+      const rawJson = await invoke<string>('get_vcp_info_payload', { id });
+      return JSON.parse(rawJson);
     } catch (err) {
       console.error(`[RagObserverStore] Failed to fetch payload for ${id}:`, err);
       throw err;
@@ -72,6 +74,8 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
 
   // 监听 Tauri 后端推送的系统事件
   const initListener = async () => {
+    const currentSessionId = ++listenerSessionId;
+
     if (unlistenFn) {
       unlistenFn();
       unlistenFn = null;
@@ -79,6 +83,11 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
 
     await fetchConnectionStatus();
     await fetchMetadataList();
+
+    // 检查竞态锁：如果在 await 期间有新的 initListener 调用，放弃当前注册
+    if (currentSessionId !== listenerSessionId) {
+      return;
+    }
 
     unlistenFn = await listen<any>('vcp-info-event', (event) => {
       const payload = event.payload;
