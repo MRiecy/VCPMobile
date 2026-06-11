@@ -348,7 +348,7 @@ watch(currentSubPage, (val) => {
 
 <style scoped>
 .settings-view {
-  background-color: color-mix(in srgb, var(--primary-bg) 100%, transparent);
+  background-color: var(--primary-bg);
 }
 
 .slide-subpage-enter-active {

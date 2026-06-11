@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { LAYER_PAGE_BASE } from '../../core/constants/layers';
 
 interface Props {
@@ -15,7 +15,7 @@ const props = withDefaults(defineProps<Props>(), {
   <Transition name="slide-page">
     <div
       v-show="props.isOpen"
-      class="fixed inset-0 pointer-events-auto"
+      class="fixed inset-0 pointer-events-auto bg-[var(--primary-bg)]"
       :style="{ zIndex: props.zIndex }"
     >
       <slot />
