@@ -65,3 +65,14 @@ fn default_context_limit() -> i32 {
 fn default_max_output() -> i32 {
     64000
 }
+
+/// 智能体(Agent)的轻量列表结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentListItem {
+    pub id: String,
+    pub name: String,
+    pub model: String,
+    pub avatar_calculated_color: Option<String>,
+}
+

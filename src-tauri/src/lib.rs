@@ -6,7 +6,7 @@ use vcp_modules::agent_chat_application_service::{
     handle_agent_chat_message, handle_assistant_chat_stream,
 };
 use vcp_modules::agent_service::{
-    create_agent, delete_agent, get_agents, read_agent_config, save_agent_config,
+    create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config, save_agent_config,
     update_agent_config,
 };
 use vcp_modules::avatar_service::{get_avatar, save_avatar_data, store_dominant_color};
@@ -240,6 +240,7 @@ pub fn run() {
             set_topic_unread,
             regenerate_topic_response,
             get_agents,
+            get_assistants_snapshot,
             read_agent_config,
             save_agent_config,
             update_agent_config,

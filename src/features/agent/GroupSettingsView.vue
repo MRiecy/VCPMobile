@@ -124,17 +124,12 @@ const onCropConfirm = async (blob: Blob) => {
   }
 };
 
-const fetchAgents = async () => {
-  try {
-    const agents = await invoke<any[]>("get_agents");
-    allAgents.value = agents.map(a => ({
-      id: a.id,
-      name: a.name,
-      avatar: a.avatar
-    }));
-  } catch (err) {
-    console.error("Failed to fetch agents:", err);
-  }
+const fetchAgents = () => {
+  allAgents.value = assistantStore.agents.map(a => ({
+    id: a.id,
+    name: a.name,
+    avatar: ""
+  }));
 };
 
 const fetchGroupConfig = async () => {
@@ -237,7 +232,7 @@ const handleDelete = async () => {
 
 onMounted(async () => {
   if (props.isOpen) {
-    await fetchAgents();
+    fetchAgents();
     await fetchGroupConfig();
   }
 });

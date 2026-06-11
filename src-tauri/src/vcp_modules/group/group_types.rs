@@ -56,3 +56,14 @@ pub struct GroupConfig {
     #[serde(default)]
     pub created_at: i64,
 }
+
+/// 群组的轻量列表结构
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupListItem {
+    pub id: String,
+    pub name: String,
+    pub avatar_calculated_color: Option<String>,
+    pub members: Vec<String>,
+}
+

@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotificationStore } from "./notification";
 
@@ -19,13 +19,12 @@ export interface AgentConfig {
   id: string;
   name: string;
   model: string;
-  systemPrompt: string;
   mobileSystemPrompt?: string;
-  temperature: number;
-  contextTokenLimit: number;
-  maxOutputTokens: number;
-  streamOutput: boolean;
-  useTemperature: boolean;
+  temperature?: number;
+  contextTokenLimit?: number;
+  maxOutputTokens?: number;
+  streamOutput?: boolean;
+  useTemperature?: boolean;
   avatarCalculatedColor?: string;
   topics?: Topic[];
 }
@@ -35,11 +34,11 @@ export interface GroupConfig {
   name: string;
   avatarCalculatedColor?: string;
   members: string[];
-  mode: string;
+  mode?: string;
   memberTags?: Record<string, any>;
   groupPrompt?: string;
   invitePrompt?: string;
-  useUnifiedModel: boolean;
+  useUnifiedModel?: boolean;
   unifiedModel?: string;
   tagMatchMode?: string;
   topics?: Topic[];
@@ -47,8 +46,8 @@ export interface GroupConfig {
 }
 
 export const useAssistantStore = defineStore("assistant", () => {
-  const agents = ref<AgentConfig[]>([]);
-  const groups = ref<GroupConfig[]>([]);
+  const agents = shallowRef<AgentConfig[]>([]);
+  const groups = shallowRef<GroupConfig[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
@@ -83,15 +82,17 @@ export const useAssistantStore = defineStore("assistant", () => {
     error.value = null;
     const startTime = Date.now();
     try {
-      console.log("[Profile] invoke('get_agents') starting...");
-      const fetchedAgents = await invoke<AgentConfig[]>("get_agents");
-      console.log(`[Profile] invoke('get_agents') resolved in ${Date.now() - startTime}ms`);
-      agents.value = fetchedAgents;
-      refreshUnreadCounts();
+      console.log("[Profile] fetchAgents invoking get_assistants_snapshot...");
+      const snapshot = await invoke<{
+        agents: AgentConfig[];
+        groups: GroupConfig[];
+        unreadCounts: Record<string, number>;
+      }>("get_assistants_snapshot");
+      agents.value = snapshot.agents;
+      unreadCounts.value = snapshot.unreadCounts;
       console.log(`[Profile] fetchAgents finished in ${Date.now() - startTime}ms`);
     } catch (e: any) {
-      const msg = e.toString();
-      error.value = msg;
+      error.value = e.toString();
       console.error("[AssistantStore] fetchAgents failed:", e);
       throw e;
     } finally {
@@ -102,13 +103,19 @@ export const useAssistantStore = defineStore("assistant", () => {
   const fetchGroups = async () => {
     loading.value = true;
     error.value = null;
+    const startTime = Date.now();
     try {
-      const fetchedGroups = await invoke<GroupConfig[]>("get_groups");
-      groups.value = fetchedGroups;
-      refreshUnreadCounts();
+      console.log("[Profile] fetchGroups invoking get_assistants_snapshot...");
+      const snapshot = await invoke<{
+        agents: AgentConfig[];
+        groups: GroupConfig[];
+        unreadCounts: Record<string, number>;
+      }>("get_assistants_snapshot");
+      groups.value = snapshot.groups;
+      unreadCounts.value = snapshot.unreadCounts;
+      console.log(`[Profile] fetchGroups finished in ${Date.now() - startTime}ms`);
     } catch (e: any) {
-      const msg = e.toString();
-      error.value = msg;
+      error.value = e.toString();
       console.error("[AssistantStore] fetchGroups failed:", e);
       throw e;
     } finally {
@@ -121,19 +128,18 @@ export const useAssistantStore = defineStore("assistant", () => {
     error.value = null;
     const startTime = Date.now();
     try {
-      console.log("[Profile] invoke('get_agents') and invoke('get_groups') concurrently starting...");
-      const [fetchedAgents, fetchedGroups] = await Promise.all([
-        invoke<AgentConfig[]>("get_agents"),
-        invoke<GroupConfig[]>("get_groups")
-      ]);
-      console.log(`[Profile] Concurrent fetches resolved in ${Date.now() - startTime}ms`);
+      console.log("[Profile] invoke('get_assistants_snapshot') starting...");
+      const snapshot = await invoke<{
+        agents: AgentConfig[];
+        groups: GroupConfig[];
+        unreadCounts: Record<string, number>;
+      }>("get_assistants_snapshot");
+      console.log(`[Profile] invoke('get_assistants_snapshot') resolved in ${Date.now() - startTime}ms`);
       
       // 在同一次 tick 中合并赋值，触发 Vue 3 渲染的批处理更新
-      agents.value = fetchedAgents;
-      groups.value = fetchedGroups;
-      
-      // 后台静默刷新未读计数，不阻塞 READY 流程
-      refreshUnreadCounts();
+      agents.value = snapshot.agents;
+      groups.value = snapshot.groups;
+      unreadCounts.value = snapshot.unreadCounts;
       
       console.log(`[Profile] fetchAgentsAndGroups finished in ${Date.now() - startTime}ms`);
     } catch (e: any) {
@@ -168,7 +174,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const deleteAgent = async (id: string) => {
     try {
       await invoke("delete_agent", { agentId: id });
-      await fetchAgents();
+      agents.value = agents.value.filter((a) => a.id !== id);
       notificationStore.addNotification({
         type: "success",
         title: "Agent 删除成功",
@@ -204,7 +210,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const deleteGroup = async (id: string) => {
     try {
       await invoke("delete_group", { groupId: id });
-      await fetchGroups();
+      groups.value = groups.value.filter((g) => g.id !== id);
       notificationStore.addNotification({
         type: "success",
         title: "Group 删除成功",
@@ -220,13 +226,26 @@ export const useAssistantStore = defineStore("assistant", () => {
   const saveAgent = async (agent: AgentConfig) => {
     try {
       await invoke("save_agent_config", { agent });
+      
+      // 点对点局部更新（仅更新轻量列表渲染字段，防止大提示词等字段污染全局列表轻量缓存）
+      const index = agents.value.findIndex((a) => a.id === agent.id);
+      if (index !== -1) {
+        const updated = [...agents.value];
+        updated[index] = {
+          ...updated[index],
+          name: agent.name,
+          model: agent.model,
+          avatarCalculatedColor: agent.avatarCalculatedColor || updated[index].avatarCalculatedColor,
+        };
+        agents.value = updated;
+      }
+
       notificationStore.addNotification({
         type: "success",
         title: "Agent 配置保存成功",
         message: "助手的最新设置已同步到核心",
         toastOnly: true,
       });
-      await fetchAgents();
     } catch (e: any) {
       error.value = e.toString();
       throw e;
@@ -236,13 +255,26 @@ export const useAssistantStore = defineStore("assistant", () => {
   const saveGroup = async (group: GroupConfig) => {
     try {
       await invoke("save_group_config", { group });
+
+      // 点对点局部更新（仅更新轻量列表渲染字段）
+      const index = groups.value.findIndex((g) => g.id === group.id);
+      if (index !== -1) {
+        const updated = [...groups.value];
+        updated[index] = {
+          ...updated[index],
+          name: group.name,
+          members: group.members,
+          avatarCalculatedColor: group.avatarCalculatedColor || updated[index].avatarCalculatedColor,
+        };
+        groups.value = updated;
+      }
+
       notificationStore.addNotification({
         type: "success",
         title: "Group 配置保存成功",
         message: "群组设置已更新",
         toastOnly: true,
       });
-      await fetchGroups();
     } catch (e: any) {
       error.value = e.toString();
       throw e;

@@ -14,7 +14,6 @@ interface AgentConfig {
   avatar?: string;
   avatarCalculatedColor?: string;
   // Prompt settings
-  systemPrompt: string;
   mobileSystemPrompt?: string;
   // Model settings
   model: string;
@@ -43,7 +42,6 @@ const agentConfig = ref<AgentConfig>({
   id: props.id || "",
   name: "",
   avatar: "",
-  systemPrompt: "",
   mobileSystemPrompt: "",
   model: "gemini-3-flash-preview",
   temperature: 1.0,
