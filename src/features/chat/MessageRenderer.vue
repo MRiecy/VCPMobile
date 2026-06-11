@@ -11,6 +11,7 @@ import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { renderMarkdownNodes } from "../../core/utils/astRenderer";
 import { useContentProcessor } from "../../core/composables/useContentProcessor";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
+import morphdom from "morphdom";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
 const mermaidCache = new Map<string, string>();
@@ -285,6 +286,22 @@ const showMessageContextMenu = async () => {
     return await historyStore.fetchRawContent(props.message.id);
   };
 
+  // 1. 如果不是流式，编辑消息移动到首位
+  if (!isStreaming.value) {
+    actions.push({
+      label: "编辑消息",
+      icon: Edit2,
+      handler: async () => {
+        const fullText = await getFullText();
+        overlayStore.openEditor({
+          initialValue: fullText || "",
+          onSave: (newContent: string) => historyStore.updateMessageContent(props.message.id, newContent),
+        });
+      },
+    });
+  }
+
+  // 2. 复制内容紧随其后
   actions.push({
     label: "复制内容",
     icon: Copy,
@@ -300,6 +317,7 @@ const showMessageContextMenu = async () => {
     },
   });
 
+  // 3. 其他非流式操作
   if (!isStreaming.value) {
     actions.push({
       label: "重新渲染",
@@ -324,18 +342,6 @@ const showMessageContextMenu = async () => {
             toastOnly: true,
           });
         }
-      },
-    });
-
-    actions.push({
-      label: "编辑消息",
-      icon: Edit2,
-      handler: async () => {
-        const fullText = await getFullText();
-        overlayStore.openEditor({
-          initialValue: fullText || "",
-          onSave: (newContent: string) => historyStore.updateMessageContent(props.message.id, newContent),
-        });
       },
     });
 
@@ -397,6 +403,48 @@ watch(
   { immediate: true }
 );
 
+// === Stream Tail Morphdom Smooth Rendering ===
+const tailRootRef = ref<HTMLElement | null>(null);
+
+watch(
+  () => props.message.tailBlock,
+  (newTailBlock) => {
+    if (!newTailBlock || !isPlainBlock(newTailBlock.type)) return;
+    nextTick(() => {
+      if (!tailRootRef.value) return;
+      const html = renderBlockHtml(newTailBlock);
+
+      // 实时提取未闭合/已闭合的 <style> 并物理抹除以防 morphdom 崩溃
+      let cssContent = "";
+      const processedHtml = html.replace(
+        /<style\b[^>]*>([\s\S]*?)(?:<\/style>|$)/gi,
+        (_, css) => {
+          cssContent += css.trim() + "\n";
+          return ""; // 从正文 HTML 中抹除 style 标签
+        }
+      );
+
+      if (cssContent.trim().length > 0) {
+        injectScopedCss(cssContent, props.message.id);
+      }
+
+      try {
+        morphdom(tailRootRef.value, processedHtml, {
+          childrenOnly: true,
+          onBeforeElUpdated: (fromEl, toEl) => {
+            if (fromEl.isEqualNode(toEl)) return false;
+            return true;
+          }
+        });
+      } catch (e) {
+        console.debug('[TailMorphdom] Skipped frame:', e);
+      }
+    });
+  },
+  { deep: true, immediate: true, flush: 'post' }
+);
+
+
 onUnmounted(() => {
   removeScopedCss(props.message.id);
 });
@@ -442,12 +490,14 @@ onUnmounted(() => {
                 :type="block.type"
                 :content="block.content"
                 :block="block"
+                :default-expanded="isMessageInActiveStream"
               />
 
               <ThoughtBlock
                 v-else-if="block.type === 'thought'"
                 :block="block"
                 :message-id="message.id"
+                :default-expanded="isMessageInActiveStream"
               />
 
               <HtmlPreviewBlock
@@ -471,12 +521,8 @@ onUnmounted(() => {
         <div v-if="isStreaming && message.tailBlock" class="streaming-tail opacity-90">
           <div
             v-if="isPlainBlock(message.tailBlock.type)"
-            v-html="renderBlockHtml(message.tailBlock)"
-          />
-          <ThoughtBlock
-            v-else-if="message.tailBlock.type === 'thought'"
-            :block="message.tailBlock"
-            :message-id="message.id"
+            ref="tailRootRef"
+            class="vcp-markdown-block"
           />
         </div>
         <div v-else-if="isStreaming && message.tailContent && message.blocks && message.blocks.length > 0" class="opacity-70 italic animate-pulse">

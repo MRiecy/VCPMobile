@@ -1,15 +1,28 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { ChevronDown, ChevronUp, Loader2 } from "lucide-vue-next";
 import { renderMarkdownNodes } from "../../../core/utils/astRenderer";
 import type { ContentBlock } from "../../../core/types/chat";
 
-defineProps<{
-  block: ContentBlock;
-  messageId: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    block: ContentBlock;
+    messageId: string;
+    defaultExpanded?: boolean;
+  }>(),
+  {
+    defaultExpanded: false,
+  }
+);
 
-const isExpanded = ref(false);
+const isExpanded = ref(props.defaultExpanded);
+
+watch(
+  () => props.defaultExpanded,
+  (newVal) => {
+    isExpanded.value = newVal;
+  }
+);
 
 const toggleExpand = () => {
   isExpanded.value = !isExpanded.value;
@@ -49,92 +62,4 @@ function escapeHtml(text: string): string {
   </div>
 </template>
 
-<style scoped>
-.vcp-thought-block {
-  background: rgba(0, 0, 0, 0.03) !important;
-  border-radius: 12px !important;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  margin: 10px 0 !important;
-  position: relative;
-  font-size: 0.92em !important;
-  line-height: 1.6;
-  width: fit-content;
-  max-width: 98%;
-  transition: background-color 0.3s ease, border-color 0.3s ease;
-}
 
-html.dark .vcp-thought-block {
-  background: rgba(120, 120, 128, 0.05) !important;
-  border-color: rgba(120, 120, 128, 0.2);
-}
-
-.vcp-thought-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  user-select: none;
-  opacity: 0.8;
-  transition: opacity 0.2s;
-  padding: 10px 15px !important;
-}
-
-.vcp-thought-header:hover {
-  opacity: 1;
-}
-
-.vcp-thought-icon {
-  font-size: 1.1em;
-  filter: grayscale(0.5);
-}
-
-.vcp-thought-label {
-  font-weight: 600;
-  font-size: 0.95em;
-}
-
-.vcp-thought-content {
-  padding: 0 15px 10px 15px;
-  border-top: 1px dashed rgba(120, 120, 128, 0.2);
-  margin-top: 5px;
-  padding-top: 10px;
-}
-
-.thought-body {
-  font-style: italic;
-  opacity: 0.8;
-}
-
-.animate-slide-down {
-  animation: slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.custom-spin {
-  animation: vcp-spin 1s linear infinite;
-  /* 提升至 GPU 合成层 */
-  will-change: transform;
-  transform: translate3d(0, 0, 0);
-}
-
-@keyframes vcp-spin {
-  from {
-    transform: rotate(0deg) translate3d(0, 0, 0);
-  }
-
-  to {
-    transform: rotate(360deg) translate3d(0, 0, 0);
-  }
-}
-</style>

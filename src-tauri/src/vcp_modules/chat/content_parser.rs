@@ -267,7 +267,7 @@ lazy_static! {
         Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
 
     pub(crate) static ref ROLE_DIVIDER: Regex = Regex::new(r"(?im)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
-    pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?i)<style\b[^>]*>").unwrap();
+    pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?im)^[ \t]*<style\b[^>]*>").unwrap();
     pub(crate) static ref STYLE_TAG_END: Regex = Regex::new(r"(?i)</style>").unwrap();
 
     pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
@@ -391,7 +391,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(^[ \t]*```html[ \t]*$)|",                               // 6
             r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 7
             r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 8
-            r"(<style\b[^>]*>)|",                                      // 9
+            r"(^[ \t]*<style\b[^>]*>)|",                                      // 9
             r"(^[ \t]*```[a-zA-Z0-9-]*[ \t]*$)|",                       // 10
             r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)" // 11
         )).unwrap();
@@ -822,3 +822,32 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 
     (tool_name, status, details, footer)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_content_style_blocks() {
+        // 1. 正常的独立行 <style> 应该被正确解析为 Style 块
+        let raw_style = "<style>\nbody { color: red; }\n</style>";
+        let blocks = parse_content(raw_style);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Style { content, .. } => {
+                assert_eq!(content.trim(), "body { color: red; }");
+            }
+            _ => panic!("Expected Style block, got {:?}", blocks[0]),
+        }
+
+        // 2. 行内代码包裹的 `<style>` 应该被保留在 Markdown 中，而不是被提取为 Style 块
+        let raw_inline = "在 HTML 中，`<style>body {}</style>` 用于定义样式。";
+        let blocks = parse_content(raw_inline);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Markdown { .. } => {}
+            _ => panic!("Expected Markdown block, got {:?}", blocks[0]),
+        }
+    }
+}
+

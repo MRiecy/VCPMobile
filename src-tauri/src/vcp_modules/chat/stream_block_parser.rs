@@ -512,56 +512,62 @@ fn split_markdown_paragraphs(text: &str) -> (Vec<StreamBlock>, String) {
         return (Vec::new(), String::new());
     }
 
-    if let Some(last_break) = text.rfind("\n\n") {
-        let stable = &text[..last_break + 2];
-        let tail = &text[last_break + 2..];
+    // 只有累计文本长度大于等于 800 字节时，才允许进行双换行分段沉淀
+    if text.len() >= 800 {
+        if let Some(last_break) = text.rfind("\n\n") {
+            let stable = &text[..last_break + 2];
+            let tail = &text[last_break + 2..];
 
-        let mut blocks = Vec::new();
-        for para in stable.split("\n\n") {
-            let trimmed = para.trim();
-            if trimmed.is_empty() {
-                continue;
+            let mut blocks = Vec::new();
+            for para in stable.split("\n\n") {
+                let trimmed = para.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // 对已闭合的 Markdown 段落进行 AST 预渲染
+                let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
+                let hash = HashAggregator::compute_content_hash(trimmed);
+                blocks.push(StreamBlock::markdown(
+                    trimmed.to_string(),
+                    Some(nodes),
+                    hash,
+                ));
             }
-            // 对已闭合的 Markdown 段落进行 AST 预渲染
-            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
-            let hash = HashAggregator::compute_content_hash(trimmed);
-            blocks.push(StreamBlock::markdown(
-                trimmed.to_string(),
-                Some(nodes),
-                hash,
-            ));
+
+            // 针对留下的 tail，进行“句级”自适应切分兜底
+            let (mut extra_blocks, final_tail) = check_sentence_precipitation(tail);
+            blocks.append(&mut extra_blocks);
+
+            // 检查 inline button clicks
+            let blocks = extract_inline_buttons(blocks);
+            (blocks, final_tail)
+        } else {
+            // 全程没有 \n\n，进行句级自适应切分兜底
+            let (blocks, final_tail) = check_sentence_precipitation(text);
+            let blocks = extract_inline_buttons(blocks);
+            (blocks, final_tail)
         }
-
-        // 针对留下的 tail，进行“句级”自适应切分兜底
-        let (mut extra_blocks, final_tail) = check_sentence_precipitation(tail);
-        blocks.append(&mut extra_blocks);
-
-        // 检查 inline button clicks
-        let blocks = extract_inline_buttons(blocks);
-        (blocks, final_tail)
     } else {
-        // 全程没有 \n\n，进行句级自适应切分兜底
-        let (blocks, final_tail) = check_sentence_precipitation(text);
-        let blocks = extract_inline_buttons(blocks);
-        (blocks, final_tail)
+        // 累计文本小于 800 字节，不分段也不触发句级沉淀，直接以 tail 形式返回
+        (Vec::new(), text.to_string())
     }
 }
 
 /// 辅助函数：当未分段文本超过阈值时，利用句尾标点强行截断沉淀
 fn check_sentence_precipitation(text: &str) -> (Vec<StreamBlock>, String) {
-    const PRECIPITATE_THRESHOLD: usize = 500; // 500字阻尼线
+    const PRECIPITATE_THRESHOLD: usize = 1500; // 1500字阻尼线
 
     if text.len() < PRECIPITATE_THRESHOLD {
         return (Vec::new(), text.to_string());
     }
 
-    // 寻找距离 500 字最近的一个句尾标点（。 ！ ？ . ! ?）
+    // 寻找距离最近的一个句尾标点（。 ！ ？ . ! ?）
     let punctuations = ['。', '！', '？', '…', '.', '!', '?'];
     let mut cut_index = None;
 
     for (i, ch) in text.char_indices().rev() {
-        // 保留至少 200 个字节（大约几十个汉字）作为 tail，保证打字机打出的文字有连续视效
-        if i < 200 {
+        // 保留至少 800 个字节作为 stable 头部，保证打字机打出的文字有连续视效
+        if i < 800 {
             break;
         }
         if punctuations.contains(&ch) {
@@ -805,26 +811,27 @@ mod tests {
     #[test]
     fn test_streaming_typewriter_incremental_precipitation() {
         let mut parser = StreamBlockParser::new();
+        let padding = "这里是一段用来填充文本长度以达到测试新设定之八百字节双换行沉淀阈值物理条件的垫片数据。".repeat(10);
 
         // 模拟第 1 帧：输出到代码块开头，未闭合
-        let frame_1 = "### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust";
-        let (blocks_1, tail_1) = parser.process(frame_1);
+        let frame_1 = format!("{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust", padding);
+        let (blocks_1, tail_1) = parser.process(&frame_1);
         println!("Frame 1 - Blocks: {}, Tail: {:?}", blocks_1.len(), tail_1);
         // 应该成功沉淀出前面的两个 Markdown 块（因 \n\n 物理分段），且 tail 只包含 ```rust
         assert_eq!(blocks_1.len(), 2);
         assert_eq!(tail_1, "```rust");
 
         // 模拟第 2 帧：代码块流式增量增长，仍未闭合
-        let frame_2 = "### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n";
-        let (blocks_2, tail_2) = parser.process(frame_2);
+        let frame_2 = format!("{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n", padding);
+        let (blocks_2, tail_2) = parser.process(&frame_2);
         println!("Frame 2 - Blocks: {}, Tail: {:?}", blocks_2.len(), tail_2);
         // 应该没有任何新的 blocks（因为前段已经沉淀，后段未闭合），且 tail 应该是增量代码块且去掉了前段
         assert_eq!(blocks_2.len(), 0);
         assert_eq!(tail_2, "```rust\nuse tokio;\n");
 
         // 模拟第 3 帧：流式代码块闭合
-        let frame_3 = "### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n```";
-        let (blocks_3, tail_3) = parser.process(frame_3);
+        let frame_3 = format!("{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n```", padding);
+        let (blocks_3, tail_3) = parser.process(&frame_3);
         println!("Frame 3 - Blocks: {}, Tail: {:?}", blocks_3.len(), tail_3);
         // 应该成功闭合代码块并将其沉淀，且 tail 为空
         assert_eq!(blocks_3.len(), 1);
