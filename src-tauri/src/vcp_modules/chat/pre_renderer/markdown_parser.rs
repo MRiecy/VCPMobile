@@ -20,6 +20,8 @@ lazy_static! {
     static ref TAG_SCANNER: Regex = Regex::new(r"(?i)(</?)([a-z0-9\-]+)(\s[^>]*)?>").unwrap();
 
     static ref INLINE_CODE_RE: Regex = Regex::new(r"(?m)`+[^`\n\r]+`+").unwrap();
+
+    static ref COMMENT_RE: Regex = Regex::new(r"(?s)<!--[\s\S]*?(?:-->|$)").unwrap();
 }
 
 fn preprocess_latex_math(text: &str) -> String {
@@ -238,6 +240,12 @@ pub(crate) fn find_matching_close_tag(
         }
     }
 
+    // 预先收集 search_area 中所有 HTML 注释的物理范围（支持流式未闭合注释边界）
+    let mut comment_ranges = Vec::new();
+    for m in COMMENT_RE.find_iter(search_area) {
+        comment_ranges.push(m.start()..m.end());
+    }
+
     for cap in TAG_SCANNER.captures_iter(search_area) {
         let full_match = cap.get(0).unwrap();
         let cap_start = full_match.start();
@@ -252,6 +260,11 @@ pub(crate) fn find_matching_close_tag(
 
         // 健壮性防御：如果当前扫描到的 HTML 标签处于代码块围栏内部，直接跳过
         if fence_ranges.iter().any(|range| range.contains(&cap_start)) {
+            continue;
+        }
+
+        // 健壮性防御：如果当前扫描到的 HTML 标签处于 HTML 注释内部，直接跳过
+        if comment_ranges.iter().any(|range| range.contains(&cap_start)) {
             continue;
         }
 

@@ -264,11 +264,14 @@ lazy_static! {
     pub(crate) static ref HTML_DOC_END: Regex = Regex::new(r"(?i)</html>").unwrap();
 
     pub(crate) static ref HTML_CONTAINER_OPEN_RE: Regex =
-        Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
+        Regex::new(r"(?im)^[ \t]*<([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>?").unwrap();
 
     pub(crate) static ref ROLE_DIVIDER: Regex = Regex::new(r"(?im)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
-    pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?im)^[ \t]*<style\b[^>]*>").unwrap();
+    pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?im)^[ \t]*<style\b[^>]*>?").unwrap();
     pub(crate) static ref STYLE_TAG_END: Regex = Regex::new(r"(?i)</style>").unwrap();
+
+    pub(crate) static ref HTML_TAG_BLOCK_RE: Regex =
+        Regex::new(r"(?im)^[ \t]*<([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>?").unwrap();
 
     pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
     pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
@@ -821,6 +824,10 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
     }
 
     (tool_name, status, details, footer)
+}
+
+pub fn is_html_tag_block(text: &str) -> bool {
+    HTML_TAG_BLOCK_RE.is_match(text)
 }
 
 #[cfg(test)]

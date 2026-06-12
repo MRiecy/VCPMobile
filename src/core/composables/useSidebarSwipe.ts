@@ -10,6 +10,63 @@ export interface SidebarSwipeOptions {
 }
 
 /**
+ * 递归判断发起事件的目标元素是否处于可滑动的展示区或具有滚动条的容器中，防止手势误触冲突
+ */
+function isScrollableArea(el: Element): boolean {
+  // 1. 常见横向滚动容器类名或输入元素直接拦截 (排除 overflow-y-auto，防止干扰聊天主纵向滚动列表)
+  if (
+    el.closest('.vcp-scrollable') ||
+    el.closest('.overflow-x-auto')
+  ) {
+    return true;
+  }
+
+  // 2. 表格相关元素直接免疫 (因移动端表格极其宽阔，横滚操作极其常见)
+  if (
+    el.closest('table') ||
+    el.closest('td') ||
+    el.closest('th') ||
+    el.closest('.table-container') ||
+    el.closest('.vcp-table')
+  ) {
+    return true;
+  }
+
+  // 3. 代码展示块等横向滚动区域免疫
+  if (
+    el.closest('pre') ||
+    el.closest('code') ||
+    el.closest('.vcp-code-block')
+  ) {
+    return true;
+  }
+
+  // 4. 输入框和文本域本身有自带滑动选择或默认拖拽行为，直接免疫
+  const tagName = el.tagName.toLowerCase();
+  if (tagName === 'textarea' || tagName === 'input') {
+    return true;
+  }
+
+  // 5. 递归向上检测其祖先节点的 computed style 中是否有隐藏的滚动区
+  let current: Element | null = el;
+  while (current && current !== document.body) {
+    const style = window.getComputedStyle(current);
+    const overflowX = style.overflowX;
+
+    // 仅侦测横向（X 轴）滚动溢出，因为侧边栏侧滑是水平手势，只与横向滚动条冲突
+    const hasScrollX = (overflowX === 'auto' || overflowX === 'scroll') && current.scrollWidth > current.clientWidth;
+
+    if (hasScrollX) {
+      return true;
+    }
+
+    current = current.parentElement;
+  }
+
+  return false;
+}
+
+/**
  * 统一管理侧边栏滑动响应的组合式函数
  * 支持：
  * 1. global: 仅在侧边栏关闭时，从左滑向右开启左侧边栏，从右滑向左开启右侧边栏（避开滚动区域）
@@ -34,7 +91,13 @@ export function useSidebarSwipe(target: Ref<HTMLElement | null>, options: Sideba
 
       if (options.type === 'global') {
         // 避开滚动区域以防跟页面内滚动冲突，同时避开侧边栏内部以防跟侧边栏自身的手势发生事件冒泡冲突
-        if (e.target instanceof Element && (e.target.closest('.vcp-scrollable') || e.target.closest('.vcp-drawer'))) return;
+        if (e.target instanceof Element) {
+          if (
+            e.target.closest('.vcp-scrollable') ||
+            e.target.closest('.vcp-drawer') ||
+            isScrollableArea(e.target)
+          ) return;
+        }
 
         if (!layoutStore.leftDrawerOpen && !layoutStore.rightDrawerOpen) {
           // 从左往右划 -> 开启左侧边栏 (需要一定位移以防误触)

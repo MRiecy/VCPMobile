@@ -45,7 +45,7 @@ export function useContentProcessor() {
     if (!css || !messageId) return;
     const scopeSelector = `[data-message-id="${messageId}"]`;
     const scopedCss = css.replace(
-      /(^|\})\s*([^{]+)\s*\{/g,
+      /(^|\}|\{)\s*([^{]+)\s*\{/g,
       (_, prefix, selectors) => {
         const scopedSelectors = selectors
           .split(",")
@@ -72,6 +72,7 @@ export function useContentProcessor() {
     if (!styleEl) {
       styleEl = document.createElement("style");
       styleEl.id = `style-${messageId}`;
+      styleEl.setAttribute("data-vcp-scope-id", messageId);
       document.head.appendChild(styleEl);
     }
     styleEl.textContent = scopedCss;
