@@ -1,8 +1,18 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { MarkdownNode, InlineNode, AstMutation } from "../types/chat";
 
+function isAstDebugEnabled(): boolean {
+  return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
+}
+
+function astDebugLog(...args: unknown[]): void {
+  if (isAstDebugEnabled()) {
+    console.warn(...args);
+  }
+}
+
 function recordAstTrace(data: any): void {
-  if (import.meta.env.DEV) {
+  if (isAstDebugEnabled()) {
     if (!(window as any).__VCP_AST_TRACES__) {
       (window as any).__VCP_AST_TRACES__ = [];
     }
@@ -129,7 +139,7 @@ function createDomFromNode(
   id: string,
   registry: Map<string, Node>
 ): Node {
-  console.warn(`[AST createDomFromNode] id=${id}, node=${JSON.stringify(node)}`);
+  astDebugLog(`[AST createDomFromNode] id=${id}, node=${JSON.stringify(node)}`);
   let el: HTMLElement;
   switch (node.type) {
     case "paragraph":
@@ -441,7 +451,7 @@ function executeMutation(
   sandbox: HTMLElement
 ): ExecuteMutationResult {
   const registry = getRegistry(messageId);
-  console.warn(`[AST Mutation Exec] op=${mutation.op}, id=${mutation.id}, parent=${(mutation as any).parent || ''}, chunk=${(mutation as any).chunk || ''}, val=${(mutation as any).value || ''}`);
+  astDebugLog(`[AST Mutation Exec] op=${mutation.op}, id=${mutation.id}, parent=${(mutation as any).parent || ''}, chunk=${(mutation as any).chunk || ''}, val=${(mutation as any).value || ''}`);
 
   let status = "success";
   let detail = "";
@@ -540,16 +550,16 @@ function executeMutation(
             newDom.classList.add("vcp-stream-element-fade-in");
           }
           parent.replaceChild(newDom, oldNode);
-          console.warn(`[AST replace success] id=${mutation.id}`);
+          astDebugLog(`[AST replace success] id=${mutation.id}`);
         } else {
           status = "failed";
           detail = "Old node has no parentNode";
-          console.warn(`[AST replace fail - oldNode has no parent] id=${mutation.id}`);
+          astDebugLog(`[AST replace fail - oldNode has no parent] id=${mutation.id}`);
         }
       } else {
         status = "failed";
         detail = "Old node not found in registry";
-        console.warn(`[AST replace fail - oldNode not found in registry] id=${mutation.id}`);
+        astDebugLog(`[AST replace fail - oldNode not found in registry] id=${mutation.id}`);
       }
       break;
     }
@@ -581,17 +591,17 @@ function executeMutation(
       if (node) {
         if (node.parentNode) {
           node.parentNode.removeChild(node);
-          console.warn(`[AST remove success] id=${mutation.id}`);
+          astDebugLog(`[AST remove success] id=${mutation.id}`);
           cleanupSubtreeRefs(mutation.id, registry, true);
         } else {
           status = "failed";
           detail = "Node has no parentNode";
-          console.warn(`[AST remove fail - node has no parent] id=${mutation.id}`);
+          astDebugLog(`[AST remove fail - node has no parent] id=${mutation.id}`);
         }
       } else {
         status = "failed";
         detail = "Node not found in registry";
-        console.warn(`[AST remove fail - node not found in registry] id=${mutation.id}`);
+        astDebugLog(`[AST remove fail - node not found in registry] id=${mutation.id}`);
       }
       break;
     }
@@ -646,7 +656,7 @@ export function applyFrame(
   }
 
   const afterHtml = sandbox.innerHTML;
-  console.warn(`[AST Executor Frame Done] messageId=${messageId}, ok=${result.ok}, html=${afterHtml}`);
+  astDebugLog(`[AST Executor Frame Done] messageId=${messageId}, ok=${result.ok}, html=${afterHtml}`);
 
   recordAstTrace({
     type: "frame_done",

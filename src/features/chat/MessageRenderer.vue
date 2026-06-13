@@ -45,6 +45,16 @@ const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 
+function isAstDebugEnabled(): boolean {
+  return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
+}
+
+function astDebugLog(...args: unknown[]): void {
+  if (isAstDebugEnabled()) {
+    console.warn(...args);
+  }
+}
+
 // === AST Diff Feature Flags & Refs ===
 const tailSandboxRef = ref<HTMLElement | null>(null);
 const enableAstDiff = ref(true); // Feature Flag, 默认开启
@@ -70,7 +80,7 @@ function rebuildTailSnapshot(sandbox: HTMLElement): void {
 
 function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
   astFailureCount += 1;
-  console.warn(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
+  astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
   if (getTailSnapshotNodes().length > 0) {
     rebuildTailSnapshot(sandbox);
     return;
@@ -618,7 +628,7 @@ watch(
     tailSandboxRef,
   ],
   ([mutations, epoch, revision, reset, _snapshot, sandbox]) => {
-    console.warn(`[AST Diff Watch] Msg ${props.message.id} update: mutations=${mutations ? mutations.length : 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, applied=${appliedMutationsCount}, epoch=${epoch}, revision=${revision}`);
+    astDebugLog(`[AST Diff Watch] Msg ${props.message.id} update: mutations=${mutations ? mutations.length : 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, applied=${appliedMutationsCount}, epoch=${epoch}, revision=${revision}`);
 
     if (!useAstForCurrentTail.value || !sandbox) {
       if (lastSandbox) {
@@ -673,7 +683,7 @@ watch(
 
     if (mutations.length > appliedMutationsCount) {
       const pending = mutations.slice(appliedMutationsCount);
-      console.warn(`[AST Diff Apply] Executing ${pending.length} new mutations for ${props.message.id}`);
+      astDebugLog(`[AST Diff Apply] Executing ${pending.length} new mutations for ${props.message.id}`);
       const result = applyFrame(pending, props.message.id, sandbox);
       if (result.ok) {
         appliedMutationsCount = mutations.length;
@@ -683,7 +693,7 @@ watch(
         handleAstFrameFailure(sandbox, result.failed?.reason || "applyFrame failed");
       }
     } else if (mutations.length < appliedMutationsCount) {
-      console.warn(`[AST Diff Reset] Mutations length shrunk from ${appliedMutationsCount} to ${mutations.length}`);
+      astDebugLog(`[AST Diff Reset] Mutations length shrunk from ${appliedMutationsCount} to ${mutations.length}`);
       sandbox.innerHTML = '';
       cleanupRegistry(props.message.id);
       appliedMutationsCount = 0;

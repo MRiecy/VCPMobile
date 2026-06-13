@@ -19,6 +19,27 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // 无论是在前台还是后台，流式消息都从此池中获取，保证响应式链路不断裂
   const activeStreamMessages = reactive<Map<string, ChatMessage>>(new Map());
 
+  function isStreamDebugEnabled(): boolean {
+    return Boolean(import.meta.env.DEV && (window as any).__VCP_STREAM_DEBUG__);
+  }
+
+  function recordStreamTrace(data: any): void {
+    if (!isStreamDebugEnabled()) return;
+    if (!(window as any).__VCP_STREAM_TRACES__) {
+      (window as any).__VCP_STREAM_TRACES__ = [];
+    }
+    (window as any).__VCP_STREAM_TRACES__.push({
+      timestamp: performance.now(),
+      ...data,
+    });
+  }
+
+  function streamDebugLog(...args: unknown[]): void {
+    if (isStreamDebugEnabled()) {
+      console.warn(...args);
+    }
+  }
+
   const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // ===== rAF 30Hz 帧合并直推暂存池 =====
@@ -280,30 +301,25 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     } else if (type === "aurora") {
       const aurora = event.aurora;
       if (aurora) {
-        // === 🚀 开启流式时空录制（开发模式生效，Release 构建时自动摇树切除） ===
-        if (import.meta.env.DEV) {
-          if (!(window as any).__VCP_STREAM_TRACES__) {
-            (window as any).__VCP_STREAM_TRACES__ = [];
-          }
-          (window as any).__VCP_STREAM_TRACES__.push({
-            timestamp: performance.now(),
-            messageId: actualMessageId,
-            auroraPayload: {
-              stableChanged: aurora.stableChanged,
-              stableBlocksCount: aurora.stableBlocks?.length || 0,
-              stableBlocksHashes: aurora.stableBlocks?.map((b: any) => b.hash) || [],
-              tailChanged: aurora.tailChanged,
-              tailContent: aurora.tail || "",
-              tailBlockType: aurora.tailBlock?.type || null
-            },
-            msgSnapshot: msg ? {
-              content: msg.content,
-              blocksCount: msg.blocks?.length || 0,
-              tailContent: msg.tailContent,
-            } : null
-          });
-        }
-        // ==========================
+        recordStreamTrace({
+          messageId: actualMessageId,
+          auroraPayload: {
+            stableChanged: aurora.stableChanged,
+            stableBlocksCount: aurora.stableBlocks?.length || 0,
+            stableBlocksHashes: aurora.stableBlocks?.map((b: any) => b.hash) || [],
+            tailChanged: aurora.tailChanged,
+            tailContent: aurora.tail || "",
+            tailBlockType: aurora.tailBlock?.type || null,
+            tailEpoch: aurora.tailEpoch,
+            tailRevision: aurora.tailRevision,
+            tailReset: aurora.tailReset,
+          },
+          msgSnapshot: msg ? {
+            contentLength: msg.content?.length || 0,
+            blocksCount: msg.blocks?.length || 0,
+            tailContentLength: msg.tailContent?.length || 0,
+          } : null,
+        });
 
         // 1. 初始化或获取该 messageId 的帧合并状态
         let update = rAFPendingUpdates.get(actualMessageId);
@@ -350,7 +366,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           update.tailBlock = (aurora.tailBlock as any) || null;
         }
         if (aurora.tailMutations) {
-          console.warn(`[chatStreamStore] Received ${aurora.tailMutations.length} mutations from backend for ${actualMessageId}`);
+          streamDebugLog(`[chatStreamStore] Received ${aurora.tailMutations.length} mutations from backend for ${actualMessageId}`);
           if (!update.tailMutations) {
             update.tailMutations = [];
           }
