@@ -155,17 +155,24 @@ export const useNotificationStore = defineStore('notification', () => {
    * 执行通知动作（如：审批）
    * 将业务逻辑从 UI 组件下沉到 Store，确保状态一致性
    */
-  const executeAction = async (notificationId: string, action: { label: string; value: any }) => {
+  const executeAction = async (notificationId: string, action: { label: string; value: any }, reason?: string) => {
     const item = historyList.value.find(n => n.id === notificationId);
     if (!item) return;
 
     if (item.type === 'warning' && item.rawPayload?.type === 'tool_approval_request') {
+      const responseData: any = {
+        requestId: item.rawPayload.data.requestId,
+        approved: action.value
+      };
+
+      const trimmedReason = reason?.trim();
+      if (trimmedReason) {
+        responseData.reason = trimmedReason;
+      }
+
       const response = {
         type: 'tool_approval_response',
-        data: {
-          requestId: item.rawPayload.data.requestId,
-          approved: action.value
-        }
+        data: responseData
       };
 
       try {
@@ -175,7 +182,7 @@ export const useNotificationStore = defineStore('notification', () => {
 
         // 处理后 UI 反馈：清空按钮并从 Toast 移除
         item.actions = [];
-        item.message = `[已处理] 操作: ${action.label}`;
+        item.message = `[已处理] 操作: ${action.label}${trimmedReason ? ` (理由: ${trimmedReason})` : ''}`;
         activeToasts.value = activeToasts.value.filter(t => t.id !== item.id);
       } catch (e) {
         console.error('[NotificationStore] Action failed:', e);

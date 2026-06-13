@@ -29,6 +29,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     tailContent: string | null;
     tailBlock: any | null;
     tailMutations: any[] | null;
+    tailEpoch: number | null;
+    tailRevision: number | null;
+    tailReset: boolean;
+    tailSnapshot: any[] | null;
     animationFrameId: number | null;
     lastRenderTime: number;
   }>();
@@ -52,8 +56,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           // 漏洞 1 修复：同步强刷收尾时，必须将暂存池中的 tail 字段强刷，绝不允许丢字闪烁
           if (up.tailContent !== null) msg.tailContent = up.tailContent;
           if (up.tailBlock !== undefined) msg.tailBlock = up.tailBlock;
+          if (up.tailEpoch !== null) msg.tailEpoch = up.tailEpoch;
+          if (up.tailRevision !== null) msg.tailRevision = up.tailRevision;
+          if (up.tailSnapshot !== null) msg.tailSnapshot = up.tailSnapshot as any;
+          if (up.tailReset) msg.tailReset = !msg.tailReset;
           if (up.tailMutations !== null) {
-            msg.tailMutations = [...up.tailMutations];
+            const current = msg.tailMutations || [];
+            msg.tailMutations = [...current, ...up.tailMutations];
           }
         }
       }
@@ -305,6 +314,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             tailContent: null,
             tailBlock: null,
             tailMutations: null,
+            tailEpoch: null,
+            tailRevision: null,
+            tailReset: false,
+            tailSnapshot: null,
             animationFrameId: null,
             lastRenderTime: 0,
           };
@@ -318,11 +331,26 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (aurora.stableChanged && aurora.stableBlocks) {
           update.blocks = aurora.stableBlocks;
         }
+        if (typeof aurora.tailEpoch === "number") {
+          update.tailEpoch = aurora.tailEpoch;
+        }
+        if (typeof aurora.tailRevision === "number") {
+          update.tailRevision = aurora.tailRevision;
+        }
+        if (aurora.tailReset) {
+          update.tailReset = true;
+          update.tailMutations = [];
+          update.tailSnapshot = (aurora.tailSnapshot as any[]) || (aurora.tailBlock as any)?.nodes || [];
+        }
+        if (aurora.tailSnapshot) {
+          update.tailSnapshot = aurora.tailSnapshot as any[];
+        }
         if (aurora.tailChanged) {
           update.tailContent = aurora.tail || "";
           update.tailBlock = (aurora.tailBlock as any) || null;
         }
         if (aurora.tailMutations) {
+          console.warn(`[chatStreamStore] Received ${aurora.tailMutations.length} mutations from backend for ${actualMessageId}`);
           if (!update.tailMutations) {
             update.tailMutations = [];
           }
@@ -343,12 +371,21 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               const m = activeStreamMessages.get(actualMessageId);
               if (m) {
                 if (up.content !== null) m.content = up.content;
-                if (up.blocks !== null) m.blocks = up.blocks;
+                if (up.blocks !== null) {
+                  m.blocks = up.blocks;
+                }
+                if (up.tailEpoch !== null) m.tailEpoch = up.tailEpoch;
+                if (up.tailRevision !== null) m.tailRevision = up.tailRevision;
+                if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot as any;
+                if (up.tailReset) {
+                  m.tailReset = !m.tailReset;
+                  m.tailMutations = up.tailMutations !== null ? [...up.tailMutations] : [];
+                } else if (up.tailMutations !== null) {
+                  const current = m.tailMutations || [];
+                  m.tailMutations = [...current, ...up.tailMutations];
+                }
                 if (up.tailContent !== null) m.tailContent = up.tailContent;
                 if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
-                if (up.tailMutations !== null) {
-                  m.tailMutations = [...up.tailMutations];
-                }
               }
               up.lastRenderTime = now;
               // 重置当前帧内的合并暂存状态
@@ -357,6 +394,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               up.tailContent = null;
               up.tailBlock = null;
               up.tailMutations = null;
+              up.tailEpoch = null;
+              up.tailRevision = null;
+              up.tailReset = false;
+              up.tailSnapshot = null;
               up.animationFrameId = null;
             } else {
               // 没到门槛，在下一屏幕物理刷新帧继续尝试

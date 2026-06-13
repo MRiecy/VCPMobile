@@ -9,8 +9,8 @@ import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { renderMarkdownNodes } from "../../core/utils/astRenderer";
-import { applyFrame, cleanupRegistry } from "../../core/utils/astExecutor";
-import { useContentProcessor } from "../../core/composables/useContentProcessor";
+import { applyFrame, cleanupRegistry, rebuildSnapshot } from "../../core/utils/astExecutor";
+import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 import morphdom from "morphdom";
 
@@ -30,6 +30,8 @@ import AttachmentPreview from "./attachment/AttachmentPreview.vue";
 import ToolBlock from "./blocks/ToolBlock.vue";
 import ThoughtBlock from "./blocks/ThoughtBlock.vue";
 import HtmlPreviewBlock from "./blocks/HtmlPreviewBlock.vue";
+import ToolSummaryBlock from "./blocks/ToolSummaryBlock.vue";
+import MermaidFullScreenViewer from "./blocks/MermaidFullScreenViewer.vue";
 
 const props = defineProps<{
   message: ChatMessage;
@@ -42,6 +44,47 @@ const notificationStore = useNotificationStore();
 const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
+
+// === AST Diff Feature Flags & Refs ===
+const tailSandboxRef = ref<HTMLElement | null>(null);
+const enableAstDiff = ref(true); // Feature Flag, 默认开启
+const useAstForCurrentTail = computed(() => {
+  return enableAstDiff.value && !!props.message.tailBlock?.nodes;
+});
+let appliedMutationsCount = 0;
+let localTailEpoch = -1;
+let localTailRevision = -1;
+let astFailureCount = 0;
+let lastSandbox: HTMLElement | null = null;
+
+function getTailSnapshotNodes() {
+  return props.message.tailSnapshot || props.message.tailBlock?.nodes || [];
+}
+
+function rebuildTailSnapshot(sandbox: HTMLElement): void {
+  rebuildSnapshot(getTailSnapshotNodes(), props.message.id, sandbox);
+  appliedMutationsCount = props.message.tailMutations?.length || 0;
+  localTailEpoch = props.message.tailEpoch ?? localTailEpoch;
+  localTailRevision = props.message.tailRevision ?? localTailRevision;
+}
+
+function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
+  astFailureCount += 1;
+  console.warn(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
+  if (getTailSnapshotNodes().length > 0) {
+    rebuildTailSnapshot(sandbox);
+    return;
+  }
+  if (astFailureCount >= 2) {
+    enableAstDiff.value = false;
+    cleanupRegistry(props.message.id);
+  }
+}
+
+// === Mermaid FullScreen States ===
+const isMermaidFullScreen = ref(false);
+const activeMermaidSvg = ref("");
+const activeMermaidSource = ref("");
 
 // === Shell Properties (Pre-computed in Rust) ===
 const shell = computed(() => props.message.shell);
@@ -181,16 +224,63 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;");
 }
 
+const openMermaidFullScreen = (svgHtml: string, sourceCode: string) => {
+  activeMermaidSvg.value = svgHtml;
+  activeMermaidSource.value = sourceCode;
+  isMermaidFullScreen.value = true;
+};
+
+function enhanceMermaid(el: HTMLElement, sourceCode: string) {
+  if (!el || el.dataset.vcpMermaidEnhanced === 'true') return;
+  
+  const svg = el.querySelector('svg');
+  if (!svg) return;
+  
+  el.dataset.vcpMermaidEnhanced = 'true';
+  
+  // 给 SVG 设置基础样式，使其自适应显示
+  svg.removeAttribute('style');
+  svg.style.maxWidth = '100%';
+  svg.style.height = 'auto';
+  svg.style.display = 'block';
+  svg.style.margin = '0 auto';
+  
+  // 创建包裹层
+  const wrapper = document.createElement('div');
+  wrapper.className = 'vcp-mermaid-wrapper group relative my-3 overflow-hidden rounded-xl border border-black/5 dark:border-white/10 bg-black/5 dark:bg-white/5 p-4 transition-all duration-300 active:scale-[0.99] cursor-pointer';
+  
+  // 创建全屏按钮
+  const fullscreenBtn = document.createElement('button');
+  fullscreenBtn.type = 'button';
+  fullscreenBtn.className = 'absolute top-3 right-3 z-10 flex items-center justify-center w-8 h-8 rounded-lg border border-black/5 dark:border-white/10 bg-white/80 dark:bg-black/80 text-gray-500 dark:text-gray-400 opacity-0 group-hover:opacity-100 active:scale-90 transition-all duration-200 cursor-pointer shadow-sm';
+  fullscreenBtn.innerHTML = '<div class="i-ph:arrows-out-bold w-4 h-4"></div>';
+  fullscreenBtn.title = '全屏查看图表';
+  
+  wrapper.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openMermaidFullScreen(svg.outerHTML, sourceCode);
+  });
+  
+  wrapper.addEventListener('dblclick', (e) => {
+    e.stopPropagation();
+  });
+  
+  el.textContent = '';
+  wrapper.appendChild(fullscreenBtn);
+  wrapper.appendChild(svg);
+  el.appendChild(wrapper);
+}
+
 // === Heavy Content Rendering (KaTeX inline math + Mermaid) ===
 const renderHeavyContent = async () => {
-  // 消息处于活跃流中时完全跳过重渲染（KaTeX/Mermaid/Emoticon），
-  // 与当前话题无关，确保多并发流式话题切换时行为一致
-  if (isMessageInActiveStream.value) return;
   await nextTick();
   if (!messageContentRef.value) return;
 
   // 1. KaTeX math (inline + display mode, rendered inside markdown blocks via v-html)
-  const mathElements = messageContentRef.value.querySelectorAll('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]');
+  const mathElements = Array.from(
+    messageContentRef.value.querySelectorAll('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]')
+  ).filter(el => !el.closest('.streaming-tail'));
+
   if (mathElements.length > 0) {
     try {
       const katexModule = await import('katex');
@@ -212,7 +302,10 @@ const renderHeavyContent = async () => {
   }
 
   // 2. Mermaid diagrams
-  const mermaidPlaceholders = messageContentRef.value.querySelectorAll('.mermaid-placeholder');
+  const mermaidPlaceholders = Array.from(
+    messageContentRef.value.querySelectorAll('.mermaid-placeholder, pre.mermaid, code.language-mermaid')
+  ).filter(el => !el.closest('.streaming-tail'));
+
   if (mermaidPlaceholders.length > 0) {
     try {
       const mermaidModule = await import('mermaid');
@@ -223,30 +316,44 @@ const renderHeavyContent = async () => {
       }
       for (const el of Array.from(mermaidPlaceholders)) {
         const placeholder = el as HTMLElement;
+        const wrapper = placeholder.closest('.vcp-mermaid-wrapper');
+        if (wrapper && wrapper.querySelector('svg')) continue; // already rendered & enhanced
         if (placeholder.querySelector('svg')) continue; // already rendered
-        // Use innerHTML (HTML-escaped code) as stable cache key
+        
+        // Use innerHTML as stable cache key
         const codeKey = placeholder.innerHTML;
         // Skip if already being rendered by a concurrent call
         if (renderingMermaids.has(codeKey)) continue;
         // Skip if Vue has replaced this element out of the DOM
         if (!messageContentRef.value.contains(placeholder)) continue;
+        
         // Use cache to avoid re-rendering the same diagram
         if (mermaidCache.has(codeKey)) {
-          placeholder.innerHTML = mermaidCache.get(codeKey)!;
+          const cachedSvg = mermaidCache.get(codeKey)!;
+          placeholder.innerHTML = cachedSvg;
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
+          enhanceMermaid(placeholder, placeholder.dataset.mermaidSource || '');
           continue;
         }
+        
         renderingMermaids.add(codeKey);
         try {
+          const sourceCode = placeholder.textContent || '';
+          placeholder.dataset.mermaidSource = sourceCode; // 保存原始源码
+          
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
           await mermaid.run({ nodes: [placeholder] });
-          mermaidCache.set(codeKey, placeholder.innerHTML);
+          
+          const renderedSvg = placeholder.innerHTML;
+          mermaidCache.set(codeKey, renderedSvg); // 缓存纯 SVG
+          
+          enhanceMermaid(placeholder, sourceCode);
         } catch (e: any) {
           const errorMsg = e?.str || e?.message || String(e);
           console.error('[MessageRenderer] Mermaid render failed:', errorMsg, e);
-          placeholder.innerHTML = `<div class="text-red-500 text-[10px]">图表渲染失败: ${escapeHtml(errorMsg)}</div>`;
+          placeholder.innerHTML = `<div class="text-red-500 text-[10px] p-4 rounded-xl border border-red-500/10 bg-red-500/5">图表渲染失败: ${escapeHtml(errorMsg)}</div>`;
         } finally {
           renderingMermaids.delete(codeKey);
         }
@@ -269,7 +376,6 @@ const renderHeavyContent = async () => {
 watch(
   () => props.message.blocks,
   () => {
-    if (isMessageInActiveStream.value) return;
     renderHeavyContent();
   },
   { immediate: true }
@@ -405,7 +511,7 @@ function formatTime(ts: number) {
 }
 
 // === Style Block CSS Injection ===
-const { injectScopedCss, removeScopedCss } = useContentProcessor();
+const { injectScopedCss, removeScopedCss } = useMessageStyleInjector();
 
 watch(
   () => props.message.blocks,
@@ -426,7 +532,7 @@ const tailRootRef = ref<HTMLElement | null>(null);
 watch(
   () => props.message.tailBlock,
   (newTailBlock) => {
-    if (enableAstDiff.value) return; // 🆕 启用 AST Diff 时完全跳过 Morphdom
+    if (useAstForCurrentTail.value) return; // 🆕 启用 AST Diff 且有节点时跳过 Morphdom
     if (!newTailBlock || !isPlainBlock(newTailBlock.type)) return;
     nextTick(() => {
       if (!tailRootRef.value) return;
@@ -501,16 +607,99 @@ watch(
 
 
 // === AST Diff Executor ===
-const tailSandboxRef = ref<HTMLElement | null>(null);
-const enableAstDiff = ref(true); // Feature Flag, 默认开启
 
 watch(
-  () => props.message.tailMutations,
-  (mutations) => {
-    if (!enableAstDiff.value || !mutations || !tailSandboxRef.value) return;
-    applyFrame(mutations, props.message.id, tailSandboxRef.value);
+  [
+    () => props.message.tailMutations,
+    () => props.message.tailEpoch,
+    () => props.message.tailRevision,
+    () => props.message.tailReset,
+    () => props.message.tailSnapshot,
+    tailSandboxRef,
+  ],
+  ([mutations, epoch, revision, reset, _snapshot, sandbox]) => {
+    console.warn(`[AST Diff Watch] Msg ${props.message.id} update: mutations=${mutations ? mutations.length : 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, applied=${appliedMutationsCount}, epoch=${epoch}, revision=${revision}`);
+
+    if (!useAstForCurrentTail.value || !sandbox) {
+      if (lastSandbox) {
+        cleanupRegistry(props.message.id);
+        lastSandbox.innerHTML = '';
+        lastSandbox = null;
+      }
+      if (!mutations || mutations.length === 0) {
+        appliedMutationsCount = 0;
+      }
+      return;
+    }
+
+    if (lastSandbox !== sandbox) {
+      cleanupRegistry(props.message.id);
+      sandbox.innerHTML = '';
+      appliedMutationsCount = 0;
+      localTailEpoch = -1;
+      localTailRevision = -1;
+      lastSandbox = sandbox;
+      if (getTailSnapshotNodes().length > 0) {
+        rebuildTailSnapshot(sandbox);
+        astFailureCount = 0;
+      }
+    }
+
+    const incomingEpoch = epoch ?? 0;
+    const incomingRevision = revision ?? -1;
+    const epochChanged = incomingEpoch !== localTailEpoch;
+    const explicitReset = reset === true || epochChanged;
+
+    if (explicitReset) {
+      sandbox.innerHTML = '';
+      cleanupRegistry(props.message.id);
+      appliedMutationsCount = 0;
+      localTailEpoch = incomingEpoch;
+      localTailRevision = incomingRevision;
+      astFailureCount = 0;
+
+      if (getTailSnapshotNodes().length > 0) {
+        rebuildTailSnapshot(sandbox);
+        return;
+      }
+    }
+
+    if (!mutations || mutations.length === 0) {
+      if (reset) {
+        appliedMutationsCount = 0;
+      }
+      return;
+    }
+
+    if (mutations.length > appliedMutationsCount) {
+      const pending = mutations.slice(appliedMutationsCount);
+      console.warn(`[AST Diff Apply] Executing ${pending.length} new mutations for ${props.message.id}`);
+      const result = applyFrame(pending, props.message.id, sandbox);
+      if (result.ok) {
+        appliedMutationsCount = mutations.length;
+        localTailRevision = incomingRevision;
+        astFailureCount = 0;
+      } else {
+        handleAstFrameFailure(sandbox, result.failed?.reason || "applyFrame failed");
+      }
+    } else if (mutations.length < appliedMutationsCount) {
+      console.warn(`[AST Diff Reset] Mutations length shrunk from ${appliedMutationsCount} to ${mutations.length}`);
+      sandbox.innerHTML = '';
+      cleanupRegistry(props.message.id);
+      appliedMutationsCount = 0;
+      if (getTailSnapshotNodes().length > 0) {
+        rebuildTailSnapshot(sandbox);
+      } else if (mutations.length > 0) {
+        const result = applyFrame(mutations, props.message.id, sandbox);
+        if (result.ok) {
+          appliedMutationsCount = mutations.length;
+        } else {
+          handleAstFrameFailure(sandbox, result.failed?.reason || "reset applyFrame failed");
+        }
+      }
+    }
   },
-  { flush: "post" }
+  { flush: "post", immediate: true }
 );
 
 onUnmounted(() => {
@@ -577,6 +766,11 @@ onUnmounted(() => {
                 :is-streaming="isStreaming"
                 :is-active-stream="isMessageInActiveStream"
               />
+
+              <ToolSummaryBlock
+                v-else-if="block.type === 'tool-call-summary'"
+                :block="block"
+              />
             </div>
           </template>
         </template>
@@ -588,16 +782,14 @@ onUnmounted(() => {
         
         <!-- 流式尾部高画质推测渲染 (Speculative Rendering) -->
         <div v-if="isStreaming && message.tailBlock" class="streaming-tail opacity-90">
-          <!-- 🆕 AST Diff Executor 沙箱容器 -->
+          <div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)">
+            <div
+              ref="tailSandboxRef"
+              class="vcp-markdown-block vcp-ast-sandbox"
+            />
+          </div>
           <div
-            v-if="enableAstDiff && isPlainBlock(message.tailBlock.type)"
-            v-pre
-            ref="tailSandboxRef"
-            class="vcp-markdown-block vcp-ast-sandbox"
-          />
-          <!-- 传统 Morphdom 容器 -->
-          <div
-            v-else-if="!enableAstDiff && isPlainBlock(message.tailBlock.type)"
+            v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
             ref="tailRootRef"
             class="vcp-markdown-block"
           />
@@ -621,6 +813,14 @@ onUnmounted(() => {
           {{ formatTime(message.timestamp) }}
         </div>
       </template>
+
+      <!-- Mermaid FullScreen Viewer -->
+      <MermaidFullScreenViewer
+        :visible="isMermaidFullScreen"
+        :svg-html="activeMermaidSvg"
+        :source-code="activeMermaidSource"
+        @close="isMermaidFullScreen = false"
+      />
     </ChatBubble>
   </div>
 </template>

@@ -38,6 +38,11 @@ export type InlineNode = {
   hash?: string | number;
 };
 
+export interface ToolCallSummaryItem {
+  tool_name: string;
+  status: string;
+}
+
 export interface ContentBlock {
   type:
   | "markdown"
@@ -49,7 +54,8 @@ export interface ContentBlock {
   | "html-preview"
   | "role-divider"
   | "style"
-  | "math";
+  | "math"
+  | "tool-call-summary";
   content?: string;
   nodes?: MarkdownNode[]; // For type: "markdown", "diary", "thought"
   tool_name?: string;
@@ -64,6 +70,8 @@ export interface ContentBlock {
   is_end?: boolean;
   display_mode?: boolean;
   highlighted_content?: string;
+  items?: ToolCallSummaryItem[]; // For type: "tool-call-summary"
+  raw_content?: string;          // For type: "tool-call-summary"
   hash?: string | number;
 }
 
@@ -112,6 +120,10 @@ export interface ChatMessage {
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
   tailBlock?: ContentBlock;
   tailMutations?: AstMutation[];
+  tailEpoch?: number;
+  tailRevision?: number;
+  tailReset?: boolean;
+  tailSnapshot?: MarkdownNode[];
 }
 
 export type AstMutation =
@@ -184,6 +196,11 @@ export interface AuroraUpdate {
   tailBlock?: StreamBlock;
   tail?: string;
   tailChanged?: boolean;
+  tailMutations?: AstMutation[];
+  tailEpoch?: number;
+  tailRevision?: number;
+  tailReset?: boolean;
+  tailSnapshot?: MarkdownNode[];
   content?: string;
 }
 

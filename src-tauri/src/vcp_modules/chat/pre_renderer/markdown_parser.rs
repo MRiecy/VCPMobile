@@ -220,6 +220,26 @@ pub(crate) fn trim_common_leading_indent(text: &str) -> String {
     result
 }
 
+fn is_void_html_tag(tag: &str) -> bool {
+    matches!(
+        tag.to_ascii_lowercase().as_str(),
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
 pub(crate) fn find_matching_close_tag(
     text: &str,
@@ -270,6 +290,12 @@ pub(crate) fn find_matching_close_tag(
 
         let is_close_tag = cap.get(1).unwrap().as_str() == "</";
         let tag_name = cap.get(2).unwrap().as_str();
+        let tag_text = full_match.as_str();
+        let is_self_closing = tag_text.trim_end().ends_with("/>");
+
+        if is_void_html_tag(tag_name) || is_self_closing {
+            continue;
+        }
 
         if tag_name.eq_ignore_ascii_case(tag) {
             if is_close_tag {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch, ref, nextTick } from "vue";
+import { computed, watch, ref, nextTick, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { useVirtualList } from "@vueuse/core";
 import { useTopicStore, type Topic } from "../../core/stores/topicListManager";
@@ -192,6 +192,23 @@ const selectTopic = async (
 
   emit("select-topic");
 };
+
+// 话题搜索逻辑集成
+const props = defineProps<{
+  searchQuery?: string;
+}>();
+
+watch(
+  () => props.searchQuery,
+  (newVal) => {
+    topicListStore.searchTerm = newVal || "";
+  },
+  { immediate: true }
+);
+
+onUnmounted(() => {
+  topicListStore.searchTerm = "";
+});
 </script>
 
 <template>

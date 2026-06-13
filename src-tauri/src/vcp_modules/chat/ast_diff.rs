@@ -368,7 +368,8 @@ mod tests {
             idx = end;
 
             buffer.append_chunk(&chunk);
-            let (_stable_changed, _tail_changed, tail_mutations) = buffer.process_queue();
+            let (_stable_changed, _tail_changed) = buffer.process_queue();
+            let tail_mutations = buffer.take_pending_mutations();
 
             if let Some(mutations) = tail_mutations {
                 total_mutations_count += mutations.len();

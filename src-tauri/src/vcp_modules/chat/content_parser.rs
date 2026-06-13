@@ -81,6 +81,19 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
+    #[serde(rename = "tool-call-summary")]
+    ToolCallSummary {
+        items: Vec<ToolCallSummaryItem>,
+        raw_content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<u64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+pub struct ToolCallSummaryItem {
+    pub tool_name: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
@@ -188,6 +201,14 @@ impl ContentBlock {
         }
     }
 
+    pub fn tool_call_summary(items: Vec<ToolCallSummaryItem>, raw_content: String) -> Self {
+        Self::ToolCallSummary {
+            items,
+            raw_content,
+            hash: None,
+        }
+    }
+
     pub fn compute_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
@@ -205,6 +226,7 @@ impl ContentBlock {
             ContentBlock::HtmlPreview { hash, .. } => *hash = Some(h),
             ContentBlock::RoleDivider { hash, .. } => *hash = Some(h),
             ContentBlock::Style { hash, .. } => *hash = Some(h),
+            ContentBlock::ToolCallSummary { hash, .. } => *hash = Some(h),
         }
     }
 
@@ -227,6 +249,7 @@ pub(crate) enum BlockType {
     Style,
     RoleDivider,
     CodeFence,
+    ToolCallSummary,
 }
 
 lazy_static! {
@@ -264,14 +287,16 @@ lazy_static! {
     pub(crate) static ref HTML_DOC_END: Regex = Regex::new(r"(?i)</html>").unwrap();
 
     pub(crate) static ref HTML_CONTAINER_OPEN_RE: Regex =
-        Regex::new(r"(?im)^[ \t]*<([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>?").unwrap();
+        Regex::new(r"(?im)^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>").unwrap();
 
     pub(crate) static ref ROLE_DIVIDER: Regex = Regex::new(r"(?im)^[ \t]*<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>").unwrap();
     pub(crate) static ref STYLE_TAG_START: Regex = Regex::new(r"(?im)^[ \t]*<style\b[^>]*>?").unwrap();
     pub(crate) static ref STYLE_TAG_END: Regex = Regex::new(r"(?i)</style>").unwrap();
+    pub(crate) static ref TOOL_CALL_SUMMARY_START: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要:\]").unwrap();
+    pub(crate) static ref TOOL_CALL_SUMMARY_END: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要结束\]").unwrap();
 
     pub(crate) static ref HTML_TAG_BLOCK_RE: Regex =
-        Regex::new(r"(?im)^[ \t]*<([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*>?").unwrap();
+        Regex::new(r"(?im)^[ \t]*<(?:style\b[^>]*>?|html[\s>]|!doctype\s+html|/?(?:div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)").unwrap();
 
     pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
     pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
@@ -396,7 +421,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 8
             r"(^[ \t]*<style\b[^>]*>)|",                                      // 9
             r"(^[ \t]*```[a-zA-Z0-9-]*[ \t]*$)|",                       // 10
-            r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)" // 11
+            r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)|", // 11
+            r"(^[ \t]*\[本轮工具调用摘要:\])"                          // 13
         )).unwrap();
     }
 
@@ -445,6 +471,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                 BlockType::Style
             } else if caps.get(10).is_some() {
                 BlockType::CodeFence
+            } else if caps.get(13).is_some() {
+                BlockType::ToolCallSummary
             } else {
                 container_tag = caps.get(12).unwrap().as_str().to_lowercase();
                 BlockType::HtmlContainer
@@ -474,6 +502,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                         (Some(m.start()), Some(m.end()), true)
                     }),
                 BlockType::Diary => DIARY_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::ToolCallSummary => TOOL_CALL_SUMMARY_END
                     .find(search_area)
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
@@ -581,6 +614,10 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     let (maid, date, content) = extract_diary_details(inner_content);
                     let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
                     ContentBlock::diary(maid, date, content, Some(nodes))
+                }
+                BlockType::ToolCallSummary => {
+                    let items = parse_tool_call_summary(inner_content);
+                    ContentBlock::tool_call_summary(items, inner_content.to_string())
                 }
                 BlockType::HtmlFence => ContentBlock::html_preview(inner_content.to_string()),
                 BlockType::HtmlDoc => {
@@ -824,6 +861,44 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
     }
 
     (tool_name, status, details, footer)
+}
+
+pub(crate) fn parse_tool_call_summary(content: &str) -> Vec<ToolCallSummaryItem> {
+    let mut items = Vec::new();
+    for entry in content.split(|c| c == '；' || c == ';' || c == '。') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+
+        let status = if entry.contains("拒绝") || entry.contains("被拒") || entry.contains("denied") || entry.contains("rejected") || entry.contains("refused") {
+            "rejected"
+        } else if entry.contains("失败") || entry.contains("错误") || entry.contains("异常") || entry.contains("error") || entry.contains("failed") {
+            "failure"
+        } else if entry.contains("超时") || entry.contains("timeout") {
+            "timeout"
+        } else if entry.contains("成功") || entry.contains("完成") || entry.contains("success") || entry.contains("succeeded") || entry.contains("ok") {
+            "success"
+        } else if entry.contains("取消") || entry.contains("中止") || entry.contains("cancel") {
+            "cancelled"
+        } else if entry.contains("跳过") || entry.contains("skip") {
+            "skipped"
+        } else {
+            "unknown"
+        };
+
+        let tool_name = if let Some(idx) = entry.find("调用") {
+            entry[..idx].trim().to_string()
+        } else {
+            entry.to_string()
+        };
+
+        items.push(ToolCallSummaryItem {
+            tool_name,
+            status: status.to_string(),
+        });
+    }
+    items
 }
 
 pub fn is_html_tag_block(text: &str) -> bool {

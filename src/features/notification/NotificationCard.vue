@@ -18,8 +18,10 @@ const emit = defineEmits<{
 const store = useNotificationStore();
 const { getIcon, getTypeColor, getActionButtonClass } = useNotificationPresentation();
 
+const reasonText = ref('');
+
 const handleAction = (action: { label: string; value: boolean; color: string }) => {
-  store.executeAction(props.item.id, action);
+  store.executeAction(props.item.id, action, reasonText.value);
 };
 
 // --- Swipe to Dismiss ---
@@ -111,11 +113,29 @@ const onTouchEnd = () => {
           {{ props.item.message }}
         </div>
 
-        <div v-if="props.item.actions && props.item.actions.length > 0" class="mt-2 flex gap-1.5">
-          <button v-for="action in props.item.actions" :key="action.label" @click="handleAction(action)"
-            :class="getActionButtonClass(action)">
-            {{ action.label }}
-          </button>
+        <div v-if="props.item.actions && props.item.actions.length > 0" class="mt-2 flex flex-col gap-2">
+          <!-- 审核理由输入框 -->
+          <div v-if="props.item.type === 'warning' && props.item.rawPayload?.type === 'tool_approval_request'" class="flex flex-col gap-1 w-full mt-0.5">
+            <textarea
+              v-model="reasonText"
+              placeholder="可选：告诉 AI 为什么通过或拒绝"
+              maxlength="1000"
+              class="w-full text-[10px] p-1.5 rounded border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.02] text-primary-text placeholder:opacity-45 focus:outline-none focus:border-amber-500/50 resize-none font-sans"
+              style="line-height: 1.4; height: calc(3.5 * 1.4em + 12px);"
+              @touchstart.stop
+              @touchmove.stop
+              @touchend.stop
+              @keydown.stop
+            />
+            <span class="text-[9px] opacity-40 leading-snug">拒绝时建议填写可执行的修正建议，最多 1000 字。</span>
+          </div>
+
+          <div class="flex gap-3.5">
+            <button v-for="action in props.item.actions" :key="action.label" @click="handleAction(action)"
+              :class="getActionButtonClass(action)">
+              {{ action.label }}
+            </button>
+          </div>
         </div>
 
         <div class="flex justify-end mt-1">
