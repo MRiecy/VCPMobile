@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
 /// 块级元素
-#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq)]
 #[serde(tag = "type")]
 pub enum MarkdownNode {
     #[serde(rename = "paragraph")]
@@ -73,7 +73,7 @@ pub enum MarkdownNode {
 }
 
 /// 行内元素
-#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq)]
 #[serde(tag = "type")]
 pub enum InlineNode {
     #[serde(rename = "text")]
@@ -160,6 +160,20 @@ pub enum InlineNode {
 }
 
 impl MarkdownNode {
+    pub fn get_hash(&self) -> Option<u64> {
+        match self {
+            MarkdownNode::Paragraph { hash, .. } => *hash,
+            MarkdownNode::Heading { hash, .. } => *hash,
+            MarkdownNode::CodeBlock { hash, .. } => *hash,
+            MarkdownNode::Blockquote { hash, .. } => *hash,
+            MarkdownNode::List { hash, .. } => *hash,
+            MarkdownNode::Table { hash, .. } => *hash,
+            MarkdownNode::ThematicBreak => None,
+            MarkdownNode::RawHtml { hash, .. } => *hash,
+            MarkdownNode::MermaidPlaceholder { hash, .. } => *hash,
+        }
+    }
+
     pub fn paragraph(children: Vec<InlineNode>) -> Self {
         Self::Paragraph {
             children,
@@ -290,6 +304,25 @@ impl MarkdownNode {
 }
 
 impl InlineNode {
+    pub fn get_hash(&self) -> Option<u64> {
+        match self {
+            InlineNode::Text { .. } => None,
+            InlineNode::Strong { hash, .. } => *hash,
+            InlineNode::Emphasis { hash, .. } => *hash,
+            InlineNode::Code { .. } => None,
+            InlineNode::Link { hash, .. } => *hash,
+            InlineNode::Image { hash, .. } => *hash,
+            InlineNode::LineBreak => None,
+            InlineNode::SoftBreak => None,
+            InlineNode::InlineMath { hash, .. } => *hash,
+            InlineNode::QuotedText { hash, .. } => *hash,
+            InlineNode::Strikethrough { hash, .. } => *hash,
+            InlineNode::HighlightTag { .. } => None,
+            InlineNode::AlertTag { .. } => None,
+            InlineNode::RawHtmlInline { hash, .. } => *hash,
+        }
+    }
+
     pub fn text(value: String) -> Self {
         Self::Text { value }
     }

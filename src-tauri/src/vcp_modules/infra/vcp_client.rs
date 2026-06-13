@@ -17,6 +17,7 @@ use tokio_util::io::StreamReader;
 use url::Url;
 
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
+use crate::vcp_modules::chat::ast_diff::AstMutation;
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
@@ -566,6 +567,7 @@ pub async fn perform_vcp_request<R: Runtime>(
         let send_aurora_update = |buffer: &AuroraBuffer,
                                   stable_changed: bool,
                                   tail_changed: bool,
+                                  tail_mutations: Option<Vec<AstMutation>>,
                                   finish_reason: Option<String>,
                                   error: Option<String>| {
             let is_final = finish_reason.is_some() || error.is_some();
@@ -589,6 +591,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                         None
                     },
                     tail_changed,
+                    tail_mutations,
                     content: if is_final {
                         Some(buffer.full_text.clone())
                     } else {
@@ -612,8 +615,8 @@ pub async fn perform_vcp_request<R: Runtime>(
         tokio::select! {
             _ = &mut abort_rx => {
                                 log::warn!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
-                                aurora_buffer.finalize();
-                send_aurora_update(&aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                                 aurora_buffer.finalize();
+                send_aurora_update(&aurora_buffer, true, true, None, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
                 active_requests_inner.remove(&message_id_inner);
                 return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
             }
@@ -636,8 +639,8 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 _ = &mut abort_rx => {
                                     is_aborted = true;
                                     log::warn!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
-                                    aurora_buffer.finalize();
-                                    send_aurora_update(&aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                                     aurora_buffer.finalize();
+                                     send_aurora_update(&aurora_buffer, true, true, None, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
 
                                     // 显式清理，防止 race
                                     active_requests_inner.remove(&message_id_inner);
@@ -645,8 +648,8 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 }
                                 _ = &mut sleep_future => {
                                     log::warn!("[VCPClient] Stream idle timeout (25s) reached for message: {}", message_id_inner);
-                                    aurora_buffer.finalize();
-                                    send_aurora_update(&aurora_buffer, true, true, Some("error".to_string()), Some("连接超时：超过 25 秒未收到服务器响应，自动关闭连接".to_string()));
+                                     aurora_buffer.finalize();
+                                     send_aurora_update(&aurora_buffer, true, true, None, Some("error".to_string()), Some("连接超时：超过 25 秒未收到服务器响应，自动关闭连接".to_string()));
                                     send_stream_event(StreamEvent::error(
                                         message_id_inner.clone(),
                                         context_inner.clone(),
@@ -663,8 +666,8 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                 let data = line.trim_start_matches("data: ").trim();
                                                 if data == "[DONE]" {
                                                     log::debug!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
-                                                    aurora_buffer.finalize();
-                                                    send_aurora_update(&aurora_buffer, true, true, last_finish_reason.clone(), None);
+                                                     aurora_buffer.finalize();
+                                                     send_aurora_update(&aurora_buffer, true, true, None, last_finish_reason.clone(), None);
                                                     break;
                                                 }
                                                 if let Ok(chunk) = serde_json::from_str::<Value>(data) {
@@ -684,9 +687,9 @@ pub async fn perform_vcp_request<R: Runtime>(
 
                                                     if !text_chunk.is_empty() {
                                                         aurora_buffer.append_chunk(&text_chunk);
-                                                        let (stable_changed, tail_changed) = aurora_buffer.process_queue();
-                                                        if stable_changed || (tail_changed && last_aurora_send.elapsed().as_millis() >= 33) {
-                                                            send_aurora_update(&aurora_buffer, stable_changed, tail_changed, None, None);
+                                                        let (stable_changed, tail_changed, mutations) = aurora_buffer.process_queue();
+                                                        if stable_changed || ((tail_changed || mutations.is_some()) && last_aurora_send.elapsed().as_millis() >= 33) {
+                                                            send_aurora_update(&aurora_buffer, stable_changed, tail_changed, mutations, None, None);
                                                             last_aurora_send = std::time::Instant::now();
                                                         }
                                                     }
@@ -703,8 +706,8 @@ pub async fn perform_vcp_request<R: Runtime>(
                                         }
                                         Some(Err(e)) => {
                                             log::error!("[VCPClient] Stream read error: {:?}", e);
-                                            aurora_buffer.finalize();
-                                            send_aurora_update(&aurora_buffer, true, true, Some("error".to_string()), Some(format!("流读取错误: {}", e)));
+                                             aurora_buffer.finalize();
+                                             send_aurora_update(&aurora_buffer, true, true, None, Some("error".to_string()), Some(format!("流读取错误: {}", e)));
                                             send_stream_event(StreamEvent::error(
                                                 message_id_inner.clone(),
                                                 context_inner.clone(),
@@ -718,10 +721,10 @@ pub async fn perform_vcp_request<R: Runtime>(
                                             aurora_buffer.finalize();
                                             if !full_content.is_empty() || last_finish_reason.is_some() {
                                                 log::debug!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
-                                                send_aurora_update(&aurora_buffer, true, true, last_finish_reason.clone(), None);
+                                                send_aurora_update(&aurora_buffer, true, true, None, last_finish_reason.clone(), None);
                                             } else {
                                                 log::warn!("[VCPClient] Stream ended unexpectedly (None)");
-                                                send_aurora_update(&aurora_buffer, true, true, Some("error".to_string()), Some("网络连接意外断开".to_string()));
+                                                send_aurora_update(&aurora_buffer, true, true, None, Some("error".to_string()), Some("网络连接意外断开".to_string()));
                                                 send_stream_event(StreamEvent::error(
                                                     message_id_inner.clone(),
                                                     context_inner.clone(),

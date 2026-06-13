@@ -111,7 +111,18 @@ export interface ChatMessage {
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
   tailBlock?: ContentBlock;
+  tailMutations?: AstMutation[];
 }
+
+export type AstMutation =
+  | { op: "add"; id: string; parent: string; node: MarkdownNode }
+  | { op: "add_inline"; id: string; parent: string; node: InlineNode }
+  | { op: "text"; id: string; value: string }
+  | { op: "append"; id: string; chunk: string }
+  | { op: "prop"; id: string; key: string; value: string }
+  | { op: "replace"; id: string; node: MarkdownNode }
+  | { op: "replace_inline"; id: string; node: InlineNode }
+  | { op: "remove"; id: string };
 
 /**
  * HistoryChunk 接口定义，用于 Channel 流式加载

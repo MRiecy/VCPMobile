@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
+use crate::vcp_modules::chat::ast_diff::{diff_ast, AstMutation};
+use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
 
 /// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，防止流式热路径性能悬崖
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 8192;
@@ -22,6 +24,9 @@ pub struct AuroraUpdate {
     pub tail: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub tail_changed: bool,
+    /// 🆕 流式 AST 突变指令集（仅在启用 AST Diff 模式且有变动时包含）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_mutations: Option<Vec<AstMutation>>,
     /// 全量内容（仅终结事件时发送，正常流式中省略）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -38,6 +43,8 @@ pub struct AuroraBuffer {
     pub stable_blocks: Vec<StreamBlock>,
     pub tail_content: String,
     pub tail_block: Option<StreamBlock>,
+    /// 🆕 上一帧的 tail AST 缓存，用于做增量 Diff 对比
+    pub prev_tail_ast: Vec<MarkdownNode>,
     parser: StreamBlockParser,
     is_finishing: bool,
 }
@@ -49,6 +56,7 @@ impl AuroraBuffer {
             stable_blocks: Vec::new(),
             tail_content: String::new(),
             tail_block: None,
+            prev_tail_ast: Vec::new(),
             parser: StreamBlockParser::new(),
             is_finishing: false,
         }
@@ -60,10 +68,10 @@ impl AuroraBuffer {
     }
 
     /// 运行块解析器，识别已闭合块和未闭合尾部
-    /// 返回 (stable_changed, tail_changed)
-    pub fn process_queue(&mut self) -> (bool, bool) {
+    /// 返回 (stable_changed, tail_changed, tail_mutations)
+    pub fn process_queue(&mut self) -> (bool, bool, Option<Vec<AstMutation>>) {
         if self.is_finishing {
-            return (false, false);
+            return (false, false, None);
         }
 
         let prev_stable_count = self.stable_blocks.len();
@@ -77,6 +85,8 @@ impl AuroraBuffer {
         }
 
         self.tail_content = new_tail;
+
+        let mut tail_mutations = None;
 
         // 2. 推测渲染 (Speculative Rendering)：将 tail 视为一个临时 Markdown 块
         //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
@@ -95,6 +105,21 @@ impl AuroraBuffer {
             let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(
                 &self.tail_content,
             );
+
+            // 🆕 如果解析出了 AST，对其计算 Diff，生成增量渲染指令集
+            if let Some(mut new_nodes) = nodes.clone() {
+                for node in &mut new_nodes {
+                    node.compute_hashes_recursively();
+                }
+                let mutations = diff_ast(&self.prev_tail_ast, &new_nodes, "t");
+                if !mutations.is_empty() {
+                    tail_mutations = Some(mutations);
+                }
+                self.prev_tail_ast = new_nodes;
+            } else {
+                self.prev_tail_ast.clear();
+            }
+
             self.tail_block = Some(StreamBlock::markdown(
                 self.tail_content.clone(),
                 nodes,
@@ -102,12 +127,13 @@ impl AuroraBuffer {
             ));
         } else {
             self.tail_block = None;
+            self.prev_tail_ast.clear();
         }
 
         let stable_changed = self.stable_blocks.len() != prev_stable_count;
         let tail_changed = self.tail_content != prev_tail;
 
-        (stable_changed, tail_changed)
+        (stable_changed, tail_changed, tail_mutations)
     }
 
     /// 结束流：强制完成剩余内容
@@ -121,5 +147,6 @@ impl AuroraBuffer {
         self.stable_blocks.extend(final_new_blocks);
         self.tail_content.clear();
         self.tail_block = None;
+        self.prev_tail_ast.clear();
     }
 }

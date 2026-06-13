@@ -28,6 +28,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     blocks: any[] | null;
     tailContent: string | null;
     tailBlock: any | null;
+    tailMutations: any[] | null;
     animationFrameId: number | null;
     lastRenderTime: number;
   }>();
@@ -51,6 +52,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           // 漏洞 1 修复：同步强刷收尾时，必须将暂存池中的 tail 字段强刷，绝不允许丢字闪烁
           if (up.tailContent !== null) msg.tailContent = up.tailContent;
           if (up.tailBlock !== undefined) msg.tailBlock = up.tailBlock;
+          if (up.tailMutations !== null) {
+            msg.tailMutations = [...up.tailMutations];
+          }
         }
       }
       rAFPendingUpdates.delete(messageId);
@@ -300,6 +304,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             blocks: null,
             tailContent: null,
             tailBlock: null,
+            tailMutations: null,
             animationFrameId: null,
             lastRenderTime: 0,
           };
@@ -316,6 +321,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (aurora.tailChanged) {
           update.tailContent = aurora.tail || "";
           update.tailBlock = (aurora.tailBlock as any) || null;
+        }
+        if (aurora.tailMutations) {
+          if (!update.tailMutations) {
+            update.tailMutations = [];
+          }
+          update.tailMutations.push(...aurora.tailMutations);
         }
 
         // 3. 申请硬件级 rAF 自适应阻尼渲染（最大 30Hz）
@@ -335,6 +346,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
                 if (up.blocks !== null) m.blocks = up.blocks;
                 if (up.tailContent !== null) m.tailContent = up.tailContent;
                 if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
+                if (up.tailMutations !== null) {
+                  m.tailMutations = [...up.tailMutations];
+                }
               }
               up.lastRenderTime = now;
               // 重置当前帧内的合并暂存状态
@@ -342,6 +356,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               up.blocks = null;
               up.tailContent = null;
               up.tailBlock = null;
+              up.tailMutations = null;
               up.animationFrameId = null;
             } else {
               // 没到门槛，在下一屏幕物理刷新帧继续尝试

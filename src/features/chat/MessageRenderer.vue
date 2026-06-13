@@ -9,6 +9,7 @@ import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { renderMarkdownNodes } from "../../core/utils/astRenderer";
+import { applyFrame, cleanupRegistry } from "../../core/utils/astExecutor";
 import { useContentProcessor } from "../../core/composables/useContentProcessor";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 import morphdom from "morphdom";
@@ -425,6 +426,7 @@ const tailRootRef = ref<HTMLElement | null>(null);
 watch(
   () => props.message.tailBlock,
   (newTailBlock) => {
+    if (enableAstDiff.value) return; // 🆕 启用 AST Diff 时完全跳过 Morphdom
     if (!newTailBlock || !isPlainBlock(newTailBlock.type)) return;
     nextTick(() => {
       if (!tailRootRef.value) return;
@@ -498,8 +500,22 @@ watch(
 );
 
 
+// === AST Diff Executor ===
+const tailSandboxRef = ref<HTMLElement | null>(null);
+const enableAstDiff = ref(true); // Feature Flag, 默认开启
+
+watch(
+  () => props.message.tailMutations,
+  (mutations) => {
+    if (!enableAstDiff.value || !mutations || !tailSandboxRef.value) return;
+    applyFrame(mutations, props.message.id, tailSandboxRef.value);
+  },
+  { flush: "post" }
+);
+
 onUnmounted(() => {
   removeScopedCss(props.message.id);
+  cleanupRegistry(props.message.id);
 });
 </script>
 
@@ -572,8 +588,16 @@ onUnmounted(() => {
         
         <!-- 流式尾部高画质推测渲染 (Speculative Rendering) -->
         <div v-if="isStreaming && message.tailBlock" class="streaming-tail opacity-90">
+          <!-- 🆕 AST Diff Executor 沙箱容器 -->
           <div
-            v-if="isPlainBlock(message.tailBlock.type)"
+            v-if="enableAstDiff && isPlainBlock(message.tailBlock.type)"
+            v-pre
+            ref="tailSandboxRef"
+            class="vcp-markdown-block vcp-ast-sandbox"
+          />
+          <!-- 传统 Morphdom 容器 -->
+          <div
+            v-else-if="!enableAstDiff && isPlainBlock(message.tailBlock.type)"
             ref="tailRootRef"
             class="vcp-markdown-block"
           />
