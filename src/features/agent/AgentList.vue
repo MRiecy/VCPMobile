@@ -174,8 +174,7 @@ const onTouchStart = (e: TouchEvent, id: string) => {
 
 const onTouchMove = (e: TouchEvent, id: string) => {
   if (isSorting.value) {
-    if (e.cancelable) e.preventDefault();
-    e.stopPropagation(); // 绝对防止排序期间由于手指滑动误触侧边栏动作或外层容器抖动
+    // 排序期间直接放行 touchmove 事件，以确保 SortableJS 能接收到手势进行拖拽位置计算
     return;
   }
   if (!isDragging.value || isVerticalScroll) return;
@@ -312,7 +311,7 @@ const filteredCombinedItems = computed(() => {
       <h3 class="px-2 text-[10px] font-black uppercase tracking-widest opacity-30">
         Agent Groups
       </h3>
-      <div ref="groupListRef" class="space-y-2 px-1">
+      <div ref="groupListRef" class="space-y-2 px-1" :class="{ 'no-swipe': isSorting }">
         <div v-for="group in orderedGroups.filter(
           (group) =>
             !searchQuery.trim() ||
@@ -369,7 +368,7 @@ const filteredCombinedItems = computed(() => {
       <h3 class="px-2 text-[10px] font-black uppercase tracking-widest opacity-30">
         Individual Agents
       </h3>
-      <div ref="agentListRef" class="space-y-2 px-1">
+      <div ref="agentListRef" class="space-y-2 px-1" :class="{ 'no-swipe': isSorting }">
         <div v-for="agent in orderedAgents.filter(
           (agent) =>
             !searchQuery.trim() ||

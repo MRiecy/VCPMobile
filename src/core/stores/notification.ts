@@ -82,9 +82,14 @@ export const useNotificationStore = defineStore('notification', () => {
         n => n.id === payload.id && (Date.now() - n.timestamp) < 30_000
       );
       if (recentHistory) {
-        // 更新历史条目时间戳，但不弹出新 Toast
+        // 更新历史条目核心字段，但不弹出新 Toast
         recentHistory.timestamp = Date.now();
+        recentHistory.title = payload.title || recentHistory.title;
+        recentHistory.type = payload.type || recentHistory.type;
         recentHistory.message = payload.message || recentHistory.message;
+        recentHistory.isPreformatted = payload.isPreformatted !== undefined ? payload.isPreformatted : recentHistory.isPreformatted;
+        recentHistory.actions = payload.actions || recentHistory.actions;
+        recentHistory.rawPayload = payload.rawPayload || recentHistory.rawPayload;
         return;
       }
     }
