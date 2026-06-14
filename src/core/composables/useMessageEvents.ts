@@ -72,10 +72,12 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
       return;
     }
 
-    // 4. 气泡内普通图片点击劫持 (排除带有 vcp-emoticon 的表情包)
+    // 4. 气泡内普通图片点击劫持 (排除带有 vcp-emoticon 的表情包以及消息附件缩略图)
     if (target.tagName.toLowerCase() === "img") {
       const isEmoticon = target.classList.contains("vcp-emoticon");
-      if (!isEmoticon) {
+      const isAttachment = target.closest(".vcp-attachment-preview") !== null;
+
+      if (!isEmoticon && !isAttachment) {
         e.preventDefault();
         e.stopPropagation();
 

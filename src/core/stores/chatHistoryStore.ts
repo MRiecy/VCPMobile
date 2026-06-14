@@ -104,12 +104,39 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     currentLoadAbortController = controller;
     const { signal } = controller;
 
+    let pendingHistory: ChatMessage[] = [];
+    let flushRafId: number | null = null;
+
     try {
       const channel = new Channel<HistoryChunk>();
       const buffer: ChatMessage[] = [];
       let receivedCount = 0;
       let resolveComplete: (() => void) | null = null;
       const completePromise = new Promise<void>((resolve) => { resolveComplete = resolve; });
+
+      let lastFlushTime = 0;
+      const FLUSH_INTERVAL = 33.3; // 30Hz
+
+      const flushHistory = (force = false) => {
+        if (pendingHistory.length === 0) return;
+        const now = performance.now();
+        if (force || now - lastFlushTime >= FLUSH_INTERVAL) {
+          currentChatHistory.value = [...currentChatHistory.value, ...pendingHistory];
+          pendingHistory = [];
+          lastFlushTime = now;
+        }
+      };
+
+      const scheduleHistoryFlush = () => {
+        if (flushRafId) return;
+        flushRafId = requestAnimationFrame(() => {
+          flushRafId = null;
+          flushHistory(false);
+          if (pendingHistory.length > 0) {
+            scheduleHistoryFlush();
+          }
+        });
+      };
 
       channel.onmessage = (chunk) => {
         // 1. 唯一性与话题一致性防御性校验：若请求已中止，或当前话题已被切换，直接丢弃该过时流数据
@@ -128,8 +155,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             currentChatHistory.value = [];
             hasMoreHistory.value = true;
           }
-          currentChatHistory.value.push(msgToUse);
+          pendingHistory.push(msgToUse);
           receivedCount++;
+          scheduleHistoryFlush();
         } else {
           buffer.push(msgToUse);
           receivedCount++;
@@ -143,6 +171,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
               hasMoreHistory.value = false;
             }
           } else {
+            if (flushRafId !== null) {
+              cancelAnimationFrame(flushRafId);
+              flushRafId = null;
+            }
+            flushHistory(true);
             historyOffset.value = receivedCount;
             if (receivedCount < limit) {
               hasMoreHistory.value = false;
@@ -193,6 +226,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     } finally {
       if (currentLoadAbortController === controller) {
         currentLoadAbortController = null;
+      }
+      if (flushRafId !== null) {
+        cancelAnimationFrame(flushRafId);
+        flushRafId = null;
       }
       loading.value = false;
       isLoadingHistory.value = false;
