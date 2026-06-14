@@ -369,13 +369,13 @@ mod tests {
 
             buffer.append_chunk(&chunk);
             let (_stable_changed, _tail_changed) = buffer.process_queue();
-            let tail_mutations = buffer.take_pending_mutations();
+            let tail_frame = buffer.take_tail_frame();
 
-            if let Some(mutations) = tail_mutations {
-                total_mutations_count += mutations.len();
-                // 确保 mutations 成功进行 serde JSON 序列化，验证没有任何序列化死锁或 panic
-                let serialized = serde_json::to_string(&mutations)
-                    .expect("Failed to serialize tail mutations to JSON");
+            if let Some(frame) = tail_frame {
+                total_mutations_count += frame.mutations.len();
+                // 确保 frame 成功进行 serde JSON 序列化，验证没有任何序列化死锁或 panic
+                let serialized = serde_json::to_string(&frame)
+                    .expect("Failed to serialize tail frame to JSON");
                 assert!(!serialized.is_empty());
             }
         }

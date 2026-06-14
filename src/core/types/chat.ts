@@ -119,10 +119,7 @@ export interface ChatMessage {
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
   tailBlock?: ContentBlock;
-  tailMutations?: AstMutation[];
-  tailEpoch?: number;
-  tailRevision?: number;
-  tailReset?: boolean;
+  tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
 }
 
@@ -135,6 +132,15 @@ export type AstMutation =
   | { op: "replace"; id: string; node: MarkdownNode }
   | { op: "replace_inline"; id: string; node: InlineNode }
   | { op: "remove"; id: string };
+
+export interface TailFrame {
+  epoch: number;
+  revision: number;
+  frameSeq: number;
+  reset?: boolean;
+  snapshot?: MarkdownNode[];
+  mutations: AstMutation[];
+}
 
 /**
  * HistoryChunk 接口定义，用于 Channel 流式加载
@@ -196,10 +202,7 @@ export interface AuroraUpdate {
   tailBlock?: StreamBlock;
   tail?: string;
   tailChanged?: boolean;
-  tailMutations?: AstMutation[];
-  tailEpoch?: number;
-  tailRevision?: number;
-  tailReset?: boolean;
+  tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
   content?: string;
 }

@@ -7,6 +7,20 @@ use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
 /// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，防止流式热路径性能悬崖
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 8192;
 
+#[derive(Debug, Serialize, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailFrame {
+    pub epoch: u64,
+    pub revision: u64,
+    pub frame_seq: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reset: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Vec<MarkdownNode>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutations: Vec<AstMutation>,
+}
+
 /// Aurora 语义沉淀更新，由 Rust 流式管道推送到前端
 /// 采用稀疏序列化：只在字段有变化时才包含在 JSON 中，减少 IPC payload
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -24,19 +38,10 @@ pub struct AuroraUpdate {
     pub tail: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub tail_changed: bool,
-    /// 🆕 流式 AST 突变指令集（仅在启用 AST Diff 模式且有变动时包含）
+    /// 流式 AST 单帧补丁。每个 frame 是独立发送批次，前端不得累计全历史 mutations。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_mutations: Option<Vec<AstMutation>>,
-    /// Tail DOM 世代：stable 沉淀、tail 清空或解析基线重置时递增
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub tail_epoch: u64,
-    /// Tail AST 版本：每次成功生成 tail AST 后递增
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub tail_revision: u64,
-    /// 本次更新是否要求前端重建 tail sandbox/registry
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub tail_reset: bool,
-    /// reset/recovery 使用的完整 tail AST 快照
+    pub tail_frame: Option<TailFrame>,
+    /// reset/recovery 使用的完整 tail AST 快照，保留为非 frame 恢复兜底字段
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_snapshot: Option<Vec<MarkdownNode>>,
     /// 全量内容（仅终结事件时发送，正常流式中省略）
@@ -46,10 +51,6 @@ pub struct AuroraUpdate {
 
 fn is_false(value: &bool) -> bool {
     !*value
-}
-
-fn is_zero_u64(value: &u64) -> bool {
-    *value == 0
 }
 
 /// Aurora 语义沉淀缓冲区
@@ -67,6 +68,7 @@ pub struct AuroraBuffer {
     pub tail_revision: u64,
     pub tail_reset_pending: bool,
     pub tail_snapshot_pending: Option<Vec<MarkdownNode>>,
+    pub tail_frame_seq: u64,
     parser: StreamBlockParser,
     is_finishing: bool,
 }
@@ -84,6 +86,7 @@ impl AuroraBuffer {
             tail_revision: 0,
             tail_reset_pending: false,
             tail_snapshot_pending: None,
+            tail_frame_seq: 0,
             parser: StreamBlockParser::new(),
             is_finishing: false,
         }
@@ -94,19 +97,25 @@ impl AuroraBuffer {
         self.full_text.push_str(chunk);
     }
 
-    /// 提取积压的所有未发送 mutations 并清空暂存池
-    pub fn take_pending_mutations(&mut self) -> Option<Vec<AstMutation>> {
-        if self.pending_mutations.is_empty() {
-            None
-        } else {
-            Some(std::mem::take(&mut self.pending_mutations))
-        }
-    }
-
-    pub fn take_tail_reset(&mut self) -> (bool, Option<Vec<MarkdownNode>>) {
+    pub fn take_tail_frame(&mut self) -> Option<TailFrame> {
         let reset = self.tail_reset_pending;
         self.tail_reset_pending = false;
-        (reset, self.tail_snapshot_pending.take())
+        let snapshot = self.tail_snapshot_pending.take();
+        let mutations = std::mem::take(&mut self.pending_mutations);
+
+        if !reset && snapshot.is_none() && mutations.is_empty() {
+            return None;
+        }
+
+        self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
+        Some(TailFrame {
+            epoch: self.tail_epoch,
+            revision: self.tail_revision,
+            frame_seq: self.tail_frame_seq,
+            reset,
+            snapshot,
+            mutations: if reset { Vec::new() } else { mutations },
+        })
     }
 
     /// 运行块解析器，识别已闭合块和未闭合尾部
@@ -142,7 +151,7 @@ impl AuroraBuffer {
                 // 如果是以 HTML 容器/样式标签开头，直接将其作为 RawHtml 块，防止 pulldown_cmark 将内部 CSS 规则或内联样式解析为缩进代码块
                 Some(vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(self.tail_content.clone())])
             } else if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
-                Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
                     &self.tail_content,
                 ))
             } else {

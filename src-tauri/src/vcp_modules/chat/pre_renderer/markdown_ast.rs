@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::hash::{Hash, Hasher};
 
 /// 块级元素
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum MarkdownNode {
     #[serde(rename = "paragraph")]
@@ -73,7 +72,7 @@ pub enum MarkdownNode {
 }
 
 /// 行内元素
-#[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum InlineNode {
     #[serde(rename = "text")]
@@ -239,9 +238,9 @@ impl MarkdownNode {
     }
 
     pub fn compute_hash(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
+        let mut hasher = rustc_hash::FxHasher::default();
+        std::hash::Hash::hash(self, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
     }
 
     pub fn set_hash(&mut self, h: u64) {
@@ -411,9 +410,9 @@ impl InlineNode {
     }
 
     pub fn compute_hash(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
+        let mut hasher = rustc_hash::FxHasher::default();
+        std::hash::Hash::hash(self, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
     }
 
     pub fn set_hash(&mut self, h: u64) {
@@ -450,5 +449,192 @@ impl InlineNode {
         }
         let h = self.compute_hash();
         self.set_hash(h);
+    }
+}
+
+impl std::hash::Hash for MarkdownNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            MarkdownNode::Paragraph { children, hash } => {
+                state.write_u8(0);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            MarkdownNode::Heading { level, children, hash } => {
+                state.write_u8(1);
+                state.write_u8(*level);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            MarkdownNode::CodeBlock { lang, code, highlighted_html, theme, hash: _ } => {
+                state.write_u8(2);
+                lang.hash(state);
+                code.hash(state);
+                highlighted_html.hash(state);
+                theme.hash(state);
+            }
+            MarkdownNode::Blockquote { children, hash } => {
+                state.write_u8(3);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for n in children {
+                        n.hash(state);
+                    }
+                }
+            }
+            MarkdownNode::List { ordered, items, hash } => {
+                state.write_u8(4);
+                ordered.hash(state);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for item in items {
+                        for n in item {
+                            n.hash(state);
+                        }
+                    }
+                }
+            }
+            MarkdownNode::Table { header, rows, wrapper_class, hash } => {
+                state.write_u8(5);
+                wrapper_class.hash(state);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for cell in header {
+                        for n in cell {
+                            n.hash(state);
+                        }
+                    }
+                    for row in rows {
+                        for cell in row {
+                            for n in cell {
+                                n.hash(state);
+                            }
+                        }
+                    }
+                }
+            }
+            MarkdownNode::ThematicBreak => {
+                state.write_u8(6);
+            }
+            MarkdownNode::RawHtml { content, hash: _ } => {
+                state.write_u8(7);
+                content.hash(state);
+            }
+            MarkdownNode::MermaidPlaceholder { code, hash: _ } => {
+                state.write_u8(8);
+                code.hash(state);
+            }
+        }
+    }
+}
+
+impl std::hash::Hash for InlineNode {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            InlineNode::Text { value } => {
+                state.write_u8(0);
+                value.hash(state);
+            }
+            InlineNode::Strong { children, hash } => {
+                state.write_u8(1);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            InlineNode::Emphasis { children, hash } => {
+                state.write_u8(2);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            InlineNode::Code { value } => {
+                state.write_u8(3);
+                value.hash(state);
+            }
+            InlineNode::Link { href, title, children, needs_asset_conversion, hash } => {
+                state.write_u8(4);
+                href.hash(state);
+                title.hash(state);
+                needs_asset_conversion.hash(state);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            InlineNode::Image { src, alt, title, needs_asset_conversion, hash: _ } => {
+                state.write_u8(5);
+                src.hash(state);
+                alt.hash(state);
+                title.hash(state);
+                needs_asset_conversion.hash(state);
+            }
+            InlineNode::LineBreak => {
+                state.write_u8(6);
+            }
+            InlineNode::SoftBreak => {
+                state.write_u8(7);
+            }
+            InlineNode::InlineMath { content, display_mode, hash: _ } => {
+                state.write_u8(8);
+                content.hash(state);
+                display_mode.hash(state);
+            }
+            InlineNode::QuotedText { children, hash } => {
+                state.write_u8(9);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            InlineNode::Strikethrough { children, hash } => {
+                state.write_u8(10);
+                if let Some(h) = hash {
+                    state.write_u64(*h);
+                } else {
+                    for c in children {
+                        c.hash(state);
+                    }
+                }
+            }
+            InlineNode::HighlightTag { value } => {
+                state.write_u8(11);
+                value.hash(state);
+            }
+            InlineNode::AlertTag { value } => {
+                state.write_u8(12);
+                value.hash(state);
+            }
+            InlineNode::RawHtmlInline { content, hash: _ } => {
+                state.write_u8(13);
+                content.hash(state);
+            }
+        }
     }
 }

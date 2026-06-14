@@ -1,6 +1,7 @@
 
 
 const injectedStyles = new Map<string, string>();
+const rawCssCache = new Map<string, string>();
 
 /**
  * Composable that provides scoped style injection helpers for message bubbles.
@@ -14,6 +15,11 @@ export function useMessageStyleInjector() {
    */
   const injectScopedCss = (css: string, messageId: string) => {
     if (!css || !messageId) return;
+    
+    // 提前去重校验：若原始 CSS 无变化，直接拦截，完全跳过后面重型 selector scoping 的正则运算
+    if (rawCssCache.get(messageId) === css) return;
+    rawCssCache.set(messageId, css);
+
     const scopeSelector = `[data-message-id="${messageId}"]`;
     const scopedCss = css.replace(
       /(^|\}|\{)\s*([^{]+)\s*\{/g,
@@ -51,14 +57,28 @@ export function useMessageStyleInjector() {
 
   /**
    * Removes the scoped style element associated with a specific message ID.
+   * Uses a setTimeout delay to prevent the style sheet from being instantly removed
+   * and re-injected during the streaming-to-stable transition tick, which causes layout flicker.
    */
   const removeScopedCss = (messageId: string) => {
     if (!messageId) return;
-    const styleEl = document.getElementById(`style-${messageId}`);
-    if (styleEl) {
-      styleEl.remove();
-    }
-    injectedStyles.delete(messageId);
+    
+    // 立即注销 rawCss 活跃状态。如果后面有新静态块接管，它会同步重新执行 injectScopedCss 重新 set 写入
+    rawCssCache.delete(messageId);
+    
+    // 延迟 50ms 物理清理，给新静态块挂载和样式接管留出时间差
+    setTimeout(() => {
+      // 核心门禁：如果在这 50ms 期间有新块重新写入并接管了该 messageId，说明样式依然活跃，保留它
+      if (rawCssCache.has(messageId)) {
+        return;
+      }
+      
+      const styleEl = document.getElementById(`style-${messageId}`);
+      if (styleEl) {
+        styleEl.remove();
+      }
+      injectedStyles.delete(messageId);
+    }, 50);
   };
 
   return {

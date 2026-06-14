@@ -5,13 +5,11 @@ import type { MarkdownNode, InlineNode } from "../types/chat";
 const htmlCache = new Map<string, string>();
 const MAX_CACHE_SIZE = 500;
 
-function getCacheKey(nodes: MarkdownNode[], messageId: string, blockHash?: string | number): string {
+function getCacheKey(messageId: string, blockHash?: string | number): string | null {
   if (blockHash !== undefined && blockHash !== null) {
     return `${messageId}:${String(blockHash)}`;
   }
-  // Fallback: If no hash provided, use a simple pointer-based or length-based key
-  // since we now expect backend to provide hashes for all production data.
-  return `${messageId}:len-${nodes.length}`;
+  return null;
 }
 
 /** 清理 AST HTML 缓存，用于重建/同步后强制重新渲染 */
@@ -36,11 +34,17 @@ export function renderMarkdownNodes(
   blockHash?: string | number
 ): string {
   if (!nodes || nodes.length === 0) return '';
-  const key = getCacheKey(nodes, messageId, blockHash);
-  const cached = htmlCache.get(key);
-  if (cached !== undefined) return cached;
+  const key = getCacheKey(messageId, blockHash);
+
+  if (key) {
+    const cached = htmlCache.get(key);
+    if (cached !== undefined) return cached;
+  }
 
   const html = nodes.map(node => renderNode(node, messageId)).join('');
+
+  // 无 hash 时不缓存，避免不同内容但节点数量相同的 legacy AST 串用 HTML
+  if (!key) return html;
 
   // 简单的 LRU 保护：超限时清空（实际命中模式是批量命中/失效）
   if (htmlCache.size >= MAX_CACHE_SIZE) {

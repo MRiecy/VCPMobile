@@ -170,12 +170,21 @@ export function useChatScroll(options: UseChatScrollOptions) {
     const target = list.querySelector(".messages-inner-container") || list;
 
     resizeObserver = new ResizeObserver(() => {
-      // 节流处理，合并单帧内的高频尺寸变动
-      if (scrollRafId) cancelAnimationFrame(scrollRafId);
-      scrollRafId = requestAnimationFrame(() => {
-        scrollRafId = null;
+      // 🌟 流式跟随状态下，必须同步处理滚动，以防止 DOM 重排和滚动条设置跨帧（16.6ms 帧时间差）引发的气泡底部被撑开后瞬间上弹归位的上下跳变。
+      if (scrollScene.value === "following") {
+        if (scrollRafId) {
+          cancelAnimationFrame(scrollRafId);
+          scrollRafId = null;
+        }
         handleContentChange();
-      });
+      } else {
+        // 其他初始/非流式跟随场景，继续使用 RAF 节流以保证能耗和页面初载的稳定性
+        if (scrollRafId) cancelAnimationFrame(scrollRafId);
+        scrollRafId = requestAnimationFrame(() => {
+          scrollRafId = null;
+          handleContentChange();
+        });
+      }
     });
 
     resizeObserver.observe(target);

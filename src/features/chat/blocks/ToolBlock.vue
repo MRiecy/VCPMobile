@@ -14,10 +14,24 @@ marked.setOptions({
   breaks: true,
 });
 
+const parsedMarkdownCache = new Map<string, string>();
+const MAX_MARKDOWN_CACHE_SIZE = 50;
+
 const renderMarkdown = (text: string): string => {
   if (!text) return '';
+  if (parsedMarkdownCache.has(text)) {
+    return parsedMarkdownCache.get(text)!;
+  }
   try {
-    return marked.parse(text) as string;
+    const rendered = marked.parse(text) as string;
+    if (parsedMarkdownCache.size >= MAX_MARKDOWN_CACHE_SIZE) {
+      const firstKey = parsedMarkdownCache.keys().next().value;
+      if (firstKey !== undefined) {
+        parsedMarkdownCache.delete(firstKey);
+      }
+    }
+    parsedMarkdownCache.set(text, rendered);
+    return rendered;
   } catch (e) {
     console.error('[ToolBlock] marked parse failed:', e);
     return text;
@@ -116,6 +130,7 @@ onMounted(() => {
 onUnmounted(() => {
   unregisterModal(modalId);
   observer?.disconnect();
+  parsedMarkdownCache.clear();
 });
 
 const toggleExpand = () => {

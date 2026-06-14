@@ -8,15 +8,9 @@ import {
 import SlidePage from '../../components/ui/SlidePage.vue';
 import { useRagObserverStore } from '../../core/stores/ragObserver';
 import { useThemeStore } from '../../core/stores/theme';
-import { marked } from 'marked';
+import RagPayloadDetail from './RagPayloadDetail.vue';
 
 const themeStore = useThemeStore();
-
-// 配置 marked：支持 GFM 和换行
-marked.setOptions({
-  gfm: true,
-  breaks: true,
-});
 
 interface Props {
   isOpen: boolean;
@@ -55,9 +49,31 @@ const toggleSubCard = async (subId: string) => {
 let touchStartX = 0;
 let touchStartY = 0;
 let isSwipeProcessed = false;
+let shouldBlockSwipe = false;
+
+// 向上追溯查找是否存在可横向滚动/需要隔离滑动手势的容器（如代码块 pre、code 等）
+const isScrollableParent = (el: HTMLElement | null): boolean => {
+  if (!el) return false;
+  if (el.tagName === 'PRE' || el.tagName === 'CODE' || el.classList.contains('no-swipe')) {
+    return true;
+  }
+  const style = window.getComputedStyle(el);
+  if (style.overflowX === 'auto' || style.overflowX === 'scroll') {
+    if (el.scrollWidth > el.clientWidth) {
+      return true;
+    }
+  }
+  return isScrollableParent(el.parentElement);
+};
 
 const handleTouchStart = (e: TouchEvent) => {
   if (e.touches.length > 0) {
+    const target = e.target as HTMLElement;
+    if (isScrollableParent(target)) {
+      shouldBlockSwipe = true;
+      return;
+    }
+    shouldBlockSwipe = false;
     touchStartX = e.touches[0].clientX;
     touchStartY = e.touches[0].clientY;
     isSwipeProcessed = false;
@@ -65,7 +81,7 @@ const handleTouchStart = (e: TouchEvent) => {
 };
 
 const handleTouchMove = (e: TouchEvent) => {
-  if (isSwipeProcessed || e.touches.length === 0) return;
+  if (shouldBlockSwipe || isSwipeProcessed || e.touches.length === 0) return;
 
   const currentX = e.touches[0].clientX;
   const currentY = e.touches[0].clientY;
@@ -97,7 +113,7 @@ const handleTouchMove = (e: TouchEvent) => {
 };
 
 const handleTouchEnd = (e: TouchEvent) => {
-  if (isSwipeProcessed) return;
+  if (shouldBlockSwipe || isSwipeProcessed) return;
   if (e.changedTouches.length > 0) {
     const deltaX = e.changedTouches[0].clientX - touchStartX;
     const deltaY = e.changedTouches[0].clientY - touchStartY;
@@ -125,6 +141,18 @@ const handleTouchEnd = (e: TouchEvent) => {
 
 // 频谱 Canvas 绘图相关
 const spectrumCanvas = ref<HTMLCanvasElement | null>(null);
+const tabContainerRef = ref<HTMLElement | null>(null);
+
+watch(activeFilter, async (newVal) => {
+  await nextTick();
+  const container = tabContainerRef.value;
+  if (!container) return;
+  const activeBtn = container.querySelector(`[data-tab-value="${newVal}"]`) as HTMLElement;
+  if (activeBtn) {
+    activeBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+  }
+});
+
 let animationFrameId: number | null = null;
 const numBars = 24;
 let barsHeights = Array(numBars).fill(4);
@@ -304,27 +332,6 @@ const getTitleStyle = (type: string) => {
   };
 };
 
-// 安全解析 HTML
-const renderMarkdown = (text: string) => {
-  try {
-    if (!text) return '';
-    // 修复 Markdown 引擎将 "[AI]:" 或 "[USER]:" 识别为隐藏链接定义（Link Reference Definition）从而吞字的 Bug
-    const safeText = text.replace(/^(\s*)\[([^\]]+)\]:/gm, '$1\\[$2\\]:');
-    return marked.parse(safeText) as string;
-  } catch (e) {
-    return text;
-  }
-};
-
-// 转义特殊 HTML 字符，防止在 v-html 渲染 query 文本时因浏览器误判 <Tauri> 等标签而吞字
-const renderSafeQuery = (text: string) => {
-  if (!text) return '';
-  const escaped = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return renderMarkdown(escaped);
-};
-
-
-
 // 24柱全宽跳动音频频谱微动画
 const drawSpectrum = () => {
   let phase = 0;
@@ -448,11 +455,12 @@ const drawSpectrum = () => {
       </div>
 
       <!-- 横向滑动选项卡 Tab -->
-      <div class="flex gap-2 px-3 py-2.5 overflow-x-auto no-scrollbar border-b bg-transparent relative z-10"
+      <div ref="tabContainerRef" class="flex gap-2 px-3 py-2.5 overflow-x-auto no-scrollbar border-b bg-transparent relative z-10"
            :class="themeStore.isDarkResolved ? 'border-white/5' : 'border-gray-300/40'">
         <button
           v-for="tab in filterTabs"
           :key="tab.value"
+          :data-tab-value="tab.value"
           @click="activeFilter = tab.value"
           class="shrink-0 px-3 py-1 rounded-full text-[11px] font-bold tracking-wider transition-all"
           :class="activeFilter === tab.value
@@ -613,7 +621,7 @@ const drawSpectrum = () => {
                         {{ payloadCache[item.id].query.slice(0, 30) }}...
                       </template>
                       <template v-else>
-                        <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderSafeQuery(payloadCache[item.id].query)"></div>
+                        <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].query" :is-query="true" />
                       </template>
                     </div>
                   </div>
@@ -692,11 +700,11 @@ const drawSpectrum = () => {
                       <!-- Sub-card Expandable Content -->
                       <div v-if="expandedSubCardIds.has(`${item.id}_res_${idx}`)" class="space-y-1.5 pt-1.5 border-t"
                            :class="themeStore.isDarkResolved ? 'border-white/5' : 'border-gray-200'">
-                        <div 
+                        <RagPayloadDetail 
                           class="leading-relaxed font-mono select-text text-[10px] break-words"
                           :class="[themeStore.isDarkResolved ? 'prose-invert text-white/85' : 'text-gray-800', 'prose prose-xs text-[10px]']"
-                          v-html="renderMarkdown(res.text)"
-                        ></div>
+                          :text="res.text"
+                        />
 
                         <!-- Matched Tags (matchedTags) -->
                         <div v-if="res.matchedTags && res.matchedTags.length > 0" class="pt-1.5 border-t font-mono font-bold text-[9px] leading-relaxed"
@@ -751,7 +759,7 @@ const drawSpectrum = () => {
                         {{ payloadCache[item.id].query.slice(0, 30) }}...
                       </template>
                       <template v-else>
-                        <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderSafeQuery(payloadCache[item.id].query)"></div>
+                        <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].query" :is-query="true" />
                       </template>
                     </div>
                   </div>
@@ -825,10 +833,10 @@ const drawSpectrum = () => {
                           <div v-if="expandedSubCardIds.has(`${item.id}_s${stage.stage}_res_${rIdx}`)" 
                                class="space-y-1.5 pt-1.5 border-t"
                                :class="themeStore.isDarkResolved ? 'border-white/5' : 'border-gray-300/40'">
-                            <div 
+                            <RagPayloadDetail 
                               :class="[themeStore.isDarkResolved ? 'prose-invert text-white/85' : 'text-gray-800', 'prose prose-xs leading-relaxed break-words font-mono text-[10px] select-text']"
-                              v-html="renderMarkdown(res.text)"
-                            ></div>
+                              :text="res.text"
+                            />
                           </div>
                         </div>
                       </div>
@@ -867,7 +875,7 @@ const drawSpectrum = () => {
                           {{ payloadCache[item.id].query.slice(0, 30) }}...
                         </template>
                         <template v-else>
-                          <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderSafeQuery(payloadCache[item.id].query)"></div>
+                          <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].query" :is-query="true" />
                         </template>
                       </div>
                     </div>
@@ -898,7 +906,7 @@ const drawSpectrum = () => {
                           {{ payloadCache[item.id].response.slice(0, 30) }}...
                         </template>
                         <template v-else>
-                          <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/85' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderSafeQuery(payloadCache[item.id].response)"></div>
+                          <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/85' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].response" :is-query="true" />
                         </template>
                       </div>
                     </div>
@@ -950,7 +958,7 @@ const drawSpectrum = () => {
                         {{ payloadCache[item.id].query.slice(0, 30) }}...
                       </template>
                       <template v-else>
-                        <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderSafeQuery(payloadCache[item.id].query)"></div>
+                        <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].query" :is-query="true" />
                       </template>
                     </div>
                   </div>
@@ -962,11 +970,11 @@ const drawSpectrum = () => {
                       <BookOpen :size="10" /> 提炼出的联合记忆报告:
                     </div>
                     <!-- 使用 marked 渲染提炼记忆 -->
-                    <div
+                    <RagPayloadDetail
                       class="leading-relaxed select-text font-mono"
                       :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']"
-                      v-html="renderMarkdown(payloadCache[item.id].extractedMemories || '')"
-                    ></div>
+                      :text="payloadCache[item.id].extractedMemories || ''"
+                    />
                   </div>
                 </div>
 
@@ -999,7 +1007,7 @@ const drawSpectrum = () => {
                         {{ payloadCache[item.id].message.slice(0, 30) }}...
                       </template>
                       <template v-else>
-                        <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderSafeQuery(payloadCache[item.id].message)"></div>
+                        <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/80' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].message" :is-query="true" />
                       </template>
                     </div>
                   </div>
@@ -1156,7 +1164,7 @@ const drawSpectrum = () => {
                         </span>
                       </template>
                       <template v-else>
-                        <div :class="[themeStore.isDarkResolved ? 'prose-invert text-white/85' : 'text-gray-800', 'prose prose-xs text-[10px]']" v-html="renderMarkdown(payloadCache[item.id].narrative || '')"></div>
+                        <RagPayloadDetail :class="[themeStore.isDarkResolved ? 'prose-invert text-white/85' : 'text-gray-800', 'prose prose-xs text-[10px]']" :text="payloadCache[item.id].narrative || ''" />
                       </template>
                     </div>
                   </div>

@@ -16,6 +16,20 @@ import morphdom from "morphdom";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
 const mermaidCache = new Map<string, string>();
+const MAX_MERMAID_CACHE_SIZE = 30;
+
+function setMermaidCache(key: string, value: string) {
+  if (mermaidCache.has(key)) {
+    mermaidCache.delete(key);
+  } else if (mermaidCache.size >= MAX_MERMAID_CACHE_SIZE) {
+    const firstKey = mermaidCache.keys().next().value;
+    if (firstKey !== undefined) {
+      mermaidCache.delete(firstKey);
+    }
+  }
+  mermaidCache.set(key, value);
+}
+
 const renderingMermaids = new Set<string>();
 let mermaidInitialized = false;
 
@@ -59,9 +73,13 @@ function astDebugLog(...args: unknown[]): void {
 const tailSandboxRef = ref<HTMLElement | null>(null);
 const enableAstDiff = ref(true); // Feature Flag, 默认开启
 const useAstForCurrentTail = computed(() => {
-  return enableAstDiff.value && !!props.message.tailBlock?.nodes;
+  return enableAstDiff.value && (
+    !!props.message.tailFrame ||
+    !!props.message.tailBlock?.nodes ||
+    !!props.message.tailSnapshot
+  );
 });
-let appliedMutationsCount = 0;
+let lastAppliedFrameSeq = 0;
 let localTailEpoch = -1;
 let localTailRevision = -1;
 let astFailureCount = 0;
@@ -73,9 +91,8 @@ function getTailSnapshotNodes() {
 
 function rebuildTailSnapshot(sandbox: HTMLElement): void {
   rebuildSnapshot(getTailSnapshotNodes(), props.message.id, sandbox);
-  appliedMutationsCount = props.message.tailMutations?.length || 0;
-  localTailEpoch = props.message.tailEpoch ?? localTailEpoch;
-  localTailRevision = props.message.tailRevision ?? localTailRevision;
+  localTailEpoch = props.message.tailFrame?.epoch ?? localTailEpoch;
+  localTailRevision = props.message.tailFrame?.revision ?? localTailRevision;
 }
 
 function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
@@ -83,6 +100,10 @@ function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
   astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
   if (getTailSnapshotNodes().length > 0) {
     rebuildTailSnapshot(sandbox);
+    // 【意图性设计说明】：此处直接 return 退出，不执行下方的关闭降级逻辑，是有意为之的保活设计。
+    // 在流式输出过程中，哪怕某些中间帧的 AST 增量解析/渲染出现临时局部错乱报错，我们也优先依赖 
+    // rebuildTailSnapshot() 在微任务/渲染帧内进行全量快照重刷，而不是彻底降级退回到普通 HTML 
+    // 渲染（那会导致流式组件切换、DOM 物理销毁重建以及严重的布局物理抖动和输入框焦点丢失）。
     return;
   }
   if (astFailureCount >= 2) {
@@ -102,12 +123,7 @@ const shell = computed(() => props.message.shell);
 // === Streaming State ===
 
 // 数据层面：消息是否处于任意活跃流中（不依赖当前话题）
-const isMessageInActiveStream = computed(() => {
-  for (const streams of Object.values(streamStore.sessionActiveStreams || {})) {
-    if (streams.includes(props.message.id)) return true;
-  }
-  return false;
-});
+const isMessageInActiveStream = computed(() => streamStore.isMessageActive(props.message.id));
 
 // UI 层面：消息是否在当前视口中显示流式状态
 const isStreaming = computed(() => {
@@ -121,9 +137,7 @@ const isStreaming = computed(() => {
   const topicId = sessionStore.currentTopicId;
   if (!itemId || !topicId) return false;
 
-  const key = `${itemId}:${topicId}`;
-  const streams = streamStore.sessionActiveStreams?.[key];
-  return streams ? streams.includes(props.message.id) : false;
+  return streamStore.isMessageActiveInSession(itemId, topicId, props.message.id);
 });
 
 // === Event Delegation ===
@@ -357,7 +371,7 @@ const renderHeavyContent = async () => {
           await mermaid.run({ nodes: [placeholder] });
           
           const renderedSvg = placeholder.innerHTML;
-          mermaidCache.set(codeKey, renderedSvg); // 缓存纯 SVG
+          setMermaidCache(codeKey, renderedSvg); // 缓存纯 SVG
           
           enhanceMermaid(placeholder, sourceCode);
         } catch (e: any) {
@@ -538,10 +552,25 @@ watch(
 
 // === Stream Tail Morphdom Smooth Rendering ===
 const tailRootRef = ref<HTMLElement | null>(null);
+const fallbackTailSignature = computed(() => {
+  const block = props.message.tailBlock;
+  if (!block) return "";
+
+  const contentSignal = block.hash !== undefined && block.hash !== null
+    ? String(block.hash)
+    : block.content || "";
+
+  return [
+    block.type,
+    contentSignal,
+    block.nodes?.length ?? 0,
+  ].join("|");
+});
 
 watch(
-  () => props.message.tailBlock,
-  (newTailBlock) => {
+  fallbackTailSignature,
+  () => {
+    const newTailBlock = props.message.tailBlock;
     if (useAstForCurrentTail.value) return; // 🆕 启用 AST Diff 且有节点时跳过 Morphdom
     if (!newTailBlock || !isPlainBlock(newTailBlock.type)) return;
     nextTick(() => {
@@ -612,7 +641,7 @@ watch(
       }
     });
   },
-  { deep: true, immediate: true, flush: 'post' }
+  { immediate: true, flush: 'post' }
 );
 
 
@@ -620,15 +649,12 @@ watch(
 
 watch(
   [
-    () => props.message.tailMutations,
-    () => props.message.tailEpoch,
-    () => props.message.tailRevision,
-    () => props.message.tailReset,
+    () => props.message.tailFrame,
     () => props.message.tailSnapshot,
     tailSandboxRef,
   ],
-  ([mutations, epoch, revision, reset, _snapshot, sandbox]) => {
-    astDebugLog(`[AST Diff Watch] Msg ${props.message.id} update: mutations=${mutations ? mutations.length : 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, applied=${appliedMutationsCount}, epoch=${epoch}, revision=${revision}`);
+  ([frame, _snapshot, sandbox]) => {
+    astDebugLog(`[AST Diff Watch] Msg ${props.message.id} frame=${frame ? frame.frameSeq : 'none'}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, epoch=${frame?.epoch}, revision=${frame?.revision}`);
 
     if (!useAstForCurrentTail.value || !sandbox) {
       if (lastSandbox) {
@@ -636,16 +662,13 @@ watch(
         lastSandbox.innerHTML = '';
         lastSandbox = null;
       }
-      if (!mutations || mutations.length === 0) {
-        appliedMutationsCount = 0;
-      }
       return;
     }
 
     if (lastSandbox !== sandbox) {
       cleanupRegistry(props.message.id);
       sandbox.innerHTML = '';
-      appliedMutationsCount = 0;
+      lastAppliedFrameSeq = 0;
       localTailEpoch = -1;
       localTailRevision = -1;
       lastSandbox = sandbox;
@@ -655,58 +678,49 @@ watch(
       }
     }
 
-    const incomingEpoch = epoch ?? 0;
-    const incomingRevision = revision ?? -1;
+    if (!frame) {
+      return;
+    }
+
+    if (frame.frameSeq <= lastAppliedFrameSeq) {
+      return;
+    }
+
+    const incomingEpoch = frame.epoch ?? 0;
+    const incomingRevision = frame.revision ?? -1;
     const epochChanged = incomingEpoch !== localTailEpoch;
-    const explicitReset = reset === true || epochChanged;
+    const explicitReset = frame.reset === true || epochChanged;
 
     if (explicitReset) {
       sandbox.innerHTML = '';
       cleanupRegistry(props.message.id);
-      appliedMutationsCount = 0;
       localTailEpoch = incomingEpoch;
       localTailRevision = incomingRevision;
+      lastAppliedFrameSeq = frame.frameSeq;
       astFailureCount = 0;
 
-      if (getTailSnapshotNodes().length > 0) {
-        rebuildTailSnapshot(sandbox);
+      const snapshot = frame.snapshot || getTailSnapshotNodes();
+      if (snapshot.length > 0) {
+        rebuildSnapshot(snapshot, props.message.id, sandbox);
         return;
       }
     }
 
-    if (!mutations || mutations.length === 0) {
-      if (reset) {
-        appliedMutationsCount = 0;
-      }
+    const mutations = frame.mutations || [];
+    if (mutations.length === 0) {
+      lastAppliedFrameSeq = frame.frameSeq;
+      localTailRevision = incomingRevision;
       return;
     }
 
-    if (mutations.length > appliedMutationsCount) {
-      const pending = mutations.slice(appliedMutationsCount);
-      astDebugLog(`[AST Diff Apply] Executing ${pending.length} new mutations for ${props.message.id}`);
-      const result = applyFrame(pending, props.message.id, sandbox);
-      if (result.ok) {
-        appliedMutationsCount = mutations.length;
-        localTailRevision = incomingRevision;
-        astFailureCount = 0;
-      } else {
-        handleAstFrameFailure(sandbox, result.failed?.reason || "applyFrame failed");
-      }
-    } else if (mutations.length < appliedMutationsCount) {
-      astDebugLog(`[AST Diff Reset] Mutations length shrunk from ${appliedMutationsCount} to ${mutations.length}`);
-      sandbox.innerHTML = '';
-      cleanupRegistry(props.message.id);
-      appliedMutationsCount = 0;
-      if (getTailSnapshotNodes().length > 0) {
-        rebuildTailSnapshot(sandbox);
-      } else if (mutations.length > 0) {
-        const result = applyFrame(mutations, props.message.id, sandbox);
-        if (result.ok) {
-          appliedMutationsCount = mutations.length;
-        } else {
-          handleAstFrameFailure(sandbox, result.failed?.reason || "reset applyFrame failed");
-        }
-      }
+    astDebugLog(`[AST Diff Apply] Executing frame ${frame.frameSeq} (${mutations.length} mutations) for ${props.message.id}`);
+    const result = applyFrame(mutations, props.message.id, sandbox);
+    if (result.ok) {
+      lastAppliedFrameSeq = frame.frameSeq;
+      localTailRevision = incomingRevision;
+      astFailureCount = 0;
+    } else {
+      handleAstFrameFailure(sandbox, result.failed?.reason || "applyFrame failed");
     }
   },
   { flush: "post", immediate: true }

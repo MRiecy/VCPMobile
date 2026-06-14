@@ -54,7 +54,7 @@ function escapeHtml(text: string): string {
         class="thought-body"
         v-html="
           block.nodes && block.nodes.length > 0
-            ? renderMarkdownNodes(block.nodes, messageId)
+            ? renderMarkdownNodes(block.nodes, messageId, block.hash)
             : escapeHtml(block.content || '')
         "
       />

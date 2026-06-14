@@ -56,7 +56,8 @@ const copyCode = async () => {
 };
 
 // 构造沙箱 HTML
-const getSandboxHtml = (content: string) => {
+const sandboxHtml = computed(() => {
+  const content = props.content;
   const isDark = themeStore.isDarkResolved;
   
   const cleanHtml = DOMPurify.sanitize(content, {
@@ -121,7 +122,7 @@ const getSandboxHtml = (content: string) => {
   } else {
     return `<!DOCTYPE html><html><head>${vcpInjections}</head>${cleanHtml}</html>`;
   }
-};
+});
 
 const openFullScreen = () => {
   isFullScreen.value = true;
@@ -176,7 +177,7 @@ onUnmounted(() => {
         leave-from-class="translate-y-0 opacity-100"
         leave-to-class="translate-y-10 opacity-0"
       >
-        <div v-show="isFullScreen" class="fixed inset-0 z-editor flex flex-col"
+        <div v-if="isFullScreen" class="fixed inset-0 z-editor flex flex-col"
           :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-[#f6f8fa] text-gray-900'">
           
           <!-- 全屏 Header -->
@@ -201,11 +202,11 @@ onUnmounted(() => {
               
               <div class="flex p-1 rounded-xl border transition-colors duration-300" :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
                 <button @click="fullScreenTab = 'code'"
-                  :class="[fullScreenTab === 'code' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
-                  class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all">代码</button>
+                  :class="[fullScreenTab === 'code' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md border-white/5' : 'bg-white text-gray-900 shadow-sm border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
+                  class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all border border-transparent">代码</button>
                 <button @click="fullScreenTab = 'preview'"
-                  :class="[fullScreenTab === 'preview' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
-                  class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all">预览</button>
+                  :class="[fullScreenTab === 'preview' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md border-white/5' : 'bg-white text-gray-900 shadow-sm border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
+                  class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all border border-transparent">预览</button>
               </div>
             </div>
           </div>
@@ -227,7 +228,7 @@ onUnmounted(() => {
               class="vcp-fullscreen-iframe w-full h-full border-none"
               sandbox="allow-scripts allow-modals allow-forms allow-popups"
               loading="lazy"
-              :srcdoc="getSandboxHtml(content)"
+              :srcdoc="sandboxHtml"
               :data-vcp-image-nonce="imageNonce"
             ></iframe>
           </div>
@@ -262,11 +263,11 @@ onUnmounted(() => {
         <div class="flex p-0.8 rounded-xl border transition-colors duration-300" 
           :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
           <button @click.stop="isPreviewing = false"
-            :class="[!isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
-            class="px-3 py-1 text-[10px] font-bold rounded-lg transition-all">代码</button>
+            :class="[!isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md border-white/5' : 'bg-white text-gray-900 shadow-sm border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
+            class="px-3 py-1 text-[10px] font-bold rounded-lg transition-all border border-transparent">代码</button>
           <button @click.stop="isPreviewing = true"
-            :class="[isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md' : 'bg-white text-gray-900 shadow-sm border border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
-            class="px-3 py-1 text-[10px] font-bold rounded-lg transition-all">预览</button>
+            :class="[isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md border-white/5' : 'bg-white text-gray-900 shadow-sm border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
+            class="px-3 py-1 text-[10px] font-bold rounded-lg transition-all border border-transparent">预览</button>
         </div>
       </div>
     </div>
@@ -290,7 +291,7 @@ onUnmounted(() => {
           class="vcp-inline-iframe w-full h-full border-none no-swipe"
           sandbox="allow-scripts allow-modals allow-forms"
           loading="lazy"
-          :srcdoc="getSandboxHtml(content)"
+          :srcdoc="sandboxHtml"
           :data-vcp-image-nonce="imageNonce"
         ></iframe>
       </div>
@@ -300,7 +301,13 @@ onUnmounted(() => {
 
 <style scoped>
 .html-preview-block {
-  box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.5);
+  /* 极致轻盈的现代双层散焦微阴影，杜绝死黑与大范围污染 */
+  box-shadow: 0 4px 20px -6px rgba(0, 0, 0, 0.12), 0 2px 8px -2px rgba(0, 0, 0, 0.04);
+}
+
+:root.dark .html-preview-block {
+  /* 暗色模式下微调投影透明度，维持极简科技感，避免脏底 */
+  box-shadow: 0 4px 20px -6px rgba(0, 0, 0, 0.35);
 }
 
 /* 高亮代码基础样式 */

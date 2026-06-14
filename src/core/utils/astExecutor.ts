@@ -1,4 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import morphdom from "morphdom";
 import type { MarkdownNode, InlineNode, AstMutation } from "../types/chat";
 
 function isAstDebugEnabled(): boolean {
@@ -129,6 +130,39 @@ function cleanupSubtreeRefs(prefix: string, registry: Map<string, Node>, include
       registry.delete(key);
     }
   }
+}
+
+/**
+ * 修复流式打字期间未闭合的 HTML 标签和属性引号断口，防止 WebView 发生排版吞噬或解析回退
+ */
+function repairHtmlFragment(html: string): string {
+  if (!html) return "";
+  let repaired = html;
+
+  // 1. 处理最末尾的不完整标签断口，例如 "<div class="card" <" 或者 "<p class="
+  const lastOpenAngle = repaired.lastIndexOf("<");
+  const lastCloseAngle = repaired.lastIndexOf(">");
+  if (lastOpenAngle > lastCloseAngle) {
+    repaired = repaired.substring(0, lastOpenAngle);
+  }
+
+  // 2. 补全未闭合的引号，防止浏览器把后面的 HTML 内容吞进未闭合的属性中
+  let doubleQuotes = 0;
+  let singleQuotes = 0;
+  for (let i = 0; i < repaired.length; i++) {
+    const char = repaired[i];
+    if (char === '"' && (i === 0 || repaired[i - 1] !== '\\')) doubleQuotes++;
+    if (char === "'" && (i === 0 || repaired[i - 1] !== '\\')) singleQuotes++;
+  }
+
+  if (doubleQuotes % 2 !== 0) {
+    repaired += '"';
+  }
+  if (singleQuotes % 2 !== 0) {
+    repaired += "'";
+  }
+
+  return repaired;
 }
 
 /**
@@ -268,7 +302,7 @@ function createDomFromNode(
       // 直接赋给 innerHTML 会导致部分 WebView 解析器因无法定位标签边界而直接丢弃并生成空 DOM。
       // 我们通过外层临时 <div> 进行强行诱导闭合补全，确保浏览器能够正确还原并渲染中间状态节点。
       const temp = document.createElement("div");
-      temp.innerHTML = `<div>${node.content || ""}</div>`;
+      temp.innerHTML = `<div>${repairHtmlFragment(node.content || "")}</div>`;
       const parsed = temp.firstElementChild;
       if (parsed) {
         el.innerHTML = parsed.innerHTML;
@@ -399,7 +433,7 @@ function createInlineDom(
       const span = document.createElement("span");
       // 物理防御：使用临时 <div> 强行闭合可能未闭合的 inline 标签，防止 WebView 抛弃节点
       const temp = document.createElement("div");
-      temp.innerHTML = `<div>${node.content || ""}</div>`;
+      temp.innerHTML = `<div>${repairHtmlFragment(node.content || "")}</div>`;
       const parsed = temp.firstElementChild;
       if (parsed) {
         span.innerHTML = parsed.innerHTML;
@@ -544,6 +578,76 @@ function executeMutation(
       if (oldNode) {
         if (oldNode.parentNode) {
           const parent = oldNode.parentNode;
+          const nodeType = mutation.node.type;
+
+          // 1. 策略 A：代码块原地 innerHTML 覆盖
+          if (
+            nodeType === "code_block" &&
+            oldNode instanceof HTMLElement &&
+            oldNode.tagName === "PRE" &&
+            mutation.node.highlighted_html
+          ) {
+            cleanupSubtreeRefs(mutation.id, registry, false); // 保留外层 pre 的 ref
+            
+            let html = mutation.node.highlighted_html;
+            // 剥离多余包裹的 pre/code...
+            const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
+            if (nestedPreMatch && nestedPreMatch[1].trim().startsWith("<pre")) {
+              const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+              if (innerMatch) {
+                html = innerMatch[1];
+              }
+            }
+            
+            oldNode.innerHTML = html; // 原地覆盖
+            astDebugLog(`[AST replace code_block optimized] id=${mutation.id}`);
+            break;
+          }
+
+          // 2. 策略 B：Mermaid 图表源码原地覆盖
+          if (
+            nodeType === "mermaid" &&
+            oldNode instanceof HTMLElement &&
+            oldNode.classList.contains("mermaid-placeholder")
+          ) {
+            cleanupSubtreeRefs(mutation.id, registry, false); // 保留外壳的 ref
+            oldNode.textContent = mutation.node.code || "";
+            astDebugLog(`[AST replace mermaid optimized] id=${mutation.id}`);
+            break;
+          }
+
+          // 3. 策略 C：RawHtml 和 Table 局部 Morphdom 拦截
+          if (
+            (nodeType === "raw_html" || nodeType === "table") &&
+            oldNode instanceof HTMLElement
+          ) {
+            const tempRegistry = new Map<string, Node>();
+            const newDom = createDomFromNode(mutation.node, mutation.id, tempRegistry);
+            
+            morphdom(oldNode, newDom, {
+              childrenOnly: false,
+              onBeforeElUpdated: (fromEl, toEl) => {
+                if (fromEl.isEqualNode(toEl)) return false;
+                
+                // 保留媒体播放与图片加载状态
+                if (fromEl.tagName === 'IMG' && (fromEl as HTMLImageElement).complete) return false;
+                if (fromEl.tagName === 'VIDEO' || fromEl.tagName === 'AUDIO') {
+                  if (!(fromEl as HTMLMediaElement).paused) return false;
+                }
+                return true;
+              }
+            });
+            
+            cleanupSubtreeRefs(mutation.id, registry, true);
+            for (const [k, v] of tempRegistry.entries()) {
+              // 物理修正：根 ID（mutation.id）在页面上真实存活的 DOM 节点依然是 oldNode，此处不能覆盖为废弃的 newDom
+              registry.set(k, k === mutation.id ? oldNode : v);
+            }
+            astDebugLog(`[AST replace morphdom optimized] id=${mutation.id}, type=${nodeType}`);
+            break;
+          }
+
+          // 4. 默认兜底策略：传统的物理 DOM 树替换
           cleanupSubtreeRefs(mutation.id, registry, true);
           const newDom = createDomFromNode(mutation.node, mutation.id, registry);
           if (newDom instanceof HTMLElement) {
@@ -569,6 +673,71 @@ function executeMutation(
       if (oldNode) {
         if (oldNode.parentNode) {
           const parent = oldNode.parentNode;
+          const nodeType = mutation.node.type;
+
+          // 1. 策略 A：叶子型行内节点原地 textContent / 属性更新 (Code, Text, InlineMath, HighlightTag, AlertTag)
+          if (nodeType === "text" && oldNode.nodeType === Node.TEXT_NODE) {
+            oldNode.textContent = mutation.node.value || "";
+            break;
+          }
+          if (nodeType === "code" && oldNode.nodeName === "CODE") {
+            oldNode.textContent = mutation.node.value || "";
+            break;
+          }
+          if (
+            nodeType === "inline_math" &&
+            oldNode instanceof HTMLElement &&
+            (oldNode.classList.contains("vcp-math-inline") || oldNode.classList.contains("vcp-math-block"))
+          ) {
+            oldNode.setAttribute("data-latex", mutation.node.content || "");
+            oldNode.textContent = mutation.node.content || "";
+            break;
+          }
+          if (
+            (nodeType === "highlight_tag" || nodeType === "alert_tag") &&
+            oldNode instanceof HTMLElement
+          ) {
+            oldNode.textContent = mutation.node.value || "";
+            break;
+          }
+
+          // 2. 策略 B：图片属性原地更新，不销毁 DOM
+          if (nodeType === "image" && oldNode instanceof HTMLImageElement) {
+            oldNode.src =
+              mutation.node.needs_asset_conversion && mutation.node.src
+                ? convertFileSrc(mutation.node.src)
+                : (mutation.node.src || "");
+            oldNode.alt = mutation.node.alt || "";
+            oldNode.title = mutation.node.title || "";
+            break;
+          }
+
+          // 3. 策略 C：容器/复杂行内节点局部 Morphdom 拦截 (Link, QuotedText, Strong, Emphasis, Strikethrough, RawHtmlInline)
+          const isContainerNode = [
+            "link",
+            "quoted_text",
+            "strong",
+            "emphasis",
+            "strikethrough",
+            "raw_html_inline",
+          ].includes(nodeType);
+          if (isContainerNode && oldNode instanceof HTMLElement) {
+            const tempRegistry = new Map<string, Node>();
+            const newDom = createInlineDom(mutation.node, mutation.id, tempRegistry);
+            
+            morphdom(oldNode, newDom, {
+              childrenOnly: false,
+            });
+            
+            cleanupSubtreeRefs(mutation.id, registry, true);
+            for (const [k, v] of tempRegistry.entries()) {
+              // 物理修正：根 ID（mutation.id）在页面上真实存活的 DOM 节点依然是 oldNode，此处不能覆盖为废弃的 newDom
+              registry.set(k, k === mutation.id ? oldNode : v);
+            }
+            break;
+          }
+
+          // 4. 默认兜底策略：物理 DOM 树替换
           cleanupSubtreeRefs(mutation.id, registry, true);
           const newDom = createInlineDom(mutation.node, mutation.id, registry);
           if (newDom instanceof HTMLElement) {
@@ -634,8 +803,8 @@ export function applyFrame(
   messageId: string,
   sandbox: HTMLElement
 ): ApplyFrameResult {
-  const registry = getRegistry(messageId);
-  const beforeHtml = sandbox.innerHTML;
+  const debugEnabled = isAstDebugEnabled();
+  const beforeHtml = debugEnabled ? sandbox.innerHTML : "";
   let result: ApplyFrameResult = { ok: true, applied: 0 };
 
   for (const [index, mutation] of mutations.entries()) {
@@ -655,20 +824,23 @@ export function applyFrame(
     result.applied += 1;
   }
 
-  const afterHtml = sandbox.innerHTML;
-  astDebugLog(`[AST Executor Frame Done] messageId=${messageId}, ok=${result.ok}, html=${afterHtml}`);
+  if (debugEnabled) {
+    const registry = getRegistry(messageId);
+    const afterHtml = sandbox.innerHTML;
+    astDebugLog(`[AST Executor Frame Done] messageId=${messageId}, ok=${result.ok}, html=${afterHtml}`);
 
-  recordAstTrace({
-    type: "frame_done",
-    messageId,
-    mutationsCount: mutations.length,
-    appliedCount: result.applied,
-    ok: result.ok,
-    failed: result.failed,
-    beforeHtml,
-    afterHtml,
-    registryKeys: Array.from(registry.keys())
-  });
+    recordAstTrace({
+      type: "frame_done",
+      messageId,
+      mutationsCount: mutations.length,
+      appliedCount: result.applied,
+      ok: result.ok,
+      failed: result.failed,
+      beforeHtml,
+      afterHtml,
+      registryKeys: Array.from(registry.keys())
+    });
+  }
 
   return result;
 }

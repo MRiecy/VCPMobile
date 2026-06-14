@@ -6,7 +6,7 @@ import { useChatSessionStore } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
-import type { ChatMessage, MessageShell } from "../types/chat";
+import type { ChatMessage, MessageShell, TailFrame } from "../types/chat";
 
 export const useChatStreamStore = defineStore("chatStream", () => {
   const streamingMessageId = ref<string | null>(null);
@@ -40,6 +40,27 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
   }
 
+  function mergeTailFrame(existing: TailFrame | null, incoming: TailFrame): TailFrame {
+    const incomingMutations = incoming.mutations || [];
+    if (!existing || incoming.reset || incoming.epoch !== existing.epoch) {
+      return {
+        ...incoming,
+        mutations: incoming.reset ? [] : [...incomingMutations],
+        snapshot: incoming.snapshot ? [...incoming.snapshot] : undefined,
+      };
+    }
+
+    return {
+      ...incoming,
+      reset: existing.reset || incoming.reset,
+      snapshot: incoming.snapshot || existing.snapshot,
+      mutations: [
+        ...(existing.reset ? [] : existing.mutations || []),
+        ...incomingMutations,
+      ],
+    };
+  }
+
   const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // ===== rAF 30Hz 帧合并直推暂存池 =====
@@ -49,10 +70,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     blocks: any[] | null;
     tailContent: string | null;
     tailBlock: any | null;
-    tailMutations: any[] | null;
-    tailEpoch: number | null;
-    tailRevision: number | null;
-    tailReset: boolean;
+    tailFrame: TailFrame | null;
     tailSnapshot: any[] | null;
     animationFrameId: number | null;
     lastRenderTime: number;
@@ -77,14 +95,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           // 漏洞 1 修复：同步强刷收尾时，必须将暂存池中的 tail 字段强刷，绝不允许丢字闪烁
           if (up.tailContent !== null) msg.tailContent = up.tailContent;
           if (up.tailBlock !== undefined) msg.tailBlock = up.tailBlock;
-          if (up.tailEpoch !== null) msg.tailEpoch = up.tailEpoch;
-          if (up.tailRevision !== null) msg.tailRevision = up.tailRevision;
           if (up.tailSnapshot !== null) msg.tailSnapshot = up.tailSnapshot as any;
-          if (up.tailReset) msg.tailReset = !msg.tailReset;
-          if (up.tailMutations !== null) {
-            const current = msg.tailMutations || [];
-            msg.tailMutations = [...current, ...up.tailMutations];
-          }
+          if (up.tailFrame !== null) msg.tailFrame = up.tailFrame;
         }
       }
       rAFPendingUpdates.delete(messageId);
@@ -123,12 +135,36 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     };
   }
 
+  const activeStreamSets = computed(() => {
+    const sets: Record<string, Set<string>> = {};
+    for (const [key, streams] of Object.entries(sessionActiveStreams.value)) {
+      sets[key] = new Set(streams);
+    }
+    return sets;
+  });
+
+  const activeStreamIdSet = computed(() => {
+    const ids = new Set<string>();
+    for (const streams of Object.values(sessionActiveStreams.value)) {
+      for (const id of streams) ids.add(id);
+    }
+    return ids;
+  });
+
+  function isMessageActive(messageId: string): boolean {
+    return activeStreamIdSet.value.has(messageId);
+  }
+
+  function isMessageActiveInSession(ownerId: string, topicId: string, messageId: string): boolean {
+    return activeStreamSets.value[`${ownerId}:${topicId}`]?.has(messageId) ?? false;
+  }
+
   // 兼容旧逻辑的计算属性
   const activeStreamingIds = computed(() => {
     if (!sessionStore.currentSelectedItem?.id || !sessionStore.currentTopicId)
       return new Set<string>();
     const key = `${sessionStore.currentSelectedItem.id}:${sessionStore.currentTopicId}`;
-    return new Set(sessionActiveStreams.value[key] || []);
+    return activeStreamSets.value[key] || new Set<string>();
   });
 
   const isGroupGenerating = computed(() => {
@@ -148,13 +184,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
   const enforceStreamPoolLimit = () => {
     if (activeStreamMessages.size <= MAX_STREAM_MESSAGES) return;
-    const excess = activeStreamMessages.size - MAX_STREAM_MESSAGES;
+    let remaining = activeStreamMessages.size - MAX_STREAM_MESSAGES;
     // 按插入顺序（Map 保持插入顺序）清理最旧的非活跃消息
     for (const [id] of activeStreamMessages) {
-      if (excess <= 0) break;
+      if (remaining <= 0) break;
       // 只删除已完成的流（不在当前活跃会话中）
-      if (!activeStreamingIds.value.has(id)) {
+      if (!isMessageActive(id)) {
         activeStreamMessages.delete(id);
+        remaining -= 1;
       }
     }
   };
@@ -310,9 +347,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             tailChanged: aurora.tailChanged,
             tailContent: aurora.tail || "",
             tailBlockType: aurora.tailBlock?.type || null,
-            tailEpoch: aurora.tailEpoch,
-            tailRevision: aurora.tailRevision,
-            tailReset: aurora.tailReset,
+            tailFrame: aurora.tailFrame ? {
+              epoch: aurora.tailFrame.epoch,
+              revision: aurora.tailFrame.revision,
+              frameSeq: aurora.tailFrame.frameSeq,
+              reset: aurora.tailFrame.reset,
+              mutationsCount: aurora.tailFrame.mutations?.length || 0,
+              hasSnapshot: !!aurora.tailFrame.snapshot,
+            } : null,
           },
           msgSnapshot: msg ? {
             contentLength: msg.content?.length || 0,
@@ -329,10 +371,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             blocks: null,
             tailContent: null,
             tailBlock: null,
-            tailMutations: null,
-            tailEpoch: null,
-            tailRevision: null,
-            tailReset: false,
+            tailFrame: null,
             tailSnapshot: null,
             animationFrameId: null,
             lastRenderTime: 0,
@@ -347,16 +386,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (aurora.stableChanged && aurora.stableBlocks) {
           update.blocks = aurora.stableBlocks;
         }
-        if (typeof aurora.tailEpoch === "number") {
-          update.tailEpoch = aurora.tailEpoch;
-        }
-        if (typeof aurora.tailRevision === "number") {
-          update.tailRevision = aurora.tailRevision;
-        }
-        if (aurora.tailReset) {
-          update.tailReset = true;
-          update.tailMutations = [];
-          update.tailSnapshot = (aurora.tailSnapshot as any[]) || (aurora.tailBlock as any)?.nodes || [];
+        if (aurora.tailFrame) {
+          streamDebugLog(`[chatStreamStore] Received tailFrame seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`);
+          update.tailFrame = mergeTailFrame(update.tailFrame, aurora.tailFrame);
+          if (aurora.tailFrame.snapshot) {
+            update.tailSnapshot = aurora.tailFrame.snapshot as any[];
+          }
         }
         if (aurora.tailSnapshot) {
           update.tailSnapshot = aurora.tailSnapshot as any[];
@@ -364,13 +399,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (aurora.tailChanged) {
           update.tailContent = aurora.tail || "";
           update.tailBlock = (aurora.tailBlock as any) || null;
-        }
-        if (aurora.tailMutations) {
-          streamDebugLog(`[chatStreamStore] Received ${aurora.tailMutations.length} mutations from backend for ${actualMessageId}`);
-          if (!update.tailMutations) {
-            update.tailMutations = [];
-          }
-          update.tailMutations.push(...aurora.tailMutations);
         }
 
         // 3. 申请硬件级 rAF 自适应阻尼渲染（最大 30Hz）
@@ -390,16 +418,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
                 if (up.blocks !== null) {
                   m.blocks = up.blocks;
                 }
-                if (up.tailEpoch !== null) m.tailEpoch = up.tailEpoch;
-                if (up.tailRevision !== null) m.tailRevision = up.tailRevision;
                 if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot as any;
-                if (up.tailReset) {
-                  m.tailReset = !m.tailReset;
-                  m.tailMutations = up.tailMutations !== null ? [...up.tailMutations] : [];
-                } else if (up.tailMutations !== null) {
-                  const current = m.tailMutations || [];
-                  m.tailMutations = [...current, ...up.tailMutations];
-                }
+                if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
                 if (up.tailContent !== null) m.tailContent = up.tailContent;
                 if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
               }
@@ -409,10 +429,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               up.blocks = null;
               up.tailContent = null;
               up.tailBlock = null;
-              up.tailMutations = null;
-              up.tailEpoch = null;
-              up.tailRevision = null;
-              up.tailReset = false;
+              up.tailFrame = null;
               up.tailSnapshot = null;
               up.animationFrameId = null;
             } else {
@@ -569,6 +586,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     sessionActiveStreams,
     activeStreamMessages,
     activeStreamingIds,
+    activeStreamIdSet,
+    isMessageActive,
+    isMessageActiveInSession,
     isGroupGenerating,
     computeShell,
     addSessionStream,

@@ -130,13 +130,27 @@ body {
   border-bottom-left-radius: 4px !important;
 }
 
-/* 切换主题时的平滑过渡保护，避免突兀的闪烁，且不在平时影响性能 */
+/* 切换主题时的平滑过渡保护，让页面所有常规元素（顶部栏、分割线、表格、按钮等）平滑同步过渡，避免局部瞬间跳变闪烁 */
 .theme-switching,
 .theme-switching * {
-  transition: background-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
-              color 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
-              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), 
-              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
+              color 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
+              border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), 
+              box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* 性能黑洞局部避退：利用特异性覆盖，对高密度微观节点（高亮代码块、KaTeX数学公式、Mermaid/SVG图表）强制关闭 transition 动画，保障移动端切换时的极限流畅度 */
+.theme-switching pre,
+.theme-switching pre *,
+.theme-switching code,
+.theme-switching code *,
+.theme-switching .katex,
+.theme-switching .katex *,
+.theme-switching .mermaid,
+.theme-switching .mermaid *,
+.theme-switching svg,
+.theme-switching svg * {
+  transition: none !important;
 }
 
