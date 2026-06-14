@@ -60,6 +60,11 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
     }
 }
 
+/// 🛡️ 前端专属数据加载指令 (仅供 Vue 前端跨进程 IPC 调用)
+///
+/// ⚠️ 警告：出于数据防泄密及减轻跨端传输 IPC 序列化性能开销的考量，此接口在返回前会【强行清空】`system_prompt`。
+/// ❌ 绝对禁止在 Rust 后端业务逻辑、群聊组装或同步推送代码中调用此函数！
+/// ➡️ 后端读取完整智能体配置请使用 `read_agent_config_internal`！
 #[tauri::command]
 pub async fn read_agent_config<R: Runtime>(
     app_handle: AppHandle<R>,

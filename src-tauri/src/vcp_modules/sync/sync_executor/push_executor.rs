@@ -44,7 +44,7 @@ impl PushExecutor {
         agent_id: &str,
     ) -> Result<(), String> {
         let config =
-            agent_service::read_agent_config(app.clone(), app.state(), agent_id.to_string(), None)
+            agent_service::read_agent_config_internal(app, &app.state(), agent_id, None)
                 .await?;
         let dto = AgentSyncDTO::from(&config);
 

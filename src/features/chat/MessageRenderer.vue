@@ -143,10 +143,26 @@ const isStreaming = computed(() => {
 // === <!--brk--> 消息分条拆分算法 ===
 
 function isBrkNode(node: any): boolean {
-  if (node.type === "raw_html" && node.content) {
+  if ((node.type === "raw_html" || node.type === "raw_html_inline") && node.content) {
     const trimmed = node.content.trim().replace(/\s+/g, "");
     return trimmed === "<!--brk-->";
   }
+  return false;
+}
+
+function isBrkBlock(block: ContentBlock): boolean {
+  if (!isPlainBlock(block.type)) return false;
+  
+  if (block.content) {
+    const trimmed = block.content.trim().replace(/\s+/g, "");
+    if (trimmed === "<!--brk-->") return true;
+  }
+  
+  if (block.nodes && block.nodes.length > 0) {
+    const groups = splitMarkdownNodes(block.nodes);
+    return groups.length === 0;
+  }
+  
   return false;
 }
 
@@ -192,11 +208,19 @@ const messageBubbles = computed(() => {
     }
   };
 
+  const isUserMsg = shell.value?.isUser;
+
   if (props.message.blocks && props.message.blocks.length > 0) {
     for (const block of props.message.blocks) {
-      if (!isPlainBlock(block.type)) {
+      if (!isPlainBlock(block.type) || isUserMsg) {
         currentBlocks.push(block);
         continue;
+      }
+
+      // 🆕 优先判定这个块是否整体就是一个 brk 物理分割块 (支持纯文本及 AST 状态双重鉴定)
+      if (isBrkBlock(block)) {
+        pushCurrentGroup();
+        continue; // 过滤掉 <!--brk--> 本身不渲染
       }
 
       if (block.nodes && block.nodes.length > 0) {
@@ -213,6 +237,9 @@ const messageBubbles = computed(() => {
               pushCurrentGroup();
             }
           });
+        } else if (nodeGroups.length === 0) {
+          // 🆕 兜底：如果内部 AST 切分结果为 0 也是纯分割块
+          pushCurrentGroup();
         } else {
           currentBlocks.push(block);
         }
@@ -224,22 +251,20 @@ const messageBubbles = computed(() => {
 
   pushCurrentGroup();
 
-  // 如果处于流式状态且有 tailBlock，将其作为一个未拆分的整体追加到最后一个气泡中
-  if (isStreaming.value && props.message.tailBlock) {
-    if (list.length === 0) {
-      list.push({
-        id: `${props.message.id}-bubble-0`,
-        blocks: [props.message.tailBlock],
-        isTail: true
-      });
-    } else {
-      const lastBubble = list[list.length - 1];
-      lastBubble.blocks.push(props.message.tailBlock);
-      lastBubble.isTail = true;
-    }
+  // 🆕 流式状态下，如果最后一个稳定块是个 brk 块，我们需要额外追加一个空的气泡组以供 tailBlock 打字渲染
+  const lastBlockIsBrk = props.message.blocks && props.message.blocks.length > 0 && (() => {
+    const last = props.message.blocks[props.message.blocks.length - 1];
+    return last ? isBrkBlock(last) : false;
+  })();
+
+  if (isStreaming.value && props.message.tailBlock && lastBlockIsBrk) {
+    list.push({
+      id: `${props.message.id}-bubble-${bubbleIndex++}`,
+      blocks: []
+    });
   }
 
-  // 兜底：如果 blocks 和 tailBlock 都为空，提供一个空的初始气泡
+  // 兜底：如果整个消息 blocks 为空
   if (list.length === 0) {
     list.push({
       id: `${props.message.id}-bubble-0`,
@@ -847,118 +872,120 @@ onUnmounted(() => {
     class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
     
+    <!-- 统一的气泡循环渲染列表 -->
     <template v-for="(bubble, bubbleIndex) in messageBubbles" :key="bubble.id">
-      <MessageHeader
-        v-if="shell"
-        :is-user="shell.isUser"
-        :display-name="shell.displayName"
-        :name-style="{ color: shell.avatarColor }"
-        :owner-type="shell.isUser ? 'user' : 'agent'"
-        :owner-id="shell.isUser ? 'user_avatar' : (message.agentId || agentId)"
-        :avatar-dominant-color="shell.avatarColor"
-      />
+      <template v-if="shell">
+        <MessageHeader
+          :is-user="shell.isUser"
+          :display-name="shell.displayName"
+          :name-style="{ color: shell.avatarColor }"
+          :owner-type="shell.isUser ? 'user' : 'agent'"
+          :owner-id="shell.isUser ? 'user_avatar' : (message.agentId || agentId)"
+          :avatar-dominant-color="shell.avatarColor"
+        />
 
-      <ChatBubble 
-        v-if="shell"
-        :is-user="shell.isUser" 
-        :is-streaming="Boolean(isStreaming && bubble.isTail)" 
-        :bubble-style="{
-          '--dynamic-color': shell.avatarColor,
-        }"
-        :class="bubbleIndex > 0 ? 'mt-2' : ''"
-      >
-        <ThinkingIndicator v-if="isStreaming && bubbleIndex === 0 && (!message.blocks || message.blocks.length === 0)" />
+        <ChatBubble 
+          :is-user="shell.isUser" 
+          :is-streaming="isStreaming && (bubbleIndex === messageBubbles.length - 1)" 
+          :bubble-style="{
+            '--dynamic-color': shell.avatarColor,
+          }"
+          :class="bubbleIndex > 0 ? 'mt-2' : ''"
+        >
+          <!-- 初始思考指示灯：仅在此活跃气泡没有任何已确认 blocks，且仍在流式并未吐出 tail 时显示 -->
+          <ThinkingIndicator v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && (!message.blocks || message.blocks.length === 0) && !message.tailBlock" />
 
-        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
-          <template v-if="bubble.blocks && bubble.blocks.length > 0">
-            <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index)">
-              <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
-              <div v-memo="[getBlockKey(block, index)]">
-                <div
-                  v-if="isPlainBlock(block.type)"
-                  v-html="renderBlockHtml(block)"
-                />
+          <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
+            <template v-if="bubble.blocks && bubble.blocks.length > 0">
+              <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index)">
+                <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
+                <div v-memo="[getBlockKey(block, index)]">
+                  <div
+                    v-if="isPlainBlock(block.type)"
+                    v-html="renderBlockHtml(block)"
+                  />
 
-                <ToolBlock
-                  v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
-                  :type="block.type"
-                  :content="block.content"
-                  :block="block"
-                  :default-expanded="isMessageInActiveStream"
-                />
+                  <ToolBlock
+                    v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
+                    :type="block.type"
+                    :content="block.content"
+                    :block="block"
+                    :default-expanded="isMessageInActiveStream"
+                  />
 
-                <ThoughtBlock
-                  v-else-if="block.type === 'thought'"
-                  :block="block"
-                  :message-id="message.id"
-                  :default-expanded="isMessageInActiveStream"
-                />
+                  <ThoughtBlock
+                    v-else-if="block.type === 'thought'"
+                    :block="block"
+                    :message-id="message.id"
+                    :default-expanded="isMessageInActiveStream"
+                  />
 
-                <HtmlPreviewBlock
-                  v-else-if="block.type === 'html-preview'"
-                  :content="block.content || ''"
-                  :highlighted-content="block.highlighted_content"
-                  :message-id="message.id"
-                  :is-streaming="isStreaming"
-                  :is-active-stream="isMessageInActiveStream"
-                />
+                  <HtmlPreviewBlock
+                    v-else-if="block.type === 'html-preview'"
+                    :content="block.content || ''"
+                    :highlighted-content="block.highlighted_content"
+                    :message-id="message.id"
+                    :is-streaming="isStreaming"
+                    :is-active-stream="isMessageInActiveStream"
+                  />
 
-                <ToolSummaryBlock
-                  v-else-if="block.type === 'tool-call-summary'"
-                  :block="block"
-                />
+                  <ToolSummaryBlock
+                    v-else-if="block.type === 'tool-call-summary'"
+                    :block="block"
+                  />
+                </div>
+              </template>
+            </template>
+            <template v-else-if="bubbleIndex === 0 && message.content && (!isStreaming || !message.tailBlock)">
+              <div class="vcp-markdown-block select-text">
+                <p>{{ message.content }}</p>
               </div>
             </template>
-          </template>
-          <template v-else-if="bubbleIndex === 0 && message.content && (!isStreaming || !message.tailBlock)">
-            <div class="vcp-markdown-block select-text">
-              <p>{{ message.content }}</p>
-            </div>
-          </template>
-          
-          <!-- 流式尾部高画质推测渲染 (Speculative Rendering) -->
-          <div v-if="isStreaming && bubble.isTail && message.tailBlock" class="streaming-tail opacity-90">
-            <div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)">
+
+            <!-- 尾部流式推测渲染（只对最后一个活跃气泡生效，且正在流式、有 tailBlock 时渲染，完美拼合在气泡正文末尾） -->
+            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
+              <div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)">
+                <div
+                  :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
+                  class="vcp-markdown-block vcp-ast-sandbox"
+                />
+              </div>
               <div
-                ref="tailSandboxRef"
-                class="vcp-markdown-block vcp-ast-sandbox"
+                v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
+                :ref="(el) => { tailRootRef = el as HTMLElement | null }"
+                class="vcp-markdown-block"
               />
             </div>
-            <div
-              v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
-              ref="tailRootRef"
-              class="vcp-markdown-block"
-            />
+            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || !isPlainBlock(message.tailBlock.type))" class="opacity-70 italic animate-pulse">
+              {{ message.tailContent }}
+            </div>
           </div>
-          <div v-else-if="isStreaming && bubble.isTail && message.tailContent && message.blocks && message.blocks.length > 0" class="opacity-70 italic animate-pulse">
-            {{ message.tailContent }}
-          </div>
-        </div>
 
-        <AttachmentPreview 
-          v-if="bubbleIndex === 0 && message.attachments && message.attachments.length > 0" 
-          :attachments="message.attachments"
-          class="pt-3 border-t border-black/5 dark:border-white/5" 
-        />
+          <AttachmentPreview 
+            v-if="bubbleIndex === 0 && message.attachments && message.attachments.length > 0" 
+            :attachments="message.attachments"
+            class="pt-3 border-t border-black/5 dark:border-white/5" 
+          />
 
-        <StreamingTag v-if="isStreaming && bubble.isTail" />
+          <StreamingTag v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1)" />
 
-        <template #footer>
-          <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
-            :class="shell.isUser ? 'text-right' : 'text-left'">
-            {{ formatTime(message.timestamp) }}
-          </div>
-        </template>
-
-        <!-- Mermaid FullScreen Viewer -->
-        <MermaidFullScreenViewer
-          :visible="isMermaidFullScreen"
-          :svg-html="activeMermaidSvg"
-          :source-code="activeMermaidSource"
-          @close="isMermaidFullScreen = false"
-        />
-      </ChatBubble>
+          <template #footer>
+            <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
+              :class="shell.isUser ? 'text-right' : 'text-left'">
+              {{ formatTime(message.timestamp) }}
+            </div>
+          </template>
+        </ChatBubble>
+      </template>
     </template>
+
+    <!-- Mermaid FullScreen Viewer -->
+    <MermaidFullScreenViewer
+      :visible="isMermaidFullScreen"
+      :svg-html="activeMermaidSvg"
+      :source-code="activeMermaidSource"
+      @close="isMermaidFullScreen = false"
+    />
   </div>
 </template>
 
