@@ -89,6 +89,7 @@ fn push_math_replaced(dest: &mut String, segment: &str) {
 }
 
 /// 提取 HTML 容器块，将其替换为占位符，并递归解析内部 Markdown
+#[allow(clippy::type_complexity)]
 fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<MarkdownNode>, String)>) {
     if !text.contains('<') {
         return (Cow::Borrowed(text), Vec::new());

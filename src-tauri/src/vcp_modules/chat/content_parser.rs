@@ -865,7 +865,7 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 
 pub(crate) fn parse_tool_call_summary(content: &str) -> Vec<ToolCallSummaryItem> {
     let mut items = Vec::new();
-    for entry in content.split(|c| c == '；' || c == ';' || c == '。') {
+    for entry in content.split(['；', ';', '。']) {
         let entry = entry.trim();
         if entry.is_empty() {
             continue;

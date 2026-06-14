@@ -102,7 +102,10 @@ pub fn assemble_history_for_vcp(
 ) -> Vec<Value> {
     let mut result = Vec::new();
 
-    for msg in history.iter().filter(|msg| !msg.is_thinking.unwrap_or(false)) {
+    for msg in history
+        .iter()
+        .filter(|msg| !msg.is_thinking.unwrap_or(false))
+    {
         use chrono::TimeZone;
         let formatted_time = if let Some(dt) = chrono::Local
             .timestamp_millis_opt(msg.timestamp as i64)
@@ -163,15 +166,11 @@ pub fn assemble_history_for_vcp(
                     };
 
                     if is_image {
-                        combined_text.push_str(&format!(
-                            "\n\n[附加图片: {}] (文件名: {})",
-                            path, att.name
-                        ));
+                        combined_text
+                            .push_str(&format!("\n\n[附加图片: {}] (文件名: {})", path, att.name));
                     } else {
-                        combined_text.push_str(&format!(
-                            "\n\n[附加文件: {}] (文件名: {})",
-                            path, att.name
-                        ));
+                        combined_text
+                            .push_str(&format!("\n\n[附加文件: {}] (文件名: {})", path, att.name));
                     }
 
                     content_parts.push(json!({
@@ -192,15 +191,17 @@ pub fn assemble_history_for_vcp(
         }
 
         // 4. 新版时间锚定机制 (元数据 A - 伪系统/user内联块格式)
-        if enable_time_anchoring {
-            if msg.role == "user" {
-                // 对于 user 消息块，直接在内部注入
-                let username = msg.name.as_deref().filter(|n| !n.is_empty()).unwrap_or("User");
-                combined_text.push_str(&format!(
-                    "\n<system_meta>[系统提示]：{}发送于{}.</system_meta>",
-                    username, formatted_time
-                ));
-            }
+        if enable_time_anchoring && msg.role == "user" {
+            // 对于 user 消息块，直接在内部注入
+            let username = msg
+                .name
+                .as_deref()
+                .filter(|n| !n.is_empty())
+                .unwrap_or("User");
+            combined_text.push_str(&format!(
+                "\n<system_meta>[系统提示]：{}发送于{}.</system_meta>",
+                username, formatted_time
+            ));
         }
 
         if !combined_text.trim().is_empty() {
@@ -238,7 +239,11 @@ pub fn assemble_history_for_vcp(
 
         // 如果是 非user 消息且启用了时间锚定，在后面追加一个伪系统 user 块
         if enable_time_anchoring && msg.role != "user" {
-            let agent_name = msg.name.as_deref().filter(|n| !n.is_empty()).unwrap_or("AI");
+            let agent_name = msg
+                .name
+                .as_deref()
+                .filter(|n| !n.is_empty())
+                .unwrap_or("AI");
             let pseudo_user_msg = json!({
                 "role": "user",
                 "content": format!(
