@@ -1,7 +1,7 @@
 ---
 id: MOD-VCP-CLI-009
-version: "1.0.3"
-date: 2026-06-05
+version: "1.1.0"
+date: 2026-06-14
 module: vcp_client.rs
 scope: src-tauri/src/vcp_modules/
 related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs]
@@ -13,7 +13,7 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 ### 1.1 模块定位
 
-`vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（851 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
+`vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（985 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
 
 其核心职责包括：
 - 将前端传入的 `VcpRequestPayload` 转换为标准化 HTTP 请求
@@ -84,7 +84,7 @@ pub struct VcpRequestPayload {
 - `model_config` 由前端组装，必须包含 `stream: bool` 字段以决定处理模式。
 - `context` 原样透传，最终会出现在 `StreamEvent.context` 中，供前端路由到正确的消息气泡。
 
-### 2.2 StreamEvent
+### 2.2 StreamEvent（v1.1.0 更新）
 
 ```rust
 #[derive(Debug, Serialize, Clone, Default)]
@@ -97,7 +97,8 @@ pub struct StreamEvent {
     pub finish_reason: Option<String>,     // "completed" | "cancelled_by_user" | "error"
     pub error: Option<String>,
     pub aurora: Option<AuroraUpdate>,      // 语义沉淀快照（仅 aurora）
-    pub blocks: Option<Vec<ContentBlock>>, // 预渲染块（仅 end，目前留空）
+    pub blocks: Option<Vec<ContentBlock>>, // 预渲染块（仅 end）
+    pub timestamp: Option<u64>,            // 🆕 v1.1.0 物理落笔时间戳（仅 end，由 finalize_stream_message 设置）
 }
 ```
 
@@ -106,10 +107,10 @@ pub struct StreamEvent {
 | `type` | 触发时机 | 前端行为 |
 |--------|---------|---------|
 | `data` | 每收到一个 SSE `data:` 行 | 兼容旧版渲染，直接追加原始文本 |
-| `aurora` | AuroraBuffer 的 stable/tail 发生变化，或 50ms 节流到期 | 增量更新已闭合块列表 + 尾部推测渲染 |
+| `aurora` | AuroraBuffer 的 stable/tail 发生变化，或 33ms / 1024 字节双阈值节流到期 | 增量更新已闭合块列表 + 尾部推测渲染 + AST Diff 突变执行 |
 | `thinking` | 后端在流式请求开始前主动发射 | 创建 thinking 占位消息骨架（is_thinking = true） |
-| `end` | 流正常结束或被中止后 | 隐藏"输入中"状态，显示最终 finish_reason |
-| `error` | HTTP 错误、流读取异常、连接断开 | 显示错误提示，终止渲染 |
+| `end` | 流正常结束或被中止后，携带 timestamp 和最终 blocks | 隐藏"输入中"状态，显示最终 finish_reason |
+| `error` | HTTP 错误、流读取异常、25s SSE 空闲超时 | 显示错误提示，终止渲染 |
 
 ### 2.3 ActiveRequests
 
@@ -257,7 +258,7 @@ System Message 最终结构：
 
 **HTTP 客户端配置**：
 - **不设 `read_timeout`**：数小时自循环场景中，`read_timeout` 是定时炸弹
-- `tcp_keepalive(Duration::from_secs(60))`：维持 TCP 层活性，防止 NAT/防火墙静默丢弃空闲连接
+- `tcp_keepalive(Duration::from_secs(20))`：维持 TCP 层活性，防止 NAT/防火墙静默丢弃空闲连接
 
 **SSE 解析流水线**：
 
@@ -278,23 +279,32 @@ let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 10
 ├─ abort_rx 触发 → 请求尚未建立，直接返回 aborted
 └─ response_res 到达 → 进入第二层
 
-第二层 select!（SSE 读取循环内）
+第二层 select!（SSE 读取循环内，三路并发）
 ├─ abort_rx 触发 → 深层轮询捕获中止
 │   ├─ aurora_buffer.finalize()
 │   ├─ 发送最终 aurora 事件（含 cancelled_by_user）
 │   └─ break 循环
-└─ lines.next() 到达 → 解析单行
+├─ 🆕 sleep_future 触发（25s SSE 空闲超时）
+│   ├─ log::warn!("Stream idle timeout (25s) reached")
+│   ├─ flush_aurora_parse(force=true)
+│   ├─ aurora_buffer.finalize()
+│   ├─ 发送 aurora 事件（error="连接超时：超过 25 秒未收到服务器响应"）
+│   ├─ 发送 error 类型 StreamEvent
+│   └─ break 循环
+└─ lines.next() 到达 → 重置 last_activity 时钟 → 解析单行
     ├─ "data: [DONE]" → 正常结束
     ├─ "data: {...}" → 提取 delta.content，追加到 AuroraBuffer
     └─ Err/None → 错误处理或容错结束
 ```
 
-**Aurora 驱动节流**：
-- 每收到非空文本 chunk，调用 `aurora_buffer.append_chunk()` + `process_queue()`
-- 仅在以下情况发送 `aurora` 事件：
-  1. `stable_changed`（新增已闭合块）
-  2. `tail_changed`（尾部内容变化）
-  3. 距离上次发送超过 **50ms**（时间节流，避免前端过度重渲染）
+**Aurora 驱动节流**（v1.1.0 更新）：
+- 每收到非空文本 chunk，追加到 pending_chunk 缓冲区
+- 通过 `flush_aurora_parse` 闭包执行**双阈值互备节流**：
+  1. **时间阈值**：距离上次 flush ≥ **33ms**（`AURORA_PARSE_INTERVAL_MS`）
+  2. **字节量阈值**：pending_chunk 累积 ≥ **1024 字节**（`AURORA_FORCE_PARSE_BYTES`）
+  3. 任一条件满足即触发 `aurora_buffer.process_queue()` → `send_aurora_update()`
+  4. `force=true` 时（流结束/中止/超时）绕过双阈值，立即 flush
+- 双阈值互备确保高频小 chunk 和低频大 chunk 都不会超阈值延迟
 
 ### 3.4.1 Backend-Driven SSE Thinking 事件
 
@@ -484,8 +494,8 @@ async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf
 | 指标 | 数值/策略 | 说明 |
 |------|----------|------|
 | SSE 行缓冲区 | 512 KB | 防止极端长行导致内存爆炸 |
-| Aurora 节流间隔 | 50 ms | 平衡实时性与前端渲染开销 |
-| TCP Keepalive | 60 s | 维持长连接活性，避免 NAT 超时 |
+| Aurora 节流间隔 | 33 ms（`AURORA_PARSE_INTERVAL_MS`）+ 1024 字节阈值（`AURORA_FORCE_PARSE_BYTES`） | 双阈值互备：时间或字节量任一满足即触发 flush |
+| TCP Keepalive | 20 s | 维持长连接活性，避免 NAT 超时 |
 | 图片长边限制 | 1120 px | 控制多模态 payload 大小 |
 | 视频最大帧数 | 300 帧 | 防止极端视频导致 OOM/API 超时 |
 | 视频去重阈值 | 1.5 秒 | 时间戳差小于此值视为重复帧 |
@@ -578,4 +588,5 @@ const handleVcpLifecycle = async (e: Event) => {
 
 ---
 
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-06-14 | VCP Mobile v1.1.0*
+*文档基于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（985 行）及 `src-tauri/src/vcp_modules/chat/aurora_pipeline.rs`（~237行）的源码分析生成。*

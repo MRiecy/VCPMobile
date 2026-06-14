@@ -1,13 +1,14 @@
 ---
 title: OTA 更新体系
 id: module-08
+version: "1.1.0"
 description: APK 本体 OTA 与前端资源热更新的双轨更新机制详解
 tags: [ota, update, frontend-update, rollback, semver]
 related_modules:
   - module-09
   - module-10
 created_at: "2026-05-13"
-updated_at: "2026-05-13"
+updated_at: "2026-06-14"
 ---
 
 # 08. OTA 更新体系
@@ -67,7 +68,7 @@ VCP Mobile 采用**双轨 OTA（Over-The-Air，空中下载技术）**更新策�
 
 ## 3. APK 本体更新详解
 
-本节基于 `src-tauri/src/vcp_modules/updater/update_manager.rs`（222 行）。
+本节基于 `src-tauri/src/vcp_modules/updater/update_manager.rs`（235 行）。
 
 ### 3.1 整体流程
 
@@ -187,7 +188,7 @@ pseudo:
 
 ## 4. 前端资源热更新详解
 
-本节基于 `src-tauri/src/vcp_modules/updater/frontend_update_manager.rs`（567 行）。
+本节基于 `src-tauri/src/vcp_modules/updater/frontend_update_manager.rs`（576 行）。
 
 ### 4.1 整体流程
 
@@ -691,5 +692,5 @@ pub struct DownloadProgress {
 ---
 
 *文档生成基于源码：*
-- `src-tauri/src/vcp_modules/updater/update_manager.rs`（222 行）
-- `src-tauri/src/vcp_modules/updater/frontend_update_manager.rs`（567 行）
+- `src-tauri/src/vcp_modules/updater/update_manager.rs`（235 行）
+- `src-tauri/src/vcp_modules/updater/frontend_update_manager.rs`（576 行）

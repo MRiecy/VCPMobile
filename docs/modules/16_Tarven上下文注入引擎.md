@@ -2,8 +2,8 @@
 id: MOD-TARVEN-016
 title: Tarven 上下文注入引擎
 description: 结构化提示词注入规则——system_suffix、user_suffix、context_inject 的解析、排序与注入流水线
-version: 1.0.3
-date: 2026-06-05
+version: "1.1.0"
+date: 2026-06-14
 ---
 
 # 16. Tarven 上下文注入引擎
@@ -930,4 +930,5 @@ Rust 侧 `TarvenRule.rule_type` 使用 `String` 而非 `enum RuleType`，原因�
 *交叉引用：详见 [Tarven 规则系统（前端视角）](../vue_docs/features/chat/22_Tarven规则系统.md)*
 
 ---
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-06-14 | VCP Mobile v1.1.0*
+*文档基于 `src-tauri/src/vcp_modules/chat/context_injection.rs`（~690 行）的源码分析生成。*

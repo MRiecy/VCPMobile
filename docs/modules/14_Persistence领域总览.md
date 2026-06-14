@@ -1,7 +1,7 @@
 ---
 id: MOD-PERSISTENCE-014
-version: "1.0.3"
-date: 2026-06-05
+version: "1.1.0"
+date: 2026-06-14
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
 related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs]

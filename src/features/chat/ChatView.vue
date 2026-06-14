@@ -333,11 +333,13 @@ onUnmounted(() => {
   /* 强制适配刘海屏，增加保底 padding */
   padding-top: calc(var(--vcp-safe-top, 24px));
   padding-bottom: 12px;
+  background-color: var(--secondary-bg);
   background-color: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
   border-bottom: 1px solid transparent;
 }
 
 .vcp-input-footer {
+  background-color: var(--secondary-bg);
   background-color: color-mix(in srgb, var(--secondary-bg) 90%, transparent);
 }
 
