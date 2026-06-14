@@ -296,7 +296,10 @@ pub(crate) fn find_matching_close_tag(
         }
 
         // 健壮性防御：如果当前扫描到的 HTML 标签处于 HTML 注释内部，直接跳过
-        if comment_ranges.iter().any(|range| range.contains(&cap_start)) {
+        if comment_ranges
+            .iter()
+            .any(|range| range.contains(&cap_start))
+        {
             continue;
         }
 
@@ -1051,7 +1054,8 @@ fn push_inline_to_context(
 
 /// 预替换 VCP Magic（引号、警报、高亮标签）为普通字母数字占位符，规避 Flanking 判定边界缺陷
 fn extract_vcp_magic(text: &str) -> (Cow<'_, str>, Vec<InlineNode>, Vec<String>) {
-    if !text.contains('@') && !text.contains('"') && !text.contains('“') && !text.contains('”') {
+    if !text.contains('@') && !text.contains('"') && !text.contains('“') && !text.contains('”')
+    {
         return (Cow::Borrowed(text), Vec::new(), Vec::new());
     }
 
@@ -1161,7 +1165,9 @@ fn restore_markdown_nodes(
                     }
                 }
             }
-            MarkdownNode::RawHtml { ref mut content, .. } => {
+            MarkdownNode::RawHtml {
+                ref mut content, ..
+            } => {
                 let mut replaced = content.clone();
                 let mut has_placeholder = false;
                 for cap in PLACEHOLDER_RE.captures_iter(content.as_str()) {
@@ -1231,10 +1237,20 @@ fn restore_inline_nodes(
                 restore_inline_nodes(&mut children, magic_nodes, magic_raws);
                 new_inlines.push(InlineNode::strikethrough(children));
             }
-            InlineNode::Link { href, title, mut children, needs_asset_conversion, .. } => {
+            InlineNode::Link {
+                href,
+                title,
+                mut children,
+                needs_asset_conversion,
+                ..
+            } => {
                 restore_inline_nodes(&mut children, magic_nodes, magic_raws);
                 let mut restored_link = InlineNode::link(href, title, children);
-                if let InlineNode::Link { needs_asset_conversion: nac, .. } = &mut restored_link {
+                if let InlineNode::Link {
+                    needs_asset_conversion: nac,
+                    ..
+                } = &mut restored_link
+                {
                     *nac = needs_asset_conversion;
                 }
                 new_inlines.push(restored_link);
@@ -1243,7 +1259,9 @@ fn restore_inline_nodes(
                 restore_inline_nodes(&mut children, magic_nodes, magic_raws);
                 new_inlines.push(InlineNode::quoted_text(children));
             }
-            InlineNode::RawHtmlInline { ref mut content, .. } => {
+            InlineNode::RawHtmlInline {
+                ref mut content, ..
+            } => {
                 let mut replaced = content.clone();
                 let mut has_placeholder = false;
                 for cap in PLACEHOLDER_RE.captures_iter(content.as_str()) {
@@ -1257,7 +1275,10 @@ fn restore_inline_nodes(
                 if has_placeholder {
                     *content = replaced;
                 }
-                new_inlines.push(InlineNode::RawHtmlInline { content: content.clone(), hash: None });
+                new_inlines.push(InlineNode::RawHtmlInline {
+                    content: content.clone(),
+                    hash: None,
+                });
             }
             _ => {
                 new_inlines.push(inline);

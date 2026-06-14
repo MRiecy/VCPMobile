@@ -871,13 +871,28 @@ pub(crate) fn parse_tool_call_summary(content: &str) -> Vec<ToolCallSummaryItem>
             continue;
         }
 
-        let status = if entry.contains("拒绝") || entry.contains("被拒") || entry.contains("denied") || entry.contains("rejected") || entry.contains("refused") {
+        let status = if entry.contains("拒绝")
+            || entry.contains("被拒")
+            || entry.contains("denied")
+            || entry.contains("rejected")
+            || entry.contains("refused")
+        {
             "rejected"
-        } else if entry.contains("失败") || entry.contains("错误") || entry.contains("异常") || entry.contains("error") || entry.contains("failed") {
+        } else if entry.contains("失败")
+            || entry.contains("错误")
+            || entry.contains("异常")
+            || entry.contains("error")
+            || entry.contains("failed")
+        {
             "failure"
         } else if entry.contains("超时") || entry.contains("timeout") {
             "timeout"
-        } else if entry.contains("成功") || entry.contains("完成") || entry.contains("success") || entry.contains("succeeded") || entry.contains("ok") {
+        } else if entry.contains("成功")
+            || entry.contains("完成")
+            || entry.contains("success")
+            || entry.contains("succeeded")
+            || entry.contains("ok")
+        {
             "success"
         } else if entry.contains("取消") || entry.contains("中止") || entry.contains("cancel") {
             "cancelled"

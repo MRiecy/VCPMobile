@@ -465,7 +465,11 @@ impl std::hash::Hash for MarkdownNode {
                     }
                 }
             }
-            MarkdownNode::Heading { level, children, hash } => {
+            MarkdownNode::Heading {
+                level,
+                children,
+                hash,
+            } => {
                 state.write_u8(1);
                 state.write_u8(*level);
                 if let Some(h) = hash {
@@ -476,7 +480,13 @@ impl std::hash::Hash for MarkdownNode {
                     }
                 }
             }
-            MarkdownNode::CodeBlock { lang, code, highlighted_html, theme, hash: _ } => {
+            MarkdownNode::CodeBlock {
+                lang,
+                code,
+                highlighted_html,
+                theme,
+                hash: _,
+            } => {
                 state.write_u8(2);
                 lang.hash(state);
                 code.hash(state);
@@ -493,7 +503,11 @@ impl std::hash::Hash for MarkdownNode {
                     }
                 }
             }
-            MarkdownNode::List { ordered, items, hash } => {
+            MarkdownNode::List {
+                ordered,
+                items,
+                hash,
+            } => {
                 state.write_u8(4);
                 ordered.hash(state);
                 if let Some(h) = hash {
@@ -506,7 +520,12 @@ impl std::hash::Hash for MarkdownNode {
                     }
                 }
             }
-            MarkdownNode::Table { header, rows, wrapper_class, hash } => {
+            MarkdownNode::Table {
+                header,
+                rows,
+                wrapper_class,
+                hash,
+            } => {
                 state.write_u8(5);
                 wrapper_class.hash(state);
                 if let Some(h) = hash {
@@ -572,7 +591,13 @@ impl std::hash::Hash for InlineNode {
                 state.write_u8(3);
                 value.hash(state);
             }
-            InlineNode::Link { href, title, children, needs_asset_conversion, hash } => {
+            InlineNode::Link {
+                href,
+                title,
+                children,
+                needs_asset_conversion,
+                hash,
+            } => {
                 state.write_u8(4);
                 href.hash(state);
                 title.hash(state);
@@ -585,7 +610,13 @@ impl std::hash::Hash for InlineNode {
                     }
                 }
             }
-            InlineNode::Image { src, alt, title, needs_asset_conversion, hash: _ } => {
+            InlineNode::Image {
+                src,
+                alt,
+                title,
+                needs_asset_conversion,
+                hash: _,
+            } => {
                 state.write_u8(5);
                 src.hash(state);
                 alt.hash(state);
@@ -598,7 +629,11 @@ impl std::hash::Hash for InlineNode {
             InlineNode::SoftBreak => {
                 state.write_u8(7);
             }
-            InlineNode::InlineMath { content, display_mode, hash: _ } => {
+            InlineNode::InlineMath {
+                content,
+                display_mode,
+                hash: _,
+            } => {
                 state.write_u8(8);
                 content.hash(state);
                 display_mode.hash(state);

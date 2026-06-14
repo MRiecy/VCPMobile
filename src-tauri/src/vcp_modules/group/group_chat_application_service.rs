@@ -68,13 +68,8 @@ pub async fn internal_process_group_chat_message(
     // 2. 加载成员配置
     let mut active_member_configs = Vec::new();
     for member_id in &group_config.members {
-        if let Ok(cfg) = read_agent_config_internal(
-            &app_handle,
-            &agent_state,
-            member_id,
-            Some(false),
-        )
-        .await
+        if let Ok(cfg) =
+            read_agent_config_internal(&app_handle, &agent_state, member_id, Some(false)).await
         {
             active_member_configs.push(cfg);
         }

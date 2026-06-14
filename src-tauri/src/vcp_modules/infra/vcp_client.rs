@@ -610,9 +610,9 @@ pub async fn perform_vcp_request<R: Runtime>(
         };
 
         let flush_aurora_parse = |buffer: &mut AuroraBuffer,
-                                      pending_chunk: &mut String,
-                                      last_parse: &mut std::time::Instant,
-                                      force: bool|
+                                  pending_chunk: &mut String,
+                                  last_parse: &mut std::time::Instant,
+                                  force: bool|
          -> (bool, bool) {
             if pending_chunk.is_empty() {
                 return (false, false);

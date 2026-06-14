@@ -44,8 +44,7 @@ impl PushExecutor {
         agent_id: &str,
     ) -> Result<(), String> {
         let config =
-            agent_service::read_agent_config_internal(app, &app.state(), agent_id, None)
-                .await?;
+            agent_service::read_agent_config_internal(app, &app.state(), agent_id, None).await?;
         let dto = AgentSyncDTO::from(&config);
 
         let idempotency_key = generate_idempotency_key("push", "agent", agent_id);

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::content_parser::{
-    BlockType, ToolResultDetail, ToolCallSummaryItem, BUTTON_CLICK, /* extraction helpers */
+    BlockType, ToolCallSummaryItem, ToolResultDetail, BUTTON_CLICK, /* extraction helpers */
     CONTENT_REGEX, DATE_REGEX, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END,
     GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START, HTML_FENCE_START, KV_REGEX, MAID_REGEX,
     ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
@@ -281,7 +281,9 @@ impl StreamBlockParser {
         let trimmed = tail.trim();
         if !trimmed.is_empty() {
             let nodes = if crate::vcp_modules::content_parser::is_html_tag_block(trimmed) {
-                vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(trimmed.to_string())]
+                vec![crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                    trimmed.to_string(),
+                )]
             } else {
                 crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed)
             };
@@ -301,7 +303,6 @@ impl StreamBlockParser {
         self.processed_len = 0;
     }
 }
-
 
 // ── 内部辅助函数 ──────────────────────────────────────────────────────
 
@@ -387,7 +388,9 @@ fn find_end_marker(
         BlockType::Think => THINK_END.find(search_area),
         BlockType::ToolResult => TOOL_RESULT_END.find(search_area),
         BlockType::Diary => DIARY_END.find(search_area),
-        BlockType::ToolCallSummary => crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_END.find(search_area),
+        BlockType::ToolCallSummary => {
+            crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_END.find(search_area)
+        }
         BlockType::HtmlFence | BlockType::CodeFence => GENERIC_CODE_FENCE_END.find(search_area),
         BlockType::HtmlDoc => HTML_DOC_END.find(search_area),
         BlockType::HtmlContainer => unreachable!(),

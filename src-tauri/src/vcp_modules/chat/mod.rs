@@ -1,3 +1,4 @@
+pub mod ast_diff;
 pub mod aurora_pipeline;
 pub mod chat_manager;
 pub mod content_parser;
@@ -11,5 +12,3 @@ pub mod stream_block_parser;
 pub mod topic_service;
 pub mod topic_summary_service;
 pub mod topic_types;
-pub mod ast_diff;
-
