@@ -140,6 +140,116 @@ const isStreaming = computed(() => {
   return streamStore.isMessageActiveInSession(itemId, topicId, props.message.id);
 });
 
+// === <!--brk--> 消息分条拆分算法 ===
+
+function isBrkNode(node: any): boolean {
+  if (node.type === "raw_html" && node.content) {
+    const trimmed = node.content.trim().replace(/\s+/g, "");
+    return trimmed === "<!--brk-->";
+  }
+  return false;
+}
+
+function splitMarkdownNodes(nodes: any[]): any[][] {
+  const result: any[][] = [];
+  let currentGroup: any[] = [];
+  
+  for (const node of nodes) {
+    if (isBrkNode(node)) {
+      if (currentGroup.length > 0) {
+        result.push(currentGroup);
+        currentGroup = [];
+      }
+    } else {
+      currentGroup.push(node);
+    }
+  }
+  
+  if (currentGroup.length > 0) {
+    result.push(currentGroup);
+  }
+  return result;
+}
+
+interface BubbleGroup {
+  id: string;
+  blocks: ContentBlock[];
+  isTail?: boolean;
+}
+
+const messageBubbles = computed(() => {
+  const list: BubbleGroup[] = [];
+  let currentBlocks: ContentBlock[] = [];
+  let bubbleIndex = 0;
+
+  const pushCurrentGroup = () => {
+    if (currentBlocks.length > 0) {
+      list.push({
+        id: `${props.message.id}-bubble-${bubbleIndex++}`,
+        blocks: [...currentBlocks]
+      });
+      currentBlocks = [];
+    }
+  };
+
+  if (props.message.blocks && props.message.blocks.length > 0) {
+    for (const block of props.message.blocks) {
+      if (!isPlainBlock(block.type)) {
+        currentBlocks.push(block);
+        continue;
+      }
+
+      if (block.nodes && block.nodes.length > 0) {
+        const nodeGroups = splitMarkdownNodes(block.nodes);
+        if (nodeGroups.length > 1) {
+          nodeGroups.forEach((groupNodes, idx) => {
+            const newBlock: ContentBlock = {
+              ...block,
+              nodes: groupNodes,
+              hash: block.hash !== undefined ? `${block.hash}-split-${idx}` : undefined
+            };
+            currentBlocks.push(newBlock);
+            if (idx < nodeGroups.length - 1) {
+              pushCurrentGroup();
+            }
+          });
+        } else {
+          currentBlocks.push(block);
+        }
+      } else {
+        currentBlocks.push(block);
+      }
+    }
+  }
+
+  pushCurrentGroup();
+
+  // 如果处于流式状态且有 tailBlock，将其作为一个未拆分的整体追加到最后一个气泡中
+  if (isStreaming.value && props.message.tailBlock) {
+    if (list.length === 0) {
+      list.push({
+        id: `${props.message.id}-bubble-0`,
+        blocks: [props.message.tailBlock],
+        isTail: true
+      });
+    } else {
+      const lastBubble = list[list.length - 1];
+      lastBubble.blocks.push(props.message.tailBlock);
+      lastBubble.isTail = true;
+    }
+  }
+
+  // 兜底：如果 blocks 和 tailBlock 都为空，提供一个空的初始气泡
+  if (list.length === 0) {
+    list.push({
+      id: `${props.message.id}-bubble-0`,
+      blocks: []
+    });
+  }
+
+  return list;
+});
+
 // === Event Delegation ===
 const messageContentRef = ref<HTMLElement | null>(null);
 useMessageEvents(messageContentRef);
@@ -733,119 +843,122 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-longpress="showMessageContextMenu"
+  <div ref="messageContentRef" v-longpress="showMessageContextMenu"
     class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
     
-    <MessageHeader
-      v-if="shell"
-      :is-user="shell.isUser"
-      :display-name="shell.displayName"
-      :name-style="{ color: shell.avatarColor }"
-      :owner-type="shell.isUser ? 'user' : 'agent'"
-      :owner-id="shell.isUser ? 'user_avatar' : (message.agentId || agentId)"
-      :avatar-dominant-color="shell.avatarColor"
-    />
+    <template v-for="(bubble, bubbleIndex) in messageBubbles" :key="bubble.id">
+      <MessageHeader
+        v-if="shell"
+        :is-user="shell.isUser"
+        :display-name="shell.displayName"
+        :name-style="{ color: shell.avatarColor }"
+        :owner-type="shell.isUser ? 'user' : 'agent'"
+        :owner-id="shell.isUser ? 'user_avatar' : (message.agentId || agentId)"
+        :avatar-dominant-color="shell.avatarColor"
+      />
 
-    <ChatBubble 
-      v-if="shell"
-      :is-user="shell.isUser" 
-      :is-streaming="isStreaming" 
-      :bubble-style="{
-        '--dynamic-color': shell.avatarColor,
-      }"
-    >
-      <ThinkingIndicator v-if="isStreaming && (!message.blocks || message.blocks.length === 0)" />
+      <ChatBubble 
+        v-if="shell"
+        :is-user="shell.isUser" 
+        :is-streaming="Boolean(isStreaming && bubble.isTail)" 
+        :bubble-style="{
+          '--dynamic-color': shell.avatarColor,
+        }"
+        :class="bubbleIndex > 0 ? 'mt-2' : ''"
+      >
+        <ThinkingIndicator v-if="isStreaming && bubbleIndex === 0 && (!message.blocks || message.blocks.length === 0)" />
 
-      <div ref="messageContentRef" class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
-        <template v-if="message.blocks && message.blocks.length > 0">
-          <template v-for="(block, index) in message.blocks" :key="getBlockKey(block, index)">
-            <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
-            <div v-memo="[getBlockKey(block, index)]">
-              <div
-                v-if="isPlainBlock(block.type)"
-                v-html="renderBlockHtml(block)"
-              />
+        <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
+          <template v-if="bubble.blocks && bubble.blocks.length > 0">
+            <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index)">
+              <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
+              <div v-memo="[getBlockKey(block, index)]">
+                <div
+                  v-if="isPlainBlock(block.type)"
+                  v-html="renderBlockHtml(block)"
+                />
 
-              <ToolBlock
-                v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
-                :type="block.type"
-                :content="block.content"
-                :block="block"
-                :default-expanded="isMessageInActiveStream"
-              />
+                <ToolBlock
+                  v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
+                  :type="block.type"
+                  :content="block.content"
+                  :block="block"
+                  :default-expanded="isMessageInActiveStream"
+                />
 
-              <ThoughtBlock
-                v-else-if="block.type === 'thought'"
-                :block="block"
-                :message-id="message.id"
-                :default-expanded="isMessageInActiveStream"
-              />
+                <ThoughtBlock
+                  v-else-if="block.type === 'thought'"
+                  :block="block"
+                  :message-id="message.id"
+                  :default-expanded="isMessageInActiveStream"
+                />
 
-              <HtmlPreviewBlock
-                v-else-if="block.type === 'html-preview'"
-                :content="block.content || ''"
-                :highlighted-content="block.highlighted_content"
-                :message-id="message.id"
-                :is-streaming="isStreaming"
-                :is-active-stream="isMessageInActiveStream"
-              />
+                <HtmlPreviewBlock
+                  v-else-if="block.type === 'html-preview'"
+                  :content="block.content || ''"
+                  :highlighted-content="block.highlighted_content"
+                  :message-id="message.id"
+                  :is-streaming="isStreaming"
+                  :is-active-stream="isMessageInActiveStream"
+                />
 
-              <ToolSummaryBlock
-                v-else-if="block.type === 'tool-call-summary'"
-                :block="block"
-              />
+                <ToolSummaryBlock
+                  v-else-if="block.type === 'tool-call-summary'"
+                  :block="block"
+                />
+              </div>
+            </template>
+          </template>
+          <template v-else-if="bubbleIndex === 0 && message.content && (!isStreaming || !message.tailBlock)">
+            <div class="vcp-markdown-block select-text">
+              <p>{{ message.content }}</p>
             </div>
           </template>
-        </template>
-        <template v-else-if="message.content && (!isStreaming || !message.tailBlock)">
-          <div class="vcp-markdown-block select-text">
-            <p>{{ message.content }}</p>
-          </div>
-        </template>
-        
-        <!-- 流式尾部高画质推测渲染 (Speculative Rendering) -->
-        <div v-if="isStreaming && message.tailBlock" class="streaming-tail opacity-90">
-          <div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)">
+          
+          <!-- 流式尾部高画质推测渲染 (Speculative Rendering) -->
+          <div v-if="isStreaming && bubble.isTail && message.tailBlock" class="streaming-tail opacity-90">
+            <div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)">
+              <div
+                ref="tailSandboxRef"
+                class="vcp-markdown-block vcp-ast-sandbox"
+              />
+            </div>
             <div
-              ref="tailSandboxRef"
-              class="vcp-markdown-block vcp-ast-sandbox"
+              v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
+              ref="tailRootRef"
+              class="vcp-markdown-block"
             />
           </div>
-          <div
-            v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
-            ref="tailRootRef"
-            class="vcp-markdown-block"
-          />
+          <div v-else-if="isStreaming && bubble.isTail && message.tailContent && message.blocks && message.blocks.length > 0" class="opacity-70 italic animate-pulse">
+            {{ message.tailContent }}
+          </div>
         </div>
-        <div v-else-if="isStreaming && message.tailContent && message.blocks && message.blocks.length > 0" class="opacity-70 italic animate-pulse">
-          {{ message.tailContent }}
-        </div>
-      </div>
 
-      <AttachmentPreview 
-        v-if="message.attachments && message.attachments.length > 0" 
-        :attachments="message.attachments"
-        class="pt-3 border-t border-black/5 dark:border-white/5" 
-      />
+        <AttachmentPreview 
+          v-if="bubbleIndex === 0 && message.attachments && message.attachments.length > 0" 
+          :attachments="message.attachments"
+          class="pt-3 border-t border-black/5 dark:border-white/5" 
+        />
 
-      <StreamingTag v-if="isStreaming" />
+        <StreamingTag v-if="isStreaming && bubble.isTail" />
 
-      <template #footer>
-        <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
-          :class="shell.isUser ? 'text-right' : 'text-left'">
-          {{ formatTime(message.timestamp) }}
-        </div>
-      </template>
+        <template #footer>
+          <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
+            :class="shell.isUser ? 'text-right' : 'text-left'">
+            {{ formatTime(message.timestamp) }}
+          </div>
+        </template>
 
-      <!-- Mermaid FullScreen Viewer -->
-      <MermaidFullScreenViewer
-        :visible="isMermaidFullScreen"
-        :svg-html="activeMermaidSvg"
-        :source-code="activeMermaidSource"
-        @close="isMermaidFullScreen = false"
-      />
-    </ChatBubble>
+        <!-- Mermaid FullScreen Viewer -->
+        <MermaidFullScreenViewer
+          :visible="isMermaidFullScreen"
+          :svg-html="activeMermaidSvg"
+          :source-code="activeMermaidSource"
+          @close="isMermaidFullScreen = false"
+        />
+      </ChatBubble>
+    </template>
   </div>
 </template>
 
