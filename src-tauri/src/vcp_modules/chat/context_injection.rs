@@ -80,8 +80,9 @@ fn format_system_metadata(now_str: &str, created_at_str: Option<&str>, system_pr
     let mut metadata = format!(
         "<system_metadata>\n\
          - 当前系统时间: {}\n\
-         - 运行环境: VCP Mobile (Android 移动端)\n",
-        now_str
+         - 运行环境: VCPMobile v{} (Android 移动端)\n",
+        now_str,
+        env!("CARGO_PKG_VERSION")
     );
 
     if let Some(created_at) = created_at_str {
@@ -636,10 +637,10 @@ pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String>
         ),
         (
             "time_anchoring_v2",
-            "时间锚定机制 V2",
+            "消息时间线感知 V2",
             "time_anchoring_v2",
             0, // 默认关闭
-            "在大模型 Payload 消息前部动态注入分钟级时间戳元数据并隔离防火墙，防止模型对物理时间产生幻觉。",
+            "为上下文中每条消息注入伪系统发送时间戳，使大模型具备精确的时间线感知，防止其对物理时间产生幻觉。",
         )
     ];
 

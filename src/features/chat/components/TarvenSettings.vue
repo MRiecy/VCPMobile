@@ -296,12 +296,12 @@ watch(() => props.isOpen, (val) => {
               <SettingsSwitch v-model="enableSystemMetadata" class="shrink-0" />
             </div>
 
-            <!-- 时间锚定机制 V2 -->
+            <!-- 时间锚定机制 V2 (重命名为 消息时间线感知) -->
             <div class="flex items-center justify-between border-t border-black/5 dark:border-white/5 pt-3.5">
               <div class="flex flex-col min-w-0 pr-4">
-                <span class="text-[13px] font-bold text-[var(--primary-text)]">会话内时间锚定机制 V2</span>
+                <span class="text-[13px] font-bold text-[var(--primary-text)]">消息时间线感知</span>
                 <span class="text-[10.5px] text-[var(--secondary-text)] mt-0.5 leading-normal font-medium">
-                  为 Payload 每条消息动态注入分钟级时间戳，并建立物理 Token 隔离换行符，防止模型对物理时间产生幻觉。
+                  为上下文中每条消息注入发送时间戳，使大模型具备精确的时间线感知，防止其对物理时间产生幻觉。
                 </span>
               </div>
               <SettingsSwitch v-model="enableTimeAnchoring" class="shrink-0" />
