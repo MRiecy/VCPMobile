@@ -281,6 +281,7 @@ pub async fn internal_process_group_chat_message(
                     is_aborted,
                     finish_reason.clone(),
                     stream_channel.clone(),
+                    Some(agent_id.clone()),
                 )
                 .await?;
 

@@ -923,7 +923,6 @@ fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Val
     })
 }
 
-/// 统一的流式落盘与终结编排器
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_stream_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
@@ -936,6 +935,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     is_aborted: bool,
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
+    agent_id: Option<String>,
 ) -> Result<(), String> {
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
@@ -945,18 +945,33 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     }
 
     let is_group = owner_type == "group";
+
+    let final_agent_id = if is_group {
+        agent_id
+    } else {
+        Some(owner_id.to_string())
+    };
+
+    let mut agent_name = None;
+    if let Some(ref aid) = final_agent_id {
+        if let Ok(Some(row)) = sqlx::query("SELECT name FROM agents WHERE id = ?")
+            .bind(aid)
+            .fetch_optional(pool)
+            .await
+        {
+            use sqlx::Row;
+            agent_name = Some(row.get::<String, _>("name"));
+        }
+    }
+
     let final_msg = ChatMessage {
         id: message_id.clone(),
         role: "assistant".to_string(),
-        name: None,
+        name: agent_name,
         content: final_content,
         timestamp: final_ts,
         is_thinking: Some(false),
-        agent_id: if is_group {
-            None
-        } else {
-            Some(owner_id.to_string())
-        },
+        agent_id: final_agent_id,
         group_id: if is_group {
             Some(owner_id.to_string())
         } else {

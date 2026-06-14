@@ -181,6 +181,7 @@ pub async fn internal_process_agent_chat_message(
                     is_aborted,
                     finish_reason,
                     Some(stream_channel),
+                    Some(agent_id.clone()),
                 )
                 .await?;
             }

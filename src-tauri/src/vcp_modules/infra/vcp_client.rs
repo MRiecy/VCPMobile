@@ -233,6 +233,7 @@ pub async fn sendToVCP<R: Runtime>(
             is_aborted,
             finish_reason,
             Some(stream_channel),
+            agent_id.map(|s| s.to_string()),
         )
         .await?;
     }
