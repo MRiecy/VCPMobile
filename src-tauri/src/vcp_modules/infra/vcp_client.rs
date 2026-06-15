@@ -563,8 +563,28 @@ pub async fn perform_vcp_request<R: Runtime>(
         let mut aurora_buffer = AuroraBuffer::new();
         let mut pending_aurora_chunk = String::new();
         let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
-        const AURORA_PARSE_INTERVAL_MS: u128 = 33;
-        const AURORA_FORCE_PARSE_BYTES: usize = 1024;
+
+        // 自适应降帧：tail 越大，单帧 IPC 载荷越重（CodeBlock/RawHtml 走整节点 Replace，
+        // 每帧重发整块），故按 tail 字节数降低解析/推送频率，把每秒 IPC 载荷压到可控范围。
+        // 基准依据见 chat/ast_bench.rs：解析本身极廉价，瓶颈在 IPC 体量。
+        //   < 8KB   → 33ms  (30Hz，正常流式，无感)
+        //   8-24KB  → 100ms (10Hz，体感为模型"稍稳重"，渲染连续不留白)
+        //   ≥ 24KB  → 200ms (5Hz，超大块仍持续推进，仅更新略缓)
+        fn adaptive_parse_interval_ms(tail_len: usize) -> u128 {
+            match tail_len {
+                0..=8_191 => 33,
+                8_192..=24_575 => 100,
+                _ => 200,
+            }
+        }
+        // force-parse 字节阈值随档位放大，避免大 chunk 在降帧窗口内靠 byte 阈值反复击穿降帧
+        fn adaptive_force_bytes(tail_len: usize) -> usize {
+            match tail_len {
+                0..=8_191 => 1024,
+                8_192..=24_575 => 4096,
+                _ => 8192,
+            }
+        }
 
         // 辅助闭包：发送 Aurora 更新事件（稀疏序列化：只发送有变化的字段）
         let send_aurora_update = |buffer: &mut AuroraBuffer,
@@ -618,9 +638,11 @@ pub async fn perform_vcp_request<R: Runtime>(
             if pending_chunk.is_empty() {
                 return (false, false);
             }
+            // 以「当前已沉淀 tail 长度 + 待并入 chunk」估算下一帧 tail 体量，据此选择降帧档位
+            let projected_tail_len = buffer.tail_content.len() + pending_chunk.len();
             if !force
-                && last_parse.elapsed().as_millis() < AURORA_PARSE_INTERVAL_MS
-                && pending_chunk.len() < AURORA_FORCE_PARSE_BYTES
+                && last_parse.elapsed().as_millis() < adaptive_parse_interval_ms(projected_tail_len)
+                && pending_chunk.len() < adaptive_force_bytes(projected_tail_len)
             {
                 return (false, false);
             }

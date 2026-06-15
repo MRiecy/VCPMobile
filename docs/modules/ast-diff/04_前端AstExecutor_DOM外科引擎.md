@@ -130,18 +130,20 @@ function cleanupSubtreeRefs(prefix: string, registry: Map<string, Node>, include
 |-------------|----------|-----------|---------|
 | `paragraph` | `<p>` | `{id}.i{N}` | 遍历 children 递归 createInlineDom |
 | `heading` | `<h{n}>` (n=level) | `{id}.i{N}` | 同上 |
-| `code_block` | `<pre class="vcp-code-block vcp-scrollable">` | — | highlighted_html 去嵌套 + innerHTML 赋值 |
+| `code_block`（`lang="mermaid"`） | `<div class="mermaid-placeholder">` | — | textContent 赋值为源码（不渲染 `<pre>`） |
+| `code_block`（其他 lang） | `<pre class="vcp-code-block vcp-scrollable">` | — | highlighted_html 去嵌套 + innerHTML 赋值 |
 | `blockquote` | `<blockquote>` | `{id}.b{N}` | 递归 createDomFromNode |
 | `list` | `<ol>` 或 `<ul>` | `{id}.li{N}.b{M}` | 每个 item→`<li>`，内部递归 |
 | `table` | `<div>` > `<table>` > `<thead>` + `<tbody>` | `{id}.th{N}.i{M}` / `{id}.tr{N}.td{M}.i{K}` | 三级嵌套结构 |
 | `thematic_break` | `<hr>` | — | 无子节点 |
-| `mermaid` | `<div class="mermaid-placeholder">` | — | textContent 赋值为源码 |
 | `raw_html` | `<div class="vcp-raw-html-container">` | — | 经过 repairHtmlFragment 修复后 innerHTML |
 | 默认 | `<div>` | — | 兜底 |
 
+> Mermaid 没有独立的节点类型，是 `code_block` 内 `node.lang === "mermaid"` 的分支。
+
 ### 3.2 行内节点 → DOM 映射表
 
-定义于 `astExecutor.ts:325-451`：
+定义于 `astExecutor.ts` 的 `createInlineDom`：
 
 | AST 节点类型 | DOM 元素/节点 | 特殊处理 |
 |-------------|-------------|---------|
@@ -150,13 +152,11 @@ function cleanupSubtreeRefs(prefix: string, registry: Map<string, Node>, include
 | `emphasis` | `<em>` | 同上 |
 | `strikethrough` | `<del>` | 同上 |
 | `code` | `<code>` | textContent 赋值 |
-| `link` | `<a target="_blank" rel="noopener">` | `needs_asset_conversion` 时通过 `convertFileSrc` 转换 href |
+| `link` | `<a target="_blank" rel="noopener noreferrer">` | `needs_asset_conversion` 时通过 `convertFileSrc` 转换 href |
 | `image` | `<img loading="lazy" class="vcp-markdown-image">` | 同上 src 转换 |
-| `line_break` / `soft_break` | `<br>` | — |
+| `break` | `<br>` | 软/硬换行统一为 `break` |
 | `inline_math` | `<span class="vcp-math-inline/block no-swipe">` | `data-latex` 属性保存原始公式 |
-| `quoted_text` | `<span class="highlighted-quote">` | 递归 children |
-| `highlight_tag` | `<span class="highlighted-tag">` | textContent 赋值为 `#标签` |
-| `alert_tag` | `<span class="highlighted-alert-tag">` | textContent 赋值为 `!告警` |
+| `vcp_custom` | `<span class="vcp-custom-{kind}">` | 有 children 递归渲染；否则 textContent 赋为 `value`。`kind` 取 `quote`/`highlight`/`alert` |
 | `raw_html_inline` | `<span>` | 经过 repairHtmlFragment 修复后 innerHTML |
 
 ### 3.3 元素注册
@@ -233,6 +233,7 @@ flowchart TD
     Dispatch -->|"text"| Text["node.textContent = value"]
     Dispatch -->|"add"| Add["createDomFromNode → parent.appendChild"]
     Dispatch -->|"add_inline"| AddInline["createInlineDom → parent.appendChild"]
+    Dispatch -->|"add_list_item"| AddListItem["创建 &lt;li&gt; → 按 {id}.b{n} 注册块级子节点 → list.appendChild"]
     Dispatch -->|"prop"| Prop{"key === 'level' && tagName is H1-H6?"}
     Dispatch -->|"replace"| Replace["四级替换策略"]
     Dispatch -->|"replace_inline"| ReplaceInline["行内四级替换策略"]
@@ -297,7 +298,7 @@ flowchart TD
 
     TypeCheck -->|"code_block<br/>+ oldNode is PRE<br/>+ has highlighted_html"| StrategyA["🟢 策略 A: 原地 innerHTML 覆盖<br/>oldNode.innerHTML = highlighted_html<br/>保留 PRE 外壳元素"]
 
-    TypeCheck -->|"mermaid<br/>+ oldNode has class 'mermaid-placeholder'"| StrategyB["🟢 策略 B: 原地 textContent 覆盖<br/>oldNode.textContent = code<br/>保留 placeholder，后续异步渲染"]
+    TypeCheck -->|"code_block + lang='mermaid'<br/>+ oldNode has class 'mermaid-placeholder'"| StrategyB["🟢 策略 B: 原地 textContent 覆盖<br/>oldNode.textContent = code<br/>保留 placeholder，后续异步渲染"]
 
     TypeCheck -->|"raw_html / table<br/>+ oldNode is HTMLElement"| StrategyC["🟡 策略 C: morphdom 局部 DOM diff<br/>createDomFromNode → morphdom(oldNode, newDom)<br/>保留媒体/图片状态"]
 
@@ -325,8 +326,11 @@ if (nodeType === "code_block" && oldNode instanceof HTMLElement &&
 
 #### 策略 B：Mermaid 原地 textContent
 
+Mermaid 是 `lang === "mermaid"` 的 `code_block`（无独立节点类型）：
+
 ```typescript
-if (nodeType === "mermaid" && oldNode instanceof HTMLElement &&
+if (nodeType === "code_block" && mutation.node.lang === "mermaid" &&
+    oldNode instanceof HTMLElement &&
     oldNode.classList.contains("mermaid-placeholder")) {
     cleanupSubtreeRefs(mutation.id, registry, false);
     oldNode.textContent = mutation.node.code || "";
@@ -356,9 +360,7 @@ if ((nodeType === "raw_html" || nodeType === "table") && oldNode instanceof HTML
     });
 
     cleanupSubtreeRefs(mutation.id, registry, true);
-    for (const [k, v] of tempRegistry.entries()) {
-        registry.set(k, k === mutation.id ? oldNode : v);  // 根节点指向存活 DOM
-    }
+    registry.set(mutation.id, oldNode);  // 仅保留根 ID → 存活 DOM；子孙引用全部清空
     break;
 }
 ```
@@ -368,7 +370,9 @@ if ((nodeType === "raw_html" || nodeType === "table") && oldNode instanceof HTML
 - **表格滚动位置**：用户横向滚动的表格位置不被 innerHTML 重置
 - **最小化 DOM 操作**：morphdom 内部也只变更实际变化的节点
 
-> **根 ID 物理修正**（`registry.set(k, k === mutation.id ? oldNode : v)`）：在 morphdom 执行后，页面上的存活 DOM 是 `oldNode`，而非临时创建的 `newDom`。注册表必须将根 ID 映射回 `oldNode`，否则后续针对此节点的 mutations 将找不到目标。
+> **⚠️ 不可采用 tempRegistry 的子孙引用**（已修复的隐患）：morphdom 会把 `oldNode` 原地变形为 `newDom` 的结构，过程中复用部分旧节点、丢弃部分 `newDom` 临时节点。因此 `tempRegistry` 里记录的子孙节点引用可能指向已被丢弃的临时 DOM。
+> - **block 级 `raw_html` / `table`**：它们永远整体 Replace、绝不对子树做增量 child diff，所以**只保留根 ID（指向存活的 `oldNode`）、清空全部子孙引用**即可（`registry.set(mutation.id, oldNode)`）。
+> - **inline 容器节点**（`link`/`strong`/`emphasis`/`strikethrough`/`vcp_custom`）会被后续 `.i{N}` 子级 mutation 继续增量更新，必须**从 morphdom 后存活的真实 DOM 子树重建子孙 registry**（见 §5.5）。
 
 #### 策略 D：默认物理替换
 
@@ -386,17 +390,24 @@ parent.replaceChild(newDom, oldNode);
 
 ### 5.5 ReplaceInline —— 行内节点四级替换策略
 
-行内替换同样采用分级策略（`astExecutor.ts:671-755`）：
+行内替换同样采用分级策略（`astExecutor.ts` 的 `replace_inline` case）：
 
 | 策略 | 节点类型 | 操作 |
 |:----:|---------|------|
 | **A** | `text`（TextNode） | `oldNode.textContent = value` |
 | **A** | `code`（`<code>`） | `oldNode.textContent = value` |
 | **A** | `inline_math` | `oldNode.setAttribute("data-latex", ...)` + `textContent` |
-| **A** | `highlight_tag` / `alert_tag` | `oldNode.textContent = value` |
+| **A** | `vcp_custom`（无 children，即 `highlight`/`alert` 叶子型） | `oldNode.textContent = value` |
 | **B** | `image`（`<img>`） | 原地更新 `src`/`alt`/`title` 属性 |
-| **C** | `link`, `quoted_text`, `strong`, `emphasis`, `strikethrough`, `raw_html_inline` | morphdom 局部 DOM diff |
+| **C** | `link`, `vcp_custom`(含 children，如 `quote`)、`strong`, `emphasis`, `strikethrough`, `raw_html_inline` | morphdom 局部 DOM diff |
 | **D** | 其他 | `createInlineDom → parent.replaceChild` |
+
+> **策略 C 的 registry 子孙重建**（已修复隐患）：`link`/`strong`/`emphasis`/`strikethrough`/`vcp_custom` 会被后续 `.i{N}` 子级 mutation 继续更新，故 morphdom 后必须重建子孙 registry，否则后续子级 mutation 会命中被 morphdom 丢弃的临时节点而**静默失败**。做法：
+> 1. **morphdom 之前**，先记录 `tempRegistry` 中每个子孙 id 相对 `newDom` 的 `childNodes` 索引路径（必须在变形前算，因变形会移走/丢弃 `newDom` 子节点）。
+> 2. morphdom 执行（保证 `oldNode` 变形后结构与 `newDom` 一致）。
+> 3. **morphdom 之后**，根 ID 指向存活的 `oldNode`；对每个子孙 id，沿其索引路径从 `oldNode` 子树下行取回真实存活节点写回 registry。
+>
+> `raw_html_inline` 无 AST children，直接只保留根、清空子孙（无需路径重建）。
 
 ### 5.6 Remove —— 安全删除
 
@@ -445,39 +456,41 @@ Chunk N+1: 'div>...</div>'
 
 如果直接将这个残缺 HTML 赋值给 `innerHTML`，部分 WebView 的解析器会因无法定位标签边界而**直接丢弃整个内容**。
 
-### 6.2 修复策略
+### 6.2 修复策略（已修正语义）
+
+> **⚠️ 修正历史**：旧实现对**整串**统计引号奇偶并补全，会把正文文本里合法出现的奇数个引号误补一个尾引号。新实现把引号判定**严格限定在「最后一个未闭合标签片段」内部**，正文引号永不受影响。
 
 ```typescript
-// astExecutor.ts:138-166
 function repairHtmlFragment(html: string): string {
     if (!html) return "";
-    let repaired = html;
 
-    // 1. 截断未闭合的标签开头 "<div class="
-    const lastOpenAngle = repaired.lastIndexOf("<");
-    const lastCloseAngle = repaired.lastIndexOf(">");
-    if (lastOpenAngle > lastCloseAngle) {
-        repaired = repaired.substring(0, lastOpenAngle);  // 切除损坏的标签
-    }
+    // 仅当最后一个 '<' 之后再无 '>'，才存在未闭合标签断口；否则原样返回（不再碰正文引号）
+    const lastOpenAngle = html.lastIndexOf("<");
+    const lastCloseAngle = html.lastIndexOf(">");
+    if (lastOpenAngle <= lastCloseAngle) return html;
 
-    // 2. 补全未闭合的引号
-    let doubleQuotes = 0, singleQuotes = 0;
-    for (let i = 0; i < repaired.length; i++) {
-        if (char === '"' && noEscape) doubleQuotes++;
-        if (char === "'" && noEscape) singleQuotes++;
-    }
-    if (doubleQuotes % 2 !== 0) repaired += '"';
-    if (singleQuotes % 2 !== 0) repaired += "'";
+    const head = html.slice(0, lastOpenAngle);
+    const fragment = html.slice(lastOpenAngle);
 
-    return repaired;
+    // 非真实标签起始（正文里的孤立 '<'）：丢弃该断口片段
+    if (!/^<\/?[a-zA-Z]/.test(fragment)) return head;
+
+    // 仅在该未闭合标签片段内部判断属性引号是否成对（忽略转义引号）
+    // ...统计 fragment 内的 " 与 ' ...
+    const quotesBalanced = /* 双/单引号均成对 */;
+
+    // 引号成对（属性已完整，仅缺 '>'）→ 补 '>' 当帧即可渲染（长 HTML 容器尽早显示）
+    // 引号失衡（卡在属性值中途，如 '<img src="http://foo'）→ 丢弃整个未闭合标签，下一帧补全
+    return quotesBalanced ? `${html}>` : head;
 }
 ```
 
-两步修复：
-1. **切除损坏标签**：如果最后一个 `<` 在最后一个 `>` 之后 → 切断从 `<` 开始的部分
-2. **平衡引号**：如果双引号/单引号数量为奇数 → 补全一个闭合引号
+核心语义：
+1. **作用域收敛**：只检查最后一个未闭合标签片段（`lastIndexOf("<")` 之后无 `>`），绝不再扫描整串。
+2. **成对则补 `>`**：属性引号成对说明标签结构完整、仅缺收尾，补 `>` 让它当帧渲染，体感上长 HTML 容器更早可见。
+3. **失衡则截断**：引号失衡（正卡在某个属性值中途）无法安全补全，丢弃该未闭合标签，待下一帧 chunk 完整后渲染。
 
-> 这是一种**有损修复**（截断了部分文本），但比 WebView 直接丢弃整个内容要好得多。被截断的内容在下一帧会随新的 SSE chunk 得到完整渲染。
+> 这是一种**有损修复**（截断了最后一个不完整标签），但比 WebView 直接丢弃整个内容要好得多。被截断的内容在下一帧会随新的 SSE chunk 得到完整渲染，且永不污染前文正文。
 
 ---
 

@@ -16,6 +16,14 @@ pub enum AstMutation {
         parent: String,
         node: InlineNode,
     },
+    /// 新增一个列表项（<li>）。列表项是「多个块级节点」的集合，无法用 Add 的单一 MarkdownNode 表达，
+    /// 故单列一个变体。id 为 <li> 的路径 ID（如 "t3.li5"），parent 为列表 <ul>/<ol> 的 ID（如 "t3"）。
+    #[serde(rename = "add_list_item")]
+    AddListItem {
+        id: String,
+        parent: String,
+        children: Vec<MarkdownNode>,
+    },
     #[serde(rename = "text")]
     UpdateText { id: String, value: String },
     #[serde(rename = "append")]
@@ -176,12 +184,14 @@ fn diff_single_markdown_node(
             },
         ) => {
             if old_ordered != new_ordered {
+                // 有序/无序切换会改变标签名（ul<->ol），无法原地修改，只能整体 Replace
                 mutations.push(AstMutation::Replace {
                     id: node_id.to_string(),
                     node: new_node.clone(),
                 });
             } else {
                 let common_len = old_items.len().min(new_items.len());
+                // 1. 公共项：逐项递归 diff（item 内块级子节点 parent 为该 <li>）
                 for i in 0..common_len {
                     let item_prefix = format!("{}.li{}", node_id, i);
                     diff_markdown_nodes(
@@ -192,16 +202,23 @@ fn diff_single_markdown_node(
                         mutations,
                     );
                 }
-
-                if old_items.len() != new_items.len() {
-                    mutations.push(AstMutation::Replace {
-                        id: node_id.to_string(),
-                        node: new_node.clone(),
+                // 2. 新增的尾部列表项：item 级别增量 Add（挂到 <ul>/<ol> 下），不再整表重建
+                for i in common_len..new_items.len() {
+                    mutations.push(AstMutation::AddListItem {
+                        id: format!("{}.li{}", node_id, i),
+                        parent: node_id.to_string(),
+                        children: new_items[i].clone(),
+                    });
+                }
+                // 3. 删除的尾部列表项：直接 Remove 对应 <li>
+                for i in new_items.len()..old_items.len() {
+                    mutations.push(AstMutation::Remove {
+                        id: format!("{}.li{}", node_id, i),
                     });
                 }
             }
         }
-        // Table, RawHtml, MermaidPlaceholder, CodeBlock, ThematicBreak 变化时直接 Replace 整个节点
+        // Table, RawHtml, CodeBlock, ThematicBreak 变化时直接 Replace 整个节点
         _ => {
             mutations.push(AstMutation::Replace {
                 id: node_id.to_string(),
@@ -334,22 +351,44 @@ fn diff_single_inline_node(
             }
         }
         (
-            InlineNode::QuotedText {
+            InlineNode::VcpCustom {
+                kind: old_kind,
+                value: old_value,
                 children: old_children,
                 ..
             },
-            InlineNode::QuotedText {
+            InlineNode::VcpCustom {
+                kind: new_kind,
+                value: new_value,
                 children: new_children,
                 ..
             },
         ) => {
-            diff_inline_nodes(
-                old_children,
-                new_children,
-                node_id,
-                &format!("{}.i", node_id),
-                mutations,
-            );
+            if old_kind != new_kind || old_value != new_value {
+                mutations.push(AstMutation::ReplaceInline {
+                    id: node_id.to_string(),
+                    node: new_node.clone(),
+                });
+            } else {
+                match (old_children, new_children) {
+                    (Some(oc), Some(nc)) => {
+                        diff_inline_nodes(
+                            oc,
+                            nc,
+                            node_id,
+                            &format!("{}.i", node_id),
+                            mutations,
+                        );
+                    }
+                    (None, None) => {}
+                    _ => {
+                        mutations.push(AstMutation::ReplaceInline {
+                            id: node_id.to_string(),
+                            node: new_node.clone(),
+                        });
+                    }
+                }
+            }
         }
         (
             InlineNode::Strikethrough {
@@ -369,6 +408,17 @@ fn diff_single_inline_node(
                 mutations,
             );
         }
+        // 行内代码（无 hash）：按值比较，值变才更新，避免每帧无谓 ReplaceInline
+        (InlineNode::Code { value: old_val }, InlineNode::Code { value: new_val }) => {
+            if old_val != new_val {
+                mutations.push(AstMutation::ReplaceInline {
+                    id: node_id.to_string(),
+                    node: new_node.clone(),
+                });
+            }
+        }
+        // 硬/软换行：同类型即等价，无字段，直接 no-op，杜绝每帧销毁重建 <br>
+        (InlineNode::Break, InlineNode::Break) => {}
         _ => {
             mutations.push(AstMutation::ReplaceInline {
                 id: node_id.to_string(),
@@ -464,6 +514,91 @@ mod tests {
             }
             _ => panic!("Expected Add mutation"),
         }
+    }
+
+    // #4：列表新增项走 item 级别增量 AddListItem，而非整表 Replace
+    #[test]
+    fn test_diff_list_add_item_incremental() {
+        let mk_item = |s: &str| vec![MarkdownNode::paragraph(vec![InlineNode::text(s.to_string())])];
+
+        let mut old = vec![MarkdownNode::list(false, vec![mk_item("A"), mk_item("B")])];
+        let mut new = vec![MarkdownNode::list(
+            false,
+            vec![mk_item("A"), mk_item("B"), mk_item("C")],
+        )];
+        old[0].compute_hashes_recursively();
+        new[0].compute_hashes_recursively();
+
+        let mutations = diff_ast(&old, &new, "t");
+        // 期望恰好一条 AddListItem（li2 挂到 t0 下），绝不出现整表 Replace
+        assert_eq!(mutations.len(), 1, "got: {:?}", mutations);
+        match &mutations[0] {
+            AstMutation::AddListItem {
+                id,
+                parent,
+                children,
+            } => {
+                assert_eq!(id, "t0.li2");
+                assert_eq!(parent, "t0");
+                assert_eq!(children.len(), 1);
+            }
+            other => panic!("Expected AddListItem, got {:?}", other),
+        }
+    }
+
+    // #4：列表删尾项走 Remove，不整表重建
+    #[test]
+    fn test_diff_list_remove_item_incremental() {
+        let mk_item = |s: &str| vec![MarkdownNode::paragraph(vec![InlineNode::text(s.to_string())])];
+        let mut old = vec![MarkdownNode::list(
+            true,
+            vec![mk_item("A"), mk_item("B"), mk_item("C")],
+        )];
+        let mut new = vec![MarkdownNode::list(true, vec![mk_item("A"), mk_item("B")])];
+        old[0].compute_hashes_recursively();
+        new[0].compute_hashes_recursively();
+
+        let mutations = diff_ast(&old, &new, "t");
+        assert_eq!(mutations.len(), 1, "got: {:?}", mutations);
+        match &mutations[0] {
+            AstMutation::Remove { id } => assert_eq!(id, "t0.li2"),
+            other => panic!("Expected Remove t0.li2, got {:?}", other),
+        }
+    }
+
+    // #5：行内 Code 值不变时零 mutation；Break 同类型零 mutation（杜绝每帧重建 <br>）
+    #[test]
+    fn test_diff_inline_code_and_break_no_churn() {
+        let mut old = vec![MarkdownNode::paragraph(vec![
+            InlineNode::code("x".to_string()),
+            InlineNode::r#break(),
+        ])];
+        let mut new = vec![MarkdownNode::paragraph(vec![
+            InlineNode::code("x".to_string()),
+            InlineNode::r#break(),
+        ])];
+        old[0].compute_hashes_recursively();
+        new[0].compute_hashes_recursively();
+
+        let mutations = diff_ast(&old, &new, "t");
+        assert!(
+            mutations.is_empty(),
+            "unchanged code+break should produce zero mutations, got: {:?}",
+            mutations
+        );
+
+        // Code 值变化时才发 ReplaceInline
+        let mut new2 = vec![MarkdownNode::paragraph(vec![
+            InlineNode::code("y".to_string()),
+            InlineNode::r#break(),
+        ])];
+        new2[0].compute_hashes_recursively();
+        let mutations2 = diff_ast(&old, &new2, "t");
+        assert_eq!(mutations2.len(), 1, "got: {:?}", mutations2);
+        assert!(matches!(
+            &mutations2[0],
+            AstMutation::ReplaceInline { id, .. } if id == "t0.i0"
+        ));
     }
 
     #[test]

@@ -64,6 +64,9 @@ function renderNode(node: MarkdownNode, messageId: string): string {
       return `<h${level}>${(node.children || []).map(renderInline).join('')}</h${level}>`;
     
     case 'code_block': {
+      if (node.lang === 'mermaid') {
+        return `<div class="mermaid-placeholder">${escapeHtml(node.code || '')}</div>`;
+      }
       let html = node.highlighted_html;
       if (html) {
         // 兼容旧 AST：如果 highlighted_html 是 <pre><code> 包裹内层 <pre> 的嵌套结构，提取单层
@@ -100,8 +103,7 @@ function renderNode(node: MarkdownNode, messageId: string): string {
     case 'thematic_break':
       return '<hr/>';
     
-    case 'mermaid':
-      return `<div class="mermaid-placeholder">${escapeHtml(node.code || '')}</div>`;
+
     
     case 'raw_html':
       return node.content || '';
@@ -142,10 +144,7 @@ function renderInline(node: InlineNode): string {
       return `<img src="${src}" alt="${escapeHtml(node.alt || '')}" title="${escapeHtml(node.title || '')}" loading="lazy" class="vcp-markdown-image" />`;
     }
     
-    case 'line_break':
-      return '<br/>';
-    
-    case 'soft_break':
+    case 'break':
       return '<br/>';
     
     case 'inline_math': {
@@ -155,15 +154,14 @@ function renderInline(node: InlineNode): string {
       return `<${tag} class="${cls}" data-latex="${escapeHtml(node.content || '')}">${escapeHtml(node.content || '')}</${tag}>`;
     }
     
-    case 'quoted_text':
-      const innerQuote = (node.children || []).map(renderInline).join('');
-      return `<span class="highlighted-quote">${innerQuote}</span>`;
-    
-    case 'highlight_tag':
-      return `<span class="highlighted-tag">${escapeHtml(node.value || '')}</span>`;
-    
-    case 'alert_tag':
-      return `<span class="highlighted-alert-tag">${escapeHtml(node.value || '')}</span>`;
+    case 'vcp_custom': {
+      const cls = `vcp-custom-${node.kind}`;
+      if (node.children && node.children.length > 0) {
+        const innerContent = (node.children || []).map(renderInline).join('');
+        return `<span class="${cls}">${innerContent}</span>`;
+      }
+      return `<span class="${cls}">${escapeHtml(node.value || '')}</span>`;
+    }
     
     case 'raw_html_inline':
       return node.content || '';

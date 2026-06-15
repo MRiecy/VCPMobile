@@ -13,7 +13,7 @@ last_updated: 2026-06-14
 
 ### 1.1 模块定位
 
-AstMutation 指令集是 Rust 后端与 Vue 3 前端之间的**通用协议（Contract / Wire Protocol）**。它定义了 8 种最小粒度的 DOM 操作指令，Rust 侧通过 `diff_ast()` 产生，前端通过 `astExecutor.ts` 执行。
+AstMutation 指令集是 Rust 后端与 Vue 3 前端之间的**通用协议（Contract / Wire Protocol）**。它定义了 9 种最小粒度的 DOM 操作指令，Rust 侧通过 `diff_ast()` 产生，前端通过 `astExecutor.ts` 执行。
 
 这套协议的三大设计目标：
 
@@ -52,7 +52,7 @@ sequenceDiagram
 
 ---
 
-## 2. AstMutation —— 8 种突变指令
+## 2. AstMutation —— 9 种突变指令
 
 ### 2.1 指令总览
 
@@ -62,14 +62,15 @@ sequenceDiagram
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "op")]
 pub enum AstMutation {
-    Add { id, parent, node: MarkdownNode },
-    AddInline { id, parent, node: InlineNode },
-    UpdateText { id, value: String },
-    AppendText { id, chunk: String },
-    UpdateProp { id, key, value: String },
-    Replace { id, node: MarkdownNode },
-    ReplaceInline { id, node: InlineNode },
-    Remove { id },
+    Add { id, parent, node: MarkdownNode },                    // op="add"
+    AddInline { id, parent, node: InlineNode },                // op="add_inline"
+    AddListItem { id, parent, children: Vec<MarkdownNode> },   // op="add_list_item"
+    UpdateText { id, value: String },                          // op="text"
+    AppendText { id, chunk: String },                          // op="append"
+    UpdateProp { id, key, value: String },                     // op="prop"
+    Replace { id, node: MarkdownNode },                        // op="replace"
+    ReplaceInline { id, node: InlineNode },                    // op="replace_inline"
+    Remove { id },                                             // op="remove"
 }
 ```
 
@@ -79,6 +80,7 @@ TypeScript 镜像（`chat.ts:126-134`）：
 export type AstMutation =
   | { op: "add"; id: string; parent: string; node: MarkdownNode }
   | { op: "add_inline"; id: string; parent: string; node: InlineNode }
+  | { op: "add_list_item"; id: string; parent: string; children: MarkdownNode[] }
   | { op: "text"; id: string; value: string }
   | { op: "append"; id: string; chunk: string }
   | { op: "prop"; id: string; key: string; value: string }
@@ -139,6 +141,22 @@ AddInline { id: String, parent: String, node: InlineNode }
 | 前端执行 | `createDomFromNode(node, id, registry)` → `parentNode.appendChild(dom)` |
 | CSS 动画 | 新增元素自动添加 `vcp-stream-element-fade-in` 类 |
 
+### 2.4b AddListItem —— 新增列表项
+
+```rust
+AddListItem { id: String, parent: String, children: Vec<MarkdownNode> }
+```
+
+| 属性 | 值 |
+|------|-----|
+| 语义 | 新增一个列表项 (`<li>`)。列表项是「多个块级节点」的集合（`Vec<MarkdownNode>`），无法用 Add 的单一 `MarkdownNode` 表达，故单列一个变体 |
+| `id` 取值 | `<li>` 路径 ID（如 `"t3.li5"`） |
+| `parent` 取值 | 列表 `<ul>`/`<ol>` 的 ID（如 `"t3"`） |
+| 触发条件 | 流式列表新增尾部项时（见 02 文档的 List diff）。删除列表项则复用通用 `Remove { id: "t3.li5" }` |
+| 前端执行 | `astExecutor.ts` 的 `"add_list_item"` case：在存活的 `<ul>`/`<ol>` 下创建 `<li>`，按 `{id}.b{n}` 注册其块级子节点，追加到列表末尾 |
+
+> **取代旧行为**：这取代了过去「列表项数量变化就整体 Replace 整个 list」的低效行为（O(n²) 重建）。现在新增尾部项只产生一条 AddListItem，已有列表项的 DOM 与 registry 完全保留。
+
 ### 2.5 Replace / ReplaceInline —— 节点替换
 
 ```rust
@@ -161,6 +179,8 @@ Replace 节点类型?
   ├─ raw_html / table → 策略 C: morphdom 局部 DOM diff（保留媒体状态）
   └─ default   → 策略 D: createDomFromNode + replaceChild
 ```
+
+> **策略 C 的 registry 一致性**：块级 `raw_html`/`table` 始终是「整节点全替换」，从不做子节点级 diff。因此 morphdom 执行后，注册表只保留**根 ID**（映射回页面上存活的 `oldNode`，而非被 morphdom 丢弃的临时 `newDom`），其余后代条目一律清除。后代条目不可从临时 registry 的后代节点取用——那些节点可能已被 morphdom 抛弃。行内容器（link/strong/emphasis 等）的 registry 重建规则更复杂（需在 morphdom 前后对路径求值），详见 04 文档 §5。
 
 ### 2.6 Remove —— 节点删除
 

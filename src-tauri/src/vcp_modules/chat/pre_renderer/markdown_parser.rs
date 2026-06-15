@@ -13,7 +13,7 @@ lazy_static! {
     static ref MATH_RE: Regex = Regex::new(r"(?s)\\\[(?P<display>.*?)\\\]|\\\((?P<inline>.*?)\\\)").unwrap();
 
     static ref MAGIC_RE: Regex =
-        Regex::new(r##"(?s)(["“”](?:[^"“”]|\\.)+?["“”])|(@![^\s@!]+)|(@[^\s@]+)"##).unwrap();
+        Regex::new(r##"(?s)(["“”](?:[^"“”\r\n]|\\.)+?["“”])|(@![^\s@!]+)|(@[^\s@]+)"##).unwrap();
 
     static ref HTML_CONTAINER_PLACEHOLDER_RE: Regex =
         Regex::new(r"<!--VCP_HTML_CONTAINER:(\d+)-->").unwrap();
@@ -24,8 +24,54 @@ lazy_static! {
 
     static ref COMMENT_RE: Regex = Regex::new(r"(?s)<!--[\s\S]*?(?:-->|$)").unwrap();
 
-    static ref PLACEHOLDER_RE: Regex =
-        Regex::new(r"VcpMagic(?:Quote|Alert|Tag)X(\d+)X").unwrap();
+    // 仅在 字母/数字 + ** + 标点 的模式下注入零宽空格，修复 CommonMark left-flanking 判定失效。
+    // 前驱限定为 [\p{L}\p{N}] 确保不会误触发闭合符号（闭合 ** 前驱通常是标点或 \u{200B}）。
+    static ref FLANKING_FIX_LEFT: Regex =
+        Regex::new(r"([\p{L}\p{N}])(\*\*|\*)([[\p{P}]&&[^*_]])").unwrap();
+
+    // 匹配行首 ≥4 空格/Tab 缩进后紧跟 $$ 的模式（块级公式被误判为缩进代码块的根因）
+    static ref INDENTED_DOLLAR_RE: Regex =
+        Regex::new(r"(?m)^[ \t]{4,}(\$\$)").unwrap();
+}
+
+fn fix_flanking_delimiters(text: &str) -> String {
+    if !text.contains('*') {
+        return text.to_string();
+    }
+    FLANKING_FIX_LEFT.replace_all(text, "${1}${2}\u{200B}${3}").into_owned()
+}
+
+/// 剥除块级 $$ 公式行的多余前导缩进，防止 pulldown-cmark 将其误判为缩进代码块。
+/// CommonMark 规则：≥4 空格缩进 = 缩进代码块，优先级高于 math 扩展的行内识别。
+/// 此函数在代码围栏内部保持原样，只处理围栏外的文本。
+fn strip_display_math_indent(text: &str) -> Cow<'_, str> {
+    if !text.contains("$$") {
+        return Cow::Borrowed(text);
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut last_end = 0;
+    let mut in_fence = false;
+
+    for m in FENCE_RE.find_iter(text) {
+        let segment = &text[last_end..m.start()];
+        if !in_fence {
+            result.push_str(INDENTED_DOLLAR_RE.replace_all(segment, "$1").as_ref());
+        } else {
+            result.push_str(segment);
+        }
+        result.push_str(m.as_str());
+        last_end = m.end();
+        in_fence = !in_fence;
+    }
+
+    let tail = &text[last_end..];
+    if !in_fence {
+        result.push_str(INDENTED_DOLLAR_RE.replace_all(tail, "$1").as_ref());
+    } else {
+        result.push_str(tail);
+    }
+
+    Cow::Owned(result)
 }
 
 fn preprocess_latex_math(text: &str) -> Cow<'_, str> {
@@ -382,11 +428,10 @@ fn parse_markdown_to_ast_opt(text: &str, is_streaming: bool) -> Vec<MarkdownNode
 }
 
 fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNode> {
-    let text = preprocess_latex_math(text);
+    let text_fixed = fix_flanking_delimiters(text);
+    let text = preprocess_latex_math(&text_fixed);
+    let text = strip_display_math_indent(text.as_ref());
     let (text, containers) = extract_html_containers(text.as_ref());
-
-    // 提取 VCP Magic 占位符以规避标点与字母交界处的 flanking 判定失效问题，并同步返回 magic_raws 原始串
-    let (text, magic_nodes, magic_raws) = extract_vcp_magic(text.as_ref());
 
     let mut nodes = Vec::new();
     let parser = Parser::new_ext(
@@ -395,23 +440,35 @@ fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNod
     );
 
     let mut stack: Vec<PartialNode> = Vec::new();
+    let mut accumulated_text = String::new();
+
+    let flush_accumulated_text = |accumulated: &mut String, stack: &mut Vec<PartialNode>, nodes: &mut Vec<MarkdownNode>| {
+        if !accumulated.is_empty() {
+            let inline_nodes = if matches!(stack.last(), Some(PartialNode::CodeBlock { .. })) {
+                vec![InlineNode::text(accumulated.clone())]
+            } else {
+                process_text_magic(accumulated)
+            };
+            if let Some(top) = stack.last_mut() {
+                top.push_inlines(inline_nodes);
+            } else {
+                nodes.push(MarkdownNode::paragraph(inline_nodes));
+            }
+            accumulated.clear();
+        }
+    };
 
     for event in parser {
+        if let Event::Text(text) = event {
+            accumulated_text.push_str(&text);
+            continue;
+        }
+
+        flush_accumulated_text(&mut accumulated_text, &mut stack, &mut nodes);
+
         match event {
             Event::Start(tag) => {
                 stack.push(PartialNode::from_tag(tag));
-            }
-            Event::Text(text) => {
-                let inline_nodes = if matches!(stack.last(), Some(PartialNode::CodeBlock { .. })) {
-                    vec![InlineNode::text(text.to_string())]
-                } else {
-                    process_text_magic(&text)
-                };
-                if let Some(top) = stack.last_mut() {
-                    top.push_inlines(inline_nodes);
-                } else {
-                    nodes.push(MarkdownNode::paragraph(inline_nodes));
-                }
             }
             Event::Code(code) => {
                 if let Some(top) = stack.last_mut() {
@@ -542,14 +599,9 @@ fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNod
                     top.push_inline(InlineNode::raw_html_inline(html.to_string()));
                 }
             }
-            Event::SoftBreak => {
+            Event::SoftBreak | Event::HardBreak => {
                 if let Some(top) = stack.last_mut() {
-                    top.push_inline(InlineNode::soft_break());
-                }
-            }
-            Event::HardBreak => {
-                if let Some(top) = stack.last_mut() {
-                    top.push_inline(InlineNode::line_break());
+                    top.push_inline(InlineNode::r#break());
                 }
             }
             Event::Rule => {
@@ -559,11 +611,10 @@ fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNod
         }
     }
 
+    flush_accumulated_text(&mut accumulated_text, &mut stack, &mut nodes);
+
     // 后处理：将 HTML 容器占位符替换为实际的开标签 + 解析后的子节点 + 闭标签
     replace_container_placeholders(&mut nodes, &containers);
-
-    // 后处理：还原 VCP Magic 占位符为真正的内联节点（包含对 RawHtml 节点的原始串级还原）
-    restore_markdown_nodes(&mut nodes, &magic_nodes, &magic_raws);
 
     // 计算全量 AST 节点的稳定哈希指纹
     for node in &mut nodes {
@@ -817,23 +868,21 @@ impl PartialNode {
             PartialNode::Heading { level, children } => MarkdownNode::heading(level, children),
             PartialNode::CodeBlock { lang, code } => {
                 let lang_str = lang.as_deref().unwrap_or("plaintext");
-                if lang_str == "mermaid" {
-                    MarkdownNode::mermaid(code)
+                let highlighted = if lang_str == "mermaid" {
+                    None
+                } else if is_streaming && code.len() > 4096 {
+                    None
                 } else {
-                    let highlighted = if is_streaming && code.len() > 4096 {
-                        None
-                    } else {
-                        highlight_code_block(&code, lang_str)
-                    };
-                    let mut node = MarkdownNode::code_block(lang, code);
-                    if let MarkdownNode::CodeBlock {
-                        highlighted_html, ..
-                    } = &mut node
-                    {
-                        *highlighted_html = highlighted;
-                    }
-                    node
+                    highlight_code_block(&code, lang_str)
+                };
+                let mut node = MarkdownNode::code_block(lang, code);
+                if let MarkdownNode::CodeBlock {
+                    highlighted_html, ..
+                } = &mut node
+                {
+                    *highlighted_html = highlighted;
                 }
+                node
             }
             PartialNode::Blockquote { children } => MarkdownNode::blockquote(children),
             PartialNode::List { ordered, items } => MarkdownNode::list(ordered, items),
@@ -888,404 +937,39 @@ impl PartialNode {
 }
 
 fn process_text_magic(text: &str) -> Vec<InlineNode> {
-    // 既然已经在解析前进行了占位符提取，这里就可以直接作为普通 text 返回，不需要进行正则解析了
-    vec![InlineNode::text(text.to_string())]
-}
-
-/// 轻量级 inline-only 解析器：只处理标准 Markdown 内联语法（strong/emphasis/strikethrough/code/link/image/math），
-/// 不解析 VCP Magic 引号，避免 process_vcp_magic 的无限递归。
-fn parse_inline_standard(text: &str) -> Vec<InlineNode> {
-    let wrapped = format!("{}\n", text);
-    let parser = Parser::new_ext(
-        &wrapped,
-        Options::ENABLE_MATH | Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH,
-    );
+    if !text.contains('@') && !text.contains('"') && !text.contains('“') && !text.contains('”') {
+        return vec![InlineNode::text(text.to_string())];
+    }
 
     let mut nodes = Vec::new();
-    let mut in_paragraph = false;
-    let mut stack: Vec<PartialInlineNode> = Vec::new();
+    let mut last_end = 0;
 
-    for event in parser {
-        match event {
-            Event::Start(Tag::Paragraph) => in_paragraph = true,
-            Event::End(TagEnd::Paragraph) => in_paragraph = false,
-            Event::Text(t) if in_paragraph || !stack.is_empty() => {
-                let node = InlineNode::text(t.to_string());
-                push_inline_to_context(&mut stack, &mut nodes, node);
-            }
-            Event::Code(code) => {
-                let node = InlineNode::code(code.to_string());
-                push_inline_to_context(&mut stack, &mut nodes, node);
-            }
-            Event::InlineMath(math) => {
-                let node = InlineNode::inline_math(math.to_string(), false);
-                push_inline_to_context(&mut stack, &mut nodes, node);
-            }
-            Event::DisplayMath(math) => {
-                let node = InlineNode::inline_math(math.to_string(), true);
-                push_inline_to_context(&mut stack, &mut nodes, node);
-            }
-            Event::Start(Tag::Strong) => stack.push(PartialInlineNode::Strong { children: vec![] }),
-            Event::End(TagEnd::Strong) => {
-                if let Some(PartialInlineNode::Strong { children }) = stack.pop() {
-                    let node = InlineNode::strong(children);
-                    push_inline_to_context(&mut stack, &mut nodes, node);
-                }
-            }
-            Event::Start(Tag::Emphasis) => {
-                stack.push(PartialInlineNode::Emphasis { children: vec![] })
-            }
-            Event::End(TagEnd::Emphasis) => {
-                if let Some(PartialInlineNode::Emphasis { children }) = stack.pop() {
-                    let node = InlineNode::emphasis(children);
-                    push_inline_to_context(&mut stack, &mut nodes, node);
-                }
-            }
-            Event::Start(Tag::Strikethrough) => {
-                stack.push(PartialInlineNode::Strikethrough { children: vec![] })
-            }
-            Event::End(TagEnd::Strikethrough) => {
-                if let Some(PartialInlineNode::Strikethrough { children }) = stack.pop() {
-                    let node = InlineNode::strikethrough(children);
-                    push_inline_to_context(&mut stack, &mut nodes, node);
-                }
-            }
-            Event::Start(Tag::Link {
-                dest_url, title, ..
-            }) => {
-                stack.push(PartialInlineNode::Link {
-                    href: dest_url.to_string(),
-                    title: if title.is_empty() {
-                        None
-                    } else {
-                        Some(title.to_string())
-                    },
-                    children: vec![],
-                });
-            }
-            Event::End(TagEnd::Link) => {
-                if let Some(PartialInlineNode::Link {
-                    href,
-                    title,
-                    children,
-                }) = stack.pop()
-                {
-                    let node = InlineNode::link(href, title, children);
-                    push_inline_to_context(&mut stack, &mut nodes, node);
-                }
-            }
-            Event::Start(Tag::Image {
-                dest_url, title, ..
-            }) => {
-                stack.push(PartialInlineNode::Image {
-                    src: dest_url.to_string(),
-                    alt: String::new(),
-                    title: if title.is_empty() {
-                        None
-                    } else {
-                        Some(title.to_string())
-                    },
-                });
-            }
-            Event::End(TagEnd::Image) => {
-                if let Some(PartialInlineNode::Image { src, alt, title }) = stack.pop() {
-                    let node = InlineNode::image(src, alt, title);
-                    push_inline_to_context(&mut stack, &mut nodes, node);
-                }
-            }
-            Event::SoftBreak => {
-                let node = InlineNode::SoftBreak;
-                push_inline_to_context(&mut stack, &mut nodes, node);
-            }
-            Event::HardBreak => {
-                let node = InlineNode::LineBreak;
-                push_inline_to_context(&mut stack, &mut nodes, node);
-            }
-            _ => {}
+    for cap in MAGIC_RE.captures_iter(text) {
+        let m = cap.get(0).unwrap();
+        if m.start() > last_end {
+            nodes.push(InlineNode::text(text[last_end..m.start()].to_string()));
         }
+
+        let node = if let Some(quote) = cap.get(1) {
+            let quote_text = quote.as_str();
+            let children = vec![InlineNode::text(quote_text.to_string())];
+            InlineNode::vcp_custom("quote".to_string(), None, Some(children))
+        } else if let Some(alert) = cap.get(2) {
+            InlineNode::vcp_custom("alert".to_string(), Some(alert.as_str().to_string()), None)
+        } else if let Some(tag) = cap.get(3) {
+            InlineNode::vcp_custom("highlight".to_string(), Some(tag.as_str().to_string()), None)
+        } else {
+            unreachable!()
+        };
+
+        nodes.push(node);
+        last_end = m.end();
+    }
+
+    if last_end < text.len() {
+        nodes.push(InlineNode::text(text[last_end..].to_string()));
     }
 
     nodes
 }
 
-enum PartialInlineNode {
-    Strong {
-        children: Vec<InlineNode>,
-    },
-    Emphasis {
-        children: Vec<InlineNode>,
-    },
-    Strikethrough {
-        children: Vec<InlineNode>,
-    },
-    Link {
-        href: String,
-        title: Option<String>,
-        children: Vec<InlineNode>,
-    },
-    Image {
-        src: String,
-        alt: String,
-        title: Option<String>,
-    },
-}
-
-#[allow(clippy::ptr_arg)]
-fn push_inline_to_context(
-    stack: &mut Vec<PartialInlineNode>,
-    nodes: &mut Vec<InlineNode>,
-    node: InlineNode,
-) {
-    if let Some(top) = stack.last_mut() {
-        match top {
-            PartialInlineNode::Strong { children } => children.push(node),
-            PartialInlineNode::Emphasis { children } => children.push(node),
-            PartialInlineNode::Strikethrough { children } => children.push(node),
-            PartialInlineNode::Link { children, .. } => children.push(node),
-            PartialInlineNode::Image { alt, .. } => {
-                if let InlineNode::Text { value } = &node {
-                    alt.push_str(value);
-                }
-            }
-        }
-    } else {
-        nodes.push(node);
-    }
-}
-
-/// 预替换 VCP Magic（引号、警报、高亮标签）为普通字母数字占位符，规避 Flanking 判定边界缺陷
-fn extract_vcp_magic(text: &str) -> (Cow<'_, str>, Vec<InlineNode>, Vec<String>) {
-    if !text.contains('@') && !text.contains('"') && !text.contains('“') && !text.contains('”')
-    {
-        return (Cow::Borrowed(text), Vec::new(), Vec::new());
-    }
-
-    let mut result = String::with_capacity(text.len());
-    let mut magic_nodes = Vec::new();
-    let mut magic_raws = Vec::new();
-    let mut last_end = 0;
-
-    let fences: Vec<regex::Match> = FENCE_RE.find_iter(text).collect();
-    let mut fence_cursor = 0;
-    let mut in_fence = false;
-
-    let inline_codes: Vec<(usize, usize)> = INLINE_CODE_RE
-        .find_iter(text)
-        .map(|m| (m.start(), m.end()))
-        .collect();
-
-    for cap in MAGIC_RE.captures_iter(text) {
-        let m = cap.get(0).unwrap();
-
-        let is_in_inline = inline_codes
-            .iter()
-            .any(|&(start, end)| m.start() >= start && m.end() <= end);
-        if is_in_inline {
-            continue;
-        }
-
-        while fence_cursor < fences.len() && fences[fence_cursor].start() <= m.start() {
-            in_fence = !in_fence;
-            fence_cursor += 1;
-        }
-
-        if in_fence {
-            continue;
-        }
-
-        if m.start() > last_end {
-            result.push_str(&text[last_end..m.start()]);
-        }
-
-        let node = if let Some(quote) = cap.get(1) {
-            let quote_text = quote.as_str();
-            let children = if quote_text.is_empty() {
-                vec![]
-            } else {
-                parse_inline_standard(quote_text)
-            };
-            InlineNode::quoted_text(children)
-        } else if let Some(alert) = cap.get(2) {
-            InlineNode::alert_tag(alert.as_str().to_string())
-        } else if let Some(tag) = cap.get(3) {
-            InlineNode::highlight_tag(tag.as_str().to_string())
-        } else {
-            unreachable!()
-        };
-
-        let type_str = match &node {
-            InlineNode::QuotedText { .. } => "Quote",
-            InlineNode::AlertTag { .. } => "Alert",
-            InlineNode::HighlightTag { .. } => "Tag",
-            _ => "Unknown",
-        };
-        let placeholder = format!("VcpMagic{}X{}X", type_str, magic_nodes.len());
-        result.push_str(&placeholder);
-        magic_nodes.push(node);
-        magic_raws.push(m.as_str().to_string());
-
-        last_end = m.end();
-    }
-
-    if last_end < text.len() {
-        result.push_str(&text[last_end..]);
-    }
-
-    (Cow::Owned(result), magic_nodes, magic_raws)
-}
-
-/// 深度优先递归还原 AST 树中的 VCP Magic 占位符
-fn restore_markdown_nodes(
-    nodes: &mut Vec<MarkdownNode>,
-    magic_nodes: &[InlineNode],
-    magic_raws: &[String],
-) {
-    for node in nodes {
-        match node {
-            MarkdownNode::Paragraph { children, .. } => {
-                restore_inline_nodes(children, magic_nodes, magic_raws);
-            }
-            MarkdownNode::Heading { children, .. } => {
-                restore_inline_nodes(children, magic_nodes, magic_raws);
-            }
-            MarkdownNode::Blockquote { children, .. } => {
-                restore_markdown_nodes(children, magic_nodes, magic_raws);
-            }
-            MarkdownNode::List { items, .. } => {
-                for item in items {
-                    restore_markdown_nodes(item, magic_nodes, magic_raws);
-                }
-            }
-            MarkdownNode::Table { header, rows, .. } => {
-                for cell in header {
-                    restore_inline_nodes(cell, magic_nodes, magic_raws);
-                }
-                for row in rows {
-                    for cell in row {
-                        restore_inline_nodes(cell, magic_nodes, magic_raws);
-                    }
-                }
-            }
-            MarkdownNode::RawHtml {
-                ref mut content, ..
-            } => {
-                let mut replaced = content.clone();
-                let mut has_placeholder = false;
-                for cap in PLACEHOLDER_RE.captures_iter(content.as_str()) {
-                    has_placeholder = true;
-                    let m = cap.get(0).unwrap();
-                    let index: usize = cap.get(1).unwrap().as_str().parse().unwrap();
-                    if index < magic_raws.len() {
-                        replaced = replaced.replace(m.as_str(), &magic_raws[index]);
-                    }
-                }
-                if has_placeholder {
-                    *content = replaced;
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// 还原并按需拆分 InlineNode 列表中的文本占位符
-fn restore_inline_nodes(
-    inlines: &mut Vec<InlineNode>,
-    magic_nodes: &[InlineNode],
-    magic_raws: &[String],
-) {
-    let mut new_inlines = Vec::with_capacity(inlines.len());
-
-    for mut inline in std::mem::take(inlines) {
-        match inline {
-            InlineNode::Text { value } => {
-                let mut last_end = 0;
-                let mut has_placeholder = false;
-
-                for cap in PLACEHOLDER_RE.captures_iter(&value) {
-                    has_placeholder = true;
-                    let m = cap.get(0).unwrap();
-                    let index: usize = cap.get(1).unwrap().as_str().parse().unwrap();
-
-                    if m.start() > last_end {
-                        new_inlines.push(InlineNode::text(value[last_end..m.start()].to_string()));
-                    }
-
-                    if index < magic_nodes.len() {
-                        new_inlines.push(magic_nodes[index].clone());
-                    }
-
-                    last_end = m.end();
-                }
-
-                if has_placeholder {
-                    if last_end < value.len() {
-                        new_inlines.push(InlineNode::text(value[last_end..].to_string()));
-                    }
-                } else {
-                    new_inlines.push(InlineNode::Text { value });
-                }
-            }
-            InlineNode::Strong { mut children, .. } => {
-                restore_inline_nodes(&mut children, magic_nodes, magic_raws);
-                new_inlines.push(InlineNode::strong(children));
-            }
-            InlineNode::Emphasis { mut children, .. } => {
-                restore_inline_nodes(&mut children, magic_nodes, magic_raws);
-                new_inlines.push(InlineNode::emphasis(children));
-            }
-            InlineNode::Strikethrough { mut children, .. } => {
-                restore_inline_nodes(&mut children, magic_nodes, magic_raws);
-                new_inlines.push(InlineNode::strikethrough(children));
-            }
-            InlineNode::Link {
-                href,
-                title,
-                mut children,
-                needs_asset_conversion,
-                ..
-            } => {
-                restore_inline_nodes(&mut children, magic_nodes, magic_raws);
-                let mut restored_link = InlineNode::link(href, title, children);
-                if let InlineNode::Link {
-                    needs_asset_conversion: nac,
-                    ..
-                } = &mut restored_link
-                {
-                    *nac = needs_asset_conversion;
-                }
-                new_inlines.push(restored_link);
-            }
-            InlineNode::QuotedText { mut children, .. } => {
-                restore_inline_nodes(&mut children, magic_nodes, magic_raws);
-                new_inlines.push(InlineNode::quoted_text(children));
-            }
-            InlineNode::RawHtmlInline {
-                ref mut content, ..
-            } => {
-                let mut replaced = content.clone();
-                let mut has_placeholder = false;
-                for cap in PLACEHOLDER_RE.captures_iter(content.as_str()) {
-                    has_placeholder = true;
-                    let m = cap.get(0).unwrap();
-                    let index: usize = cap.get(1).unwrap().as_str().parse().unwrap();
-                    if index < magic_raws.len() {
-                        replaced = replaced.replace(m.as_str(), &magic_raws[index]);
-                    }
-                }
-                if has_placeholder {
-                    *content = replaced;
-                }
-                new_inlines.push(InlineNode::RawHtmlInline {
-                    content: content.clone(),
-                    hash: None,
-                });
-            }
-            _ => {
-                new_inlines.push(inline);
-            }
-        }
-    }
-
-    *inlines = new_inlines;
-}

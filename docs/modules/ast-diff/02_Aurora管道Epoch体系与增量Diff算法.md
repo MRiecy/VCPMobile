@@ -111,10 +111,10 @@ stateDiagram-v2
 
 ```rust
 // aurora_pipeline.rs:8
-const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 8192;
+const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
 ```
 
-当 tail 文本超过 8KB 时，跳过 AST 解析，直接使用原始文本模式。这个阈值保护了流式热路径，防止超长文本的 AST 解析成为性能瓶颈。
+当 tail 文本超过 64KB 时，跳过 AST 解析，回退到**纯文本兜底模式**（`nodes=None`，但 `tail_block` 仍携带纯文本 `content`，前端经 `tailContent` 路径渲染，**绝不留白**）。这个阈值保护了流式热路径，防止超长文本的 AST 解析成为性能瓶颈。
 
 ---
 
@@ -156,11 +156,11 @@ sequenceDiagram
     alt tail_content is not empty
         alt is HTML tag block?
             AB->>AB: nodes = [RawHtml(tail_content)]
-        else tail_content.len() <= 8192
+        else tail_content.len() <= 65536
             AB->>MP: parse_markdown_to_ast_streaming(&tail_content)
             MP-->>AB: Vec<MarkdownNode>
-        else tail > 8192
-            AB->>AB: nodes = None (跳过 AST)
+        else tail > 65536
+            AB->>AB: nodes = None (回退纯文本兜底)
         end
 
         alt nodes is Some(new_nodes)
@@ -180,12 +180,12 @@ sequenceDiagram
                 AB->>AB: tail_snapshot_pending = Some(new_nodes)
             end
         else nodes is None
-            Note over AB: 超过 8KB 阈值，降级处理
+            Note over AB: 超过 64KB → 纯文本兜底<br/>仅在 AST→纯文本「切换瞬间」bump 一次 epoch
             AB->>AB: prev_tail_ast.clear()
-            AB->>AB: epoch++ / reset
+            AB->>AB: (仅切换帧) epoch++ / reset；后续帧静默
         end
 
-        AB->>AB: tail_block = Some(StreamBlock::markdown(...))
+        AB->>AB: tail_block = Some(StreamBlock::markdown(...))<br/>纯文本兜底时仍携带 content
     else tail_content is empty
         Note over AB: tail 清空 → epoch reset with empty snapshot
     end
@@ -228,7 +228,7 @@ if !self.tail_content.is_empty() {
         // 正常路径：解析为 AST
         Some(parse_markdown_to_ast_streaming(&self.tail_content))
     } else {
-        None  // 超长文本：跳过，降级到纯文本模式
+        None  // 超长文本（> 64KB 且非 HTML 容器）：跳过 AST，回退纯文本兜底
     };
     // ...
 }
@@ -237,9 +237,11 @@ if !self.tail_content.is_empty() {
 三个分支的语义：
 | 条件 | 策略 | 理由 |
 |------|------|------|
-| 以 HTML 标签开头 | 包装为 `RawHtml` | 防止 pulldown-cmark 将 CSS/内联样式解析为代码块 |
-| ≤ 8KB 且非 HTML | 正常 AST 解析 | 标准推测渲染路径 |
-| > 8KB | 跳过 AST | 防止性能悬崖，前端降级到 innerHTML |
+| 以 HTML 标签开头（HTML 容器块） | 包装为 `RawHtml`（**无论大小**） | 防止 pulldown-cmark 将 CSS/内联样式解析为代码块 |
+| ≤ 64KB 且非 HTML | 正常 AST 解析 | 标准推测渲染路径 |
+| > 64KB 且非 HTML | `nodes=None` → **纯文本兜底** | 防止性能悬崖；`tail_block` 仍携带纯文本 `content`，前端走 `tailContent` 渲染（**不留白、不进空 AST sandbox**） |
+
+> **降级只 bump 一次 epoch**：当 tail 跨过 64KB 进入纯文本兜底时，**仅在 AST 模式 → 纯文本模式的「切换帧」**递增一次 epoch/reset；此后保持安静，不再每帧 bump。这与旧版「每帧 `nodes=None` 并 bump epoch/reset（降级到 innerHTML、反复留白）」的行为根本不同——旧版会在超阈值后每帧清空重建，造成可见闪烁。
 
 #### Step 3-4：Hash 计算 + AST Diff
 
@@ -539,7 +541,7 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 | 触发条件 | 代码位置 | 后续行为 |
 |---------|---------|---------|
 | 新的稳定块被解析 | `process_queue:136-141` | epoch++, rev=0, reset=true, 清空 prev_tail_ast 和 mutations |
-| Tail 超过 8KB，跳过 AST 解析 | `process_queue:186-193` | epoch++, rev=0, reset=true, 清空 mutations 和 snapshot |
+| Tail 超过 64KB（非 HTML 容器），切换到纯文本兜底 | `process_queue:186-193` | **仅切换帧** epoch++, rev=0, reset=true, 清空 mutations 和 snapshot；后续帧静默（不再每帧 bump） |
 | Tail 变为空字符串 | `process_queue:201-209` | epoch++, rev=0, reset=true, snapshot=Some(Vec::new()) |
 | 流结束 (finalize) | `finalize:232-235` | epoch++, rev=0, reset=true, snapshot=Some(Vec::new()) |
 
@@ -552,12 +554,12 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 | 阶段 | 复杂度 | 说明 |
 |------|--------|------|
 | StreamBlockParser 增量解析 | O(n) | n = 新增文本长度 |
-| Tail AST 解析（pulldown-cmark） | O(n) | n = tail 文本长度（≤ 8KB） |
+| Tail AST 解析（pulldown-cmark） | O(n) | n = tail 文本长度（≤ 64KB） |
 | 递归 Hash 计算 | O(k) | k = AST 节点总数 |
 | diff_ast | O(min(m,n) + \|m-n\|) | m,n = 旧/新 AST 块级节点数 |
 | Hash 快速跳过 | O(1) per node | 稳态下 70%+ 节点被跳过 |
 
-**典型流式场景**（tail ≤ 8KB，~5-20 个块级节点）：
+**典型流式场景**（tail ≤ 64KB，~5-20 个块级节点）：
 - 单次 `process_queue` 总耗时：**0.5 - 3ms**
 - 其中 `diff_ast` 部分：**0.01 - 0.5ms**
 
@@ -577,6 +579,24 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 1. **`test_diff_append_text`**：验证 `"Hello"` → `"Hello World"` 产生正确的 AppendText 突变
 2. **`test_diff_add_node`**：验证新增段落产生正确的 Add 突变
 3. **`test_real_agent_stream_simulation`**：从文件读取 9.8KB 的 Agent 输出样张，模拟真实的随机 SSE 分块（5-150 chars per chunk），全程追踪突变总数，验证 serde 序列化不会 panic
+
+### 6.4 自适应降帧 (Adaptive Frame-Rate Degradation)
+
+CodeBlock / RawHtml 在 Diff 时是**整节点 Replace**（见 §4.5），意味着每一帧都把**整个不断增长的块**重新序列化进 IPC 载荷。对一个流式增长到 40KB 的块，累计重发量高达 **~18.5MB**——载荷体积是块大小的 O(N²)。
+
+因此，引擎不再在旧的 8KB 悬崖处做「硬性纯文本降级」，而是改为两手并用：**把 AST 上限抬高到 64KB**（见 §2.3），**同时按 tail 字节长度对 emit 频率做节流**。节流实现在 `vcp_client.rs` 的 `flush_aurora_parse`（既有的 ~33ms 节流逻辑就在此处）：
+
+| Tail 字节长度 | emit 间隔 | 频率 | 说明 |
+|--------------|----------|:----:|------|
+| < 8KB | 33ms | 30Hz | 不变，肉眼无感 |
+| 8–24KB | 100ms | 10Hz | 进入降帧 |
+| ≥ 24KB | 200ms | 5Hz | 重度降帧 |
+
+这把每秒 IPC 载荷量压住了：在 5Hz 下，一个 64KB 的块每秒重发 **~320KB/s**，而非 30Hz 下的 **~2MB/s**。`force-parse-bytes`（强制解析阈值）也随档位缩放（**1024 / 4096 / 8192**），使大块 chunk 不至于绕过节流。
+
+> **基准依据**：对一个 40KB tail 做 parse + hash + diff + serialize 仅 **~0.55ms**——**解析根本不是瓶颈**，真正的代价是 IPC 载荷体积。基准代码位于 `src-tauri/src/vcp_modules/chat/ast_bench.rs`。
+
+此外，流式期间 syntect 语法高亮被 `code.len() > 4096` 门控（`markdown_parser.rs`）。这道门是合理的：高亮成本随长度急剧上升（**7ms@4k → 66ms@40k**），而纯解析始终维持在亚毫秒级。
 
 ---
 

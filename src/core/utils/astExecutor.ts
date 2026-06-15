@@ -133,36 +133,69 @@ function cleanupSubtreeRefs(prefix: string, registry: Map<string, Node>, include
 }
 
 /**
+ * 计算 node 相对 root 的 childNodes 索引路径（从 root 到 node 的下标序列）。
+ * 不在 root 子树内则返回 null。用 childNodes（含文本节点）而非 children，保证路径可寻回文本节点。
+ */
+function computeChildPath(node: Node, root: Node): number[] | null {
+  const path: number[] = [];
+  let cur: Node | null = node;
+  while (cur && cur !== root) {
+    const parent: Node | null = cur.parentNode;
+    if (!parent) return null;
+    path.unshift(Array.prototype.indexOf.call(parent.childNodes, cur));
+    cur = parent;
+  }
+  return cur === root ? path : null;
+}
+
+/** 沿 childNodes 索引路径从 root 下行取节点，任一层缺失返回 null。 */
+function resolveChildPath(root: Node, path: number[]): Node | null {
+  let cur: Node | null = root;
+  for (const idx of path) {
+    if (!cur) return null;
+    cur = cur.childNodes[idx] || null;
+  }
+  return cur;
+}
+
+/**
  * 修复流式打字期间未闭合的 HTML 标签和属性引号断口，防止 WebView 发生排版吞噬或解析回退
  */
 function repairHtmlFragment(html: string): string {
   if (!html) return "";
-  let repaired = html;
 
-  // 1. 处理最末尾的不完整标签断口，例如 "<div class="card" <" 或者 "<p class="
-  const lastOpenAngle = repaired.lastIndexOf("<");
-  const lastCloseAngle = repaired.lastIndexOf(">");
-  if (lastOpenAngle > lastCloseAngle) {
-    repaired = repaired.substring(0, lastOpenAngle);
+  // 语义：只处理「最后一个未闭合标签片段」。最后一个 '<' 之后若再无 '>'，则它到末尾是一段正在
+  // 流式输出、尚未闭合的标签（如 '<img src="http://...'）；只有这种片段才会把后续内容（含外层
+  // wrapper 的 </div>）吞进未闭合的标签/属性里。若标签已闭合或无标签，则无断口，原样返回——
+  // 关键修复：不再对整串做引号配平，避免正文文本中合法的奇数引号被误加一个尾引号。
+  const lastOpenAngle = html.lastIndexOf("<");
+  const lastCloseAngle = html.lastIndexOf(">");
+  if (lastOpenAngle <= lastCloseAngle) {
+    return html;
   }
 
-  // 2. 补全未闭合的引号，防止浏览器把后面的 HTML 内容吞进未闭合的属性中
+  const head = html.slice(0, lastOpenAngle);
+  const fragment = html.slice(lastOpenAngle);
+
+  // 非真实标签起始（如正文里的孤立 '<' 或 '< b'）：直接丢弃该断口片段，交由下一帧补全。
+  if (!/^<\/?[a-zA-Z]/.test(fragment)) {
+    return head;
+  }
+
+  // 仅在该未闭合标签片段内部判断属性引号是否成对（忽略转义引号）。
   let doubleQuotes = 0;
   let singleQuotes = 0;
-  for (let i = 0; i < repaired.length; i++) {
-    const char = repaired[i];
-    if (char === '"' && (i === 0 || repaired[i - 1] !== '\\')) doubleQuotes++;
-    if (char === "'" && (i === 0 || repaired[i - 1] !== '\\')) singleQuotes++;
+  for (let i = 0; i < fragment.length; i++) {
+    const char = fragment[i];
+    if (char === '"' && (i === 0 || fragment[i - 1] !== "\\")) doubleQuotes++;
+    if (char === "'" && (i === 0 || fragment[i - 1] !== "\\")) singleQuotes++;
   }
+  const quotesBalanced = doubleQuotes % 2 === 0 && singleQuotes % 2 === 0;
 
-  if (doubleQuotes % 2 !== 0) {
-    repaired += '"';
-  }
-  if (singleQuotes % 2 !== 0) {
-    repaired += "'";
-  }
-
-  return repaired;
+  // 属性引号成对（如 '<div class="card" '）：标签结构已完整，仅缺收尾 '>'，补 '>' 让其当帧即可渲染，
+  // 体验上长 HTML 容器能尽早显示。引号失衡（如 '<img src="http://foo'）说明正卡在某个属性值中途，
+  // 无法安全补全，丢弃整个未闭合标签，下一帧 chunk 到达后完整渲染。
+  return quotesBalanced ? `${html}>` : head;
 }
 
 /**
@@ -195,23 +228,29 @@ function createDomFromNode(
       break;
 
     case "code_block": {
-      el = document.createElement("pre");
-      el.className = "vcp-code-block vcp-scrollable";
-      if (node.highlighted_html) {
-        let html = node.highlighted_html;
-        // 剥离多余的 <pre><code> 嵌套包裹以满足前端样式
-        const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
-        if (nestedPreMatch && nestedPreMatch[1].trim().startsWith("<pre")) {
-          const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-          if (innerMatch) {
-            html = innerMatch[1];
-          }
-        }
-        el.innerHTML = html;
+      if (node.lang === "mermaid") {
+        el = document.createElement("div");
+        el.className = "mermaid-placeholder";
+        el.textContent = node.code || "";
       } else {
-        const code = document.createElement("code");
-        code.textContent = node.code || "";
-        el.appendChild(code);
+        el = document.createElement("pre");
+        el.className = "vcp-code-block vcp-scrollable";
+        if (node.highlighted_html) {
+          let html = node.highlighted_html;
+          // 剥离多余的 <pre><code> 嵌套包裹以满足前端样式
+          const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
+          if (nestedPreMatch && nestedPreMatch[1].trim().startsWith("<pre")) {
+            const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+            if (innerMatch) {
+              html = innerMatch[1];
+            }
+          }
+          el.innerHTML = html;
+        } else {
+          const code = document.createElement("code");
+          code.textContent = node.code || "";
+          el.appendChild(code);
+        }
       }
       break;
     }
@@ -289,11 +328,6 @@ function createDomFromNode(
       el = document.createElement("hr");
       break;
 
-    case "mermaid":
-      el = document.createElement("div");
-      el.className = "mermaid-placeholder";
-      el.textContent = node.code || "";
-      break;
 
     case "raw_html": {
       el = document.createElement("div");
@@ -387,8 +421,7 @@ function createInlineDom(
       break;
     }
 
-    case "line_break":
-    case "soft_break":
+    case "break":
       el = document.createElement("br");
       break;
 
@@ -402,29 +435,17 @@ function createInlineDom(
       break;
     }
 
-    case "quoted_text": {
+    case "vcp_custom": {
       const span = document.createElement("span");
-      span.className = "highlighted-quote";
-      node.children?.forEach((child, i) => {
-        const childId = `${id}.i${i}`;
-        span.appendChild(createInlineDom(child, childId, registry));
-      });
-      el = span;
-      break;
-    }
-
-    case "highlight_tag": {
-      const span = document.createElement("span");
-      span.className = "highlighted-tag";
-      span.textContent = node.value || "";
-      el = span;
-      break;
-    }
-
-    case "alert_tag": {
-      const span = document.createElement("span");
-      span.className = "highlighted-alert-tag";
-      span.textContent = node.value || "";
+      span.className = `vcp-custom-${node.kind}`;
+      if (node.children && node.children.length > 0) {
+        node.children.forEach((child, i) => {
+          const childId = `${id}.i${i}`;
+          span.appendChild(createInlineDom(child, childId, registry));
+        });
+      } else {
+        span.textContent = node.value || "";
+      }
       el = span;
       break;
     }
@@ -545,6 +566,26 @@ function executeMutation(
       break;
     }
 
+    case "add_list_item": {
+      // 列表项级别增量：在已存活的 <ul>/<ol> 下追加一个 <li>，并按 {id}.b{n} 注册其块级子节点。
+      // 与 createDomFromNode 的 list 分支中 <li>/子块的 ID 命名规则保持一致。
+      const parentNode = registry.get(mutation.parent);
+      if (parentNode) {
+        const li = document.createElement("li");
+        registry.set(mutation.id, li);
+        mutation.children.forEach((child, bIdx) => {
+          const childDom = createDomFromNode(child, `${mutation.id}.b${bIdx}`, registry);
+          li.appendChild(childDom);
+        });
+        li.classList.add("vcp-stream-element-fade-in");
+        parentNode.appendChild(li);
+      } else {
+        status = "failed";
+        detail = `List parent node '${mutation.parent}' not found`;
+      }
+      break;
+    }
+
     case "prop": {
       const node = registry.get(mutation.id);
       if (node instanceof HTMLElement) {
@@ -606,7 +647,8 @@ function executeMutation(
 
           // 2. 策略 B：Mermaid 图表源码原地覆盖
           if (
-            nodeType === "mermaid" &&
+            nodeType === "code_block" &&
+            mutation.node.lang === "mermaid" &&
             oldNode instanceof HTMLElement &&
             oldNode.classList.contains("mermaid-placeholder")
           ) {
@@ -628,7 +670,7 @@ function executeMutation(
               childrenOnly: false,
               onBeforeElUpdated: (fromEl, toEl) => {
                 if (fromEl.isEqualNode(toEl)) return false;
-                
+
                 // 保留媒体播放与图片加载状态
                 if (fromEl.tagName === 'IMG' && (fromEl as HTMLImageElement).complete) return false;
                 if (fromEl.tagName === 'VIDEO' || fromEl.tagName === 'AUDIO') {
@@ -637,12 +679,11 @@ function executeMutation(
                 return true;
               }
             });
-            
+
+            // raw_html / table 是无 AST children 的整体节点（后端永远整块 Replace，绝不对其子树做
+            // 增量 child diff），故只需保留根节点引用、清空全部子孙引用，杜绝悬空的 temp 子孙引用。
             cleanupSubtreeRefs(mutation.id, registry, true);
-            for (const [k, v] of tempRegistry.entries()) {
-              // 物理修正：根 ID（mutation.id）在页面上真实存活的 DOM 节点依然是 oldNode，此处不能覆盖为废弃的 newDom
-              registry.set(k, k === mutation.id ? oldNode : v);
-            }
+            registry.set(mutation.id, oldNode);
             astDebugLog(`[AST replace morphdom optimized] id=${mutation.id}, type=${nodeType}`);
             break;
           }
@@ -694,7 +735,8 @@ function executeMutation(
             break;
           }
           if (
-            (nodeType === "highlight_tag" || nodeType === "alert_tag") &&
+            nodeType === "vcp_custom" &&
+            !mutation.node.children &&
             oldNode instanceof HTMLElement
           ) {
             oldNode.textContent = mutation.node.value || "";
@@ -715,7 +757,7 @@ function executeMutation(
           // 3. 策略 C：容器/复杂行内节点局部 Morphdom 拦截 (Link, QuotedText, Strong, Emphasis, Strikethrough, RawHtmlInline)
           const isContainerNode = [
             "link",
-            "quoted_text",
+            "vcp_custom",
             "strong",
             "emphasis",
             "strikethrough",
@@ -724,15 +766,32 @@ function executeMutation(
           if (isContainerNode && oldNode instanceof HTMLElement) {
             const tempRegistry = new Map<string, Node>();
             const newDom = createInlineDom(mutation.node, mutation.id, tempRegistry);
-            
+
+            // 在 morphdom 变形前先记录每个子孙 id 相对 newDom 的结构路径。morphdom 会保证 oldNode
+            // 变形后结构与 newDom 一致，故变形后沿同一路径即可从存活的 oldNode 子树取回真实节点。
+            // 必须在 morphdom 之前计算：变形会把 newDom 的子节点移走/丢弃，事后再走 temp 树已不可靠。
+            const childPaths: Array<[string, number[]]> = [];
+            if (nodeType !== "raw_html_inline") {
+              for (const [id, tempNode] of tempRegistry.entries()) {
+                if (id === mutation.id) continue;
+                const path = computeChildPath(tempNode, newDom);
+                if (path) childPaths.push([id, path]);
+              }
+            }
+
             morphdom(oldNode, newDom, {
               childrenOnly: false,
             });
-            
+
             cleanupSubtreeRefs(mutation.id, registry, true);
-            for (const [k, v] of tempRegistry.entries()) {
-              // 物理修正：根 ID（mutation.id）在页面上真实存活的 DOM 节点依然是 oldNode，此处不能覆盖为废弃的 newDom
-              registry.set(k, k === mutation.id ? oldNode : v);
+            registry.set(mutation.id, oldNode); // 根 ID 永远指向页面上存活的 oldNode
+            // link / strong / emphasis / strikethrough / vcp_custom 会被后续 .i{N} 子级 mutation
+            // 继续增量更新，必须从 morphdom 后存活的真实 DOM 子树重建子孙 registry，
+            // 否则后续子级 mutation 会命中被丢弃的 temp 节点而静默失败。
+            // raw_html_inline 无 AST children（childPaths 为空），自然只保留根。
+            for (const [id, path] of childPaths) {
+              const live = resolveChildPath(oldNode, path);
+              if (live) registry.set(id, live);
             }
             break;
           }

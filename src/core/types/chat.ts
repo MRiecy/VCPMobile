@@ -7,7 +7,7 @@ export interface MessageShell {
 }
 
 export type MarkdownNode = {
-  type: "paragraph" | "heading" | "code_block" | "blockquote" | "list" | "table" | "thematic_break" | "raw_html" | "mermaid";
+  type: "paragraph" | "heading" | "code_block" | "blockquote" | "list" | "table" | "thematic_break" | "raw_html";
   children?: InlineNode[];
   level?: number;
   lang?: string;
@@ -25,7 +25,8 @@ export type MarkdownNode = {
 };
 
 export type InlineNode = {
-  type: "text" | "strong" | "emphasis" | "strikethrough" | "code" | "link" | "image" | "line_break" | "soft_break" | "inline_math" | "quoted_text" | "highlight_tag" | "alert_tag" | "raw_html_inline";
+  type: "text" | "strong" | "emphasis" | "strikethrough" | "code" | "link" | "image" | "break" | "inline_math" | "vcp_custom" | "raw_html_inline";
+  kind?: string;
   value?: string;
   children?: InlineNode[];
   href?: string;
@@ -126,6 +127,7 @@ export interface ChatMessage {
 export type AstMutation =
   | { op: "add"; id: string; parent: string; node: MarkdownNode }
   | { op: "add_inline"; id: string; parent: string; node: InlineNode }
+  | { op: "add_list_item"; id: string; parent: string; children: MarkdownNode[] }
   | { op: "text"; id: string; value: string }
   | { op: "append"; id: string; chunk: string }
   | { op: "prop"; id: string; key: string; value: string }

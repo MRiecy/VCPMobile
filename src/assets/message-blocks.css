@@ -246,7 +246,8 @@ html.dark .vcp-markdown-block code:not(pre code) {
 }
 
 /* --- VCP Magic Highlights (theme-aware) --- */
-.highlighted-quote {
+.highlighted-quote,
+.vcp-custom-quote {
   color: var(--quoted-text, #ff7f50) !important;
   display: inline !important;
   word-break: break-all;
@@ -254,13 +255,15 @@ html.dark .vcp-markdown-block code:not(pre code) {
   font-style: inherit;
 }
 
-.highlighted-tag {
+.highlighted-tag,
+.vcp-custom-highlight {
   color: var(--highlight-text, #3498db) !important;
   font-weight: 600;
   display: inline !important;
 }
 
-.highlighted-alert-tag {
+.highlighted-alert-tag,
+.vcp-custom-alert {
   color: var(--danger-color, #e74c3c) !important;
   font-weight: bold;
   display: inline !important;

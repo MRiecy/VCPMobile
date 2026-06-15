@@ -94,3 +94,13 @@ opt-level = 1   # 基础代码优化，保持极速编译的同时大幅缩减�
 debug = 0       # 彻底关闭开发模式下海量臃肿的调试符号（体积暴降的关键！）
 strip = true    # 强行剥离动态库的辅助冗余符号
 
+# 性能基准专用 profile：继承 release 的优化等级，但保留 panic=unwind 以便
+# cargo test --profile perf 能正常链接测试 harness（release 的 panic=abort 无法运行测试）。
+# 仅用于本地基准测量（如 ast_diff 的 tail 处理开销基准），不参与发布构建。
+[profile.perf]
+inherits = "release"
+panic = "unwind"
+strip = false
+lto = "thin"        # full LTO 编译过慢；thin 已足够逼近发布版热路径性能
+codegen-units = 16
+

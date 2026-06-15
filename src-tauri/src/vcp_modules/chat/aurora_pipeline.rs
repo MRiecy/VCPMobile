@@ -4,8 +4,16 @@ use crate::vcp_modules::chat::ast_diff::{diff_ast, AstMutation};
 use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
 use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 
-/// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，防止流式热路径性能悬崖
-const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 8192;
+/// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，降级为纯文本尾部。
+///
+/// 取值依据（perf profile 基准，见 ast_bench.rs，约等于发布版热路径速度）：
+/// - 解析本身极廉价：40KB tail 的 parse+hash+diff+serialize 仅约 0.55ms，远非瓶颈。
+/// - 真正的成本是 IPC 载荷：CodeBlock/RawHtml 走整节点 Replace，每帧重发整块，
+///   40KB 块在一次流式中累计推送可达 ~18.5MB。
+/// 因此上限从 8192 提升到 65536（覆盖绝大多数真实 HTML/代码产物），
+/// 并配合 vcp_client 的自适应降帧（30→10→5Hz）把每秒 IPC 载荷压到可接受范围。
+/// 仅在 tail 超过 64KB 这种极端体量时才降级为纯文本，避免单帧 JSON 过大拖垮 webview。
+const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,24 +181,32 @@ impl AuroraBuffer {
                 for node in &mut new_nodes {
                     node.compute_hashes_recursively();
                 }
-                let mutations = diff_ast(&self.prev_tail_ast, &new_nodes, "t");
-                if !mutations.is_empty() {
-                    self.pending_mutations.extend(mutations);
-                }
-                self.tail_revision = self.tail_revision.saturating_add(1);
+                // reset 帧会被 take_tail_frame 强制清空 mutations 并改发 snapshot，
+                // 故此时跳过 diff_ast（其结果必被丢弃），直接记录 snapshot，省去一次全量 diff。
                 if self.tail_reset_pending {
                     self.tail_snapshot_pending = Some(new_nodes.clone());
+                } else {
+                    let mutations = diff_ast(&self.prev_tail_ast, &new_nodes, "t");
+                    if !mutations.is_empty() {
+                        self.pending_mutations.extend(mutations);
+                    }
                 }
+                self.tail_revision = self.tail_revision.saturating_add(1);
                 self.prev_tail_ast = new_nodes;
             } else {
+                // 超长 tail（> MAX_SPECULATIVE_TAIL_AST_BYTES 且非 HTML 容器）：降级为纯文本尾部。
+                // 不再逐帧产出 AST 帧，改由 tail_block.content 走前端纯文本路径渲染（绝不留白）。
+                // 仅在「首次从 AST 模式跨入纯文本模式」时触发一次 epoch reset 清空旧 AST 沙箱，
+                // 之后保持安静，避免逐帧 epoch 自增与空转 reset 帧。
+                let was_ast_mode = !self.prev_tail_ast.is_empty();
                 self.prev_tail_ast.clear();
-                if !self.tail_reset_pending {
+                self.pending_mutations.clear();
+                if was_ast_mode && !self.tail_reset_pending {
                     self.tail_epoch = self.tail_epoch.saturating_add(1);
                     self.tail_revision = 0;
                     self.tail_reset_pending = true;
+                    self.tail_snapshot_pending = Some(Vec::new());
                 }
-                self.pending_mutations.clear();
-                self.tail_snapshot_pending = None;
             }
 
             self.tail_block = Some(StreamBlock::markdown(
@@ -233,5 +249,56 @@ impl AuroraBuffer {
         self.tail_revision = 0;
         self.tail_reset_pending = true;
         self.tail_snapshot_pending = Some(Vec::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个超过 MAX_SPECULATIVE_TAIL_AST_BYTES 的、非 HTML 起始的纯文本代码块 tail，
+    /// 验证 #1c 降级行为：tail_block 仍带纯文本 content（绝不留白），且不再逐帧自增 epoch。
+    #[test]
+    fn test_oversized_tail_falls_back_to_plaintext_not_blank() {
+        let mut buffer = AuroraBuffer::new();
+        // 未闭合代码围栏，确保整段留在 tail；体量远超 64KB 上限
+        let big = format!("```text\n{}", "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 20_000));
+        buffer.append_chunk(&big);
+        buffer.process_queue();
+
+        // 关键：tail_block 必须存在且携带纯文本 content，nodes 为 None（前端据此走纯文本路径）
+        let tb = buffer.tail_block.as_ref().expect("tail_block 不应为空（绝不留白）");
+        match tb {
+            StreamBlock::Markdown { content, nodes, .. } => {
+                assert!(!content.is_empty(), "降级后必须保留纯文本 content");
+                assert!(nodes.is_none(), "超长 tail 应跳过 AST 解析，nodes 为 None");
+            }
+            other => panic!("expected markdown tail block, got {:?}", other),
+        }
+        // 降级后 AST 基线已清空
+        assert!(buffer.prev_tail_ast.is_empty());
+
+        // 继续追加一个 chunk：epoch 不应再逐帧自增（已处于纯文本模式，应保持安静）
+        let epoch_before = buffer.tail_epoch;
+        buffer.append_chunk("YYYYY");
+        buffer.process_queue();
+        assert_eq!(
+            buffer.tail_epoch, epoch_before,
+            "纯文本模式下不应逐帧自增 epoch（避免空转 reset 帧）"
+        );
+    }
+
+    /// 小于上限的普通代码块仍走 AST 路径：tail_block.nodes 应为 Some。
+    #[test]
+    fn test_normal_tail_uses_ast() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("正常一段流式文本，尚未闭合");
+        buffer.process_queue();
+        let tb = buffer.tail_block.as_ref().expect("tail_block 应存在");
+        if let StreamBlock::Markdown { nodes, .. } = tb {
+            assert!(nodes.is_some(), "小体量 tail 应解析出 AST 节点");
+        } else {
+            panic!("expected markdown tail block");
+        }
     }
 }

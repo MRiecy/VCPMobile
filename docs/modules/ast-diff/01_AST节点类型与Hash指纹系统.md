@@ -15,9 +15,9 @@ last_updated: 2026-06-14
 
 AST 节点类型系统是整个增量 Diff 渲染引擎的**数据基石（Data Foundation）**。它定义了流式 Markdown 文本的结构化表示——每一行文本、每一个加粗片段、每一个代码块，在 Diff 引擎眼中都是一个携带**唯一路径 ID** 和**内容哈希指纹**的 AST 节点。
 
-核心源码位于 `src-tauri/src/vcp_modules/chat/pre_renderer/markdown_ast.rs`（~675行），定义了：
-- **`MarkdownNode`** 枚举：9 种块级元素（Block-level Elements）
-- **`InlineNode`** 枚举：14 种行内元素（Inline Elements）
+核心源码位于 `src-tauri/src/vcp_modules/chat/pre_renderer/markdown_ast.rs`，定义了：
+- **`MarkdownNode`** 枚举：**8 种**块级元素（Block-level Elements）
+- **`InlineNode`** 枚举：**11 种**行内元素（Inline Elements）
 - **哈希指纹系统**：基于 `rustc_hash::FxHasher` 的递归哈希计算
 - **工厂方法**：便捷创建各类节点的构造器
 
@@ -94,7 +94,9 @@ classDiagram
 
 ## 2. MarkdownNode —— 块级元素（Block-level Elements）
 
-定义于 `markdown_ast.rs:5-72`，共 9 种变体，通过 `#[serde(tag = "type")]` 实现内部标签序列化。
+定义于 `markdown_ast.rs:6-67`，共 **8 种**变体，通过 `#[serde(tag = "type")]` 实现内部标签序列化。
+
+> **⚠️ 无独立 Mermaid 节点**：Mermaid 图表不是单独的 `MarkdownNode` 变体，而是 `lang === "mermaid"` 的 `code_block`。前端在 `astExecutor.ts` 的 `code_block` 分支里据此渲染为 `.mermaid-placeholder`（见 §2.4），后续由 `MessageRenderer.vue` 的异步管线渲染为 SVG。
 
 ### 2.1 变体总览表
 
@@ -102,13 +104,12 @@ classDiagram
 |:----:|------------|-----------|------|:-------:|----------|
 | 1 | `paragraph` | `Paragraph { children, hash }` | 标准段落 | ✅ | 递归 diff inline children |
 | 2 | `heading` | `Heading { level, children, hash }` | 标题 H1-H6 | ✅ | level 变则 UpdateProp，否则递归 diff inline children |
-| 3 | `code_block` | `CodeBlock { lang, code, highlighted_html, theme, hash }` | 围栏代码块 | ✅ | 整体 Replace（前端原地 innerHTML 优化） |
+| 3 | `code_block` | `CodeBlock { lang, code, highlighted_html, theme, hash }` | 围栏代码块（含 `lang="mermaid"`） | ✅ | 整体 Replace（前端原地 innerHTML / mermaid textContent 优化） |
 | 4 | `blockquote` | `Blockquote { children, hash }` | 嵌套引用块 | ✅ | 递归 diff 子 MarkdownNode |
-| 5 | `list` | `List { ordered, items, hash }` | 有序/无序列表 | ✅ | ordered 变则 Replace；否则逐 item 递归 diff |
+| 5 | `list` | `List { ordered, items, hash }` | 有序/无序列表 | ✅ | ordered 变则 Replace；否则逐 item 递归 diff + **item 级别 AddListItem/Remove 增量**（见 03_§2.8） |
 | 6 | `table` | `Table { header, rows, wrapper_class, hash }` | GFM 表格 | ✅ | 整体 Replace（前端 morphdom 优化） |
 | 7 | `thematic_break` | `ThematicBreak` | 水平分割线 `<hr>` | ❌ | 整体 Replace |
 | 8 | `raw_html` | `RawHtml { content, hash }` | 原始 HTML 块 | ✅ | 整体 Replace（前端 morphdom 优化） |
-| 9 | `mermaid` | `MermaidPlaceholder { code, hash }` | Mermaid 图表占位 | ✅ | 整体 Replace（前端原地 textContent 优化） |
 
 ### 2.2 Paragraph（段落）
 
@@ -236,23 +237,21 @@ RawHtml {
 
 用于 HTML 容器包装（`<div>`/`<section>` 等）。Diff 行为：整体 Replace。前端通过 `repairHtmlFragment()` 修复流式断口后赋值 `innerHTML`，再用 morphdom 做局部 diff。
 
-### 2.10 MermaidPlaceholder（Mermaid 图表占位）
+### 2.10 Mermaid（通过 `code_block` 表达，无独立节点）
 
-```rust
-#[serde(rename = "mermaid")]
-MermaidPlaceholder {
-    code: String,              // Mermaid 图表源码
-    hash: Option<u64>,
-}
-```
+Mermaid 图表**没有**独立的 `MarkdownNode` 变体。它就是一个 `lang === "mermaid"` 的 `code_block`：
 
-Diff 行为：整体 Replace。前端实现**原地 textContent 覆盖**（策略 B），保留 placeholder 元素，后续由 Mermaid 渲染管线异步处理。
+- 后端 `markdown_parser.rs` 的 `finalize()` 对 `lang == "mermaid"` 跳过 syntect 高亮（`highlighted_html = None`）。
+- 前端 `astExecutor.ts` 的 `code_block` 分支检测到 `node.lang === "mermaid"` 时，创建 `<div class="mermaid-placeholder">` 并把源码写入 `textContent`，而非渲染为 `<pre>`。
+- Replace 时走**策略 B（原地 textContent 覆盖）**：保留 placeholder 元素，后续由 `MessageRenderer.vue` 的 `renderHeavyContent()` 经 `mermaid.run()` 异步渲染为 SVG。
 
 ---
 
 ## 3. InlineNode —— 行内元素（Inline Elements）
 
-定义于 `markdown_ast.rs:75-159`，共 14 种变体。
+定义于 `markdown_ast.rs:72-150`，共 **11 种**变体。
+
+> **⚠️ 与旧设计的关键差异**：VCP 魔法标记（引号 `"..."`、`#标签`、`!告警`）已**统一收敛为单个 `vcp_custom { kind, value, children }`** 变体（`kind` 取 `"quote"`/`"highlight"`/`"alert"`），不再是三个独立节点。硬/软换行也**合并为单个 `break`**（无 `line_break`/`soft_break` 之分）。前端 `chat.ts` 镜像类型与此一致。
 
 ### 3.1 变体总览表
 
@@ -261,17 +260,16 @@ Diff 行为：整体 Replace。前端实现**原地 textContent 覆盖**（策�
 | 1 | `text` | `Text { value }` | 纯文本 | ❌ | AppendText / UpdateText 优化 |
 | 2 | `strong` | `Strong { children, hash }` | **粗体** | ✅ | 递归 diff inline children |
 | 3 | `emphasis` | `Emphasis { children, hash }` | *斜体* | ✅ | 递归 diff inline children |
-| 4 | `code` | `Code { value }` | 行内代码 | ❌ | 原地 textContent 更新 |
+| 4 | `code` | `Code { value }` | 行内代码 | ❌ | 值变才 ReplaceInline（值同则零 mutation） |
 | 5 | `link` | `Link { href, title, children, needs_asset_conversion, hash }` | 超链接 | ✅ | href/title 变则 ReplaceInline；否则递归 diff children |
 | 6 | `image` | `Image { src, alt, title, needs_asset_conversion, hash }` | 图片 | ✅ | 原地属性更新（策略 B） |
-| 7 | `line_break` | `LineBreak` | 硬换行 `<br>` | ❌ | ReplaceInline |
-| 8 | `soft_break` | `SoftBreak` | 软换行 `<br>` | ❌ | ReplaceInline |
-| 9 | `inline_math` | `InlineMath { content, display_mode, hash }` | LaTeX 公式 | ✅ | 原地 data-latex + textContent 更新 |
-| 10 | `quoted_text` | `QuotedText { children, hash }` | VCP 魔法引号 `"..."` | ✅ | 递归 diff children |
-| 11 | `strikethrough` | `Strikethrough { children, hash }` | ~~删除线~~ | ✅ | 递归 diff children |
-| 12 | `highlight_tag` | `HighlightTag { value }` | `#标签` | ❌ | 原地 textContent 更新 |
-| 13 | `alert_tag` | `AlertTag { value }` | `!告警` | ❌ | 原地 textContent 更新 |
-| 14 | `raw_html_inline` | `RawHtmlInline { content, hash }` | 行内原始 HTML | ✅ | morphdom 局部 diff |
+| 7 | `break` | `Break` | 软/硬换行 `<br>` | ❌ | 同类型 no-op（零 mutation） |
+| 8 | `inline_math` | `InlineMath { content, display_mode, hash }` | LaTeX 公式 | ✅ | 原地 data-latex + textContent 更新 |
+| 9 | `vcp_custom` | `VcpCustom { kind, value, children, hash }` | VCP 魔法标记（引号/`#标签`/`!告警`，由 `kind` 区分） | ✅ | kind/value 变则 ReplaceInline；有 children 则递归 diff，否则原地 textContent |
+| 10 | `strikethrough` | `Strikethrough { children, hash }` | ~~删除线~~ | ✅ | 递归 diff children |
+| 11 | `raw_html_inline` | `RawHtmlInline { content, hash }` | 行内原始 HTML | ✅ | morphdom 局部 diff |
+
+> **判别式字节**：`InlineNode` 的 `Hash` 实现中，各变体的 discriminant byte 并非连续（见 `markdown_ast.rs` 的 `impl Hash`）：`text=0, strong=1, emphasis=2, code=3, link=4, image=5, break=6, inline_math=8, strikethrough=10, raw_html_inline=13, vcp_custom=14`。中间空缺是历史变体移除/合并留下的，因仅用于同进程内防碰撞、无需连续，故未重排。
 
 ### 3.2 关键 InlineNode 详解
 
@@ -284,7 +282,7 @@ Text { value: String }
 
 **无 Hash**。这是整个流式 Diff 中**最关键**的节点类型——因为流式输出中 90% 以上的变更是"在已有文本末尾追加字符"。
 
-**Text Diff 优化**（`ast_diff.rs:381-399`）：
+**Text Diff 优化**（`ast_diff.rs` 的 `diff_text_node`）：
 
 ```rust
 fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Vec<AstMutation>) {
@@ -338,6 +336,26 @@ Image {
 
 Diff 行为：`ReplaceInline`。前端实现**原地属性更新**（策略 B），不销毁 `<img>` 元素，保留图片加载状态。
 
+#### VcpCustom（VCP 魔法标记）
+
+```rust
+VcpCustom {
+    kind: String,                        // "quote" | "highlight" | "alert"
+    value: Option<String>,               // 叶子型标记（highlight/alert）的文本值
+    children: Option<Vec<InlineNode>>,   // 容器型标记（quote）的子节点
+    hash: Option<u64>,
+}
+```
+
+由 `markdown_parser.rs` 的 `process_text_magic()` 产出：魔法引号 `"..."` → `kind="quote"`（带 children），`@!告警` → `kind="alert"`（带 value），`@标签` → `kind="highlight"`（带 value）。前端渲染为 `<span class="vcp-custom-{kind}">`。
+
+Diff 决策树：
+```
+kind 或 value 变化 ?
+  ├─ Yes → ReplaceInline (整体替换)
+  └─ No  → 有 children 则递归 diff children；否则（叶子型）原地 textContent 更新
+```
+
 ---
 
 ## 4. 哈希指纹系统
@@ -372,35 +390,33 @@ pub fn compute_hash(&self) -> u64 {
 
 ### 4.3 哈希的计算范围
 
-`std::hash::Hash` trait 的实现在 `markdown_ast.rs:455-675`，定义了每个节点类型参与哈希计算的字段：
+`std::hash::Hash` trait 的实现在 `markdown_ast.rs` 末尾的 `impl Hash`，定义了每个节点类型参与哈希计算的字段：
 
-**MarkdownNode 哈希包围盒**：
+**MarkdownNode 哈希包围盒**（共 8 变体）：
 
 | 变体 | Discriminant Byte | 哈希字段 |
 |------|:---:|------|
 | Paragraph | `0` | `children` 中每个 InlineNode 的 hash 值（或递归哈希） |
 | Heading | `1` | `level` + `children` 的 hash |
-| CodeBlock | `2` | `lang` + `code` + `highlighted_html` + `theme` |
+| CodeBlock | `2` | `lang` + `code` + `highlighted_html` + `theme`（mermaid 即 `lang="mermaid"` 的 CodeBlock） |
 | Blockquote | `3` | `children` 中每个 MarkdownNode 的 hash |
 | List | `4` | `ordered` + `items` 中所有节点的 hash |
 | Table | `5` | `wrapper_class` + `header`/`rows` 中所有 InlineNode 的 hash |
 | ThematicBreak | `6` | 仅 discriminant byte（无字段） |
 | RawHtml | `7` | `content` 字符串 |
-| MermaidPlaceholder | `8` | `code` 字符串 |
 
-> **Design Note**：每个变体的 hash 实现中都使用了 `discriminant byte`（0-8）作为前缀，防止不同变体产生相同哈希值（如 Paragraph 和 Heading 有相同的 children 内容）。
+> **Design Note**：每个变体的 hash 实现中都使用了 `discriminant byte`（0-7）作为前缀，防止不同变体产生相同哈希值（如 Paragraph 和 Heading 有相同的 children 内容）。
 
 ### 4.4 哪些节点不计算哈希
 
 | 节点类型 | 原因 |
 |---------|------|
 | `Text` | 是最频繁变化的叶子节点，通过 `AppendText` 优化处理，哈希无意义 |
-| `Code`（行内） | 同 Text，文本值直接比较更高效 |
-| `LineBreak` | 无字段枚举，O(1) 判别 |
-| `SoftBreak` | 同上 |
-| `HighlightTag` | 文本值在 `diff_text_node` 路径中比较 |
-| `AlertTag` | 同上 |
+| `Code`（行内） | 同 Text，文本值直接比较更高效（值同则零 mutation） |
+| `Break` | 无字段枚举，O(1) 判别（同类型 no-op） |
 | `ThematicBreak` | 无字段枚举 |
+
+> 注：`vcp_custom`（含旧 `highlight`/`alert`/`quote`）**有 hash**——它统一为带 `kind`/`value`/`children` 的变体，需要 hash 来跳过未变化的容器型标记。
 
 ### 4.5 递归哈希计算流程
 
@@ -412,7 +428,7 @@ flowchart TD
     Match -->|"Blockquote"| ChildHash2["对每个 children[i].compute_hashes_recursively()"]
     Match -->|"List"| ItemHash["对每个 items[li][b].compute_hashes_recursively()"]
     Match -->|"Table"| CellHash["对每个 header/rows cell[i].compute_hashes_recursively()"]
-    Match -->|"Leaf (CodeBlock/RawHtml/Mermaid/...)"| DirectHash["直接 compute_hash()"]
+    Match -->|"Leaf (CodeBlock/RawHtml/ThematicBreak)"| DirectHash["直接 compute_hash()"]
 
     ChildHash1 --> SetHash["self.set_hash(h)"]
     ChildHash2 --> SetHash
@@ -455,12 +471,12 @@ Epoch 5, Revision 3:
 
 ### 5.1 TypeScript 类型定义
 
-定义于 `src/core/types/chat.ts:9-39`：
+定义于 `src/core/types/chat.ts`（与 Rust 8/11 变体完全对齐）：
 
 ```typescript
 export type MarkdownNode = {
   type: "paragraph" | "heading" | "code_block" | "blockquote" |
-        "list" | "table" | "thematic_break" | "raw_html" | "mermaid";
+        "list" | "table" | "thematic_break" | "raw_html";
   children?: InlineNode[];
   level?: number;
   lang?: string;
@@ -473,14 +489,15 @@ export type MarkdownNode = {
   rows?: InlineNode[][][];
   wrapper_class?: string;
   content?: string;
+  encoded?: string;
   hash?: string | number;  // Rust Option<u64> → TS string | number
 };
 
 export type InlineNode = {
   type: "text" | "strong" | "emphasis" | "strikethrough" | "code" |
-        "link" | "image" | "line_break" | "soft_break" |
-        "inline_math" | "quoted_text" | "highlight_tag" |
-        "alert_tag" | "raw_html_inline";
+        "link" | "image" | "break" | "inline_math" |
+        "vcp_custom" | "raw_html_inline";
+  kind?: string;          // vcp_custom 专用："quote" | "highlight" | "alert"
   value?: string;
   children?: InlineNode[];
   href?: string;
@@ -493,6 +510,8 @@ export type InlineNode = {
   hash?: string | number;
 };
 ```
+
+> TS 镜像始终与 Rust 端保持同步（无 `mermaid`、无 `line_break`/`soft_break`、无 `quoted_text`/`highlight_tag`/`alert_tag`；统一为 `break` 与 `vcp_custom`）。
 
 ### 5.2 Rust vs TypeScript 类型差异
 
