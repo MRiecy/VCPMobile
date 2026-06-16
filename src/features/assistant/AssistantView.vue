@@ -180,7 +180,8 @@ onMounted(() => {
 
     <!-- Input -->
     <div
-      class="p-3 border-t border-black/5 dark:border-white/5 shrink-0 bg-white/50 dark:bg-zinc-900/50 pb-6"
+      class="p-3 border-t border-black/5 dark:border-white/5 shrink-0 bg-white/50 dark:bg-zinc-900/50"
+      :style="{ paddingBottom: 'calc(var(--vcp-safe-bottom, 48px) + 24px)' }"
     >
       <div
         class="flex items-end gap-2 bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl p-2 focus-within:border-blue-500 transition-colors"

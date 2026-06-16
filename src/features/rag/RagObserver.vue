@@ -1233,7 +1233,7 @@ const drawSpectrum = () => {
       </div>
 
       <!-- 底部栏 -->
-      <div class="flex items-center justify-between px-4 py-2 border-t relative z-10"
+      <div class="flex items-center justify-between px-4 py-2 border-t relative z-10 pb-[calc(var(--vcp-safe-bottom,48px)+4px)]"
            :class="themeStore.isDarkResolved ? 'bg-[#1a202c] border-white/5 text-white/40' : 'bg-[#edf0f2] border-gray-350/50 text-gray-500'">
         <div class="text-[9px] opacity-30 font-bold tracking-[0.2em] uppercase">
           VCPinfo 灵视引擎状态监听

@@ -110,7 +110,7 @@ watch(() => props.img, (newImg) => {
         </div>
       </div>
 
-      <footer class="p-10 flex flex-col items-center gap-6 shrink-0 pb-[calc(var(--vcp-safe-bottom,20px)+20px)] bg-black">
+      <footer class="p-10 flex flex-col items-center gap-6 shrink-0 pb-[calc(var(--vcp-safe-bottom,48px)+20px)] bg-black">
         <div class="flex items-center gap-8">
            <button @click="handleScale(1)" class="p-3 bg-white/10 rounded-full text-white active:bg-white/20">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line><line x1="11" y1="8" x2="11" y2="14"></line><line x1="8" y1="11" x2="14" y2="11"></line></svg>

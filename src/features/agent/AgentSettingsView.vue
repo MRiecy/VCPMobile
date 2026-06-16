@@ -234,7 +234,7 @@ onMounted(async () => {
       </header>
 
       <!-- Scrollable Form Area -->
-      <div class="flex-1 overflow-y-auto p-5 space-y-6 pb-safe no-rubber-band">
+      <div class="flex-1 overflow-y-auto p-5 space-y-6 pb-[calc(var(--vcp-safe-bottom,48px))] no-rubber-band">
         <!-- 1. Identity Section -->
         <section class="card-modern">
           <div class="flex flex-col items-center gap-6">
@@ -357,10 +357,8 @@ onMounted(async () => {
           </div>
         </section>
 
-        <div class="h-4"></div>
-
         <!-- Actions -->
-        <div class="space-y-4">
+        <div class="pt-4 pb-8">
           <button @click="handleDelete"
             class="w-full py-3 bg-transparent border border-red-500/20 text-red-500/60 hover:bg-red-500/5 active:bg-red-500/10 active:scale-95 transition-all rounded-xl font-bold uppercase tracking-widest text-[11px]">
             删除此 Agent

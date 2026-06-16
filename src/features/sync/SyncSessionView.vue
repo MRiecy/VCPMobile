@@ -289,7 +289,7 @@ const handlePrerenderToggle = (val: boolean) => {
       </div>
 
       <!-- 底部工具栏 -->
-      <div class="flex items-center justify-between px-4 py-2 border-t border-white/5">
+      <div class="flex items-center justify-between px-4 py-2 border-t border-white/5 pb-[calc(var(--vcp-safe-bottom,48px)+4px)]">
         <div class="text-[9px] opacity-30 font-bold tracking-[0.2em] uppercase">
           <span v-if="store.status === 'idle'">选择上方操作以继续</span>
           <span v-else-if="store.status === 'connecting'">正在建立神经同步通道...</span>

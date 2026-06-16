@@ -542,7 +542,7 @@ onUnmounted(() => {
 
         <div
           ref="containerRef"
-          class="relative flex-1 overflow-hidden flex items-center justify-center px-2 py-4 pb-[calc(var(--vcp-safe-bottom,0px)+16px)]"
+          class="relative flex-1 overflow-hidden flex items-center justify-center px-2 py-4 pb-[calc(var(--vcp-safe-bottom,48px)+16px)]"
           @touchstart="handleTouchStart"
           @touchmove="handleTouchMove"
           @touchend="handleTouchEnd"

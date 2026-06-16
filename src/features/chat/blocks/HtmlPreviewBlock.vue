@@ -177,7 +177,7 @@ onUnmounted(() => {
         leave-from-class="translate-y-0 opacity-100"
         leave-to-class="translate-y-10 opacity-0"
       >
-        <div v-if="isFullScreen" class="fixed inset-0 z-editor flex flex-col"
+        <div v-if="isFullScreen" class="fixed inset-0 z-editor flex flex-col pb-[calc(var(--vcp-safe-bottom,48px))]"
           :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-[#f6f8fa] text-gray-900'">
           
           <!-- 全屏 Header -->

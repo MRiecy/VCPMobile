@@ -4,6 +4,7 @@ import AssistantView from "./features/assistant/AssistantView.vue";
 
 import "virtual:uno.css";
 import "@unocss/reset/tailwind.css";
+import "./assets/themes.css";
 
 const app = createApp(AssistantView);
 const pinia = createPinia();

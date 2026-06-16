@@ -169,7 +169,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Bottom Action -->
-            <div class="mt-auto w-full flex flex-col items-center gap-2 pb-6">
+            <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
               <button v-if="allGranted && currentStep === 1"
                 @click="goNext"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
@@ -202,7 +202,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Bottom Action -->
-            <div class="mt-auto w-full flex flex-col items-center gap-2 pb-6">
+            <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
               <button
                 @click="lifecycleStore.bootstrap(true)"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"

@@ -273,7 +273,7 @@ watch(() => props.isOpen, (val) => {
       </header>
 
       <!-- 滚动区域 -->
-      <div class="flex-1 overflow-y-auto relative no-rubber-band px-4 py-4 scrollbar-none">
+      <div class="flex-1 overflow-y-auto relative no-rubber-band px-4 py-4 scrollbar-none pb-[calc(var(--vcp-safe-bottom,48px))]">
         
         <!-- 视图 A: 规则列表 (按类型分区展示与排序) -->
         <div v-if="currentView === 'list'" class="flex flex-col gap-4 animate-fade-in pb-16">

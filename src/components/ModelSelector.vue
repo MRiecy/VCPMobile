@@ -211,7 +211,7 @@ onUnmounted(() => {
       <div v-if="modelValue"
         ref="sheetRef"
         class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden select-none no-rubber-band"
-        style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 12px);"
+        style="padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 12px);"
         :class="{ 'transition-transform duration-300': !isDragging }">
 
         <!-- 顶部拉手条及头部 (支持手势下拉) -->

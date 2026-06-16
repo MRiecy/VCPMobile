@@ -57,7 +57,7 @@ onMounted(() => {
     <Transition name="slide-up">
       <div v-if="tarvenStore.isSelectorOpen"
         class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 backdrop-blur-xl rounded-t-[1.8rem] shadow-2xl p-5 flex flex-col border-t border-white/20 dark:border-white/5"
-        style="padding-bottom: calc(env(safe-area-inset-bottom, 20px) + 12px);">
+        style="padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 12px);">
         
         <!-- 拖手线 -->
         <div class="w-10 h-1 bg-black/10 dark:bg-white/15 rounded-full mx-auto mb-4"></div>

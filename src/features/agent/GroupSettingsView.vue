@@ -275,7 +275,7 @@ const tagModeOptions = [
         </div>
       </header>
 
-      <div class="flex-1 overflow-y-auto p-5 space-y-8 pb-safe no-rubber-band">
+      <div class="flex-1 overflow-y-auto p-5 space-y-8 pb-[calc(var(--vcp-safe-bottom,48px))] no-rubber-band">
         <!-- 1. Basic Info -->
         <section class="flex flex-col items-center gap-6 py-2">
           <div class="relative group" @click="triggerFileInput">

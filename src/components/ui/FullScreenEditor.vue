@@ -95,7 +95,7 @@ const handleTouchMove = (e: TouchEvent) => {
     <Transition name="slide-up">
       <div v-if="isOpen" v-bind="$attrs"
         class="fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden"
-        :style="{ paddingBottom: `calc(env(safe-area-inset-bottom) + ${keyboardHeight}px)` }">
+        :style="{ paddingBottom: `calc(var(--vcp-safe-bottom, 48px) + ${keyboardHeight}px)` }">
 
         <!-- 顶部导航栏 -->
         <div

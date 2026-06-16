@@ -709,7 +709,7 @@ html.dark .vcp-tool-block.is-tool-result .detail-key {
 
 .vcp-fullscreen-tool-panel {
   padding-top: calc(1rem + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(1rem + var(--vcp-safe-bottom, 48px));
   padding-left: calc(1rem + env(safe-area-inset-left, 0px));
   padding-right: calc(1rem + env(safe-area-inset-right, 0px));
 }

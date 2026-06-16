@@ -223,7 +223,7 @@ const saveToAlbum = async () => {
 
       <!-- Main Content -->
       <div
-        class="flex-1 overflow-auto vcp-scrollable no-rubber-band pb-[env(safe-area-inset-bottom)]"
+        class="flex-1 overflow-auto vcp-scrollable no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]"
       >
         <!-- Text/Code/MD Viewer -->
         <div

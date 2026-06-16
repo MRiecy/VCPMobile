@@ -242,9 +242,9 @@ watch(currentSubPage, (val) => {
             class="absolute inset-0 flex flex-col z-10 transition-colors duration-300 bg-[var(--primary-bg)]"
           >
 
-            <div 
-              class="flex-1 pb-safe"
-              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col' : 'overflow-y-auto px-3 pt-6 pb-5 space-y-6 no-rubber-band'"
+            <div
+              class="flex-1"
+              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col pb-[calc(var(--vcp-safe-bottom,48px))]' : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
             >
               <!-- 用户身份 -->
               <template v-if="visibleSubPage === 'identity'">

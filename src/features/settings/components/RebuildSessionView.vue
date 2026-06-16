@@ -144,7 +144,7 @@ const handleClose = async () => {
       </div>
 
       <!-- 底部状态栏 -->
-      <div class="flex items-center justify-center px-4 py-2 border-t border-white/5">
+      <div class="flex items-center justify-center px-4 py-2 border-t border-white/5 pb-[calc(var(--vcp-safe-bottom,48px)+4px)]">
         <div class="text-[9px] opacity-30 font-bold tracking-[0.2em] uppercase">
           <span v-if="store.status === 'idle'">点击上方按钮以开始</span>
           <span v-else-if="store.status === 'running'">重建进行中</span>

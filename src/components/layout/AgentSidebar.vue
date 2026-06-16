@@ -80,7 +80,7 @@ const openSettings = () => {
 
     <!-- 底部: 动作区与设置 -->
     <div
-      class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 space-y-3 pb-[calc(var(--vcp-safe-bottom,16px)+8px)]">
+      class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 space-y-3 pb-[calc(var(--vcp-safe-bottom,48px)+8px)]">
       <template v-if="activeTab === 'agents'">
         <AgentsCreator />
       </template>
