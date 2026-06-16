@@ -62,8 +62,6 @@ pub enum MarkdownNode {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
-
-
 }
 
 /// 行内元素
@@ -139,7 +137,6 @@ pub enum InlineNode {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
-
 
     #[serde(rename = "raw_html_inline")]
     RawHtmlInline {
@@ -223,7 +220,6 @@ impl MarkdownNode {
         }
     }
 
-
     pub fn compute_hash(&self) -> u64 {
         let mut hasher = rustc_hash::FxHasher::default();
         std::hash::Hash::hash(self, &mut hasher);
@@ -240,7 +236,6 @@ impl MarkdownNode {
             MarkdownNode::Table { hash, .. } => *hash = Some(h),
             MarkdownNode::ThematicBreak => {}
             MarkdownNode::RawHtml { hash, .. } => *hash = Some(h),
-
         }
     }
 
@@ -348,7 +343,6 @@ impl InlineNode {
         }
     }
 
-
     pub fn inline_math(content: String, display_mode: bool) -> Self {
         Self::InlineMath {
             content,
@@ -357,7 +351,11 @@ impl InlineNode {
         }
     }
 
-    pub fn vcp_custom(kind: String, value: Option<String>, children: Option<Vec<InlineNode>>) -> Self {
+    pub fn vcp_custom(
+        kind: String,
+        value: Option<String>,
+        children: Option<Vec<InlineNode>>,
+    ) -> Self {
         Self::VcpCustom {
             kind,
             value,
@@ -416,11 +414,11 @@ impl InlineNode {
                     c.compute_hashes_recursively();
                 }
             }
-            InlineNode::VcpCustom { children, .. } => {
-                if let Some(ch) = children {
-                    for c in ch {
-                        c.compute_hashes_recursively();
-                    }
+            InlineNode::VcpCustom {
+                children: Some(ch), ..
+            } => {
+                for c in ch {
+                    c.compute_hashes_recursively();
                 }
             }
             _ => {}
@@ -530,7 +528,6 @@ impl std::hash::Hash for MarkdownNode {
                 state.write_u8(7);
                 content.hash(state);
             }
-
         }
     }
 }

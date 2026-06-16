@@ -10,9 +10,9 @@ use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 /// - 解析本身极廉价：40KB tail 的 parse+hash+diff+serialize 仅约 0.55ms，远非瓶颈。
 /// - 真正的成本是 IPC 载荷：CodeBlock/RawHtml 走整节点 Replace，每帧重发整块，
 ///   40KB 块在一次流式中累计推送可达 ~18.5MB。
-/// 因此上限从 8192 提升到 65536（覆盖绝大多数真实 HTML/代码产物），
-/// 并配合 vcp_client 的自适应降帧（30→10→5Hz）把每秒 IPC 载荷压到可接受范围。
-/// 仅在 tail 超过 64KB 这种极端体量时才降级为纯文本，避免单帧 JSON 过大拖垮 webview。
+///   因此上限从 8192 提升到 65536（覆盖绝大多数真实 HTML/代码产物），
+///   并配合 vcp_client 的自适应降帧（30→10→5Hz）把每秒 IPC 载荷压到可接受范围。
+///   仅在 tail 超过 64KB 这种极端体量时才降级为纯文本，避免单帧 JSON 过大拖垮 webview。
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -262,12 +262,18 @@ mod tests {
     fn test_oversized_tail_falls_back_to_plaintext_not_blank() {
         let mut buffer = AuroraBuffer::new();
         // 未闭合代码围栏，确保整段留在 tail；体量远超 64KB 上限
-        let big = format!("```text\n{}", "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 20_000));
+        let big = format!(
+            "```text\n{}",
+            "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 20_000)
+        );
         buffer.append_chunk(&big);
         buffer.process_queue();
 
         // 关键：tail_block 必须存在且携带纯文本 content，nodes 为 None（前端据此走纯文本路径）
-        let tb = buffer.tail_block.as_ref().expect("tail_block 不应为空（绝不留白）");
+        let tb = buffer
+            .tail_block
+            .as_ref()
+            .expect("tail_block 不应为空（绝不留白）");
         match tb {
             StreamBlock::Markdown { content, nodes, .. } => {
                 assert!(!content.is_empty(), "降级后必须保留纯文本 content");

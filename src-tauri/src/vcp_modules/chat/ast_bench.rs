@@ -9,10 +9,10 @@
 //! 注意：dev profile 下的绝对耗时无参考意义；务必看 perf profile 的输出，
 //! 并参考文末的"发布版换算说明"。
 
+use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, TailFrame};
 use crate::vcp_modules::chat::ast_diff::diff_ast;
 use crate::vcp_modules::pre_renderer::code_highlighter::highlight_code_block;
 use crate::vcp_modules::pre_renderer::{parse_markdown_to_ast_streaming, MarkdownNode};
-use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, TailFrame};
 use std::time::Instant;
 
 /// 以中位数（取多轮最小值附近的稳定值）返回闭包耗时（毫秒）。
@@ -126,7 +126,9 @@ fn bench_tail_single_frame_pipeline() {
             tier, parse_ms, hash_ms, diff_ms, ser_ms, frame_total, payload_bytes
         );
     }
-    println!("说明：frame合计 = parse + diff + serialize（parse 内部已包含 hash 计算，不重复累加）。");
+    println!(
+        "说明：frame合计 = parse + diff + serialize（parse 内部已包含 hash 计算，不重复累加）。"
+    );
 }
 
 /// 基准 2：syntect 高亮开销（决定 4096 流式高亮阈值是否合理）。
@@ -134,7 +136,10 @@ fn bench_tail_single_frame_pipeline() {
 fn bench_tail_syntect_highlight() {
     let html = load_genesis_html();
     println!("\n====== 基准 2：syntect 高亮开销（highlight_code_block, lang=html）======");
-    println!("{:>8} | {:>10} | {:>14}", "tier(B)", "highlight", "输出html(B)");
+    println!(
+        "{:>8} | {:>10} | {:>14}",
+        "tier(B)", "highlight", "输出html(B)"
+    );
     println!("{}", "-".repeat(40));
 
     for &tier in TIERS.iter() {

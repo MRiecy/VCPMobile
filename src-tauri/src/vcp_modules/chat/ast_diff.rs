@@ -203,11 +203,11 @@ fn diff_single_markdown_node(
                     );
                 }
                 // 2. 新增的尾部列表项：item 级别增量 Add（挂到 <ul>/<ol> 下），不再整表重建
-                for i in common_len..new_items.len() {
+                for (i, item) in new_items.iter().enumerate().skip(common_len) {
                     mutations.push(AstMutation::AddListItem {
                         id: format!("{}.li{}", node_id, i),
                         parent: node_id.to_string(),
-                        children: new_items[i].clone(),
+                        children: item.clone(),
                     });
                 }
                 // 3. 删除的尾部列表项：直接 Remove 对应 <li>
@@ -372,13 +372,7 @@ fn diff_single_inline_node(
             } else {
                 match (old_children, new_children) {
                     (Some(oc), Some(nc)) => {
-                        diff_inline_nodes(
-                            oc,
-                            nc,
-                            node_id,
-                            &format!("{}.i", node_id),
-                            mutations,
-                        );
+                        diff_inline_nodes(oc, nc, node_id, &format!("{}.i", node_id), mutations);
                     }
                     (None, None) => {}
                     _ => {
@@ -519,7 +513,11 @@ mod tests {
     // #4：列表新增项走 item 级别增量 AddListItem，而非整表 Replace
     #[test]
     fn test_diff_list_add_item_incremental() {
-        let mk_item = |s: &str| vec![MarkdownNode::paragraph(vec![InlineNode::text(s.to_string())])];
+        let mk_item = |s: &str| {
+            vec![MarkdownNode::paragraph(vec![InlineNode::text(
+                s.to_string(),
+            )])]
+        };
 
         let mut old = vec![MarkdownNode::list(false, vec![mk_item("A"), mk_item("B")])];
         let mut new = vec![MarkdownNode::list(
@@ -549,7 +547,11 @@ mod tests {
     // #4：列表删尾项走 Remove，不整表重建
     #[test]
     fn test_diff_list_remove_item_incremental() {
-        let mk_item = |s: &str| vec![MarkdownNode::paragraph(vec![InlineNode::text(s.to_string())])];
+        let mk_item = |s: &str| {
+            vec![MarkdownNode::paragraph(vec![InlineNode::text(
+                s.to_string(),
+            )])]
+        };
         let mut old = vec![MarkdownNode::list(
             true,
             vec![mk_item("A"), mk_item("B"), mk_item("C")],

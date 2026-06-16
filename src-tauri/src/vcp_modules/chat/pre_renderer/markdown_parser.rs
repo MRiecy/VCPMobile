@@ -38,7 +38,9 @@ fn fix_flanking_delimiters(text: &str) -> String {
     if !text.contains('*') {
         return text.to_string();
     }
-    FLANKING_FIX_LEFT.replace_all(text, "${1}${2}\u{200B}${3}").into_owned()
+    FLANKING_FIX_LEFT
+        .replace_all(text, "${1}${2}\u{200B}${3}")
+        .into_owned()
 }
 
 /// 剥除块级 $$ 公式行的多余前导缩进，防止 pulldown-cmark 将其误判为缩进代码块。
@@ -442,21 +444,22 @@ fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNod
     let mut stack: Vec<PartialNode> = Vec::new();
     let mut accumulated_text = String::new();
 
-    let flush_accumulated_text = |accumulated: &mut String, stack: &mut Vec<PartialNode>, nodes: &mut Vec<MarkdownNode>| {
-        if !accumulated.is_empty() {
-            let inline_nodes = if matches!(stack.last(), Some(PartialNode::CodeBlock { .. })) {
-                vec![InlineNode::text(accumulated.clone())]
-            } else {
-                process_text_magic(accumulated)
-            };
-            if let Some(top) = stack.last_mut() {
-                top.push_inlines(inline_nodes);
-            } else {
-                nodes.push(MarkdownNode::paragraph(inline_nodes));
+    let flush_accumulated_text =
+        |accumulated: &mut String, stack: &mut Vec<PartialNode>, nodes: &mut Vec<MarkdownNode>| {
+            if !accumulated.is_empty() {
+                let inline_nodes = if matches!(stack.last(), Some(PartialNode::CodeBlock { .. })) {
+                    vec![InlineNode::text(accumulated.clone())]
+                } else {
+                    process_text_magic(accumulated)
+                };
+                if let Some(top) = stack.last_mut() {
+                    top.push_inlines(inline_nodes);
+                } else {
+                    nodes.push(MarkdownNode::paragraph(inline_nodes));
+                }
+                accumulated.clear();
             }
-            accumulated.clear();
-        }
-    };
+        };
 
     for event in parser {
         if let Event::Text(text) = event {
@@ -868,9 +871,7 @@ impl PartialNode {
             PartialNode::Heading { level, children } => MarkdownNode::heading(level, children),
             PartialNode::CodeBlock { lang, code } => {
                 let lang_str = lang.as_deref().unwrap_or("plaintext");
-                let highlighted = if lang_str == "mermaid" {
-                    None
-                } else if is_streaming && code.len() > 4096 {
+                let highlighted = if lang_str == "mermaid" || (is_streaming && code.len() > 4096) {
                     None
                 } else {
                     highlight_code_block(&code, lang_str)
@@ -937,7 +938,8 @@ impl PartialNode {
 }
 
 fn process_text_magic(text: &str) -> Vec<InlineNode> {
-    if !text.contains('@') && !text.contains('"') && !text.contains('“') && !text.contains('”') {
+    if !text.contains('@') && !text.contains('"') && !text.contains('“') && !text.contains('”')
+    {
         return vec![InlineNode::text(text.to_string())];
     }
 
@@ -957,7 +959,11 @@ fn process_text_magic(text: &str) -> Vec<InlineNode> {
         } else if let Some(alert) = cap.get(2) {
             InlineNode::vcp_custom("alert".to_string(), Some(alert.as_str().to_string()), None)
         } else if let Some(tag) = cap.get(3) {
-            InlineNode::vcp_custom("highlight".to_string(), Some(tag.as_str().to_string()), None)
+            InlineNode::vcp_custom(
+                "highlight".to_string(),
+                Some(tag.as_str().to_string()),
+                None,
+            )
         } else {
             unreachable!()
         };
@@ -972,4 +978,3 @@ fn process_text_magic(text: &str) -> Vec<InlineNode> {
 
     nodes
 }
-
