@@ -103,6 +103,49 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
   };
 
+  /**
+   * 调度并申请 rAF 渲染，合并 data 和 aurora 的高频更新，在同一渲染帧内原子写入
+   */
+  const scheduleRAFUpdate = (messageId: string) => {
+    const update = rAFPendingUpdates.get(messageId);
+    if (!update || update.animationFrameId !== null) return;
+
+    const runRenderLoop = () => {
+      const up = rAFPendingUpdates.get(messageId);
+      if (!up) return;
+
+      const now = performance.now();
+      const elapsed = now - up.lastRenderTime;
+
+      if (elapsed >= MIN_RENDER_INTERVAL_MS) {
+        // 满足 30Hz 时间间隔，以原子事务方式刷入 Vue 响应式数据
+        const m = activeStreamMessages.get(messageId);
+        if (m) {
+          if (up.content !== null) m.content = up.content;
+          if (up.blocks !== null) m.blocks = up.blocks;
+          if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot as any;
+          if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
+          if (up.tailContent !== null) m.tailContent = up.tailContent;
+          if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
+        }
+        up.lastRenderTime = now;
+        // 重置当前帧内的合并暂存状态
+        up.content = null;
+        up.blocks = null;
+        up.tailContent = null;
+        up.tailBlock = null;
+        up.tailFrame = null;
+        up.tailSnapshot = null;
+        up.animationFrameId = null;
+      } else {
+        // 未到时间阀值，在下一物理帧继续尝试
+        up.animationFrameId = requestAnimationFrame(runRenderLoop);
+      }
+    };
+    
+    update.animationFrameId = requestAnimationFrame(runRenderLoop);
+  };
+
   const sessionStore = useChatSessionStore();
   const assistantStore = useAssistantStore();
   const avatarStore = useAvatarStore();
@@ -332,8 +375,27 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
 
       if (textChunk) {
-        msg!.content = (msg!.content || "") + textChunk;
-        msg!.tailContent = msg!.content;
+        let update = rAFPendingUpdates.get(actualMessageId);
+        if (!update) {
+          update = {
+            content: null,
+            blocks: null,
+            tailContent: null,
+            tailBlock: null,
+            tailFrame: null,
+            tailSnapshot: null,
+            animationFrameId: null,
+            lastRenderTime: 0,
+          };
+          rAFPendingUpdates.set(actualMessageId, update);
+        }
+
+        // 增量追加
+        const currentBase = update.content !== null ? update.content : (msg!.content || "");
+        update.content = currentBase + textChunk;
+        update.tailContent = update.content;
+
+        scheduleRAFUpdate(actualMessageId);
       }
     } else if (type === "aurora") {
       const aurora = event.aurora;
@@ -401,44 +463,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           update.tailBlock = (aurora.tailBlock as any) || null;
         }
 
-        // 3. 申请硬件级 rAF 自适应阻尼渲染（最大 30Hz）
-        if (update.animationFrameId === null) {
-          const runRenderLoop = () => {
-            const up = rAFPendingUpdates.get(actualMessageId);
-            if (!up) return;
-
-            const now = performance.now();
-            const elapsed = now - up.lastRenderTime;
-
-            if (elapsed >= MIN_RENDER_INTERVAL_MS) {
-              // 满足约 30Hz 间隔，触发 Vue 响应式写入进行重绘
-              const m = activeStreamMessages.get(actualMessageId);
-              if (m) {
-                if (up.content !== null) m.content = up.content;
-                if (up.blocks !== null) {
-                  m.blocks = up.blocks;
-                }
-                if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot as any;
-                if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
-                if (up.tailContent !== null) m.tailContent = up.tailContent;
-                if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
-              }
-              up.lastRenderTime = now;
-              // 重置当前帧内的合并暂存状态
-              up.content = null;
-              up.blocks = null;
-              up.tailContent = null;
-              up.tailBlock = null;
-              up.tailFrame = null;
-              up.tailSnapshot = null;
-              up.animationFrameId = null;
-            } else {
-              // 没到门槛，在下一屏幕物理刷新帧继续尝试
-              up.animationFrameId = requestAnimationFrame(runRenderLoop);
-            }
-          };
-          update.animationFrameId = requestAnimationFrame(runRenderLoop);
-        }
+        // 3. 申请硬件级 rAF 渲染调度（合并原子提交）
+        scheduleRAFUpdate(actualMessageId);
       }
       msg!.isThinking = false;
       addSessionStream(itemId, topicId, actualMessageId);

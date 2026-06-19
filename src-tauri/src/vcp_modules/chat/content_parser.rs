@@ -322,15 +322,11 @@ fn is_natural_language_line_start(c: char) -> bool {
         || ('\u{AC00}'..='\u{D7AF}').contains(&c)
         || ('\u{F900}'..='\u{FAFF}').contains(&c)
         || ('\u{FE30}'..='\u{FE4F}').contains(&c)
-        || ('\u{FF01}'..='\u{FF60}').contains(&c)
+        || ('\u{FF00}'..='\u{FFEF}').contains(&c)
         || ('\u{FFE0}'..='\u{FFE6}').contains(&c)
-        || matches!(
-            c,
-            '\u{201C}' | '\u{201D}' | // " "
-            '\u{2018}' | '\u{2019}' | // ' '
-            '\u{2026}' | // …
-            '\u{2014}' // —
-        )
+        || ('\u{2000}'..='\u{206F}').contains(&c)
+        || ('\u{25A0}'..='\u{25FF}').contains(&c)
+        || c == '\u{00B7}'
 }
 
 #[inline]

@@ -176,7 +176,7 @@ const loadPluginsMetadata = async () => {
         description: tool.description || "",
         type: tool.category || "oneshot",
         placeholder: tool.placeholder || undefined,
-        icon: tool.icon || "i-lucide-toy-brick",
+        icon: tool.icon || "i-ph:cube-bold",
         communication: tool.communication,
         enabled: tool.enabled !== undefined ? tool.enabled : true,
         requiresRoot: !!tool.requiresRoot

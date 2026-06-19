@@ -239,10 +239,14 @@ function createDomFromNode(
           let html = node.highlighted_html;
           // 剥离多余的 <pre><code> 嵌套包裹以满足前端样式
           const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
-          if (nestedPreMatch && nestedPreMatch[1].trim().startsWith("<pre")) {
-            const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-            if (innerMatch) {
-              html = innerMatch[1];
+          if (nestedPreMatch) {
+            if (nestedPreMatch[1].trim().startsWith("<pre")) {
+              const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+              if (innerMatch) {
+                html = innerMatch[1];
+              }
+            } else {
+              html = nestedPreMatch[1];
             }
           }
           el.innerHTML = html;
@@ -633,10 +637,14 @@ function executeMutation(
             let html = mutation.node.highlighted_html;
             // 剥离多余包裹的 pre/code...
             const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
-            if (nestedPreMatch && nestedPreMatch[1].trim().startsWith("<pre")) {
-              const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-              if (innerMatch) {
-                html = innerMatch[1];
+            if (nestedPreMatch) {
+              if (nestedPreMatch[1].trim().startsWith("<pre")) {
+                const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
+                if (innerMatch) {
+                  html = innerMatch[1];
+                }
+              } else {
+                html = nestedPreMatch[1];
               }
             }
             

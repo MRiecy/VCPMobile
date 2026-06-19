@@ -35,6 +35,7 @@
     "vue-router": "^5.0.6"
   },
   "devDependencies": {
+    "@iconify-json/heroicons": "^1.2.3",
     "@iconify-json/ph": "^1.2.2",
     "@tauri-apps/cli": "2.11.2",
     "@types/katex": "^0.16.8",
