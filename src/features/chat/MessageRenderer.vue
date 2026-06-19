@@ -175,10 +175,23 @@ function isBrkBlock(block: ContentBlock): boolean {
   return false;
 }
 
+function isWhitespaceNode(node: any): boolean {
+  if (!node) return true;
+  if (node.type === "text") {
+    return !node.value || node.value.trim() === "";
+  }
+  if (node.type === "paragraph") {
+    return !node.children || node.children.length === 0 || node.children.every(isWhitespaceNode);
+  }
+  if (node.type === "softbreak" || node.type === "hardbreak" || node.type === "break") {
+    return true;
+  }
+  return false;
+}
+
 function splitMarkdownNodes(nodes: any[]): any[][] {
   const result: any[][] = [];
   let currentGroup: any[] = [];
-  let hasBrk = false;
   let htmlDepth = 0;
   
   for (const node of nodes) {
@@ -193,17 +206,16 @@ function splitMarkdownNodes(nodes: any[]): any[][] {
     }
 
     if (isBrkNode(node) && htmlDepth === 0) {
-      result.push(currentGroup);
+      if (currentGroup.some(n => !isWhitespaceNode(n))) {
+        result.push(currentGroup);
+      }
       currentGroup = [];
-      hasBrk = true;
     } else {
       currentGroup.push(node);
     }
   }
   
-  if (hasBrk && currentGroup.length === 0) {
-    result.push([]);
-  } else if (currentGroup.length > 0) {
+  if (currentGroup.some(n => !isWhitespaceNode(n))) {
     result.push(currentGroup);
   }
   return result;
@@ -246,6 +258,24 @@ const messageBubbles = computed(() => {
       }
 
       if (block.nodes && block.nodes.length > 0) {
+        // 🆕 如果这个 block 的第一个有效节点是 brk 节点，说明它和前一个 bubble 之间有 brk 割裂，
+        // 应该在处理这个 block 之前，先把当前气泡推出去！
+        let startsWithBrk = false;
+        for (const node of block.nodes) {
+          if (isBrkNode(node)) {
+            startsWithBrk = true;
+            break;
+          }
+          if (isWhitespaceNode(node)) {
+            continue;
+          }
+          break;
+        }
+
+        if (startsWithBrk) {
+          pushCurrentGroup();
+        }
+
         const nodeGroups = splitMarkdownNodes(block.nodes);
         if (nodeGroups.length > 1) {
           nodeGroups.forEach((groupNodes, idx) => {

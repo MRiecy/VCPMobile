@@ -593,6 +593,12 @@ pub(crate) fn find_matching_close_tag(
     // 预先收集 search_area 中所有标准代码围栏的物理范围（支持流式未闭合边界）
     let fence_ranges = get_fence_ranges(search_area);
 
+    // 预先收集 search_area 中所有行内代码范围
+    let inline_codes: Vec<(usize, usize)> = INLINE_CODE_RE
+        .find_iter(search_area)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+
     // 预先收集 search_area 中所有 HTML 注释的物理范围（支持流式未闭合注释边界）
     let mut comment_ranges = Vec::new();
     for m in COMMENT_RE.find_iter(search_area) {
@@ -613,6 +619,14 @@ pub(crate) fn find_matching_close_tag(
 
         // 健壮性防御：如果当前扫描到的 HTML 标签处于代码块围栏内部，直接跳过
         if fence_ranges.iter().any(|range| range.contains(&cap_start)) {
+            continue;
+        }
+
+        // 健壮性防御：如果当前扫描到的 HTML 标签处于行内代码内部，直接跳过
+        let is_in_inline = inline_codes
+            .iter()
+            .any(|&(start, end)| cap_start >= start && cap_start < end);
+        if is_in_inline {
             continue;
         }
 
@@ -1654,6 +1668,17 @@ mod tests {
                     println!("FOUND NESTED CODEBLOCK:\n{:#?}", node);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_brk_text_37() {
+        let text = std::fs::read_to_string("G:\\VCPMobile\\scripts\\tail-test\\brk.txt").unwrap();
+        // 模拟 content_parser.rs 的 parse_content 切分
+        let blocks = crate::vcp_modules::content_parser::parse_content(&text);
+        println!("TOTAL BLOCKS: {}", blocks.len());
+        for (idx, block) in blocks.iter().enumerate() {
+            println!("Block [{}]: type={:?}", idx, block);
         }
     }
 }

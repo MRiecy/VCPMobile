@@ -203,6 +203,17 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   // --- scroll 事件 ---
   const onScroll = () => {
+    // 🌟 修复无限置底死锁：在 scroll 触发的第一时间，同步（非节流）判定是否已向上偏离底部。
+    // 若已偏离，瞬间切入 free 状态，使紧随其后的 ResizeObserver 同步回调直接走 else 节流分支，打断强位置底。
+    const list = messageListRef.value;
+    if (list) {
+      const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+      if (!nearBottom && scrollScene.value === "following") {
+        scrollScene.value = "free";
+        showScrollToBottom.value = true;
+      }
+    }
+
     if (scrollThrottleId) return; // 已调度，节流中
     scrollThrottleId = requestAnimationFrame(() => {
       scrollThrottleId = null;
