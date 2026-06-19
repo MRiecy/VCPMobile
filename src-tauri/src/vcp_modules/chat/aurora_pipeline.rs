@@ -55,6 +55,9 @@ pub struct AuroraUpdate {
     /// 全量内容（仅终结事件时发送，正常流式中省略）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// 🆕 推送周期中新增的、尚未推送给前端的纯文本片段
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -77,6 +80,8 @@ pub struct AuroraBuffer {
     pub tail_reset_pending: bool,
     pub tail_snapshot_pending: Option<Vec<MarkdownNode>>,
     pub tail_frame_seq: u64,
+    /// 🆕 记录已被消费并发送的 full_text 长度，用于计算增量 chunk
+    pub pushed_len: usize,
     parser: StreamBlockParser,
     is_finishing: bool,
 }
@@ -95,6 +100,7 @@ impl AuroraBuffer {
             tail_reset_pending: false,
             tail_snapshot_pending: None,
             tail_frame_seq: 0,
+            pushed_len: 0,
             parser: StreamBlockParser::new(),
             is_finishing: false,
         }
@@ -103,6 +109,18 @@ impl AuroraBuffer {
     /// 将新的文本块追加到全文
     pub fn append_chunk(&mut self, chunk: &str) {
         self.full_text.push_str(chunk);
+    }
+
+    /// 🆕 提取自上次推送以来累积消费的新增字符
+    pub fn take_chunk(&mut self) -> Option<String> {
+        let current_len = self.full_text.len();
+        if current_len > self.pushed_len {
+            let chunk = self.full_text[self.pushed_len..current_len].to_string();
+            self.pushed_len = current_len;
+            Some(chunk)
+        } else {
+            None
+        }
     }
 
     pub fn take_tail_frame(&mut self) -> Option<TailFrame> {

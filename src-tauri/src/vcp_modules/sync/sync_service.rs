@@ -527,9 +527,15 @@ async fn run_sync_session(
                 // 1: 基础 Metadata (agent, group, avatar), 2: Topic Metadata
                 let manifest_phase = Arc::new(AtomicU8::new(1));
                 let mut sync_success = false;
+                let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(15));
 
                 loop {
                     tokio::select! {
+                        _ = heartbeat_interval.tick() => {
+                            if let Err(e) = ws_stream.send(Message::Ping(vec![].into())).await {
+                                log::warn!("[SyncService] Failed to send WebSocket Ping: {}", e);
+                            }
+                        }
                         Some(cmd) = pipeline_rx.recv() => {
                             match cmd {
                                 crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicMetadata => {

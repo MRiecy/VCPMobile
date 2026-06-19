@@ -54,16 +54,6 @@ pub struct StreamEvent {
 }
 
 impl StreamEvent {
-    pub fn data(message_id: String, chunk: Value, context: Option<Value>) -> Self {
-        Self {
-            r#type: "data".into(),
-            chunk: Some(chunk),
-            message_id,
-            context,
-            ..Default::default()
-        }
-    }
-
     pub fn thinking(message_id: String, context: Option<Value>) -> Self {
         Self {
             r#type: "thinking".into(),
@@ -593,6 +583,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                   finish_reason: Option<String>,
                                   error: Option<String>| {
             let is_final = finish_reason.is_some() || error.is_some();
+            let chunk = buffer.take_chunk(); // ⚡ 消费获取新增的 chunk 文本
             let tail_frame = buffer.take_tail_frame();
             let tail_snapshot = tail_frame.as_ref().and_then(|frame| frame.snapshot.clone());
             let mut event = StreamEvent::aurora(
@@ -622,6 +613,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                     } else {
                         None
                     },
+                    chunk, // ⚡ 填入 chunk 属性
                 },
                 context_inner.clone(),
             );
@@ -677,13 +669,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                         let reader = StreamReader::new(stream);
                         let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 1024));
 
-                        let mut last_activity = std::time::Instant::now();
-                        let timeout_duration = Duration::from_secs(25);
-
                         loop {
-                            let sleep_future = tokio::time::sleep_until(tokio::time::Instant::from_std(last_activity + timeout_duration));
-                            tokio::pin!(sleep_future);
-
                             tokio::select! {
                                 // 核心修复：即使在等待数据的间隙，也能捕获中断信号
                                 _ = &mut abort_rx => {
@@ -696,20 +682,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     active_requests_inner.remove(&message_id_inner);
                                     break;
                                 }
-                                _ = &mut sleep_future => {
-                                    log::warn!("[VCPClient] Stream idle timeout (25s) reached for message: {}", message_id_inner);
-                                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                    aurora_buffer.finalize();
-                                    send_aurora_update(&mut aurora_buffer, true, true, Some("error".to_string()), Some("连接超时：超过 25 秒未收到服务器响应，自动关闭连接".to_string()));
-                                    send_stream_event(StreamEvent::error(
-                                        message_id_inner.clone(),
-                                        context_inner.clone(),
-                                        "连接超时：超过 25 秒未收到服务器响应，自动关闭连接".to_string(),
-                                    ));
-                                    break;
-                                }
                                 line_res = lines.next() => {
-                                    last_activity = std::time::Instant::now();
                                     match line_res {
                                         Some(Ok(line)) => {
                                             if line.trim().is_empty() { continue; }
@@ -751,12 +724,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                                         }
                                                     }
 
-                                                    // 保留原始 data 事件以保证兼容性
-                                                    send_stream_event(StreamEvent::data(
-                                                        message_id_inner.clone(),
-                                                        chunk,
-                                                        context_inner.clone(),
-                                                    ));
+
 
                                                 }
                                             }

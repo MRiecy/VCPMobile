@@ -16,7 +16,7 @@ import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
 import { useAssistantStore } from "./core/stores/assistant";
 import { useSettingsStore } from "./core/stores/settings";
-import { reapplyScreenKeepIfActive, suspendPhysicalScreenKeep } from "./core/composables/useScreenKeeper";
+
 
 // Native safe-area bridge: CSS env(safe-area-inset-bottom) often reports 0
 // on Android WebView even when viewport-fit=cover is set. This takes the real
@@ -312,7 +312,7 @@ const handleVcpLifecycle = (e: Event) => {
     if (isAppBackground) return;
     isAppBackground = true;
     console.log("[Lifecycle] App moved to background, tuning heartbeat to 120s...");
-    suspendPhysicalScreenKeep(); // 休眠物理亮屏，达到省电效果
+
     invoke("set_vcp_log_heartbeat", { intervalMs: 120000 }).catch((err) => {
       console.error("[Lifecycle] Failed to set background heartbeat:", err);
     });
@@ -320,7 +320,7 @@ const handleVcpLifecycle = (e: Event) => {
     if (!isAppBackground) return;
     isAppBackground = false;
     console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
-    reapplyScreenKeepIfActive(); // 唤醒时自动校准和恢复可能丢失的物理亮屏 FLAG
+
     invoke("set_vcp_log_heartbeat", { intervalMs: 15000 }).catch((err) => {
       console.error("[Lifecycle] Failed to restore foreground heartbeat:", err);
     });

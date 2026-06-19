@@ -61,6 +61,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     init {
         instanceRef = java.lang.ref.WeakReference(this)
+        activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
     }
 
     companion object {
@@ -85,8 +86,29 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val shareIntentHandler = ShareIntentHandler(this)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var cameraTempFile: java.io.File? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
+    private var isScreenKeepOnActive = false
+
+    private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
+        override fun onActivityResumed(a: Activity) {
+            if (a === activity && isScreenKeepOnActive) {
+                activity.runOnUiThread {
+                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }
+        override fun onActivityPaused(a: Activity) {
+            if (a === activity && isScreenKeepOnActive) {
+                activity.runOnUiThread {
+                    activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }
+        override fun onActivityCreated(a: Activity, savedInstanceState: android.os.Bundle?) {}
+        override fun onActivityStarted(a: Activity) {}
+        override fun onActivityStopped(a: Activity) {}
+        override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
+        override fun onActivityDestroyed(a: Activity) {}
+    }
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var lastConnected: Boolean? = null
     private var isNetworkMonitoringStarted = false
@@ -417,6 +439,15 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
             }
 
+            // 联动屏幕高亮常亮
+            val needsScreenKeep = args.agentName.contains("[数据同步]") || args.agentName.contains("[预渲染重建]")
+            if (needsScreenKeep) {
+                isScreenKeepOnActive = true
+                activity.runOnUiThread {
+                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+
             startServiceCompatible(intent)
             invoke.resolve()
         } catch (e: Exception) {
@@ -442,6 +473,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun stopStreamingService(invoke: Invoke) {
         try {
             val intent = StreamKeepaliveService.createIntent(activity, "")
+
+            // 联动取消屏幕高亮常亮
+            isScreenKeepOnActive = false
+            activity.runOnUiThread {
+                activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+
             activity.stopService(intent)
             invoke.resolve()
         } catch (e: Exception) {
@@ -453,33 +491,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun acquireWakeLock(invoke: Invoke) {
         try {
-            val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (wakeLock == null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VcpMobile:WakeLock")
-            }
-            if (wakeLock?.isHeld == false) {
-                wakeLock?.acquire(5 * 60 * 1000L) // 最大持有5分钟安全限制
-            }
-
-            try {
-                val wm = activity.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-                if (wifiLock == null) {
-                    @Suppress("DEPRECATION")
-                    wifiLock = wm.createWifiLock(
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q)
-                            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                        else
-                            android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
-                        "VcpMobile:WifiLock"
-                    )
-                }
-                if (wifiLock?.isHeld == false) {
-                    wifiLock?.acquire()
-                }
-            } catch (wifiEx: Exception) {
-                Log.w(TAG, "Failed to acquire WiFi Lock: ${wifiEx.message}")
-            }
-
+            val intent = StreamKeepaliveService.createIntent(activity, "[后台保活]", true)
+            startServiceCompatible(intent)
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "acquireWakeLock failed", e)
@@ -490,12 +503,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun releaseWakeLock(invoke: Invoke) {
         try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-            if (wifiLock?.isHeld == true) {
-                wifiLock?.release()
-            }
+            val intent = StreamKeepaliveService.createIntent(activity, "", false)
+            activity.stopService(intent)
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "releaseWakeLock failed", e)
@@ -599,6 +608,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
+        activity.application.unregisterActivityLifecycleCallbacks(activityLifecycleCallbacks)
         webViewRef = null
         try {
             if (networkCallback != null) {
@@ -609,8 +619,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             }
         } catch (_: Exception) {}
         try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-            if (wifiLock?.isHeld == true) wifiLock?.release()
+            // Locks are managed by StreamKeepaliveService
         } catch (_: Exception) {}
         try {
             fileIoExecutor.shutdown()

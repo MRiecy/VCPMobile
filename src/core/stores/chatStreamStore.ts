@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed, reactive, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { releaseScreenKeep } from "../composables/useScreenKeeper";
+
 import { useChatSessionStore } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
@@ -263,19 +263,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   ) => {
     const key = `${ownerId}:${topicId}`;
     const streams = sessionActiveStreams.value[key];
-    let didRemove = false;
     if (streams) {
       const index = streams.indexOf(messageId);
       if (index !== -1) {
         streams.splice(index, 1);
-        didRemove = true;
       }
       if (streams.length === 0) {
         delete sessionActiveStreams.value[key];
       }
-    }
-    if (didRemove && Object.keys(sessionActiveStreams.value).length === 0) {
-      releaseScreenKeep();
     }
     // 同时从全局池中移除 (延迟移除，确保 finalizeStream 能拿到对象)
     const cleanupTimer = setTimeout(() => {
@@ -295,7 +290,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     onStreamFinished?: (messageId: string, topicId: string) => void;
   }) => {
     const actualMessageId = event.messageId || event.message_id || "";
-    const { chunk, type, context } = event;
+    const { type, context } = event;
     const ctx = context || {};
     const topicId = ctx.topicId;
     const isGroup = !!ctx.isGroupMessage || !!ctx.groupId;
@@ -362,42 +357,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (!streamingMessageId.value) {
         streamingMessageId.value = actualMessageId;
       }
-    } else if (type === "data") {
+    } else if (type === "aurora") {
       msg!.isThinking = false;
       addSessionStream(itemId, topicId, actualMessageId);
 
-      let textChunk = "";
-      if (typeof chunk === "string") {
-        textChunk = chunk;
-      } else if (chunk && chunk.choices && chunk.choices.length > 0) {
-        const delta = chunk.choices[0].delta;
-        if (delta && delta.content) textChunk = delta.content;
-      }
-
-      if (textChunk) {
-        let update = rAFPendingUpdates.get(actualMessageId);
-        if (!update) {
-          update = {
-            content: null,
-            blocks: null,
-            tailContent: null,
-            tailBlock: null,
-            tailFrame: null,
-            tailSnapshot: null,
-            animationFrameId: null,
-            lastRenderTime: 0,
-          };
-          rAFPendingUpdates.set(actualMessageId, update);
-        }
-
-        // 增量追加
-        const currentBase = update.content !== null ? update.content : (msg!.content || "");
-        update.content = currentBase + textChunk;
-        update.tailContent = update.content;
-
-        scheduleRAFUpdate(actualMessageId);
-      }
-    } else if (type === "aurora") {
       const aurora = event.aurora;
       if (aurora) {
         recordStreamTrace({
@@ -444,6 +407,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         // 2. 覆盖写入暂存数据（稀疏合并）
         if (typeof aurora.content === "string") {
           update.content = aurora.content;
+        } else if (aurora.chunk) {
+          const currentBase = update.content !== null ? update.content : (msg!.content || "");
+          update.content = currentBase + aurora.chunk;
         }
         if (aurora.stableChanged && aurora.stableBlocks) {
           update.blocks = aurora.stableBlocks;
@@ -466,8 +432,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         // 3. 申请硬件级 rAF 渲染调度（合并原子提交）
         scheduleRAFUpdate(actualMessageId);
       }
-      msg!.isThinking = false;
-      addSessionStream(itemId, topicId, actualMessageId);
     } else if (type === "end" || type === "error") {
       const errorMsg = event.error;
       const finishReason = event.finishReason;

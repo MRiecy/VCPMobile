@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { acquireScreenKeep, releaseScreenKeep } from '../composables/useScreenKeeper';
+
 
 export const useSyncSessionStore = defineStore('syncSession', () => {
   // --- 视图状态 ---
@@ -43,7 +43,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     progressData.value = { phase: 'initialization', total: 0, completed: 0, message: '' };
 
     status.value = 'connecting';
-    acquireScreenKeep();
+
 
     // 原生设备电量与省电检测保障
     try {
@@ -56,14 +56,14 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
           pushLog('error', '当前设备处于系统省电模式，已智能拦截同步，请关闭省电模式或充电后重试。');
           status.value = 'error';
           canDismiss.value = true;
-          releaseScreenKeep();
+
           return;
         }
         if (battery.level > 0 && battery.level < 30) {
           pushLog('error', `当前设备电量过低 (${battery.level}%)，低于 30% 限制，已智能拦截同步以保护电池与数据安全。`);
           status.value = 'error';
           canDismiss.value = true;
-          releaseScreenKeep();
+
           return;
         }
       }
@@ -77,7 +77,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       pushLog('error', `启动失败: ${e}`);
       status.value = 'error';
       canDismiss.value = true;
-      releaseScreenKeep();
+
     });
   };
 
@@ -86,7 +86,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
     isOpen.value = false;
     activeTab.value = 'live';
     cleanupListeners();
-    releaseScreenKeep();
+
     invoke('stop_sync').catch(() => {});
   };
 
@@ -125,7 +125,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       if (s === 'error') { 
         status.value = 'error'; 
         canDismiss.value = true; 
-        releaseScreenKeep();
+
       }
     }).then(fn => unlistenFns.push(fn));
 
@@ -133,7 +133,7 @@ export const useSyncSessionStore = defineStore('syncSession', () => {
       status.value = 'completed';
       canDismiss.value = true;
       needsReload.value = true;
-      releaseScreenKeep();
+
       pushLog('success', '同步已全部完成，点击关闭以刷新数据');
     }).then(fn => unlistenFns.push(fn));
   };

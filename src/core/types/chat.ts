@@ -207,6 +207,7 @@ export interface AuroraUpdate {
   tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
   content?: string;
+  chunk?: string;
 }
 
 /**

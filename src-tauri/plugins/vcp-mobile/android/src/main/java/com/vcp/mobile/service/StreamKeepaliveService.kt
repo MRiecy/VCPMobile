@@ -30,6 +30,7 @@ class StreamKeepaliveService : Service() {
     private var isKeepaliveModeActive = false
     private var currentStreamName = ""
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
 
     companion object {
         const val CHANNEL_ID = "vcp_stream_keepalive"
@@ -115,9 +116,29 @@ class StreamKeepaliveService : Service() {
                     PowerManager.PARTIAL_WAKE_LOCK,
                     "VcpMobile::StreamWakeLock"
                 ).apply {
-                    acquire(10 * 60 * 1000L) // 限制最大超时 10 分钟以防电池耗尽
+                    acquire() // 移除超时限制以实现真正的持续持有
                 }
                 Log.i(TAG, "WakeLock acquired for stream: $currentStreamName")
+            }
+
+            try {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                if (wifiLock == null) {
+                    @Suppress("DEPRECATION")
+                    wifiLock = wifiManager.createWifiLock(
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        else
+                            android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                        "VcpMobile::StreamWifiLock"
+                    )
+                }
+                if (wifiLock?.isHeld == false) {
+                    wifiLock?.acquire()
+                    Log.i(TAG, "WifiLock acquired for stream: $currentStreamName")
+                }
+            } catch (wifiEx: Exception) {
+                Log.w(TAG, "Failed to acquire WifiLock inside service: ${wifiEx.message}")
             }
         }
 
@@ -137,6 +158,14 @@ class StreamKeepaliveService : Service() {
             }
         }
         wakeLock = null
+
+        wifiLock?.let {
+            if (it.isHeld) {
+                it.release()
+            }
+        }
+        wifiLock = null
+
         isServiceRunning = false
         super.onDestroy()
     }

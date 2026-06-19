@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { withScreenKeep } from '../composables/useScreenKeeper';
+
 
 export type RebuildTaskType = 'preRender';
 
@@ -48,7 +48,7 @@ export const useRebuildSessionStore = defineStore('rebuildSession', () => {
     errorMessage.value = '';
 
     try {
-      await withScreenKeep(() => invoke('rebuild_all_pre_renders'));
+      await invoke('rebuild_all_pre_renders');
       needsReload.value = true;
       status.value = 'completed';
       canDismiss.value = true;
