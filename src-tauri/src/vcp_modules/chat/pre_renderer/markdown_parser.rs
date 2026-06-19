@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 lazy_static! {
     static ref FENCE_RE: Regex =
-        Regex::new(r"(?m)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
+        Regex::new(r"(?m)^[ \t]*(`{3,})[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
 
     // 合并 LaTeX 匹配：[ ... ] 和 ( ... )
     static ref MATH_RE: Regex = Regex::new(r"(?s)\\\[(?P<display>.*?)\\\]|\\\((?P<inline>.*?)\\\)").unwrap();
@@ -41,6 +41,34 @@ fn is_punctuation(c: char) -> bool {
         || ('\u{FF5B}'..='\u{FF60}').contains(&c)
         || ('\u{FFE0}'..='\u{FFE6}').contains(&c)
         || c == '\u{00B7}'
+}
+
+fn get_fence_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut current_start: Option<(usize, usize)> = None;
+
+    for cap in FENCE_RE.captures_iter(text) {
+        let m = cap.get(0).unwrap();
+        let backticks = cap.get(1).unwrap().as_str().len();
+
+        match current_start {
+            None => {
+                current_start = Some((m.start(), backticks));
+            }
+            Some((start_pos, start_backticks)) => {
+                if backticks >= start_backticks {
+                    ranges.push(start_pos..m.end());
+                    current_start = None;
+                }
+            }
+        }
+    }
+
+    if let Some((start_pos, _)) = current_start {
+        ranges.push(start_pos..text.len());
+    }
+
+    ranges
 }
 
 fn apply_flanking_fix(segment: &str) -> String {
@@ -318,59 +346,38 @@ fn fix_flanking_delimiters(text: &str) -> String {
 
     let mut result = String::with_capacity(text.len() + 16);
     let mut last_end = 0;
-    let mut in_fence = false;
+    let ranges = get_fence_ranges(text);
 
-    for m in FENCE_RE.find_iter(text) {
-        let segment = &text[last_end..m.start()];
-        if !in_fence {
-            result.push_str(&apply_flanking_fix(segment));
-        } else {
-            result.push_str(segment);
-        }
-        result.push_str(m.as_str());
-        last_end = m.end();
-        in_fence = !in_fence;
+    for range in &ranges {
+        let segment = &text[last_end..range.start];
+        result.push_str(&apply_flanking_fix(segment));
+        result.push_str(&text[range.start..range.end]);
+        last_end = range.end;
     }
 
     let tail = &text[last_end..];
-    if !in_fence {
-        result.push_str(&apply_flanking_fix(tail));
-    } else {
-        result.push_str(tail);
-    }
+    result.push_str(&apply_flanking_fix(tail));
 
     result
 }
 
-/// 剥除块级 $$ 公式行的多余前导缩进，防止 pulldown-cmark 将其误判为缩进代码块。
-/// CommonMark 规则：≥4 空格缩进 = 缩进代码块，优先级高于 math 扩展的行内识别。
-/// 此函数在代码围栏内部保持原样，只处理围栏外的文本。
 fn strip_display_math_indent(text: &str) -> Cow<'_, str> {
     if !text.contains("$$") {
         return Cow::Borrowed(text);
     }
     let mut result = String::with_capacity(text.len());
     let mut last_end = 0;
-    let mut in_fence = false;
+    let ranges = get_fence_ranges(text);
 
-    for m in FENCE_RE.find_iter(text) {
-        let segment = &text[last_end..m.start()];
-        if !in_fence {
-            result.push_str(INDENTED_DOLLAR_RE.replace_all(segment, "$1").as_ref());
-        } else {
-            result.push_str(segment);
-        }
-        result.push_str(m.as_str());
-        last_end = m.end();
-        in_fence = !in_fence;
+    for range in &ranges {
+        let segment = &text[last_end..range.start];
+        result.push_str(INDENTED_DOLLAR_RE.replace_all(segment, "$1").as_ref());
+        result.push_str(&text[range.start..range.end]);
+        last_end = range.end;
     }
 
     let tail = &text[last_end..];
-    if !in_fence {
-        result.push_str(INDENTED_DOLLAR_RE.replace_all(tail, "$1").as_ref());
-    } else {
-        result.push_str(tail);
-    }
+    result.push_str(INDENTED_DOLLAR_RE.replace_all(tail, "$1").as_ref());
 
     Cow::Owned(result)
 }
@@ -382,30 +389,17 @@ fn preprocess_latex_math(text: &str) -> Cow<'_, str> {
 
     let mut result = String::with_capacity(text.len());
     let mut last_end = 0;
-    let mut in_fence = false;
+    let ranges = get_fence_ranges(text);
 
-    // 1. 扫描代码围栏
-    for m in FENCE_RE.find_iter(text) {
-        let segment = &text[last_end..m.start()];
-        if !in_fence {
-            // 在围栏外：执行极速公式替换
-            push_math_replaced(&mut result, segment);
-        } else {
-            // 在围栏内：直接追加
-            result.push_str(segment);
-        }
-        result.push_str(m.as_str());
-        last_end = m.end();
-        in_fence = !in_fence;
+    for range in &ranges {
+        let segment = &text[last_end..range.start];
+        push_math_replaced(&mut result, segment);
+        result.push_str(&text[range.start..range.end]);
+        last_end = range.end;
     }
 
-    // 2. 处理尾部
     let tail = &text[last_end..];
-    if !in_fence {
-        push_math_replaced(&mut result, tail);
-    } else {
-        result.push_str(tail);
-    }
+    push_math_replaced(&mut result, tail);
 
     Cow::Owned(result)
 }
@@ -446,10 +440,8 @@ fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<Markdo
     let mut containers: Vec<(String, Vec<MarkdownNode>, String)> = Vec::new();
     let mut last_pos = 0;
 
-    // 预先收集所有代码围栏的位置以供快速查询 (标准 regex find_iter)
-    let fences: Vec<regex::Match> = FENCE_RE.find_iter(text).collect();
-    let mut fence_cursor = 0;
-    let mut in_fence = false;
+    // 预先收集所有代码围栏的物理范围
+    let fences = get_fence_ranges(text);
 
     // 预先收集所有内联反引号的范围以跳过误提取
     let inline_codes: Vec<(usize, usize)> = INLINE_CODE_RE
@@ -473,13 +465,8 @@ fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<Markdo
             continue;
         }
 
-        // 高效同步围栏状态：跳过当前匹配位置之前的围栏切换
-        while fence_cursor < fences.len() && fences[fence_cursor].start() <= m.start() {
-            in_fence = !in_fence;
-            fence_cursor += 1;
-        }
-
-        if in_fence {
+        // 健壮性防御：如果当前标签处于代码围栏内部，直接跳过
+        if fences.iter().any(|range| range.contains(&m.start())) {
             continue;
         }
 
@@ -502,12 +489,6 @@ fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<Markdo
             containers.push((open_tag, inner_nodes, close_tag));
 
             last_pos = close_end;
-
-            // 由于 last_pos 跳跃了，同步围栏游标状态
-            while fence_cursor < fences.len() && fences[fence_cursor].start() < last_pos {
-                in_fence = !in_fence;
-                fence_cursor += 1;
-            }
         }
     }
 
@@ -610,15 +591,7 @@ pub(crate) fn find_matching_close_tag(
     let search_area = &text[start_pos..];
 
     // 预先收集 search_area 中所有标准代码围栏的物理范围（支持流式未闭合边界）
-    let mut fence_ranges = Vec::new();
-    let mut fence_iter = FENCE_RE.find_iter(search_area);
-    while let Some(start) = fence_iter.next() {
-        if let Some(end) = fence_iter.next() {
-            fence_ranges.push(start.start()..end.end());
-        } else {
-            fence_ranges.push(start.start()..search_area.len());
-        }
-    }
+    let fence_ranges = get_fence_ranges(search_area);
 
     // 预先收集 search_area 中所有 HTML 注释的物理范围（支持流式未闭合注释边界）
     let mut comment_ranges = Vec::new();
@@ -1658,5 +1631,29 @@ mod tests {
             }
         }
         assert!(found, "Could not find bolded '自愈判定阀' node in Strong.txt");
+    }
+
+    #[test]
+    fn test_code_block_nesting_isolation() {
+        // 外层 4 个反引号，内层 3 个反引号
+        let text = "````markdown\n这是一段嵌套代码块：\n```rust\nfn main() {\n    // **这不该被flanking修改**\n    let a = \"**hello**\";\n}\n```\n````";
+        let fixed = fix_flanking_delimiters(text);
+        
+        // 应该完全没有任何修改，因为这段内容全部在 4 个反引号的代码围栏中
+        assert_eq!(fixed, text);
+    }
+
+    #[test]
+    fn test_pre_txt_16() {
+        let text = std::fs::read_to_string("G:\\VCPMobile\\scripts\\tail-test\\pre.txt").unwrap();
+        let nodes = parse_markdown_to_ast(&text);
+        for (i, node) in nodes.iter().enumerate() {
+            if let MarkdownNode::CodeBlock { lang, code, .. } = node {
+                println!("CodeBlock [{}]: lang={:?}, code_len={}", i, lang, code.len());
+                if code.contains("nested") {
+                    println!("FOUND NESTED CODEBLOCK:\n{:#?}", node);
+                }
+            }
+        }
     }
 }

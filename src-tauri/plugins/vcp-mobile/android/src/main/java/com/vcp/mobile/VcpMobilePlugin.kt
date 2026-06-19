@@ -59,6 +59,30 @@ import com.topjohnwu.superuser.Shell
 ])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
+    private var isScreenKeepOnActive = false
+
+    private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
+        override fun onActivityResumed(a: Activity) {
+            if (a === activity && isScreenKeepOnActive) {
+                activity.runOnUiThread {
+                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }
+        override fun onActivityPaused(a: Activity) {
+            if (a === activity && isScreenKeepOnActive) {
+                activity.runOnUiThread {
+                    activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+        }
+        override fun onActivityCreated(a: Activity, savedInstanceState: android.os.Bundle?) {}
+        override fun onActivityStarted(a: Activity) {}
+        override fun onActivityStopped(a: Activity) {}
+        override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
+        override fun onActivityDestroyed(a: Activity) {}
+    }
+
     init {
         instanceRef = java.lang.ref.WeakReference(this)
         activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
@@ -86,29 +110,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val shareIntentHandler = ShareIntentHandler(this)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var cameraTempFile: java.io.File? = null
-    private var isScreenKeepOnActive = false
-
-    private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
-        override fun onActivityResumed(a: Activity) {
-            if (a === activity && isScreenKeepOnActive) {
-                activity.runOnUiThread {
-                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
-            }
-        }
-        override fun onActivityPaused(a: Activity) {
-            if (a === activity && isScreenKeepOnActive) {
-                activity.runOnUiThread {
-                    activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
-            }
-        }
-        override fun onActivityCreated(a: Activity, savedInstanceState: android.os.Bundle?) {}
-        override fun onActivityStarted(a: Activity) {}
-        override fun onActivityStopped(a: Activity) {}
-        override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
-        override fun onActivityDestroyed(a: Activity) {}
-    }
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var lastConnected: Boolean? = null
     private var isNetworkMonitoringStarted = false

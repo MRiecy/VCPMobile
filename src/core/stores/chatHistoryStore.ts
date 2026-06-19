@@ -445,6 +445,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             blocks: undefined,
           },
         });
+        clearMessageCache(messageId);
         currentChatHistory.value[targetIndex] = {
           ...currentChatHistory.value[targetIndex],
           blocks: compiledBlocks as any,
@@ -558,6 +559,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         messageId,
         topicId,
       });
+      clearMessageCache(messageId);
       currentChatHistory.value[targetIndex] = {
         ...currentChatHistory.value[targetIndex],
         blocks: compiledBlocks,

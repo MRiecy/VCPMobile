@@ -89,13 +89,11 @@ const logColor = (level: string) => {
 
 const handleClose = async () => {
   if (store.needsReload) {
-    const confirmed = confirm('同步已完成，数据已更新。点击确认立即刷新以生效。');
-    if (confirmed) {
-      store.markReloaded();
-      overlayStore.closeSyncSession();
-      await performFullReload();
-      return;
-    }
+    alert('同步已完成，数据已更新。系统将立即刷新以生效。');
+    store.markReloaded();
+    overlayStore.closeSyncSession();
+    await performFullReload();
+    return;
   }
   overlayStore.closeSyncSession();
 };

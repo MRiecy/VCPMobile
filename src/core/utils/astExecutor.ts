@@ -233,24 +233,20 @@ function createDomFromNode(
         el.className = "mermaid-placeholder";
         el.textContent = node.code || "";
       } else {
-        el = document.createElement("pre");
-        el.className = "vcp-code-block vcp-scrollable";
         if (node.highlighted_html) {
-          let html = node.highlighted_html;
-          // 剥离多余的 <pre><code> 嵌套包裹以满足前端样式
-          const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
-          if (nestedPreMatch) {
-            if (nestedPreMatch[1].trim().startsWith("<pre")) {
-              const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-              if (innerMatch) {
-                html = innerMatch[1];
-              }
-            } else {
-              html = nestedPreMatch[1];
-            }
+          // 🆕 利用浏览器原生 DOM 解析器，直接实例化后端提供的带外壳完整 HTML
+          const temp = document.createElement("div");
+          temp.innerHTML = node.highlighted_html.trim();
+          el = temp.firstElementChild as HTMLElement;
+          if (!el || el.tagName !== "PRE") {
+            // 兜底安全保障
+            el = document.createElement("pre");
+            el.className = "vcp-code-block vcp-scrollable";
+            el.innerHTML = node.highlighted_html;
           }
-          el.innerHTML = html;
         } else {
+          el = document.createElement("pre");
+          el.className = "vcp-code-block vcp-scrollable";
           const code = document.createElement("code");
           code.textContent = node.code || "";
           el.appendChild(code);
@@ -625,7 +621,7 @@ function executeMutation(
           const parent = oldNode.parentNode;
           const nodeType = mutation.node.type;
 
-          // 1. 策略 A：代码块原地 innerHTML 覆盖
+          // 1. 策略 A：代码块原地 innerHTML 覆盖与 Style 原地同步
           if (
             nodeType === "code_block" &&
             oldNode instanceof HTMLElement &&
@@ -634,21 +630,23 @@ function executeMutation(
           ) {
             cleanupSubtreeRefs(mutation.id, registry, false); // 保留外层 pre 的 ref
             
-            let html = mutation.node.highlighted_html;
-            // 剥离多余包裹的 pre/code...
-            const nestedPreMatch = html.match(/<pre[^>]*>\s*<code>([\s\S]*?)<\/code>\s*<\/pre>/i);
-            if (nestedPreMatch) {
-              if (nestedPreMatch[1].trim().startsWith("<pre")) {
-                const innerMatch = nestedPreMatch[1].match(/<pre[^>]*>([\s\S]*?)<\/pre>/i);
-                if (innerMatch) {
-                  html = innerMatch[1];
-                }
+            // 🆕 利用原生 DOM 树解析，安全提取 innerHTML 与 style，彻底废除正则剥离
+            const temp = document.createElement("div");
+            temp.innerHTML = mutation.node.highlighted_html.trim();
+            const newPre = temp.firstElementChild as HTMLElement;
+            if (newPre && newPre.tagName === "PRE") {
+              // 原地同步 style 属性（如背景颜色）与类名
+              oldNode.className = newPre.className;
+              if (newPre.getAttribute("style")) {
+                oldNode.setAttribute("style", newPre.getAttribute("style") || "");
               } else {
-                html = nestedPreMatch[1];
+                oldNode.removeAttribute("style");
               }
+              // 原地覆盖内容（剥离了外层 pre 的内部节点）
+              oldNode.innerHTML = newPre.innerHTML;
+            } else {
+              oldNode.innerHTML = mutation.node.highlighted_html;
             }
-            
-            oldNode.innerHTML = html; // 原地覆盖
             astDebugLog(`[AST replace code_block optimized] id=${mutation.id}`);
             break;
           }

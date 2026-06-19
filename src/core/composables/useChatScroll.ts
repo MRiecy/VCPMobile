@@ -243,14 +243,62 @@ export function useChatScroll(options: UseChatScrollOptions) {
     });
   };
 
+  // --- 手势与鼠标滚轮物理置顶继续滑动判定 ---
+  let startY = 0;
+
+  const onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length > 0) {
+      startY = e.touches[0].pageY;
+    }
+  };
+
+  const onTouchMove = (e: TouchEvent) => {
+    const list = messageListRef.value;
+    if (!list) return;
+
+    // 如果已经在最顶部，且用户手指继续向下拉（deltaY > 10px）
+    if (list.scrollTop <= 2 && e.touches.length > 0) {
+      const deltaY = e.touches[0].pageY - startY;
+      if (
+        deltaY > 10 &&
+        hasMoreHistory.value &&
+        !isLoadingHistory.value
+      ) {
+        prepareLoadAnchor();
+        scrollScene.value = "loading-top";
+        onLoadMore();
+      }
+    }
+  };
+
+  const onWheel = (e: WheelEvent) => {
+    const list = messageListRef.value;
+    if (!list) return;
+
+    // 如果已经在最顶部，且鼠标滚轮继续向上滚（试图拉出顶部）
+    if (list.scrollTop <= 2 && e.deltaY < 0) {
+      if (hasMoreHistory.value && !isLoadingHistory.value) {
+        prepareLoadAnchor();
+        scrollScene.value = "loading-top";
+        onLoadMore();
+      }
+    }
+  };
+
   // --- 监听 messageListRef 变化，自动设置/清理事件与 Observer ---
   const stopWatchListRef = watch(messageListRef, (el, oldEl) => {
     if (oldEl) {
       oldEl.removeEventListener("scroll", onScroll);
+      oldEl.removeEventListener("touchstart", onTouchStart);
+      oldEl.removeEventListener("touchmove", onTouchMove);
+      oldEl.removeEventListener("wheel", onWheel);
     }
     if (el) {
       startContentObserver();
       el.addEventListener("scroll", onScroll, { passive: true });
+      el.addEventListener("touchstart", onTouchStart, { passive: true });
+      el.addEventListener("touchmove", onTouchMove, { passive: true });
+      el.addEventListener("wheel", onWheel, { passive: true });
       stopWatchListRef();
     }
   });
@@ -321,7 +369,11 @@ export function useChatScroll(options: UseChatScrollOptions) {
       loadMoreDebounceId = null;
     }
     if (messageListRef.value) {
-      messageListRef.value.removeEventListener("scroll", onScroll);
+      const list = messageListRef.value;
+      list.removeEventListener("scroll", onScroll);
+      list.removeEventListener("touchstart", onTouchStart);
+      list.removeEventListener("touchmove", onTouchMove);
+      list.removeEventListener("wheel", onWheel);
     }
     loadAnchor = null;
   };
