@@ -15,6 +15,33 @@ pub fn process_video_for_multimodal<R: Runtime>(
         use tauri::Manager;
         use tauri_plugin_vcp_mobile::VcpMobileState;
 
+        // 1. 获取内容 Hash (基于 attachments 下的内容寻址文件名)
+        let hash = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        let cache_dir = crate::vcp_modules::infra::file_manager::get_multimodal_cache_dir(app)?;
+        if !cache_dir.exists() {
+            let _ = std::fs::create_dir_all(&cache_dir);
+        }
+        let cache_path = cache_dir.join(format!("{}.json", hash));
+
+        // 2. 检查并命中缓存
+        if !hash.is_empty() && cache_path.exists() {
+            if let Ok(json_str) = std::fs::read_to_string(&cache_path) {
+                if let Ok(cached_frames) = serde_json::from_str::<Vec<String>>(&json_str) {
+                    log::info!(
+                        "[VideoExtractor] Cache HIT for hash: {}, returning {} frames instantly",
+                        hash,
+                        cached_frames.len()
+                    );
+                    return Ok(cached_frames);
+                }
+            }
+        }
+
         let state = app.state::<VcpMobileState<R>>();
         let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
         let plugin_handle = handle
@@ -28,7 +55,7 @@ pub fn process_video_for_multimodal<R: Runtime>(
 
         let input_str = path.to_str().ok_or("Invalid video path")?;
         log::info!(
-            "[VideoExtractor] Invoking Kotlin processVideo for: {}",
+            "[VideoExtractor] Cache MISS. Invoking Kotlin processVideo for: {}",
             input_str
         );
 
@@ -84,6 +111,21 @@ pub fn process_video_for_multimodal<R: Runtime>(
             if let Some(parent_dir) = Path::new(first_path_str).parent() {
                 if parent_dir.exists() && parent_dir.is_dir() {
                     let _ = std::fs::remove_dir_all(parent_dir);
+                }
+            }
+        }
+
+        // 3. 写入持久化缓存
+        if !hash.is_empty() && !results.is_empty() {
+            if let Ok(json_str) = serde_json::to_string(&results) {
+                if let Err(e) = std::fs::write(&cache_path, json_str) {
+                    log::warn!("[VideoExtractor] Failed to write cache for {}: {}", hash, e);
+                } else {
+                    log::info!(
+                        "[VideoExtractor] Successfully cached {} frames for hash: {}",
+                        results.len(),
+                        hash
+                    );
                 }
             }
         }

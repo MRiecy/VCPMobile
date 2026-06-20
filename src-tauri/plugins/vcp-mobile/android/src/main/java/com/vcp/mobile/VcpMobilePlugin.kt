@@ -48,6 +48,16 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import com.topjohnwu.superuser.Shell
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.transformer.Transformer
+import androidx.media3.transformer.TransformationRequest
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Composition
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
@@ -846,7 +856,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 // 2. 获取 MIME 类型
-                val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
+                var mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
                 Log.i(TAG, "[onPickFileResult] Processing picked file: $originalName (size=$size, mime=$mimeType)")
 
                 // 3. 发送预准备事件给前端，让前端立即创建进度卡片
@@ -862,7 +872,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
                 // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
                 val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
-                val tempFile = java.io.File(uploadsDir, "pick_${System.currentTimeMillis()}_temp")
+                var tempFile = java.io.File(uploadsDir, "pick_${System.currentTimeMillis()}_temp")
                 currentTempFile = tempFile
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
                 
@@ -905,12 +915,98 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 val hashBytes = digest.digest()
-                val hash = hashBytes.joinToString("") { "%02x".format(it) }
+                var hash = hashBytes.joinToString("") { "%02x".format(it) }
 
-                // 内容寻址哈希命名重命名去重
-                val fileExtension = java.io.File(originalName).extension.let { 
+                // ⚡ 多媒体硬件预转码与 API 动态门槛拦截预处理层
+                val ext = originalName.substringAfterLast(".").lowercase()
+                val sdkInt = android.os.Build.VERSION.SDK_INT
+                val isUnsupportedVideo = listOf("mkv", "avi", "flv", "wmv", "ts").contains(ext)
+                val isUnsupportedAudio = listOf("wma", "aiff").contains(ext)
+                val isUnsupportedHeic = (ext == "heic" || ext == "heif") && sdkInt < 28
+                val isUnsupportedAvif = ext == "avif" && sdkInt < 31
+                val isUnsupportedOpus = ext == "opus" && sdkInt < 29
+
+                val needTranscode = isUnsupportedVideo || isUnsupportedAudio || isUnsupportedHeic || isUnsupportedAvif || isUnsupportedOpus
+
+                var fileExtension = java.io.File(originalName).extension.let { 
                     if (it.isEmpty()) "" else ".$it" 
                 }
+
+                if (needTranscode) {
+                    Log.i(TAG, "[onPickFileResult] File need transcode: $originalName (ext=$ext, sdk=$sdkInt)")
+                    val isAudioOnly = isUnsupportedAudio || isUnsupportedOpus || (ext == "ogg" && sdkInt < 29)
+                    val isImageOnly = isUnsupportedHeic || isUnsupportedAvif
+                    val outputSuffix = if (isAudioOnly) "m4a" else if (isImageOnly) "jpg" else "mp4"
+                    val transcodedFile = java.io.File(uploadsDir, "transcoded_${System.currentTimeMillis()}.$outputSuffix")
+                    currentTempFile = transcodedFile
+
+                    val latch = CountDownLatch(1)
+                    var transcodeError: Throwable? = null
+
+                    activity.runOnUiThread {
+                        try {
+                            val request = TransformationRequest.Builder()
+                                .setVideoMimeType(if (!isAudioOnly && !isImageOnly) MimeTypes.VIDEO_H264 else null)
+                                .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                                .build()
+
+                            val transformer = Transformer.Builder(context)
+                                .setTransformationRequest(request)
+                                .addListener(object : Transformer.Listener {
+                                    override fun onCompleted(composition: Composition, result: ExportResult) {
+                                        latch.countDown()
+                                    }
+
+                                    override fun onError(composition: Composition, result: ExportResult, exception: ExportException) {
+                                        transcodeError = exception
+                                        latch.countDown()
+                                    }
+                                })
+                                .build()
+
+                            val mediaItem = MediaItem.fromUri(Uri.fromFile(tempFile))
+                            val editedMediaItem = EditedMediaItem.Builder(mediaItem)
+                                .setRemoveAudio(false)
+                                .build()
+
+                            transformer.start(editedMediaItem, transcodedFile.absolutePath)
+                        } catch (e: Throwable) {
+                            transcodeError = e
+                            latch.countDown()
+                        }
+                    }
+
+                    if (!latch.await(300, java.util.concurrent.TimeUnit.SECONDS)) {
+                        transcodeError = java.util.concurrent.TimeoutException("Transcoding timed out after 5 minutes")
+                    }
+
+                    if (transcodeError != null) {
+                        try { transcodedFile.delete() } catch (_: Exception) {}
+                        throw transcodeError!!
+                    }
+
+                    // 转码成功，物理删除原格式的临时文件以释放空间
+                    try { tempFile.delete() } catch (_: Exception) {}
+
+                    // 重新计算转码后文件的 CAS SHA-256 哈希
+                    val newDigest = java.security.MessageDigest.getInstance("SHA-256")
+                    java.io.FileInputStream(transcodedFile).use { fis ->
+                        val buf = ByteArray(65536)
+                        var n: Int
+                        while (fis.read(buf).also { n = it } != -1) {
+                            newDigest.update(buf, 0, n)
+                        }
+                    }
+                    val newHashBytes = newDigest.digest()
+                    hash = newHashBytes.joinToString("") { "%02x".format(it) }
+
+                    // 更新下游变量
+                    fileExtension = ".$outputSuffix"
+                    mimeType = if (isAudioOnly) "audio/mp4" else if (isImageOnly) "image/jpeg" else "video/mp4"
+                    originalName = originalName.substringBeforeLast(".") + "." + outputSuffix
+                    tempFile = transcodedFile
+                }
+
                 val finalTempFile = java.io.File(uploadsDir, "$hash$fileExtension")
                 
                 if (finalTempFile.exists()) {

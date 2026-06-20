@@ -104,6 +104,9 @@
 .vcp-markdown-block p:last-child {
   margin-bottom: 0;
 }
+.vcp-markdown-block p:empty {
+  display: none !important;
+}
 
 /* --- Lists (restore bullets/numbers after Tailwind reset) --- */
 .vcp-markdown-block ul {

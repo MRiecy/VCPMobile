@@ -422,6 +422,24 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
+  const deleteAttachment = async (topicId: string, messageId: string, hash: string) => {
+    // 1. 调用后端逻辑删除命令
+    await invoke("delete_message_attachment", {
+      topicId,
+      messageId,
+      hash,
+    });
+
+    // 2. 更新本地状态，以便在界面上实时隐藏该附件
+    const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
+    if (targetIndex !== -1) {
+      const msg = currentChatHistory.value[targetIndex];
+      if (msg.attachments) {
+        msg.attachments = msg.attachments.filter(att => att.hash !== hash);
+      }
+    }
+  };
+
   const updateMessageContent = async (messageId: string, newContent: string) => {
     clearMessageCache(messageId);
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
@@ -583,6 +601,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     loadMoreHistory,
     sendMessage,
     deleteMessage,
+    deleteAttachment,
     triggerGeneration,
     summarizeTopic,
     updateMessageContent,

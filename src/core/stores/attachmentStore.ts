@@ -6,6 +6,8 @@ import { useDocumentProcessor } from "../composables/useDocumentProcessor";
 import { useNotificationStore } from "./notification";
 import type { Attachment } from "../types/chat";
 
+
+
 /**
  * 前端辅助：异步读取图片原始分辨率（不依赖后端）
  * 用于上传前拦截超限图片（>8K×8K）
@@ -36,10 +38,16 @@ export const useAttachmentStore = defineStore("attachment", () => {
     if (stableId) {
       const idx = stagedAttachments.value.findIndex((a) => a.id === stableId);
       if (idx !== -1 && stagedAttachments.value[idx].status === "loading") {
-        const currentProgress = stagedAttachments.value[idx].progress || 0;
-        // 防抖/防回退：仅在进度增加时更新
-        if (progress > currentProgress) {
-          stagedAttachments.value[idx].progress = progress;
+        if (progress >= 99) {
+          // 进度达到 99% 说明物理传输/Hash已完毕，开始进入后端同步文本提取的 processing 阶段
+          stagedAttachments.value[idx].status = "processing";
+          stagedAttachments.value[idx].progress = undefined;
+        } else {
+          const currentProgress = stagedAttachments.value[idx].progress || 0;
+          // 防抖/防回退：仅在进度增加时更新
+          if (progress > currentProgress) {
+            stagedAttachments.value[idx].progress = progress;
+          }
         }
       }
     }
@@ -185,6 +193,26 @@ export const useAttachmentStore = defineStore("attachment", () => {
           return;
         }
 
+        // ⚡ 附件防线：拦截无法解析的二进制/未知异构格式 (调用后端统一检测接口)
+        if (picked.name) {
+          try {
+            await invoke("check_attachment_support", { originalName: picked.name });
+          } catch (err: any) {
+            const errMsg = err?.message || String(err);
+            notificationStore.addNotification({
+              type: "warning",
+              title: "不支持的附件格式",
+              message: errMsg.startsWith("❌") ? errMsg : `❌ ${errMsg}`,
+              toastOnly: false,
+            });
+            const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
+            if (existingIdx !== -1) {
+              stagedAttachments.value.splice(existingIdx, 1);
+            }
+            return;
+          }
+        }
+
         // 兜底：如果卡片还没插入，补插一张
         const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
         if (existingIdx === -1) {
@@ -239,6 +267,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
               name: finalData.name,
               size: finalData.size,
               hash: finalData.hash,
+              thumbnailPath: finalData.thumbnail_path,
               status: "done",
               progress: undefined,
             };
@@ -301,9 +330,25 @@ export const useAttachmentStore = defineStore("attachment", () => {
           );
 
           const ext = file.name.split('.').pop()?.toLowerCase() || '';
+          const notificationStore = useNotificationStore();
+
+          // ⚡ 附件防线：拦截无法解析的二进制/未知异构格式 (调用后端统一检测接口)
+          try {
+            await invoke("check_attachment_support", { originalName: file.name });
+          } catch (err: any) {
+            const errMsg = err?.message || String(err);
+            notificationStore.addNotification({
+              type: "warning",
+              title: "不支持的附件格式",
+              message: errMsg.startsWith("❌") ? errMsg : `❌ ${errMsg}`,
+              toastOnly: false,
+            });
+            resolve();
+            return;
+          }
+
           const isGif = ext === 'gif' || file.type === 'image/gif';
           const isImage = file.type.startsWith('image/');
-          const notificationStore = useNotificationStore();
 
           // 1. 大小拦截：非 GIF 图片 > 10MB 直接拒绝
           if (isImage && !isGif && file.size > 10 * 1024 * 1024) {
@@ -365,6 +410,14 @@ export const useAttachmentStore = defineStore("attachment", () => {
               const arrayBuffer = await file.arrayBuffer();
               const bytes = new Uint8Array(arrayBuffer);
 
+              // 零拷贝 IPC 发送前直接切入 processing 阶段，后端同步做文本提取
+              const attIndex = stagedAttachments.value.findIndex(
+                (a) => a.id === stableId,
+              );
+              if (attIndex !== -1) {
+                stagedAttachments.value[attIndex].status = "processing";
+              }
+
               finalData = await invoke<any>("store_file", {
                 originalName: file.name,
                 fileBytes: bytes, 
@@ -409,7 +462,12 @@ export const useAttachmentStore = defineStore("attachment", () => {
                       (a) => a.id === stableId,
                     );
                     if (attIndex !== -1) {
-                      stagedAttachments.value[attIndex].progress = progress;
+                      if (progress >= 99) {
+                        stagedAttachments.value[attIndex].status = "processing";
+                        stagedAttachments.value[attIndex].progress = undefined;
+                      } else {
+                        stagedAttachments.value[attIndex].progress = progress;
+                      }
                     }
                   }
                 };

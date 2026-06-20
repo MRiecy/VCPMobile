@@ -83,7 +83,8 @@ fn apply_flanking_fix(segment: &str) -> String {
     let mut i = 0;
     while i < len {
         // 1. 换行符重置（支持多种换行符，防跨行状态泄露）
-        if chars[i] == '\n' || chars[i] == '\r' || chars[i] == '\u{2028}' || chars[i] == '\u{2029}' {
+        if chars[i] == '\n' || chars[i] == '\r' || chars[i] == '\u{2028}' || chars[i] == '\u{2029}'
+        {
             in_strong = false;
             in_emphasis = false;
             inline_code_backticks = 0;
@@ -148,7 +149,12 @@ fn apply_flanking_fix(segment: &str) -> String {
                     false
                 } else {
                     let next = next_char.unwrap();
-                    let is_next_whitespace = next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '\u{2028}' || next == '\u{2029}';
+                    let is_next_whitespace = next == ' '
+                        || next == '\t'
+                        || next == '\n'
+                        || next == '\r'
+                        || next == '\u{2028}'
+                        || next == '\u{2029}';
                     if is_next_whitespace {
                         false
                     } else {
@@ -158,7 +164,13 @@ fn apply_flanking_fix(segment: &str) -> String {
                         } else {
                             !has_prev || {
                                 let prev = prev_char.unwrap();
-                                prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == '\u{2028}' || prev == '\u{2029}' || is_punctuation(prev)
+                                prev == ' '
+                                    || prev == '\t'
+                                    || prev == '\n'
+                                    || prev == '\r'
+                                    || prev == '\u{2028}'
+                                    || prev == '\u{2029}'
+                                    || is_punctuation(prev)
                             }
                         }
                     }
@@ -170,7 +182,12 @@ fn apply_flanking_fix(segment: &str) -> String {
                     false
                 } else {
                     let prev = prev_char.unwrap();
-                    let is_prev_whitespace = prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == '\u{2028}' || prev == '\u{2029}';
+                    let is_prev_whitespace = prev == ' '
+                        || prev == '\t'
+                        || prev == '\n'
+                        || prev == '\r'
+                        || prev == '\u{2028}'
+                        || prev == '\u{2029}';
                     if is_prev_whitespace {
                         false
                     } else {
@@ -180,7 +197,13 @@ fn apply_flanking_fix(segment: &str) -> String {
                         } else {
                             !has_next || {
                                 let next = next_char.unwrap();
-                                next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '\u{2028}' || next == '\u{2029}' || is_punctuation(next)
+                                next == ' '
+                                    || next == '\t'
+                                    || next == '\n'
+                                    || next == '\r'
+                                    || next == '\u{2028}'
+                                    || next == '\u{2029}'
+                                    || is_punctuation(next)
                             }
                         }
                     }
@@ -259,7 +282,12 @@ fn apply_flanking_fix(segment: &str) -> String {
                     false
                 } else {
                     let next = next_char.unwrap();
-                    let is_next_whitespace = next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '\u{2028}' || next == '\u{2029}';
+                    let is_next_whitespace = next == ' '
+                        || next == '\t'
+                        || next == '\n'
+                        || next == '\r'
+                        || next == '\u{2028}'
+                        || next == '\u{2029}';
                     if is_next_whitespace {
                         false
                     } else {
@@ -269,7 +297,13 @@ fn apply_flanking_fix(segment: &str) -> String {
                         } else {
                             !has_prev || {
                                 let prev = prev_char.unwrap();
-                                prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == '\u{2028}' || prev == '\u{2029}' || is_punctuation(prev)
+                                prev == ' '
+                                    || prev == '\t'
+                                    || prev == '\n'
+                                    || prev == '\r'
+                                    || prev == '\u{2028}'
+                                    || prev == '\u{2029}'
+                                    || is_punctuation(prev)
                             }
                         }
                     }
@@ -281,7 +315,12 @@ fn apply_flanking_fix(segment: &str) -> String {
                     false
                 } else {
                     let prev = prev_char.unwrap();
-                    let is_prev_whitespace = prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == '\u{2028}' || prev == '\u{2029}';
+                    let is_prev_whitespace = prev == ' '
+                        || prev == '\t'
+                        || prev == '\n'
+                        || prev == '\r'
+                        || prev == '\u{2028}'
+                        || prev == '\u{2029}';
                     if is_prev_whitespace {
                         false
                     } else {
@@ -291,7 +330,13 @@ fn apply_flanking_fix(segment: &str) -> String {
                         } else {
                             !has_next || {
                                 let next = next_char.unwrap();
-                                next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '\u{2028}' || next == '\u{2029}' || is_punctuation(next)
+                                next == ' '
+                                    || next == '\t'
+                                    || next == '\n'
+                                    || next == '\r'
+                                    || next == '\u{2028}'
+                                    || next == '\u{2029}'
+                                    || is_punctuation(next)
                             }
                         }
                     }
@@ -1274,7 +1319,7 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
                 let chars: Vec<char> = value.chars().collect();
                 let len = chars.len();
                 let mut j = 0;
-                
+
                 while j < len {
                     let c = chars[j];
                     if c == '“' || c == '”' || c == '"' {
@@ -1306,7 +1351,10 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
                     InlineNode::Strikethrough { children, .. } => {
                         *children = split_text_by_quotes(children.clone());
                     }
-                    InlineNode::VcpCustom { children: Some(children), .. } => {
+                    InlineNode::VcpCustom {
+                        children: Some(children),
+                        ..
+                    } => {
                         *children = split_text_by_quotes(children.clone());
                     }
                     _ => {}
@@ -1326,7 +1374,7 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
     while i < len {
         let mut start_idx = None;
         let mut open_char = None;
-        
+
         if let InlineNode::Text { value } = &inlines[i] {
             if value.starts_with('“') {
                 start_idx = Some(i);
@@ -1358,7 +1406,7 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
 
             if let Some(e_idx) = end_idx {
                 let mut children = Vec::new();
-                
+
                 if s_idx == e_idx {
                     if let InlineNode::Text { value } = &inlines[s_idx] {
                         let inner_val = &value[op_c.len_utf8()..value.len() - cl_c.len_utf8()];
@@ -1373,11 +1421,11 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
                             children.push(InlineNode::text(inner_val.to_string()));
                         }
                     }
-                    
+
                     for k in (s_idx + 1)..e_idx {
                         children.push(inlines[k].clone());
                     }
-                    
+
                     if let InlineNode::Text { value } = &inlines[e_idx] {
                         let inner_val = &value[..value.len() - cl_c.len_utf8()];
                         if !inner_val.is_empty() {
@@ -1388,14 +1436,18 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
 
                 // 递归合并内部子节点（绝对不含外层引号，安全防御无限递归）
                 let merged_children = merge_quote_nodes(children);
-                
+
                 // 将外层引号和已合并的内部子节点组装起来
                 let mut final_children = Vec::new();
                 final_children.push(InlineNode::text(op_c.to_string()));
                 final_children.extend(merged_children);
                 final_children.push(InlineNode::text(cl_c.to_string()));
 
-                result.push(InlineNode::vcp_custom("quote".to_string(), None, Some(final_children)));
+                result.push(InlineNode::vcp_custom(
+                    "quote".to_string(),
+                    None,
+                    Some(final_children),
+                ));
                 i = e_idx + 1;
                 continue;
             }
@@ -1415,7 +1467,10 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
             InlineNode::Strikethrough { children, .. } => {
                 *children = merge_quote_nodes(children.clone());
             }
-            InlineNode::VcpCustom { children: Some(children), .. } => {
+            InlineNode::VcpCustom {
+                children: Some(children),
+                ..
+            } => {
                 *children = merge_quote_nodes(children.clone());
             }
             _ => {}
@@ -1485,7 +1540,10 @@ mod tests {
         assert_eq!(fix_flanking_delimiters("“**加粗**”"), "“**加粗**”");
 
         // 2. 这很**“重要”**的 -> 应该在开启后注入，闭合前注入
-        assert_eq!(fix_flanking_delimiters("这很**“重要”**的"), "这很**\u{200B}“重要”\u{200B}**的");
+        assert_eq!(
+            fix_flanking_delimiters("这很**“重要”**的"),
+            "这很**\u{200B}“重要”\u{200B}**的"
+        );
 
         // 3. 代码块内部的加粗不应该被处理
         let code_text = "```\n这很**“重要”**的\n```";
@@ -1505,7 +1563,12 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         if let MarkdownNode::Paragraph { children, .. } = &nodes[0] {
             assert_eq!(children.len(), 1);
-            if let InlineNode::VcpCustom { kind, children: Some(ch), .. } = &children[0] {
+            if let InlineNode::VcpCustom {
+                kind,
+                children: Some(ch),
+                ..
+            } = &children[0]
+            {
                 assert_eq!(kind, "quote");
                 assert_eq!(ch.len(), 3);
                 assert_eq!(ch[0], InlineNode::text("“".to_string()));
@@ -1523,7 +1586,12 @@ mod tests {
         assert_eq!(nodes.len(), 1);
         if let MarkdownNode::Paragraph { children, .. } = &nodes[0] {
             assert_eq!(children.len(), 1);
-            if let InlineNode::VcpCustom { kind, children: Some(ch), .. } = &children[0] {
+            if let InlineNode::VcpCustom {
+                kind,
+                children: Some(ch),
+                ..
+            } = &children[0]
+            {
                 assert_eq!(kind, "quote");
                 assert_eq!(ch.len(), 5);
                 assert_eq!(ch[0], InlineNode::text("“".to_string()));
@@ -1537,7 +1605,6 @@ mod tests {
         } else {
             panic!("Expected Paragraph");
         }
-
     }
 
     #[test]
@@ -1549,42 +1616,73 @@ mod tests {
         if let MarkdownNode::Paragraph { children, .. } = &nodes_single_bold[0] {
             assert_eq!(children.len(), 2);
             assert_eq!(children[0], InlineNode::text("看哪些".to_string()));
-            if let InlineNode::Strong { children: strong_children, .. } = &children[1] {
+            if let InlineNode::Strong {
+                children: strong_children,
+                ..
+            } = &children[1]
+            {
                 // \u{200b}, VcpCustom("quote"), Text("，或者"), VcpCustom("quote"), \u{200b}
                 assert_eq!(strong_children.len(), 5);
                 assert_eq!(strong_children[0], InlineNode::text("\u{200b}".to_string()));
                 assert_eq!(strong_children[4], InlineNode::text("\u{200b}".to_string()));
-                
-                if let InlineNode::VcpCustom { kind, children: Some(q_ch), .. } = &strong_children[1] {
+
+                if let InlineNode::VcpCustom {
+                    kind,
+                    children: Some(q_ch),
+                    ..
+                } = &strong_children[1]
+                {
                     assert_eq!(kind, "quote");
                     assert_eq!(q_ch[0], InlineNode::text("“".to_string()));
-                    assert_eq!(q_ch[1], InlineNode::text("应该加粗的部分没有加粗".to_string()));
+                    assert_eq!(
+                        q_ch[1],
+                        InlineNode::text("应该加粗的部分没有加粗".to_string())
+                    );
                     assert_eq!(q_ch[2], InlineNode::text("”".to_string()));
                 }
-                
+
                 assert_eq!(strong_children[2], InlineNode::text("，或者".to_string()));
-                
-                if let InlineNode::VcpCustom { kind, children: Some(q_ch), .. } = &strong_children[3] {
+
+                if let InlineNode::VcpCustom {
+                    kind,
+                    children: Some(q_ch),
+                    ..
+                } = &strong_children[3]
+                {
                     assert_eq!(kind, "quote");
                     assert_eq!(q_ch[0], InlineNode::text("“".to_string()));
-                    assert_eq!(q_ch[1], InlineNode::text("不该加粗的部分泄漏了".to_string()));
+                    assert_eq!(
+                        q_ch[1],
+                        InlineNode::text("不该加粗的部分泄漏了".to_string())
+                    );
                     assert_eq!(q_ch[2], InlineNode::text("”".to_string()));
                 }
-            } else { panic!("Expected Strong"); }
+            } else {
+                panic!("Expected Strong");
+            }
         }
 
         // 2. 测试长文本行隔离及多层复杂嵌套
         let text1 = "主人，如果真的是由于“跨容器截断”导致的 DOM 崩溃，我们在前端解析器的 `contentProcessor.js` 里，必须要加装一个**「自愈判定阀」**：\n\n> **核心逻辑**：只有当 `Marked.parser` 的当前 **AST 嵌套深度等于 0（`astDepth === 0`）**，且不处于任何未闭合的代码块/表格内部时，才允许执行 `<!--brk-->` 物理切片！\n> 如果在深度嵌套里遇到了 `<!--brk-->`，则将其自动**挂起并延后**，直到检测到当前容器完全 `</div>` 闭合，再在根节点上执行优雅 of “呼吸切片”！";
         let nodes1 = parse_markdown_to_ast(text1);
         assert_eq!(nodes1.len(), 2);
-        
+
         // 验证第一行中的“自愈判定阀”被正确加粗了
         if let MarkdownNode::Paragraph { children, .. } = &nodes1[0] {
             // “自愈判定阀”在第 6 个子节点（i = 5）
-            if let InlineNode::Strong { children: strong_children, .. } = &children[5] {
+            if let InlineNode::Strong {
+                children: strong_children,
+                ..
+            } = &children[5]
+            {
                 assert_eq!(strong_children.len(), 1);
-                assert_eq!(strong_children[0], InlineNode::text("\u{200b}「自愈判定阀」\u{200b}".to_string()));
-            } else { panic!("Expected Strong for self-cure valve"); }
+                assert_eq!(
+                    strong_children[0],
+                    InlineNode::text("\u{200b}「自愈判定阀」\u{200b}".to_string())
+                );
+            } else {
+                panic!("Expected Strong for self-cure valve");
+            }
         }
 
         // 3. 原本的四星号并排加粗引号测试
@@ -1594,43 +1692,81 @@ mod tests {
         if let MarkdownNode::Paragraph { children, .. } = &nodes[0] {
             assert_eq!(children.len(), 4);
             assert_eq!(children[0], InlineNode::text("看哪些".to_string()));
-            if let InlineNode::Strong { children: strong_children, .. } = &children[1] {
+            if let InlineNode::Strong {
+                children: strong_children,
+                ..
+            } = &children[1]
+            {
                 assert_eq!(strong_children.len(), 3);
                 assert_eq!(strong_children[0], InlineNode::text("\u{200b}".to_string()));
                 assert_eq!(strong_children[2], InlineNode::text("\u{200b}".to_string()));
-                if let InlineNode::VcpCustom { kind, children: Some(q_ch), .. } = &strong_children[1] {
+                if let InlineNode::VcpCustom {
+                    kind,
+                    children: Some(q_ch),
+                    ..
+                } = &strong_children[1]
+                {
                     assert_eq!(kind, "quote");
-                    assert_eq!(q_ch[1], InlineNode::text("应该加粗的部分没有加粗".to_string()));
-                } else { panic!("Expected quote 1"); }
-            } else { panic!("Expected Strong 1"); }
-            
+                    assert_eq!(
+                        q_ch[1],
+                        InlineNode::text("应该加粗的部分没有加粗".to_string())
+                    );
+                } else {
+                    panic!("Expected quote 1");
+                }
+            } else {
+                panic!("Expected Strong 1");
+            }
+
             assert_eq!(children[2], InlineNode::text("，或者".to_string()));
-            
-            if let InlineNode::Strong { children: strong_children, .. } = &children[3] {
+
+            if let InlineNode::Strong {
+                children: strong_children,
+                ..
+            } = &children[3]
+            {
                 assert_eq!(strong_children.len(), 3);
                 assert_eq!(strong_children[0], InlineNode::text("\u{200b}".to_string()));
                 assert_eq!(strong_children[2], InlineNode::text("\u{200b}".to_string()));
-                if let InlineNode::VcpCustom { kind, children: Some(q_ch), .. } = &strong_children[1] {
+                if let InlineNode::VcpCustom {
+                    kind,
+                    children: Some(q_ch),
+                    ..
+                } = &strong_children[1]
+                {
                     assert_eq!(kind, "quote");
-                    assert_eq!(q_ch[1], InlineNode::text("不该加粗的部分泄漏了".to_string()));
-                } else { panic!("Expected quote 2"); }
-            } else { panic!("Expected Strong 2"); }
+                    assert_eq!(
+                        q_ch[1],
+                        InlineNode::text("不该加粗的部分泄漏了".to_string())
+                    );
+                } else {
+                    panic!("Expected quote 2");
+                }
+            } else {
+                panic!("Expected Strong 2");
+            }
         }
     }
 
     #[test]
     fn test_user_reproduce() {
         let text = std::fs::read_to_string("G:\\VCPMobile\\scripts\\tail-test\\Strong.txt")
-            .unwrap_or_else(|_| include_str!("../../../../../scripts/tail-test/Strong.txt").to_string());
-        
+            .unwrap_or_else(|_| {
+                include_str!("../../../../../scripts/tail-test/Strong.txt").to_string()
+            });
+
         let nodes = parse_markdown_to_ast(&text);
-        
+
         // 查找包含“自愈判定阀”的 Strong 节点
         let mut found = false;
         for node in &nodes {
             if let MarkdownNode::Paragraph { children, .. } = node {
                 for child in children {
-                    if let InlineNode::Strong { children: strong_children, .. } = child {
+                    if let InlineNode::Strong {
+                        children: strong_children,
+                        ..
+                    } = child
+                    {
                         if strong_children.len() > 0 {
                             if let InlineNode::Text { value, .. } = &strong_children[0] {
                                 if value.contains("自愈判定阀") {
@@ -1644,7 +1780,10 @@ mod tests {
                 }
             }
         }
-        assert!(found, "Could not find bolded '自愈判定阀' node in Strong.txt");
+        assert!(
+            found,
+            "Could not find bolded '自愈判定阀' node in Strong.txt"
+        );
     }
 
     #[test]
@@ -1652,7 +1791,7 @@ mod tests {
         // 外层 4 个反引号，内层 3 个反引号
         let text = "````markdown\n这是一段嵌套代码块：\n```rust\nfn main() {\n    // **这不该被flanking修改**\n    let a = \"**hello**\";\n}\n```\n````";
         let fixed = fix_flanking_delimiters(text);
-        
+
         // 应该完全没有任何修改，因为这段内容全部在 4 个反引号的代码围栏中
         assert_eq!(fixed, text);
     }
@@ -1663,7 +1802,12 @@ mod tests {
         let nodes = parse_markdown_to_ast(&text);
         for (i, node) in nodes.iter().enumerate() {
             if let MarkdownNode::CodeBlock { lang, code, .. } = node {
-                println!("CodeBlock [{}]: lang={:?}, code_len={}", i, lang, code.len());
+                println!(
+                    "CodeBlock [{}]: lang={:?}, code_len={}",
+                    i,
+                    lang,
+                    code.len()
+                );
                 if code.contains("nested") {
                     println!("FOUND NESTED CODEBLOCK:\n{:#?}", node);
                 }

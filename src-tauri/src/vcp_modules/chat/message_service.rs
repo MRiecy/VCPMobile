@@ -106,7 +106,7 @@ pub async fn load_multi_topic_messages(
                     ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE (ma.topic_id, ma.msg_id) IN ({})
+             WHERE (ma.topic_id, ma.msg_id) IN ({}) AND ma.deleted_at IS NULL
              ORDER BY ma.topic_id, ma.msg_id, ma.attachment_order ASC",
             att_placeholders.join(",")
         );
@@ -174,16 +174,18 @@ pub async fn load_chat_history_internal(
     let offset = offset.unwrap_or(0);
 
     let query_str = if limit.is_some() {
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON m.agent_id = a.agent_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC 
          LIMIT ? OFFSET ?"
     } else {
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON m.agent_id = a.agent_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC"
     };
@@ -218,7 +220,7 @@ pub async fn load_chat_history_internal(
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) 
+             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
@@ -437,14 +439,16 @@ pub async fn load_chat_text_history_for_context(
 
     // 彻底剥离了对 render_cache 联表查询，仅拉取核心文本和配置字段
     let query_str = if limit.is_some() {
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
          FROM messages m
+         LEFT JOIN agents a ON m.agent_id = a.agent_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC 
          LIMIT ? OFFSET ?"
     } else {
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
          FROM messages m
+         LEFT JOIN agents a ON m.agent_id = a.agent_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
          ORDER BY m.timestamp DESC, m.rowid DESC"
     };
@@ -477,7 +481,7 @@ pub async fn load_chat_text_history_for_context(
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) 
+             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
@@ -954,7 +958,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
 
     let mut agent_name = None;
     if let Some(ref aid) = final_agent_id {
-        if let Ok(Some(row)) = sqlx::query("SELECT name FROM agents WHERE id = ?")
+        if let Ok(Some(row)) = sqlx::query("SELECT name FROM agents WHERE agent_id = ?")
             .bind(aid)
             .fetch_optional(pool)
             .await
@@ -1050,5 +1054,36 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         ));
     }
 
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_message_attachment(
+    app_handle: tauri::AppHandle,
+    topic_id: String,
+    message_id: String,
+    hash: String,
+) -> Result<(), String> {
+    use crate::vcp_modules::db_manager::DbState;
+    use tauri::Manager;
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+    let now = crate::vcp_modules::infra::utils::now_millis() as i64;
+    sqlx::query(
+        "UPDATE message_attachments SET deleted_at = ? \
+         WHERE topic_id = ? AND msg_id = ? AND hash = ?",
+    )
+    .bind(now)
+    .bind(&topic_id)
+    .bind(&message_id)
+    .bind(&hash)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // ⚡ 冒泡更新主题内容哈希，使该删除动作能够在局域网同步端识别并广播
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }

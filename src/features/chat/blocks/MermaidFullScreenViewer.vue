@@ -80,25 +80,7 @@ const resetView = () => {
 };
 
 const fitToWidth = () => {
-  if (!fullscreenCanvasRef.value || !fullscreenViewportRef.value) return;
-  const svg = fullscreenCanvasRef.value.querySelector('svg');
-  if (!svg) return;
-  
-  const svgWidth = svg.getBBox?.().width || svg.viewBox?.baseVal?.width || svg.clientWidth || svg.getBoundingClientRect().width;
-  
-  const viewWidth = fullscreenViewportRef.value.clientWidth - 48; // 24px padding on each side
-  
-  if (!svgWidth) {
-    resetView();
-    return;
-  }
-  
-  const scaleW = viewWidth / svgWidth;
-  const targetScale = Math.min(2.0, Math.max(0.15, scaleW));
-  
-  scale.value = targetScale;
-  translateX.value = 0;
-  translateY.value = 0;
+  resetView();
 };
 
 // Pointer Handlers for drag and pinch zoom
@@ -241,8 +223,10 @@ const exportToGallery = () => {
   clonedSvg.setAttribute('height', String(svgHeight));
 
   const svgString = new XMLSerializer().serializeToString(clonedSvg);
-  const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(svgBlob);
+  // 100% 规避 Android WebView 下 URL.createObjectURL(Blob) 造成的 Canvas 污损 (Tainted Canvas) 安全异常，
+  // 使用 inline Base64 Data URL 方案。使用 unescape(encodeURIComponent) 兼容中文及特殊字符编码。
+  const base64Svg = window.btoa(unescape(encodeURIComponent(svgString)));
+  const dataUrlSrc = `data:image/svg+xml;base64,${base64Svg}`;
 
   const img = new Image();
   img.onload = () => {
@@ -278,17 +262,27 @@ const exportToGallery = () => {
         });
       } catch (err) {
         console.error('Canvas serialization failed:', err);
+        notificationStore.addNotification({
+          type: 'error',
+          title: '保存失败',
+          message: '保存失败：Canvas 序列化受限',
+          toastOnly: true
+        });
       }
     }
-    URL.revokeObjectURL(url);
   };
   
   img.onerror = (e) => {
     console.error('Image load failed', e);
-    URL.revokeObjectURL(url);
+    notificationStore.addNotification({
+      type: 'error',
+      title: '导出失败',
+      message: '图表图像加载失败，无法渲染',
+      toastOnly: true
+    });
   };
   
-  img.src = url;
+  img.src = dataUrlSrc;
 };
 </script>
 

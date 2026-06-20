@@ -9,6 +9,58 @@ pub fn process_audio_for_multimodal<R: Runtime>(
     app: &AppHandle<R>,
     path: &Path,
 ) -> Result<String, String> {
+    let hash = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let cache_dir = crate::vcp_modules::infra::file_manager::get_multimodal_cache_dir(app)?;
+    if !cache_dir.exists() {
+        let _ = std::fs::create_dir_all(&cache_dir);
+    }
+    let cache_path = cache_dir.join(format!("{}.json", hash));
+
+    // 1. 检查并命中缓存
+    if !hash.is_empty() && cache_path.exists() {
+        if let Ok(json_str) = std::fs::read_to_string(&cache_path) {
+            if let Ok(cached_data) = serde_json::from_str::<Vec<String>>(&json_str) {
+                if let Some(audio_url) = cached_data.first() {
+                    log::info!(
+                        "[AudioExtractor] Cache HIT for hash: {}, returning audio payload instantly",
+                        hash
+                    );
+                    return Ok(audio_url.clone());
+                }
+            }
+        }
+    }
+
+    // 2. 缓存未命中，执行内部提取逻辑
+    let result = process_audio_for_multimodal_internal(app, path)?;
+
+    // 3. 写入持久化缓存
+    if !hash.is_empty() && !result.is_empty() {
+        let wrapper = vec![result.clone()];
+        if let Ok(json_str) = serde_json::to_string(&wrapper) {
+            if let Err(e) = std::fs::write(&cache_path, json_str) {
+                log::warn!("[AudioExtractor] Failed to write cache for {}: {}", hash, e);
+            } else {
+                log::info!(
+                    "[AudioExtractor] Successfully cached audio payload for hash: {}",
+                    hash
+                );
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn process_audio_for_multimodal_internal<R: Runtime>(
+    app: &AppHandle<R>,
+    path: &Path,
+) -> Result<String, String> {
     let process_err: Option<String>;
 
     #[cfg(target_os = "android")]
@@ -30,7 +82,7 @@ pub fn process_audio_for_multimodal<R: Runtime>(
 
             let input_str = path.to_str().ok_or("Invalid audio path")?;
             log::info!(
-                "[AudioExtractor] Invoking Kotlin processAudio for: {}",
+                "[AudioExtractor] Cache MISS. Invoking Kotlin processAudio for: {}",
                 input_str
             );
 

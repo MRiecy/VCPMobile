@@ -361,6 +361,7 @@ async fn internal_write_agent_config<R: Runtime>(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(agent_id) DO UPDATE SET
             name = excluded.name, 
+            system_prompt = excluded.system_prompt,
             mobile_system_prompt = excluded.mobile_system_prompt,
             model = excluded.model, 
             temperature = excluded.temperature, 

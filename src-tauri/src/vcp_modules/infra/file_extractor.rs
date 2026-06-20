@@ -84,6 +84,48 @@ pub fn is_extractable_extension(ext: &str) -> bool {
     is_text_or_code_extension(ext) || is_structured_doc_extension(ext)
 }
 
+/// 判定是否是任何受支持的附件后缀格式（多模态格式 或 文本提取格式）
+pub fn is_supported_attachment_extension(ext: &str) -> bool {
+    let ext_lower = ext.to_lowercase();
+    let ext_str = ext_lower.as_str();
+
+    // 1. 多模态媒体支持判定 (与 vcp_client 一致，支持主流媒体及硬件预转码后格式)
+    let is_multimodal = matches!(
+        ext_str,
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "bmp"
+            | "heic"
+            | "heif"
+            | "avif"
+            | "mp3"
+            | "wav"
+            | "ogg"
+            | "flac"
+            | "aac"
+            | "m4a"
+            | "opus"
+            | "amr"
+            | "wma"
+            | "aiff"
+            | "mp4"
+            | "webm"
+            | "3gp"
+            | "3g2"
+            | "mov"
+            | "mkv"
+            | "avi"
+            | "flv"
+            | "wmv"
+            | "ts"
+    );
+
+    is_multimodal || is_extractable_extension(ext_str)
+}
+
 /// =================================================================
 /// vcp_modules/infra/file_extractor.rs - 多模态文件文本内容提取纯函数库
 /// =================================================================

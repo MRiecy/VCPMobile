@@ -189,6 +189,18 @@ function isWhitespaceNode(node: any): boolean {
   return false;
 }
 
+function trimWhitespaceNodes(nodes: any[]): any[] {
+  let start = 0;
+  while (start < nodes.length && isWhitespaceNode(nodes[start])) {
+    start++;
+  }
+  let end = nodes.length;
+  while (end > start && isWhitespaceNode(nodes[end - 1])) {
+    end--;
+  }
+  return nodes.slice(start, end);
+}
+
 function splitMarkdownNodes(nodes: any[]): any[][] {
   const result: any[][] = [];
   let currentGroup: any[] = [];
@@ -206,8 +218,9 @@ function splitMarkdownNodes(nodes: any[]): any[][] {
     }
 
     if (isBrkNode(node) && htmlDepth === 0) {
-      if (currentGroup.some(n => !isWhitespaceNode(n))) {
-        result.push(currentGroup);
+      const trimmed = trimWhitespaceNodes(currentGroup);
+      if (trimmed.length > 0) {
+        result.push(trimmed);
       }
       currentGroup = [];
     } else {
@@ -215,8 +228,9 @@ function splitMarkdownNodes(nodes: any[]): any[][] {
     }
   }
   
-  if (currentGroup.some(n => !isWhitespaceNode(n))) {
-    result.push(currentGroup);
+  const trimmed = trimWhitespaceNodes(currentGroup);
+  if (trimmed.length > 0) {
+    result.push(trimmed);
   }
   return result;
 }
@@ -1021,6 +1035,8 @@ onUnmounted(() => {
           <AttachmentPreview 
             v-if="bubbleIndex === 0 && message.attachments && message.attachments.length > 0" 
             :attachments="message.attachments"
+            :message-id="message.id"
+            :topic-id="message.topicId || sessionStore.currentTopicId || undefined"
             class="pt-3 border-t border-black/5 dark:border-white/5" 
           />
 

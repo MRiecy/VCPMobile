@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import AttachmentRenderer from './AttachmentRenderer.vue';
 
+import { useChatHistoryStore } from "../../../core/stores/chatHistoryStore";
+
 interface Attachment {
   type: string;
   src: string;
@@ -21,8 +23,10 @@ interface Attachment {
   createdAt?: number;
 }
 
-defineProps<{
+const props = defineProps<{
   attachments: Attachment[];
+  messageId?: string;
+  topicId?: string;
 }>();
 
 const isViewerOpen = ref(false);
@@ -77,6 +81,22 @@ const openExternal = async (path: string) => {
     console.error("[AttachmentPreview] Open failed:", e);
   }
 };
+
+const removeAttachment = async (index: number) => {
+  const att = props.attachments[index];
+  if (!att || !att.hash || !props.messageId || !props.topicId) return;
+
+  const confirmed = confirm("是否确定要移除该附件？该操作仅会隐藏历史消息中的附件，您仍能继续使用此模型进行对话。");
+  if (!confirmed) return;
+
+  try {
+    const historyStore = useChatHistoryStore();
+    await historyStore.deleteAttachment(props.topicId, props.messageId, att.hash);
+  } catch (err) {
+    console.error("[AttachmentPreview] Failed to delete attachment:", err);
+    alert("删除附件失败，请重试");
+  }
+};
 </script>
 
 <template>
@@ -92,7 +112,8 @@ const openExternal = async (path: string) => {
       <AttachmentRenderer
         :file="att"
         :index="index"
-        :show-remove="false"
+        :show-remove="!!props.messageId"
+        @remove="removeAttachment"
       />
     </div>
 

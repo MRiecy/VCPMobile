@@ -394,7 +394,10 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
     result
 }
 
-fn find_matching_fence_end(search_area: &str, start_marker_text: &str) -> (Option<usize>, Option<usize>, bool) {
+fn find_matching_fence_end(
+    search_area: &str,
+    start_marker_text: &str,
+) -> (Option<usize>, Option<usize>, bool) {
     let trimmed = start_marker_text.trim_start();
     let fence_char = match trimmed.chars().next() {
         Some(c) if c == '`' => c,
@@ -406,13 +409,13 @@ fn find_matching_fence_end(search_area: &str, start_marker_text: &str) -> (Optio
     }
 
     let regex_str = format!(r"(?m)^[ \t]{{0,3}}\`{{{},}}[ \t]*\r?$", count);
-    
+
     if let Ok(re) = Regex::new(&regex_str) {
         if let Some(m) = re.find(search_area) {
             return (Some(m.start()), Some(m.end()), true);
         }
     }
-    
+
     (None, None, false)
 }
 
@@ -964,12 +967,15 @@ mod tests {
         let blocks = parse_content(text);
         println!("BLOCKS: {:#?}", blocks);
         assert_eq!(blocks.len(), 2);
-        
+
         // 第一个块应该是 Heading
         if let ContentBlock::Markdown { nodes, .. } = &blocks[0] {
             let nodes = nodes.as_ref().unwrap();
             assert_eq!(nodes.len(), 1);
-            assert!(matches!(nodes[0], crate::vcp_modules::pre_renderer::MarkdownNode::Heading { .. }));
+            assert!(matches!(
+                nodes[0],
+                crate::vcp_modules::pre_renderer::MarkdownNode::Heading { .. }
+            ));
         } else {
             panic!("Expected Heading block");
         }
@@ -979,15 +985,26 @@ mod tests {
             let nodes = nodes.as_ref().unwrap();
             assert_eq!(nodes.len(), 1);
             let has_nested_code = nodes.iter().any(|node| {
-                if let crate::vcp_modules::pre_renderer::MarkdownNode::CodeBlock { lang, code, .. } = node {
+                if let crate::vcp_modules::pre_renderer::MarkdownNode::CodeBlock {
+                    lang,
+                    code,
+                    ..
+                } = node
+                {
                     lang.as_deref() == Some("markdown") && code.contains("```python")
                 } else {
                     false
                 }
             });
-            assert!(has_nested_code, "Expected to find a nested CodeBlock with lang=markdown and containing inner code");
+            assert!(
+                has_nested_code,
+                "Expected to find a nested CodeBlock with lang=markdown and containing inner code"
+            );
         } else {
-            panic!("Expected Markdown block with nested code, got {:?}", blocks[1]);
+            panic!(
+                "Expected Markdown block with nested code, got {:?}",
+                blocks[1]
+            );
         }
     }
 }

@@ -19,6 +19,7 @@ use vcp_modules::context_injection::{
     save_tarven_rule, toggle_rule_enabled,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
+use vcp_modules::message_service::delete_message_attachment;
 use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 // use vcp_modules::db_manager::DbState;
 use tauri_plugin_log::{Target, TargetKind};
@@ -26,7 +27,7 @@ use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
 use vcp_modules::file_manager::{
-    get_attachment_real_path, open_file, register_local_file, store_file,
+    check_attachment_support, get_attachment_real_path, open_file, register_local_file, store_file,
 };
 use vcp_modules::frontend_update_manager::{
     apply_frontend_update, check_for_frontend_update, clear_frontend_updates,
@@ -224,6 +225,7 @@ pub fn run() {
             append_single_message,
             patch_single_message,
             delete_messages,
+            delete_message_attachment,
             truncate_history_after_timestamp,
             process_message_content,
             rebuild_all_pre_renders,
@@ -258,6 +260,7 @@ pub fn run() {
             delete_agent,
             set_theme,
             store_file,
+            check_attachment_support,
             register_local_file,
             prepare_vcp_upload,
             fetch_raw_message_content,

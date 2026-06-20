@@ -311,17 +311,14 @@ pub async fn perform_vcp_request<R: Runtime>(
                                     .unwrap_or("")
                                     .to_lowercase();
                                 let (mime, part_type) = match ext.as_str() {
-                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff"
-                                    | "tif" | "heic" | "heif" | "avif" | "ico" => {
-                                        ("image", "image_url")
-                                    }
+                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "heic"
+                                    | "heif" | "avif" => ("image", "image_url"),
                                     "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
-                                    | "wma" | "amr" | "aiff" | "aif" => ("audio", "input_audio"),
-                                    "mp4" | "mkv" | "webm" | "avi" | "mov" | "flv" | "m4v"
-                                    | "3gp" | "3g2" | "wmv" | "ts" | "mts" | "m2ts" | "qt" => {
+                                    | "amr" => ("audio", "input_audio"),
+                                    "mp4" | "webm" | "3gp" | "3g2" | "mov" => {
                                         ("video", "image_url")
                                     }
-                                    _ => ("application", "file_url"), // 非多模态文件回退
+                                    _ => ("application", "file_url"), // 非支持多模态格式退化回退
                                 };
 
                                 if mime == "image" {

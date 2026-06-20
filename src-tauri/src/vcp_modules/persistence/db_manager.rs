@@ -249,6 +249,7 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
             src TEXT,
             status TEXT,
             created_at BIGINT NOT NULL,
+            deleted_at BIGINT,
             PRIMARY KEY (topic_id, msg_id, attachment_order),
             FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
         )",
@@ -380,6 +381,11 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC)").execute(pool).await.map_err(|e| e.to_string())?;
+
+    // ⚡ 增量热迁移：为 message_attachments 表增加 deleted_at 逻辑删除字段
+    let _ = sqlx::query("ALTER TABLE message_attachments ADD COLUMN deleted_at BIGINT")
+        .execute(pool)
+        .await;
 
     // 运行系统内置高级规则的多模态无损同步器
     crate::vcp_modules::chat::context_injection::sync_system_preset_rules(pool)

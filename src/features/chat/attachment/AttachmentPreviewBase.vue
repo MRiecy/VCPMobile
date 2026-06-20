@@ -1,6 +1,6 @@
 <template>
   <div class="attachment-preview-base relative flex items-center bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl transition-all"
-       :class="[sizeClass, { 'hover:bg-black/10 dark:hover:bg-white/10': !isLoading }]">
+       :class="[sizeClass, { 'hover:bg-black/10 dark:hover:bg-white/10': !isLoading && !isProcessing }]">
     <!-- Default slot for content -->
     <slot />
     
@@ -27,16 +27,21 @@
 
     <!-- Loading Overlay -->
     <div
-      v-if="isLoading"
+      v-if="isLoading || isProcessing"
       class="absolute inset-0 bg-black/40 rounded-xl flex flex-col items-center justify-center z-10 gap-1"
     >
       <div
+        v-if="isLoading"
         class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"
       ></div>
       <span
-        v-if="file.progress !== undefined"
+        v-if="isLoading && file.progress !== undefined"
         class="text-[9px] text-white font-bold tabular-nums"
       >{{ file.progress }}%</span>
+      <span
+        v-if="isProcessing"
+        class="text-[9px] text-white/80 font-mono select-none"
+      >解析中...</span>
     </div>
   </div>
 </template>
@@ -60,6 +65,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
 
 const isLoading = computed(() => props.file.status === "loading");
+const isProcessing = computed(() => props.file.status === "processing");
 
 const sizeClass = computed(() => {
   switch (props.size) {
@@ -70,8 +76,8 @@ const sizeClass = computed(() => {
     case 'auto':
       return 'min-w-[40px] h-auto';
     case 'medium':
-    default:
-      return 'w-14 h-14';
+      default:
+        return 'w-14 h-14';
   }
 });
 </script>
