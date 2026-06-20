@@ -61,7 +61,7 @@ pub struct ChatMessage {
     #[serde(rename = "finishReason", skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<Attachment>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]

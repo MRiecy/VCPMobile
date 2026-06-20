@@ -104,10 +104,10 @@ const removeAttachment = async (index: number) => {
     class="vcp-attachment-preview flex flex-wrap gap-3 mt-3 w-full max-w-full overflow-hidden"
   >
     <div
-      v-for="(att, index) in attachments"
-      :key="index"
+      v-for="(att, index) in (attachments || []).filter(Boolean)"
+      :key="att?.hash || index"
       class="attachment-item relative group"
-      @click="openViewer(att)"
+      @click="att && openViewer(att)"
     >
       <AttachmentRenderer
         :file="att"

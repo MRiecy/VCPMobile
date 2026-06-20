@@ -1,5 +1,6 @@
 <template>
   <component
+    v-if="file"
     :is="currentComponent"
     :file="file"
     :index="index"
@@ -27,9 +28,10 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
 
 // Classify the attachment type
-const attachmentType = computed(() => 
-  classifyAttachment(props.file.type, props.file.name)
-);
+const attachmentType = computed(() => {
+  if (!props.file) return AttachmentType.OTHER;
+  return classifyAttachment(props.file.type, props.file.name);
+});
 
 // Get the appropriate component for the attachment type
 const currentComponent = computed(() => {
