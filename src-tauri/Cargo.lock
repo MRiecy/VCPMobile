@@ -6251,7 +6251,7 @@ checksum = "7ba6f5989077681266825251a52748b8c1d8a4ad098cc37e440103d0ea717fc0"
 
 [[package]]
 name = "vcp-mobile"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "async-trait",
  "axum",
