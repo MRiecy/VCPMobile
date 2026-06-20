@@ -1366,6 +1366,7 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
     result
 }
 
+#[allow(clippy::needless_range_loop)]
 fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -1422,9 +1423,7 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
                         }
                     }
 
-                    for k in (s_idx + 1)..e_idx {
-                        children.push(inlines[k].clone());
-                    }
+                    children.extend(inlines[(s_idx + 1)..e_idx].iter().cloned());
 
                     if let InlineNode::Text { value } = &inlines[e_idx] {
                         let inner_val = &value[..value.len() - cl_c.len_utf8()];

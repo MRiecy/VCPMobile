@@ -1068,7 +1068,7 @@ pub async fn delete_message_attachment(
     use tauri::Manager;
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    let now = crate::vcp_modules::infra::utils::now_millis() as i64;
+    let now = crate::vcp_modules::infra::utils::now_millis();
     sqlx::query(
         "UPDATE message_attachments SET deleted_at = ? \
          WHERE topic_id = ? AND msg_id = ? AND hash = ?",
