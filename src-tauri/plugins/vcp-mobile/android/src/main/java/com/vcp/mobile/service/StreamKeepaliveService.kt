@@ -175,6 +175,9 @@ class StreamKeepaliveService : Service() {
         wifiLock = null
 
         isServiceRunning = false
+        isKeepaliveModeRequested = false
+        isDistributedKeepaliveRequested = false
+        isTemporaryWakeLockServiceActive = false
         super.onDestroy()
     }
 
