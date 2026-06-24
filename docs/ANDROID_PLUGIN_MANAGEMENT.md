@@ -15,6 +15,7 @@ VCP Mobile 采用**单一自定义插件** `tauri-plugin-vcp-mobile` 统一管�
 | 功能 | Rust 模块 | Kotlin 模块 | 通信方式 |
 |------|-----------|-------------|----------|
 | 屏幕常亮 | `src/screen.rs` | — | Rust 侧 Raw JNI |
+| 前台锁协同 | `src/stream.rs` | `service/ForegroundGuardian.kt` | `PluginHandle.run_mobile_plugin`（v1.1.2 新增） |
 | 流式前台保活 | `src/stream.rs` | `service/StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin` |
 | 键盘 Insets | — | `KeyboardInsetsManager.kt` | `evaluateJavascript` 注入 CustomEvent |
 | 返回键拦截 | — | `MainActivity.onWebViewCreate()` | `OnBackPressedDispatcher` |
@@ -93,8 +94,10 @@ src-tauri/plugins/vcp-mobile/
     android:enabled="true"
     android:exported="false"
     android:foregroundServiceType="remoteMessaging"
-    android:stopWithTask="false" />
+    android:stopWithTask="true" />
 ```
+
+> **v1.1.2 变更**：`stopWithTask` 从 `false` 改为 `true`。ForegroundGuardian 已接管全部锁管理，进程被划掉后锁即消亡，残留前台服务无实际保活作用。
 
 ---
 
@@ -106,7 +109,7 @@ src-tauri/plugins/vcp-mobile/
 |------|-------------|----------|---------|
 | `Plugin.trigger()` | `listen()` from `@tauri-apps/api/event` | Tauri 官方插件事件通道 | 未使用（trigger 与 listen 不互通） |
 | `evaluateJavascript` + `CustomEvent` | `window.addEventListener()` | 需要前端 window 级别事件兼容性 | `vcp-keyboard-inset`、`vcp-lifecycle` |
-| `PluginHandle.run_mobile_plugin` | 无需监听，直接 invoke | Rust 到 Kotlin 单向命令调用 | `startStreamingService`、`stopStreamingService` |
+| `PluginHandle.run_mobile_plugin` | 无需监听，直接 invoke | Rust 到 Kotlin 单向命令调用 | `startStreamingService`、`acquireForeground`、`releaseForeground`（v1.1.2 新增） |
 
 ### 4.2 关键约束：trigger() 与 listen() 不互通
 

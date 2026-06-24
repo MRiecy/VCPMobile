@@ -2,8 +2,8 @@
 id: VUE-AGEN-013
 title: Agent与群组设置面板
 description: VCP Mobile 前端 AgentSettingsView 与 GroupSettingsView 的表单设计、头像裁剪与配置持久化
-version: 1.0.3
-date: 2026-06-05
+version: 1.1.2
+date: 2026-06-24
 ---
 
 # 13. Agent与群组设置面板
@@ -354,68 +354,55 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
 
 ---
 
-## 5. 配置保存策略
+## 5. 配置保存策略（v1.1.2: 关闭时保存）
 
-### 5.1 全量保存（save_agent_config / save_group_config）
+### 5.1 关闭时保存（saveOnClose）— v1.1.2 重构
 
-虽然 Rust 侧提供了 `update_agent_config`（JSON Patch 风格合并），但**前端设置面板统一使用全量保存**，以简化逻辑：
+v1.1.2 将保存策略从**深度 Watch + 防抖自动保存**改为**关闭时保存（Save-on-Close）**。核心变化：
+
+- **移除**：`watch(deep)` + `setTimeout(debounce)` 自动保存机制
+- **新增**：`saveOnClose()` 函数 — 面板关闭时（`isOpen` 变为 `false` 或 `onBeforeUnmount`）触发一次性保存
 
 ```ts
-// assistant.ts
-const saveAgent = async (agent: AgentConfig) => {
-  await invoke("save_agent_config", { agent });
-  await fetchAgents();  // 刷新列表，确保侧边栏同步
+// AgentSettingsView.vue / GroupSettingsView.vue — v1.1.2
+const saveOnClose = async (): Promise<boolean> => {
+    // 1. 深比较：当前配置与原始快照是否一致
+    if (JSON.stringify(currentConfig.value) === JSON.stringify(originalConfig.value)) {
+        return true; // 无变更，直接跳过
+    }
+    // 2. 更新快照（在等待保存前，防止重入）
+    originalConfig.value = JSON.parse(JSON.stringify(currentConfig.value));
+    // 3. 执行保存
+    try {
+        await saveConfig(currentConfig.value);
+        return true;
+    } catch (error) {
+        // 4. 失败：回滚快照 + Toast 通知
+        originalConfig.value = previousSnapshot;
+        notificationStore.addNotification({
+            title: '保存失败', message: String(error),
+            type: 'error', toastOnly: true, duration: 3000,
+        });
+        return false;
+    }
 };
+
+watch(() => props.isOpen, (newVal) => { if (!newVal) saveOnClose(); });
+onBeforeUnmount(() => saveOnClose());
 ```
 
-全量保存的优劣：
-- **优点**：前端无需维护字段级 diff 逻辑；Rust 侧通过事务化写入保证原子性
-- **缺点**：每次保存传输完整配置对象；但在移动端 WiFi/USB 调试环境下，对象体积（<1KB）可忽略
+### 5.2 设计理由
 
-### 5.2 防抖与自动保存
+| 维度 | 旧版（Watch+Debounce） | 新版（Save-on-Close） |
+|------|----------------------|---------------------|
+| IPC 频率 | 每次按键可能触发（O(n)） | 每次打开-关闭周期仅 1 次（O(1)） |
+| 输入流畅度 | 深度比较降低编辑器响应 | 无后台比较负担 |
+| 失败反馈 | `console.error` + 隐式重试 | 显式 Toast + 快照回滚 |
+| 数据安全性 | 依赖 Watch 在组件存活期间持续重试 | `onBeforeUnmount` 兜底 + 失败可重试 |
 
-两个视图均实现了**深度 Watch + 防抖**的自动保存机制：
+### 5.3 保存失败的回滚策略
 
-```ts
-// AgentSettingsView.vue (防抖 800ms)
-watch(agentConfig, () => {
-  if (!originalConfig.value) return;
-  if (JSON.stringify(agentConfig.value) === JSON.stringify(originalConfig.value)) return;
-  if (saveTimeout) clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(() => autoSave(), 800);
-}, { deep: true });
-
-// GroupSettingsView.vue (防抖 1000ms)
-watch(groupConfig, () => {
-  if (!originalConfig.value) return;
-  if (JSON.stringify(groupConfig.value) === JSON.stringify(originalConfig.value)) return;
-  if (saveTimeout) clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(() => autoSave(), 1000);
-}, { deep: true });
-```
-
-**为什么 GroupSettingsView 使用更长的 1000ms？**
-- 群组配置包含成员列表的频繁勾选操作（checkbox toggle），稍长的防抖可降低连续勾选时的后端调用频率。
-
-### 5.3 保存状态反馈
-
-Header 右上角提供实时保存状态指示：
-
-```vue
-<div :class="{ 'opacity-100': isSaving || saveSuccess, 'opacity-0': !isSaving && !saveSuccess }">
-  <span v-if="isSaving" class="text-blue-400 animate-pulse">保存中...</span>
-  <span v-else-if="saveSuccess" class="text-green-500">已自动保存 ✅</span>
-</div>
-```
-
-- `saveSuccess` 持续 2 秒后自动淡出（通过 `saveSuccessTimer` 控制）
-- 无保存操作时完全隐藏，避免界面常驻噪音
-
-### 5.4 保存失败的回滚策略
-
-当前实现**不自动回滚**：若 `autoSave()` 抛出异常，仅通过 `console.error` 输出并触发 `assistant.ts` 中的 Toast 错误通知。用户输入保留在本地 `agentConfig` / `groupConfig` 中，下次 Watch 触发时会再次尝试保存。
-
-> 注意：由于 `originalConfig` 仅在保存**成功**后才更新，保存失败时下一次 Watch 仍会检测到差异并重新触发保存，形成隐式的重试机制。
+失败时回滚 `originalConfig` 快照，使下次关闭仍检测到差异并重试。同时通过 `notificationStore.addNotification({ toastOnly: true })` 向用户展示错误 Toast。详见 [17_通知中心与Toast联动](17_通知中心与Toast联动.md)。
 
 ---
 

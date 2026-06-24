@@ -2,8 +2,8 @@
 id: MOD-INFRA-023
 title: RAG灵视中心
 description: VCP Mobile 认知广播观察器，WebSocket 连接桌面 VCP /vcpinfo 端点，监听并可视化 AI 认知事件流
-version: "1.1.0"
-date: 2026-06-15
+version: "1.1.2"
+date: 2026-06-24
 module: vcp_info_service.rs
 scope: src-tauri/src/vcp_modules/infra/
 related: [RagObserver.vue, ragObserver.ts, lifecycle_manager.rs, settings_manager.rs, RightSidebar.vue]
@@ -236,6 +236,21 @@ match msg_type {
 heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(15));
 ```
 Ping 失败时退出消息循环，进入重连流程。这确保了长时间空闲连接不会被中间代理关闭。
+
+### 3.7 前台感知事件丢弃（v1.1.2 新增）
+
+v1.1.2 引入前台感知的事件发射控制——`vcp_info_service` 引用 `vcp_log_service::APP_IN_FOREGROUND` 全局原子变量。当应用处于后台时，所有 `emit_info_event()` 调用静默丢弃 payload，防止 `evaluateJavascript` 注入在 WebView 中堆积。
+
+```rust
+fn emit_info_event(app_handle: &AppHandle, payload: Value) {
+    if !vcp_log_service::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
+        return; // 后台静默丢弃
+    }
+    let _ = app_handle.emit("vcp-info-event", payload);
+}
+```
+
+连接超时从 10s 降至 5s（与 vcp_log_service 统一）。详见 [21_基础设施杂项](21_基础设施杂项.md) §3.7。
 
 ---
 

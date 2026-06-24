@@ -2,8 +2,8 @@
 id: VUE-NOTI-017
 title: 通知中心与Toast联动
 description: VCP Mobile 前端通知列表、Toast 气泡、剪贴板联动与 VCP System Event 处理
-version: 1.0.3
-date: 2026-06-05
+version: 1.1.2
+date: 2026-06-24
 ---
 
 # 17. 通知中心与Toast联动

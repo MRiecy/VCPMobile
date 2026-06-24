@@ -1,5 +1,5 @@
 ---
-id: PLUGIN-HARDWARE-009
+id: PLUGIN-HARDWARE-011
 title: 硬件状态与 Root 访问
 description: 设备硬件状态采集（CPU 热分级、GPU 型号、网络连接）与 Root 权限访问体系的实现细节。v1.0.3 新增
 version: 1.0.3
