@@ -13,6 +13,8 @@ use url::Url;
 static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(15000);
 
+pub static APP_IN_FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 lazy_static::lazy_static! {
 static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
@@ -20,6 +22,20 @@ static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value
 static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
 static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
 static ref HEARTBEAT_RESET_TX: Arc<tokio::sync::Mutex<Option<mpsc::Sender<()>>>> = Arc::new(tokio::sync::Mutex::new(None));
+}
+
+#[tauri::command]
+pub fn set_app_foreground_state(is_foreground: bool) {
+    APP_IN_FOREGROUND.store(is_foreground, Ordering::SeqCst);
+    log::info!("[VCPLog] App foreground state updated to: {}", is_foreground);
+}
+
+fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
+    if !APP_IN_FOREGROUND.load(Ordering::SeqCst) {
+        // App 处于后台时直接丢弃日志相关的实时推送，防止注入 evaluateJavascript 积压导致内存泄漏和前台恢复大卡死
+        return;
+    }
+    let _ = app.emit("vcp-system-event", payload);
 }
 
 #[tauri::command]
@@ -144,8 +160,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             *CURRENT_LOG_STATUS.write().await = "connecting".to_string();
         }
 
-        let _ = app_handle.emit(
-            "vcp-system-event",
+        emit_log_event(
+            &app_handle,
             serde_json::json!({
                 "type": "vcp-log-status",
                 "status": "connecting",
@@ -164,8 +180,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     "[VCPLog] Failed to build request: {}. Retrying in 5 seconds...",
                     e
                 );
-                let _ = app_handle.emit(
-                    "vcp-system-event",
+                emit_log_event(
+                    &app_handle,
                     serde_json::json!({
                         "type": "vcp-log-status",
                         "status": "error",
@@ -175,8 +191,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 );
 
                 // 错误卡片 1：请求构建失败 (例如 URL 格式错误)
-                let _ = app_handle.emit(
-                    "vcp-system-event",
+                emit_log_event(
+                    &app_handle,
                     serde_json::json!({
                         "type": "vcp-log-message",
                         "data": {
@@ -238,8 +254,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-                    let _ = app_handle.emit(
-                        "vcp-system-event",
+                    emit_log_event(
+                        &app_handle,
                         serde_json::json!({
                             "type": "vcp-log-status",
                             "status": "connected",
@@ -249,8 +265,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     );
 
                     // 额外发送一条连接成功的通知卡片
-                    let _ = app_handle.emit(
-                        "vcp-system-event",
+                    emit_log_event(
+                        &app_handle,
                         serde_json::json!({
                             "type": "vcp-log-message",
                             "data": {
@@ -302,12 +318,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                                             let text = msg.to_text().unwrap_or_default();
                                             match serde_json::from_str::<Value>(text) {
                                                 Ok(payload) => {
-                                                    if let Err(e) = app_handle.emit("vcp-system-event", payload) {
-                                                        log::error!("[VCPLog] Failed to emit event to frontend: {}", e);
-                                                    }
+                                                    emit_log_event(&app_handle, payload);
                                                 }
                                                 Err(_) => {
-                                                    let _ = app_handle.emit("vcp-system-event", serde_json::json!({
+                                                    emit_log_event(&app_handle, serde_json::json!({
                                                         "type": "raw_text",
                                                         "data": text
                                                     }));
@@ -348,8 +362,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     {
                         *CURRENT_LOG_STATUS.write().await = "closed".to_string();
                     }
-                    let _ = app_handle.emit(
-                        "vcp-system-event",
+                    emit_log_event(
+                        &app_handle,
                         serde_json::json!({
                             "type": "vcp-log-status",
                             "status": "closed",
@@ -363,8 +377,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         *CURRENT_LOG_STATUS.write().await = "error".to_string();
                     }
                     log::error!("[VCPLog] Connection Error: {}. Status: {}", e, e);
-                    let _ = app_handle.emit(
-                        "vcp-system-event",
+                    emit_log_event(
+                        &app_handle,
                         serde_json::json!({
                             "type": "vcp-log-status",
                             "status": "error",
@@ -374,8 +388,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     );
 
                     // 额外发送一条连接错误的通知卡片，辅助排查 (错误卡片 2)
-                    let _ = app_handle.emit(
-                        "vcp-system-event",
+                    emit_log_event(
+                        &app_handle,
                         serde_json::json!({
                             "type": "vcp-log-message",
                             "data": {
@@ -396,8 +410,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 log::error!(
                     "[VCPLog] Connection timed out after 10 seconds. Retrying in 5 seconds..."
                 );
-                let _ = app_handle.emit(
-                    "vcp-system-event",
+                emit_log_event(
+                    &app_handle,
                     serde_json::json!({
                         "type": "vcp-log-status",
                         "status": "error",
@@ -407,8 +421,8 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 );
 
                 // 错误卡片 3：连接超时
-                let _ = app_handle.emit(
-                    "vcp-system-event",
+                emit_log_event(
+                    &app_handle,
                     serde_json::json!({
                         "type": "vcp-log-message",
                         "data": {

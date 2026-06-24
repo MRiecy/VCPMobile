@@ -73,7 +73,7 @@ use vcp_modules::vcp_info_service::{
     get_vcp_info_payload, init_vcp_info_connection,
 };
 use vcp_modules::vcp_log_service::{
-    init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
+    init_vcp_log_connection, send_vcp_log_message, set_app_foreground_state, set_vcp_log_heartbeat,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -188,7 +188,11 @@ pub fn run() {
                     ];
                     targets
                 })
-                .level(log::LevelFilter::Info)
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Warn
+                })
                 .filter(|metadata| {
                     let target = metadata.target();
                     // 屏蔽高频 UI 交互、系统窗口以及 Android 系统底层冗余日志
@@ -281,6 +285,7 @@ pub fn run() {
             init_vcp_log_connection,
             send_vcp_log_message,
             set_vcp_log_heartbeat,
+            set_app_foreground_state,
             init_vcp_info_connection,
             get_vcp_info_connection_status,
             get_vcp_info_metadata_list,

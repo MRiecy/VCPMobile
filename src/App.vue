@@ -316,6 +316,9 @@ const handleVcpLifecycle = (e: Event) => {
     invoke("set_vcp_log_heartbeat", { intervalMs: 120000 }).catch((err) => {
       console.error("[Lifecycle] Failed to set background heartbeat:", err);
     });
+    invoke("set_app_foreground_state", { isForeground: false }).catch((err) => {
+      console.error("[Lifecycle] Failed to notify background state:", err);
+    });
   } else if (state === "resume") {
     if (!isAppBackground) return;
     isAppBackground = false;
@@ -323,6 +326,9 @@ const handleVcpLifecycle = (e: Event) => {
 
     invoke("set_vcp_log_heartbeat", { intervalMs: 15000 }).catch((err) => {
       console.error("[Lifecycle] Failed to restore foreground heartbeat:", err);
+    });
+    invoke("set_app_foreground_state", { isForeground: true }).catch((err) => {
+      console.error("[Lifecycle] Failed to notify foreground state:", err);
     });
     lifecycleStore.hydrateSystemStatus().catch((err) => {
       console.error("[Lifecycle] Failed to hydrate system status:", err);

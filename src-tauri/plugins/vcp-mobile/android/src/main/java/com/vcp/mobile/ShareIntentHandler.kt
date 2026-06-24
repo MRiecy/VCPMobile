@@ -103,7 +103,12 @@ class ShareIntentHandler(private val plugin: VcpMobilePlugin) {
         }
 
         root.put("files", files)
-        Log.i(TAG, "[extractSharedContent] text=${combinedText.take(120)}, fileCount=${files.length()}")
+        val isDebug = (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (isDebug) {
+            Log.i(TAG, "[extractSharedContent] text=${combinedText.take(120)}, fileCount=${files.length()}")
+        } else {
+            Log.i(TAG, "[extractSharedContent] textLength=${combinedText.length}, fileCount=${files.length()}")
+        }
         return root
     }
 
