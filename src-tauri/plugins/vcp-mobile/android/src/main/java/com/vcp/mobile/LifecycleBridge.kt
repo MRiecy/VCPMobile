@@ -21,15 +21,18 @@ class LifecycleBridge : DefaultLifecycleObserver {
     fun attach(activity: Activity, webView: WebView) {
         webViewRef = webView
         activityRef = WeakReference(activity)
-        if (activity is LifecycleOwner) {
-            activity.lifecycle.addObserver(this)
+        // 升级为进程级生命周期监听，完美防抖，免疫 Activity 重建与切换
+        activity.runOnUiThread {
+            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(this)
         }
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
         webViewRef = null
         activityRef = null
-        owner.lifecycle.removeObserver(this)
+        try {
+            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
+        } catch (_: Exception) {}
         super.onDestroy(owner)
     }
 

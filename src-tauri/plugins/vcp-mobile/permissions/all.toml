@@ -39,5 +39,7 @@ commands.allow = [
     "request_power_management_permission",
     "check_auto_start_permission",
     "get_free_disk_space",
+    "acquire_foreground",
+    "release_foreground",
 ]
 

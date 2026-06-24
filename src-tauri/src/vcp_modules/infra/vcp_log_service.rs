@@ -2,13 +2,14 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
+use tokio_util::sync::CancellationToken;
 
 static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(15000);
@@ -22,12 +23,126 @@ static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value
 static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
 static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
 static ref HEARTBEAT_RESET_TX: Arc<tokio::sync::Mutex<Option<mpsc::Sender<()>>>> = Arc::new(tokio::sync::Mutex::new(None));
+static ref LOG_LINGER_CANCEL: tokio::sync::Mutex<Option<CancellationToken>> = tokio::sync::Mutex::new(None);
+static ref DIST_LINGER_CANCEL: tokio::sync::Mutex<Option<CancellationToken>> = tokio::sync::Mutex::new(None);
+static ref IS_LINGER_DISCONNECTED: AtomicBool = AtomicBool::new(false);
 }
 
 #[tauri::command]
-pub fn set_app_foreground_state(is_foreground: bool) {
+pub async fn set_app_foreground_state(app: AppHandle, is_foreground: bool) {
     APP_IN_FOREGROUND.store(is_foreground, Ordering::SeqCst);
     log::info!("[VCPLog] App foreground state updated to: {}", is_foreground);
+
+    if !is_foreground {
+        // 1. 取消可能已存在的旧冷却任务
+        {
+            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+        {
+            let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+        IS_LINGER_DISCONNECTED.store(false, Ordering::SeqCst);
+
+        // 2. 开启 VCPLog/Info (10分钟冷却任务)
+        let log_token = CancellationToken::new();
+        {
+            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
+            *cancel_lock = Some(log_token.clone());
+        }
+        let app_clone = app.clone();
+        crate::vcp_modules::infra::utils::spawn_linger_task(
+            Duration::from_secs(600),
+            log_token,
+            move || async move {
+                log::info!("[VCPLog] Background linger expired (10m). Performing cold disconnect for VCPLog/Info.");
+                let _ = crate::vcp_modules::infra::vcp_log_service::init_vcp_log_connection_internal(
+                    app_clone.clone(),
+                    "".to_string(),
+                    "".to_string()
+                ).await;
+                let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
+                    app_clone,
+                    "".to_string(),
+                    "".to_string()
+                ).await;
+                IS_LINGER_DISCONNECTED.store(true, Ordering::SeqCst);
+            }
+        );
+
+        // 3. 开启 Distributed (5分钟保活冷却任务)
+        let settings_state = app.state::<crate::vcp_modules::settings_manager::SettingsState>();
+        if let Ok(settings) = crate::vcp_modules::settings_manager::read_settings(app.clone(), settings_state).await {
+            if settings.distributed_enabled {
+                log::info!("[VCPLog] Distributed enabled. Activating FGS keepalive from Rust backend.");
+                let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, true);
+
+                let dist_token = CancellationToken::new();
+                {
+                    let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
+                    *cancel_lock = Some(dist_token.clone());
+                }
+                let app_clone = app.clone();
+                crate::vcp_modules::infra::utils::spawn_linger_task(
+                    Duration::from_secs(300),
+                    dist_token,
+                    move || async move {
+                        log::info!("[VCPLog] Background distributed linger expired (5m). Deactivating keepalive from Rust.");
+                        let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app_clone, false);
+                    }
+                );
+            }
+        }
+    } else {
+        // 切回前台：立即取消所有倒计时
+        {
+            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+        {
+            let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+
+        // 恢复分布式保活状态 (确保前台关闭保活通知)
+        let settings_state = app.state::<crate::vcp_modules::settings_manager::SettingsState>();
+        if let Ok(settings) = crate::vcp_modules::settings_manager::read_settings(app.clone(), settings_state).await {
+            if settings.distributed_enabled {
+                let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, false);
+            }
+        }
+
+        // 如果此前已冷断开，立即一键拉起恢复
+        if IS_LINGER_DISCONNECTED.swap(false, Ordering::SeqCst) {
+            let settings_state = app.state::<crate::vcp_modules::settings_manager::SettingsState>();
+            if let Ok(settings) = crate::vcp_modules::settings_manager::read_settings(app.clone(), settings_state).await {
+                let log_url = settings.vcp_log_url;
+                let log_key = settings.vcp_log_key;
+                if !log_url.trim().is_empty() && !log_key.trim().is_empty() {
+                    log::info!("[VCPLog] App returned to foreground. Reconnecting VCPLog and VCPInfo from Rust.");
+                    let _ = crate::vcp_modules::infra::vcp_log_service::init_vcp_log_connection_internal(
+                        app.clone(),
+                        log_url.clone(),
+                        log_key.clone()
+                    ).await;
+                    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
+                        app.clone(),
+                        log_url,
+                        log_key
+                    ).await;
+                }
+            }
+        }
+    }
 }
 
 fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
@@ -243,7 +358,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".parse().unwrap()
         );
 
-        match tokio::time::timeout(Duration::from_secs(10), connect_async(request)).await {
+        match tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await {
             Ok(connection_result) => match connection_result {
                 Ok((ws_stream, _)) => {
                     retry_delay = Duration::from_millis(1000);
@@ -408,7 +523,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     *CURRENT_LOG_STATUS.write().await = "error".to_string();
                 }
                 log::error!(
-                    "[VCPLog] Connection timed out after 10 seconds. Retrying in 5 seconds..."
+                    "[VCPLog] Connection timed out after 5 seconds. Retrying in 5 seconds..."
                 );
                 emit_log_event(
                     &app_handle,
@@ -429,7 +544,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             "id": "vcp_log_connection_status",
                             "status": "error",
                             "tool_name": "VCPLog 连接超时",
-                            "content": "❌ 连接 VCPLog 超时 (10s)。\n\n提示：\n1. 请检查桌面端是否处于运行状态。\n2. 确认手机与电脑是否处于同一局域网。",
+                            "content": "❌ 连接 VCPLog 超时 (5s)。\n\n提示：\n1. 请检查桌面端是否处于运行状态。\n2. 确认手机与电脑是否处于同一局域网。",
                             "source": "VCPLog"
                         }
                     }),

@@ -67,3 +67,27 @@ pub fn calculate_sha256_slices(slices: &[&[u8]]) -> String {
 pub fn calculate_sha256(bytes: &[u8]) -> String {
     calculate_sha256_slices(&[bytes])
 }
+
+/// 后台延迟任务计时器工具
+/// 传入延时时长、取消令牌，以及一个在未被取消且到期时执行的闭包
+pub fn spawn_linger_task<F, Fut>(
+    delay: std::time::Duration,
+    cancel_token: tokio_util::sync::CancellationToken,
+    action: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                // 被取消，优雅退出
+            }
+            _ = tokio::time::sleep(delay) => {
+                // 时间到，且未被取消，执行操作
+                action().await;
+            }
+        }
+    })
+}

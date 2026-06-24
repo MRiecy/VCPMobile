@@ -27,33 +27,13 @@ import android.os.PowerManager
  */
 class StreamKeepaliveService : Service() {
 
-    private var isKeepaliveModeActive = false
-    private var currentStreamName = ""
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: android.net.wifi.WifiManager.WifiLock? = null
-
     companion object {
         const val CHANNEL_ID = "vcp_stream_keepalive"
         const val NOTIFICATION_ID = 0x53545201 // "STR" + 01
-        const val EXTRA_AGENT_NAME = "agent_name"
-        const val EXTRA_IS_KEEPALIVE_MODE = "is_keepalive_mode"
         private const val TAG = "VcpMobileService"
 
         @Volatile
         var isServiceRunning = false
-
-        /**
-         * 构造启动该服务的 Intent
-         */
-        @JvmStatic
-        fun createIntent(context: Context, agentName: String, isKeepaliveMode: Boolean? = null): Intent {
-            return Intent(context, StreamKeepaliveService::class.java).apply {
-                putExtra(EXTRA_AGENT_NAME, agentName)
-                if (isKeepaliveMode != null) {
-                    putExtra(EXTRA_IS_KEEPALIVE_MODE, isKeepaliveMode)
-                }
-            }
-        }
     }
 
     override fun onCreate() {
@@ -63,36 +43,8 @@ class StreamKeepaliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent != null) {
-            if (intent.hasExtra(EXTRA_IS_KEEPALIVE_MODE)) {
-                isKeepaliveModeActive = intent.getBooleanExtra(EXTRA_IS_KEEPALIVE_MODE, false)
-            }
-            if (intent.hasExtra(EXTRA_AGENT_NAME)) {
-                currentStreamName = intent.getStringExtra(EXTRA_AGENT_NAME) ?: ""
-            }
-        }
-
-        if (!isKeepaliveModeActive && currentStreamName.isEmpty()) {
-            Log.i(TAG, "No active streams and keepalive mode is inactive. Stopping service safely.")
-            val notification = buildNotification("", false)
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
-                    )
-                } else {
-                    startForeground(NOTIFICATION_ID, notification)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to startForeground during shutdown fallback", e)
-            }
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val notification = buildNotification(currentStreamName, isKeepaliveModeActive)
+        val label = ForegroundGuardian.getNotificationLabel()
+        val notification = buildNotification(label)
 
         // Android 14+ 必须声明前台服务类型，且加 try-catch 兜底，防止 ForegroundServiceStartNotAllowedException
         try {
@@ -106,40 +58,7 @@ class StreamKeepaliveService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to startForeground, falling back to basic background service", e)
-        }
-
-        if (isKeepaliveModeActive || currentStreamName.isNotEmpty()) {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (wakeLock == null) {
-                wakeLock = powerManager.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK,
-                    "VcpMobile::StreamWakeLock"
-                ).apply {
-                    acquire() // 移除超时限制以实现真正的持续持有
-                }
-                Log.i(TAG, "WakeLock acquired for stream: $currentStreamName")
-            }
-
-            try {
-                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
-                if (wifiLock == null) {
-                    @Suppress("DEPRECATION")
-                    wifiLock = wifiManager.createWifiLock(
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                            android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                        else
-                            android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF,
-                        "VcpMobile::StreamWifiLock"
-                    )
-                }
-                if (wifiLock?.isHeld == false) {
-                    wifiLock?.acquire()
-                    Log.i(TAG, "WifiLock acquired for stream: $currentStreamName")
-                }
-            } catch (wifiEx: Exception) {
-                Log.w(TAG, "Failed to acquire WifiLock inside service: ${wifiEx.message}")
-            }
+            Log.e(TAG, "Failed to startForeground", e)
         }
 
         return START_STICKY
@@ -152,19 +71,9 @@ class StreamKeepaliveService : Service() {
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
-        wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-            }
-        }
-        wakeLock = null
-
-        wifiLock?.let {
-            if (it.isHeld) {
-                it.release()
-            }
-        }
-        wifiLock = null
+        
+        // 关键安全闭环：前台服务销毁（包括被系统/用户强杀）时，强行释放全部进程级物理锁，防止电量泄露
+        ForegroundGuardian.releaseAllLocks()
 
         isServiceRunning = false
         super.onDestroy()
@@ -189,7 +98,7 @@ class StreamKeepaliveService : Service() {
         }
     }
 
-    private fun buildNotification(agentName: String, isKeepalive: Boolean): Notification {
+    private fun buildNotification(label: String): Notification {
         // 点击通知：打开应用（通过反射获取主 Activity，避免跨包编译依赖）
         val openIntent = try {
             val mainActivityClass = Class.forName("com.vcp.avatar.MainActivity")
@@ -208,16 +117,17 @@ class StreamKeepaliveService : Service() {
         )
 
         val contentText = when {
-            agentName.contains("[数据同步]") -> "正在与云端服务器进行高精度同步..."
-            agentName.contains("[预渲染重建]") -> "正在优化与加速本地响应缓存..."
-            agentName.isNotEmpty() -> "思考中……"
-            isKeepalive -> "分布式后台连接维系中..."
+            label.contains("[数据同步]") -> "正在与云端服务器进行高精度同步..."
+            label.contains("[预渲染重建]") -> "正在优化与加速本地响应缓存..."
+            label == "distributed" || label.contains("分布式") -> "分布式后台连接维系中..."
+            label.isNotEmpty() -> "思考中……"
             else -> "已连接"
         }
-        val cleanTitle = agentName.replace("[数据同步]", "").replace("[预渲染重建]", "").trim()
+        val cleanTitle = label.replace("[数据同步]", "").replace("[预渲染重建]", "").trim()
+        val title = if (cleanTitle.isEmpty() || cleanTitle == "distributed") "VCP Mobile" else cleanTitle
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (cleanTitle.isEmpty()) "VCP Mobile" else cleanTitle)
+            .setContentTitle(title)
             .setContentText(contentText)
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)

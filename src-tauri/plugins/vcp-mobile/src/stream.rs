@@ -1,112 +1,121 @@
+#[allow(unused_imports)]
 use tauri::{AppHandle, Manager, Runtime};
 
+#[allow(unused_imports)]
 use crate::VcpMobileState;
 
-/// Start the stream keepalive service.
-pub fn start_stream_service_inner<R: Runtime>(
-    app: &AppHandle<R>,
-    agent_name: &str,
+/// 申请持有进程级前台锁 (语义化接口)
+pub fn acquire_foreground_inner<R: Runtime>(
+    _app: &AppHandle<R>,
+    tag: &str,
+    priority: i32,
+    label: &str,
+    screen_keep_on: bool,
 ) -> Result<(), String> {
-    let state = app.state::<VcpMobileState<R>>();
-
-    let active_names = {
-        let mut streams = state.active_streams.lock().map_err(|e| e.to_string())?;
-
-        // 更新计数或添加新 Agent
-        if let Some(pos) = streams.iter().position(|(name, _)| name == agent_name) {
-            streams[pos].1 += 1;
-        } else {
-            streams.push((agent_name.to_string(), 1));
-        }
-
-        // 格式化名字列表：A、B、C...
-        let names: Vec<&str> = streams.iter().map(|(name, _)| name.as_str()).collect();
-        if names.len() > 3 {
-            format!("{}...", names[..3].join("、"))
-        } else {
-            names.join("、")
-        }
-    };
-
     #[cfg(target_os = "android")]
     {
+        let state = _app.state::<VcpMobileState<R>>();
         let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
-                "startStreamingService",
-                serde_json::json!({ "agentName": active_names }),
+                "acquireForeground",
+                serde_json::json!({
+                    "tag": tag,
+                    "priority": priority,
+                    "label": label,
+                    "screenKeepOn": screen_keep_on
+                }),
             )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
     }
 
     log::info!(
-        "[VcpMobilePlugin] Stream started for '{}'. Current notification: {}",
-        agent_name,
-        active_names
+        "[VcpMobilePlugin] acquire_foreground_inner: tag={}, priority={}, label={}, screenKeepOn={}",
+        tag, priority, label, screen_keep_on
     );
 
     Ok(())
 }
 
-/// Stop the stream keepalive service.
+/// 释放进程级前台锁 (语义化接口)
+pub fn release_foreground_inner<R: Runtime>(
+    _app: &AppHandle<R>,
+    tag: &str,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = _app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "releaseForeground",
+                serde_json::json!({ "tag": tag }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+
+    log::info!("[VcpMobilePlugin] release_foreground_inner: tag={}", tag);
+
+    Ok(())
+}
+
+/// Start the stream keepalive service (兼容老版本接口)
+pub fn start_stream_service_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    agent_name: &str,
+) -> Result<(), String> {
+    let tag = format!("stream:{}", agent_name);
+    let priority = if agent_name.contains("[数据同步]") {
+        40
+    } else if agent_name.contains("[预渲染重建]") {
+        30
+    } else {
+        20
+    };
+    let screen_keep_on = agent_name.contains("[数据同步]") || agent_name.contains("[预渲染重建]");
+    acquire_foreground_inner(app, &tag, priority, agent_name, screen_keep_on)
+}
+
+/// Stop the stream keepalive service (兼容老版本接口)
 pub fn stop_stream_service_inner<R: Runtime>(
     app: &AppHandle<R>,
     agent_name: &str,
 ) -> Result<(), String> {
-    let state = app.state::<VcpMobileState<R>>();
+    let tag = format!("stream:{}", agent_name);
+    release_foreground_inner(app, &tag)
+}
 
-    let (_should_stop, active_names) = {
-        let mut streams = state.active_streams.lock().map_err(|e| e.to_string())?;
-
-        if let Some(pos) = streams.iter().position(|(name, _)| name == agent_name) {
-            if streams[pos].1 > 1 {
-                streams[pos].1 -= 1;
-            } else {
-                streams.remove(pos);
-            }
-        }
-
-        let names: Vec<&str> = streams.iter().map(|(name, _)| name.as_str()).collect();
-        let formatted = if names.len() > 3 {
-            format!("{}...", names[..3].join("、"))
-        } else {
-            names.join("、")
-        };
-
-        (streams.is_empty(), formatted)
-    };
-
-    #[cfg(target_os = "android")]
-    {
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
-
-        if _should_stop {
-            plugin_handle
-                .run_mobile_plugin::<serde_json::Value>(
-                    "startStreamingService",
-                    serde_json::json!({ "agentName": "" }),
-                )
-                .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        } else {
-            // 更新通知内容为剩余的 Agent
-            plugin_handle
-                .run_mobile_plugin::<serde_json::Value>(
-                    "startStreamingService",
-                    serde_json::json!({ "agentName": active_names }),
-                )
-                .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        }
+/// 设置分布式保活模式 (兼容老版本接口)
+pub fn set_keepalive_mode_inner<R: Runtime>(
+    app: &AppHandle<R>,
+    is_keepalive: bool,
+) -> Result<(), String> {
+    if is_keepalive {
+        acquire_foreground_inner(app, "distributed", 10, "distributed", false)
+    } else {
+        release_foreground_inner(app, "distributed")
     }
+}
 
-    log::info!(
-        "[VcpMobilePlugin] Stream stopped for '{}'. Current notification: {}",
-        agent_name,
-        active_names
-    );
+#[tauri::command]
+pub fn acquire_foreground<R: Runtime>(
+    app: AppHandle<R>,
+    tag: String,
+    priority: i32,
+    label: String,
+    screen_keep_on: bool,
+) -> Result<(), String> {
+    acquire_foreground_inner(&app, &tag, priority, &label, screen_keep_on)
+}
 
-    Ok(())
+#[tauri::command]
+pub fn release_foreground<R: Runtime>(
+    app: AppHandle<R>,
+    tag: String,
+) -> Result<(), String> {
+    release_foreground_inner(&app, &tag)
 }
 
 #[tauri::command]
@@ -125,28 +134,10 @@ pub fn stop_streaming_service<R: Runtime>(
     stop_stream_service_inner(&app, &agent_name)
 }
 
-/// 设置分布式保活模式
+#[tauri::command]
 pub fn set_keepalive_mode<R: Runtime>(
-    _app: &AppHandle<R>,
+    app: AppHandle<R>,
     is_keepalive: bool,
 ) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        let state = _app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
-        plugin_handle
-            .run_mobile_plugin::<serde_json::Value>(
-                "startStreamingService",
-                serde_json::json!({
-                    "agentName": "",
-                    "isKeepaliveMode": is_keepalive
-                }),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-    }
-
-    log::info!("[VcpMobilePlugin] Keepalive mode set to {}", is_keepalive);
-
-    Ok(())
+    set_keepalive_mode_inner(&app, is_keepalive)
 }

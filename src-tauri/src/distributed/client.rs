@@ -112,7 +112,7 @@ impl DistributedClient {
         Self::emit_status(&app, &status).await;
 
         #[cfg(target_os = "android")]
-        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode(&app, true) {
+        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, true) {
             log::warn!(
                 "[Distributed] Failed to start keepalive foreground service: {}",
                 e
@@ -146,7 +146,7 @@ impl DistributedClient {
     /// Stop the distributed node.
     pub async fn stop(&self, _app: &AppHandle) {
         #[cfg(target_os = "android")]
-        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode(_app, false) {
+        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(_app, false) {
             log::warn!(
                 "[Distributed] Failed to stop keepalive foreground service: {}",
                 e

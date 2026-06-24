@@ -321,6 +321,7 @@ pub fn run() {
             get_active_frontend_version,
             clear_frontend_updates,
             confirm_frontend_boot,
+            tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
         ])
         .run(context)
         .expect("error while running tauri application");

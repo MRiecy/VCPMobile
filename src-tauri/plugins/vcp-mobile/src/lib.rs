@@ -9,7 +9,6 @@ pub mod system;
 
 /// Plugin state shared across commands
 pub struct VcpMobileState<R: Runtime> {
-    pub active_streams: std::sync::Mutex<Vec<(String, u32)>>,
     #[cfg(target_os = "android")]
     pub plugin_handle: std::sync::Mutex<Option<tauri::plugin::PluginHandle<R>>>,
     #[cfg(not(target_os = "android"))]
@@ -24,6 +23,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             screen::clear_keep_screen_on,
             stream::start_streaming_service,
             stream::stop_streaming_service,
+            stream::acquire_foreground,
+            stream::release_foreground,
             system::check_all_permissions,
             system::request_android_permission,
             system::move_task_to_back,
@@ -64,7 +65,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 _api.register_android_plugin("com.vcp.mobile", "VcpMobilePlugin")?;
 
             app.manage(VcpMobileState::<R> {
-                active_streams: std::sync::Mutex::new(Vec::new()),
                 #[cfg(target_os = "android")]
                 plugin_handle: std::sync::Mutex::new(Some(plugin_handle)),
                 #[cfg(not(target_os = "android"))]
