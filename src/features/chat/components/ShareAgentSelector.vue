@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch, onUnmounted } from "vue";
 import { useAssistantStore, type AgentConfig } from "../../../core/stores/assistant";
+import { useModalHistory } from "../../../core/composables/useModalHistory";
 import VcpAvatar from "../../../components/ui/VcpAvatar.vue";
 
 const props = defineProps<{
@@ -15,6 +16,8 @@ const emit = defineEmits<{
 }>();
 
 const assistantStore = useAssistantStore();
+const { registerModal, unregisterModal } = useModalHistory();
+const modalId = "ShareAgentSelector";
 
 const availableAgents = computed(() => assistantStore.agents);
 
@@ -28,6 +31,24 @@ const previewText = computed(() => {
 const handleSelect = (agent: AgentConfig) => {
   emit("selected", agent);
 };
+
+watch(
+  () => props.isOpen,
+  (newVal) => {
+    if (newVal) {
+      registerModal(modalId, () => {
+        emit("close");
+      });
+    } else {
+      unregisterModal(modalId);
+    }
+  },
+  { immediate: true }
+);
+
+onUnmounted(() => {
+  unregisterModal(modalId);
+});
 </script>
 
 <template>

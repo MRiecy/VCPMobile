@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
+import { useNotificationStore } from "../../core/stores/notification";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
@@ -37,6 +38,7 @@ const emit = defineEmits(["close", "delete"]);
 
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
+const notificationStore = useNotificationStore();
 
 const agentConfig = ref<AgentConfig>({
   id: props.id || "",
@@ -126,6 +128,7 @@ onUnmounted(() => {
     clearTimeout(saveSuccessTimer);
     saveSuccessTimer = null;
   }
+  saveOnClose();
 });
 
 const loadConfig = async () => {
@@ -143,49 +146,49 @@ const loadConfig = async () => {
   }
 };
 
-const autoSave = async () => {
-  if (!agentConfig.value.id || !props.isOpen) return;
+const saveOnClose = async () => {
+  if (!agentConfig.value.id) return;
 
-  isSaving.value = true;
-  saveSuccess.value = false;
+  // 仅在配置真正被修改时才触发保存，避免无意义的后端调用
+  if (originalConfig.value && JSON.stringify(agentConfig.value) !== JSON.stringify(originalConfig.value)) {
+    isSaving.value = true;
+    saveSuccess.value = false;
 
-  try {
-    // Use assistantStore to save config and get notification
-    await assistantStore.saveAgent(agentConfig.value);
-    saveSuccess.value = true;
-    // 保存成功后更新快照，避免重复保存相同内容
+    // 加固防重入：在 await 之前同步更新快照，拦截后续瞬时触发的并发保存调用
+    const previousSnapshot = originalConfig.value;
     originalConfig.value = JSON.parse(JSON.stringify(agentConfig.value));
-    if (saveSuccessTimer) clearTimeout(saveSuccessTimer);
-    saveSuccessTimer = setTimeout(() => {
-      saveSuccess.value = false;
-    }, 2000);
-  } catch (err) {
-    console.error("Auto save failed:", err);
-  } finally {
-    isSaving.value = false;
+
+    try {
+      await assistantStore.saveAgent(agentConfig.value);
+      saveSuccess.value = true;
+      if (saveSuccessTimer) clearTimeout(saveSuccessTimer);
+      saveSuccessTimer = setTimeout(() => {
+        saveSuccess.value = false;
+      }, 2000);
+    } catch (err: any) {
+      // 保存失败时回滚快照，以便后续有机会重新触发保存
+      originalConfig.value = previousSnapshot;
+      console.error("Save config on close failed:", err);
+      
+      // 加固异常感知：通过 Toast 提示用户保存失败
+      notificationStore.addNotification({
+        type: "error",
+        title: "设置保存失败",
+        message: err.toString() || "请检查连接并重试",
+        toastOnly: true,
+      });
+    } finally {
+      isSaving.value = false;
+    }
   }
 };
 
-watch(
-  agentConfig,
-  () => {
-    if (!originalConfig.value || !props.isOpen) return;
-    // 只有与原始快照不同时才触发保存，避免无意义的后端调用
-    if (JSON.stringify(agentConfig.value) === JSON.stringify(originalConfig.value)) {
-      return;
-    }
-    if (saveTimeout) {
-      clearTimeout(saveTimeout);
-    }
-    saveTimeout = setTimeout(() => {
-      autoSave();
-    }, 800);
-  },
-  { deep: true },
-);
-
 watch(() => props.isOpen, (val) => {
-  if (val) loadConfig();
+  if (val) {
+    loadConfig();
+  } else {
+    saveOnClose();
+  }
 });
 
 const handleDelete = async () => {
