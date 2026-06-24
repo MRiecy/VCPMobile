@@ -35,5 +35,9 @@ commands.allow = [
     "acquire_wake_lock",
     "release_wake_lock",
     "start_network_monitoring",
+    "request_auto_start_permission",
+    "request_power_management_permission",
+    "check_auto_start_permission",
+    "get_free_disk_space",
 ]
 

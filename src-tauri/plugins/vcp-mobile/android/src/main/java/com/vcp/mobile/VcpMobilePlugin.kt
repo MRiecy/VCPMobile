@@ -16,6 +16,7 @@ import app.tauri.annotation.TauriPlugin
 import androidx.activity.result.ActivityResult
 import app.tauri.plugin.Plugin
 import android.content.Intent
+import android.content.ComponentName
 import android.util.Log
 import androidx.core.content.FileProvider
 import android.webkit.MimeTypeMap
@@ -96,6 +97,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     init {
         instanceRef = java.lang.ref.WeakReference(this)
         activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
+        startOomScoreGuard()
     }
 
     companion object {
@@ -216,6 +218,233 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun moveTaskToBack(invoke: Invoke) {
         activity.moveTaskToBack(true)
         invoke.resolve()
+    }
+
+    private fun startOomScoreGuard() {
+        fileIoExecutor.execute {
+            try {
+                // 利用 topjohnwu 的 superuser 库检查 root 状态
+                if (Shell.getShell().isRoot) {
+                    val pid = android.os.Process.myPid()
+                    Log.i(TAG, "OomScoreGuard: Root detected. Locking OOM score adj for PID $pid to -900.")
+                    while (true) {
+                        try {
+                            // 强行把 oom_score_adj 改为 -900
+                            Shell.cmd("echo -900 > /proc/$pid/oom_score_adj").exec()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "OomScoreGuard: Write command failed", e)
+                        }
+                        // 每 20 秒循环锁定一次，应对部分定制系统后台回收机制的复原
+                        Thread.sleep(20000)
+                    }
+                } else {
+                    Log.i(TAG, "OomScoreGuard: Non-root device. Skipping OOM score lock.")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "OomScoreGuard error", e)
+            }
+        }
+    }
+
+    private fun checkAutoStartStatus(): String {
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
+        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi")) {
+            val ops = activity.getSystemService(Context.APP_OPS_SERVICE) as? android.app.AppOpsManager
+            if (ops != null) {
+                try {
+                    val method = ops.javaClass.getMethod(
+                        "checkOpNoThrow",
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        String::class.java
+                    )
+                    // 10008 is OP_AUTO_START in MIUI / HyperOS AppOpsManager
+                    val mode = method.invoke(
+                        ops,
+                        10008,
+                        activity.applicationInfo.uid,
+                        activity.packageName
+                    ) as Int
+                    return if (mode == android.app.AppOpsManager.MODE_ALLOWED) "true" else "false"
+                } catch (e: Exception) {
+                    Log.e(TAG, "checkAutoStartStatus: reflection failed", e)
+                }
+            }
+        }
+        return "unsupported"
+    }
+
+    @Command
+    fun checkAutoStartPermission(invoke: Invoke) {
+        val status = checkAutoStartStatus()
+        val result = JSObject()
+        result.put("status", status)
+        invoke.resolve(result)
+    }
+
+    @Command
+    fun requestAutoStartPermission(invoke: Invoke) {
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
+        var success = false
+        val intents = mutableListOf<Intent>()
+        
+        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi")) {
+            // 小米 / HyperOS
+            intents.add(Intent().setComponent(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")))
+        } else if (manufacturer.contains("huawei") || manufacturer.contains("honor")) {
+            // 华为 / 荣耀
+            intents.add(Intent().setComponent(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")))
+            intents.add(Intent().setComponent(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.bootstart.BootStartActivity")))
+        } else if (manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme")) {
+            // OPPO / 一加 / 真我
+            // 针对自启动跳错，我们优先拉起系统应用管理主页，或直接拉起应用详情页，保障在 OPPO/ColorOS 上的准确性
+            intents.add(Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS))
+        } else if (manufacturer.contains("vivo")) {
+            // VIVO
+            intents.add(Intent().setComponent(ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager")))
+            intents.add(Intent().setComponent(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")))
+            intents.add(Intent().setComponent(ComponentName("com.iqoo.secure", "com.iqoo.secure.MainActivity")))
+        } else if (manufacturer.contains("meizu")) {
+            // 魅族
+            intents.add(Intent().setComponent(ComponentName("com.meizu.safe", "com.meizu.safe.permission.SmartBGActivity")))
+            intents.add(Intent().setComponent(ComponentName("com.meizu.safe", "com.meizu.safe.MainActivity")))
+        }
+
+        // 尝试打开厂商特定的 Activity
+        for (intent in intents) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+                success = true
+                break
+            } catch (e: Exception) {
+                // Try next
+            }
+        }
+        
+        // 兜底退避
+        if (!success) {
+            try {
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.parse("package:${activity.packageName}")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                activity.startActivity(intent)
+                success = true
+            } catch (e: Exception) {
+                try {
+                    val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    activity.startActivity(intent)
+                    success = true
+                } catch (e2: Exception) {}
+            }
+        }
+        
+        val result = JSObject()
+        result.put("success", success)
+        invoke.resolve(result)
+    }
+
+    @Command
+    fun requestPowerManagementPermission(invoke: Invoke) {
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
+        var success = false
+        val intents = mutableListOf<Intent>()
+        
+        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi")) {
+            // 小米省电策略
+            try {
+                val miuiIntent = Intent("miui.intent.action.OP_POWER_PRIORITY_SETTINGS").apply {
+                    putExtra("package_name", activity.packageName)
+                    putExtra("package_label", activity.applicationInfo.loadLabel(activity.packageManager).toString())
+                }
+                intents.add(miuiIntent)
+            } catch (e: Exception) {}
+            intents.add(Intent().setComponent(ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")).apply {
+                putExtra("package_name", activity.packageName)
+                putExtra("package_label", activity.applicationInfo.loadLabel(activity.packageManager).toString())
+            })
+            intents.add(Intent().setComponent(ComponentName("com.miui.securitycenter", "com.miui.powercenter.PowerSettings")))
+        } else if (manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme")) {
+            // OPPO 省电与后台完全行为
+            intents.add(Intent().setComponent(ComponentName("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaurd.PowerUsageModelActivity")))
+            intents.add(Intent().setComponent(ComponentName("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaurd.PowerSavedModeActivity")))
+            try {
+                intents.add(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
+            } catch (e: Exception) {}
+        } else if (manufacturer.contains("huawei") || manufacturer.contains("honor")) {
+            // 华为
+            intents.add(Intent().setComponent(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.power.ui.PowerConsumptionActivity")))
+            intents.add(Intent().setComponent(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")))
+        } else if (manufacturer.contains("vivo")) {
+            // VIVO
+            intents.add(Intent().setComponent(ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.poweroptimize.PowerOptimizeActivity")))
+        }
+
+        // 尝试打开特定的电池设置页面
+        for (intent in intents) {
+            try {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(intent)
+                success = true
+                break
+            } catch (e: Exception) {
+                // Try next
+            }
+        }
+        
+        // 兜底退避
+        if (!success) {
+            try {
+                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                activity.startActivity(intent)
+                success = true
+            } catch (e: Exception) {
+                try {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:${activity.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    activity.startActivity(intent)
+                    success = true
+                } catch (e2: Exception) {}
+            }
+        }
+        
+        val result = JSObject()
+        result.put("success", success)
+        invoke.resolve(result)
+    }
+
+    @Command
+    fun getFreeDiskSpace(invoke: Invoke) {
+        try {
+            val path = Environment.getDataDirectory()
+            val stat = android.os.StatFs(path.path)
+            val blockSize = stat.blockSizeLong
+            val availableBlocks = stat.availableBlocksLong
+            val totalBlocks = stat.blockCountLong
+            
+            val freeBytes = availableBlocks * blockSize
+            val totalBytes = totalBlocks * blockSize
+            
+            val freeGB = freeBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+            val totalGB = totalBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+            
+            val result = JSObject()
+            result.put("freeBytes", freeBytes.toDouble())
+            result.put("freeGb", freeGB)
+            result.put("totalBytes", totalBytes.toDouble())
+            result.put("totalGb", totalGB)
+            invoke.resolve(result)
+        } catch (e: Exception) {
+            Log.e(TAG, "getFreeDiskSpace failed", e)
+            invoke.reject(e.message ?: "Failed to get free disk space")
+        }
     }
 
     // ==================================================================

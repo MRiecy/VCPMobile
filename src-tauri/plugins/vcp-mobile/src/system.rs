@@ -89,6 +89,106 @@ pub fn move_task_to_back<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn request_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let res = plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("requestAutoStartPermission", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        
+        let success = res.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+pub fn request_power_management_permission<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let res = plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("requestPowerManagementPermission", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        
+        let success = res.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+pub fn check_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let res = plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("checkAutoStartPermission", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        
+        let status = res.get("status").and_then(|v| v.as_str()).unwrap_or("unsupported").to_string();
+        Ok(status)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok("unsupported".to_string())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskSpaceInfo {
+    pub free_bytes: u64,
+    pub free_gb: f64,
+    pub total_bytes: u64,
+    pub total_gb: f64,
+}
+
+#[tauri::command]
+pub fn get_free_disk_space<R: Runtime>(app: AppHandle<R>) -> Result<DiskSpaceInfo, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let info = plugin_handle
+            .run_mobile_plugin::<DiskSpaceInfo>("getFreeDiskSpace", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(info)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(DiskSpaceInfo {
+            free_bytes: 10 * 1024 * 1024 * 1024,
+            free_gb: 10.0,
+            total_bytes: 100 * 1024 * 1024 * 1024,
+            total_gb: 100.0,
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PickedFileInfo {

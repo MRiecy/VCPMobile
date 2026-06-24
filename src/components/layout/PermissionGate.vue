@@ -19,14 +19,68 @@ const status = ref<PermissionStatus>({
 
 const currentStep = ref(1);
 
+// Step 2 状态
+const autoStartStatus = ref<'true' | 'false' | 'unsupported'>('unsupported');
+const hasClickedAutoStart = ref(false);
+const userConfirmedAutoStart = ref(false);
+const hasClickedPower = ref(false);
+const userConfirmedPower = ref(false);
+
+// Step 3 状态
+const freeDiskSpaceGB = ref(0);
+const totalDiskSpaceGB = ref(0);
+const isDiskCheckError = ref(false);
+
 const allGranted = computed(() => status.value.notification && status.value.storage && status.value.battery);
+
+// 自启动是否配置好 (小米/HyperOS自动感应，非小米依赖用户勾选)
+const isAutoStartReady = computed(() => {
+  if (autoStartStatus.value === 'true') return true;
+  return userConfirmedAutoStart.value;
+});
+
+// 后台省电是否配置好
+const isPowerReady = computed(() => {
+  return userConfirmedPower.value;
+});
+
+// Step 2 是否满足要求
+const step2Ready = computed(() => isAutoStartReady.value && isPowerReady.value);
+
+// Step 3 存储检测是否合格 (要求 >= 5.0 GB)
+const isStorageSpaceOk = computed(() => freeDiskSpaceGB.value >= 5.0);
 
 const check = async () => {
   try {
     const res = await invoke<PermissionStatus>('plugin:vcp-mobile|check_all_permissions');
     status.value = res;
+    
+    // 如果已经授予存储权限，检测内部存储空间和自启动状态
+    await checkDiskSpace();
+    await checkAutoStart();
   } catch (e) {
     console.error('[PermissionGate] Failed to check permissions:', e);
+  }
+};
+
+const checkAutoStart = async () => {
+  try {
+    const res = await invoke<string>('plugin:vcp-mobile|check_auto_start_permission');
+    autoStartStatus.value = res as any;
+  } catch (e) {
+    console.error('[PermissionGate] Failed to check auto start permission:', e);
+  }
+};
+
+const checkDiskSpace = async () => {
+  try {
+    const res = await invoke<{ freeBytes: number, freeGb: number, totalBytes: number, totalGb: number }>('plugin:vcp-mobile|get_free_disk_space');
+    freeDiskSpaceGB.value = res.freeGb;
+    totalDiskSpaceGB.value = res.totalGb;
+    isDiskCheckError.value = false;
+  } catch (e) {
+    console.error('[PermissionGate] Failed to check disk space:', e);
+    isDiskCheckError.value = true;
   }
 };
 
@@ -35,6 +89,24 @@ const request = async (type: 'notification' | 'storage' | 'battery') => {
     await invoke('plugin:vcp-mobile|request_android_permission', { pType: type });
   } catch (e) {
     console.error(`[PermissionGate] Failed to request ${type} permission:`, e);
+  }
+};
+
+const triggerAutoStartSettings = async () => {
+  try {
+    await invoke('plugin:vcp-mobile|request_auto_start_permission');
+    hasClickedAutoStart.value = true;
+  } catch (e) {
+    console.error('[PermissionGate] Failed to request auto start settings:', e);
+  }
+};
+
+const triggerPowerManagementSettings = async () => {
+  try {
+    await invoke('plugin:vcp-mobile|request_power_management_permission');
+    hasClickedPower.value = true;
+  } catch (e) {
+    console.error('[PermissionGate] Failed to request power management settings:', e);
   }
 };
 
@@ -185,54 +257,151 @@ onUnmounted(() => {
 
           <!-- ========== Step 2: Battery Optimization ========== -->
           <div class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
-            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">品牌电池白名单设置</h3>
+            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">品牌厂商自启动与后台管理</h3>
             <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
-              系统后台权限已授予，但这拦不住品牌厂商自己的电池管理。<br>小米、华为、OPPO 等品牌还有独立的电池管理策略
-  ，需要额外将本应用加入白名单。如果不进行以下设置，锁屏后 Agent 仍可能掉线。<br><br>建议将 VCP Mobile 加入电池白名单。
+              由于国产手机系统拥有极其激进的后台强杀机制，必须强制前往设置开启自启动和后台完全允许运行。
             </p>
 
-            <div class="bg-gray-100/50 border border-gray-200 rounded-xl p-4 space-y-2 mb-4">
-              <div class="flex items-center gap-2 text-gray-700">
-                <div class="i-heroicons-information-circle w-4 h-4"></div>
-                <span class="text-xs font-bold uppercase tracking-wider">建议操作</span>
+            <div class="w-full space-y-4 mb-4">
+              <!-- 卡片 1：自启动 -->
+              <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0">
+                    <div class="i-heroicons-arrow-path text-indigo-500 text-lg"></div>
+                  </div>
+                  <div class="flex-1">
+                    <span class="font-semibold text-gray-900 text-sm">开机与后台自启动</span>
+                    <span v-if="autoStartStatus === 'true'" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
+                  </div>
+                  <button 
+                    @click="triggerAutoStartSettings"
+                    class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
+                  >
+                    去设置
+                  </button>
+                </div>
+                <p class="text-xs text-gray-500 leading-relaxed pl-11">
+                  请在打开的系统页面中开启以下选项：
+                  <span class="block mt-1 text-[11px] text-[#8B7D6B] font-bold">
+                    关联权限名称：自启动 / 开机自动启动 / 关联启动
+                  </span>
+                </p>
+                <!-- 非小米设备，或者小米检测不成功，在点击跳转后，显示勾选防呆机制 -->
+                <div v-if="autoStartStatus !== 'true' && hasClickedAutoStart" class="mt-2 pl-11 flex items-center gap-2">
+                  <input type="checkbox" id="chkAutoStart" v-model="userConfirmedAutoStart" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
+                  <label for="chkAutoStart" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已允许自启动</label>
+                </div>
               </div>
-              <p class="text-xs text-gray-500 leading-relaxed">
-                进入应用后，右滑打开「全局设置 → 电池优化」查看各品牌的详细设置步骤，按步骤添加白名单即可。
-              </p>
+
+              <!-- 卡片 2：省电策略 (完全允许后台行为) -->
+              <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
+                <div class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+                    <div class="i-heroicons-bolt text-amber-500 text-lg"></div>
+                  </div>
+                  <div class="flex-1">
+                    <span class="font-semibold text-gray-900 text-sm">省电无限制策略</span>
+                  </div>
+                  <button 
+                    @click="triggerPowerManagementSettings"
+                    class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
+                  >
+                    去设置
+                  </button>
+                </div>
+                <p class="text-xs text-gray-500 leading-relaxed pl-11">
+                  请在打开的系统页面中将本应用设为不受限：
+                  <span class="block mt-1 text-[11px] text-[#8B7D6B] font-bold">
+                    关联权限名称：允许完全后台行为 / 不限制 / 应用耗电管理
+                  </span>
+                </p>
+                <div v-if="hasClickedPower" class="mt-2 pl-11 flex items-center gap-2">
+                  <input type="checkbox" id="chkPower" v-model="userConfirmedPower" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
+                  <label for="chkPower" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已将本应用省电策略改为「无限制」</label>
+                </div>
+              </div>
             </div>
 
             <!-- Bottom Action -->
             <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
-              <button
-                @click="lifecycleStore.bootstrap(true)"
+              <button v-if="step2Ready && currentStep === 2"
+                @click="goNext"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >
-                <span>进入应用</span>
+                <span>下一步</span>
                 <div class="i-heroicons-arrow-right text-lg"></div>
+              </button>
+              <button v-else-if="currentStep === 2" class="w-full py-4 bg-gray-300 text-gray-500 text-[15px] font-bold rounded-2xl cursor-not-allowed flex items-center justify-center gap-2" disabled>
+                <span>请先跳转完成保活设置</span>
               </button>
             </div>
           </div>
 
-          <!-- ========== Step 3: Placeholder ========== -->
+          <!-- ========== Step 3: Hardened Keep-Alive & Storage Check ========== -->
           <div class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
-            <div class="flex-1 flex flex-col items-center justify-center">
-              <div class="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center mb-4">
-                <div class="i-heroicons-rocket-launch text-2xl text-gray-400"></div>
+            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">系统运行环境与存储空间检测</h3>
+            <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
+              完成应用锁定配置并确保充足的系统存储空间，以保障后台服务的高可用性。
+            </p>
+
+            <div class="w-full space-y-4 mb-4">
+              <!-- 多任务卡片加锁 -->
+              <div class="p-4 rounded-2xl bg-gray-100/50 border border-gray-200 space-y-2">
+                <div class="flex items-center gap-2 text-gray-800">
+                  <div class="i-heroicons-lock-closed text-gray-600 text-lg"></div>
+                  <span class="font-bold text-sm">1. 后台多任务锁定（推荐）</span>
+                </div>
+                <p class="text-xs text-gray-500 leading-relaxed">
+                  在系统『多任务管理器』中，找到 VCP Mobile 并点击『加锁』图标。这能避免应用在系统一键清理时被强制关闭。
+                </p>
               </div>
-              <h3 class="text-lg font-semibold text-gray-900 mb-2">更多功能即将上线</h3>
-              <p class="text-sm text-[#8B7D6B] text-center leading-relaxed px-4">
-                后续版本将提供更多初始化引导功能
-              </p>
+
+              <!-- 存储空间防爆检测 -->
+              <div class="p-4 rounded-2xl bg-gray-100/50 border border-gray-200 space-y-3">
+                <div class="flex items-center gap-2 text-gray-800">
+                  <div class="i-heroicons-cpu-chip text-gray-600 text-lg"></div>
+                  <span class="font-bold text-sm">2. 系统可用存储空间校验</span>
+                </div>
+                <p class="text-xs text-gray-500 leading-relaxed">
+                  Android 进程管理机制在系统可用存储低于 5.0 GB 时会执行更激进的后台资源回收。为确保连接稳定性，本应用需预留至少 **5.0 GB** 可用存储。
+                </p>
+
+                <!-- Disk Space Status Bar -->
+                <div class="space-y-1" v-if="freeDiskSpaceGB > 0">
+                  <div class="flex justify-between text-xs font-semibold">
+                    <span :class="isStorageSpaceOk ? 'text-green-600' : 'text-red-500'">
+                      {{ isStorageSpaceOk ? '✅ 系统可用存储充足' : '⚠️ 可用存储空间不足 5.0 GB' }}
+                    </span>
+                    <span class="text-gray-600">
+                      {{ freeDiskSpaceGB.toFixed(2) }} GB / {{ totalDiskSpaceGB.toFixed(1) }} GB 可用
+                    </span>
+                  </div>
+                  <!-- Progress bar -->
+                  <div class="w-full h-2.5 bg-gray-200 rounded-full overflow-hidden">
+                    <div class="h-full transition-all duration-500" 
+                      :class="isStorageSpaceOk ? 'bg-green-500' : 'bg-red-500'"
+                      :style="{ width: `${Math.min(100, (freeDiskSpaceGB / totalDiskSpaceGB) * 100)}%` }"
+                    ></div>
+                  </div>
+                </div>
+
+                <p v-if="!isStorageSpaceOk && freeDiskSpaceGB > 0" class="text-[11px] text-red-500 font-bold leading-normal">
+                  ⚠️ 系统可用存储空间低于 5.0 GB，后台进程可能会被系统终止运行。请清理设备存储以解除阻断。
+                </p>
+              </div>
             </div>
 
             <!-- Bottom Action -->
-            <div class="w-full flex flex-col items-center gap-2 pb-6">
-              <button
+            <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
+              <button v-if="isStorageSpaceOk"
                 @click="lifecycleStore.bootstrap(true)"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >
-                <span>进入应用</span>
-                <div class="i-heroicons-arrow-right text-lg"></div>
+                <span>激活并进入应用</span>
+                <div class="i-heroicons-rocket text-lg"></div>
+              </button>
+              <button v-else class="w-full py-4 bg-red-100 text-red-400 text-[15px] font-bold rounded-2xl cursor-not-allowed flex items-center justify-center gap-2" disabled>
+                <span>存储空间不足，已阻断进入</span>
               </button>
             </div>
           </div>
