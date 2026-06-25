@@ -92,7 +92,7 @@ pub async fn orchestrate_chat_context(
 /// -------------------------------------------------------------
 /// 1. 【文档类提取】：若附件（如 PDF、DOCX、TXT 等）已被 Rust 底层流水线提取为文本 `extracted_text`，
 ///    将以极其工整的形式通过内联闭环标签嵌入到文本尾部：
-///    `\n\n[附加文件: {path}]\n{text}\n[/附加文件结束: {name}]`
+///    `\n\n[附加文件: {path}] (文件名: {name})\n{text}\n[/附加文件结束: {name}]`
 /// 2. 【多模态富资产】：如果是图片、音频或视频资产，自动将其编译为带 MIME 与本地安全路径的 `local_file`
 ///    标准 JSON 对象（供底层 VCP Client 执行多模态 Payload 投递），并辅以内联标记供纯文本后备降级渲染。
 pub fn assemble_history_for_vcp(
@@ -146,8 +146,8 @@ pub fn assemble_history_for_vcp(
                 if let Some(text) = &att.extracted_text {
                     if !text.is_empty() {
                         combined_text.push_str(&format!(
-                            "\n\n[附加文件: {}]\n{}\n[/附加文件结束: {}]",
-                            att.internal_path, text, att.name
+                            "\n\n[附加文件: {}] (文件名: {})\n{}\n[/附加文件结束: {}]",
+                            att.internal_path, att.name, text, att.name
                         ));
                     }
                 }
