@@ -51,7 +51,7 @@ use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_r
 use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
-    toggle_favorite_model,
+    toggle_favorite_model, test_model_connectivity, start_batch_model_test, stop_all_model_tests,
 };
 
 use vcp_modules::sync_service::{
@@ -281,6 +281,9 @@ pub fn run() {
             get_favorite_models,
             toggle_favorite_model,
             record_model_usage,
+            test_model_connectivity,
+            start_batch_model_test,
+            stop_all_model_tests,
             summarize_topic,
             init_vcp_log_connection,
             send_vcp_log_message,

@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
-import { useVirtualList } from '@vueuse/core';
+import { ref, computed, watch, onUnmounted } from 'vue';
 import { useModelStore, type ModelInfo } from '../core/stores/modelStore';
 import { useModalHistory } from '../core/composables/useModalHistory';
 import {
@@ -10,7 +9,10 @@ import {
   X,
   RefreshCw,
   Check,
-  Cpu
+  Cpu,
+  Zap,
+  Loader2,
+  Square
 } from 'lucide-vue-next';
 
 const props = defineProps<{
@@ -67,22 +69,12 @@ const filteredModels = computed(() => {
   );
 });
 
-// --- Virtual Scroll Engine (Zero-Lag fixed height) ---
-const { list, containerProps, wrapperProps } = useVirtualList(filteredModels, {
-  itemHeight: 62, // py-3.5 (28px) + text-15 (20px) + text-11 (14px) 约 62px
-  overscan: 10,
-});
-
+// --- Scroll To Top Reference ---
 const scrollContainerRef = ref<HTMLElement | null>(null);
-const bindContainerRef = (el: unknown) => {
-  const htmlEl = el as HTMLElement | null;
-  containerProps.ref.value = htmlEl;
-  scrollContainerRef.value = htmlEl;
-};
 
 const selectTag = (tag: string) => {
   activeTag.value = tag;
-  // 切换 Tag 时滚动重置回顶部，防止虚拟滚动越界导致瞬间空白
+  // 切换 Tag 时滚动重置回顶部
   if (scrollContainerRef.value) {
     scrollContainerRef.value.scrollTop = 0;
   }
@@ -179,20 +171,83 @@ const refresh = () => {
   modelStore.fetchModels(true);
 };
 
-onMounted(() => {
-  modelStore.fetchModels();
-});
 
 // --- Modal History Stack Registration ---
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
     registerModal(modalId, close);
+    // 🌟 5分钟检测：如果为空，或者距离上次同步超过 5 分钟，直接触发强力同步（与点击刷新按钮完全等价，自动播放转圈并展示 Toast）
+    const shouldRefresh = modelStore.models.length === 0 || (Date.now() - modelStore.lastRefreshed > 1000 * 60 * 5);
+    if (shouldRefresh) {
+      modelStore.fetchModels(true);
+    }
   } else {
+    modelStore.stopTestAll(); // 抽屉关闭时，自动停止后台未完成的所有测试，清理垃圾状态以防残留 0.0s
     unregisterModal(modalId);
   }
 }, { immediate: true });
 
+// --- Latency Color Classification ---
+const getLatencyClass = (modelId: string) => {
+  const res = modelStore.testResults[modelId];
+  if (!res) return 'text-gray-400 dark:text-zinc-600';
+  if (res.status === 'testing') return 'text-blue-500 dark:text-blue-400';
+  if (res.status === 'failed') return 'text-red-500 dark:text-red-400';
+
+  const latency = res.latency || 0;
+  if (latency < 1500) return 'text-emerald-600 dark:text-emerald-400 font-medium';
+  if (latency < 5000) return 'text-amber-600 dark:text-amber-400 font-medium';
+  return 'text-orange-600 dark:text-orange-400 font-medium';
+};
+
+const getLatencyDotClass = (modelId: string) => {
+  const res = modelStore.testResults[modelId];
+  if (!res || res.status !== 'success') return 'bg-gray-400';
+
+  const latency = res.latency || 0;
+  if (latency < 1500) return 'bg-emerald-500';
+  if (latency < 5000) return 'bg-amber-500';
+  return 'bg-orange-500';
+};
+
+const getTestResultText = (modelId: string) => {
+  const res = modelStore.testResults[modelId];
+  if (!res) return '';
+  if (res.status === 'testing') return '测试中...';
+  if (res.status === 'failed') {
+    const err = res.error || '';
+    const errLower = err.toLowerCase();
+    
+    // 优先检测超时错误，避免被归类为“网络异常”
+    if (
+      errLower.includes("timeout") || 
+      errLower.includes("timed out") || 
+      errLower.includes("timedout") || 
+      err.includes("超时")
+    ) {
+      return '连接超时 (60s)';
+    }
+
+    if (err.includes("401")) return '401 鉴权失败';
+    if (err.includes("403")) return '403 拒绝访问';
+    if (err.includes("404")) return '404 模型缺失';
+    if (err.includes("429")) return '429 频控限流';
+    if (err.includes("500") || err.includes("502") || err.includes("503") || err.includes("504")) return '5xx 服务端错误';
+    if (errLower.includes("connect") || err.includes("连接") || errLower.includes("reach")) return '网络异常';
+    return '连接失败';
+  }
+  const sec = (res.latency || 0) / 1000;
+  return `${sec.toFixed(1)}s`;
+};
+
+// --- Test All Filtered Models ---
+const testAllFiltered = () => {
+  const ids = filteredModels.value.map(m => m.id);
+  modelStore.testAllModels(ids);
+};
+
 onUnmounted(() => {
+  modelStore.stopTestAll(); // 组件卸载时，自动清理后台未完成的测试，规避内存与网络泄漏
   unregisterModal(modalId);
 });
 </script>
@@ -232,11 +287,27 @@ onUnmounted(() => {
                 共 {{ modelStore.models.length }} 个可用模型
               </span>
             </div>
-            <button @click="refresh"
-              class="p-2 rounded-xl bg-black/5 dark:bg-white/5 active:scale-95 transition-all text-gray-600 dark:text-gray-300"
-              :class="{ 'animate-spin': modelStore.isLoading }">
-              <RefreshCw :size="18" />
-            </button>
+            <div class="flex items-center gap-2">
+              <!-- 停止测试按钮 (红色醒目) -->
+              <button v-if="modelStore.isTestingAll" @click="modelStore.stopTestAll"
+                class="px-3 py-1.5 rounded-xl bg-red-500 text-white text-[11px] font-bold active:scale-95 transition-all flex items-center gap-1 shadow-md shadow-red-500/20 shrink-0 animate-pulse"
+                title="停止当前测试">
+                <Square :size="10" class="fill-current shrink-0" />
+                <span>停止测试</span>
+              </button>
+              <!-- 开启批量测试按钮 -->
+              <button v-else @click="testAllFiltered"
+                class="p-2 rounded-xl bg-black/5 dark:bg-white/5 active:scale-95 transition-all text-gray-600 dark:text-gray-300 shrink-0"
+                title="测试当前列表中模型的延迟">
+                <Zap :size="18" />
+              </button>
+              <button @click="refresh"
+                class="p-2 rounded-xl bg-black/5 dark:bg-white/5 active:scale-95 transition-all text-gray-600 dark:text-gray-300"
+                :class="{ 'animate-spin will-change-transform': modelStore.isLoading }"
+                title="同步模型列表">
+                <RefreshCw :size="18" />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -266,11 +337,9 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 模型列表 (使用 VueUse 虚拟滚动) -->
+        <!-- 模型列表 (GPU 物理滚动列表) -->
         <div 
-          :ref="bindContainerRef"
-          :style="containerProps.style"
-          @scroll="containerProps.onScroll"
+          ref="scrollContainerRef"
           class="flex-1 overflow-y-auto px-2 pb-4 no-rubber-band vcp-scrollable"
         >
           <!-- 骨架屏 -->
@@ -292,36 +361,73 @@ onUnmounted(() => {
             <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>
           </div>
 
-          <!-- 实际渲染的模型虚拟列表 -->
-          <div v-else v-bind="wrapperProps" class="space-y-1">
-            <div v-for="item in list" :key="item.data.id" @click="selectModel(item.data.id)"
+          <!-- 实际渲染的模型列表 -->
+          <div v-else class="space-y-1">
+            <div v-for="item in filteredModels" :key="item.id" @click="selectModel(item.id)"
               class="relative group px-4 py-3.5 flex items-center gap-3 rounded-2xl active:bg-black/5 dark:active:bg-white/5 transition-colors cursor-pointer"
-              :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === item.data.id }"
-              style="height: 62px; box-sizing: border-box;"
+              :class="{ 'bg-blue-50 dark:bg-blue-500/10': currentModel === item.id }"
+              style="height: 62px; box-sizing: border-box; content-visibility: auto; contain-intrinsic-size: 62px;"
             >
               <div class="absolute left-0 top-1/4 bottom-1/4 w-1 bg-blue-500 rounded-r-md transition-all scale-y-0"
-                :class="{ 'scale-y-100': currentModel === item.data.id }"></div>
+                :class="{ 'scale-y-100': currentModel === item.id }"></div>
 
               <div class="flex-1 min-w-0 flex flex-col justify-center">
                 <div class="flex items-center gap-2">
                   <span class="text-[15px] font-medium tracking-tight truncate text-gray-900 dark:text-zinc-100"
-                    :class="{ 'text-blue-600 dark:text-blue-400 font-semibold': currentModel === item.data.id }">
-                    {{ item.data.id }}
+                    :class="{ 'text-blue-600 dark:text-blue-400 font-semibold': currentModel === item.id }">
+                    {{ item.id }}
                   </span>
-                  <Flame v-if="modelStore.hotModels.includes(item.data.id)" :size="14"
+                  <Flame v-if="modelStore.hotModels.includes(item.id)" :size="14"
                     class="text-orange-500 fill-orange-500/20 shrink-0" />
                 </div>
                 <div class="flex items-center gap-2 mt-0.5">
-                  <span class="text-[11px] text-gray-500 dark:text-gray-400">{{ item.data.owned_by }}</span>
+                  <span class="text-[11px] text-gray-500 dark:text-gray-400 shrink-0">{{ item.owned_by }}</span>
+                  <template v-if="modelStore.testResults[item.id]">
+                    <span class="text-[10px] text-gray-300 dark:text-zinc-700 shrink-0">•</span>
+                    <span 
+                      class="text-[11px] flex items-center gap-1 min-w-0" 
+                      :class="getLatencyClass(item.id)"
+                    >
+                      <span v-if="modelStore.testResults[item.id].status === 'testing'" class="w-1 h-1 rounded-full bg-blue-500 shrink-0"></span>
+                      <span v-else-if="modelStore.testResults[item.id].status === 'success'" class="w-1 h-1 rounded-full shrink-0" :class="getLatencyDotClass(item.id)"></span>
+                      <span v-else-if="modelStore.testResults[item.id].status === 'failed'" class="w-1 h-1 rounded-full bg-red-500 shrink-0"></span>
+                      <span class="truncate">{{ getTestResultText(item.id) }}</span>
+                    </span>
+                  </template>
                 </div>
               </div>
 
-              <div class="flex items-center gap-3 shrink-0">
-                <button @click="toggleFavorite($event, item.data.id)" class="p-2 -mr-2 transition-transform active:scale-75"
-                  :class="modelStore.isFavorite(item.data.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
-                  <Star :size="20" :fill="modelStore.isFavorite(item.data.id) ? 'currentColor' : 'none'" />
+              <div class="flex items-center gap-2.5 shrink-0">
+                <!-- Connectivity test action -->
+                <button 
+                  v-if="!modelStore.testResults[item.id]"
+                  @click.stop="modelStore.testModel(item.id)"
+                  class="p-2 -mr-1 text-gray-400 hover:text-blue-500 dark:text-zinc-600 dark:hover:text-blue-400 active:scale-75 transition-transform shrink-0"
+                  title="测试延迟"
+                >
+                  <Zap :size="16" />
                 </button>
-                <Check v-if="currentModel === item.data.id" :size="18" class="text-blue-500" />
+                <button 
+                  v-else-if="modelStore.testResults[item.id].status === 'testing'"
+                  class="p-2 -mr-1 text-blue-500 animate-spin will-change-transform shrink-0"
+                >
+                  <Loader2 :size="16" />
+                </button>
+                <button 
+                  v-else
+                  @click.stop="modelStore.testModel(item.id)"
+                  class="p-2 -mr-1 active:scale-75 transition-transform shrink-0"
+                  :class="getLatencyClass(item.id)"
+                  :title="modelStore.testResults[item.id].status === 'failed' ? modelStore.testResults[item.id].error : '重新测试'"
+                >
+                  <RefreshCw :size="14" />
+                </button>
+
+                <button @click="toggleFavorite($event, item.id)" class="p-2 -mr-2 transition-transform active:scale-75 shrink-0"
+                  :class="modelStore.isFavorite(item.id) ? 'text-yellow-500' : 'text-gray-300 dark:text-zinc-600'">
+                  <Star :size="20" :fill="modelStore.isFavorite(item.id) ? 'currentColor' : 'none'" />
+                </button>
+                <Check v-if="currentModel === item.id" :size="18" class="text-blue-500 shrink-0" />
               </div>
             </div>
           </div>

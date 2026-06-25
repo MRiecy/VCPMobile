@@ -92,12 +92,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         override fun onActivityDestroyed(a: Activity) {}
     }
 
-    init {
-        instanceRef = java.lang.ref.WeakReference(this)
-        activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
-        startOomScoreGuard()
-    }
-
     companion object {
         const val TAG = "VcpMobilePlugin"
         private var instanceRef: java.lang.ref.WeakReference<VcpMobilePlugin>? = null
@@ -123,6 +117,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var lastConnected: Boolean? = null
     private var isNetworkMonitoringStarted = false
+
+    init {
+        instanceRef = java.lang.ref.WeakReference(this)
+        activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
+        startOomScoreGuard()
+    }
+
 
     // ==================================================================
     // Permissions & App Control
