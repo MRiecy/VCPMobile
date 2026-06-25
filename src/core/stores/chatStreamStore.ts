@@ -468,6 +468,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);
           }
+          if (typeof navigator !== "undefined" && navigator.vibrate) {
+            navigator.vibrate(40);
+          }
         };
 
         try {

@@ -340,6 +340,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const sendMessage = async (content: string) => {
     if (!sessionStore.currentSelectedItem || !sessionStore.currentTopicId || (!content.trim() && attachmentStore.stagedAttachments.length === 0)) return;
 
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      navigator.vibrate(25);
+    }
+
     if (editingOriginalMessageId.value) {
       const originalId = editingOriginalMessageId.value;
       editingOriginalMessageId.value = null;

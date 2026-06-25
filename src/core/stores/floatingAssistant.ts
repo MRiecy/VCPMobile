@@ -153,6 +153,9 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
       }
       if (target) target.isThinking = false;
       currentStreamingMessageId.value = null;
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(40);
+      }
     } else if (data.type === "error") {
       isGenerating.value = false;
       let target = messages.value.find(
@@ -168,6 +171,9 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
           `\n\n[错误]: ${data.error || "请求异常"}`;
       }
       currentStreamingMessageId.value = null;
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate(40);
+      }
     }
   };
 
@@ -250,6 +256,10 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
 
   const sendMessage = async (content: string) => {
     if (!content.trim() || isGenerating.value) return;
+
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      navigator.vibrate(25);
+    }
 
     const settings = await resolveSettings();
     console.log("[FloatingAssistantStore] sendMessage settings:", settings);
