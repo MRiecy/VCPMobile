@@ -126,6 +126,12 @@ pub fn process_video_for_multimodal<R: Runtime>(
                         results.len(),
                         hash
                     );
+                    // 🌟 写入缓存后，主动运行一次大小收敛，限制在 300MB，清理至 150MB 🌟
+                    crate::vcp_modules::infra::file_manager::evict_multimodal_cache_if_needed(
+                        app,
+                        300 * 1024 * 1024,
+                        150 * 1024 * 1024,
+                    );
                 }
             }
         }

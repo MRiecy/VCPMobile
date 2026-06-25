@@ -818,6 +818,18 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         path,
         mime_type
     );
+
+    // 硬上限：防止极端巨型文件载入内存导致 OOM（50MB 为安全阈值）
+    const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > MAX_FILE_SIZE_BYTES {
+            return Some(format!(
+                "[文件过大（{:.2} MB），已跳过自动提取以保护内存]",
+                (meta.len() as f64) / 1024.0 / 1024.0
+            ));
+        }
+    }
+
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -832,17 +844,6 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
         || is_text_or_code_extension(&ext);
 
     if is_text_type {
-        // 硬上限：防止极端巨型文件载入内存导致 OOM（50MB 为安全阈值）
-        const MAX_FILE_SIZE_BYTES: u64 = 50 * 1024 * 1024;
-        if let Ok(meta) = fs::metadata(path) {
-            if meta.len() > MAX_FILE_SIZE_BYTES {
-                return Some(format!(
-                    "[文件过大（{:.2} MB），已跳过自动提取以保护内存]",
-                    (meta.len() as f64) / 1024.0 / 1024.0
-                ));
-            }
-        }
-
         // mmap + 自动编码检测 → UTF-8
         let text = read_text_with_mmap(path)?;
 

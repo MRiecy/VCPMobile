@@ -34,6 +34,8 @@ object MediaBridge {
         callback: (Result<String>) -> Unit
     ) {
         fileIoExecutor.execute {
+            var rawBitmap: Bitmap? = null
+            var scaledBitmap: Bitmap? = null
             try {
                 val file = File(inputPath)
                 if (!file.exists()) {
@@ -69,11 +71,11 @@ object MediaBridge {
                 val decodeOptions = BitmapFactory.Options().apply {
                     inSampleSize = calculateInSampleSize(origW, origH, targetW, targetH)
                 }
-                val rawBitmap = BitmapFactory.decodeFile(inputPath, decodeOptions)
+                rawBitmap = BitmapFactory.decodeFile(inputPath, decodeOptions)
                     ?: throw Exception("Failed to decode image bitmap")
 
                 // 4. 精确缩放 (filter = true 提供高保真插值)
-                val scaledBitmap = if (rawBitmap.width != targetW || rawBitmap.height != targetH) {
+                scaledBitmap = if (rawBitmap.width != targetW || rawBitmap.height != targetH) {
                     Bitmap.createScaledBitmap(rawBitmap, targetW, targetH, true)
                 } else {
                     rawBitmap
@@ -91,17 +93,18 @@ object MediaBridge {
                     }
                 }
 
-                // 释放内存
-                if (scaledBitmap != rawBitmap) {
-                    scaledBitmap.recycle()
-                }
-                rawBitmap.recycle()
-
                 Log.d(TAG, "Image scale success: ${outFile.absolutePath} (${targetW}x${targetH})")
                 callback(Result.success(outFile.absolutePath))
             } catch (e: Exception) {
                 Log.e(TAG, "Image scale error", e)
                 callback(Result.failure(e))
+            } finally {
+                scaledBitmap?.let {
+                    if (it != rawBitmap) {
+                        it.recycle()
+                    }
+                }
+                rawBitmap?.recycle()
             }
         }
     }
@@ -120,6 +123,8 @@ object MediaBridge {
         callback: (Result<List<String>>) -> Unit
     ) {
         fileIoExecutor.execute {
+            var retriever: MediaMetadataRetriever? = null
+            var tempFolder: File? = null
             try {
                 val file = File(inputPath)
                 if (!file.exists()) {
@@ -127,7 +132,7 @@ object MediaBridge {
                     return@execute
                 }
 
-                val retriever = MediaMetadataRetriever()
+                retriever = MediaMetadataRetriever()
                 retriever.setDataSource(inputPath)
 
                 // 1. 获取视频基本元数据
@@ -192,8 +197,9 @@ object MediaBridge {
                 // 7. 循环提帧并压缩保存
                 val outputPaths = ArrayList<String>()
                 val uploadsDir = File(context.cacheDir, "uploads").apply { mkdirs() }
-                val tempFolder = File(uploadsDir, "vid_" + UUID.randomUUID().toString())
-                if (!tempFolder.exists()) tempFolder.mkdirs()
+                val localFolder = File(uploadsDir, "vid_" + UUID.randomUUID().toString())
+                tempFolder = localFolder
+                if (!localFolder.exists()) localFolder.mkdirs()
 
                 // 为了速度考虑，MediaMetadataRetriever 在 API 27+ 支持指定大小获取，但兼容性较差，
                 // 我们在获取后统一由 Matrix 或 Bitmap.createScaledBitmap 高保真缩小。
@@ -228,15 +234,23 @@ object MediaBridge {
                     }
                 }
 
-                try {
-                    retriever.release()
-                } catch (ignored: Exception) {}
-
                 Log.d(TAG, "Video frame extraction success: ${outputPaths.size} frames extracted.")
                 callback(Result.success(outputPaths))
             } catch (e: Exception) {
                 Log.e(TAG, "Video processing error", e)
+                // 发生异常时物理删除已创建的临时文件夹，杜绝垃圾帧泄露
+                tempFolder?.let { folder ->
+                    if (folder.exists()) {
+                        try {
+                            folder.deleteRecursively()
+                        } catch (ignored: Exception) {}
+                    }
+                }
                 callback(Result.failure(e))
+            } finally {
+                try {
+                    retriever?.release()
+                } catch (ignored: Exception) {}
             }
         }
     }
@@ -329,9 +343,12 @@ object MediaBridge {
                 // 最大压制时长硬截断: 3500s -> 3500,000,000 Us
                 val maxDurationUs = 3500L * 1_000_000L
 
+                // 背压控制阈值：384KB (对齐线性重采样缓存)
+                const val BACKPRESSURE_THRESHOLD = 384 * 1024
+
                 while (!isEncoderOutputEOS) {
-                    // Feed 解码器
-                    if (!isDecoderInputEOS) {
+                    // Feed 解码器 (当 pending 缓存低于背压阈值时才进行解码，实现生产-消费限速)
+                    if (!isDecoderInputEOS && pendingPcmBytes.size < BACKPRESSURE_THRESHOLD) {
                         val inputBufIndex = decoder.dequeueInputBuffer(10000)
                         if (inputBufIndex >= 0) {
                             val dstBuffer = decoderInputBuffers[inputBufIndex]
@@ -354,8 +371,8 @@ object MediaBridge {
                         }
                     }
 
-                    // 从解码器拿 PCM
-                    if (!isDecoderOutputEOS) {
+                    // 从解码器拿 PCM (同样受背压阀门控制)
+                    if (!isDecoderOutputEOS && pendingPcmBytes.size < BACKPRESSURE_THRESHOLD) {
                         val res = decoder.dequeueOutputBuffer(decoderBufferInfo, 10000)
                         if (res >= 0) {
                             val pcmBuffer = decoderOutputBuffers[res]
@@ -373,38 +390,39 @@ object MediaBridge {
                             if ((decoderBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                                 isDecoderOutputEOS = true
                             }
-
-                            // Feed 编码器
-                            var offset = 0
-                            while (pendingPcmBytes.size - offset >= 4096 || (isDecoderOutputEOS && pendingPcmBytes.size > offset)) {
-                                val encInputBufIndex = encoder.dequeueInputBuffer(10000)
-                                if (encInputBufIndex >= 0) {
-                                    val sizeToFeed = Math.min(4096, pendingPcmBytes.size - offset)
-                                    val encBuffer = encoderInputBuffers[encInputBufIndex]
-                                    encBuffer.clear()
-                                    encBuffer.put(pendingPcmBytes, offset, sizeToFeed)
-                                    offset += sizeToFeed
-
-                                    val flags = if (isDecoderOutputEOS && offset >= pendingPcmBytes.size) {
-                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                    } else {
-                                        0
-                                    }
-                                    encoder.queueInputBuffer(
-                                        encInputBufIndex, 0, sizeToFeed,
-                                        decoderBufferInfo.presentationTimeUs, flags
-                                    )
-                                } else {
-                                    break
-                                }
-                            }
-                            // 移除被编码消费的数据
-                            if (offset > 0) {
-                                pendingPcmBytes = pendingPcmBytes.copyOfRange(offset, pendingPcmBytes.size)
-                            }
                         } else if (res == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                             Log.d(TAG, "Decoder output format changed")
                         }
+                    }
+
+                    // Feed 编码器
+                    var offset = 0
+                    while (pendingPcmBytes.size - offset >= 4096 || (isDecoderOutputEOS && pendingPcmBytes.size > offset)) {
+                        val encInputBufIndex = encoder.dequeueInputBuffer(10000)
+                        if (encInputBufIndex >= 0) {
+                            val sizeToFeed = Math.min(4096, pendingPcmBytes.size - offset)
+                            val encBuffer = encoderInputBuffers[encInputBufIndex]
+                            encBuffer.clear()
+                            encBuffer.put(pendingPcmBytes, offset, sizeToFeed)
+                            offset += sizeToFeed
+
+                            val flags = if (isDecoderOutputEOS && offset >= pendingPcmBytes.size) {
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            } else {
+                                0
+                            }
+                            encoder.queueInputBuffer(
+                                encInputBufIndex, 0, sizeToFeed,
+                                decoderBufferInfo.presentationTimeUs, flags
+                            )
+                        } else {
+                            break
+                        }
+                    }
+
+                    // 移除被编码消费的数据，并进行重整，释放闲置内存
+                    if (offset > 0) {
+                        pendingPcmBytes = pendingPcmBytes.copyOfRange(offset, pendingPcmBytes.size)
                     }
 
                     // 从编码器拿 AAC 帧，加上 ADTS 头写入文件
@@ -435,6 +453,12 @@ object MediaBridge {
                 callback(Result.success(outFile.absolutePath))
             } catch (e: Exception) {
                 Log.e(TAG, "Audio transcode error", e)
+                // 发生异常时物理删除已创建的临时转码文件，杜绝垃圾音频泄露
+                try {
+                    if (outFile.exists()) {
+                        outFile.delete()
+                    }
+                } catch (ignored: Exception) {}
                 callback(Result.failure(e))
             } finally {
                 try { extractor?.release() } catch (ignored: Exception) {}

@@ -20,6 +20,22 @@ impl DeleteExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
+        // 级联将该 Agent 下的所有话题标记为逻辑删除
+        sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL")
+            .bind(now)
+            .bind(agent_id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 级联将该 Agent 下所有话题的所有消息标记为逻辑删除
+        sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'agent') AND deleted_at IS NULL")
+            .bind(now)
+            .bind(agent_id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
         let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
         HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
@@ -35,6 +51,22 @@ impl DeleteExecutor {
         let now = chrono::Utc::now().timestamp_millis();
 
         sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ?")
+            .bind(now)
+            .bind(group_id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 级联将该 Group 下的所有话题标记为逻辑删除
+        sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL")
+            .bind(now)
+            .bind(group_id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 级联将该 Group 下所有话题的所有消息标记为逻辑删除
+        sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'group') AND deleted_at IS NULL")
             .bind(now)
             .bind(group_id)
             .execute(&db.pool)
@@ -62,6 +94,14 @@ impl DeleteExecutor {
             .map_err(|e| e.to_string())?;
 
         sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ?")
+            .bind(now)
+            .bind(topic_id)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // 级联将该话题下的所有消息标记为逻辑删除
+        sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
             .bind(now)
             .bind(topic_id)
             .execute(&db.pool)
@@ -110,41 +150,27 @@ impl DeleteExecutor {
         let db = app.state::<DbState>();
         let threshold = chrono::Utc::now().timestamp_millis() - days * 24 * 60 * 60 * 1000;
 
-        let agents =
-            sqlx::query("DELETE FROM agents WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+        // 1. 物理强清除已删除超过安全期（30天）的消息的预渲染缓存
+        let render_cache =
+            sqlx::query("DELETE FROM render_cache WHERE (topic_id, msg_id) IN (SELECT topic_id, msg_id FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < ?)")
                 .bind(threshold)
                 .execute(&db.pool)
                 .await
                 .map_err(|e| e.to_string())?;
 
-        let groups =
-            sqlx::query("DELETE FROM groups WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-                .bind(threshold)
-                .execute(&db.pool)
-                .await
-                .map_err(|e| e.to_string())?;
-
-        let topics =
-            sqlx::query("DELETE FROM topics WHERE deleted_at IS NOT NULL AND deleted_at < ?")
-                .bind(threshold)
-                .execute(&db.pool)
-                .await
-                .map_err(|e| e.to_string())?;
-
+        // 2. 仅清空已删除超过安全期（30天）的消息的正文内容，保留消息的主键、角色与墓碑时间戳（防止多端同步幽灵复活，并释放大文本空间）
         let messages =
-            sqlx::query("DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < ?")
+            sqlx::query("UPDATE messages SET content = '[已清空]' WHERE deleted_at IS NOT NULL AND deleted_at < ? AND content != '[已清空]'")
                 .bind(threshold)
                 .execute(&db.pool)
                 .await
                 .map_err(|e| e.to_string())?;
 
         log::info!(
-            "[DeleteExecutor] Cleaned up old records (older than {} days): agents={}, groups={}, topics={}, messages={}",
+            "[DeleteExecutor] Completed safety-period cleanup (older than {} days): cleared_messages_content={}, deleted_render_caches={}",
             days,
-            agents.rows_affected(),
-            groups.rows_affected(),
-            topics.rows_affected(),
-            messages.rows_affected()
+            messages.rows_affected(),
+            render_cache.rows_affected()
         );
 
         Ok(())

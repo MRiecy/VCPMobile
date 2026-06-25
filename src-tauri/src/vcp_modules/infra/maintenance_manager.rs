@@ -92,23 +92,35 @@ pub async fn cleanup_orphaned_attachments(
     let mut deleted_count = 0;
     let mut freed_size = 0u64;
 
-    // 1.5 将已逻辑删除或所属消息已删除的 message_attachments 记录清空为无害的墓碑态 (清空敏感正文、src路径等)，但保留主键条目
+    // 1.5 将已逻辑删除或所属消息/话题/智能体/群组已删除的 message_attachments 记录清空为无害的墓碑态 (清空敏感正文、src路径等)，但保留主键条目
     let _ = sqlx::query(
         "UPDATE message_attachments \
          SET display_name = '[附件已删除]', src = NULL, status = 'removed' \
          WHERE deleted_at IS NOT NULL \
             OR (topic_id, msg_id) IN (\
                 SELECT topic_id, msg_id FROM messages WHERE deleted_at IS NOT NULL\
+            ) \
+            OR topic_id IN (\
+                SELECT topic_id FROM topics WHERE deleted_at IS NOT NULL \
+                   OR owner_id IN (SELECT agent_id FROM agents WHERE deleted_at IS NOT NULL) AND owner_type = 'agent' \
+                   OR owner_id IN (SELECT group_id FROM groups WHERE deleted_at IS NOT NULL) AND owner_type = 'group' \
             )",
     )
     .execute(&db_state.pool)
     .await;
 
-    // 2. 查 message_attachments 确定哪些 hash 正在被有效消息引用 (防线四：GC 强校验)
+    // 2. 查 message_attachments 确定哪些 hash 正在被有效消息引用 (防线四：GC 强校验，包含对 Topic/Agent/Group 存活链路的安全判定)
     let used_hashes: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT ma.hash FROM message_attachments ma \
              INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
-             WHERE m.deleted_at IS NULL AND ma.deleted_at IS NULL",
+             INNER JOIN topics t ON m.topic_id = t.topic_id \
+             LEFT JOIN agents a ON t.owner_id = a.agent_id AND t.owner_type = 'agent' \
+             LEFT JOIN groups g ON t.owner_id = g.group_id AND t.owner_type = 'group' \
+             WHERE m.deleted_at IS NULL \
+               AND ma.deleted_at IS NULL \
+               AND t.deleted_at IS NULL \
+               AND (t.owner_type != 'agent' OR a.deleted_at IS NULL) \
+               AND (t.owner_type != 'group' OR g.deleted_at IS NULL)",
     )
     .fetch_all(&db_state.pool)
     .await

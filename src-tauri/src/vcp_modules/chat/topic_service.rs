@@ -218,6 +218,14 @@ pub async fn delete_topic(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 级联将该话题下的所有消息标记为逻辑删除
+    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
+        .bind(now)
+        .bind(&topic_id)
+        .execute(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
             data_type: SyncDataType::Topic,

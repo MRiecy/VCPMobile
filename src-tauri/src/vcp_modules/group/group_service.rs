@@ -556,6 +556,22 @@ pub async fn delete_group(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 级联将该 Group 下的所有话题标记为逻辑删除
+    sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL")
+        .bind(now)
+        .bind(&group_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 级联将该 Group 下所有话题的所有消息标记为逻辑删除
+    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'group') AND deleted_at IS NULL")
+        .bind(now)
+        .bind(&group_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     state.caches.remove(&group_id);
     state.locks.remove(&group_id);
 
