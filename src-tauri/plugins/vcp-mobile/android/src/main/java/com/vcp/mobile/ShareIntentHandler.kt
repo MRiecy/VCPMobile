@@ -8,6 +8,7 @@ import android.webkit.WebView
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import java.io.File
+import androidx.core.content.IntentCompat
 
 class ShareIntentHandler(private val plugin: VcpMobilePlugin) {
 
@@ -82,8 +83,7 @@ class ShareIntentHandler(private val plugin: VcpMobilePlugin) {
         val files = JSArray()
 
         if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
-            @Suppress("DEPRECATION")
-            val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+            val uris = IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
             if (uris != null) {
                 for (uri in uris) {
                     val fileInfo = copyStreamToCache(uri, context)
@@ -93,7 +93,7 @@ class ShareIntentHandler(private val plugin: VcpMobilePlugin) {
                 }
             }
         } else {
-            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            val uri = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
             if (uri != null) {
                 val fileInfo = copyStreamToCache(uri, context)
                 if (fileInfo != null) {

@@ -129,14 +129,13 @@ object ForegroundGuardian {
             }
         }
 
-        // 2. 获取 WifiLock (防止后台 Wi-Fi 睡眠/降速)
         if (wifiLock == null) {
             val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             if (wifiManager != null) {
+                @Suppress("DEPRECATION")
                 wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VCP:ForegroundGuardianWifi")
                 } else {
-                    @Suppress("DEPRECATION")
                     wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL, "VCP:ForegroundGuardianWifi")
                 }
             }

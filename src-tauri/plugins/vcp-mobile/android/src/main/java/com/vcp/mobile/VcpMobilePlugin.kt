@@ -1214,6 +1214,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                                 .setAudioMimeType(MimeTypes.AUDIO_AAC)
                                 .build()
 
+                            @Suppress("DEPRECATION")
                             val transformer = Transformer.Builder(context)
                                 .setTransformationRequest(request)
                                 .addListener(object : Transformer.Listener {
