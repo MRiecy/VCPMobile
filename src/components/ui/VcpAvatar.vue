@@ -2,9 +2,17 @@
 import { ref, watchEffect, computed } from "vue";
 import { useAvatarStore } from "../../core/stores/avatar";
 
+export interface AvatarTarget {
+  id: string;
+  type: "user" | "agent" | "group";
+  name: string;
+  avatarCalculatedColor?: string | null;
+}
+
 const props = defineProps<{
-  ownerType: "user" | "agent" | "group";
-  ownerId: string;
+  target?: AvatarTarget | null;
+  ownerType?: "user" | "agent" | "group";
+  ownerId?: string;
   version?: number;
   fallbackName?: string;
   size?: string; // 如 'w-10 h-10'
@@ -16,9 +24,15 @@ const avatarStore = useAvatarStore();
 const avatarUrl = ref("");
 const imgExists = ref(false);
 
+// 解析属性值，优先从 target 中提取
+const resolvedType = computed(() => props.target?.type || props.ownerType || "agent");
+const resolvedId = computed(() => props.target?.id || props.ownerId || "");
+const resolvedFallbackName = computed(() => props.target?.name || props.fallbackName || "");
+const resolvedColor = computed(() => props.target?.avatarCalculatedColor || props.dominantColor || null);
+
 // 处理主色调边框
 const borderStyle = computed(() => {
-  const color = props.dominantColor;
+  const color = resolvedColor.value;
   if (!color) return {};
   // 使用 color-mix 混合出 80% 不透明度的边框，使其更自然地融入背景
   const mixedColor = `color-mix(in srgb, ${color} 80%, transparent)`;
@@ -30,13 +44,13 @@ const borderStyle = computed(() => {
 
 // 提取首字母用于 Fallback
 const initial = computed(() => {
-  const name = props.fallbackName || props.ownerId || "?";
+  const name = resolvedFallbackName.value || resolvedId.value || "?";
   return name.trim().charAt(0).toUpperCase();
 });
 
 // 根据 ID 生成一个确定的背景色，防止所有 Fallback 都一个颜色
 const fallbackBg = computed(() => {
-  if (props.dominantColor) return props.dominantColor;
+  if (resolvedColor.value) return resolvedColor.value;
   const colors = [
     "rgb(226, 54, 56)", // VCP Red
     "rgb(59, 130, 246)", // Blue
@@ -45,20 +59,23 @@ const fallbackBg = computed(() => {
     "rgb(139, 92, 246)", // Violet
   ];
   let hash = 0;
-  for (let i = 0; i < props.ownerId.length; i++) {
-    hash = props.ownerId.charCodeAt(i) + ((hash << 5) - hash);
+  const id = resolvedId.value;
+  for (let i = 0; i < id.length; i++) {
+    hash = id.charCodeAt(i) + ((hash << 5) - hash);
   }
   return colors[Math.abs(hash) % colors.length];
 });
 
 watchEffect(async () => {
-  if (!props.ownerId) {
+  const ownerIdVal = resolvedId.value;
+  const ownerTypeVal = resolvedType.value;
+  if (!ownerIdVal) {
     avatarUrl.value = "";
     imgExists.value = false;
     return;
   }
   
-  const key = `${props.ownerType}:${props.ownerId}`;
+  const key = `${ownerTypeVal}:${ownerIdVal}`;
   const reqVersion = props.version || 0;
 
   // 核心修复：同步检查缓存。如果命中且不需要强制刷新，立即显示，消除“顿一下”的感觉。
@@ -70,7 +87,7 @@ watchEffect(async () => {
   }
 
   // 缓存未命中或版本过旧，再进入异步获取逻辑
-  const url = await avatarStore.getAvatarUrl(props.ownerType, props.ownerId, reqVersion);
+  const url = await avatarStore.getAvatarUrl(ownerTypeVal, ownerIdVal, reqVersion);
   if (url) {
     avatarUrl.value = url;
     imgExists.value = true;
@@ -89,7 +106,7 @@ const handleImgError = () => {
     size || 'w-10 h-10', 
     rounded || 'rounded-xl',
     'relative overflow-hidden flex-shrink-0 flex items-center justify-center shadow-inner transition-all duration-500',
-    dominantColor ? 'border' : 'border border-black/15 dark:border-white/20'
+    resolvedColor ? 'border' : 'border border-black/15 dark:border-white/20'
   ]" :style="borderStyle">
     <!-- Fallback 占位 (底层) -->
     <div 

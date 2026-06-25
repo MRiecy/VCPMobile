@@ -344,7 +344,7 @@ object MediaBridge {
                 val maxDurationUs = 3500L * 1_000_000L
 
                 // 背压控制阈值：384KB (对齐线性重采样缓存)
-                const val BACKPRESSURE_THRESHOLD = 384 * 1024
+                val BACKPRESSURE_THRESHOLD = 384 * 1024
 
                 while (!isEncoderOutputEOS) {
                     // Feed 解码器 (当 pending 缓存低于背压阈值时才进行解码，实现生产-消费限速)

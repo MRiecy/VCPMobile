@@ -202,10 +202,7 @@ onUnmounted(() => {
         <!-- 头像展示 -->
         <VcpAvatar 
           v-if="sessionStore.currentSelectedItem"
-          :owner-type="sessionStore.currentSelectedItem.type" 
-          :owner-id="sessionStore.currentSelectedItem.id" 
-          :fallback-name="sessionStore.currentSelectedItem.name"
-          :dominant-color="sessionStore.currentSelectedItem.avatarCalculatedColor"
+          :target="sessionStore.currentSelectedItem"
           size="w-10 h-10"
           rounded="rounded-full"
           class="shrink-0"
@@ -216,7 +213,7 @@ onUnmounted(() => {
             class="font-bold text-sm truncate transition-colors duration-500"
             :style="{ color: sessionStore.currentSelectedItem?.avatarCalculatedColor || 'var(--primary-text)' }"
           >
-            {{ sessionStore.currentSelectedItem?.name || "VCP Mobile" }}
+            {{ sessionStore.headerTitle }}
           </span>
   <div class="flex items-center gap-1" :title="lifecycleStore.errorMsg || undefined">
     <CoreStatusIndicator />

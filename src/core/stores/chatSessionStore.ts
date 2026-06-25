@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "./assistant";
+import { useTopicStore } from "./topicListManager";
 
 export interface PickedFileInfo {
   path: string;
@@ -16,6 +17,18 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   const currentSelectedItem = ref<any>(null);
   const currentTopicId = ref<string | null>(null);
   const lastActiveTopicMap = ref<Record<string, string>>({});
+
+  // 动态检索当前活跃的话题对象
+  const currentTopic = computed(() => {
+    if (!currentTopicId.value) return null;
+    const topicStore = useTopicStore();
+    return topicStore.topics.find((t) => t.id === currentTopicId.value) || null;
+  });
+
+  // 顶部显示标题（话题名，无话题则回退到智能体/群组名字）
+  const headerTitle = computed(() => {
+    return currentTopic.value?.name || currentSelectedItem.value?.name || "VCP Mobile";
+  });
 
   // Share intent prefill state
   const sharePrefillText = ref("");
@@ -158,6 +171,8 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   return {
     currentSelectedItem,
     currentTopicId,
+    currentTopic,
+    headerTitle,
     lastActiveTopicMap,
     sharePrefillText,
     sharePrefillFiles,

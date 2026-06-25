@@ -253,11 +253,6 @@ export const useTopicStore = defineStore("topic", () => {
         // 强制触发虚拟列表重绘
         topics.value = [...topics.value];
       }
-
-      // 如果更新的是当前正在活跃的话题，同步更新顶部栏标题
-      if (sessionStore.currentTopicId === topicId && sessionStore.currentSelectedItem) {
-        sessionStore.currentSelectedItem.name = newTitle;
-      }
     } catch (e) {
       console.error("[TopicStore] Failed to update topic title:", e);
       throw e;
