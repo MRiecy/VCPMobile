@@ -316,6 +316,10 @@ pub async fn internal_process_group_chat_message(
                 agent_id,
                 e
             );
+            let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
+                .bind(&message_id)
+                .execute(&db_pool)
+                .await;
         }
     }
 

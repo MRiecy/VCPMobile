@@ -91,3 +91,69 @@ where
         }
     })
 }
+
+/// 规范化 VCP 服务器 URL。
+/// 优先检查是否为合规格式，若非合规格式则直接提取 scheme://host:port 部分并统一拼接后缀。
+/// 对于非法或缺失 Scheme 的 URL，不做额外处理，直接返回原样。
+pub fn normalize_vcp_url(url_str: &str) -> String {
+    let cleaned = url_str.trim();
+    if let Ok(mut url) = url::Url::parse(cleaned) {
+        let path = url.path().trim_end_matches('/').to_string();
+        
+        // 1. 先看看是否是需要的格式（以 /v1/chat/completions 或 /chat/completions 结尾）
+        if path.ends_with("/v1/chat/completions") || path.ends_with("/chat/completions") {
+            url.set_path(&path);
+            return url.to_string();
+        }
+
+        // 2. 如果不是，直接获取 scheme://host:port 部分，后面的丢掉，我们自己拼接
+        let scheme = url.scheme();
+        let host = url.host_str().unwrap_or("");
+        let port = match url.port() {
+            Some(p) => format!(":{}", p),
+            None => "".to_string(),
+        };
+
+        return format!("{}://{}{}/v1/chat/completions", scheme, host, port);
+    }
+
+    // 解析失败（如缺失 scheme），不做额外处理，直接返回原样
+    url_str.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_vcp_url() {
+        assert_eq!(
+            normalize_vcp_url("127.0.0.1:8000"),
+            "127.0.0.1:8000"
+        );
+        assert_eq!(
+            normalize_vcp_url("http://127.0.0.1:8080/v1"),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_vcp_url("http://127.0.0.1:8080/v1/chat/"),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_vcp_url("http://127.0.0.1:8080/v1/chat/completions/"),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_vcp_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_vcp_url("http://127.0.0.1/proxy/"),
+            "http://127.0.0.1/v1/chat/completions"
+        );
+        assert_eq!(
+            normalize_vcp_url("  http://localhost:3000/  "),
+            "http://localhost:3000/v1/chat/completions"
+        );
+    }
+}

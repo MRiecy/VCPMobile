@@ -114,9 +114,7 @@ pub fn run() {
         context.set_assets(Box::new(ota_assets));
     }
 
-    let builder = tauri::Builder::default();
-
-    builder
+    let app = tauri::Builder::default()
         .setup(|app| {
             // 2. 初始化核心状态
             app.manage(app.handle().clone());
@@ -326,6 +324,16 @@ pub fn run() {
             confirm_frontend_boot,
             tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application");
+
+    app.run(|_, event| {
+        match event {
+            tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::Focused(focused), .. } => {
+                log::info!("[Lifecycle] Native WindowEvent::Focused: focused={}", focused);
+                vcp_modules::infra::vcp_log_service::APP_IN_FOREGROUND.store(focused, std::sync::atomic::Ordering::SeqCst);
+            }
+            _ => {}
+        }
+    });
 }

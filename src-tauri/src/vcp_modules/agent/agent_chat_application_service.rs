@@ -188,6 +188,10 @@ pub async fn internal_process_agent_chat_message(
         }
         Err(e) => {
             log::error!("[AgentChatAppService] perform_vcp_request failed: {}", e);
+            let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
+                .bind(&thinking_id)
+                .execute(&db_state.pool)
+                .await;
         }
     }
 

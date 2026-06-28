@@ -347,6 +347,20 @@ async fn setup_tables(pool: &Pool<Sqlite>) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
 
+    // 15. active_generations 活跃生成注册表 (用于云端无状态断点恢复的事务日志)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS active_generations (
+            msg_id TEXT PRIMARY KEY,
+            topic_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            owner_type TEXT NOT NULL,
+            created_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // 索引 (共 9 个)
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_id, owner_type, created_at DESC)").execute(pool).await.map_err(|e| e.to_string())?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category)")
