@@ -98,10 +98,16 @@ pub fn request_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<bo
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         let res = plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("requestAutoStartPermission", serde_json::json!({}))
+            .run_mobile_plugin::<serde_json::Value>(
+                "requestAutoStartPermission",
+                serde_json::json!({}),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        
-        let success = res.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let success = res
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
     #[cfg(not(target_os = "android"))]
@@ -120,10 +126,16 @@ pub fn request_power_management_permission<R: Runtime>(app: AppHandle<R>) -> Res
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         let res = plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("requestPowerManagementPermission", serde_json::json!({}))
+            .run_mobile_plugin::<serde_json::Value>(
+                "requestPowerManagementPermission",
+                serde_json::json!({}),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        
-        let success = res.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let success = res
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
     #[cfg(not(target_os = "android"))]
@@ -142,10 +154,17 @@ pub fn check_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<Stri
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         let res = plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("checkAutoStartPermission", serde_json::json!({}))
+            .run_mobile_plugin::<serde_json::Value>(
+                "checkAutoStartPermission",
+                serde_json::json!({}),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        
-        let status = res.get("status").and_then(|v| v.as_str()).unwrap_or("unsupported").to_string();
+
+        let status = res
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unsupported")
+            .to_string();
         Ok(status)
     }
     #[cfg(not(target_os = "android"))]

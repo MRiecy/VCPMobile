@@ -334,11 +334,9 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     // 2. 提取文本内容 (如果适用，使用 spawn_blocking 隔离 CPU 密集型操作以防阻塞 Tokio 异步线程)
     let path_c = internal_file_path.clone();
     let mime_c = mime_type.clone();
-    let extracted_text = tokio::task::spawn_blocking(move || {
-        try_extract_text(&path_c, &mime_c)
-    })
-    .await
-    .map_err(|e| format!("Text extraction panicked: {}", e))?;
+    let extracted_text = tokio::task::spawn_blocking(move || try_extract_text(&path_c, &mime_c))
+        .await
+        .map_err(|e| format!("Text extraction panicked: {}", e))?;
 
     // 3. 生成缩略图 (如果适用，spawn_blocking 隔离 CPU 密集型操作)
     let thumbnail_path = if mime_type.starts_with("image/") {
@@ -829,7 +827,9 @@ pub fn evict_multimodal_cache_if_needed<R: tauri::Runtime>(
         if path.is_file() {
             if let Ok(meta) = fs::metadata(&path) {
                 let size = meta.len();
-                let mtime = meta.modified().unwrap_or_else(|_| std::time::SystemTime::now());
+                let mtime = meta
+                    .modified()
+                    .unwrap_or_else(|_| std::time::SystemTime::now());
                 total_size += size;
                 cache_files.push(CacheFile { path, size, mtime });
             }

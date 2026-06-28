@@ -89,9 +89,12 @@ pub async fn clear_vcp_info(app: AppHandle) -> Result<(), String> {
         compressed_map.clear();
     }
     // 2. 广播给前端
-    emit_info_event(&app, serde_json::json!({
-        "type": "vcp-info-clear"
-    }));
+    emit_info_event(
+        &app,
+        serde_json::json!({
+            "type": "vcp-info-clear"
+        }),
+    );
     Ok(())
 }
 
@@ -161,12 +164,15 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             *CURRENT_INFO_STATUS.write().await = "connecting".to_string();
         }
 
-        emit_info_event(&app_handle, serde_json::json!({
-            "type": "vcp-info-status",
-            "status": "connecting",
-            "message": "连接中...",
-            "source": "VCPInfo"
-        }));
+        emit_info_event(
+            &app_handle,
+            serde_json::json!({
+                "type": "vcp-info-status",
+                "status": "connecting",
+                "message": "连接中...",
+                "source": "VCPInfo"
+            }),
+        );
 
         let mut request = match ws_url.as_str().into_client_request() {
             Ok(req) => req,
@@ -237,12 +243,15 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-                    emit_info_event(&app_handle, serde_json::json!({
-                        "type": "vcp-info-status",
-                        "status": "connected",
-                        "message": "已连接",
-                        "source": "VCPInfo"
-                    }));
+                    emit_info_event(
+                        &app_handle,
+                        serde_json::json!({
+                            "type": "vcp-info-status",
+                            "status": "connected",
+                            "message": "已连接",
+                            "source": "VCPInfo"
+                        }),
+                    );
 
                     let mut heartbeat_timer = Box::pin(sleep(Duration::from_secs(15)));
 
@@ -290,24 +299,30 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     {
                         *CURRENT_INFO_STATUS.write().await = "closed".to_string();
                     }
-                    emit_info_event(&app_handle, serde_json::json!({
-                        "type": "vcp-info-status",
-                        "status": "closed",
-                        "message": "连接已断开",
-                        "source": "VCPInfo"
-                    }));
+                    emit_info_event(
+                        &app_handle,
+                        serde_json::json!({
+                            "type": "vcp-info-status",
+                            "status": "closed",
+                            "message": "连接已断开",
+                            "source": "VCPInfo"
+                        }),
+                    );
                 }
                 Err(e) => {
                     {
                         *CURRENT_INFO_STATUS.write().await = "error".to_string();
                     }
                     log::error!("[VCPInfo] Connection Error: {}", e);
-                    emit_info_event(&app_handle, serde_json::json!({
-                        "type": "vcp-info-status",
-                        "status": "error",
-                        "message": "连接错误",
-                        "source": "VCPInfo"
-                    }));
+                    emit_info_event(
+                        &app_handle,
+                        serde_json::json!({
+                            "type": "vcp-info-status",
+                            "status": "error",
+                            "message": "连接错误",
+                            "source": "VCPInfo"
+                        }),
+                    );
                 }
             },
             Err(_) => {
@@ -315,12 +330,15 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     *CURRENT_INFO_STATUS.write().await = "error".to_string();
                 }
                 log::error!("[VCPInfo] Connection timed out after 5 seconds.");
-                emit_info_event(&app_handle, serde_json::json!({
-                    "type": "vcp-info-status",
-                    "status": "error",
-                    "message": "连接超时",
-                    "source": "VCPInfo"
-                }));
+                emit_info_event(
+                    &app_handle,
+                    serde_json::json!({
+                        "type": "vcp-info-status",
+                        "status": "error",
+                        "message": "连接超时",
+                        "source": "VCPInfo"
+                    }),
+                );
             }
         }
 
@@ -364,10 +382,13 @@ async fn process_incoming_vcp_info<R: tauri::Runtime>(
                 }
 
                 // 5. 发送前端广播事件
-                emit_info_event(app_handle, serde_json::json!({
-                    "type": "vcp-info-message",
-                    "data": metadata
-                }));
+                emit_info_event(
+                    app_handle,
+                    serde_json::json!({
+                        "type": "vcp-info-message",
+                        "data": metadata
+                    }),
+                );
             }
             Err(e) => {
                 log::error!("[VCPInfo] Zstd compression failed: {}", e);

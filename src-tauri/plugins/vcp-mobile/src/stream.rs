@@ -39,10 +39,7 @@ pub fn acquire_foreground_inner<R: Runtime>(
 }
 
 /// 释放进程级前台锁 (语义化接口)
-pub fn release_foreground_inner<R: Runtime>(
-    _app: &AppHandle<R>,
-    tag: &str,
-) -> Result<(), String> {
+pub fn release_foreground_inner<R: Runtime>(_app: &AppHandle<R>, tag: &str) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = _app.state::<VcpMobileState<R>>();
@@ -111,10 +108,7 @@ pub fn acquire_foreground<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn release_foreground<R: Runtime>(
-    app: AppHandle<R>,
-    tag: String,
-) -> Result<(), String> {
+pub fn release_foreground<R: Runtime>(app: AppHandle<R>, tag: String) -> Result<(), String> {
     release_foreground_inner(&app, &tag)
 }
 
@@ -135,9 +129,6 @@ pub fn stop_streaming_service<R: Runtime>(
 }
 
 #[tauri::command]
-pub fn set_keepalive_mode<R: Runtime>(
-    app: AppHandle<R>,
-    is_keepalive: bool,
-) -> Result<(), String> {
+pub fn set_keepalive_mode<R: Runtime>(app: AppHandle<R>, is_keepalive: bool) -> Result<(), String> {
     set_keepalive_mode_inner(&app, is_keepalive)
 }

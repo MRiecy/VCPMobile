@@ -35,29 +35,23 @@ pub async fn handle_foreground_state_change(_app: &AppHandle, is_foreground: boo
 }
 
 pub async fn disconnect_log_connections(app: &AppHandle) {
-    let _ = init_vcp_log_connection_internal(
-        app.clone(),
-        "".to_string(),
-        "".to_string()
-    ).await;
+    let _ = init_vcp_log_connection_internal(app.clone(), "".to_string(), "".to_string()).await;
     let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
         app.clone(),
         "".to_string(),
-        "".to_string()
-    ).await;
+        "".to_string(),
+    )
+    .await;
 }
 
 pub async fn reconnect_log_connections(app: &AppHandle, log_url: String, log_key: String) {
-    let _ = init_vcp_log_connection_internal(
-        app.clone(),
-        log_url.clone(),
-        log_key.clone()
-    ).await;
+    let _ = init_vcp_log_connection_internal(app.clone(), log_url.clone(), log_key.clone()).await;
     let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
         app.clone(),
         log_url,
-        log_key
-    ).await;
+        log_key,
+    )
+    .await;
 }
 
 fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
@@ -425,7 +419,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             "data": {
                                 "id": "vcp_log_connection_status",
                                 "status": "error",
-                                "tool_name": "VCPLog 连接失败",                                
+                                "tool_name": "VCPLog 连接失败",
                                 "content": format!("❌ 连接错误: {}\n\n提示：\n1. 请检查桌面端 VCP 是否已开启且 VCPLog 服务正常。\n2. 检查 VCP API 地址和 Key 配置是否正确。", e),
                                 "source": "VCPLog"
                             }

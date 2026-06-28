@@ -52,7 +52,7 @@ use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_r
 use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
-    toggle_favorite_model, test_model_connectivity, start_batch_model_test, stop_all_model_tests,
+    start_batch_model_test, stop_all_model_tests, test_model_connectivity, toggle_favorite_model,
 };
 
 use vcp_modules::sync_service::{
@@ -331,30 +331,37 @@ pub fn run() {
         .build(context)
         .expect("error while building tauri application");
 
-    app.run(|_app_handle, event| {
-        match event {
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            tauri::RunEvent::Suspended => {
-                log::info!("[Lifecycle] Native RunEvent::Suspended. App entered background.");
-                let handle = _app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, false).await;
-                });
-            }
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            tauri::RunEvent::Resumed => {
-                log::info!("[Lifecycle] Native RunEvent::Resumed. App entered foreground.");
-                let handle = _app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, true).await;
-                });
-            }
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::Focused(focused), .. } => {
-                log::info!("[Lifecycle] Native WindowEvent::Focused: focused={}", focused);
-                vcp_modules::lifecycle_manager::APP_IN_FOREGROUND.store(focused, std::sync::atomic::Ordering::SeqCst);
-            }
-            _ => {}
+    app.run(|_app_handle, event| match event {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        tauri::RunEvent::Suspended => {
+            log::info!("[Lifecycle] Native RunEvent::Suspended. App entered background.");
+            let handle = _app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, false)
+                    .await;
+            });
         }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        tauri::RunEvent::Resumed => {
+            log::info!("[Lifecycle] Native RunEvent::Resumed. App entered foreground.");
+            let handle = _app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, true)
+                    .await;
+            });
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        tauri::RunEvent::WindowEvent {
+            event: tauri::WindowEvent::Focused(focused),
+            ..
+        } => {
+            log::info!(
+                "[Lifecycle] Native WindowEvent::Focused: focused={}",
+                focused
+            );
+            vcp_modules::lifecycle_manager::APP_IN_FOREGROUND
+                .store(focused, std::sync::atomic::Ordering::SeqCst);
+        }
+        _ => {}
     });
 }

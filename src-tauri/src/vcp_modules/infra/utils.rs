@@ -99,7 +99,7 @@ pub fn normalize_vcp_url(url_str: &str) -> String {
     let cleaned = url_str.trim();
     if let Ok(mut url) = url::Url::parse(cleaned) {
         let path = url.path().trim_end_matches('/').to_string();
-        
+
         // 1. 先看看是否是需要的格式（以 /v1/chat/completions 或 /chat/completions 结尾）
         if path.ends_with("/v1/chat/completions") || path.ends_with("/chat/completions") {
             url.set_path(&path);
@@ -127,10 +127,7 @@ mod tests {
 
     #[test]
     fn test_normalize_vcp_url() {
-        assert_eq!(
-            normalize_vcp_url("127.0.0.1:8000"),
-            "127.0.0.1:8000"
-        );
+        assert_eq!(normalize_vcp_url("127.0.0.1:8000"), "127.0.0.1:8000");
         assert_eq!(
             normalize_vcp_url("http://127.0.0.1:8080/v1"),
             "http://127.0.0.1:8080/v1/chat/completions"
