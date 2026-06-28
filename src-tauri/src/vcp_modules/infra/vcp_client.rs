@@ -274,15 +274,111 @@ pub async fn perform_vcp_request<R: Runtime>(
         payload.context
     );
 
-    let send_stream_event = |event: StreamEvent| {
-        if let Some(ref ch) = stream_channel {
-            let _ = ch.send(event);
-        }
-    };
+    let message_id = payload.message_id.clone();
+    let context = payload.context.clone();
 
-    // === 0. 数据验证和规范化 ===
+    // === 1. 数据验证和多模态资产转换 ===
+    let mut messages = preprocess_multimodal_messages(app, payload.messages).await?;
+
+    // === 2. 读取设置与动态路由切换 ===
+    let mut enable_vcp_tool_injection = false;
+
+    if let Ok(settings) = load_app_settings(app).await {
+        if let Some(extra) = settings.extra.as_object() {
+            enable_vcp_tool_injection = extra
+                .get("enableVcpToolInjection")
+                .and_then(|v: &Value| v.as_bool())
+                .unwrap_or(false);
+        }
+    }
+
+    let mut final_url = payload.vcp_url.clone();
+    if enable_vcp_tool_injection {
+        if let Ok(mut url) = Url::parse(&final_url) {
+            url.set_path("/v1/chatvcp/completions");
+            final_url = url.to_string();
+        }
+    } else {
+        final_url = normalize_vcp_url(&final_url);
+    }
+
+    // === 3. 补充 System 提示词首部 ===
+    let has_system = messages.iter().any(|m| m["role"] == "system");
+    if !has_system {
+        messages.insert(0, json!({"role": "system", "content": ""}));
+    }
+
+    // === 4. 剥离并生成元数据时间戳绑定 ===
+    let timestamp_bindings = extract_timestamp_bindings(&mut messages);
+
+    // === 5. 准备请求体 ===
+    let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
+    let mut request_body = payload.model_config.clone();
+    if let Some(obj) = request_body.as_object_mut() {
+        obj.insert("messages".to_string(), json!(messages));
+        obj.insert("requestId".to_string(), json!(payload.message_id));
+        obj.insert("stream".to_string(), json!(is_stream));
+        if !timestamp_bindings.is_empty() {
+            obj.insert(
+                "vcpchatExtensions".to_string(),
+                json!({
+                    "schemaVersion": 1,
+                    "messageMetadataMode": "hash_only",
+                    "messageTimestampBindings": timestamp_bindings
+                }),
+            );
+        }
+    }
+
+    // === 6. 配置网络请求 ===
+    let client = Client::builder()
+        .tcp_keepalive(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 创建并注册中止信号
+    let (abort_tx, abort_rx) = oneshot::channel();
+    active_requests.insert(payload.message_id.clone(), abort_tx);
+    let _guard = ActiveRequestGuard::new(active_requests.clone(), payload.message_id.clone());
+
+    // === 7. 分发至专职处理器执行请求 ===
+    if is_stream {
+        handle_streaming_request(
+            app,
+            client,
+            &final_url,
+            &payload.vcp_api_key,
+            request_body,
+            message_id,
+            context,
+            abort_rx,
+            active_requests,
+            stream_channel,
+        )
+        .await
+    } else {
+        handle_non_streaming_request(
+            client,
+            &final_url,
+            &payload.vcp_api_key,
+            request_body,
+            message_id,
+            context,
+            abort_rx,
+            active_requests,
+            stream_channel,
+        )
+        .await
+    }
+}
+
+/// 1. 抽离多模态消息预处理逻辑
+async fn preprocess_multimodal_messages<R: Runtime>(
+    app: &AppHandle<R>,
+    raw_messages: Vec<Value>,
+) -> Result<Vec<Value>, String> {
     let mut messages: Vec<Value> = Vec::new();
-    for msg_val in payload.messages.into_iter() {
+    for msg_val in raw_messages.into_iter() {
         if !msg_val.is_object() {
             messages.push(json!({"role": "system", "content": "[Invalid message]"}));
             continue;
@@ -405,7 +501,7 @@ pub async fn perform_vcp_request<R: Runtime>(
                                 }
                             }
 
-                            // 修复：若文件不存在或读取失败，至少保留文本描述，避免内容静默丢失
+                            // 若文件不存在或读取失败，至少保留文本描述，避免内容静默丢失
                             if !converted {
                                 new_parts.push(json!({
                                     "type": "text",
@@ -433,37 +529,11 @@ pub async fn perform_vcp_request<R: Runtime>(
 
         messages.push(msg);
     }
+    Ok(messages)
+}
 
-    // === 1. 读取设置与动态路由切换 ===
-    let mut enable_vcp_tool_injection = false;
-
-    if let Ok(settings) = load_app_settings(app).await {
-        if let Some(extra) = settings.extra.as_object() {
-            enable_vcp_tool_injection = extra
-                .get("enableVcpToolInjection")
-                .and_then(|v: &Value| v.as_bool())
-                .unwrap_or(false);
-        }
-    }
-
-    let mut final_url = payload.vcp_url.clone();
-    if enable_vcp_tool_injection {
-        if let Ok(mut url) = Url::parse(&final_url) {
-            url.set_path("/v1/chatvcp/completions");
-            final_url = url.to_string();
-        }
-    } else {
-        final_url = normalize_vcp_url(&final_url);
-    }
-
-    // === 2. 上下文注入 ===
-    let has_system = messages.iter().any(|m| m["role"] == "system");
-    if !has_system {
-        messages.insert(0, json!({"role": "system", "content": ""}));
-    }
-
-    // === 4. 准备请求体 ===
-    let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
+/// 2. 抽离时间戳与哈希绑定生成逻辑
+fn extract_timestamp_bindings(messages: &mut [Value]) -> Vec<Value> {
     let mut message_timestamp_bindings = Vec::new();
     for (index, msg) in messages.iter_mut().enumerate() {
         let mut timestamp_meta = None;
@@ -501,328 +571,395 @@ pub async fn perform_vcp_request<R: Runtime>(
             }
         }
     }
+    message_timestamp_bindings
+}
 
-    let mut request_body = payload.model_config.clone();
-    if let Some(obj) = request_body.as_object_mut() {
-        obj.insert("messages".to_string(), json!(messages));
-        obj.insert("requestId".to_string(), json!(payload.message_id));
-        obj.insert("stream".to_string(), json!(is_stream));
-        if !message_timestamp_bindings.is_empty() {
-            obj.insert(
-                "vcpchatExtensions".to_string(),
-                json!({
-                    "schemaVersion": 1,
-                    "messageMetadataMode": "hash_only",
-                    "messageTimestampBindings": message_timestamp_bindings
-                }),
-            );
+/// 3. 抽离自适应降帧流式请求循环
+async fn handle_streaming_request<R: Runtime>(
+    _app: &AppHandle<R>,
+    client: Client,
+    final_url: &str,
+    api_key: &str,
+    request_body: Value,
+    message_id: String,
+    context: Option<Value>,
+    mut abort_rx: tokio::sync::oneshot::Receiver<()>,
+    active_requests: Arc<DashMap<String, tokio::sync::oneshot::Sender<()>>>,
+    stream_channel: Option<Channel<StreamEvent>>,
+) -> Result<(Value, bool), String> {
+    let send_stream_event = |event: StreamEvent| {
+        if let Some(ref ch) = stream_channel {
+            let _ = ch.send(event);
+        }
+    };
+
+    let message_id_inner = message_id.clone();
+    let context_inner = context.clone();
+    let active_requests_inner = active_requests.clone();
+
+    let mut full_content = String::new();
+    let mut last_finish_reason: Option<String> = None;
+    let mut is_aborted = false;
+    let mut aurora_buffer = AuroraBuffer::new();
+    let mut pending_aurora_chunk = String::new();
+    let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
+
+    fn adaptive_parse_interval_ms(tail_len: usize) -> u128 {
+        match tail_len {
+            0..=8_191 => 33,
+            8_192..=24_575 => 100,
+            _ => 200,
+        }
+    }
+    fn adaptive_force_bytes(tail_len: usize) -> usize {
+        match tail_len {
+            0..=8_191 => 1024,
+            8_192..=24_575 => 4096,
+            _ => 8192,
         }
     }
 
-    // === 5. 配置网络请求 ===
-    let client = Client::builder()
-        // 不设 read_timeout：数小时自循环中，任何 read_timeout 都是定时炸弹
-        // tcp_keepalive(20s) 维持 TCP 层活性，防止 NAT/防火墙静默丢弃空闲连接
-        .tcp_keepalive(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    // 创建并注册中止信号
-    let (abort_tx, abort_rx) = oneshot::channel();
-    active_requests.insert(payload.message_id.clone(), abort_tx);
-    let _guard = ActiveRequestGuard::new(active_requests.clone(), payload.message_id.clone());
-
-    let message_id = payload.message_id.clone();
-    let context = payload.context.clone();
-    let api_key = payload.vcp_api_key.clone();
-
-    if is_stream {
-        // === 6. 流式处理模式 (同步等待，以便串行调用) ===
-        let _app_handle = app.clone();
-        let message_id_inner = message_id.clone();
-        let context_inner = context.clone();
-        let active_requests_inner = active_requests.clone();
-
-        let mut full_content = String::new();
-        let mut last_finish_reason: Option<String> = None;
-        let mut is_aborted = false;
-        let mut abort_rx = abort_rx; // 取得所有权进入循环
-        let mut aurora_buffer = AuroraBuffer::new();
-        let mut pending_aurora_chunk = String::new();
-        let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
-
-        // 自适应降帧：tail 越大，单帧 IPC 载荷越重（CodeBlock/RawHtml 走整节点 Replace，
-        // 每帧重发整块），故按 tail 字节数降低解析/推送频率，把每秒 IPC 载荷压到可控范围。
-        // 基准依据见 chat/ast_bench.rs：解析本身极廉价，瓶颈在 IPC 体量。
-        //   < 8KB   → 33ms  (30Hz，正常流式，无感)
-        //   8-24KB  → 100ms (10Hz，体感为模型"稍稳重"，渲染连续不留白)
-        //   ≥ 24KB  → 200ms (5Hz，超大块仍持续推进，仅更新略缓)
-        fn adaptive_parse_interval_ms(tail_len: usize) -> u128 {
-            match tail_len {
-                0..=8_191 => 33,
-                8_192..=24_575 => 100,
-                _ => 200,
-            }
-        }
-        // force-parse 字节阈值随档位放大，避免大 chunk 在降帧窗口内靠 byte 阈值反复击穿降帧
-        fn adaptive_force_bytes(tail_len: usize) -> usize {
-            match tail_len {
-                0..=8_191 => 1024,
-                8_192..=24_575 => 4096,
-                _ => 8192,
-            }
-        }
-
-        // 辅助闭包：发送 Aurora 更新事件（稀疏序列化：只发送有变化的字段）
-        let send_aurora_update = |buffer: &mut AuroraBuffer,
-                                  stable_changed: bool,
-                                  tail_changed: bool,
-                                  finish_reason: Option<String>,
-                                  error: Option<String>| {
-            let is_final = finish_reason.is_some() || error.is_some();
-            let chunk = buffer.take_chunk(); // ⚡ 消费获取新增的 chunk 文本
-            let tail_frame = buffer.take_tail_frame();
-            let tail_snapshot = tail_frame.as_ref().and_then(|frame| frame.snapshot.clone());
-            let mut event = StreamEvent::aurora(
-                message_id_inner.clone(),
-                AuroraUpdate {
-                    stable_blocks: if stable_changed {
-                        Some(buffer.stable_blocks.clone())
-                    } else {
-                        None
-                    },
-                    stable_changed,
-                    tail_block: if tail_changed {
-                        buffer.tail_block.clone()
-                    } else {
-                        None
-                    },
-                    tail: if tail_changed {
-                        Some(buffer.tail_content.clone())
-                    } else {
-                        None
-                    },
-                    tail_changed,
-                    tail_frame,
-                    tail_snapshot,
-                    content: if is_final {
-                        Some(buffer.full_text.clone())
-                    } else {
-                        None
-                    },
-                    chunk, // ⚡ 填入 chunk 属性
+    let send_aurora_update = |buffer: &mut AuroraBuffer,
+                              stable_changed: bool,
+                              tail_changed: bool,
+                              finish_reason: Option<String>,
+                              error: Option<String>| {
+        let is_final = finish_reason.is_some() || error.is_some();
+        let chunk = buffer.take_chunk();
+        let tail_frame = buffer.take_tail_frame();
+        let tail_snapshot = tail_frame.as_ref().and_then(|frame| frame.snapshot.clone());
+        let mut event = StreamEvent::aurora(
+            message_id_inner.clone(),
+            AuroraUpdate {
+                stable_blocks: if stable_changed {
+                    Some(buffer.stable_blocks.clone())
+                } else {
+                    None
                 },
-                context_inner.clone(),
-            );
-            event.finish_reason = finish_reason;
-            event.error = error;
-            send_stream_event(event);
-        };
+                stable_changed,
+                tail_block: if tail_changed {
+                    buffer.tail_block.clone()
+                } else {
+                    None
+                },
+                tail: if tail_changed {
+                    Some(buffer.tail_content.clone())
+                } else {
+                    None
+                },
+                tail_changed,
+                tail_frame,
+                tail_snapshot,
+                content: if is_final {
+                    Some(buffer.full_text.clone())
+                } else {
+                    None
+                },
+                chunk,
+            },
+            context_inner.clone(),
+        );
+        event.finish_reason = finish_reason;
+        event.error = error;
+        send_stream_event(event);
+    };
 
-        let flush_aurora_parse = |buffer: &mut AuroraBuffer,
-                                  pending_chunk: &mut String,
-                                  last_parse: &mut std::time::Instant,
-                                  force: bool|
-         -> (bool, bool) {
-            if pending_chunk.is_empty() {
-                return (false, false);
-            }
-            // 以「当前已沉淀 tail 长度 + 待并入 chunk」估算下一帧 tail 体量，据此选择降帧档位
-            let projected_tail_len = buffer.tail_content.len() + pending_chunk.len();
-            if !force
-                && last_parse.elapsed().as_millis() < adaptive_parse_interval_ms(projected_tail_len)
-                && pending_chunk.len() < adaptive_force_bytes(projected_tail_len)
-            {
-                return (false, false);
-            }
+    let flush_aurora_parse = |buffer: &mut AuroraBuffer,
+                              pending_chunk: &mut String,
+                              last_parse: &mut std::time::Instant,
+                              force: bool|
+     -> (bool, bool) {
+        if pending_chunk.is_empty() {
+            return (false, false);
+        }
+        let projected_tail_len = buffer.tail_content.len() + pending_chunk.len();
+        if !force
+            && last_parse.elapsed().as_millis() < adaptive_parse_interval_ms(projected_tail_len)
+            && pending_chunk.len() < adaptive_force_bytes(projected_tail_len)
+        {
+            return (false, false);
+        }
 
-            buffer.append_chunk(pending_chunk);
-            pending_chunk.clear();
-            *last_parse = std::time::Instant::now();
-            buffer.process_queue()
-        };
+        buffer.append_chunk(pending_chunk);
+        pending_chunk.clear();
+        *last_parse = std::time::Instant::now();
+        buffer.process_queue()
+    };
 
-        let res_future = client
-            .post(&final_url)
-            .header(AUTHORIZATION, format!("Bearer {}", api_key))
-            .header(CONTENT_TYPE, "application/json")
-            .json(&request_body)
-            .send();
+    let res_future = client
+        .post(final_url)
+        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&request_body)
+        .send();
 
-        tokio::select! {
-            _ = &mut abort_rx => {
-                log::warn!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
-                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                    aurora_buffer.finalize();
-                                    send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-                active_requests_inner.remove(&message_id_inner);
-                return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
-            }
-            response_res = res_future => {
-                match response_res {
-                    Ok(resp) if resp.status().is_success() => {
-                        let stream = resp.bytes_stream().map_err(IoError::other);
-                        let reader = StreamReader::new(stream);
-                        let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 1024));
+    tokio::select! {
+        _ = &mut abort_rx => {
+            log::warn!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
+            flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+            flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+            aurora_buffer.finalize();
+            send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+            active_requests_inner.remove(&message_id_inner);
+            return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
+        }
+        response_res = res_future => {
+            match response_res {
+                Ok(resp) if resp.status().is_success() => {
+                    let stream = resp.bytes_stream().map_err(IoError::other);
+                    let reader = StreamReader::new(stream);
+                    let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 1024));
 
-                        loop {
-                            tokio::select! {
-                                // 核心修复：即使在等待数据的间隙，也能捕获中断信号
-                                _ = &mut abort_rx => {
-                                    is_aborted = true;
-                                    log::warn!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
-                                     aurora_buffer.finalize();
-                                     send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-
-                                    // 显式清理，防止 race
-                                    active_requests_inner.remove(&message_id_inner);
-                                    break;
-                                }
-                                line_res = lines.next() => {
-                                    match line_res {
-                                        Some(Ok(line)) => {
-                                            if line.trim().is_empty() { continue; }
-                                            if line.starts_with("data: ") {
-                                                let data = line.trim_start_matches("data: ").trim();
-                                                if data == "[DONE]" {
-                                                    log::debug!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
-                                                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                                    aurora_buffer.finalize();
-                                                    send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
-                                                    break;
-                                                }
-                                                if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                                    // 累加全量内容并驱动 Aurora 沉淀
-                                                    let mut text_chunk = String::new();
-                                                    if let Some(choice) = chunk["choices"].as_array().and_then(|a| a.first()) {
-                                                        if let Some(text) = choice["delta"]["content"].as_str() {
-                                                            full_content.push_str(text);
-                                                            text_chunk.push_str(text);
-                                                        }
-                                                        if let Some(reason) = choice["finish_reason"].as_str() {
-                                                            last_finish_reason = Some(
-                                                                if reason == "stop" { "completed".to_string() } else { reason.to_string() }
-                                                            );
-                                                        }
+                    loop {
+                        tokio::select! {
+                            _ = &mut abort_rx => {
+                                is_aborted = true;
+                                log::warn!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
+                                 aurora_buffer.finalize();
+                                 send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                                active_requests_inner.remove(&message_id_inner);
+                                break;
+                            }
+                            line_res = lines.next() => {
+                                match line_res {
+                                    Some(Ok(line)) => {
+                                        if line.trim().is_empty() { continue; }
+                                        if line.starts_with("data: ") {
+                                            let data = line.trim_start_matches("data: ").trim();
+                                            if data == "[DONE]" {
+                                                log::debug!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
+                                                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                                aurora_buffer.finalize();
+                                                send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
+                                                break;
+                                            }
+                                            if let Ok(chunk) = serde_json::from_str::<Value>(data) {
+                                                let mut text_chunk = String::new();
+                                                if let Some(choice) = chunk["choices"].as_array().and_then(|a| a.first()) {
+                                                    if let Some(text) = choice["delta"]["content"].as_str() {
+                                                        full_content.push_str(text);
+                                                        text_chunk.push_str(text);
                                                     }
-
-                                                    if !text_chunk.is_empty() {
-                                                        pending_aurora_chunk.push_str(&text_chunk);
-                                                        let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                            &mut aurora_buffer,
-                                                            &mut pending_aurora_chunk,
-                                                            &mut last_aurora_parse,
-                                                            false,
+                                                    if let Some(reason) = choice["finish_reason"].as_str() {
+                                                        last_finish_reason = Some(
+                                                            if reason == "stop" { "completed".to_string() } else { reason.to_string() }
                                                         );
-                                                        let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                        if stable_changed || tail_changed || has_mutations {
-                                                            send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
-                                                        }
                                                     }
+                                                }
 
-
-
+                                                if !text_chunk.is_empty() {
+                                                    pending_aurora_chunk.push_str(&text_chunk);
+                                                    let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                        &mut aurora_buffer,
+                                                        &mut pending_aurora_chunk,
+                                                        &mut last_aurora_parse,
+                                                        false,
+                                                    );
+                                                    let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                    if stable_changed || tail_changed || has_mutations {
+                                                        send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                    }
                                                 }
                                             }
                                         }
-                                        Some(Err(e)) => {
-                                            log::error!("[VCPClient] Stream read error: {:?}", e);
-                                            flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                            aurora_buffer.finalize();
-                                            send_aurora_update(&mut aurora_buffer, true, true, Some("error".to_string()), Some(format!("流读取错误: {}", e)));
+                                    }
+                                    Some(Err(e)) => {
+                                        log::error!("[VCPClient] Stream read error: {:?}", e);
+                                        flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                        aurora_buffer.finalize();
+                                        send_aurora_update(&mut aurora_buffer, true, true, Some("error".to_string()), Some(format!("流读取错误: {}", e)));
+                                        send_stream_event(StreamEvent::error(
+                                            message_id_inner.clone(),
+                                            context_inner.clone(),
+                                            format!("流读取错误: {}", e),
+                                        ));
+                                        break;
+                                    }
+                                    None => {
+                                        flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                        aurora_buffer.finalize();
+                                        if !full_content.is_empty() || last_finish_reason.is_some() {
+                                            log::debug!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
+                                            send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
+                                        } else {
+                                            log::warn!("[VCPClient] Stream ended unexpectedly (None)");
+                                            send_aurora_update(&mut aurora_buffer, true, true, Some("error".to_string()), Some("网络连接意外断开".to_string()));
                                             send_stream_event(StreamEvent::error(
                                                 message_id_inner.clone(),
                                                 context_inner.clone(),
-                                                format!("流读取错误: {}", e),
+                                                "网络连接意外断开".to_string(),
                                             ));
-
-                                            break;
                                         }
-                                        None => {
-                                            // 修复：若此前已收到有效 chunk，则视为正常结束（对齐桌面端行为）
-                                            flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                            aurora_buffer.finalize();
-                                            if !full_content.is_empty() || last_finish_reason.is_some() {
-                                                log::debug!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
-                                                send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
-                                            } else {
-                                                log::warn!("[VCPClient] Stream ended unexpectedly (None)");
-                                                send_aurora_update(&mut aurora_buffer, true, true, Some("error".to_string()), Some("网络连接意外断开".to_string()));
-                                                send_stream_event(StreamEvent::error(
-                                                    message_id_inner.clone(),
-                                                    context_inner.clone(),
-                                                    "网络连接意外断开".to_string(),
-                                                ));
-
-                                            }
-                                            break;
-                                        }
+                                        break;
                                     }
                                 }
                             }
                         }
                     }
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let text = resp.text().await.unwrap_or_default();
-                        send_stream_event(StreamEvent::error(
-                            message_id_inner.clone(),
-                            context_inner.clone(),
-                            format!("VCP服务器错误: {} - {}", status, text),
-                        ));
-
-                        active_requests_inner.remove(&message_id_inner);
-                        return Err(format!("VCP Error: {}", status));
-                    }
-                    Err(e) => {
-                        send_stream_event(StreamEvent::error(
-                            message_id_inner.clone(),
-                            context_inner.clone(),
-                            format!("网络请求异常: {}", e),
-                        ));
-
-                        active_requests_inner.remove(&message_id_inner);
-                        return Err(e.to_string());
-                    }
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    send_stream_event(StreamEvent::error(
+                        message_id_inner.clone(),
+                        context_inner.clone(),
+                        format!("VCP服务器错误: {} - {}", status, text),
+                    ));
+                    active_requests_inner.remove(&message_id_inner);
+                    return Err(format!("VCP Error: {}", status));
+                }
+                Err(e) => {
+                    send_stream_event(StreamEvent::error(
+                        message_id_inner.clone(),
+                        context_inner.clone(),
+                        format!("网络请求异常: {}", e),
+                    ));
+                    active_requests_inner.remove(&message_id_inner);
+                    return Err(e.to_string());
                 }
             }
         }
-
-        active_requests_inner.remove(&message_id_inner);
-        Ok((
-            json!({
-                "fullContent": aurora_buffer.full_text,
-                "streamingStarted": true,
-                "finishReason": last_finish_reason
-            }),
-            is_aborted,
-        ))
-    } else {
-        // === 7. 非流式响应模式 ===
-        let response = client
-            .post(&final_url)
-            .header(AUTHORIZATION, format!("Bearer {}", api_key))
-            .header(CONTENT_TYPE, "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("VCP请求失败: {}", e))?;
-
-        active_requests.remove(&message_id);
-
-        if !response.status().is_success() {
-            let status = response.status();
-            return Err(format!("VCP响应错误: {}", status));
-        }
-
-        let vcp_response = response
-            .json::<Value>()
-            .await
-            .map_err(|e| format!("JSON解析失败: {}", e))?;
-        Ok((json!({"response": vcp_response, "context": context}), false))
     }
+
+    active_requests_inner.remove(&message_id_inner);
+    Ok((
+        json!({
+            "fullContent": aurora_buffer.full_text,
+            "streamingStarted": true,
+            "finishReason": last_finish_reason
+        }),
+        is_aborted,
+    ))
 }
+
+/// 4. 抽离非流式请求循环
+async fn handle_non_streaming_request(
+    client: Client,
+    final_url: &str,
+    api_key: &str,
+    request_body: Value,
+    message_id: String,
+    context: Option<Value>,
+    mut abort_rx: tokio::sync::oneshot::Receiver<()>,
+    active_requests: Arc<DashMap<String, tokio::sync::oneshot::Sender<()>>>,
+    stream_channel: Option<Channel<StreamEvent>>,
+) -> Result<(Value, bool), String> {
+    let send_stream_event = |event: StreamEvent| {
+        if let Some(ref ch) = stream_channel {
+            let _ = ch.send(event);
+        }
+    };
+
+    let request_future = client
+        .post(final_url)
+        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&request_body)
+        .send();
+
+    let response = tokio::select! {
+        _ = &mut abort_rx => {
+            log::warn!("[VCPClient] Non-streaming request aborted before response for message: {}", message_id);
+            send_stream_event(StreamEvent::error(
+                message_id.clone(),
+                context.clone(),
+                "请求已中止".to_string(),
+            ));
+            active_requests.remove(&message_id);
+            return Ok((
+                json!({
+                    "response": serde_json::Value::Null,
+                    "fullContent": "",
+                    "finishReason": "cancelled_by_user",
+                    "context": context
+                }),
+                true,
+            ));
+        }
+        res = request_future => {
+            match res {
+                Ok(resp) => resp,
+                Err(e) => {
+                    let err_msg = format!("VCP请求失败: {}", e);
+                    send_stream_event(StreamEvent::error(
+                        message_id.clone(),
+                        context.clone(),
+                        err_msg.clone(),
+                    ));
+                    active_requests.remove(&message_id);
+                    return Err(err_msg);
+                }
+            }
+        }
+    };
+
+    active_requests.remove(&message_id);
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        let err_msg = format!("VCP服务器错误: {} - {}", status, text);
+        send_stream_event(StreamEvent::error(
+            message_id.clone(),
+            context.clone(),
+            err_msg.clone(),
+        ));
+        return Err(err_msg);
+    }
+
+    let vcp_response = match response.json::<Value>().await {
+        Ok(json) => json,
+        Err(e) => {
+            let err_msg = format!("JSON解析失败: {}", e);
+            send_stream_event(StreamEvent::error(
+                message_id.clone(),
+                context.clone(),
+                err_msg.clone(),
+            ));
+            return Err(err_msg);
+        }
+    };
+
+    // 从标准的 OpenAI 格式中提取文本和结束原因
+    let choices = vcp_response["choices"].as_array();
+    let first_choice = choices.and_then(|c| c.first());
+    let full_content = first_choice
+        .and_then(|choice| choice["message"]["content"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let finish_reason = first_choice
+        .and_then(|choice| choice["finish_reason"].as_str())
+        .map(|r| if r == "stop" { "completed".to_string() } else { r.to_string() });
+
+    // 发送单次 aurora 事件以将文本呈现在 UI 中
+    send_stream_event(StreamEvent::aurora(
+        message_id.clone(),
+        AuroraUpdate {
+            stable_blocks: None,
+            stable_changed: false,
+            tail_block: None,
+            tail: None,
+            tail_changed: false,
+            tail_frame: None,
+            tail_snapshot: None,
+            content: Some(full_content.clone()),
+            chunk: None,
+        },
+        context.clone(),
+    ));
+
+    Ok((
+        json!({
+            "response": vcp_response,
+            "fullContent": full_content,
+            "finishReason": finish_reason,
+            "context": context
+        }),
+        false,
+    ))
+}
+
+
 
 async fn load_app_settings<R: Runtime>(app: &AppHandle<R>) -> Result<Settings, String> {
     let db_state = app.state::<DbState>();

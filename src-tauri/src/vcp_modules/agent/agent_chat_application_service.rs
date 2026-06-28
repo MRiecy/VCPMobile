@@ -117,7 +117,7 @@ pub async fn internal_process_agent_chat_message(
         "model": agent_config.model,
         "max_tokens": agent_config.max_output_tokens,
         "contextTokenLimit": agent_config.context_token_limit,
-        "stream": true
+        "stream": agent_config.stream_output
     });
     if agent_config.use_temperature {
         model_config["temperature"] = json!(agent_config.temperature);
@@ -257,7 +257,7 @@ pub async fn handle_assistant_chat_stream(
         "model": agent_config.model,
         "max_tokens": agent_config.max_output_tokens,
         "contextTokenLimit": agent_config.context_token_limit,
-        "stream": true
+        "stream": agent_config.stream_output
     });
     if agent_config.use_temperature {
         model_config["temperature"] = json!(agent_config.temperature);
