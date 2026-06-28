@@ -122,6 +122,7 @@ export interface ChatMessage {
   tailBlock?: ContentBlock;
   tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
+  isReconnecting?: boolean;  // 🆕 流接续重连中状态
 }
 
 export type AstMutation =

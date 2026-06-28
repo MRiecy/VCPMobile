@@ -25,6 +25,28 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const hasBootstrapped = ref(false);
   const currentPhaseLabel = ref('准备启动...');
   const lastTransitionAt = ref<number | null>(null);
+  const isBackground = ref(false);
+
+  const initListeners = () => {
+    if (typeof window === 'undefined') return;
+
+    document.addEventListener('visibilitychange', () => {
+      isBackground.value = document.hidden;
+      console.log(`[Lifecycle Store] Visibility changed: hidden=${document.hidden}`);
+    });
+
+    window.addEventListener('vcp-lifecycle', (e: any) => {
+      const stateVal = e.detail?.state;
+      console.log(`[Lifecycle Store] Received vcp-lifecycle: state=${stateVal}`);
+      if (stateVal === 'stop' || stateVal === 'pause') {
+        isBackground.value = true;
+      } else if (stateVal === 'resume') {
+        isBackground.value = false;
+      }
+    });
+  };
+
+  initListeners();
 
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
@@ -286,6 +308,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     isBootstrapping,
     hasBootstrapped,
     lastTransitionAt,
+    isBackground,
     coreStatus: computed(() => notificationStore.vcpCoreStatus),
     bootstrap,
     hydrateSystemStatus

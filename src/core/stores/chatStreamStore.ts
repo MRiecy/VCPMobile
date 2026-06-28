@@ -1,11 +1,12 @@
 import { defineStore } from "pinia";
 import { ref, computed, reactive, onScopeDispose } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 
 import { useChatSessionStore } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
+import { useChatHistoryStore } from "./chatHistoryStore";
 import type { ChatMessage, MessageShell, TailFrame } from "../types/chat";
 
 export const useChatStreamStore = defineStore("chatStream", () => {
@@ -574,6 +575,130 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     rAFPendingUpdates.clear();
   });
 
+  const isRecovering = ref(false);
+
+  /**
+   * 检查并恢复被异常打断的活跃生成（冷启动自对齐与流接续）
+   */
+  const checkAndRecoverInterruptedStreams = async () => {
+    if (isRecovering.value) return;
+
+    // 1. 本地扫表：无网状态下也能运行
+    let activeGens: any[] = [];
+    try {
+      activeGens = await invoke<any[]>("get_active_generations");
+    } catch (e) {
+      console.error("[ChatStreamStore] Failed to get active generations:", e);
+      return;
+    }
+
+    if (!activeGens || activeGens.length === 0) return;
+
+    console.log(`[ChatStreamStore] Found ${activeGens.length} interrupted active generations:`, activeGens);
+
+    // 2. UI 预处理：在内存中将消息标记为 reconnecting，让用户在界面上看到“重连中”
+    for (const gen of activeGens) {
+      const { msgId, topicId, ownerId, owner_type: ownerType } = gen;
+      
+      let msg = activeStreamMessages.get(msgId);
+      if (!msg) {
+        msg = reactive<ChatMessage>({
+          id: msgId,
+          role: "assistant",
+          name: undefined,
+          content: "",
+          timestamp: gen.createdAt || Date.now(),
+          isThinking: false,
+          isReconnecting: true,
+          agentId: ownerType === "agent" ? ownerId : undefined,
+          groupId: ownerType === "group" ? ownerId : undefined,
+          isGroupMessage: ownerType === "group",
+          shell: computeShell({ role: "assistant", agentId: ownerType === "agent" ? ownerId : undefined }),
+        });
+        activeStreamMessages.set(msgId, msg);
+      } else {
+        msg.isReconnecting = true;
+      }
+      addSessionStream(ownerId, topicId, msgId);
+    }
+
+    // 3. 网络请求 Gate 门控
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      console.log("[ChatStreamStore] Network offline. Suspending active generations cloud sync.");
+      return;
+    }
+
+    isRecovering.value = true;
+    try {
+      for (const gen of activeGens) {
+        const { msgId, topicId, ownerId, owner_type: ownerType } = gen;
+        const msg = activeStreamMessages.get(msgId);
+
+        const res = await invoke<any>("recover_active_generation", { msgId });
+        console.log(`[ChatStreamStore] Recovery status for ${msgId}:`, res);
+
+        if (res.status === "streaming") {
+          // 云端仍在生成，开启接续
+          if (msg) {
+            msg.isReconnecting = false;
+            msg.isThinking = false;
+            msg.content = res.content || "";
+          }
+
+          const streamChannel = new Channel<any>();
+          streamChannel.onmessage = (event) => processStreamEvent(event, {
+            onMessageCreated: (m, tid) => {
+              const historyStore = useChatHistoryStore();
+              if (tid === sessionStore.currentTopicId && !historyStore.currentChatHistory.some(x => x.id === m.id)) {
+                historyStore.currentChatHistory.push(m);
+                historyStore.currentChatHistory.sort((a, b) => a.timestamp - b.timestamp);
+              }
+            },
+            onStreamFinished: (_mid, tid) => {
+              if (tid === sessionStore.currentTopicId) {
+                const historyStore = useChatHistoryStore();
+                historyStore.summarizeTopic();
+              }
+            }
+          });
+
+          // 唤醒流接续 (在 Rust 侧执行)
+          invoke("resume_stream", {
+            msgId,
+            topicId,
+            ownerId,
+            ownerType,
+            streamChannel,
+          }).catch(err => {
+            console.error(`[ChatStreamStore] Failed to resume stream for ${msgId}:`, err);
+            if (msg) {
+              msg.isReconnecting = false;
+              msg.finishReason = "error";
+              msg.content += "\n\n> VCP流式错误: 接续失败";
+            }
+            removeSessionStream(ownerId, topicId, msgId);
+          });
+        } else {
+          // completed 或 failed
+          if (msg) {
+            msg.isReconnecting = false;
+          }
+          removeSessionStream(ownerId, topicId, msgId);
+          
+          // 如果当前正处于该话题，重新加载历史展示最新状态
+          if (topicId === sessionStore.currentTopicId) {
+            const historyStore = useChatHistoryStore();
+            historyStore.loadHistory(ownerId, ownerType, topicId);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("[ChatStreamStore] Cloud sync failed during recovery:", e);
+    } finally {
+      isRecovering.value = false;
+    }
+  };
+
   return {
     streamingMessageId,
     sessionActiveStreams,
@@ -589,6 +714,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     processStreamEvent,
     stopMessage,
     stopGroupTurn,
+    checkAndRecoverInterruptedStreams,
   };
 });
 

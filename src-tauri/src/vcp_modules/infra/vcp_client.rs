@@ -365,6 +365,8 @@ pub async fn perform_vcp_request<R: Runtime>(
             abort_rx,
             active_requests,
             stream_channel,
+            None,
+            None,
         )
         .await
     } else {
@@ -597,6 +599,8 @@ async fn handle_streaming_request<R: Runtime>(
     mut abort_rx: tokio::sync::oneshot::Receiver<()>,
     active_requests: Arc<DashMap<String, tokio::sync::oneshot::Sender<()>>>,
     stream_channel: Option<Channel<StreamEvent>>,
+    initial_reconnect_url: Option<String>,
+    initial_content: Option<String>,
 ) -> Result<(Value, bool), String> {
     let send_stream_event = |event: StreamEvent| {
         if let Some(ref ch) = stream_channel {
@@ -614,6 +618,8 @@ async fn handle_streaming_request<R: Runtime>(
     let mut aurora_buffer = AuroraBuffer::new();
     let mut pending_aurora_chunk = String::new();
     let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
+    let mut retry_count = 0;
+    let mut backoff = Duration::from_millis(500);
 
     fn adaptive_parse_interval_ms(tail_len: usize) -> u128 {
         match tail_len {
@@ -697,7 +703,6 @@ async fn handle_streaming_request<R: Runtime>(
         buffer.process_queue()
     };
 
-    // 定义线读取的通用装箱流类型，用以抹平 reqwest 底层繁琐的泛型定义
     type BoxedLineStream = Box<dyn futures_util::Stream<Item = Result<String, std::io::Error>> + Unpin + Send>;
     let to_line_stream = |resp: reqwest::Response| -> BoxedLineStream {
         let stream = resp.bytes_stream().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
@@ -707,224 +712,317 @@ async fn handle_streaming_request<R: Runtime>(
         Box::new(mapped)
     };
 
-    // 1. 发起初始请求
-    let res_future = client
-        .post(final_url)
-        .header(AUTHORIZATION, format!("Bearer {}", api_key))
-        .header(CONTENT_TYPE, "application/json")
-        .json(&request_body)
-        .send();
+    let mut lines: Option<BoxedLineStream> = None;
 
-    let mut lines: Option<BoxedLineStream>;
-
-    tokio::select! {
-        _ = &mut abort_rx => {
-            log::warn!("[VCPClient] Request aborted before response for message: {}", message_id_inner);
-            flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-            aurora_buffer.finalize();
-            send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-            active_requests_inner.remove(&message_id_inner);
-            return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
-        }
-        response_res = res_future => {
-            match response_res {
-                Ok(resp) if resp.status().is_success() => {
-                    lines = Some(to_line_stream(resp));
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    send_stream_event(StreamEvent::error(
-                        message_id_inner.clone(),
-                        context_inner.clone(),
-                        format!("VCP服务器错误: {} - {}", status, text),
-                    ));
-                    active_requests_inner.remove(&message_id_inner);
-                    return Err(format!("VCP Error: {}", status));
-                }
-                Err(e) => {
-                    send_stream_event(StreamEvent::error(
-                        message_id_inner.clone(),
-                        context_inner.clone(),
-                        format!("网络请求异常: {}", e),
-                    ));
-                    active_requests_inner.remove(&message_id_inner);
-                    return Err(e.to_string());
-                }
-            }
-        }
+    // 1. 声明状态机的所有状态
+    enum State {
+        Init,
+        Connecting,
+        Resuming,
+        Streaming,
+        Aligning,
+        Retrying,
     }
 
-    // 2. 主循环与断点续传重连状态机
-    let mut retry_count = 0;
-    const MAX_RETRIES: u32 = 5;
-    let mut backoff = Duration::from_millis(500);
+    let mut state = State::Init;
 
+    // 2. 状态机驱动循环
     'main_loop: loop {
-        if is_aborted {
-            break 'main_loop;
-        }
+        match state {
+            State::Init => {
+                // 初始内容对齐：如果是冷启动接续，先将已生成内容喂给 AST 解析器对齐状态
+                if let Some(ref content) = initial_content {
+                    aurora_buffer.append_chunk(content);
+                    let _ = aurora_buffer.process_queue();
+                    aurora_buffer.pushed_len = content.len();
+                    let _ = aurora_buffer.take_chunk();
+                    let _ = aurora_buffer.take_tail_frame();
+                    full_content.push_str(content);
+                }
+                if initial_reconnect_url.is_some() {
+                    state = State::Resuming;
+                } else {
+                    state = State::Connecting;
+                }
+            }
+            State::Connecting => {
+                let res_future = client
+                    .post(final_url)
+                    .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                    .header(CONTENT_TYPE, "application/json")
+                    .json(&request_body)
+                    .send();
 
-        if let Some(ref mut line_stream) = lines {
-            loop {
                 tokio::select! {
                     _ = &mut abort_rx => {
+                        log::warn!("[VCPClient] Request aborted during connection: {}", message_id_inner);
                         is_aborted = true;
-                        log::warn!("[VCPClient] Stream deep-polling detected abort for message: {}", message_id_inner);
+                        flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                         aurora_buffer.finalize();
                         send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
                         active_requests_inner.remove(&message_id_inner);
-                        break 'main_loop;
+                        return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
                     }
-                    line_res = line_stream.next() => {
-                        match line_res {
-                            Some(Ok(line)) => {
-                                if line.trim().is_empty() { continue; }
-                                if line.starts_with("data: ") {
-                                    let data = line.trim_start_matches("data: ").trim();
-                                    if data == "[DONE]" {
-                                        log::debug!("[VCPClient] Stream finished normally with [DONE] for message: {}", message_id_inner);
-                                        flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                        aurora_buffer.finalize();
-                                        send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
-                                        break 'main_loop;
-                                    }
-                                    if let Ok(chunk) = serde_json::from_str::<Value>(data) {
-                                        let mut text_chunk = String::new();
-                                        if let Some(choice) = chunk["choices"].as_array().and_then(|a| a.first()) {
-                                            if let Some(text) = choice["delta"]["content"].as_str() {
-                                                full_content.push_str(text);
-                                                text_chunk.push_str(text);
-                                            }
-                                            if let Some(reason) = choice["finish_reason"].as_str() {
-                                                last_finish_reason = Some(
-                                                    if reason == "stop" { "completed".to_string() } else { reason.to_string() }
-                                                );
-                                            }
-                                        }
-
-                                        if !text_chunk.is_empty() {
-                                            pending_aurora_chunk.push_str(&text_chunk);
-                                            let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                &mut aurora_buffer,
-                                                &mut pending_aurora_chunk,
-                                                &mut last_aurora_parse,
-                                                false,
-                                            );
-                                            let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                            if stable_changed || tail_changed || has_mutations {
-                                                send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
-                                            }
-                                        }
-                                    }
-                                }
+                    response_res = res_future => {
+                        match response_res {
+                            Ok(resp) if resp.status().is_success() => {
+                                lines = Some(to_line_stream(resp));
+                                state = State::Streaming;
                             }
-                            Some(Err(e)) => {
-                                log::warn!("[VCPClient] Stream read error, entering reconnect: {:?}", e);
-                                break; // 跳出内层流式循环，触发断点重连
+                            Ok(resp) => {
+                                let status = resp.status();
+                                let text = resp.text().await.unwrap_or_default();
+                                send_stream_event(StreamEvent::error(
+                                    message_id_inner.clone(),
+                                    context_inner.clone(),
+                                    format!("VCP服务器错误: {} - {}", status, text),
+                                ));
+                                active_requests_inner.remove(&message_id_inner);
+                                return Err(format!("VCP Error: {}", status));
                             }
-                            None => {
-                                // TCP 连接被服务器关闭
-                                if !full_content.is_empty() || last_finish_reason.is_some() {
-                                    log::debug!("[VCPClient] Stream ended without [DONE] but content was received. Treating as normal end.");
-                                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                    aurora_buffer.finalize();
-                                    send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
-                                    break 'main_loop;
-                                } else {
-                                    log::warn!("[VCPClient] Stream ended unexpectedly (None), entering reconnect");
-                                    break; // 跳出内层流式循环，触发断点重连
-                                }
+                            Err(e) => {
+                                log::warn!("[VCPClient] Connection failed, transitioning to Retrying: {:?}", e);
+                                state = State::Retrying;
                             }
                         }
                     }
                 }
             }
-        }
-
-        // 3. 断点续传与重连状态机逻辑
-        lines = None; // 丢弃旧的线读取流
-
-        // 🌟 修复温回归/后台恢复：若 App 处于后台，则挂起重连循环，等待 App 回到前台后再试，防止在后台耗尽重试次数
-        while !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(std::sync::atomic::Ordering::SeqCst) {
-            log::info!("[VCPClient] App is in background. Suspending reconnection for message: {}", message_id_inner);
-            tokio::select! {
-                _ = &mut abort_rx => {
-                    is_aborted = true;
-                    break 'main_loop;
+            State::Resuming => {
+                // 确保 App 处于前台（温回归门控）
+                while !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(std::sync::atomic::Ordering::SeqCst) {
+                    log::info!("[VCPClient] App is in background. Suspending reconnection for message: {}", message_id_inner);
+                    tokio::select! {
+                        _ = &mut abort_rx => {
+                            is_aborted = true;
+                            active_requests_inner.remove(&message_id_inner);
+                            return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+
+                let reconnect_url = if let Some(ref url) = initial_reconnect_url {
+                    url.clone()
+                } else {
+                    match Url::parse(final_url) {
+                        Ok(mut url) => {
+                            url.set_path("/api/chat/stream");
+                            url.set_query(Some(&format!("msg_id={}", message_id_inner)));
+                            url.to_string()
+                        }
+                        Err(_) => {
+                            active_requests_inner.remove(&message_id_inner);
+                            return Err("Failed to parse final_url for reconnection".to_string());
+                        }
+                    }
+                };
+
+                let offset = aurora_buffer.full_text.chars().count();
+                log::info!("[VCPClient] Re-establishing stream connection to {} with Last-Event-ID: {}", reconnect_url, offset);
+
+                let req_res = client
+                    .get(&reconnect_url)
+                    .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                    .header("Last-Event-ID", offset.to_string())
+                    .send()
+                    .await;
+
+                match req_res {
+                    Ok(resp) if resp.status().is_success() => {
+                        log::info!("[VCPClient] Reconnection successful for message: {}", message_id_inner);
+                        retry_count = 0;
+                        backoff = Duration::from_millis(500);
+                        send_stream_event(StreamEvent {
+                            r#type: "reconnecting".into(),
+                            message_id: message_id_inner.clone(),
+                            context: context_inner.clone(),
+                            ..Default::default()
+                        });
+                        lines = Some(to_line_stream(resp));
+                        state = State::Streaming;
+                    }
+                    Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND || resp.status() == reqwest::StatusCode::BAD_REQUEST => {
+                        log::warn!("[VCPClient] Stream not found (status: {}). Transitioning to Aligning.", resp.status());
+                        state = State::Aligning;
+                    }
+                    Ok(resp) => {
+                        log::warn!("[VCPClient] Reconnect returned status {}, transitioning to Retrying", resp.status());
+                        state = State::Retrying;
+                    }
+                    Err(e) => {
+                        log::warn!("[VCPClient] Reconnect failed: {:?}, transitioning to Retrying", e);
+                        state = State::Retrying;
+                    }
+                }
             }
-        }
+            State::Streaming => {
+                let mut stream_ended_normally = false;
 
-        if retry_count >= MAX_RETRIES {
-            log::error!("[VCPClient] Max retries reached ({}) for message: {}", MAX_RETRIES, message_id_inner);
-            send_stream_event(StreamEvent::error(
-                message_id_inner.clone(),
-                context_inner.clone(),
-                "网络连接意外断开，重连失败".to_string(),
-            ));
-            break 'main_loop;
-        }
+                if let Some(ref mut line_stream) = lines {
+                    loop {
+                        tokio::select! {
+                            _ = &mut abort_rx => {
+                                log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
+                                is_aborted = true;
+                                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                aurora_buffer.finalize();
+                                send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                                active_requests_inner.remove(&message_id_inner);
+                                return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                            }
+                            next_line = line_stream.next() => {
+                                match next_line {
+                                    Some(Ok(line)) => {
+                                        if line.starts_with("data:") {
+                                            let data_content = line["data:".len()..].trim();
+                                            if data_content == "[DONE]" {
+                                                stream_ended_normally = true;
+                                                break;
+                                            }
+                                            if let Ok(val) = serde_json::from_str::<Value>(data_content) {
+                                                if let Some(reason) = val.get("finish_reason").and_then(|r| r.as_str()) {
+                                                    last_finish_reason = Some(reason.to_string());
+                                                }
+                                                if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.get(0)).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
+                                                    pending_aurora_chunk.push_str(delta);
+                                                    let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                        &mut aurora_buffer,
+                                                        &mut pending_aurora_chunk,
+                                                        &mut last_aurora_parse,
+                                                        false,
+                                                    );
+                                                    let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                    if stable_changed || tail_changed || has_mutations {
+                                                        send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        log::warn!("[VCPClient] Stream read error: {:?}, transitioning to Retrying", e);
+                                        state = State::Retrying;
+                                        break;
+                                    }
+                                    None => {
+                                        if !aurora_buffer.full_text.is_empty() || last_finish_reason.is_some() {
+                                            stream_ended_normally = true;
+                                        } else {
+                                            log::warn!("[VCPClient] Stream ended unexpectedly (None), transitioning to Retrying");
+                                            state = State::Retrying;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    log::warn!("[VCPClient] Streaming state entered but lines is None. Transitioning to Retrying.");
+                    state = State::Retrying;
+                }
 
-        retry_count += 1;
-        log::info!("[VCPClient] Reconnecting {}/{} for message: {}", retry_count, MAX_RETRIES, message_id_inner);
+                if stream_ended_normally {
+                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                    aurora_buffer.finalize();
+                    send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
+                    active_requests_inner.remove(&message_id_inner);
+                    return Ok((
+                        json!({
+                            "fullContent": aurora_buffer.full_text,
+                            "streamingStarted": true,
+                            "finishReason": last_finish_reason
+                        }),
+                        false,
+                    ));
+                }
+            }
+            State::Aligning => {
+                let mut query_url = match Url::parse(final_url) {
+                    Ok(u) => u,
+                    Err(_) => {
+                        active_requests_inner.remove(&message_id_inner);
+                        return Err("Failed to parse final_url for alignment".to_string());
+                    }
+                };
+                query_url.set_path(&format!("/api/chat/messages/{}", message_id_inner));
 
-        // 发射 reconnecting 事件通知前端展示重连状态
-        send_stream_event(StreamEvent {
-            r#type: "reconnecting".into(),
-            message_id: message_id_inner.clone(),
-            context: context_inner.clone(),
-            ..Default::default()
-        });
+                let status_res = client
+                    .get(query_url.as_str())
+                    .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                    .send()
+                    .await;
 
-        // 进行指数退避等待，且支持响应前端的主止信号
-        tokio::select! {
-            _ = &mut abort_rx => {
-                is_aborted = true;
-                log::warn!("[VCPClient] Aborted during reconnection backoff sleep");
+                if let Ok(status_resp) = status_res {
+                    if status_resp.status().is_success() {
+                        if let Ok(info) = status_resp.json::<Value>().await {
+                            let status = info["status"].as_str().unwrap_or("failed");
+                            let content = info["content"].as_str().unwrap_or("").to_string();
+                            if status == "completed" {
+                                log::info!("[VCPClient] Message is completed on server during warm reconnection. Aligning content.");
+
+                                let current_len = aurora_buffer.full_text.chars().count();
+                                let server_len = content.chars().count();
+                                if server_len > current_len {
+                                    let remaining: String = content.chars().skip(current_len).collect();
+                                    aurora_buffer.append_chunk(&remaining);
+                                    let _ = aurora_buffer.process_queue();
+                                }
+
+                                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                aurora_buffer.finalize();
+                                send_aurora_update(&mut aurora_buffer, true, true, Some("completed".to_string()), None);
+
+                                active_requests_inner.remove(&message_id_inner);
+                                return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": "completed" }), false));
+                            }
+                        }
+                    }
+                }
+                
+                log::warn!("[VCPClient] Message is not completed on server. Failing stream.");
+                send_stream_event(StreamEvent::error(
+                    message_id_inner.clone(),
+                    context_inner.clone(),
+                    "流已失效且任务未完成".to_string(),
+                ));
                 break 'main_loop;
             }
-            _ = tokio::time::sleep(backoff) => {}
-        }
-        backoff *= 2;
+            State::Retrying => {
+                const MAX_RETRIES: u32 = 3;
+                if retry_count >= MAX_RETRIES {
+                    log::error!("[VCPClient] Max retries reached ({}) for message: {}", MAX_RETRIES, message_id_inner);
+                    send_stream_event(StreamEvent::error(
+                        message_id_inner.clone(),
+                        context_inner.clone(),
+                        "网络连接意外断开，重连失败".to_string(),
+                    ));
+                    active_requests_inner.remove(&message_id_inner);
+                    return Err("Max retries reached".to_string());
+                }
 
-        // 构造断点流式接续 URL: GET /api/chat/stream?msg_id={message_id}
-        let reconnect_url = match Url::parse(final_url) {
-            Ok(mut url) => {
-                url.set_path("/api/chat/stream");
-                url.set_query(Some(&format!("msg_id={}", message_id_inner)));
-                url.to_string()
-            }
-            Err(_) => {
-                log::error!("[VCPClient] Failed to parse final_url for reconnection");
-                break 'main_loop;
-            }
-        };
+                retry_count += 1;
+                log::info!("[VCPClient] Reconnecting {}/{} for message: {}", retry_count, MAX_RETRIES, message_id_inner);
 
-        // 计算当前已接收的文本字符数作为 Last-Event-ID
-        let offset = aurora_buffer.full_text.chars().count();
-        log::info!("[VCPClient] Re-establishing stream connection to {} with Last-Event-ID: {}", reconnect_url, offset);
+                send_stream_event(StreamEvent {
+                    r#type: "reconnecting".into(),
+                    message_id: message_id_inner.clone(),
+                    context: context_inner.clone(),
+                    ..Default::default()
+                });
 
-        let req_res = client
-            .get(&reconnect_url)
-            .header(AUTHORIZATION, format!("Bearer {}", api_key))
-            .header("Last-Event-ID", offset.to_string())
-            .send()
-            .await;
-
-        match req_res {
-            Ok(resp) if resp.status().is_success() => {
-                log::info!("[VCPClient] Reconnection successful for message: {}", message_id_inner);
-                retry_count = 0; // 重置重试计数器
-                backoff = Duration::from_millis(500); // 重置退避延迟
-                lines = Some(to_line_stream(resp));
-            }
-            Ok(resp) => {
-                log::warn!("[VCPClient] Reconnection returned non-success status: {}", resp.status());
-            }
-            Err(e) => {
-                log::warn!("[VCPClient] Reconnection request failed: {:?}", e);
+                tokio::select! {
+                    _ = &mut abort_rx => {
+                        log::warn!("[VCPClient] Aborted during retry backoff sleep");
+                        is_aborted = true;
+                        active_requests_inner.remove(&message_id_inner);
+                        return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                    }
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff *= 2;
+                state = State::Resuming;
             }
         }
     }
@@ -1197,6 +1295,342 @@ pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result
         let text = res.text().await.unwrap_or_default();
         Err(format!("验证失败 ({}): {}", status.as_u16(), text))
     }
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveGeneration {
+    pub msg_id: String,
+    pub topic_id: String,
+    pub owner_id: String,
+    pub owner_type: String,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+pub async fn get_active_generations(
+    app: tauri::AppHandle,
+) -> Result<Vec<ActiveGeneration>, String> {
+    let db = app.state::<DbState>();
+    let rows = sqlx::query(
+        "SELECT msg_id, topic_id, owner_id, owner_type, created_at FROM active_generations ORDER BY created_at ASC"
+    )
+    .fetch_all(&db.pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut list = Vec::new();
+    for row in rows {
+        use sqlx::Row;
+        list.push(ActiveGeneration {
+            msg_id: row.get("msg_id"),
+            topic_id: row.get("topic_id"),
+            owner_id: row.get("owner_id"),
+            owner_type: row.get("owner_type"),
+            created_at: row.get("created_at"),
+        });
+    }
+    Ok(list)
+}
+
+async fn mark_message_as_error<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    msg_id: &str,
+    custom_error: Option<String>,
+) -> Result<(), String> {
+    let row = sqlx::query("SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?")
+        .bind(msg_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(r) = row {
+        use sqlx::Row;
+        let topic_id: String = r.get("topic_id");
+        let owner_id: String = r.get("owner_id");
+        let owner_type: String = r.get("owner_type");
+
+        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+            .bind(msg_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+
+        let error_placeholder = match custom_error {
+            Some(err) => format!("\n\n> VCP流式错误: {}", err),
+            None => "\n\n> VCP流式错误: 生成意外中断".to_string(),
+        };
+
+        crate::vcp_modules::chat::message_service::finalize_stream_message(
+            app_handle.clone(),
+            pool,
+            &owner_id,
+            &owner_type,
+            topic_id,
+            msg_id.to_string(),
+            error_placeholder,
+            false,
+            Some("error".to_string()),
+            None,
+            agent_id,
+        )
+        .await?;
+    } else {
+        sqlx::query("UPDATE messages SET finish_reason = 'error', is_thinking = 0 WHERE msg_id = ?")
+            .bind(msg_id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
+            .bind(msg_id)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn finalize_recovered_message<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    msg_id: &str,
+    content: String,
+) -> Result<(), String> {
+    let row = sqlx::query("SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?")
+        .bind(msg_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(r) = row {
+        use sqlx::Row;
+        let topic_id: String = r.get("topic_id");
+        let owner_id: String = r.get("owner_id");
+        let owner_type: String = r.get("owner_type");
+
+        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+            .bind(msg_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+
+        crate::vcp_modules::chat::message_service::finalize_stream_message(
+            app_handle.clone(),
+            pool,
+            &owner_id,
+            &owner_type,
+            topic_id,
+            msg_id.to_string(),
+            content,
+            false,
+            Some("completed".to_string()),
+            None,
+            agent_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn recover_active_generation<R: Runtime>(
+    app: AppHandle<R>,
+    msg_id: String,
+) -> Result<Value, String> {
+    log::info!("[VCPClient] Checking/recovering active generation: {}", msg_id);
+    
+    let settings = load_app_settings(&app).await?;
+    let api_key = settings.vcp_api_key;
+    
+    let mut url = match Url::parse(&settings.vcp_server_url) {
+        Ok(u) => u,
+        Err(e) => return Err(format!("VCP URL 解析失败: {}", e)),
+    };
+    url.set_path(&format!("/api/chat/messages/{}", msg_id));
+    let query_url = url.to_string();
+    
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+        
+    let response_res = client
+        .get(&query_url)
+        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+        .send()
+        .await;
+        
+    let response = match response_res {
+        Ok(resp) => resp,
+        Err(e) => {
+            log::warn!("[VCPClient] Network error querying message status for {}: {:?}", msg_id, e);
+            return Ok(json!({ "status": "network_error" }));
+        }
+    };
+    
+    let db = app.state::<DbState>();
+    
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        log::warn!("[VCPClient] Message {} not found on server. Marking as error.", msg_id);
+        mark_message_as_error(&app, &db.pool, &msg_id, Some("云端任务不存在(404)".to_string())).await?;
+        return Ok(json!({ "status": "failed" }));
+    }
+    
+    if !response.status().is_success() {
+        log::warn!("[VCPClient] Server returned error status {} for message {}", response.status(), msg_id);
+        return Ok(json!({ "status": "server_error" }));
+    }
+    
+    let info = match response.json::<Value>().await {
+        Ok(val) => val,
+        Err(e) => {
+            log::warn!("[VCPClient] Failed to parse message info JSON for {}: {:?}", msg_id, e);
+            return Err(format!("JSON 解析失败: {}", e));
+        }
+    };
+    
+    let status = info["status"].as_str().unwrap_or("failed");
+    let content = info["content"].as_str().unwrap_or("").to_string();
+    let error_msg = info["error"].as_str().map(|s| s.to_string());
+    
+    match status {
+        "completed" => {
+            log::info!("[VCPClient] Message {} is completed on server. Finalizing locally.", msg_id);
+            finalize_recovered_message(&app, &db.pool, &msg_id, content).await?;
+            Ok(json!({ "status": "completed" }))
+        }
+        "streaming" => {
+            log::info!("[VCPClient] Message {} is still streaming on server.", msg_id);
+            // 纯内存接续：不在本地进行物理写盘更新，仅更新内存并返回状态给前端
+            Ok(json!({ "status": "streaming", "content": content }))
+        }
+        _ => {
+            log::warn!("[VCPClient] Message {} is failed on server. Marking as error.", msg_id);
+            mark_message_as_error(&app, &db.pool, &msg_id, error_msg).await?;
+            Ok(json!({ "status": "failed" }))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn resume_stream<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, ActiveRequests>,
+    msg_id: String,
+    topic_id: String,
+    owner_id: String,
+    owner_type: String,
+    stream_channel: Channel<StreamEvent>,
+) -> Result<Value, String> {
+    log::info!("[VCPClient] resume_stream called for msg_id: {}", msg_id);
+    
+    let settings = load_app_settings(&app).await?;
+    let api_key = settings.vcp_api_key;
+    
+    let mut url = match Url::parse(&settings.vcp_server_url) {
+        Ok(u) => u,
+        Err(e) => return Err(format!("VCP URL 解析失败: {}", e)),
+    };
+    url.set_path(&format!("/api/chat/messages/{}", msg_id));
+    let query_url = url.to_string();
+    
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+        
+    let response = client
+        .get(&query_url)
+        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("查询云端消息失败: {}", e))?;
+        
+    if !response.status().is_success() {
+        return Err(format!("查询云端消息失败，HTTP 状态码: {}", response.status()));
+    }
+    
+    let info = response.json::<Value>().await.map_err(|e| format!("JSON 解析失败: {}", e))?;
+    let content = info["content"].as_str().unwrap_or("").to_string();
+    
+    let mut stream_url = match Url::parse(&settings.vcp_server_url) {
+        Ok(u) => u,
+        Err(e) => return Err(format!("VCP URL 解析失败: {}", e)),
+    };
+    stream_url.set_path("/api/chat/stream");
+    stream_url.set_query(Some(&format!("msg_id={}", msg_id)));
+    let reconnect_url = stream_url.to_string();
+    
+    let context = Some(if owner_type == "group" {
+        json!({
+            "groupId": owner_id,
+            "topicId": topic_id,
+            "isGroupMessage": true,
+        })
+    } else {
+        json!({
+            "agentId": owner_id,
+            "topicId": topic_id,
+        })
+    });
+    
+    let (res, is_aborted) = handle_streaming_request(
+        &app,
+        client,
+        &settings.vcp_server_url,
+        &api_key,
+        json!({}),
+        msg_id.clone(),
+        context,
+        {
+            let (abort_tx, abort_rx) = oneshot::channel();
+            state.0.insert(msg_id.clone(), abort_tx);
+            abort_rx
+        },
+        state.0.clone(),
+        Some(stream_channel.clone()),
+        Some(reconnect_url),
+        Some(content),
+    )
+    .await?;
+    
+    let finish_reason = if is_aborted {
+        Some("cancelled_by_user".to_string())
+    } else {
+        res["finishReason"].as_str().map(|s| s.to_string())
+    };
+    
+    let db = app.state::<DbState>();
+    use sqlx::Row;
+    
+    let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+        .bind(&msg_id)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+
+    crate::vcp_modules::chat::message_service::finalize_stream_message(
+        app.clone(),
+        &db.pool,
+        &owner_id,
+        &owner_type,
+        topic_id,
+        msg_id,
+        res["fullContent"].as_str().unwrap_or("").to_string(),
+        is_aborted,
+        finish_reason,
+        Some(stream_channel),
+        agent_id,
+    )
+    .await?;
+    
+    Ok(res)
 }
 
 

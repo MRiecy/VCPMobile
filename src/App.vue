@@ -16,6 +16,7 @@ import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
 import { useAssistantStore } from "./core/stores/assistant";
 import { useSettingsStore } from "./core/stores/settings";
+import { useChatStreamStore } from "./core/stores/chatStreamStore";
 
 
 // Native safe-area bridge: CSS env(safe-area-inset-bottom) often reports 0
@@ -188,9 +189,34 @@ const bootstrapApp = async () => {
       return;
     }
     await lifecycleStore.bootstrap();
+
+    // 🆕 异步恢复被异常打断的活跃生成，不阻塞 READY 渲染流程
+    const streamStore = useChatStreamStore();
+    streamStore.checkAndRecoverInterruptedStreams().catch(e => {
+      console.error("[App] Failed to recover interrupted streams on bootstrap:", e);
+    });
   } catch (error) {
     console.error("[App] Bootstrap failed:", error);
   }
+};
+
+const handleLifecycleState = (e: Event) => {
+  const detail = (e as CustomEvent<{ state?: string }>).detail;
+  if (detail && detail.state === "resume") {
+    console.log("[App] App resumed from background. Triggering stream recovery.");
+    const streamStore = useChatStreamStore();
+    streamStore.checkAndRecoverInterruptedStreams().catch(err => {
+      console.error("[App] Failed to recover streams on resume:", err);
+    });
+  }
+};
+
+const handleOnline = () => {
+  console.log("[App] Device online. Triggering stream recovery.");
+  const streamStore = useChatStreamStore();
+  streamStore.checkAndRecoverInterruptedStreams().catch(err => {
+    console.error("[App] Failed to recover streams on network restored:", err);
+  });
 };
 
 const backgroundStyle = computed(() => {
@@ -292,36 +318,20 @@ const handleExitRequest = async () => {
 };
 
 
-const handleVisibilityChange = () => {
-  if (document.hidden) {
-    document.documentElement.classList.add("vcp-paused-animations");
-  } else {
-    document.documentElement.classList.remove("vcp-paused-animations");
-  }
-};
-
-let isAppBackground = false;
-
-const handleVcpLifecycle = (e: Event) => {
+watch(() => lifecycleStore.isBackground, (newVal) => {
   if (isAssistant.value) return;
 
-  const detail = (e as CustomEvent).detail;
-  const state = detail?.state;
-  
-  if (state === "stop" || state === "pause") {
-    if (isAppBackground) return;
-    isAppBackground = true;
-    console.log("[Lifecycle] App moved to background (UI event).");
-  } else if (state === "resume") {
-    if (!isAppBackground) return;
-    isAppBackground = false;
-    console.log("[Lifecycle] App moved to foreground (UI event). Hydrating system status...");
-
+  if (newVal) {
+    document.documentElement.classList.add("vcp-paused-animations");
+    console.log("[App] App moved to background, pausing animations.");
+  } else {
+    document.documentElement.classList.remove("vcp-paused-animations");
+    console.log("[App] App moved to foreground, resuming animations and hydrating status.");
     lifecycleStore.hydrateSystemStatus().catch((err) => {
       console.error("[Lifecycle] Failed to hydrate system status:", err);
     });
   }
-};
+}, { immediate: true });
 
 const handleFloatingBallClick = async () => {
   console.log("[App] Floating ball clicked. Resolving assistant window...");
@@ -370,11 +380,11 @@ onMounted(async () => {
   // 1. 同步挂载基础物理按键与系统事件监听 (混合应用黄金铁律：物理拦截最优先挂载，杜绝初始化阻塞失效)
   window.addEventListener("vcp-exit-requested", handleExitRequest);
   window.addEventListener("vcp-hardware-back", handleExitRequest);
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-  window.addEventListener("vcp-lifecycle", handleVcpLifecycle);
   window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.addEventListener("vcp-share-intent", handleShareIntent);
   window.addEventListener("vcp-keyboard-inset", handleSafeAreaInset);
+  window.addEventListener("vcp-lifecycle", handleLifecycleState);
+  window.addEventListener("online", handleOnline);
 
   // 初始化全局表情包修复器
   initGlobalFixer();
@@ -406,11 +416,11 @@ onUnmounted(() => {
   if (unlistenLog) unlistenLog();
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
-  document.removeEventListener("visibilitychange", handleVisibilityChange);
-  window.removeEventListener("vcp-lifecycle", handleVcpLifecycle);
   window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
   window.removeEventListener("vcp-keyboard-inset", handleSafeAreaInset);
+  window.removeEventListener("vcp-lifecycle", handleLifecycleState);
+  window.removeEventListener("online", handleOnline);
 });
 </script>
 
