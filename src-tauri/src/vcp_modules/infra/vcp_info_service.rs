@@ -20,7 +20,7 @@ lazy_static::lazy_static! {
 }
 
 fn emit_info_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
-    if !crate::vcp_modules::infra::vcp_log_service::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
+    if !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
         return;
     }
     let _ = app.emit("vcp-info-event", payload);

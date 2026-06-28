@@ -886,6 +886,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun onDestroy(activity: AppCompatActivity) {
         activity.application.unregisterActivityLifecycleCallbacks(activityLifecycleCallbacks)
         webViewRef = null
+        lifecycleBridge.detach()
         try {
             if (networkCallback != null) {
                 val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager

@@ -846,7 +846,7 @@ async fn handle_streaming_request<R: Runtime>(
         lines = None; // 丢弃旧的线读取流
 
         // 🌟 修复温回归/后台恢复：若 App 处于后台，则挂起重连循环，等待 App 回到前台后再试，防止在后台耗尽重试次数
-        while !crate::vcp_modules::infra::vcp_log_service::APP_IN_FOREGROUND.load(std::sync::atomic::Ordering::SeqCst) {
+        while !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(std::sync::atomic::Ordering::SeqCst) {
             log::info!("[VCPClient] App is in background. Suspending reconnection for message: {}", message_id_inner);
             tokio::select! {
                 _ = &mut abort_rx => {

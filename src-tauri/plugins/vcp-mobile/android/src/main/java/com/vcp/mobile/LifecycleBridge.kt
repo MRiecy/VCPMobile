@@ -15,11 +15,11 @@ import java.lang.ref.WeakReference
  */
 class LifecycleBridge : DefaultLifecycleObserver {
 
-    private var webViewRef: WebView? = null
+    private var webViewRef: WeakReference<WebView>? = null
     private var activityRef: WeakReference<Activity>? = null
 
     fun attach(activity: Activity, webView: WebView) {
-        webViewRef = webView
+        webViewRef = WeakReference(webView)
         activityRef = WeakReference(activity)
         // 升级为进程级生命周期监听，完美防抖，免疫 Activity 重建与切换
         activity.runOnUiThread {
@@ -27,12 +27,25 @@ class LifecycleBridge : DefaultLifecycleObserver {
         }
     }
 
-    override fun onDestroy(owner: LifecycleOwner) {
+    fun detach() {
+        val activity = activityRef?.get()
+        if (activity != null) {
+            activity.runOnUiThread {
+                try {
+                    androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
+                } catch (_: Exception) {}
+            }
+        } else {
+            try {
+                androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
+            } catch (_: Exception) {}
+        }
         webViewRef = null
         activityRef = null
-        try {
-            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
-        } catch (_: Exception) {}
+    }
+
+    override fun onDestroy(owner: LifecycleOwner) {
+        detach()
         super.onDestroy(owner)
     }
 
@@ -62,43 +75,18 @@ class LifecycleBridge : DefaultLifecycleObserver {
     }
 
     private fun emit(eventName: String, detail: Map<String, Any?>) {
-        val json = serializeValue(detail)
+        val json = org.json.JSONObject(detail).toString()
         val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
         val activity = activityRef?.get()
+        val webView = webViewRef?.get() ?: return
         if (activity != null) {
             activity.runOnUiThread {
-                webViewRef?.evaluateJavascript(script, null)
+                webView.evaluateJavascript(script, null)
             }
         } else {
-            webViewRef?.post {
-                webViewRef?.evaluateJavascript(script, null)
+            webView.post {
+                webView.evaluateJavascript(script, null)
             }
         }
-    }
-
-    private fun serializeValue(value: Any?): String {
-        return when (value) {
-            null -> "null"
-            is String -> "\"${escapeJson(value)}\""
-            is Boolean -> value.toString()
-            is Number -> value.toString()
-            is Map<*, *> -> {
-                val entries = value.entries.joinToString(", ") { (k, v) ->
-                    "\"$k\": ${serializeValue(v)}"
-                }
-                "{ $entries }"
-            }
-            else -> "\"${escapeJson(value.toString())}\""
-        }
-    }
-
-    private fun escapeJson(s: String): String {
-        return s
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\b", "\\b")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
     }
 }

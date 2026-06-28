@@ -465,3 +465,122 @@ pub async fn get_core_status(state: State<'_, LifecycleState>) -> Result<CoreSta
 pub async fn get_last_error(state: State<'_, LifecycleState>) -> Result<Option<String>, String> {
     Ok(state.last_error.read().await.clone())
 }
+
+pub static APP_IN_FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+lazy_static::lazy_static! {
+    static ref LOG_LINGER_CANCEL: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>> = tokio::sync::Mutex::new(None);
+    static ref DIST_LINGER_CANCEL: tokio::sync::Mutex<Option<tokio_util::sync::CancellationToken>> = tokio::sync::Mutex::new(None);
+    static ref IS_LINGER_DISCONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+}
+
+#[tauri::command]
+pub async fn set_app_foreground_state(app: AppHandle, is_foreground: bool) {
+    set_app_foreground_state_internal(app, is_foreground).await;
+}
+
+pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bool) {
+    let was_foreground = APP_IN_FOREGROUND.swap(is_foreground, std::sync::atomic::Ordering::SeqCst);
+    if was_foreground == is_foreground {
+        return;
+    }
+    log::info!("[Lifecycle] App foreground state transitioned: {} -> {}", was_foreground, is_foreground);
+
+    // 1. 调整心跳频率
+    crate::vcp_modules::infra::vcp_log_service::handle_foreground_state_change(&app, is_foreground).await;
+
+    if !is_foreground {
+        // --- 进入后台 ---
+        // 1.1 取消旧倒计时任务
+        {
+            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+        {
+            let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+        IS_LINGER_DISCONNECTED.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // 1.2 开启 VCPLog/Info (10分钟延迟断连任务)
+        let log_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
+            *cancel_lock = Some(log_token.clone());
+        }
+        let app_clone = app.clone();
+        crate::vcp_modules::infra::utils::spawn_linger_task(
+            Duration::from_secs(600),
+            log_token,
+            move || async move {
+                log::info!("[Lifecycle] Background linger expired (10m). Disconnecting VCPLog/Info.");
+                let _ = crate::vcp_modules::infra::vcp_log_service::disconnect_log_connections(&app_clone).await;
+                IS_LINGER_DISCONNECTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        );
+
+        // 1.3 开启 Distributed (5分钟保活冷却任务)
+        let settings_state = app.state::<SettingsState>();
+        if let Ok(settings) = read_settings(app.clone(), settings_state).await {
+            if settings.distributed_enabled {
+                log::info!("[Lifecycle] Distributed enabled. Activating FGS keepalive.");
+                let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, true);
+
+                let dist_token = tokio_util::sync::CancellationToken::new();
+                {
+                    let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
+                    *cancel_lock = Some(dist_token.clone());
+                }
+                let app_clone = app.clone();
+                crate::vcp_modules::infra::utils::spawn_linger_task(
+                    Duration::from_secs(300),
+                    dist_token,
+                    move || async move {
+                        log::info!("[Lifecycle] Background distributed linger expired (5m). Deactivating keepalive.");
+                        let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app_clone, false);
+                    }
+                );
+            }
+        }
+    } else {
+        // --- 返回前台 ---
+        // 2.1 立即取消所有倒计时
+        {
+            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+        {
+            let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
+            if let Some(token) = cancel_lock.take() {
+                token.cancel();
+            }
+        }
+
+        // 2.2 恢复分布式保活状态 (前台关闭保活通知)
+        let settings_state = app.state::<SettingsState>();
+        if let Ok(settings) = read_settings(app.clone(), settings_state).await {
+            if settings.distributed_enabled {
+                let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, false);
+            }
+        }
+
+        // 2.3 若此前已冷断开，一键拉起恢复
+        if IS_LINGER_DISCONNECTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let settings_state = app.state::<SettingsState>();
+            if let Ok(settings) = read_settings(app.clone(), settings_state).await {
+                let log_url = settings.vcp_log_url;
+                let log_key = settings.vcp_log_key;
+                if !log_url.trim().is_empty() && !log_key.trim().is_empty() {
+                    log::info!("[Lifecycle] App returned to foreground. Reconnecting VCPLog/Info.");
+                    let _ = crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(&app, log_url, log_key).await;
+                }
+            }
+        }
+    }
+}

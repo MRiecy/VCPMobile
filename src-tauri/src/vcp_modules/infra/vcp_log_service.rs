@@ -2,151 +2,66 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
-use tokio_util::sync::CancellationToken;
 
 static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(15000);
 
-pub static APP_IN_FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
 lazy_static::lazy_static! {
-static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
-// 关键修复：保持 Sender 和一个 Receiver 都在生命周期内，防止通道因无接收者而被视为关闭
-static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
-static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
-static ref HEARTBEAT_RESET_TX: Arc<tokio::sync::Mutex<Option<mpsc::Sender<()>>>> = Arc::new(tokio::sync::Mutex::new(None));
-static ref LOG_LINGER_CANCEL: tokio::sync::Mutex<Option<CancellationToken>> = tokio::sync::Mutex::new(None);
-static ref DIST_LINGER_CANCEL: tokio::sync::Mutex<Option<CancellationToken>> = tokio::sync::Mutex::new(None);
-static ref IS_LINGER_DISCONNECTED: AtomicBool = AtomicBool::new(false);
+    static ref LOG_CONNECTION_ACTIVE: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    static ref LOG_SENDER: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>> = Arc::new(tokio::sync::Mutex::new(None));
+    // 关键修复：保持 Sender 和一个 Receiver 都在生命周期内，防止通道因无接收者而被视为关闭
+    static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
+    static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
+    static ref HEARTBEAT_RESET_TX: Arc<tokio::sync::Mutex<Option<mpsc::Sender<()>>>> = Arc::new(tokio::sync::Mutex::new(None));
 }
 
-#[tauri::command]
-pub async fn set_app_foreground_state(app: AppHandle, is_foreground: bool) {
-    APP_IN_FOREGROUND.store(is_foreground, Ordering::SeqCst);
-    log::info!("[VCPLog] App foreground state updated to: {}", is_foreground);
-
-    if !is_foreground {
-        // 1. 取消可能已存在的旧冷却任务
-        {
-            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
-            if let Some(token) = cancel_lock.take() {
-                token.cancel();
-            }
-        }
-        {
-            let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
-            if let Some(token) = cancel_lock.take() {
-                token.cancel();
-            }
-        }
-        IS_LINGER_DISCONNECTED.store(false, Ordering::SeqCst);
-
-        // 2. 开启 VCPLog/Info (10分钟冷却任务)
-        let log_token = CancellationToken::new();
-        {
-            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
-            *cancel_lock = Some(log_token.clone());
-        }
-        let app_clone = app.clone();
-        crate::vcp_modules::infra::utils::spawn_linger_task(
-            Duration::from_secs(600),
-            log_token,
-            move || async move {
-                log::info!("[VCPLog] Background linger expired (10m). Performing cold disconnect for VCPLog/Info.");
-                let _ = crate::vcp_modules::infra::vcp_log_service::init_vcp_log_connection_internal(
-                    app_clone.clone(),
-                    "".to_string(),
-                    "".to_string()
-                ).await;
-                let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
-                    app_clone,
-                    "".to_string(),
-                    "".to_string()
-                ).await;
-                IS_LINGER_DISCONNECTED.store(true, Ordering::SeqCst);
-            }
-        );
-
-        // 3. 开启 Distributed (5分钟保活冷却任务)
-        let settings_state = app.state::<crate::vcp_modules::settings_manager::SettingsState>();
-        if let Ok(settings) = crate::vcp_modules::settings_manager::read_settings(app.clone(), settings_state).await {
-            if settings.distributed_enabled {
-                log::info!("[VCPLog] Distributed enabled. Activating FGS keepalive from Rust backend.");
-                let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, true);
-
-                let dist_token = CancellationToken::new();
-                {
-                    let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
-                    *cancel_lock = Some(dist_token.clone());
-                }
-                let app_clone = app.clone();
-                crate::vcp_modules::infra::utils::spawn_linger_task(
-                    Duration::from_secs(300),
-                    dist_token,
-                    move || async move {
-                        log::info!("[VCPLog] Background distributed linger expired (5m). Deactivating keepalive from Rust.");
-                        let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app_clone, false);
-                    }
-                );
-            }
-        }
-    } else {
-        // 切回前台：立即取消所有倒计时
-        {
-            let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
-            if let Some(token) = cancel_lock.take() {
-                token.cancel();
-            }
-        }
-        {
-            let mut cancel_lock = DIST_LINGER_CANCEL.lock().await;
-            if let Some(token) = cancel_lock.take() {
-                token.cancel();
-            }
-        }
-
-        // 恢复分布式保活状态 (确保前台关闭保活通知)
-        let settings_state = app.state::<crate::vcp_modules::settings_manager::SettingsState>();
-        if let Ok(settings) = crate::vcp_modules::settings_manager::read_settings(app.clone(), settings_state).await {
-            if settings.distributed_enabled {
-                let _ = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, false);
-            }
-        }
-
-        // 如果此前已冷断开，立即一键拉起恢复
-        if IS_LINGER_DISCONNECTED.swap(false, Ordering::SeqCst) {
-            let settings_state = app.state::<crate::vcp_modules::settings_manager::SettingsState>();
-            if let Ok(settings) = crate::vcp_modules::settings_manager::read_settings(app.clone(), settings_state).await {
-                let log_url = settings.vcp_log_url;
-                let log_key = settings.vcp_log_key;
-                if !log_url.trim().is_empty() && !log_key.trim().is_empty() {
-                    log::info!("[VCPLog] App returned to foreground. Reconnecting VCPLog and VCPInfo from Rust.");
-                    let _ = crate::vcp_modules::infra::vcp_log_service::init_vcp_log_connection_internal(
-                        app.clone(),
-                        log_url.clone(),
-                        log_key.clone()
-                    ).await;
-                    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
-                        app.clone(),
-                        log_url,
-                        log_key
-                    ).await;
-                }
-            }
+pub async fn handle_foreground_state_change(_app: &AppHandle, is_foreground: bool) {
+    // 自动根据前后台状态调整并重置心跳
+    let heartbeat_ms = if is_foreground { 15000 } else { 120000 };
+    HEARTBEAT_INTERVAL_MS.store(heartbeat_ms, Ordering::SeqCst);
+    {
+        let tx_lock = HEARTBEAT_RESET_TX.lock().await;
+        if let Some(tx) = tx_lock.as_ref() {
+            let _ = tx.send(()).await;
         }
     }
 }
 
+pub async fn disconnect_log_connections(app: &AppHandle) {
+    let _ = init_vcp_log_connection_internal(
+        app.clone(),
+        "".to_string(),
+        "".to_string()
+    ).await;
+    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
+        app.clone(),
+        "".to_string(),
+        "".to_string()
+    ).await;
+}
+
+pub async fn reconnect_log_connections(app: &AppHandle, log_url: String, log_key: String) {
+    let _ = init_vcp_log_connection_internal(
+        app.clone(),
+        log_url.clone(),
+        log_key.clone()
+    ).await;
+    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
+        app.clone(),
+        log_url,
+        log_key
+    ).await;
+}
+
 fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
-    if !APP_IN_FOREGROUND.load(Ordering::SeqCst) {
+    if !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
         // App 处于后台时直接丢弃日志相关的实时推送，防止注入 evaluateJavascript 积压导致内存泄漏和前台恢复大卡死
         return;
     }

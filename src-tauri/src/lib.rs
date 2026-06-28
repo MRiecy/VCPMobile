@@ -41,7 +41,8 @@ use vcp_modules::group_service::{
 use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot,
-    reconcile_distributed_node_cmd, reconcile_local_server_cmd, LifecycleState,
+    reconcile_distributed_node_cmd, reconcile_local_server_cmd, set_app_foreground_state,
+    LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
@@ -73,7 +74,7 @@ use vcp_modules::vcp_info_service::{
     get_vcp_info_payload, init_vcp_info_connection,
 };
 use vcp_modules::vcp_log_service::{
-    init_vcp_log_connection, send_vcp_log_message, set_app_foreground_state, set_vcp_log_heartbeat,
+    init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -327,11 +328,28 @@ pub fn run() {
         .build(context)
         .expect("error while building tauri application");
 
-    app.run(|_, event| {
+    app.run(|_app_handle, event| {
         match event {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            tauri::RunEvent::Suspended => {
+                log::info!("[Lifecycle] Native RunEvent::Suspended. App entered background.");
+                let handle = _app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, false).await;
+                });
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            tauri::RunEvent::Resumed => {
+                log::info!("[Lifecycle] Native RunEvent::Resumed. App entered foreground.");
+                let handle = _app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, true).await;
+                });
+            }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             tauri::RunEvent::WindowEvent { event: tauri::WindowEvent::Focused(focused), .. } => {
                 log::info!("[Lifecycle] Native WindowEvent::Focused: focused={}", focused);
-                vcp_modules::infra::vcp_log_service::APP_IN_FOREGROUND.store(focused, std::sync::atomic::Ordering::SeqCst);
+                vcp_modules::lifecycle_manager::APP_IN_FOREGROUND.store(focused, std::sync::atomic::Ordering::SeqCst);
             }
             _ => {}
         }

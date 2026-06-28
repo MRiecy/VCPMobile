@@ -311,25 +311,12 @@ const handleVcpLifecycle = (e: Event) => {
   if (state === "stop" || state === "pause") {
     if (isAppBackground) return;
     isAppBackground = true;
-    console.log("[Lifecycle] App moved to background, tuning heartbeat to 120s...");
-
-    invoke("set_vcp_log_heartbeat", { intervalMs: 120000 }).catch((err) => {
-      console.error("[Lifecycle] Failed to set background heartbeat:", err);
-    });
-    invoke("set_app_foreground_state", { isForeground: false }).catch((err) => {
-      console.error("[Lifecycle] Failed to notify background state:", err);
-    });
+    console.log("[Lifecycle] App moved to background (UI event).");
   } else if (state === "resume") {
     if (!isAppBackground) return;
     isAppBackground = false;
-    console.log("[Lifecycle] App moved to foreground, restoring heartbeat to 15s...");
+    console.log("[Lifecycle] App moved to foreground (UI event). Hydrating system status...");
 
-    invoke("set_vcp_log_heartbeat", { intervalMs: 15000 }).catch((err) => {
-      console.error("[Lifecycle] Failed to restore foreground heartbeat:", err);
-    });
-    invoke("set_app_foreground_state", { isForeground: true }).catch((err) => {
-      console.error("[Lifecycle] Failed to notify foreground state:", err);
-    });
     lifecycleStore.hydrateSystemStatus().catch((err) => {
       console.error("[Lifecycle] Failed to hydrate system status:", err);
     });
