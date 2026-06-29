@@ -27,5 +27,13 @@
             android:exported="false"
             android:foregroundServiceType="remoteMessaging"
             android:stopWithTask="true" />
+
+        <!-- 隔离进程推送接收服务：仅加载极简 Kotlin 与网络监听，占用约 15MB 内存，完美对抗 LMK 后台清理 -->
+        <service
+            android:name=".service.PushListenerService"
+            android:process=":push"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
     </application>
 </manifest>

@@ -512,7 +512,9 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
         }
         IS_LINGER_DISCONNECTED.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        // 1.2 开启 VCPLog/Info (10分钟延迟断连任务)
+        // 1.2 开启 VCPLog/Info (5分钟延迟断连任务)
+        // 优化：将延迟断连时间从 10 分钟缩短至 5 分钟。
+        // 原因：在后台缩短活跃连接持有时间，可显著降低后台长连接维持的心跳能耗，并防御 aggressive 系统省电机制的杀进程风险。
         let log_token = tokio_util::sync::CancellationToken::new();
         {
             let mut cancel_lock = LOG_LINGER_CANCEL.lock().await;
@@ -520,7 +522,7 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
         }
         let app_clone = app.clone();
         crate::vcp_modules::infra::utils::spawn_linger_task(
-            Duration::from_secs(600),
+            Duration::from_secs(300),
             log_token,
             move || async move {
                 log::info!(

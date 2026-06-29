@@ -72,16 +72,50 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(a: Activity) {
-            if (a === activity && com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
-                activity.runOnUiThread {
-                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (a === activity) {
+                isAppInForeground = true
+                // 当应用返回前台时，立即停止后台 SSE 监听服务，由前台 WebView 的实时连接接管，避免双重连接与重复通知
+                try {
+                    val intent = Intent(activity, com.vcp.mobile.service.PushListenerService::class.java).apply {
+                        action = com.vcp.mobile.service.PushListenerService.ACTION_STOP
+                    }
+                    activity.stopService(intent)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to stop PushListenerService on resume: ", e)
+                }
+
+                if (com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
+                    activity.runOnUiThread {
+                        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
                 }
             }
         }
         override fun onActivityPaused(a: Activity) {
-            if (a === activity && com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
-                activity.runOnUiThread {
-                    activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (a === activity) {
+                isAppInForeground = false
+                // 当应用进入后台时，如果开启了推送，则拉起隔离进程的 SSE 监听服务，开始低功耗守护
+                val prefs = activity.getSharedPreferences("vcp_push_prefs", Context.MODE_PRIVATE)
+                val enabled = prefs.getBoolean("enabled", false)
+                if (enabled) {
+                    try {
+                        val intent = Intent(activity, com.vcp.mobile.service.PushListenerService::class.java).apply {
+                            action = com.vcp.mobile.service.PushListenerService.ACTION_START
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            activity.startForegroundService(intent)
+                        } else {
+                            activity.startService(intent)
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to start PushListenerService on pause: ", e)
+                    }
+                }
+
+                if (com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
+                    activity.runOnUiThread {
+                        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
                 }
             }
         }
@@ -103,6 +137,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     val pluginActivity: Activity get() = activity
     var webViewRef: WebView? = null
+    private var isAppInForeground = true // 追踪应用是否处于前台，用于精准控制后台推送服务的生命周期
+    private var pendingApprovalData: JSObject? = null // 暂存点击通知启动时携带的审批数据，供冷启动对齐
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
@@ -912,6 +948,19 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         shareIntentHandler.handleShareIntent(intent)
+        
+        // 解析 Intent 中是否包含审批参数，如果有，将其暂合并分发事件给前端 WebView
+        val approval = parseApprovalFromIntent(intent)
+        if (approval != null) {
+            pendingApprovalData = approval
+            Log.i(TAG, "onNewIntent: Received pending approval, dispatching event to webview.")
+            webViewRef?.post {
+                webViewRef?.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('vcp-pending-approval', { detail: ${approval.toString()} }))",
+                    null
+                )
+            }
+        }
     }
 
     // ==================================================================
@@ -2126,6 +2175,66 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject(e.message ?: "Unknown error")
         }
     }
+
+    @Command
+    fun updatePushCredentials(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(UpdatePushCredentialsArgs::class.java)
+            val prefs = activity.getSharedPreferences("vcp_push_prefs", Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putString("vcp_url", args.url)
+                putString("vcp_key", args.key)
+                putString("vcp_topic", args.topic)
+                putBoolean("enabled", args.enabled)
+            }.apply()
+
+            Log.i(TAG, "updatePushCredentials: url=${args.url}, topic=${args.topic}, enabled=${args.enabled}")
+
+            // 如果已经处于后台且启用了，则立即拉起；否则（前台或被禁用）停止服务
+            val intent = Intent(activity, com.vcp.mobile.service.PushListenerService::class.java)
+            if (args.enabled && !isAppInForeground) {
+                intent.action = com.vcp.mobile.service.PushListenerService.ACTION_START
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    activity.startForegroundService(intent)
+                } else {
+                    activity.startService(intent)
+                }
+            } else {
+                intent.action = com.vcp.mobile.service.PushListenerService.ACTION_STOP
+                activity.stopService(intent)
+            }
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "updatePushCredentials failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getPendingApproval(invoke: Invoke) {
+        // 冷启动对齐：优先读取 intent 中并解析，如无则使用缓存
+        val intentData = parseApprovalFromIntent(activity.intent)
+        val result = intentData ?: pendingApprovalData
+        pendingApprovalData = null // 消费后即时清理，防止重复唤醒弹窗
+        
+        Log.i(TAG, "getPendingApproval: Returning ${if (result != null) "data" else "empty"}")
+        invoke.resolve(result ?: JSObject())
+    }
+
+    private fun parseApprovalFromIntent(intent: Intent?): JSObject? {
+        if (intent == null) return null
+        val approvalId = intent.getStringExtra("approval_id") ?: return null
+        val toolName = intent.getStringExtra("tool_name") ?: ""
+        val detail = intent.getStringExtra("detail") ?: ""
+        val reason = intent.getStringExtra("reason") ?: ""
+
+        val obj = JSObject()
+        obj.put("approvalId", approvalId)
+        obj.put("toolName", toolName)
+        obj.put("detail", detail)
+        obj.put("reason", reason)
+        return obj
+    }
 }
 
 @InvokeArg
@@ -2221,5 +2330,13 @@ class AcquireForegroundArgs {
 @InvokeArg
 class ReleaseForegroundArgs {
     lateinit var tag: String
+}
+
+@InvokeArg
+class UpdatePushCredentialsArgs {
+    lateinit var url: String
+    lateinit var key: String
+    lateinit var topic: String
+    var enabled: Boolean = false
 }
 
