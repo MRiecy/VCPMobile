@@ -14,10 +14,6 @@ export const vLongpress: Directive = {
 
     // 触发长按逻辑
     const executeLongPress = (e: Event) => {
-      // 在 WebView 中触发震动反馈 (物理感知)
-      if (navigator.vibrate) {
-        navigator.vibrate(50);
-      }
       callback(e);
     };
 

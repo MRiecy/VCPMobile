@@ -79,7 +79,6 @@ const onTouchEnd = () => {
   isDragging.value = false;
 
   if (swipeX.value > SWIPE_THRESHOLD) {
-    if (navigator.vibrate) navigator.vibrate(40);
     emit('remove');
   } else {
     swipeX.value = 0;

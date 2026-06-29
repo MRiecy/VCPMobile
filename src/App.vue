@@ -306,10 +306,6 @@ const handleExitRequest = async () => {
       toastOnly: true,
     });
 
-    if (typeof navigator !== "undefined" && navigator.vibrate) {
-      navigator.vibrate(50);
-    }
-
     exitTimer = window.setTimeout(() => {
       isWaitingExit.value = false;
       exitTimer = null;
