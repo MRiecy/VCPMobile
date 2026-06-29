@@ -1669,6 +1669,7 @@ pub struct ActiveGeneration {
 #[tauri::command]
 pub async fn get_active_generations(
     app: tauri::AppHandle,
+    active_requests: tauri::State<'_, ActiveRequests>,
 ) -> Result<Vec<ActiveGeneration>, String> {
     let db = app.state::<DbState>();
     let rows = sqlx::query(
@@ -1681,8 +1682,13 @@ pub async fn get_active_generations(
     let mut list = Vec::new();
     for row in rows {
         use sqlx::Row;
+        let msg_id: String = row.get("msg_id");
+        // 过滤掉当前正在活跃运行的后台流式任务，它们由 sse helper 代理，并不是“被异常打断”的
+        if active_requests.0.contains_key(&msg_id) {
+            continue;
+        }
         list.push(ActiveGeneration {
-            msg_id: row.get("msg_id"),
+            msg_id,
             topic_id: row.get("topic_id"),
             owner_id: row.get("owner_id"),
             owner_type: row.get("owner_type"),
@@ -1756,282 +1762,36 @@ async fn mark_message_as_error<R: Runtime>(
     Ok(())
 }
 
-async fn finalize_recovered_message<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    pool: &sqlx::Pool<sqlx::Sqlite>,
-    msg_id: &str,
-    content: String,
-) -> Result<(), String> {
-    let row = sqlx::query(
-        "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
-    )
-    .bind(msg_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if let Some(r) = row {
-        use sqlx::Row;
-        let topic_id: String = r.get("topic_id");
-        let owner_id: String = r.get("owner_id");
-        let owner_type: String = r.get("owner_type");
-
-        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
-            .bind(msg_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
-
-        crate::vcp_modules::chat::message_service::finalize_stream_message(
-            app_handle.clone(),
-            pool,
-            &owner_id,
-            &owner_type,
-            topic_id,
-            msg_id.to_string(),
-            content,
-            false,
-            Some("completed".to_string()),
-            None,
-            agent_id,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn recover_active_generation<R: Runtime>(
     app: AppHandle<R>,
+    active_requests: tauri::State<'_, ActiveRequests>,
     msg_id: String,
 ) -> Result<Value, String> {
-    log::info!(
-        "[VCPClient] Checking/recovering active generation: {}",
+    // 1. 如果此消息在当前 active_requests 中，说明后台流式任务仍在正常进行/重连接续中
+    if active_requests.0.contains_key(&msg_id) {
+        log::info!(
+            "[VCPClient] Active generation {} is running in background. Returning streaming status.",
+            msg_id
+        );
+        return Ok(json!({ "status": "streaming" }));
+    }
+
+    // 2. 如果不在 active_requests 中，说明在后台挂起期间进程已被杀死（或者任务从未启动/已被用户中止）
+    // 由于服务端不保存任何流式状态，因此无法通过网络恢复。直接在本地标记为错误并返回失败。
+    log::warn!(
+        "[VCPClient] Active generation {} not found in active_requests (process was likely killed). Marking as failed.",
         msg_id
     );
 
-    let settings = load_app_settings(&app).await?;
-    let api_key = settings.vcp_api_key;
-
-    let mut url = match Url::parse(&settings.vcp_server_url) {
-        Ok(u) => u,
-        Err(e) => return Err(format!("VCP URL 解析失败: {}", e)),
-    };
-    url.set_path(&format!("/api/chat/messages/{}", msg_id));
-    let query_url = url.to_string();
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let response_res = client
-        .get(&query_url)
-        .header(AUTHORIZATION, format!("Bearer {}", api_key))
-        .send()
-        .await;
-
-    let response = match response_res {
-        Ok(resp) => resp,
-        Err(e) => {
-            log::warn!(
-                "[VCPClient] Network error querying message status for {}: {:?}",
-                msg_id,
-                e
-            );
-            return Ok(json!({ "status": "network_error" }));
-        }
-    };
-
     let db = app.state::<DbState>();
-
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        log::warn!(
-            "[VCPClient] Message {} not found on server. Marking as error.",
-            msg_id
-        );
-        mark_message_as_error(
-            &app,
-            &db.pool,
-            &msg_id,
-            Some("云端任务不存在(404)".to_string()),
-        )
-        .await?;
-        return Ok(json!({ "status": "failed" }));
-    }
-
-    if !response.status().is_success() {
-        log::warn!(
-            "[VCPClient] Server returned error status {} for message {}",
-            response.status(),
-            msg_id
-        );
-        return Ok(json!({ "status": "server_error" }));
-    }
-
-    let info = match response.json::<Value>().await {
-        Ok(val) => val,
-        Err(e) => {
-            log::warn!(
-                "[VCPClient] Failed to parse message info JSON for {}: {:?}",
-                msg_id,
-                e
-            );
-            return Err(format!("JSON 解析失败: {}", e));
-        }
-    };
-
-    let status = info["status"].as_str().unwrap_or("failed");
-    let content = info["content"].as_str().unwrap_or("").to_string();
-    let error_msg = info["error"].as_str().map(|s| s.to_string());
-
-    match status {
-        "completed" => {
-            log::info!(
-                "[VCPClient] Message {} is completed on server. Finalizing locally.",
-                msg_id
-            );
-            finalize_recovered_message(&app, &db.pool, &msg_id, content).await?;
-            Ok(json!({ "status": "completed" }))
-        }
-        "streaming" => {
-            log::info!(
-                "[VCPClient] Message {} is still streaming on server.",
-                msg_id
-            );
-            // 纯内存接续：不在本地进行物理写盘更新，仅更新内存并返回状态给前端
-            Ok(json!({ "status": "streaming", "content": content }))
-        }
-        _ => {
-            log::warn!(
-                "[VCPClient] Message {} is failed on server. Marking as error.",
-                msg_id
-            );
-            mark_message_as_error(&app, &db.pool, &msg_id, error_msg).await?;
-            Ok(json!({ "status": "failed" }))
-        }
-    }
-}
-
-#[tauri::command]
-pub async fn resume_stream<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, ActiveRequests>,
-    msg_id: String,
-    topic_id: String,
-    owner_id: String,
-    owner_type: String,
-    stream_channel: Channel<StreamEvent>,
-) -> Result<Value, String> {
-    log::info!("[VCPClient] resume_stream called for msg_id: {}", msg_id);
-
-    let settings = load_app_settings(&app).await?;
-    let api_key = settings.vcp_api_key;
-
-    let mut url = match Url::parse(&settings.vcp_server_url) {
-        Ok(u) => u,
-        Err(e) => return Err(format!("VCP URL 解析失败: {}", e)),
-    };
-    url.set_path(&format!("/api/chat/messages/{}", msg_id));
-    let query_url = url.to_string();
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let response = client
-        .get(&query_url)
-        .header(AUTHORIZATION, format!("Bearer {}", api_key))
-        .send()
-        .await
-        .map_err(|e| format!("查询云端消息失败: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "查询云端消息失败，HTTP 状态码: {}",
-            response.status()
-        ));
-    }
-
-    let info = response
-        .json::<Value>()
-        .await
-        .map_err(|e| format!("JSON 解析失败: {}", e))?;
-    let content = info["content"].as_str().unwrap_or("").to_string();
-
-    let mut stream_url = match Url::parse(&settings.vcp_server_url) {
-        Ok(u) => u,
-        Err(e) => return Err(format!("VCP URL 解析失败: {}", e)),
-    };
-    stream_url.set_path("/api/chat/stream");
-    stream_url.set_query(Some(&format!("msg_id={}", msg_id)));
-    let reconnect_url = stream_url.to_string();
-
-    let context = Some(if owner_type == "group" {
-        json!({
-            "groupId": owner_id,
-            "topicId": topic_id,
-            "isGroupMessage": true,
-        })
-    } else {
-        json!({
-            "agentId": owner_id,
-            "topicId": topic_id,
-        })
-    });
-
-    let (res, is_aborted) = handle_streaming_request(
+    mark_message_as_error(
         &app,
-        client,
-        &settings.vcp_server_url,
-        &api_key,
-        json!({}),
-        msg_id.clone(),
-        context,
-        {
-            let (abort_tx, abort_rx) = oneshot::channel();
-            state.0.insert(msg_id.clone(), abort_tx);
-            abort_rx
-        },
-        state.0.clone(),
-        Some(stream_channel.clone()),
-        Some(reconnect_url),
-        Some(content),
-    )
-    .await?;
-
-    let finish_reason = if is_aborted {
-        Some("cancelled_by_user".to_string())
-    } else {
-        res["finishReason"].as_str().map(|s| s.to_string())
-    };
-
-    let db = app.state::<DbState>();
-    use sqlx::Row;
-
-    let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
-        .bind(&msg_id)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-    let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
-
-    crate::vcp_modules::chat::message_service::finalize_stream_message(
-        app.clone(),
         &db.pool,
-        &owner_id,
-        &owner_type,
-        topic_id,
-        msg_id,
-        res["fullContent"].as_str().unwrap_or("").to_string(),
-        is_aborted,
-        finish_reason,
-        Some(stream_channel),
-        agent_id,
+        &msg_id,
+        Some("后台进程已被系统销毁，流式对话中断".to_string()),
     )
     .await?;
 
-    Ok(res)
+    Ok(json!({ "status": "failed" }))
 }

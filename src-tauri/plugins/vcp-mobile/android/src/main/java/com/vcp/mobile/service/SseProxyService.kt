@@ -357,6 +357,16 @@ class SseProxyService : Service() {
                 }
             }
             wifiLock = null
+
+            // 当没有活跃连接时，主动退出前台并停止服务，消除通知栏残留
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+            Log.i(TAG, "updateLocks: No active connections. SseProxyService stopping self.")
         }
     }
 
