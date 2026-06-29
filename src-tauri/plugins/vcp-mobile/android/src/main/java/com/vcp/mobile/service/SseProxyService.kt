@@ -7,14 +7,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
-import android.os.Bundle
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
-import android.os.Message
-import android.os.Messenger
-import android.os.RemoteException
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +18,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.yield
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -31,22 +26,26 @@ import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
+import org.json.JSONArray
 import org.json.JSONObject
-import android.os.PowerManager
-import android.net.wifi.WifiManager
+import java.io.BufferedReader
+import java.io.BufferedWriter
 import java.io.File
-import java.io.FileOutputStream
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
- * 隔离进程通用助手 (SseProxyService)
+ * 隔离进程网络助手 (SseProxyService)
  * 
  * 【职责】：
- * 1. 运行在独立的 ":helper" 进程中，极低内存消耗，免受主进程 LMK 强杀影响。
- * 2. 作为一个“哑网络管道”，不含任何 VCP 业务逻辑，仅执行主进程交给的 SSE 请求。
- * 3. 即使主进程（WebView/Rust）切后台被冻结或强杀，此服务依然在后台维持连接并将流式数据缓存于内存。
- * 4. 主进程重新启动（冷启动）或返回前台（温回归）后，绑定此服务即可倍速流式回放积压的 Chunks，实现无缝流恢复。
+ * 1. 运行在独立的 ":helper" 进程中，通过本地 TCP 套接字与主进程通信，彻底避免 Binder 限制与高频 IPC 开销。
+ * 2. 采用全内存设计，主进程死亡时后台下载流直接缓存在内存中，避免磁盘 I/O。
+ * 3. 动态锁控：只在流下载时持有 WakeLock/WifiLock，下载完成后即刻释放，闲置时自动退出服务。
  */
 class SseProxyService : Service() {
 
@@ -54,102 +53,36 @@ class SseProxyService : Service() {
         private const val TAG = "SseProxyService"
         private const val CHANNEL_ID = "vcp_helper_service_channel"
         private const val NOTIFICATION_ID_SERVICE = 0x53545210
-
-        // Messenger 消息协议 (主进程 -> 子进程)
-        const val MSG_REGISTER_CLIENT = 1
-        const val MSG_UNREGISTER_CLIENT = 2
-        const val MSG_START_STREAM = 3
-        const val MSG_STOP_STREAM = 4
-        const val MSG_GET_CACHE = 5
-
-        // Messenger 消息协议 (子进程 -> 主进程)
-        const val EVENT_SSE_CHUNK = 10
-        // 注：EVENT_CACHE_RESPONSE 已废弃，完全走 EVENT_SSE_CHUNK 流式倍速回放
-
-        // Bundle 键名
-        const val KEY_REQUEST_ID = "request_id"
-        const val KEY_URL = "url"
-        const val KEY_HEADERS = "headers"
-        const val KEY_BODY = "body"
-        const val KEY_EVENT_TYPE = "event_type" // "open", "message", "error", "closed"
-        const val KEY_EVENT_DATA = "event_data"
     }
+
+    class StreamSession(
+        val requestId: String,
+        var eventSource: EventSource? = null,
+        val eventBuffer: MutableList<JSONObject> = mutableListOf(),
+        var isCompleted: Boolean = false,
+        var lastFinishReason: String? = null,
+        var activeSocketWriter: BufferedWriter? = null
+    )
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .readTimeout(0, TimeUnit.MILLISECONDS) // 维持无限长连接
+            .readTimeout(0, TimeUnit.MILLISECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
             .build()
     }
 
-    // 追踪所有活跃的 EventSource 连接
-    private val activeConnections = ConcurrentHashMap<String, EventSource>()
-
-    // 独立于主进程的子进程物理锁，保障后台网络不中断
+    private val activeSessions = ConcurrentHashMap<String, StreamSession>()
+    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    
+    private var serverSocket: ServerSocket? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
-    
-    // 活跃的缓存文件流句柄表 (Key: requestId, Value: FileOutputStream)
-    private val activeFileStreams = ConcurrentHashMap<String, FileOutputStream>()
-
-    // 主进程的 Messenger 客户端
-    private var clientMessenger: Messenger? = null
-
-    // 自身的 Messenger，用于接收主进程的消息
-    private lateinit var serviceMessenger: Messenger
-
-    // 协程作用域，用于后台流式回放
-    private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-
-    /**
-     * 处理主进程发来的消息
-     */
-    private inner class IncomingHandler(looper: Looper) : Handler(looper) {
-        override fun handleMessage(msg: Message) {
-            when (msg.what) {
-                MSG_REGISTER_CLIENT -> {
-                    Log.i(TAG, "Client registered.")
-                    clientMessenger = msg.replyTo
-                }
-                MSG_UNREGISTER_CLIENT -> {
-                    Log.i(TAG, "Client unregistered.")
-                    clientMessenger = null
-                }
-                MSG_START_STREAM -> {
-                    val data = msg.data ?: return
-                    val requestId = data.getString(KEY_REQUEST_ID) ?: return
-                    val url = data.getString(KEY_URL) ?: return
-                    val headersJson = data.getString(KEY_HEADERS) ?: "{}"
-                    val body = data.getString(KEY_BODY) ?: ""
-                    
-                    startSseRequest(requestId, url, headersJson, body)
-                }
-                MSG_STOP_STREAM -> {
-                    val data = msg.data ?: return
-                    val requestId = data.getString(KEY_REQUEST_ID) ?: return
-                    stopSseRequest(requestId)
-                }
-            }
-        }
-    }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        serviceMessenger = Messenger(IncomingHandler(Looper.getMainLooper()))
         
-        // 清理上一次运行残留的缓存文件，防止磁盘堆积
-        try {
-            val sseCacheDir = File(applicationContext.cacheDir, "sse_cache")
-            if (sseCacheDir.exists()) {
-                sseCacheDir.deleteRecursively()
-            }
-            sseCacheDir.mkdirs()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to cleanup stale cache files", e)
-        }
-        
-        // 启动为前台服务，获得免死金牌
+        // 启动为前台服务，获得后台守护资格
         val serviceNotification = buildServiceNotification()
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -164,6 +97,9 @@ class SseProxyService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "startForeground failed: ", e)
         }
+
+        // 启动本地 TCP 服务端
+        startTcpServer()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -171,194 +107,323 @@ class SseProxyService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? {
-        Log.i(TAG, "onBind called.")
-        return serviceMessenger.binder
+        // 本地 TCP 架构下，主进程不再绑定此服务，直接通过 TCP 连接通信
+        return null
     }
 
     override fun onDestroy() {
-        Log.i(TAG, "onDestroy: cancelling all connections.")
-        for (requestId in activeConnections.keys) {
-            stopSseRequest(requestId)
+        Log.i(TAG, "onDestroy: shutting down TCP server and all sessions.")
+        try {
+            serverSocket?.close()
+        } catch (ignored: Exception) {}
+        
+        for (session in activeSessions.values) {
+            session.eventSource?.cancel()
+            try { session.activeSocketWriter?.close() } catch (ignored: Exception) {}
         }
-        activeConnections.clear()
-        updateLocks() // 确保进程销毁时双锁被物理释放
-        serviceScope.cancel() // 取消协程，释放资源
+        activeSessions.clear()
+        
+        releaseLocks()
+        serviceScope.cancel()
         super.onDestroy()
     }
 
     /**
-     * 发起外部 SSE 请求
+     * 在 127.0.0.1 启动 TCP 监听，并将端口写入 sse_helper.port
      */
-    private fun startSseRequest(requestId: String, url: String, headersJson: String, postBody: String) {
-        if (activeConnections.containsKey(requestId)) {
-            Log.w(TAG, "Connection already exists for requestId=$requestId, skipping.")
-            return
-        }
-
-        Log.i(TAG, "Starting SSE Request: id=$requestId, url=$url")
-        
-        // 初始化该请求的本地缓存文件流
-        try {
-            val sseCacheDir = File(applicationContext.cacheDir, "sse_cache")
-            val cacheFile = File(sseCacheDir, "sse_cache_$requestId.txt")
-            if (cacheFile.exists()) {
-                cacheFile.delete()
+    private fun startTcpServer() {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+                serverSocket = server
+                val port = server.localPort
+                Log.i(TAG, "TCP Server listening on 127.0.0.1:$port")
+                
+                val portFile = File(applicationContext.cacheDir, "sse_helper.port")
+                portFile.writeText(port.toString())
+                
+                while (!server.isClosed) {
+                    val socket = server.accept()
+                    handleClientSocket(socket)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "TCP Server error or closed: ", e)
             }
-            val fos = FileOutputStream(cacheFile, true)
-            activeFileStreams[requestId] = fos
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create cache file stream for id=$requestId", e)
         }
+    }
 
-        val requestBuilder = Request.Builder().url(url)
+    /**
+     * 处理客户端 Socket 接入与 JSON 行命令解析
+     */
+    private fun handleClientSocket(socket: Socket) {
+        serviceScope.launch(Dispatchers.IO) {
+            var reader: BufferedReader? = null
+            var writer: BufferedWriter? = null
+            var boundRequestId: String? = null
+            try {
+                reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+                
+                val requestLine = reader.readLine() ?: return@launch
+                val request = JSONObject(requestLine)
+                val action = request.getString("action")
+                val requestId = request.getString("requestId")
+                boundRequestId = requestId
+                
+                Log.i(TAG, "TCP Command received: action=$action, requestId=$requestId")
+                
+                when (action) {
+                    "start" -> {
+                        val url = request.getString("url")
+                        val headersJson = request.optString("headers", "{}")
+                        val body = request.optString("body", "")
+                        handleStartStream(requestId, url, headersJson, body, writer)
+                        readSocketUntilClose(socket, reader, requestId)
+                    }
+                    "resume" -> {
+                        handleResumeStream(requestId, writer)
+                        readSocketUntilClose(socket, reader, requestId)
+                    }
+                    "query" -> {
+                        handleQueryStream(requestId, writer)
+                        socket.close()
+                    }
+                    "stop" -> {
+                        handleStopStream(requestId)
+                        socket.close()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling client socket for $boundRequestId", e)
+                try { socket.close() } catch (ignored: Exception) {}
+            }
+        }
+    }
+
+    private fun readSocketUntilClose(socket: Socket, reader: BufferedReader, requestId: String) {
+        try {
+            val buf = CharArray(1024)
+            while (reader.read(buf) != -1) {
+                // 仅维持连接读取，阻塞直到客户端断开连接
+            }
+        } catch (ignored: Exception) {
+        } finally {
+            Log.i(TAG, "Client socket disconnected for requestId=$requestId")
+            val session = activeSessions[requestId]
+            if (session != null) {
+                synchronized(session) {
+                    if (session.activeSocketWriter != null) {
+                        try { session.activeSocketWriter?.close() } catch (ignored: Exception) {}
+                        session.activeSocketWriter = null
+                    }
+                }
+                cleanupSessionIfCompletedAndDisconnected(session)
+            }
+            try { socket.close() } catch (ignored: Exception) {}
+            updateLocks()
+        }
+    }
+
+    private fun handleStartStream(
+        requestId: String,
+        url: String,
+        headersJson: String,
+        body: String,
+        writer: BufferedWriter
+    ) {
+        val session = StreamSession(requestId, activeSocketWriter = writer)
+        activeSessions[requestId] = session
         
-        // 解析 Headers
+        val requestBuilder = Request.Builder().url(url)
         try {
             val headersObj = JSONObject(headersJson)
             val keys = headersObj.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
-                val value = headersObj.getString(key)
-                requestBuilder.header(key, value)
+                requestBuilder.header(key, headersObj.getString(key))
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse headers JSON: ", e)
+            Log.e(TAG, "Failed to parse headers", e)
         }
-
-        // 设定为 POST 流式请求（符合 VCP /v1/chat/completions 规范）
-        if (postBody.isNotEmpty()) {
+        
+        if (body.isNotEmpty()) {
             val mediaType = "application/json; charset=utf-8".toMediaType()
-            requestBuilder.post(postBody.toRequestBody(mediaType))
+            requestBuilder.post(body.toRequestBody(mediaType))
         }
-
-        val request = requestBuilder.build()
-
-        val eventSourceListener = object : EventSourceListener() {
+        
+        val listener = object : EventSourceListener() {
             override fun onOpen(eventSource: EventSource, response: Response) {
                 Log.i(TAG, "SSE Connected: id=$requestId")
-                sendEventToClient(requestId, "open", "")
+                sendEventToSession(session, "open", "")
             }
-
+            
             override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
-                // 收到流式块
-                sendEventToClient(requestId, "message", data)
+                sendEventToSession(session, "message", data)
             }
-
+            
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 val errorMsg = t?.message ?: response?.message ?: "Unknown network error"
                 Log.w(TAG, "SSE Failed: id=$requestId, error=$errorMsg")
-                
-                // 将错误事件格式化为 JSON 供前端/Rust解析
                 val errObj = JSONObject().apply {
                     put("error", errorMsg)
                     put("status", response?.code ?: 0)
                 }
-                sendEventToClient(requestId, "error", errObj.toString())
-                
-                activeConnections.remove(requestId)
-                updateLocks()
+                session.isCompleted = true
+                session.lastFinishReason = "error"
+                sendEventToSession(session, "error", errObj.toString())
+                cleanupSessionIfCompletedAndDisconnected(session)
             }
-
+            
             override fun onClosed(eventSource: EventSource) {
                 Log.i(TAG, "SSE Closed: id=$requestId")
-                sendEventToClient(requestId, "closed", "")
-                activeConnections.remove(requestId)
-                updateLocks()
+                session.isCompleted = true
+                session.lastFinishReason = "completed"
+                sendEventToSession(session, "closed", "")
+                cleanupSessionIfCompletedAndDisconnected(session)
             }
         }
-
-        val source = EventSources.createFactory(httpClient).newEventSource(request, eventSourceListener)
-        activeConnections[requestId] = source
-        updateLocks()
-    }
-
-    /**
-     * 终止特定请求并清除缓存
-     */
-    private fun stopSseRequest(requestId: String) {
-        Log.i(TAG, "Stopping SSE Request: id=$requestId")
-        activeConnections.remove(requestId)?.cancel()
         
-        // 关闭并移除文件流
-        activeFileStreams.remove(requestId)?.let { fos ->
-            try {
-                fos.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to close file stream for id=$requestId", e)
-            }
-        }
-
-        // 物理删除缓存文件，防止磁盘堆积
-        try {
-            val sseCacheDir = File(applicationContext.cacheDir, "sse_cache")
-            val cacheFile = File(sseCacheDir, "sse_cache_$requestId.txt")
-            if (cacheFile.exists()) {
-                cacheFile.delete()
-                Log.d(TAG, "Deleted stream cache file for id=$requestId")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to delete cache file for id=$requestId", e)
-        }
-
+        val source = EventSources.createFactory(httpClient).newEventSource(requestBuilder.build(), listener)
+        session.eventSource = source
         updateLocks()
     }
 
-    /**
-     * 根据当前是否有活跃连接，动态在子进程中获取/释放 WakeLock 和 WifiLock
-     */
-    @Synchronized
-    private fun updateLocks() {
-        val hasActive = activeConnections.isNotEmpty()
-        if (hasActive) {
-            val appContext = applicationContext
-            if (wakeLock == null) {
-                val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
-                if (powerManager != null) {
-                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VCP:SseProxyWakeLock")
+    private fun handleResumeStream(requestId: String, writer: BufferedWriter) {
+        val session = activeSessions[requestId]
+        if (session == null) {
+            Log.w(TAG, "resume: Session not found for id=$requestId")
+            val errEvent = JSONObject().apply {
+                put("requestId", requestId)
+                put("eventType", "error")
+                put("eventData", JSONObject().apply { put("error", "Session not found") }.toString())
+            }
+            writer.write(errEvent.toString() + "\n")
+            writer.flush()
+            return
+        }
+        
+        Log.i(TAG, "Resuming session id=$requestId, playing back ${session.eventBuffer.size} events.")
+        
+        synchronized(session) {
+            session.activeSocketWriter = writer
+            for (event in session.eventBuffer) {
+                try {
+                    writer.write(event.toString() + "\n")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed playing back events to socket", e)
+                    session.activeSocketWriter = null
+                    return
                 }
             }
-            wakeLock?.let {
-                if (!it.isHeld) {
-                    it.acquire()
-                    Log.i(TAG, "updateLocks: SseProxy WakeLock ACQUIRED.")
-                }
+            try {
+                writer.flush()
+            } catch (e: Exception) {
+                session.activeSocketWriter = null
             }
+        }
+        updateLocks()
+    }
 
-            if (wifiLock == null) {
-                val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-                if (wifiManager != null) {
-                    @Suppress("DEPRECATION")
-                    wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VCP:SseProxyWifiLock")
-                    } else {
-                        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL, "VCP:SseProxyWifiLock")
+    private fun handleQueryStream(requestId: String, writer: BufferedWriter) {
+        val session = activeSessions[requestId]
+        val resp = JSONObject()
+        resp.put("requestId", requestId)
+        
+        if (session == null) {
+            resp.put("status", "not_found")
+        } else {
+            synchronized(session) {
+                resp.put("status", if (session.isCompleted) "completed" else "streaming")
+                resp.put("lastFinishReason", session.lastFinishReason ?: "")
+                
+                // 从内存中拼接出完整的文本，供冷启动快速落盘
+                val fullText = StringBuilder()
+                for (event in session.eventBuffer) {
+                    if (event.getString("eventType") == "message") {
+                        val eventData = event.getString("eventData")
+                        if (eventData != "[DONE]") {
+                            try {
+                                val dataVal = JSONObject(eventData)
+                                val choices = dataVal.optJSONArray("choices")
+                                if (choices != null && choices.length() > 0) {
+                                    val delta = choices.getJSONObject(0).optJSONObject("delta")
+                                    val content = delta?.optString("content", "") ?: ""
+                                    fullText.append(content)
+                                }
+                            } catch (ignored: Exception) {}
+                        }
                     }
                 }
+                resp.put("content", fullText.toString())
             }
-            wifiLock?.let {
-                if (!it.isHeld) {
-                    it.acquire()
-                    Log.i(TAG, "updateLocks: SseProxy WifiLock ACQUIRED.")
+        }
+        
+        try {
+            writer.write(resp.toString() + "\n")
+            writer.flush()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write query response", e)
+        }
+    }
+
+    private fun handleStopStream(requestId: String) {
+        Log.i(TAG, "Stopping session: id=$requestId")
+        val session = activeSessions.remove(requestId)
+        if (session != null) {
+            synchronized(session) {
+                session.eventSource?.cancel()
+                if (session.activeSocketWriter != null) {
+                    try { session.activeSocketWriter?.close() } catch (ignored: Exception) {}
+                    session.activeSocketWriter = null
                 }
             }
+        }
+        updateLocks()
+    }
+
+    private fun sendEventToSession(session: StreamSession, eventType: String, data: String) {
+        val eventObj = JSONObject().apply {
+            put("requestId", session.requestId)
+            put("eventType", eventType)
+            put("eventData", data)
+        }
+        
+        synchronized(session) {
+            session.eventBuffer.add(eventObj)
+            
+            session.activeSocketWriter?.let { writer ->
+                try {
+                    writer.write(eventObj.toString() + "\n")
+                    writer.flush()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to write event to socket, client might be suspended. id=${session.requestId}")
+                    session.activeSocketWriter = null
+                }
+            }
+        }
+    }
+
+    private fun cleanupSessionIfCompletedAndDisconnected(session: StreamSession) {
+        synchronized(session) {
+            if (session.isCompleted && session.activeSocketWriter == null) {
+                Log.i(TAG, "Session id=${session.requestId} is completed and disconnected. Cleaning up.")
+                activeSessions.remove(session.requestId)
+            }
+        }
+        updateLocks()
+    }
+
+    @Synchronized
+    private fun updateLocks() {
+        val hasRunning = activeSessions.values.any { !it.isCompleted }
+        if (hasRunning) {
+            acquireLocks()
         } else {
-            wakeLock?.let {
-                if (it.isHeld) {
-                    it.release()
-                    Log.i(TAG, "updateLocks: SseProxy WakeLock RELEASED.")
-                }
-            }
-            wakeLock = null
-
-            wifiLock?.let {
-                if (it.isHeld) {
-                    it.release()
-                    Log.i(TAG, "updateLocks: SseProxy WifiLock RELEASED.")
-                }
-            }
-            wifiLock = null
-
-            // 当没有活跃连接时，主动退出前台并停止服务，消除通知栏残留
+            releaseLocks()
+        }
+        
+        if (activeSessions.isEmpty()) {
+            Log.i(TAG, "No sessions left. Stopping foreground and service.")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
@@ -366,52 +431,59 @@ class SseProxyService : Service() {
                 stopForeground(true)
             }
             stopSelf()
-            Log.i(TAG, "updateLocks: No active connections. SseProxyService stopping self.")
         }
     }
 
-    /**
-     * 向主进程发送事件，如果主进程挂起/死亡，则自动写入本地缓存
-     */
-    private fun sendEventToClient(requestId: String, eventType: String, data: String, bypassCache: Boolean = false) {
-        if (!bypassCache) {
-            // 构造标准的 SSE JSON 包写入缓存
-            val payload = JSONObject().apply {
-                put("type", eventType)
-                put("data", data)
-                put("timestamp", System.currentTimeMillis())
-            }.toString()
+    private fun acquireLocks() {
+        val appContext = applicationContext
+        if (wakeLock == null) {
+            val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (powerManager != null) {
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VCP:SseProxyWakeLock")
+            }
+        }
+        wakeLock?.let {
+            if (!it.isHeld) {
+                it.acquire()
+                Log.i(TAG, "SseProxy WakeLock ACQUIRED.")
+            }
+        }
 
-            // 实时追加写入本地缓存文件（带缓冲且线程安全）
-            val fos = activeFileStreams[requestId]
-            if (fos != null) {
-                try {
-                    synchronized(fos) {
-                        fos.write((payload + "\n").toByteArray(Charsets.UTF_8))
-                        fos.flush() // 确保数据立即可被主进程读取
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to write chunk to cache file for id=$requestId", e)
+        if (wifiLock == null) {
+            val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wifiManager != null) {
+                @Suppress("DEPRECATION")
+                wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VCP:SseProxyWifiLock")
+                } else {
+                    wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL, "VCP:SseProxyWifiLock")
                 }
             }
         }
-
-        // 如果客户端在线，尝试实时推过去
-        clientMessenger?.let { messenger ->
-            // 使用 Message.obtain() 从全局消息池中获取 Message 实例，减少 GC 压力
-            val msg = Message.obtain(null, EVENT_SSE_CHUNK)
-            msg.data = Bundle().apply {
-                putString(KEY_REQUEST_ID, requestId)
-                putString(KEY_EVENT_TYPE, eventType)
-                putString(KEY_EVENT_DATA, data)
-            }
-            try {
-                messenger.send(msg)
-            } catch (e: RemoteException) {
-                Log.w(TAG, "Client is unreachable, caching event. id=$requestId")
-                clientMessenger = null // 客户端连接已失效
+        wifiLock?.let {
+            if (!it.isHeld) {
+                it.acquire()
+                Log.i(TAG, "SseProxy WifiLock ACQUIRED.")
             }
         }
+    }
+
+    private fun releaseLocks() {
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Log.i(TAG, "SseProxy WakeLock RELEASED.")
+            }
+        }
+        wakeLock = null
+
+        wifiLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Log.i(TAG, "SseProxy WifiLock RELEASED.")
+            }
+        }
+        wifiLock = null
     }
 
     private fun createNotificationChannel() {

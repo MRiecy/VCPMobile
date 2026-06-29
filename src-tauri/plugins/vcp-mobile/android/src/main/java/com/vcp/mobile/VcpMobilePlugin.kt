@@ -134,57 +134,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     // SSE Proxy Service Binder & IPC (Messenger)
     // ==================================================================
-    private var serviceMessenger: android.os.Messenger? = null
-    private var isBound = false
-
-    private val localMessenger = android.os.Messenger(Handler(Looper.getMainLooper()) { msg ->
-        when (msg.what) {
-            com.vcp.mobile.service.SseProxyService.EVENT_SSE_CHUNK -> {
-                val data = msg.data ?: return@Handler true
-                val requestId = data.getString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID) ?: return@Handler true
-                val eventType = data.getString(com.vcp.mobile.service.SseProxyService.KEY_EVENT_TYPE) ?: return@Handler true
-                val eventData = data.getString(com.vcp.mobile.service.SseProxyService.KEY_EVENT_DATA) ?: ""
-                
-                // 将数据分发给 Rust 侧的全局事件监听器
-                val triggerData = JSObject()
-                triggerData.put("requestId", requestId)
-                triggerData.put("eventType", eventType)
-                triggerData.put("eventData", eventData)
-                trigger("sse_event", triggerData)
-            }
-        }
-        true
-    })
-
-    private val serviceConnection = object : android.content.ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, service: android.os.IBinder?) {
-            Log.i(TAG, "SseProxyService connected.")
-            serviceMessenger = android.os.Messenger(service)
-            isBound = true
-            
-            try {
-                val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_REGISTER_CLIENT)
-                msg.replyTo = localMessenger
-                serviceMessenger?.send(msg)
-            } catch (e: android.os.RemoteException) {
-                Log.e(TAG, "Failed to register client: ", e)
-            }
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            Log.i(TAG, "SseProxyService disconnected.")
-            serviceMessenger = null
-            isBound = false
-        }
-    }
-
-    private fun bindSseService() {
+    // ==================================================================
+    // SSE Proxy Service Lifecycle
+    // ==================================================================
+    private fun startHelperServiceInternal() {
         try {
             val intent = Intent(activity, com.vcp.mobile.service.SseProxyService::class.java)
-            activity.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-            Log.i(TAG, "Binding to SseProxyService initiated.")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                activity.startForegroundService(intent)
+            } else {
+                activity.startService(intent)
+            }
+            Log.i(TAG, "SseProxyService start initiated.")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to bind SseProxyService: ", e)
+            Log.e(TAG, "Failed to start SseProxyService: ", e)
         }
     }
 
@@ -192,7 +155,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         instanceRef = java.lang.ref.WeakReference(this)
         activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
         startOomScoreGuard()
-        bindSseService()
+        startHelperServiceInternal()
     }
 
 
@@ -2199,87 +2162,12 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun startSseProxy(invoke: Invoke) {
+    fun startHelperService(invoke: Invoke) {
         try {
-            val args = invoke.parseArgs(StartSseProxyArgs::class.java)
-            Log.i(TAG, "startSseProxy: id=${args.requestId}, url=${args.url}")
-            
-            val messenger = serviceMessenger
-            if (messenger == null) {
-                invoke.reject("SseProxyService is not bound")
-                return
-            }
-
-            val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_START_STREAM)
-            msg.data = Bundle().apply {
-                putString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID, args.requestId)
-                putString(com.vcp.mobile.service.SseProxyService.KEY_URL, args.url)
-                putString(com.vcp.mobile.service.SseProxyService.KEY_HEADERS, args.headers)
-                putString(com.vcp.mobile.service.SseProxyService.KEY_BODY, args.body)
-            }
-            messenger.send(msg)
+            startHelperServiceInternal()
             invoke.resolve()
         } catch (e: Exception) {
-            Log.e(TAG, "startSseProxy failed", e)
-            invoke.reject(e.message ?: "Unknown error")
-        }
-    }
-
-    @Command
-    fun stopSseProxy(invoke: Invoke) {
-        try {
-            val args = invoke.parseArgs(StopSseProxyArgs::class.java)
-            Log.i(TAG, "stopSseProxy: id=${args.requestId}")
-            
-            val messenger = serviceMessenger
-            if (messenger == null) {
-                invoke.reject("SseProxyService is not bound")
-                return
-            }
-
-            val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_STOP_STREAM)
-            msg.data = Bundle().apply {
-                putString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID, args.requestId)
-            }
-            messenger.send(msg)
-            invoke.resolve()
-        } catch (e: Exception) {
-            Log.e(TAG, "stopSseProxy failed", e)
-            invoke.reject(e.message ?: "Unknown error")
-        }
-    }
-
-    @Command
-    fun getSseProxyCache(invoke: Invoke) {
-        try {
-            val args = invoke.parseArgs(GetSseProxyCacheArgs::class.java)
-            Log.i(TAG, "getSseProxyCache: id=${args.requestId}")
-            
-            // 直接在主进程中读取沙盒下的缓存文件，彻底绕过 Binder IPC 传输大流量
-            val sseCacheDir = java.io.File(activity.cacheDir, "sse_cache")
-            val cacheFile = java.io.File(sseCacheDir, "sse_cache_${args.requestId}.txt")
-            
-            val cacheArray = JSArray()
-            if (cacheFile.exists()) {
-                try {
-                    cacheFile.forEachLine { line ->
-                        if (line.trim().isNotEmpty()) {
-                            cacheArray.put(line)
-                        }
-                    }
-                    Log.i(TAG, "getSseProxyCache: Successfully read ${cacheArray.length()} chunks from file.")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to read sse_cache file for id=${args.requestId}", e)
-                }
-            } else {
-                Log.w(TAG, "getSseProxyCache: Cache file does not exist for id=${args.requestId}")
-            }
-            
-            val resObj = JSObject()
-            resObj.put("cache", cacheArray)
-            invoke.resolve(resObj)
-        } catch (e: Exception) {
-            Log.e(TAG, "getSseProxyCache failed", e)
+            Log.e(TAG, "startHelperService failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
     }
@@ -2380,21 +2268,5 @@ class ReleaseForegroundArgs {
     lateinit var tag: String
 }
 
-@InvokeArg
-class StartSseProxyArgs {
-    lateinit var requestId: String
-    lateinit var url: String
-    lateinit var headers: String
-    lateinit var body: String
-}
 
-@InvokeArg
-class StopSseProxyArgs {
-    lateinit var requestId: String
-}
-
-@InvokeArg
-class GetSseProxyCacheArgs {
-    lateinit var requestId: String
-}
 

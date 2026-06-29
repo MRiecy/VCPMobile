@@ -67,7 +67,7 @@ use vcp_modules::topic_service::{
 use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
     get_active_generations, interruptGroupTurn, interruptRequest, recover_active_generation,
-    sendToVCP, test_vcp_connection, ActiveRequests, CancelledGroupTurns,
+    resume_stream, sendToVCP, test_vcp_connection, ActiveRequests, CancelledGroupTurns,
 };
 use vcp_modules::vcp_info_service::{
     clear_vcp_info, get_vcp_info_connection_status, get_vcp_info_metadata_list,
@@ -174,14 +174,7 @@ pub fn run() {
                 }
             });
 
-            // 4. 监听由 Kotlin SseProxyService 发回的 SSE 事件，并分发给 Rust 状态机
-            app.listen_any("vcp-mobile://sse_event", move |event| {
-                if let Ok(payload) = serde_json::from_str::<crate::vcp_modules::vcp_client::KotlinSseEvent>(event.payload()) {
-                    crate::vcp_modules::vcp_client::dispatch_sse_event(payload);
-                } else {
-                    log::warn!("[VCPCore] Failed to parse sse_event payload: {:?}", event.payload());
-                }
-            });
+
 
             // 5. 监听由 Kotlin LifecycleBridge 发回的原生进程级生命周期事件
             #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -247,6 +240,7 @@ pub fn run() {
             sendToVCP,
             get_active_generations,
             recover_active_generation,
+            resume_stream,
             get_tarven_rules,
             save_tarven_rule,
             delete_tarven_rule,

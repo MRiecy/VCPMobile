@@ -15,7 +15,7 @@ import SettingsRow from "../../components/settings/SettingsRow.vue";
 import AboutSection from "./components/AboutSection.vue"; // 实测解析延迟明显，保持静态
 
 // 低频子页面（advanced / power）：懒加载，用户点进子页面时才解析
-const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
+// const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
 const TopicSummarySection = defineAsyncComponent(() => import("./components/TopicSummarySection.vue"));
 const DistributedSettingsSection = defineAsyncComponent(() => import("../distributed/DistributedSettingsSection.vue"));
 const MaintenanceSection = defineAsyncComponent(() => import("./components/MaintenanceSection.vue"));
@@ -287,12 +287,14 @@ watch(currentSubPage, (val) => {
               <!-- 高级功能 -->
               <template v-if="visibleSubPage === 'advanced'">
                 <div class="space-y-6">
+                  <!-- 暂时停用划词悬浮助手功能
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">划词悬浮助手</h3>
                     <SettingsCard>
                       <AssistantSettingsSection :settings="settings" @save-request="saveSettings" />
                     </SettingsCard>
                   </div>
+                  -->
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">话题总结</h3>
                     <SettingsCard>

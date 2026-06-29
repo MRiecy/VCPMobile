@@ -1,9 +1,7 @@
 use crate::vcp_modules::infra::utils::normalize_vcp_url;
 use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use dashmap::{DashMap, DashSet};
-#[cfg(not(target_os = "android"))]
 use futures_util::StreamExt;
-#[cfg(not(target_os = "android"))]
 use futures_util::TryStreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
@@ -14,9 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
 use tokio::sync::oneshot;
-#[cfg(not(target_os = "android"))]
 use tokio_util::codec::{FramedRead, LinesCodec};
-#[cfg(not(target_os = "android"))]
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -24,39 +20,6 @@ use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
-use lazy_static::lazy_static;
-use std::sync::Mutex;
-use std::collections::HashMap;
-
-/// 从 Kotlin 传回的原始 SSE 事件载荷
-#[derive(Deserialize, Clone, Debug)]
-#[allow(dead_code)]
-pub struct KotlinSseEvent {
-    #[serde(rename = "requestId")]
-    pub request_id: String,
-    #[serde(rename = "eventType")]
-    pub event_type: String,
-    #[serde(rename = "eventData")]
-    pub event_data: String,
-}
-
-lazy_static! {
-    /// 全局流接收端映射表，用于将 Kotlin 异步通知路由到具体的 Rust 状态机线程
-    pub static ref ACTIVE_STREAM_RECEIVERS: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<KotlinSseEvent>>> =
-        Mutex::new(HashMap::new());
-}
-
-/// 将来自 Kotlin 插件的事件派发给对应的 Rust 状态机
-pub fn dispatch_sse_event(event: KotlinSseEvent) {
-    let receivers = ACTIVE_STREAM_RECEIVERS.lock().unwrap();
-    if let Some(tx) = receivers.get(&event.request_id) {
-        if let Err(e) = tx.send(event) {
-            log::warn!("[VCPClient] Failed to send sse event to channel: {:?}", e);
-        }
-    } else {
-        log::debug!("[VCPClient] No active receiver for sse event: {}", event.request_id);
-    }
-}
 
 /// =================================================================
 /// vcp_modules/vcp_client.rs - 统一的 VCP 请求处理模块 (Rust 重写版)
@@ -630,6 +593,75 @@ fn extract_timestamp_bindings(messages: &mut [Value]) -> Vec<Value> {
     message_timestamp_bindings
 }
 
+#[cfg(target_os = "android")]
+fn get_helper_port<R: Runtime>(app: &AppHandle<R>) -> Result<u16, String> {
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let port_file = cache_dir.join("sse_helper.port");
+    if !port_file.exists() {
+        return Err("sse_helper.port file not found. Is SseProxyService running?".to_string());
+    }
+    let content = std::fs::read_to_string(port_file).map_err(|e| e.to_string())?;
+    let port = content.trim().parse::<u16>().map_err(|e| e.to_string())?;
+    Ok(port)
+}
+
+#[cfg(target_os = "android")]
+async fn connect_to_helper<R: Runtime>(
+    app: &AppHandle<R>,
+    action: &str,
+    msg_id: &str,
+    extra_params: Option<Value>,
+) -> Result<tokio::net::TcpStream, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = tauri_plugin_vcp_mobile::stream::start_helper_service(app.clone());
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let port = get_helper_port(app)?;
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| format!("Failed to connect to sse helper socket on 127.0.0.1:{}: {}", port, e))?;
+
+    let mut cmd = json!({
+        "action": action,
+        "requestId": msg_id
+    });
+    if let Some(params) = extra_params {
+        if let Some(obj) = cmd.as_object_mut() {
+            for (k, v) in params.as_object().unwrap() {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    
+    use tokio::io::AsyncWriteExt;
+    let cmd_line = cmd.to_string() + "\n";
+    stream.write_all(cmd_line.as_bytes()).await.map_err(|e| e.to_string())?;
+    stream.flush().await.map_err(|e| e.to_string())?;
+    
+    Ok(stream)
+}
+
+#[cfg(target_os = "android")]
+async fn send_stop_to_helper<R: Runtime>(app: &AppHandle<R>, msg_id: &str) -> Result<(), String> {
+    let port = get_helper_port(app)?;
+    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    let cmd = json!({
+        "action": "stop",
+        "requestId": msg_id
+    });
+    
+    use tokio::io::AsyncWriteExt;
+    let cmd_line = cmd.to_string() + "\n";
+    stream.write_all(cmd_line.as_bytes()).await.map_err(|e| e.to_string())?;
+    stream.flush().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 3. 抽离自适应降帧流式请求循环
 #[allow(clippy::too_many_arguments, unused_variables)]
 async fn handle_streaming_request<R: Runtime>(
@@ -746,11 +778,9 @@ async fn handle_streaming_request<R: Runtime>(
         buffer.process_queue()
     };
 
-    #[cfg(not(target_os = "android"))]
     type BoxedLineStream =
         Box<dyn futures_util::Stream<Item = Result<String, std::io::Error>> + Unpin + Send>;
     
-    #[cfg(not(target_os = "android"))]
     let to_line_stream = |resp: reqwest::Response| -> BoxedLineStream {
         let stream = resp.bytes_stream().map_err(std::io::Error::other);
         let reader = StreamReader::new(stream);
@@ -759,11 +789,11 @@ async fn handle_streaming_request<R: Runtime>(
         Box::new(mapped)
     };
 
+    #[cfg(target_os = "android")]
+    let mut tcp_reader: Option<FramedRead<tokio::net::TcpStream, LinesCodec>> = None;
+
     #[cfg(not(target_os = "android"))]
     let mut lines: Option<BoxedLineStream> = None;
-
-    #[cfg(target_os = "android")]
-    let mut rx_channel: Option<tokio::sync::mpsc::UnboundedReceiver<KotlinSseEvent>> = None;
 
     // 1. 声明状态机的所有状态
     enum State {
@@ -781,7 +811,6 @@ async fn handle_streaming_request<R: Runtime>(
     'main_loop: loop {
         match state {
             State::Init => {
-                // 初始内容对齐：如果是冷启动接续，先将已生成内容喂给 AST 解析器对齐状态
                 if let Some(ref content) = initial_content {
                     aurora_buffer.append_chunk(content);
                     let _ = aurora_buffer.process_queue();
@@ -799,37 +828,32 @@ async fn handle_streaming_request<R: Runtime>(
             State::Connecting => {
                 #[cfg(target_os = "android")]
                 {
-                    // 1. 创建本地接收通道，并注册到全局表
-                    let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel();
-                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().insert(message_id_inner.clone(), tx);
-                    rx_channel = Some(rx_new);
-
-                    // 2. 调用 Kotlin 插件命令开始流
                     let headers_json = json!({
                         "Authorization": format!("Bearer {}", api_key),
                         "Content-Type": "application/json"
-                    }).to_string();
-                    let body_json = request_body.to_string();
+                    });
+                    let params = json!({
+                        "url": final_url,
+                        "headers": headers_json.to_string(),
+                        "body": request_body.to_string()
+                    });
 
-                    if let Err(e) = tauri_plugin_vcp_mobile::stream::start_sse_proxy(
-                        _app.clone(),
-                        message_id_inner.clone(),
-                        final_url.to_string(),
-                        headers_json,
-                        body_json,
-                    ) {
-                        log::error!("[VCPClient] start_sse_proxy failed: {:?}", e);
-                        send_stream_event(StreamEvent::error(
-                            message_id_inner.clone(),
-                            context_inner.clone(),
-                            format!("启动本地代理失败: {}", e),
-                        ));
-                        ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
-                        active_requests_inner.remove(&message_id_inner);
-                        return Err(e);
+                    match connect_to_helper(_app, "start", &message_id_inner, Some(params)).await {
+                        Ok(stream) => {
+                            tcp_reader = Some(FramedRead::new(stream, LinesCodec::new()));
+                            state = State::Streaming;
+                        }
+                        Err(e) => {
+                            log::error!("[VCPClient] connect_to_helper failed: {:?}", e);
+                            send_stream_event(StreamEvent::error(
+                                message_id_inner.clone(),
+                                context_inner.clone(),
+                                format!("启动本地代理失败: {}", e),
+                            ));
+                            active_requests_inner.remove(&message_id_inner);
+                            return Err(e);
+                        }
                     }
-
-                    state = State::Streaming;
                 }
                 #[cfg(not(target_os = "android"))]
                 {
@@ -876,7 +900,6 @@ async fn handle_streaming_request<R: Runtime>(
                 }
             }
             State::Resuming => {
-                // 确保 App 处于前台（温回归门控）
                 while !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
@@ -888,8 +911,7 @@ async fn handle_streaming_request<R: Runtime>(
                         _ = &mut abort_rx => {
                             #[cfg(target_os = "android")]
                             {
-                                let _ = tauri_plugin_vcp_mobile::stream::stop_sse_proxy(_app.clone(), message_id_inner.clone());
-                                ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                                let _ = send_stop_to_helper(_app, &message_id_inner).await;
                             }
                             active_requests_inner.remove(&message_id_inner);
                             return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
@@ -901,179 +923,28 @@ async fn handle_streaming_request<R: Runtime>(
                 #[cfg(target_os = "android")]
                 {
                     log::info!(
-                        "[VCPClient] Resuming SSE from local proxy cache for message: {}",
+                        "[VCPClient] Resuming SSE from local proxy socket for message: {}",
                         message_id_inner
                     );
                     
-                    // 1. 从 Kotlin 获取缓存的 chunks
-                    match tauri_plugin_vcp_mobile::stream::get_sse_proxy_cache(_app.clone(), message_id_inner.clone()) {
-                        Ok(resp) => {
-                            log::info!(
-                                "[VCPClient] Successfully retrieved {} cached events from proxy",
-                                resp.cache.len()
-                            );
-                            
-                            // 重新注册接收通道，保证后续实时流能接收到
-                            if rx_channel.is_none() {
-                                let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel();
-                                ACTIVE_STREAM_RECEIVERS.lock().unwrap().insert(message_id_inner.clone(), tx);
-                                rx_channel = Some(rx_new);
-                            }
-
-                            // 2. 模拟处理缓存中的所有事件
-                            let mut stream_ended_in_cache = false;
-                            for event_str in resp.cache {
-                                if let Ok(val) = serde_json::from_str::<Value>(&event_str) {
-                                    let event_type = val["type"].as_str().unwrap_or("");
-                                    let event_data = val["data"].as_str().unwrap_or("");
-                                    
-                                    if event_type == "message" {
-                                        if event_data == "[DONE]" {
-                                            stream_ended_in_cache = true;
-                                            break;
-                                        }
-                                        if let Ok(data_val) = serde_json::from_str::<Value>(event_data) {
-                                            if let Some(reason) = data_val.get("finish_reason").and_then(|r| r.as_str()) {
-                                                last_finish_reason = Some(reason.to_string());
-                                            }
-                                            if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                pending_aurora_chunk.push_str(delta);
-                                                let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                    &mut aurora_buffer,
-                                                    &mut pending_aurora_chunk,
-                                                    &mut last_aurora_parse,
-                                                    false,
-                                                );
-                                                let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                if stable_changed || tail_changed || has_mutations {
-                                                    send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
-                                                }
-                                            }
-                                        }
-                                    } else if event_type == "closed" {
-                                        stream_ended_in_cache = true;
-                                        break;
-                                    } else if event_type == "error" {
-                                        // 缓存中包含错误事件
-                                        let err_msg = if let Ok(err_val) = serde_json::from_str::<Value>(event_data) {
-                                            err_val["error"].as_str().unwrap_or("Unknown proxy error").to_string()
-                                        } else {
-                                            "Unknown proxy error".to_string()
-                                        };
-                                        send_stream_event(StreamEvent::error(
-                                            message_id_inner.clone(),
-                                            context_inner.clone(),
-                                            err_msg,
-                                        ));
-                                        ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
-                                        active_requests_inner.remove(&message_id_inner);
-                                        return Err("SSE failed in proxy cache".to_string());
-                                    }
-                                }
-                            }
-
-                            if stream_ended_in_cache {
-                                // 缓存中已经完成了这个流
-                                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                aurora_buffer.finalize();
-                                send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
-                                ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
-                                active_requests_inner.remove(&message_id_inner);
-                                return Ok((
-                                    json!({
-                                        "fullContent": aurora_buffer.full_text,
-                                        "streamingStarted": true,
-                                        "finishReason": last_finish_reason
-                                    }),
-                                    false,
-                                ));
-                            } else {
-                                // 缓存中未完结，转向 Streaming 接收后续实时流
-                                retry_count = 0;
-                                backoff = Duration::from_millis(500);
-                                state = State::Streaming;
-                            }
+                    match connect_to_helper(_app, "resume", &message_id_inner, None).await {
+                        Ok(stream) => {
+                            log::info!("[VCPClient] Successfully reconnected to sse helper socket");
+                            tcp_reader = Some(FramedRead::new(stream, LinesCodec::new()));
+                            retry_count = 0;
+                            backoff = Duration::from_millis(500);
+                            state = State::Streaming;
                         }
                         Err(e) => {
-                            log::warn!("[VCPClient] Failed to get sse proxy cache: {:?}", e);
+                            log::warn!("[VCPClient] Failed to reconnect to sse helper: {:?}", e);
                             state = State::Aligning;
                         }
                     }
                 }
                 #[cfg(not(target_os = "android"))]
                 {
-                    let reconnect_url = if let Some(ref url) = initial_reconnect_url {
-                        url.clone()
-                    } else {
-                        match Url::parse(final_url) {
-                            Ok(mut url) => {
-                                url.set_path("/api/chat/stream");
-                                url.set_query(Some(&format!("msg_id={}", message_id_inner)));
-                                url.to_string()
-                            }
-                            Err(_) => {
-                                active_requests_inner.remove(&message_id_inner);
-                                return Err("Failed to parse final_url for reconnection".to_string());
-                            }
-                        }
-                    };
-
-                    let offset = aurora_buffer.full_text.chars().count();
-                    log::info!(
-                        "[VCPClient] Re-establishing stream connection to {} with Last-Event-ID: {}",
-                        reconnect_url,
-                        offset
-                    );
-
-                    let req_res = client
-                        .get(&reconnect_url)
-                        .header(AUTHORIZATION, format!("Bearer {}", api_key))
-                        .header("Last-Event-ID", offset.to_string())
-                        .send()
-                        .await;
-
-                    match req_res {
-                        Ok(resp) if resp.status().is_success() => {
-                            log::info!(
-                                "[VCPClient] Reconnection successful for message: {}",
-                                message_id_inner
-                            );
-                            retry_count = 0;
-                            backoff = Duration::from_millis(500);
-                            send_stream_event(StreamEvent {
-                                r#type: "reconnecting".into(),
-                                message_id: message_id_inner.clone(),
-                                context: context_inner.clone(),
-                                ..Default::default()
-                            });
-                            lines = Some(to_line_stream(resp));
-                            state = State::Streaming;
-                        }
-                        Ok(resp)
-                            if resp.status() == reqwest::StatusCode::NOT_FOUND
-                                || resp.status() == reqwest::StatusCode::BAD_REQUEST =>
-                        {
-                            log::warn!(
-                                "[VCPClient] Stream not found (status: {}). Transitioning to Aligning.",
-                                resp.status()
-                            );
-                            state = State::Aligning;
-                        }
-                        Ok(resp) => {
-                            log::warn!(
-                                "[VCPClient] Reconnect returned status {}, transitioning to Retrying",
-                                resp.status()
-                            );
-                            state = State::Retrying;
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "[VCPClient] Reconnect failed: {:?}, transitioning to Retrying",
-                                e
-                            );
-                            state = State::Retrying;
-                        }
-                    }
+                    log::warn!("[VCPClient] Reconnection is only supported on Android via SSE proxy. Transitioning to Aligning.");
+                    state = State::Aligning;
                 }
             }
             State::Streaming => {
@@ -1081,64 +952,76 @@ async fn handle_streaming_request<R: Runtime>(
 
                 #[cfg(target_os = "android")]
                 {
-                    if let Some(ref mut rx) = rx_channel {
+                    if let Some(ref mut reader) = tcp_reader {
                         loop {
                             tokio::select! {
                                 _ = &mut abort_rx => {
                                     log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
-                                    let _ = tauri_plugin_vcp_mobile::stream::stop_sse_proxy(_app.clone(), message_id_inner.clone());
+                                    let _ = send_stop_to_helper(_app, &message_id_inner).await;
                                     flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                                     aurora_buffer.finalize();
                                     send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-                                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
                                     active_requests_inner.remove(&message_id_inner);
                                     return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                                 }
-                                event_opt = rx.recv() => {
-                                    match event_opt {
-                                        Some(event) => {
-                                            let event_type = event.event_type.as_str();
-                                            let event_data = event.event_data.as_str();
-                                            
-                                            if event_type == "message" {
-                                                if event_data == "[DONE]" {
-                                                    stream_ended_normally = true;
-                                                    break;
-                                                }
-                                                if let Ok(val) = serde_json::from_str::<Value>(event_data) {
-                                                    if let Some(reason) = val.get("finish_reason").and_then(|r| r.as_str()) {
-                                                        last_finish_reason = Some(reason.to_string());
+                                next_line = reader.next() => {
+                                    match next_line {
+                                        Some(Ok(line)) => {
+                                            if let Ok(event) = serde_json::from_str::<Value>(&line) {
+                                                let event_type = event["eventType"].as_str().unwrap_or("");
+                                                let event_data = event["eventData"].as_str().unwrap_or("");
+                                                
+                                                if event_type == "message" {
+                                                    if event_data == "[DONE]" {
+                                                        stream_ended_normally = true;
+                                                        break;
                                                     }
-                                                    if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                        pending_aurora_chunk.push_str(delta);
-                                                        let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                            &mut aurora_buffer,
-                                                            &mut pending_aurora_chunk,
-                                                            &mut last_aurora_parse,
-                                                            false,
-                                                        );
-                                                        let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                        if stable_changed || tail_changed || has_mutations {
-                                                            send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                    if let Ok(data_val) = serde_json::from_str::<Value>(event_data) {
+                                                        if let Some(reason) = data_val.get("finish_reason").and_then(|r| r.as_str()) {
+                                                            last_finish_reason = Some(reason.to_string());
+                                                        }
+                                                        if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
+                                                            pending_aurora_chunk.push_str(delta);
+                                                            let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                                &mut aurora_buffer,
+                                                                &mut pending_aurora_chunk,
+                                                                &mut last_aurora_parse,
+                                                                false,
+                                                            );
+                                                            let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                            if stable_changed || tail_changed || has_mutations {
+                                                                send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                            }
                                                         }
                                                     }
+                                                } else if event_type == "closed" {
+                                                    stream_ended_normally = true;
+                                                    break;
+                                                } else if event_type == "error" {
+                                                    let err_msg = if let Ok(err_val) = serde_json::from_str::<Value>(event_data) {
+                                                        err_val["error"].as_str().unwrap_or("Unknown proxy error").to_string()
+                                                    } else {
+                                                        "Unknown proxy error".to_string()
+                                                    };
+                                                    log::warn!("[VCPClient] Stream proxy error: {}. Failing stream immediately.", err_msg);
+                                                    send_stream_event(StreamEvent::error(
+                                                        message_id_inner.clone(),
+                                                        context_inner.clone(),
+                                                        err_msg.clone(),
+                                                    ));
+                                                    let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                                                    active_requests_inner.remove(&message_id_inner);
+                                                    return Err(err_msg);
                                                 }
-                                            } else if event_type == "closed" {
-                                                stream_ended_normally = true;
-                                                break;
-                                            } else if event_type == "error" {
-                                                let err_msg = if let Ok(err_val) = serde_json::from_str::<Value>(event_data) {
-                                                    err_val["error"].as_str().unwrap_or("Unknown proxy error").to_string()
-                                                } else {
-                                                    "Unknown proxy error".to_string()
-                                                };
-                                                log::warn!("[VCPClient] Stream proxy error: {}, transitioning to Retrying", err_msg);
-                                                state = State::Retrying;
-                                                break;
                                             }
                                         }
+                                        Some(Err(e)) => {
+                                            log::warn!("[VCPClient] TCP socket read error: {:?}, transitioning to Retrying", e);
+                                            state = State::Retrying;
+                                            break;
+                                        }
                                         None => {
-                                            log::warn!("[VCPClient] Local receiver channel closed, transitioning to Retrying");
+                                            log::warn!("[VCPClient] TCP socket closed by server. Transitioning to Retrying.");
                                             state = State::Retrying;
                                             break;
                                         }
@@ -1147,7 +1030,7 @@ async fn handle_streaming_request<R: Runtime>(
                             }
                         }
                     } else {
-                        log::error!("[VCPClient] Streaming state entered but rx_channel is None. Transitioning to Retrying.");
+                        log::error!("[VCPClient] Streaming state entered but tcp_reader is None. Transitioning to Retrying.");
                         state = State::Retrying;
                     }
                 }
@@ -1234,7 +1117,9 @@ async fn handle_streaming_request<R: Runtime>(
                         None,
                     );
                     #[cfg(target_os = "android")]
-                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                    {
+                        let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                    }
                     active_requests_inner.remove(&message_id_inner);
                     return Ok((
                         json!({
@@ -1247,85 +1132,13 @@ async fn handle_streaming_request<R: Runtime>(
                 }
             }
             State::Aligning => {
-                #[cfg(target_os = "android")]
-                {
-                    // 在 Android 上，Aligning 说明本地缓存读取失败或没用，并且连接被丢弃。
-                    // 相当于真正的连接中断，无法恢复。
-                    log::warn!("[VCPClient] Stream alignment failed on Android (cache was empty or errored). Failing stream.");
-                    send_stream_event(StreamEvent::error(
-                        message_id_inner.clone(),
-                        context_inner.clone(),
-                        "流连接意外断开且本地缓存不可用".to_string(),
-                    ));
-                    break 'main_loop;
-                }
-                #[cfg(not(target_os = "android"))]
-                {
-                    let mut query_url = match Url::parse(final_url) {
-                        Ok(u) => u,
-                        Err(_) => {
-                            active_requests_inner.remove(&message_id_inner);
-                            return Err("Failed to parse final_url for alignment".to_string());
-                        }
-                    };
-                    query_url.set_path(&format!("/api/chat/messages/{}", message_id_inner));
-
-                    let status_res = client
-                        .get(query_url.as_str())
-                        .header(AUTHORIZATION, format!("Bearer {}", api_key))
-                        .send()
-                        .await;
-
-                    if let Ok(status_resp) = status_res {
-                        if status_resp.status().is_success() {
-                            if let Ok(info) = status_resp.json::<Value>().await {
-                                let status = info["status"].as_str().unwrap_or("failed");
-                                let content = info["content"].as_str().unwrap_or("").to_string();
-                                if status == "completed" {
-                                    log::info!("[VCPClient] Message is completed on server during warm reconnection. Aligning content.");
-
-                                    let current_len = aurora_buffer.full_text.chars().count();
-                                    let server_len = content.chars().count();
-                                    if server_len > current_len {
-                                        let remaining: String =
-                                            content.chars().skip(current_len).collect();
-                                        aurora_buffer.append_chunk(&remaining);
-                                        let _ = aurora_buffer.process_queue();
-                                    }
-
-                                    flush_aurora_parse(
-                                        &mut aurora_buffer,
-                                        &mut pending_aurora_chunk,
-                                        &mut last_aurora_parse,
-                                        true,
-                                    );
-                                    aurora_buffer.finalize();
-                                    send_aurora_update(
-                                        &mut aurora_buffer,
-                                        true,
-                                        true,
-                                        Some("completed".to_string()),
-                                        None,
-                                    );
-
-                                    active_requests_inner.remove(&message_id_inner);
-                                    return Ok((
-                                        json!({ "fullContent": aurora_buffer.full_text, "finishReason": "completed" }),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-
-                    log::warn!("[VCPClient] Message is not completed on server. Failing stream.");
-                    send_stream_event(StreamEvent::error(
-                        message_id_inner.clone(),
-                        context_inner.clone(),
-                        "流已失效且任务未完成".to_string(),
-                    ));
-                    break 'main_loop;
-                }
+                log::warn!("[VCPClient] Stream alignment failed (cache was empty or errored). Failing stream.");
+                send_stream_event(StreamEvent::error(
+                    message_id_inner.clone(),
+                    context_inner.clone(),
+                    "流连接意外断开且本地缓存不可用".to_string(),
+                ));
+                break 'main_loop;
             }
             State::Retrying => {
                 const MAX_RETRIES: u32 = 3;
@@ -1340,8 +1153,6 @@ async fn handle_streaming_request<R: Runtime>(
                         context_inner.clone(),
                         "网络连接意外断开，重连失败".to_string(),
                     ));
-                    #[cfg(target_os = "android")]
-                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
                     active_requests_inner.remove(&message_id_inner);
                     return Err("Max retries reached".to_string());
                 }
@@ -1366,8 +1177,7 @@ async fn handle_streaming_request<R: Runtime>(
                         log::warn!("[VCPClient] Aborted during retry backoff sleep");
                         #[cfg(target_os = "android")]
                         {
-                            let _ = tauri_plugin_vcp_mobile::stream::stop_sse_proxy(_app.clone(), message_id_inner.clone());
-                            ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                            let _ = send_stop_to_helper(_app, &message_id_inner).await;
                         }
                         active_requests_inner.remove(&message_id_inner);
                         return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
@@ -1380,8 +1190,6 @@ async fn handle_streaming_request<R: Runtime>(
         }
     }
 
-    #[cfg(target_os = "android")]
-    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
     active_requests_inner.remove(&message_id_inner);
     Ok((
         json!({
@@ -1777,10 +1585,108 @@ pub async fn recover_active_generation<R: Runtime>(
         return Ok(json!({ "status": "streaming" }));
     }
 
-    // 2. 如果不在 active_requests 中，说明在后台挂起期间进程已被杀死（或者任务从未启动/已被用户中止）
-    // 由于服务端不保存任何流式状态，因此无法通过网络恢复。直接在本地标记为错误并返回失败。
+    // 2. 如果不在 active_requests 中，在 Android 上检查是否存在本地 sse_cache 临时文件
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(cache_dir) = app.path().app_cache_dir() {
+            let cache_file = cache_dir.join("sse_cache").join(format!("sse_cache_{}.txt", msg_id));
+            if cache_file.exists() {
+                log::info!("[VCPClient] Found local sse_cache file for msg_id: {}. Attempting recovery.", msg_id);
+                if let Ok(content) = std::fs::read_to_string(&cache_file) {
+                    let mut accumulated_text = String::new();
+                    let mut stream_ended = false;
+                    let mut last_finish_reason = None;
+
+                    for line in content.lines() {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        if let Ok(val) = serde_json::from_str::<Value>(line) {
+                            let event_type = val["type"].as_str().unwrap_or("");
+                            let event_data = val["data"].as_str().unwrap_or("");
+
+                            if event_type == "message" {
+                                if event_data == "[DONE]" {
+                                    stream_ended = true;
+                                    break;
+                                }
+                                if let Ok(data_val) = serde_json::from_str::<Value>(event_data) {
+                                    if let Some(reason) = data_val.get("finish_reason").and_then(|r| r.as_str()) {
+                                        last_finish_reason = Some(reason.to_string());
+                                    }
+                                    if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
+                                        accumulated_text.push_str(delta);
+                                    }
+                                }
+                            } else if event_type == "closed" {
+                                stream_ended = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if stream_ended {
+                        log::info!("[VCPClient] Stream was fully completed in background cache. Finalizing message.");
+                        let db = app.state::<DbState>();
+                        let row = sqlx::query(
+                            "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
+                        )
+                        .bind(&msg_id)
+                        .fetch_optional(&db.pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                        if let Some(r) = row {
+                            use sqlx::Row;
+                            let topic_id: String = r.get("topic_id");
+                            let owner_id: String = r.get("owner_id");
+                            let owner_type: String = r.get("owner_type");
+
+                            let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+                                .bind(&msg_id)
+                                .fetch_optional(&db.pool)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+
+                            crate::vcp_modules::chat::message_service::finalize_stream_message(
+                                app.clone(),
+                                &db.pool,
+                                &owner_id,
+                                &owner_type,
+                                topic_id,
+                                msg_id.clone(),
+                                accumulated_text.clone(),
+                                false,
+                                last_finish_reason.or(Some("completed".to_string())),
+                                None,
+                                agent_id,
+                            )
+                            .await?;
+                        }
+
+                        // 清理本地缓存文件
+                        let _ = std::fs::remove_file(&cache_file);
+
+                        return Ok(json!({
+                            "status": "completed",
+                            "content": accumulated_text
+                        }));
+                    } else {
+                        log::info!("[VCPClient] Stream is incomplete in background cache. Returning streaming status for resumption.");
+                        return Ok(json!({
+                            "status": "streaming",
+                            "content": accumulated_text
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 如果本地缓存不存在，说明在后台挂起期间进程已被杀死且无可用保活缓存（或者任务从未启动/已被用户中止）
     log::warn!(
-        "[VCPClient] Active generation {} not found in active_requests (process was likely killed). Marking as failed.",
+        "[VCPClient] Active generation {} not found in active_requests and no local cache available. Marking as failed.",
         msg_id
     );
 
@@ -1794,4 +1700,88 @@ pub async fn recover_active_generation<R: Runtime>(
     .await?;
 
     Ok(json!({ "status": "failed" }))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn resume_stream<R: Runtime>(
+    app: AppHandle<R>,
+    state: tauri::State<'_, ActiveRequests>,
+    msg_id: String,
+    topic_id: String,
+    owner_id: String,
+    owner_type: String,
+    stream_channel: Channel<StreamEvent>,
+) -> Result<Value, String> {
+    log::info!(
+        "[VCPClient] resume_stream called for messageId: {}, topicId: {}",
+        msg_id,
+        topic_id
+    );
+
+    let client = Client::builder()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let (abort_tx, abort_rx) = oneshot::channel();
+    state.0.insert(msg_id.clone(), abort_tx);
+    let _guard = ActiveRequestGuard::new(state.0.clone(), msg_id.clone());
+
+    let context = json!({
+        "topicId": topic_id,
+        "groupId": if owner_type == "group" { Some(&owner_id) } else { None },
+        "agentId": if owner_type == "agent" { Some(&owner_id) } else { None },
+    });
+
+    let (res, is_aborted) = match handle_streaming_request(
+        &app,
+        client,
+        "",
+        "",
+        Value::Null,
+        msg_id.clone(),
+        Some(context.clone()),
+        abort_rx,
+        state.0.clone(),
+        Some(stream_channel.clone()),
+        Some("local_resume".to_string()),
+        None,
+    )
+    .await
+    {
+        Ok(val) => val,
+        Err(e) => {
+            let pool = app.state::<DbState>().pool.clone();
+            let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
+                .bind(&msg_id)
+                .execute(&pool)
+                .await;
+            return Err(e);
+        }
+    };
+
+    let finish_reason = if is_aborted {
+        Some("cancelled_by_user".to_string())
+    } else {
+        res["finishReason"].as_str().map(|s| s.to_string())
+    };
+
+    let pool = app.state::<DbState>().pool.clone();
+
+    crate::vcp_modules::chat::message_service::finalize_stream_message(
+        app.clone(),
+        &pool,
+        &owner_id,
+        &owner_type,
+        topic_id,
+        msg_id.clone(),
+        res["fullContent"].as_str().unwrap_or("").to_string(),
+        is_aborted,
+        finish_reason,
+        Some(stream_channel),
+        if owner_type == "agent" { Some(owner_id.clone()) } else { None },
+    )
+    .await?;
+
+    Ok(res)
 }

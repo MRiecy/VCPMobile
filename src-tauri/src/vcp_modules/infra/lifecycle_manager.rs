@@ -211,14 +211,12 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         }
     };
 
-    // 3.5 根据设置决定是否启动划词助手本地服务器 (Beta)
+    // 3.5 根据设置决定是否启动划词助手本地服务器 (Beta) - 暂时停用该功能
     {
-        let enable = settings.enable_assistant;
         log::info!(
-            "[Lifecycle] enableAssistant={}, reconciling local server...",
-            enable
+            "[Lifecycle] enableAssistant=false (temporarily disabled), reconciling local server..."
         );
-        reconcile_local_server(&handle, &lifecycle, enable).await;
+        reconcile_local_server(&handle, &lifecycle, false).await;
     }
 
     // 3.6 根据设置决定是否启动分布式节点 (自动重连)
@@ -427,7 +425,7 @@ pub async fn get_system_snapshot(
     })
 }
 
-/// 前端保存设置后调用，即时生效启用/停用划词助手本地服务器
+/// 前端保存设置后调用，即时生效启用/停用划词助手本地服务器 - 暂时停用该功能
 #[tauri::command]
 pub async fn reconcile_local_server_cmd(
     app_handle: AppHandle,
@@ -435,12 +433,12 @@ pub async fn reconcile_local_server_cmd(
     enable: bool,
 ) -> Result<bool, String> {
     log::info!(
-        "[Lifecycle] reconcile_local_server_cmd called: enable={}",
+        "[Lifecycle] reconcile_local_server_cmd called (temporarily disabled): enable={}",
         enable
     );
     let lifecycle = &*state;
-    reconcile_local_server(&app_handle, lifecycle, enable).await;
-    Ok(enable)
+    reconcile_local_server(&app_handle, lifecycle, false).await;
+    Ok(false)
 }
 
 #[tauri::command]

@@ -327,28 +327,30 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         callbacks.onMessageCreated(msg!, topicId);
       }
 
-      // [关键修复] 异步持久化骨架消息到 SQLite 数据库
+      // [关键修复] 异步持久化骨架消息到 SQLite 数据库（排除不需要持久化的浮动助手对话）
       // 使得用户即便中途切换会话，重新加载历史时也存在此消息占位，从而触发 Object Hydration 完美接续流式动画
-      invoke("append_single_message", {
-        ownerId: itemId,
-        ownerType: isGroup ? "group" : "agent",
-        topicId,
-        message: {
-          id: actualMessageId,
-          role: "assistant",
-          name: ctx.agentName || null,
-          content: "",
-          timestamp: msg!.timestamp,
-          isThinking: msg!.isThinking,
-          is_thinking: msg!.isThinking,
-          agentId: ctx.agentId || null,
-          groupId: ctx.groupId || null,
+      if (topicId !== "assistant_chat") {
+        invoke("append_single_message", {
+          ownerId: itemId,
+          ownerType: isGroup ? "group" : "agent",
           topicId,
-          isGroupMessage: isGroup,
-        }
-      }).catch(e => {
-        console.error("[ChatStreamStore] Failed to persist initial thinking skeleton:", e);
-      });
+          message: {
+            id: actualMessageId,
+            role: "assistant",
+            name: ctx.agentName || null,
+            content: "",
+            timestamp: msg!.timestamp,
+            isThinking: msg!.isThinking,
+            is_thinking: msg!.isThinking,
+            agentId: ctx.agentId || null,
+            groupId: ctx.groupId || null,
+            topicId,
+            isGroupMessage: isGroup,
+          }
+        }).catch(e => {
+          console.error("[ChatStreamStore] Failed to persist initial thinking skeleton:", e);
+        });
+      }
     }
 
     // 维护流状态
