@@ -28,10 +28,10 @@
             android:foregroundServiceType="remoteMessaging"
             android:stopWithTask="true" />
 
-        <!-- 隔离进程推送接收服务：仅加载极简 Kotlin 与网络监听，占用约 15MB 内存，完美对抗 LMK 后台清理 -->
+        <!-- 隔离进程通用助手：维持坚固的后台 SSE 连接与流式缓存，占用约 15MB 内存 -->
         <service
-            android:name=".service.PushListenerService"
-            android:process=":push"
+            android:name=".service.SseProxyService"
+            android:process=":helper"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging" />

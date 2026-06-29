@@ -74,15 +74,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         override fun onActivityResumed(a: Activity) {
             if (a === activity) {
                 isAppInForeground = true
-                // 当应用返回前台时，立即停止后台 SSE 监听服务，由前台 WebView 的实时连接接管，避免双重连接与重复通知
-                try {
-                    val intent = Intent(activity, com.vcp.mobile.service.PushListenerService::class.java).apply {
-                        action = com.vcp.mobile.service.PushListenerService.ACTION_STOP
-                    }
-                    activity.stopService(intent)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to stop PushListenerService on resume: ", e)
-                }
 
                 if (com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
                     activity.runOnUiThread {
@@ -94,23 +85,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         override fun onActivityPaused(a: Activity) {
             if (a === activity) {
                 isAppInForeground = false
-                // 当应用进入后台时，如果开启了推送，则拉起隔离进程的 SSE 监听服务，开始低功耗守护
-                val prefs = activity.getSharedPreferences("vcp_push_prefs", Context.MODE_PRIVATE)
-                val enabled = prefs.getBoolean("enabled", false)
-                if (enabled) {
-                    try {
-                        val intent = Intent(activity, com.vcp.mobile.service.PushListenerService::class.java).apply {
-                            action = com.vcp.mobile.service.PushListenerService.ACTION_START
-                        }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            activity.startForegroundService(intent)
-                        } else {
-                            activity.startService(intent)
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to start PushListenerService on pause: ", e)
-                    }
-                }
 
                 if (com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
                     activity.runOnUiThread {
@@ -137,7 +111,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     val pluginActivity: Activity get() = activity
     var webViewRef: WebView? = null
-    private var isAppInForeground = true // 追踪应用是否处于前台，用于精准控制后台推送服务的生命周期
+    private var isAppInForeground = true
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
@@ -153,10 +127,68 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private var lastConnected: Boolean? = null
     private var isNetworkMonitoringStarted = false
 
+    // ==================================================================
+    // SSE Proxy Service Binder & IPC (Messenger)
+    // ==================================================================
+    private var serviceMessenger: android.os.Messenger? = null
+    private var isBound = false
+
+    private val localMessenger = android.os.Messenger(Handler(Looper.getMainLooper()) { msg ->
+        when (msg.what) {
+            com.vcp.mobile.service.SseProxyService.EVENT_SSE_CHUNK -> {
+                val data = msg.data ?: return@Handler true
+                val requestId = data.getString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID) ?: return@Handler true
+                val eventType = data.getString(com.vcp.mobile.service.SseProxyService.KEY_EVENT_TYPE) ?: return@Handler true
+                val eventData = data.getString(com.vcp.mobile.service.SseProxyService.KEY_EVENT_DATA) ?: ""
+                
+                // 将数据分发给 Rust 侧的全局事件监听器
+                val triggerData = JSObject()
+                triggerData.put("requestId", requestId)
+                triggerData.put("eventType", eventType)
+                triggerData.put("eventData", eventData)
+                trigger("sse_event", triggerData)
+            }
+        }
+        true
+    })
+
+    private val serviceConnection = object : android.content.ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: android.os.IBinder?) {
+            Log.i(TAG, "SseProxyService connected.")
+            serviceMessenger = android.os.Messenger(service)
+            isBound = true
+            
+            try {
+                val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_REGISTER_CLIENT)
+                msg.replyTo = localMessenger
+                serviceMessenger?.send(msg)
+            } catch (e: android.os.RemoteException) {
+                Log.e(TAG, "Failed to register client: ", e)
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            Log.i(TAG, "SseProxyService disconnected.")
+            serviceMessenger = null
+            isBound = false
+        }
+    }
+
+    private fun bindSseService() {
+        try {
+            val intent = Intent(activity, com.vcp.mobile.service.SseProxyService::class.java)
+            activity.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+            Log.i(TAG, "Binding to SseProxyService initiated.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to bind SseProxyService: ", e)
+        }
+    }
+
     init {
         instanceRef = java.lang.ref.WeakReference(this)
         activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
         startOomScoreGuard()
+        bindSseService()
     }
 
 
@@ -2163,35 +2195,81 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun updatePushCredentials(invoke: Invoke) {
+    fun startSseProxy(invoke: Invoke) {
         try {
-            val args = invoke.parseArgs(UpdatePushCredentialsArgs::class.java)
-            val prefs = activity.getSharedPreferences("vcp_push_prefs", Context.MODE_PRIVATE)
-            prefs.edit().apply {
-                putString("vcp_url", args.url)
-                putString("vcp_key", args.key)
-                putString("vcp_topic", args.topic)
-                putBoolean("enabled", args.enabled)
-            }.apply()
-
-            Log.i(TAG, "updatePushCredentials: url=${args.url}, topic=${args.topic}, enabled=${args.enabled}")
-
-            // 如果已经处于后台且启用了，则立即拉起；否则（前台或被禁用）停止服务
-            val intent = Intent(activity, com.vcp.mobile.service.PushListenerService::class.java)
-            if (args.enabled && !isAppInForeground) {
-                intent.action = com.vcp.mobile.service.PushListenerService.ACTION_START
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    activity.startForegroundService(intent)
-                } else {
-                    activity.startService(intent)
-                }
-            } else {
-                intent.action = com.vcp.mobile.service.PushListenerService.ACTION_STOP
-                activity.stopService(intent)
+            val args = invoke.parseArgs(StartSseProxyArgs::class.java)
+            Log.i(TAG, "startSseProxy: id=${args.requestId}, url=${args.url}")
+            
+            val messenger = serviceMessenger
+            if (messenger == null) {
+                invoke.reject("SseProxyService is not bound")
+                return
             }
+
+            val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_START_STREAM)
+            msg.data = Bundle().apply {
+                putString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID, args.requestId)
+                putString(com.vcp.mobile.service.SseProxyService.KEY_URL, args.url)
+                putString(com.vcp.mobile.service.SseProxyService.KEY_HEADERS, args.headers)
+                putString(com.vcp.mobile.service.SseProxyService.KEY_BODY, args.body)
+            }
+            messenger.send(msg)
             invoke.resolve()
         } catch (e: Exception) {
-            Log.e(TAG, "updatePushCredentials failed", e)
+            Log.e(TAG, "startSseProxy failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun stopSseProxy(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(StopSseProxyArgs::class.java)
+            Log.i(TAG, "stopSseProxy: id=${args.requestId}")
+            
+            val messenger = serviceMessenger
+            if (messenger == null) {
+                invoke.reject("SseProxyService is not bound")
+                return
+            }
+
+            val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_STOP_STREAM)
+            msg.data = Bundle().apply {
+                putString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID, args.requestId)
+            }
+            messenger.send(msg)
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "stopSseProxy failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getSseProxyCache(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(GetSseProxyCacheArgs::class.java)
+            Log.i(TAG, "getSseProxyCache: id=${args.requestId}")
+            
+            val messenger = serviceMessenger
+            if (messenger == null) {
+                invoke.reject("SseProxyService is not bound")
+                return
+            }
+
+            val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_GET_CACHE)
+            msg.data = Bundle().apply {
+                putString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID, args.requestId)
+            }
+            msg.replyTo = localMessenger
+            messenger.send(msg)
+            
+            // 立即向 Rust 返回空缓存响应，后续缓存数据通过流式回放通道接收
+            val resObj = JSObject()
+            resObj.put("cache", JSArray())
+            invoke.resolve(resObj)
+        } catch (e: Exception) {
+            Log.e(TAG, "getSseProxyCache failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
     }
@@ -2293,10 +2371,20 @@ class ReleaseForegroundArgs {
 }
 
 @InvokeArg
-class UpdatePushCredentialsArgs {
+class StartSseProxyArgs {
+    lateinit var requestId: String
     lateinit var url: String
-    lateinit var key: String
-    lateinit var topic: String
-    var enabled: Boolean = false
+    lateinit var headers: String
+    lateinit var body: String
+}
+
+@InvokeArg
+class StopSseProxyArgs {
+    lateinit var requestId: String
+}
+
+@InvokeArg
+class GetSseProxyCacheArgs {
+    lateinit var requestId: String
 }
 

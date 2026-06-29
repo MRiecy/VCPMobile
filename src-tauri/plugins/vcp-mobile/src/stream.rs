@@ -127,8 +127,86 @@ pub fn stop_streaming_service<R: Runtime>(
 ) -> Result<(), String> {
     stop_stream_service_inner(&app, &agent_name)
 }
-
 #[tauri::command]
 pub fn set_keepalive_mode<R: Runtime>(app: AppHandle<R>, is_keepalive: bool) -> Result<(), String> {
     set_keepalive_mode_inner(&app, is_keepalive)
+}
+
+#[tauri::command]
+#[allow(unused_variables)]
+pub fn start_sse_proxy<R: Runtime>(
+    app: AppHandle<R>,
+    request_id: String,
+    url: String,
+    headers: String,
+    body: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "startSseProxy",
+                serde_json::json!({
+                    "requestId": request_id,
+                    "url": url,
+                    "headers": headers,
+                    "body": body
+                }),
+            )
+            .map_err(|e| format!("startSseProxy failed: {}", e))?;
+    }
+    log::info!("[VcpMobilePlugin] start_sse_proxy: id={}, url={}", request_id, url);
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(unused_variables)]
+pub fn stop_sse_proxy<R: Runtime>(app: AppHandle<R>, request_id: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "stopSseProxy",
+                serde_json::json!({ "requestId": request_id }),
+            )
+            .map_err(|e| format!("stopSseProxy failed: {}", e))?;
+    }
+    log::info!("[VcpMobilePlugin] stop_sse_proxy: id={}", request_id);
+    Ok(())
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+pub struct CacheResponse {
+    pub cache: Vec<String>,
+}
+
+#[tauri::command]
+#[allow(unused_variables)]
+pub fn get_sse_proxy_cache<R: Runtime>(
+    app: AppHandle<R>,
+    request_id: String,
+) -> Result<CacheResponse, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let res = plugin_handle
+            .run_mobile_plugin::<CacheResponse>(
+                "getSseProxyCache",
+                serde_json::json!({ "requestId": request_id }),
+            )
+            .map_err(|e| format!("getSseProxyCache failed: {}", e))?;
+        Ok(res)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(CacheResponse { cache: Vec::new() })
+    }
 }

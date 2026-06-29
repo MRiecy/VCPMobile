@@ -20,6 +20,39 @@ use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+use std::collections::HashMap;
+
+/// 从 Kotlin 传回的原始 SSE 事件载荷
+#[derive(Deserialize, Clone, Debug)]
+#[allow(dead_code)]
+pub struct KotlinSseEvent {
+    #[serde(rename = "requestId")]
+    pub request_id: String,
+    #[serde(rename = "eventType")]
+    pub event_type: String,
+    #[serde(rename = "eventData")]
+    pub event_data: String,
+}
+
+lazy_static! {
+    /// 全局流接收端映射表，用于将 Kotlin 异步通知路由到具体的 Rust 状态机线程
+    pub static ref ACTIVE_STREAM_RECEIVERS: Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<KotlinSseEvent>>> =
+        Mutex::new(HashMap::new());
+}
+
+/// 将来自 Kotlin 插件的事件派发给对应的 Rust 状态机
+pub fn dispatch_sse_event(event: KotlinSseEvent) {
+    let receivers = ACTIVE_STREAM_RECEIVERS.lock().unwrap();
+    if let Some(tx) = receivers.get(&event.request_id) {
+        if let Err(e) = tx.send(event) {
+            log::warn!("[VCPClient] Failed to send sse event to channel: {:?}", e);
+        }
+    } else {
+        log::debug!("[VCPClient] No active receiver for sse event: {}", event.request_id);
+    }
+}
 
 /// =================================================================
 /// vcp_modules/vcp_client.rs - 统一的 VCP 请求处理模块 (Rust 重写版)
@@ -709,8 +742,11 @@ async fn handle_streaming_request<R: Runtime>(
         buffer.process_queue()
     };
 
+    #[cfg(not(target_os = "android"))]
     type BoxedLineStream =
         Box<dyn futures_util::Stream<Item = Result<String, std::io::Error>> + Unpin + Send>;
+    
+    #[cfg(not(target_os = "android"))]
     let to_line_stream = |resp: reqwest::Response| -> BoxedLineStream {
         let stream = resp.bytes_stream().map_err(std::io::Error::other);
         let reader = StreamReader::new(stream);
@@ -719,7 +755,11 @@ async fn handle_streaming_request<R: Runtime>(
         Box::new(mapped)
     };
 
+    #[cfg(not(target_os = "android"))]
     let mut lines: Option<BoxedLineStream> = None;
+
+    #[cfg(target_os = "android")]
+    let mut rx_channel: Option<tokio::sync::mpsc::UnboundedReceiver<KotlinSseEvent>> = None;
 
     // 1. 声明状态机的所有状态
     enum State {
@@ -753,42 +793,79 @@ async fn handle_streaming_request<R: Runtime>(
                 }
             }
             State::Connecting => {
-                let res_future = client
-                    .post(final_url)
-                    .header(AUTHORIZATION, format!("Bearer {}", api_key))
-                    .header(CONTENT_TYPE, "application/json")
-                    .json(&request_body)
-                    .send();
+                #[cfg(target_os = "android")]
+                {
+                    // 1. 创建本地接收通道，并注册到全局表
+                    let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel();
+                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().insert(message_id_inner.clone(), tx);
+                    rx_channel = Some(rx_new);
 
-                tokio::select! {
-                    _ = &mut abort_rx => {
-                        log::warn!("[VCPClient] Request aborted during connection: {}", message_id_inner);
-                        flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                        aurora_buffer.finalize();
-                        send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                    // 2. 调用 Kotlin 插件命令开始流
+                    let headers_json = json!({
+                        "Authorization": format!("Bearer {}", api_key),
+                        "Content-Type": "application/json"
+                    }).to_string();
+                    let body_json = request_body.to_string();
+
+                    if let Err(e) = tauri_plugin_vcp_mobile::stream::start_sse_proxy(
+                        _app.clone(),
+                        message_id_inner.clone(),
+                        final_url.to_string(),
+                        headers_json,
+                        body_json,
+                    ) {
+                        log::error!("[VCPClient] start_sse_proxy failed: {:?}", e);
+                        send_stream_event(StreamEvent::error(
+                            message_id_inner.clone(),
+                            context_inner.clone(),
+                            format!("启动本地代理失败: {}", e),
+                        ));
+                        ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
                         active_requests_inner.remove(&message_id_inner);
-                        return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
+                        return Err(e);
                     }
-                    response_res = res_future => {
-                        match response_res {
-                            Ok(resp) if resp.status().is_success() => {
-                                lines = Some(to_line_stream(resp));
-                                state = State::Streaming;
-                            }
-                            Ok(resp) => {
-                                let status = resp.status();
-                                let text = resp.text().await.unwrap_or_default();
-                                send_stream_event(StreamEvent::error(
-                                    message_id_inner.clone(),
-                                    context_inner.clone(),
-                                    format!("VCP服务器错误: {} - {}", status, text),
-                                ));
-                                active_requests_inner.remove(&message_id_inner);
-                                return Err(format!("VCP Error: {}", status));
-                            }
-                            Err(e) => {
-                                log::warn!("[VCPClient] Connection failed, transitioning to Retrying: {:?}", e);
-                                state = State::Retrying;
+
+                    state = State::Streaming;
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    let res_future = client
+                        .post(final_url)
+                        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                        .header(CONTENT_TYPE, "application/json")
+                        .json(&request_body)
+                        .send();
+
+                    tokio::select! {
+                        _ = &mut abort_rx => {
+                            log::warn!("[VCPClient] Request aborted during connection: {}", message_id_inner);
+                            flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                            aurora_buffer.finalize();
+                            send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                            active_requests_inner.remove(&message_id_inner);
+                            return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
+                        }
+                        response_res = res_future => {
+                            match response_res {
+                                Ok(resp) if resp.status().is_success() => {
+                                    lines = Some(to_line_stream(resp));
+                                    state = State::Streaming;
+                                }
+                                Ok(resp) => {
+                                    let status = resp.status();
+                                    let text = resp.text().await.unwrap_or_default();
+                                    send_stream_event(StreamEvent::error(
+                                        message_id_inner.clone(),
+                                        context_inner.clone(),
+                                        format!("VCP服务器错误: {} - {}", status, text),
+                                    ));
+                                    active_requests_inner.remove(&message_id_inner);
+                                    return Err(format!("VCP Error: {}", status));
+                                }
+                                Err(e) => {
+                                    log::warn!("[VCPClient] Connection failed, transitioning to Retrying: {:?}", e);
+                                    state = State::Retrying;
+                                }
                             }
                         }
                     }
@@ -805,6 +882,11 @@ async fn handle_streaming_request<R: Runtime>(
                     );
                     tokio::select! {
                         _ = &mut abort_rx => {
+                            #[cfg(target_os = "android")]
+                            {
+                                let _ = tauri_plugin_vcp_mobile::stream::stop_sse_proxy(_app.clone(), message_id_inner.clone());
+                                ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                            }
                             active_requests_inner.remove(&message_id_inner);
                             return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                         }
@@ -812,143 +894,324 @@ async fn handle_streaming_request<R: Runtime>(
                     }
                 }
 
-                let reconnect_url = if let Some(ref url) = initial_reconnect_url {
-                    url.clone()
-                } else {
-                    match Url::parse(final_url) {
-                        Ok(mut url) => {
-                            url.set_path("/api/chat/stream");
-                            url.set_query(Some(&format!("msg_id={}", message_id_inner)));
-                            url.to_string()
+                #[cfg(target_os = "android")]
+                {
+                    log::info!(
+                        "[VCPClient] Resuming SSE from local proxy cache for message: {}",
+                        message_id_inner
+                    );
+                    
+                    // 1. 从 Kotlin 获取缓存的 chunks
+                    match tauri_plugin_vcp_mobile::stream::get_sse_proxy_cache(_app.clone(), message_id_inner.clone()) {
+                        Ok(resp) => {
+                            log::info!(
+                                "[VCPClient] Successfully retrieved {} cached events from proxy",
+                                resp.cache.len()
+                            );
+                            
+                            // 重新注册接收通道，保证后续实时流能接收到
+                            if rx_channel.is_none() {
+                                let (tx, rx_new) = tokio::sync::mpsc::unbounded_channel();
+                                ACTIVE_STREAM_RECEIVERS.lock().unwrap().insert(message_id_inner.clone(), tx);
+                                rx_channel = Some(rx_new);
+                            }
+
+                            // 2. 模拟处理缓存中的所有事件
+                            let mut stream_ended_in_cache = false;
+                            for event_str in resp.cache {
+                                if let Ok(val) = serde_json::from_str::<Value>(&event_str) {
+                                    let event_type = val["type"].as_str().unwrap_or("");
+                                    let event_data = val["data"].as_str().unwrap_or("");
+                                    
+                                    if event_type == "message" {
+                                        if event_data == "[DONE]" {
+                                            stream_ended_in_cache = true;
+                                            break;
+                                        }
+                                        if let Ok(data_val) = serde_json::from_str::<Value>(event_data) {
+                                            if let Some(reason) = data_val.get("finish_reason").and_then(|r| r.as_str()) {
+                                                last_finish_reason = Some(reason.to_string());
+                                            }
+                                            if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
+                                                pending_aurora_chunk.push_str(delta);
+                                                let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                    &mut aurora_buffer,
+                                                    &mut pending_aurora_chunk,
+                                                    &mut last_aurora_parse,
+                                                    false,
+                                                );
+                                                let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                if stable_changed || tail_changed || has_mutations {
+                                                    send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                }
+                                            }
+                                        }
+                                    } else if event_type == "closed" {
+                                        stream_ended_in_cache = true;
+                                        break;
+                                    } else if event_type == "error" {
+                                        // 缓存中包含错误事件
+                                        let err_msg = if let Ok(err_val) = serde_json::from_str::<Value>(event_data) {
+                                            err_val["error"].as_str().unwrap_or("Unknown proxy error").to_string()
+                                        } else {
+                                            "Unknown proxy error".to_string()
+                                        };
+                                        send_stream_event(StreamEvent::error(
+                                            message_id_inner.clone(),
+                                            context_inner.clone(),
+                                            err_msg,
+                                        ));
+                                        ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                                        active_requests_inner.remove(&message_id_inner);
+                                        return Err("SSE failed in proxy cache".to_string());
+                                    }
+                                }
+                            }
+
+                            if stream_ended_in_cache {
+                                // 缓存中已经完成了这个流
+                                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                aurora_buffer.finalize();
+                                send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone(), None);
+                                ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                                active_requests_inner.remove(&message_id_inner);
+                                return Ok((
+                                    json!({
+                                        "fullContent": aurora_buffer.full_text,
+                                        "streamingStarted": true,
+                                        "finishReason": last_finish_reason
+                                    }),
+                                    false,
+                                ));
+                            } else {
+                                // 缓存中未完结，转向 Streaming 接收后续实时流
+                                retry_count = 0;
+                                backoff = Duration::from_millis(500);
+                                state = State::Streaming;
+                            }
                         }
-                        Err(_) => {
-                            active_requests_inner.remove(&message_id_inner);
-                            return Err("Failed to parse final_url for reconnection".to_string());
+                        Err(e) => {
+                            log::warn!("[VCPClient] Failed to get sse proxy cache: {:?}", e);
+                            state = State::Aligning;
                         }
                     }
-                };
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    let reconnect_url = if let Some(ref url) = initial_reconnect_url {
+                        url.clone()
+                    } else {
+                        match Url::parse(final_url) {
+                            Ok(mut url) => {
+                                url.set_path("/api/chat/stream");
+                                url.set_query(Some(&format!("msg_id={}", message_id_inner)));
+                                url.to_string()
+                            }
+                            Err(_) => {
+                                active_requests_inner.remove(&message_id_inner);
+                                return Err("Failed to parse final_url for reconnection".to_string());
+                            }
+                        }
+                    };
 
-                let offset = aurora_buffer.full_text.chars().count();
-                log::info!(
-                    "[VCPClient] Re-establishing stream connection to {} with Last-Event-ID: {}",
-                    reconnect_url,
-                    offset
-                );
+                    let offset = aurora_buffer.full_text.chars().count();
+                    log::info!(
+                        "[VCPClient] Re-establishing stream connection to {} with Last-Event-ID: {}",
+                        reconnect_url,
+                        offset
+                    );
 
-                let req_res = client
-                    .get(&reconnect_url)
-                    .header(AUTHORIZATION, format!("Bearer {}", api_key))
-                    .header("Last-Event-ID", offset.to_string())
-                    .send()
-                    .await;
+                    let req_res = client
+                        .get(&reconnect_url)
+                        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                        .header("Last-Event-ID", offset.to_string())
+                        .send()
+                        .await;
 
-                match req_res {
-                    Ok(resp) if resp.status().is_success() => {
-                        log::info!(
-                            "[VCPClient] Reconnection successful for message: {}",
-                            message_id_inner
-                        );
-                        retry_count = 0;
-                        backoff = Duration::from_millis(500);
-                        send_stream_event(StreamEvent {
-                            r#type: "reconnecting".into(),
-                            message_id: message_id_inner.clone(),
-                            context: context_inner.clone(),
-                            ..Default::default()
-                        });
-                        lines = Some(to_line_stream(resp));
-                        state = State::Streaming;
-                    }
-                    Ok(resp)
-                        if resp.status() == reqwest::StatusCode::NOT_FOUND
-                            || resp.status() == reqwest::StatusCode::BAD_REQUEST =>
-                    {
-                        log::warn!(
-                            "[VCPClient] Stream not found (status: {}). Transitioning to Aligning.",
-                            resp.status()
-                        );
-                        state = State::Aligning;
-                    }
-                    Ok(resp) => {
-                        log::warn!(
-                            "[VCPClient] Reconnect returned status {}, transitioning to Retrying",
-                            resp.status()
-                        );
-                        state = State::Retrying;
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[VCPClient] Reconnect failed: {:?}, transitioning to Retrying",
-                            e
-                        );
-                        state = State::Retrying;
+                    match req_res {
+                        Ok(resp) if resp.status().is_success() => {
+                            log::info!(
+                                "[VCPClient] Reconnection successful for message: {}",
+                                message_id_inner
+                            );
+                            retry_count = 0;
+                            backoff = Duration::from_millis(500);
+                            send_stream_event(StreamEvent {
+                                r#type: "reconnecting".into(),
+                                message_id: message_id_inner.clone(),
+                                context: context_inner.clone(),
+                                ..Default::default()
+                            });
+                            lines = Some(to_line_stream(resp));
+                            state = State::Streaming;
+                        }
+                        Ok(resp)
+                            if resp.status() == reqwest::StatusCode::NOT_FOUND
+                                || resp.status() == reqwest::StatusCode::BAD_REQUEST =>
+                        {
+                            log::warn!(
+                                "[VCPClient] Stream not found (status: {}). Transitioning to Aligning.",
+                                resp.status()
+                            );
+                            state = State::Aligning;
+                        }
+                        Ok(resp) => {
+                            log::warn!(
+                                "[VCPClient] Reconnect returned status {}, transitioning to Retrying",
+                                resp.status()
+                            );
+                            state = State::Retrying;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[VCPClient] Reconnect failed: {:?}, transitioning to Retrying",
+                                e
+                            );
+                            state = State::Retrying;
+                        }
                     }
                 }
             }
             State::Streaming => {
                 let mut stream_ended_normally = false;
 
-                if let Some(ref mut line_stream) = lines {
-                    loop {
-                        tokio::select! {
-                            _ = &mut abort_rx => {
-                                log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
-                                flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
-                                aurora_buffer.finalize();
-                                send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
-                                active_requests_inner.remove(&message_id_inner);
-                                return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
-                            }
-                            next_line = line_stream.next() => {
-                                match next_line {
-                                    Some(Ok(line)) => {
-                                        if let Some(stripped) = line.strip_prefix("data:") {
-                                            let data_content = stripped.trim();
-                                            if data_content == "[DONE]" {
-                                                stream_ended_normally = true;
-                                                break;
-                                            }
-                                            if let Ok(val) = serde_json::from_str::<Value>(data_content) {
-                                                if let Some(reason) = val.get("finish_reason").and_then(|r| r.as_str()) {
-                                                    last_finish_reason = Some(reason.to_string());
+                #[cfg(target_os = "android")]
+                {
+                    if let Some(ref mut rx) = rx_channel {
+                        loop {
+                            tokio::select! {
+                                _ = &mut abort_rx => {
+                                    log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
+                                    let _ = tauri_plugin_vcp_mobile::stream::stop_sse_proxy(_app.clone(), message_id_inner.clone());
+                                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                    aurora_buffer.finalize();
+                                    send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                                    active_requests_inner.remove(&message_id_inner);
+                                    return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                                }
+                                event_opt = rx.recv() => {
+                                    match event_opt {
+                                        Some(event) => {
+                                            let event_type = event.event_type.as_str();
+                                            let event_data = event.event_data.as_str();
+                                            
+                                            if event_type == "message" {
+                                                if event_data == "[DONE]" {
+                                                    stream_ended_normally = true;
+                                                    break;
                                                 }
-                                                if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                    pending_aurora_chunk.push_str(delta);
-                                                    let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                        &mut aurora_buffer,
-                                                        &mut pending_aurora_chunk,
-                                                        &mut last_aurora_parse,
-                                                        false,
-                                                    );
-                                                    let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                    if stable_changed || tail_changed || has_mutations {
-                                                        send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                if let Ok(val) = serde_json::from_str::<Value>(event_data) {
+                                                    if let Some(reason) = val.get("finish_reason").and_then(|r| r.as_str()) {
+                                                        last_finish_reason = Some(reason.to_string());
+                                                    }
+                                                    if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
+                                                        pending_aurora_chunk.push_str(delta);
+                                                        let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                            &mut aurora_buffer,
+                                                            &mut pending_aurora_chunk,
+                                                            &mut last_aurora_parse,
+                                                            false,
+                                                        );
+                                                        let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                        if stable_changed || tail_changed || has_mutations {
+                                                            send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                        }
                                                     }
                                                 }
+                                            } else if event_type == "closed" {
+                                                stream_ended_normally = true;
+                                                break;
+                                            } else if event_type == "error" {
+                                                let err_msg = if let Ok(err_val) = serde_json::from_str::<Value>(event_data) {
+                                                    err_val["error"].as_str().unwrap_or("Unknown proxy error").to_string()
+                                                } else {
+                                                    "Unknown proxy error".to_string()
+                                                };
+                                                log::warn!("[VCPClient] Stream proxy error: {}, transitioning to Retrying", err_msg);
+                                                state = State::Retrying;
+                                                break;
                                             }
                                         }
-                                    }
-                                    Some(Err(e)) => {
-                                        log::warn!("[VCPClient] Stream read error: {:?}, transitioning to Retrying", e);
-                                        state = State::Retrying;
-                                        break;
-                                    }
-                                    None => {
-                                        if !aurora_buffer.full_text.is_empty() || last_finish_reason.is_some() {
-                                            stream_ended_normally = true;
-                                        } else {
-                                            log::warn!("[VCPClient] Stream ended unexpectedly (None), transitioning to Retrying");
+                                        None => {
+                                            log::warn!("[VCPClient] Local receiver channel closed, transitioning to Retrying");
                                             state = State::Retrying;
+                                            break;
                                         }
-                                        break;
                                     }
                                 }
                             }
                         }
+                    } else {
+                        log::error!("[VCPClient] Streaming state entered but rx_channel is None. Transitioning to Retrying.");
+                        state = State::Retrying;
                     }
-                } else {
-                    log::warn!("[VCPClient] Streaming state entered but lines is None. Transitioning to Retrying.");
-                    state = State::Retrying;
+                }
+
+                #[cfg(not(target_os = "android"))]
+                {
+                    if let Some(ref mut line_stream) = lines {
+                        loop {
+                            tokio::select! {
+                                _ = &mut abort_rx => {
+                                    log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
+                                    flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
+                                    aurora_buffer.finalize();
+                                    send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
+                                    active_requests_inner.remove(&message_id_inner);
+                                    return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                                }
+                                next_line = line_stream.next() => {
+                                    match next_line {
+                                        Some(Ok(line)) => {
+                                            if let Some(stripped) = line.strip_prefix("data:") {
+                                                let data_content = stripped.trim();
+                                                if data_content == "[DONE]" {
+                                                    stream_ended_normally = true;
+                                                    break;
+                                                }
+                                                if let Ok(val) = serde_json::from_str::<Value>(data_content) {
+                                                    if let Some(reason) = val.get("finish_reason").and_then(|r| r.as_str()) {
+                                                        last_finish_reason = Some(reason.to_string());
+                                                    }
+                                                    if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
+                                                        pending_aurora_chunk.push_str(delta);
+                                                        let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                            &mut aurora_buffer,
+                                                            &mut pending_aurora_chunk,
+                                                            &mut last_aurora_parse,
+                                                            false,
+                                                        );
+                                                        let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                        if stable_changed || tail_changed || has_mutations {
+                                                            send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Some(Err(e)) => {
+                                            log::warn!("[VCPClient] Stream read error: {:?}, transitioning to Retrying", e);
+                                            state = State::Retrying;
+                                            break;
+                                        }
+                                        None => {
+                                            if !aurora_buffer.full_text.is_empty() || last_finish_reason.is_some() {
+                                                stream_ended_normally = true;
+                                            } else {
+                                                log::warn!("[VCPClient] Stream ended unexpectedly (None), transitioning to Retrying");
+                                                state = State::Retrying;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        log::warn!("[VCPClient] Streaming state entered but lines is None. Transitioning to Retrying.");
+                        state = State::Retrying;
+                    }
                 }
 
                 if stream_ended_normally {
@@ -966,6 +1229,8 @@ async fn handle_streaming_request<R: Runtime>(
                         last_finish_reason.clone(),
                         None,
                     );
+                    #[cfg(target_os = "android")]
+                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
                     active_requests_inner.remove(&message_id_inner);
                     return Ok((
                         json!({
@@ -978,70 +1243,85 @@ async fn handle_streaming_request<R: Runtime>(
                 }
             }
             State::Aligning => {
-                let mut query_url = match Url::parse(final_url) {
-                    Ok(u) => u,
-                    Err(_) => {
-                        active_requests_inner.remove(&message_id_inner);
-                        return Err("Failed to parse final_url for alignment".to_string());
-                    }
-                };
-                query_url.set_path(&format!("/api/chat/messages/{}", message_id_inner));
+                #[cfg(target_os = "android")]
+                {
+                    // 在 Android 上，Aligning 说明本地缓存读取失败或没用，并且连接被丢弃。
+                    // 相当于真正的连接中断，无法恢复。
+                    log::warn!("[VCPClient] Stream alignment failed on Android (cache was empty or errored). Failing stream.");
+                    send_stream_event(StreamEvent::error(
+                        message_id_inner.clone(),
+                        context_inner.clone(),
+                        "流连接意外断开且本地缓存不可用".to_string(),
+                    ));
+                    break 'main_loop;
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    let mut query_url = match Url::parse(final_url) {
+                        Ok(u) => u,
+                        Err(_) => {
+                            active_requests_inner.remove(&message_id_inner);
+                            return Err("Failed to parse final_url for alignment".to_string());
+                        }
+                    };
+                    query_url.set_path(&format!("/api/chat/messages/{}", message_id_inner));
 
-                let status_res = client
-                    .get(query_url.as_str())
-                    .header(AUTHORIZATION, format!("Bearer {}", api_key))
-                    .send()
-                    .await;
+                    let status_res = client
+                        .get(query_url.as_str())
+                        .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                        .send()
+                        .await;
 
-                if let Ok(status_resp) = status_res {
-                    if status_resp.status().is_success() {
-                        if let Ok(info) = status_resp.json::<Value>().await {
-                            let status = info["status"].as_str().unwrap_or("failed");
-                            let content = info["content"].as_str().unwrap_or("").to_string();
-                            if status == "completed" {
-                                log::info!("[VCPClient] Message is completed on server during warm reconnection. Aligning content.");
+                    if let Ok(status_resp) = status_res {
+                        if status_resp.status().is_success() {
+                            if let Ok(info) = status_resp.json::<Value>().await {
+                                let status = info["status"].as_str().unwrap_or("failed");
+                                let content = info["content"].as_str().unwrap_or("").to_string();
+                                if status == "completed" {
+                                    log::info!("[VCPClient] Message is completed on server during warm reconnection. Aligning content.");
 
-                                let current_len = aurora_buffer.full_text.chars().count();
-                                let server_len = content.chars().count();
-                                if server_len > current_len {
-                                    let remaining: String =
-                                        content.chars().skip(current_len).collect();
-                                    aurora_buffer.append_chunk(&remaining);
-                                    let _ = aurora_buffer.process_queue();
+                                    let current_len = aurora_buffer.full_text.chars().count();
+                                    let server_len = content.chars().count();
+                                    if server_len > current_len {
+                                        let remaining: String =
+                                            content.chars().skip(current_len).collect();
+                                        aurora_buffer.append_chunk(&remaining);
+                                        let _ = aurora_buffer.process_queue();
+                                    }
+
+                                    flush_aurora_parse(
+                                        &mut aurora_buffer,
+                                        &mut pending_aurora_chunk,
+                                        &mut last_aurora_parse,
+                                        true,
+                                    );
+                                    aurora_buffer.finalize();
+                                    send_aurora_update(
+                                        &mut aurora_buffer,
+                                        true,
+                                        true,
+                                        Some("completed".to_string()),
+                                        None,
+                                    );
+
+                                    active_requests_inner.remove(&message_id_inner);
+                                    return Ok((
+                                        json!({ "fullContent": aurora_buffer.full_text, "finishReason": "completed" }),
+                                        false,
+                                    ));
                                 }
-
-                                flush_aurora_parse(
-                                    &mut aurora_buffer,
-                                    &mut pending_aurora_chunk,
-                                    &mut last_aurora_parse,
-                                    true,
-                                );
-                                aurora_buffer.finalize();
-                                send_aurora_update(
-                                    &mut aurora_buffer,
-                                    true,
-                                    true,
-                                    Some("completed".to_string()),
-                                    None,
-                                );
-
-                                active_requests_inner.remove(&message_id_inner);
-                                return Ok((
-                                    json!({ "fullContent": aurora_buffer.full_text, "finishReason": "completed" }),
-                                    false,
-                                ));
                             }
                         }
                     }
-                }
 
-                log::warn!("[VCPClient] Message is not completed on server. Failing stream.");
-                send_stream_event(StreamEvent::error(
-                    message_id_inner.clone(),
-                    context_inner.clone(),
-                    "流已失效且任务未完成".to_string(),
-                ));
-                break 'main_loop;
+                    log::warn!("[VCPClient] Message is not completed on server. Failing stream.");
+                    send_stream_event(StreamEvent::error(
+                        message_id_inner.clone(),
+                        context_inner.clone(),
+                        "流已失效且任务未完成".to_string(),
+                    ));
+                    break 'main_loop;
+                }
             }
             State::Retrying => {
                 const MAX_RETRIES: u32 = 3;
@@ -1056,6 +1336,8 @@ async fn handle_streaming_request<R: Runtime>(
                         context_inner.clone(),
                         "网络连接意外断开，重连失败".to_string(),
                     ));
+                    #[cfg(target_os = "android")]
+                    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
                     active_requests_inner.remove(&message_id_inner);
                     return Err("Max retries reached".to_string());
                 }
@@ -1078,6 +1360,11 @@ async fn handle_streaming_request<R: Runtime>(
                 tokio::select! {
                     _ = &mut abort_rx => {
                         log::warn!("[VCPClient] Aborted during retry backoff sleep");
+                        #[cfg(target_os = "android")]
+                        {
+                            let _ = tauri_plugin_vcp_mobile::stream::stop_sse_proxy(_app.clone(), message_id_inner.clone());
+                            ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
+                        }
                         active_requests_inner.remove(&message_id_inner);
                         return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                     }
@@ -1089,6 +1376,8 @@ async fn handle_streaming_request<R: Runtime>(
         }
     }
 
+    #[cfg(target_os = "android")]
+    ACTIVE_STREAM_RECEIVERS.lock().unwrap().remove(&message_id_inner);
     active_requests_inner.remove(&message_id_inner);
     Ok((
         json!({

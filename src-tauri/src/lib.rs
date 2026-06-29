@@ -174,6 +174,15 @@ pub fn run() {
                 }
             });
 
+            // 4. 监听由 Kotlin SseProxyService 发回的 SSE 事件，并分发给 Rust 状态机
+            app.listen_any("vcp-mobile://sse_event", move |event| {
+                if let Ok(payload) = serde_json::from_str::<crate::vcp_modules::vcp_client::KotlinSseEvent>(event.payload()) {
+                    crate::vcp_modules::vcp_client::dispatch_sse_event(payload);
+                } else {
+                    log::warn!("[VCPCore] Failed to parse sse_event payload: {:?}", event.payload());
+                }
+            });
+
             Ok(())
         })
         .plugin(

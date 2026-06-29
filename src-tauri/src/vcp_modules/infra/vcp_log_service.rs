@@ -20,6 +20,8 @@ lazy_static::lazy_static! {
     static ref WS_URL_CHANNEL: (watch::Sender<Option<Url>>, watch::Receiver<Option<Url>>) = watch::channel(None);
     static ref CURRENT_LOG_STATUS: Arc<tokio::sync::RwLock<String>> = Arc::new(tokio::sync::RwLock::new("closed".to_string()));
     static ref HEARTBEAT_RESET_TX: Arc<tokio::sync::Mutex<Option<mpsc::Sender<()>>>> = Arc::new(tokio::sync::Mutex::new(None));
+    // 缓存 App 在后台期间接收到的 VCPLog 消息，避免丢弃和 WebView 积压，待返回前台时一并冲刷
+    static ref BACKGROUND_LOG_CACHE: std::sync::Mutex<Vec<serde_json::Value>> = std::sync::Mutex::new(Vec::new());
 }
 
 pub async fn handle_foreground_state_change(_app: &AppHandle, is_foreground: bool) {
@@ -56,10 +58,29 @@ pub async fn reconnect_log_connections(app: &AppHandle, log_url: String, log_key
 
 fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
     if !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
-        // App 处于后台时直接丢弃日志相关的实时推送，防止注入 evaluateJavascript 积压导致内存泄漏和前台恢复大卡死
+        // App 处于后台时，不直接发射到 WebView，而是缓存在 Rust 侧，防止内存泄漏，并在返回前台时补发
+        if let Ok(mut cache) = BACKGROUND_LOG_CACHE.lock() {
+            cache.push(payload);
+        }
         return;
     }
     let _ = app.emit("vcp-system-event", payload);
+}
+
+pub fn flush_background_logs<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let logs = {
+        if let Ok(mut cache) = BACKGROUND_LOG_CACHE.lock() {
+            std::mem::take(&mut *cache)
+        } else {
+            Vec::new()
+        }
+    };
+    if !logs.is_empty() {
+        log::info!("[VCPLog] Flashing {} cached background logs to WebView.", logs.len());
+        for log in logs {
+            let _ = app.emit("vcp-system-event", log);
+        }
+    }
 }
 
 #[tauri::command]
