@@ -270,40 +270,15 @@ class PushListenerService : Service() {
             }
             
             "tool_approval_requested" -> {
-                // 场景二：安全审计工具授权请求 (带 Action 按钮)
-                val approvalId = json.optString("approval_id", "")
+                // 场景二：安全审计工具授权请求 (点击将拉起主应用进行处理)
                 val toolName = json.optString("tool_name", "未知命令")
                 val detail = json.optString("detail", "")
                 val reason = json.optString("reason", "")
-
-                // 1. 同意按钮广播
-                val approveIntent = Intent(this, PushActionReceiver::class.java).apply {
-                    action = PushActionReceiver.ACTION_APPROVE
-                    putExtra("approval_id", approvalId)
-                    putExtra("notification_id", NOTIFICATION_ID_MESSAGE_BASE + uniqueId)
-                }
-                val pendingApprove = PendingIntent.getBroadcast(
-                    this, uniqueId + 1, approveIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                // 2. 拒绝按钮广播
-                val denyIntent = Intent(this, PushActionReceiver::class.java).apply {
-                    action = PushActionReceiver.ACTION_DENY
-                    putExtra("approval_id", approvalId)
-                    putExtra("notification_id", NOTIFICATION_ID_MESSAGE_BASE + uniqueId)
-                }
-                val pendingDeny = PendingIntent.getBroadcast(
-                    this, uniqueId + 2, denyIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
 
                 builder.setContentTitle("[$agentName] 等待工具执行授权")
                     .setContentText("申请调用 $toolName 进行操作，请点击处理。")
                     .setStyle(NotificationCompat.BigTextStyle().bigText("申请调用: $toolName\n操作指令: $detail\n原因说明: $reason"))
                     .setPriority(NotificationCompat.PRIORITY_HIGH) // 强提醒
-                    .addAction(android.R.drawable.ic_media_play, "允许 (Approve)", pendingApprove)
-                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, "拒绝 (Deny)", pendingDeny)
                 
                 notificationManager.notify(NOTIFICATION_ID_MESSAGE_BASE + uniqueId, builder.build())
             }

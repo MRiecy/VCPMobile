@@ -36,11 +36,6 @@
             android:exported="false"
             android:foregroundServiceType="remoteMessaging" />
 
-        <!-- 隔离进程通知栏交互响应接收器：同样运行在 :push 进程，用于在后台直接响应【允许】/【拒绝】并进行异步 POST 请求 -->
-        <receiver
-            android:name=".service.PushActionReceiver"
-            android:process=":push"
-            android:enabled="true"
-            android:exported="false" />
+
     </application>
 </manifest>
