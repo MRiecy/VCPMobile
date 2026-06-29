@@ -952,6 +952,9 @@ async fn handle_streaming_request<R: Runtime>(
 
                 #[cfg(target_os = "android")]
                 {
+                    let base_len = aurora_buffer.full_text.len();
+                    let mut replayed_len = 0;
+
                     if let Some(ref mut reader) = tcp_reader {
                         loop {
                             tokio::select! {
@@ -981,16 +984,26 @@ async fn handle_streaming_request<R: Runtime>(
                                                             last_finish_reason = Some(reason.to_string());
                                                         }
                                                         if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                            pending_aurora_chunk.push_str(delta);
-                                                            let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                                &mut aurora_buffer,
-                                                                &mut pending_aurora_chunk,
-                                                                &mut last_aurora_parse,
-                                                                false,
-                                                            );
-                                                            let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                            if stable_changed || tail_changed || has_mutations {
-                                                                send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                            replayed_len += delta.len();
+                                                            if replayed_len > base_len {
+                                                                let new_delta = if replayed_len - delta.len() < base_len {
+                                                                    let skip_bytes = base_len - (replayed_len - delta.len());
+                                                                    &delta[skip_bytes..]
+                                                                } else {
+                                                                    delta
+                                                                };
+
+                                                                pending_aurora_chunk.push_str(new_delta);
+                                                                let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                                    &mut aurora_buffer,
+                                                                    &mut pending_aurora_chunk,
+                                                                    &mut last_aurora_parse,
+                                                                    false,
+                                                                );
+                                                                let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                                if stable_changed || tail_changed || has_mutations {
+                                                                    send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
+                                                                }
                                                             }
                                                         }
                                                     }
