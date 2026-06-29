@@ -1,7 +1,9 @@
 use crate::vcp_modules::infra::utils::normalize_vcp_url;
 use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use dashmap::{DashMap, DashSet};
+#[cfg(not(target_os = "android"))]
 use futures_util::StreamExt;
+#[cfg(not(target_os = "android"))]
 use futures_util::TryStreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
@@ -12,7 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
 use tokio::sync::oneshot;
+#[cfg(not(target_os = "android"))]
 use tokio_util::codec::{FramedRead, LinesCodec};
+#[cfg(not(target_os = "android"))]
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -627,7 +631,7 @@ fn extract_timestamp_bindings(messages: &mut [Value]) -> Vec<Value> {
 }
 
 /// 3. 抽离自适应降帧流式请求循环
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 async fn handle_streaming_request<R: Runtime>(
     _app: &AppHandle<R>,
     client: Client,

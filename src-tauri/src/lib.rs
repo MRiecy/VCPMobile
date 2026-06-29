@@ -183,6 +183,30 @@ pub fn run() {
                 }
             });
 
+            // 5. 监听由 Kotlin LifecycleBridge 发回的原生进程级生命周期事件
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                let handle_lifecycle = app.handle().clone();
+                app.listen_any("vcp-mobile://lifecycle", move |event| {
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                        if let Some(state) = payload.get("state").and_then(|v| v.as_str()) {
+                            let handle = handle_lifecycle.clone();
+                            if state == "pause" || state == "stop" {
+                                log::info!("[Lifecycle] App entered background (state={})", state);
+                                tauri::async_runtime::spawn(async move {
+                                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, false).await;
+                                });
+                            } else if state == "resume" {
+                                log::info!("[Lifecycle] App entered foreground (state={})", state);
+                                tauri::async_runtime::spawn(async move {
+                                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, true).await;
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .plugin(
@@ -341,24 +365,6 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(|_app_handle, event| match event {
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        tauri::RunEvent::Suspended => {
-            log::info!("[Lifecycle] Native RunEvent::Suspended. App entered background.");
-            let handle = _app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, false)
-                    .await;
-            });
-        }
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        tauri::RunEvent::Resumed => {
-            log::info!("[Lifecycle] Native RunEvent::Resumed. App entered foreground.");
-            let handle = _app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, true)
-                    .await;
-            });
-        }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         tauri::RunEvent::WindowEvent {
             event: tauri::WindowEvent::Focused(focused),

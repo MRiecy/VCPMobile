@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import android.webkit.WebView
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import app.tauri.plugin.JSObject
 import java.lang.ref.WeakReference
 
 /**
@@ -17,10 +18,12 @@ class LifecycleBridge : DefaultLifecycleObserver {
 
     private var webViewRef: WeakReference<WebView>? = null
     private var activityRef: WeakReference<Activity>? = null
+    private var pluginRef: WeakReference<VcpMobilePlugin>? = null
 
-    fun attach(activity: Activity, webView: WebView) {
+    fun attach(activity: Activity, webView: WebView, plugin: VcpMobilePlugin) {
         webViewRef = WeakReference(webView)
         activityRef = WeakReference(activity)
+        pluginRef = WeakReference(plugin)
         // 升级为进程级生命周期监听，完美防抖，免疫 Activity 重建与切换
         activity.runOnUiThread {
             androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.addObserver(this)
@@ -42,6 +45,7 @@ class LifecycleBridge : DefaultLifecycleObserver {
         }
         webViewRef = null
         activityRef = null
+        pluginRef = null
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
@@ -78,15 +82,33 @@ class LifecycleBridge : DefaultLifecycleObserver {
         val json = org.json.JSONObject(detail).toString()
         val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
         val activity = activityRef?.get()
-        val webView = webViewRef?.get() ?: return
-        if (activity != null) {
-            activity.runOnUiThread {
-                webView.evaluateJavascript(script, null)
+        val webView = webViewRef?.get()
+        if (webView != null) {
+            if (activity != null) {
+                activity.runOnUiThread {
+                    webView.evaluateJavascript(script, null)
+                }
+            } else {
+                webView.post {
+                    webView.evaluateJavascript(script, null)
+                }
             }
-        } else {
-            webView.post {
-                webView.evaluateJavascript(script, null)
+        }
+
+        // 同时向 Rust 侧派发强类型的原生生命周期事件，规避 WebView 被冻结时 JS 无法执行的痛点
+        val plugin = pluginRef?.get()
+        if (plugin != null) {
+            val triggerData = JSObject()
+            for ((key, value) in detail) {
+                when (value) {
+                    is String -> triggerData.put(key, value)
+                    is Boolean -> triggerData.put(key, value)
+                    is Int -> triggerData.put(key, value)
+                    is Double -> triggerData.put(key, value)
+                    is Long -> triggerData.put(key, value)
+                }
             }
+            plugin.trigger("lifecycle", triggerData)
         }
     }
 }

@@ -32,6 +32,10 @@ import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import org.json.JSONObject
+import android.os.PowerManager
+import android.net.wifi.WifiManager
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -80,9 +84,13 @@ class SseProxyService : Service() {
 
     // 追踪所有活跃的 EventSource 连接
     private val activeConnections = ConcurrentHashMap<String, EventSource>()
+
+    // 独立于主进程的子进程物理锁，保障后台网络不中断
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     
-    // 缓存已接收但主进程尚未读取 of Chunks (Key: requestId, Value: 缓存的事件列表)
-    private val streamCaches = ConcurrentHashMap<String, ArrayList<String>>()
+    // 活跃的缓存文件流句柄表 (Key: requestId, Value: FileOutputStream)
+    private val activeFileStreams = ConcurrentHashMap<String, FileOutputStream>()
 
     // 主进程的 Messenger 客户端
     private var clientMessenger: Messenger? = null
@@ -121,40 +129,6 @@ class SseProxyService : Service() {
                     val requestId = data.getString(KEY_REQUEST_ID) ?: return
                     stopSseRequest(requestId)
                 }
-                MSG_GET_CACHE -> {
-                    val data = msg.data ?: return
-                    val requestId = data.getString(KEY_REQUEST_ID) ?: return
-                    val replyTo = msg.replyTo ?: clientMessenger
-                    
-                    val cachedList = streamCaches.remove(requestId) ?: ArrayList()
-                    Log.i(TAG, "Draining cache for stream replay. requestId=$requestId, size=${cachedList.size}")
-                    
-                    if (replyTo != null && cachedList.isNotEmpty()) {
-                        // 在后台协程中快速回放所有缓存事件，避免阻塞主线程
-                        serviceScope.launch {
-                            var count = 0
-                            for (eventJson in cachedList) {
-                                try {
-                                    val obj = JSONObject(eventJson)
-                                    val eventType = obj.optString("type")
-                                    val eventData = obj.optString("data")
-                                    
-                                    sendEventToClient(requestId, eventType, eventData, bypassCache = true)
-                                    
-                                    count++
-                                    // 每发送 20 个 chunk 执行一次 yield()，释放 CPU 调度权，防止 Binder 拥堵
-                                    if (count % 20 == 0) {
-                                        yield()
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed to replay cached chunk: ", e)
-                                }
-                            }
-                            Log.i(TAG, "Completed cache replay of $count chunks for requestId=$requestId")
-                        }
-                    }
-                }
-                else -> super.handleMessage(msg)
             }
         }
     }
@@ -163,6 +137,17 @@ class SseProxyService : Service() {
         super.onCreate()
         createNotificationChannel()
         serviceMessenger = Messenger(IncomingHandler(Looper.getMainLooper()))
+        
+        // 清理上一次运行残留的缓存文件，防止磁盘堆积
+        try {
+            val sseCacheDir = File(applicationContext.cacheDir, "sse_cache")
+            if (sseCacheDir.exists()) {
+                sseCacheDir.deleteRecursively()
+            }
+            sseCacheDir.mkdirs()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to cleanup stale cache files", e)
+        }
         
         // 启动为前台服务，获得免死金牌
         val serviceNotification = buildServiceNotification()
@@ -195,6 +180,8 @@ class SseProxyService : Service() {
         for (requestId in activeConnections.keys) {
             stopSseRequest(requestId)
         }
+        activeConnections.clear()
+        updateLocks() // 确保进程销毁时双锁被物理释放
         serviceScope.cancel() // 取消协程，释放资源
         super.onDestroy()
     }
@@ -210,8 +197,18 @@ class SseProxyService : Service() {
 
         Log.i(TAG, "Starting SSE Request: id=$requestId, url=$url")
         
-        // 初始化该请求的缓存队列
-        streamCaches[requestId] = ArrayList()
+        // 初始化该请求的本地缓存文件流
+        try {
+            val sseCacheDir = File(applicationContext.cacheDir, "sse_cache")
+            val cacheFile = File(sseCacheDir, "sse_cache_$requestId.txt")
+            if (cacheFile.exists()) {
+                cacheFile.delete()
+            }
+            val fos = FileOutputStream(cacheFile, true)
+            activeFileStreams[requestId] = fos
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create cache file stream for id=$requestId", e)
+        }
 
         val requestBuilder = Request.Builder().url(url)
         
@@ -259,17 +256,20 @@ class SseProxyService : Service() {
                 sendEventToClient(requestId, "error", errObj.toString())
                 
                 activeConnections.remove(requestId)
+                updateLocks()
             }
 
             override fun onClosed(eventSource: EventSource) {
                 Log.i(TAG, "SSE Closed: id=$requestId")
                 sendEventToClient(requestId, "closed", "")
                 activeConnections.remove(requestId)
+                updateLocks()
             }
         }
 
         val source = EventSources.createFactory(httpClient).newEventSource(request, eventSourceListener)
         activeConnections[requestId] = source
+        updateLocks()
     }
 
     /**
@@ -278,7 +278,86 @@ class SseProxyService : Service() {
     private fun stopSseRequest(requestId: String) {
         Log.i(TAG, "Stopping SSE Request: id=$requestId")
         activeConnections.remove(requestId)?.cancel()
-        streamCaches.remove(requestId)
+        
+        // 关闭并移除文件流
+        activeFileStreams.remove(requestId)?.let { fos ->
+            try {
+                fos.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to close file stream for id=$requestId", e)
+            }
+        }
+
+        // 物理删除缓存文件，防止磁盘堆积
+        try {
+            val sseCacheDir = File(applicationContext.cacheDir, "sse_cache")
+            val cacheFile = File(sseCacheDir, "sse_cache_$requestId.txt")
+            if (cacheFile.exists()) {
+                cacheFile.delete()
+                Log.d(TAG, "Deleted stream cache file for id=$requestId")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete cache file for id=$requestId", e)
+        }
+
+        updateLocks()
+    }
+
+    /**
+     * 根据当前是否有活跃连接，动态在子进程中获取/释放 WakeLock 和 WifiLock
+     */
+    @Synchronized
+    private fun updateLocks() {
+        val hasActive = activeConnections.isNotEmpty()
+        if (hasActive) {
+            val appContext = applicationContext
+            if (wakeLock == null) {
+                val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                if (powerManager != null) {
+                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VCP:SseProxyWakeLock")
+                }
+            }
+            wakeLock?.let {
+                if (!it.isHeld) {
+                    it.acquire()
+                    Log.i(TAG, "updateLocks: SseProxy WakeLock ACQUIRED.")
+                }
+            }
+
+            if (wifiLock == null) {
+                val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                if (wifiManager != null) {
+                    @Suppress("DEPRECATION")
+                    wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "VCP:SseProxyWifiLock")
+                    } else {
+                        wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL, "VCP:SseProxyWifiLock")
+                    }
+                }
+            }
+            wifiLock?.let {
+                if (!it.isHeld) {
+                    it.acquire()
+                    Log.i(TAG, "updateLocks: SseProxy WifiLock ACQUIRED.")
+                }
+            }
+        } else {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.i(TAG, "updateLocks: SseProxy WakeLock RELEASED.")
+                }
+            }
+            wakeLock = null
+
+            wifiLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.i(TAG, "updateLocks: SseProxy WifiLock RELEASED.")
+                }
+            }
+            wifiLock = null
+        }
     }
 
     /**
@@ -293,11 +372,16 @@ class SseProxyService : Service() {
                 put("timestamp", System.currentTimeMillis())
             }.toString()
 
-            // 写入该请求的缓存队列，确保数据不丢失
-            val cache = streamCaches[requestId]
-            if (cache != null) {
-                synchronized(cache) {
-                    cache.add(payload)
+            // 实时追加写入本地缓存文件（带缓冲且线程安全）
+            val fos = activeFileStreams[requestId]
+            if (fos != null) {
+                try {
+                    synchronized(fos) {
+                        fos.write((payload + "\n").toByteArray(Charsets.UTF_8))
+                        fos.flush() // 确保数据立即可被主进程读取
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to write chunk to cache file for id=$requestId", e)
                 }
             }
         }

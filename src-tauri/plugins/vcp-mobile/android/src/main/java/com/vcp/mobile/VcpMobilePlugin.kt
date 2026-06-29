@@ -20,6 +20,10 @@ import android.content.ComponentName
 import android.util.Log
 import androidx.core.content.FileProvider
 import android.webkit.MimeTypeMap
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Message
 import android.os.PowerManager
 import android.net.Uri
 import android.provider.Settings
@@ -943,7 +947,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         webViewRef = webView
 
         keyboardInsetsManager.attach(webView)
-        lifecycleBridge.attach(activity, webView)
+        lifecycleBridge.attach(activity, webView, this)
 
         // 冷启动：处理传递给 Activity 的初始 intent
         shareIntentHandler.handleShareIntent(activity.intent)
@@ -2251,22 +2255,28 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             val args = invoke.parseArgs(GetSseProxyCacheArgs::class.java)
             Log.i(TAG, "getSseProxyCache: id=${args.requestId}")
             
-            val messenger = serviceMessenger
-            if (messenger == null) {
-                invoke.reject("SseProxyService is not bound")
-                return
-            }
-
-            val msg = Message.obtain(null, com.vcp.mobile.service.SseProxyService.MSG_GET_CACHE)
-            msg.data = Bundle().apply {
-                putString(com.vcp.mobile.service.SseProxyService.KEY_REQUEST_ID, args.requestId)
-            }
-            msg.replyTo = localMessenger
-            messenger.send(msg)
+            // 直接在主进程中读取沙盒下的缓存文件，彻底绕过 Binder IPC 传输大流量
+            val sseCacheDir = java.io.File(activity.cacheDir, "sse_cache")
+            val cacheFile = java.io.File(sseCacheDir, "sse_cache_${args.requestId}.txt")
             
-            // 立即向 Rust 返回空缓存响应，后续缓存数据通过流式回放通道接收
+            val cacheArray = JSArray()
+            if (cacheFile.exists()) {
+                try {
+                    cacheFile.forEachLine { line ->
+                        if (line.trim().isNotEmpty()) {
+                            cacheArray.put(line)
+                        }
+                    }
+                    Log.i(TAG, "getSseProxyCache: Successfully read ${cacheArray.length()} chunks from file.")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to read sse_cache file for id=${args.requestId}", e)
+                }
+            } else {
+                Log.w(TAG, "getSseProxyCache: Cache file does not exist for id=${args.requestId}")
+            }
+            
             val resObj = JSObject()
-            resObj.put("cache", JSArray())
+            resObj.put("cache", cacheArray)
             invoke.resolve(resObj)
         } catch (e: Exception) {
             Log.e(TAG, "getSseProxyCache failed", e)
