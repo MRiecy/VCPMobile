@@ -138,7 +138,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     val pluginActivity: Activity get() = activity
     var webViewRef: WebView? = null
     private var isAppInForeground = true // 追踪应用是否处于前台，用于精准控制后台推送服务的生命周期
-    private var pendingApprovalData: JSObject? = null // 暂存点击通知启动时携带的审批数据，供冷启动对齐
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
@@ -948,19 +947,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         shareIntentHandler.handleShareIntent(intent)
-        
-        // 解析 Intent 中是否包含审批参数，如果有，将其暂合并分发事件给前端 WebView
-        val approval = parseApprovalFromIntent(intent)
-        if (approval != null) {
-            pendingApprovalData = approval
-            Log.i(TAG, "onNewIntent: Received pending approval, dispatching event to webview.")
-            webViewRef?.post {
-                webViewRef?.evaluateJavascript(
-                    "window.dispatchEvent(new CustomEvent('vcp-pending-approval', { detail: ${approval.toString()} }))",
-                    null
-                )
-            }
-        }
     }
 
     // ==================================================================
@@ -2208,32 +2194,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             Log.e(TAG, "updatePushCredentials failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
-    }
-
-    @Command
-    fun getPendingApproval(invoke: Invoke) {
-        // 冷启动对齐：优先读取 intent 中并解析，如无则使用缓存
-        val intentData = parseApprovalFromIntent(activity.intent)
-        val result = intentData ?: pendingApprovalData
-        pendingApprovalData = null // 消费后即时清理，防止重复唤醒弹窗
-        
-        Log.i(TAG, "getPendingApproval: Returning ${if (result != null) "data" else "empty"}")
-        invoke.resolve(result ?: JSObject())
-    }
-
-    private fun parseApprovalFromIntent(intent: Intent?): JSObject? {
-        if (intent == null) return null
-        val approvalId = intent.getStringExtra("approval_id") ?: return null
-        val toolName = intent.getStringExtra("tool_name") ?: ""
-        val detail = intent.getStringExtra("detail") ?: ""
-        val reason = intent.getStringExtra("reason") ?: ""
-
-        val obj = JSObject()
-        obj.put("approvalId", approvalId)
-        obj.put("toolName", toolName)
-        obj.put("detail", detail)
-        obj.put("reason", reason)
-        return obj
     }
 }
 

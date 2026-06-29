@@ -270,41 +270,40 @@ class PushListenerService : Service() {
             }
             
             "tool_approval_requested" -> {
-                // 场景二：安全审计工具授权请求。点击通知直接唤醒主应用，由主应用弹窗供用户输入【审批备注】
+                // 场景二：安全审计工具授权请求 (带 Action 按钮)
                 val approvalId = json.optString("approval_id", "")
                 val toolName = json.optString("tool_name", "未知命令")
                 val detail = json.optString("detail", "")
                 val reason = json.optString("reason", "")
 
-                // 重新包装打开主应用的 Intent，携带完整的审批上下文
-                val customOpenIntent = try {
-                    val mainActivityClass = Class.forName("com.vcp.avatar.MainActivity")
-                    Intent(this, mainActivityClass).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                        putExtra("approval_id", approvalId)
-                        putExtra("tool_name", toolName)
-                        putExtra("detail", detail)
-                        putExtra("reason", reason)
-                        action = Intent.ACTION_VIEW
-                        data = android.net.Uri.parse("vcp://approval?approval_id=$approvalId")
-                    }
-                } catch (_: ClassNotFoundException) {
-                    Intent(Intent.ACTION_MAIN).apply {
-                        setPackage(packageName)
-                        addCategory(Intent.CATEGORY_LAUNCHER)
-                    }
+                // 1. 同意按钮广播
+                val approveIntent = Intent(this, PushActionReceiver::class.java).apply {
+                    action = PushActionReceiver.ACTION_APPROVE
+                    putExtra("approval_id", approvalId)
+                    putExtra("notification_id", NOTIFICATION_ID_MESSAGE_BASE + uniqueId)
                 }
+                val pendingApprove = PendingIntent.getBroadcast(
+                    this, uniqueId + 1, approveIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
 
-                val pendingCustomOpen = PendingIntent.getActivity(
-                    this, uniqueId, customOpenIntent,
+                // 2. 拒绝按钮广播
+                val denyIntent = Intent(this, PushActionReceiver::class.java).apply {
+                    action = PushActionReceiver.ACTION_DENY
+                    putExtra("approval_id", approvalId)
+                    putExtra("notification_id", NOTIFICATION_ID_MESSAGE_BASE + uniqueId)
+                }
+                val pendingDeny = PendingIntent.getBroadcast(
+                    this, uniqueId + 2, denyIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
 
                 builder.setContentTitle("[$agentName] 等待工具执行授权")
-                    .setContentText("申请调用 $toolName，点击进入应用审批。")
+                    .setContentText("申请调用 $toolName 进行操作，请点击处理。")
                     .setStyle(NotificationCompat.BigTextStyle().bigText("申请调用: $toolName\n操作指令: $detail\n原因说明: $reason"))
-                    .setPriority(NotificationCompat.PRIORITY_HIGH) // 强提醒，确保横幅弹出
-                    .setContentIntent(pendingCustomOpen)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH) // 强提醒
+                    .addAction(android.R.drawable.ic_media_play, "允许 (Approve)", pendingApprove)
+                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, "拒绝 (Deny)", pendingDeny)
                 
                 notificationManager.notify(NOTIFICATION_ID_MESSAGE_BASE + uniqueId, builder.build())
             }
