@@ -253,6 +253,40 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve()
     }
 
+    @Command
+    fun check_notification_listener_permission(invoke: Invoke) {
+        val context = activity.applicationContext
+        val pkgName = context.packageName
+        val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+        var isEnabled = false
+        if (!flat.isNullOrEmpty()) {
+            val names = flat.split(":")
+            for (name in names) {
+                val cn = ComponentName.unflattenFromString(name)
+                if (cn != null && cn.packageName == pkgName) {
+                    isEnabled = true
+                    break
+                }
+            }
+        }
+        val ret = JSObject()
+        ret.put("enabled", isEnabled)
+        invoke.resolve(ret)
+    }
+
+    @Command
+    fun request_notification_listener_permission(invoke: Invoke) {
+        try {
+            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject("Failed to open notification listener settings: ${e.message}")
+        }
+    }
+
     private fun startOomScoreGuard() {
         fileIoExecutor.execute {
             try {

@@ -9,6 +9,8 @@ commands.allow = [
     "check_all_permissions",
     "request_android_permission",
     "move_task_to_back",
+    "check_notification_listener_permission",
+    "request_notification_listener_permission",
     "pick_file",
     "get_battery_status",
     "get_network_status",

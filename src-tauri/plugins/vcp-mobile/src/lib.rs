@@ -29,6 +29,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::check_all_permissions,
             system::request_android_permission,
             system::move_task_to_back,
+            system::check_notification_listener_permission,
+            system::request_notification_listener_permission,
             system::request_auto_start_permission,
             system::request_power_management_permission,
             system::check_auto_start_permission,

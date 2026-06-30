@@ -37,6 +37,15 @@
             android:foregroundServiceType="remoteMessaging"
             android:stopWithTask="false" />
 
-
+        <!-- 系统级通知栏监听器：用于极度稳定的后台常驻与豁免 -->
+        <service
+            android:name=".service.VcpNotificationListenerService"
+            android:label="VCP 连接守护助手"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

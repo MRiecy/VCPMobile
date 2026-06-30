@@ -13,6 +13,8 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -51,10 +53,15 @@ import java.util.concurrent.TimeUnit
 class SseProxyService : Service() {
 
     companion object {
-        private const val TAG = "SseProxyService"
-        private const val CHANNEL_ID = "vcp_helper_service_channel"
-        private const val NOTIFICATION_ID_SERVICE = 0x53545210
+        private const val TAG = "VcpSseProxy"
+        const val CHANNEL_ID = "vcp_sse_proxy_helper"
+        const val NOTIFICATION_ID_SERVICE = 0x53545202
+
+        @Volatile
+        var isServiceRunning = false
     }
+
+    private var mediaPlayer: MediaPlayer? = null
 
     class StreamSession(
         val requestId: String,
@@ -81,6 +88,7 @@ class SseProxyService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        isServiceRunning = true
         createNotificationChannel()
         
         // 启动为前台服务，获得后台守护资格
@@ -125,6 +133,7 @@ class SseProxyService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy: shutting down TCP server and all sessions.")
+        isServiceRunning = false
         try {
             val portFile = File(applicationContext.cacheDir, "sse_helper.port")
             if (portFile.exists()) {
@@ -135,6 +144,8 @@ class SseProxyService : Service() {
         try {
             serverSocket?.close()
         } catch (ignored: Exception) {}
+        
+        stopSilentPlayback()
         
         for (session in activeSessions.values) {
             session.eventSource?.cancel()
@@ -516,8 +527,10 @@ class SseProxyService : Service() {
         val hasRunning = activeSessions.values.any { !it.isCompleted }
         if (hasRunning) {
             acquireLocks()
+            startSilentPlayback()
         } else {
             releaseLocks()
+            stopSilentPlayback()
         }
         checkSelfTermination()
     }
@@ -628,5 +641,81 @@ class SseProxyService : Service() {
         }
 
         return builder.build()
+    }
+
+    private fun ensureSilentAudioFile(): File {
+        val file = File(cacheDir, "silent.wav")
+        if (file.exists() && file.length() > 0) {
+            return file
+        }
+        try {
+            file.outputStream().use { out ->
+                // RIFF Header
+                out.write(byteArrayOf(0x52, 0x49, 0x46, 0x46)) // "RIFF"
+                out.write(byteArrayOf(0x64, 0x06, 0x00, 0x00)) // Size: 1636
+                out.write(byteArrayOf(0x57, 0x41, 0x56, 0x45)) // "WAVE"
+                
+                // fmt Chunk
+                out.write(byteArrayOf(0x66, 0x6d, 0x74, 0x20)) // "fmt "
+                out.write(byteArrayOf(0x10, 0x00, 0x00, 0x00)) // Chunk size: 16
+                out.write(byteArrayOf(0x01, 0x00))             // Format: 1 (PCM)
+                out.write(byteArrayOf(0x01, 0x00))             // Channels: 1 (Mono)
+                out.write(byteArrayOf(0x40, 0x1F, 0x00, 0x00)) // Sample rate: 8000
+                out.write(byteArrayOf(0x40, 0x1F, 0x00, 0x00)) // Byte rate: 8000
+                out.write(byteArrayOf(0x01, 0x00))             // Block align: 1
+                out.write(byteArrayOf(0x08, 0x00))             // Bits per sample: 8
+                
+                // data Chunk
+                out.write(byteArrayOf(0x64, 0x61, 0x74, 0x61)) // "data"
+                out.write(byteArrayOf(0x40, 0x06, 0x00, 0x00)) // Data size: 1600
+                
+                // 1600 bytes of silence (0x80 for 8-bit PCM)
+                val silence = ByteArray(1600) { 0x80.toByte() }
+                out.write(silence)
+            }
+            Log.i(TAG, "Created silent.wav in cache directory.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create silent.wav", e)
+        }
+        return file
+    }
+
+    private fun startSilentPlayback() {
+        if (mediaPlayer != null) return
+        try {
+            val silentFile = ensureSilentAudioFile()
+            mediaPlayer = MediaPlayer().apply {
+                setDataSource(silentFile.absolutePath)
+                isLooping = true
+                
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                }
+                
+                prepare()
+                start()
+            }
+            Log.i(TAG, "Silent playback started.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start silent playback", e)
+        }
+    }
+
+    private fun stopSilentPlayback() {
+        mediaPlayer?.let {
+            try {
+                if (it.isPlaying) {
+                    it.stop()
+                }
+                it.release()
+            } catch (ignored: Exception) {}
+        }
+        mediaPlayer = null
+        Log.i(TAG, "Silent playback stopped.")
     }
 }
