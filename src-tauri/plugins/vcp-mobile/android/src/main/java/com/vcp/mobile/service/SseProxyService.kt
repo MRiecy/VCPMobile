@@ -3,6 +3,7 @@ package com.vcp.mobile.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -103,6 +104,17 @@ class SseProxyService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        serverSocket?.let { server ->
+            serviceScope.launch(Dispatchers.IO) {
+                try {
+                    val portFile = File(applicationContext.cacheDir, "sse_helper.port")
+                    portFile.writeText(server.localPort.toString())
+                    Log.i(TAG, "onStartCommand: Rewrote port file with ${server.localPort}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "onStartCommand: Failed to write port file", e)
+                }
+            }
+        }
         return START_STICKY
     }
 
@@ -113,6 +125,13 @@ class SseProxyService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy: shutting down TCP server and all sessions.")
+        try {
+            val portFile = File(applicationContext.cacheDir, "sse_helper.port")
+            if (portFile.exists()) {
+                portFile.delete()
+            }
+        } catch (ignored: Exception) {}
+        
         try {
             serverSocket?.close()
         } catch (ignored: Exception) {}
@@ -468,17 +487,20 @@ class SseProxyService : Service() {
         }
     }
 
+    private var isTaskRemoved = false
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        Log.i(TAG, "onTaskRemoved: Main task removed by user.")
+        isTaskRemoved = true
+        checkSelfTermination()
+    }
+
     @Synchronized
-    private fun updateLocks() {
+    private fun checkSelfTermination() {
         val hasRunning = activeSessions.values.any { !it.isCompleted }
-        if (hasRunning) {
-            acquireLocks()
-        } else {
-            releaseLocks()
-        }
-        
-        if (activeSessions.isEmpty()) {
-            Log.i(TAG, "No sessions left. Stopping foreground and service.")
+        if (isTaskRemoved && !hasRunning) {
+            Log.i(TAG, "Task removed and no running sessions. Stopping service.")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 stopForeground(STOP_FOREGROUND_REMOVE)
             } else {
@@ -487,6 +509,17 @@ class SseProxyService : Service() {
             }
             stopSelf()
         }
+    }
+
+    @Synchronized
+    private fun updateLocks() {
+        val hasRunning = activeSessions.values.any { !it.isCompleted }
+        if (hasRunning) {
+            acquireLocks()
+        } else {
+            releaseLocks()
+        }
+        checkSelfTermination()
     }
 
     private fun acquireLocks() {
@@ -546,23 +579,49 @@ class SseProxyService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "VCP 后台连接助手",
-                NotificationManager.IMPORTANCE_MIN
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "维持后台稳定的 AI 对话流式连接"
                 setShowBadge(false)
+                enableVibration(false)
+                setSound(null, null)
             }
             getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
 
     private fun buildServiceNotification(): Notification {
+        // 点击通知：打开应用（通过反射获取主 Activity，避免跨包编译依赖）
+        val openIntent = try {
+            val mainActivityClass = Class.forName("com.vcp.avatar.MainActivity")
+            Intent(this, mainActivityClass).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+        } catch (_: ClassNotFoundException) {
+            Intent(Intent.ACTION_MAIN).apply {
+                setPackage(packageName)
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
+        }
+        val openPendingIntent = PendingIntent.getActivity(
+            this, 0, openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("VCP 连接助手")
-            .setContentText("后台低功耗网络托管中")
+            .setContentText("正在后台托管 AI 对话流式连接...")
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openPendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(
+                applicationInfo.icon,
+                "Open",
+                openPendingIntent
+            )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)

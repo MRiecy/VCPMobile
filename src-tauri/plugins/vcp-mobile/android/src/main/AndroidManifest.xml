@@ -35,7 +35,7 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging"
-            android:stopWithTask="true" />
+            android:stopWithTask="false" />
 
 
     </application>

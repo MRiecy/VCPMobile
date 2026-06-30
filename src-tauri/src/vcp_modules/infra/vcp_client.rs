@@ -612,17 +612,92 @@ async fn connect_to_helper<R: Runtime>(
     msg_id: &str,
     extra_params: Option<Value>,
 ) -> Result<tokio::net::TcpStream, String> {
-    #[cfg(target_os = "android")]
-    {
-        let _ = tauri_plugin_vcp_mobile::stream::start_helper_service(app.clone());
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let port_file = cache_dir.join("sse_helper.port");
+
+    // 1. 尝试使用已有的端口文件进行连接（适用于 helper 已经在运行且就绪的情况）
+    if port_file.exists() {
+        if let Ok(content) = std::fs::read_to_string(&port_file) {
+            if let Ok(port) = content.trim().parse::<u16>() {
+                if let Ok(stream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+                    log::info!("[VCPClient] Connected to existing sse helper socket on 127.0.0.1:{}", port);
+                    return send_command_to_stream(stream, action, msg_id, extra_params).await;
+                }
+            }
+        }
     }
 
-    let port = get_helper_port(app)?;
-    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|e| format!("Failed to connect to sse helper socket on 127.0.0.1:{}: {}", port, e))?;
+    // 2. 如果连接失败或文件不存在，启动/唤醒 helper 服务
+    log::info!("[VCPClient] Helper not responding or port file missing. Starting/Waking helper service...");
+    let _ = tauri_plugin_vcp_mobile::stream::start_helper_service(app.clone());
 
+    // 3. 循环等待新端口文件并尝试连接（最多尝试 60 次，每次间隔 50ms，总计 3 秒超时）
+    let mut last_err = String::new();
+    let max_attempts = 60;
+    let delay = Duration::from_millis(50);
+
+    for attempt in 1..=max_attempts {
+        if !port_file.exists() {
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&port_file) {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("Read port file error: {}", e);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
+
+        let port_str = content.trim();
+        if port_str.is_empty() {
+            tokio::time::sleep(delay).await;
+            continue;
+        }
+
+        let port = match port_str.parse::<u16>() {
+            Ok(p) => p,
+            Err(e) => {
+                last_err = format!("Parse port error: {}", e);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        };
+
+        // 尝试连接
+        match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            Ok(stream) => {
+                log::info!(
+                    "[VCPClient] Connected to sse helper socket on 127.0.0.1:{} after {} attempts",
+                    port,
+                    attempt
+                );
+                return send_command_to_stream(stream, action, msg_id, extra_params).await;
+            }
+            Err(e) => {
+                last_err = format!("Connect to 127.0.0.1:{} failed: {}", port, e);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to connect to sse helper after {}s (last error: {})",
+        (max_attempts as f32 * 0.05),
+        last_err
+    ))
+}
+
+// 辅助函数：向已连接的 TcpStream 发送 JSON 指令
+#[cfg(target_os = "android")]
+async fn send_command_to_stream(
+    mut stream: tokio::net::TcpStream,
+    action: &str,
+    msg_id: &str,
+    extra_params: Option<Value>,
+) -> Result<tokio::net::TcpStream, String> {
     let mut cmd = json!({
         "action": action,
         "requestId": msg_id
@@ -637,9 +712,8 @@ async fn connect_to_helper<R: Runtime>(
     
     use tokio::io::AsyncWriteExt;
     let cmd_line = cmd.to_string() + "\n";
-    stream.write_all(cmd_line.as_bytes()).await.map_err(|e| e.to_string())?;
-    stream.flush().await.map_err(|e| e.to_string())?;
-    
+    stream.write_all(cmd_line.as_bytes()).await.map_err(|e| format!("Write command error: {}", e))?;
+    stream.flush().await.map_err(|e| format!("Flush command error: {}", e))?;
     Ok(stream)
 }
 
