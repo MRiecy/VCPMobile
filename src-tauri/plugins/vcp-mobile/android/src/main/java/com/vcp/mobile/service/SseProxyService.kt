@@ -211,7 +211,8 @@ class SseProxyService : Service() {
                         readSocketUntilClose(socket, reader, requestId)
                     }
                     "resume" -> {
-                        handleResumeStream(requestId, writer)
+                        val startIndex = request.optInt("startIndex", 0)
+                        handleResumeStream(requestId, startIndex, writer)
                         readSocketUntilClose(socket, reader, requestId)
                     }
                     "query" -> {
@@ -318,7 +319,7 @@ class SseProxyService : Service() {
         updateLocks()
     }
 
-    private fun handleResumeStream(requestId: String, writer: BufferedWriter) {
+    private fun handleResumeStream(requestId: String, startIndex: Int, writer: BufferedWriter) {
         val session = activeSessions[requestId]
         if (session == null) {
             Log.w(TAG, "resume: Session not found for id=$requestId")
@@ -332,12 +333,14 @@ class SseProxyService : Service() {
             return
         }
         
-        Log.i(TAG, "Resuming session id=$requestId, playing back ${session.eventBuffer.size} events.")
+        Log.i(TAG, "Resuming session id=$requestId, playing back events from $startIndex.")
         
         synchronized(session) {
             session.activeSocketWriter = writer
-            for (event in session.eventBuffer) {
+            val bufferSize = session.eventBuffer.size
+            for (i in startIndex until bufferSize) {
                 try {
+                    val event = session.eventBuffer[i]
                     writer.write(event.toString() + "\n")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed playing back events to socket", e)
@@ -365,6 +368,7 @@ class SseProxyService : Service() {
             synchronized(session) {
                 resp.put("status", if (session.isCompleted) "completed" else "streaming")
                 resp.put("lastFinishReason", session.lastFinishReason ?: "")
+                resp.put("lastEventIndex", session.eventBuffer.size - 1)
                 
                 // 从内存中拼接出完整的文本，供冷启动快速落盘
                 val fullText = StringBuilder()
@@ -416,6 +420,7 @@ class SseProxyService : Service() {
             put("requestId", session.requestId)
             put("eventType", eventType)
             put("eventData", data)
+            put("index", session.eventBuffer.size)
         }
         
         synchronized(session) {
@@ -437,14 +442,17 @@ class SseProxyService : Service() {
         synchronized(session) {
             if (session.isCompleted) {
                 if (session.activeSocketWriter == null) {
-                    // 主进程已断开：延迟 5 分钟清理，给冷启动恢复留出时间
-                    Log.i(TAG, "Session id=${session.requestId} completed while disconnected. Scheduling cleanup in 5 minutes.")
+                    // 主进程已断开：立即将数据转储到磁盘缓存，确保在释放 WakeLock / 进程休眠前数据已落盘！
+                    Log.i(TAG, "Session id=${session.requestId} completed while disconnected. Dumping to disk immediately.")
+                    dumpSessionToFile(session)
+
+                    // 延迟 5 分钟清理内存缓存，给冷启动恢复留出时间
+                    Log.i(TAG, "Scheduling memory cleanup for session id=${session.requestId} in 5 minutes.")
                     serviceScope.launch(Dispatchers.IO) {
                         kotlinx.coroutines.delay(5 * 60 * 1000L)
                         synchronized(session) {
                             if (activeSessions[session.requestId] === session && session.activeSocketWriter == null) {
-                                Log.i(TAG, "Session id=${session.requestId} 5-min timeout. Dumping to cache file and removing.")
-                                dumpSessionToFile(session)
+                                Log.i(TAG, "Session id=${session.requestId} 5-min timeout. Removing from memory.")
                                 activeSessions.remove(session.requestId)
                                 updateLocks()
                             }

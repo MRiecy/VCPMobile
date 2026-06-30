@@ -867,6 +867,20 @@ pub async fn delete_messages(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 级联清除活跃生成注册表，杜绝已删除消息复活
+    let delete_active_gen_query = format!(
+        "DELETE FROM active_generations WHERE topic_id = ? AND msg_id IN ({})",
+        msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+    );
+    let mut q_active = sqlx::query(&delete_active_gen_query).bind(topic_id);
+    for id in &msg_ids {
+        q_active = q_active.bind(id);
+    }
+    q_active
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
     )

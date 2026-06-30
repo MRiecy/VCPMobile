@@ -189,12 +189,6 @@ const bootstrapApp = async () => {
       return;
     }
     await lifecycleStore.bootstrap();
-
-    // 🆕 异步恢复被异常打断的活跃生成，不阻塞 READY 渲染流程
-    const streamStore = useChatStreamStore();
-    streamStore.checkAndRecoverInterruptedStreams().catch(e => {
-      console.error("[App] Failed to recover interrupted streams on bootstrap:", e);
-    });
   } catch (error) {
     console.error("[App] Bootstrap failed:", error);
   }

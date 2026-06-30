@@ -371,6 +371,7 @@ pub async fn perform_vcp_request<R: Runtime>(
             abort_rx,
             active_requests,
             stream_channel,
+            false,
             None,
             None,
         )
@@ -749,7 +750,8 @@ async fn handle_streaming_request<R: Runtime>(
     mut abort_rx: tokio::sync::oneshot::Receiver<()>,
     active_requests: Arc<DashMap<String, tokio::sync::oneshot::Sender<()>>>,
     stream_channel: Option<Channel<StreamEvent>>,
-    initial_reconnect_url: Option<String>,
+    is_resume: bool,
+    last_event_index: Option<i64>,
     initial_content: Option<String>,
 ) -> Result<(Value, bool), String> {
     let send_stream_event = |event: StreamEvent| {
@@ -764,6 +766,8 @@ async fn handle_streaming_request<R: Runtime>(
 
     let mut full_content = String::new();
     let mut last_finish_reason: Option<String> = None;
+    #[allow(unused_mut)]
+    let mut last_received_index: Option<i64> = last_event_index;
     let mut aurora_buffer = AuroraBuffer::new();
     let mut pending_aurora_chunk = String::new();
     let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
@@ -893,7 +897,7 @@ async fn handle_streaming_request<R: Runtime>(
                     let _ = aurora_buffer.take_tail_frame();
                     full_content.push_str(content);
                 }
-                if initial_reconnect_url.is_some() {
+                if is_resume {
                     state = State::Resuming;
                 } else {
                     state = State::Connecting;
@@ -1001,7 +1005,12 @@ async fn handle_streaming_request<R: Runtime>(
                         message_id_inner
                     );
                     
-                    match connect_to_helper(_app, "resume", &message_id_inner, None).await {
+                    let start_idx = last_received_index.map(|idx| idx + 1).unwrap_or(0);
+                    let params = json!({
+                        "startIndex": start_idx
+                    });
+                    
+                    match connect_to_helper(_app, "resume", &message_id_inner, Some(params)).await {
                         Ok(stream) => {
                             log::info!("[VCPClient] Successfully reconnected to sse helper socket");
                             tcp_reader = Some(FramedRead::new(stream, LinesCodec::new()));
@@ -1026,9 +1035,6 @@ async fn handle_streaming_request<R: Runtime>(
 
                 #[cfg(target_os = "android")]
                 {
-                    let base_len = aurora_buffer.full_text.len();
-                    let mut replayed_len = 0;
-
                     if let Some(ref mut reader) = tcp_reader {
                         loop {
                             tokio::select! {
@@ -1048,6 +1054,10 @@ async fn handle_streaming_request<R: Runtime>(
                                                 let event_type = event["eventType"].as_str().unwrap_or("");
                                                 let event_data = event["eventData"].as_str().unwrap_or("");
                                                 
+                                                if let Some(idx) = event.get("index").and_then(|v| v.as_i64()) {
+                                                    last_received_index = Some(idx);
+                                                }
+                                                
                                                 if event_type == "message" {
                                                     if event_data == "[DONE]" {
                                                         stream_ended_normally = true;
@@ -1058,26 +1068,16 @@ async fn handle_streaming_request<R: Runtime>(
                                                             last_finish_reason = Some(reason.to_string());
                                                         }
                                                         if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                            replayed_len += delta.len();
-                                                            if replayed_len > base_len {
-                                                                let new_delta = if replayed_len - delta.len() < base_len {
-                                                                    let skip_bytes = base_len - (replayed_len - delta.len());
-                                                                    &delta[skip_bytes..]
-                                                                } else {
-                                                                    delta
-                                                                };
-
-                                                                pending_aurora_chunk.push_str(new_delta);
-                                                                let (stable_changed, tail_changed) = flush_aurora_parse(
-                                                                    &mut aurora_buffer,
-                                                                    &mut pending_aurora_chunk,
-                                                                    &mut last_aurora_parse,
-                                                                    false,
-                                                                );
-                                                                let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                                if stable_changed || tail_changed || has_mutations {
-                                                                    send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
-                                                                }
+                                                            pending_aurora_chunk.push_str(delta);
+                                                            let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                                &mut aurora_buffer,
+                                                                &mut pending_aurora_chunk,
+                                                                &mut last_aurora_parse,
+                                                                false,
+                                                            );
+                                                            let has_mutations = !aurora_buffer.pending_mutations.is_empty();
+                                                            if stable_changed || tail_changed || has_mutations {
+                                                                send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None, None);
                                                             }
                                                         }
                                                     }
@@ -1599,6 +1599,18 @@ async fn mark_message_as_error<R: Runtime>(
     msg_id: &str,
     custom_error: Option<String>,
 ) -> Result<(), String> {
+    use sqlx::Row;
+
+    // 先获取已有的正文内容进行挽留保留
+    let existing_content_row = sqlx::query("SELECT content FROM messages WHERE msg_id = ?")
+        .bind(msg_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let existing_content = existing_content_row
+        .and_then(|r| r.get::<Option<String>, _>("content"))
+        .unwrap_or_default();
+
     let row = sqlx::query(
         "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
     )
@@ -1608,7 +1620,6 @@ async fn mark_message_as_error<R: Runtime>(
     .map_err(|e| e.to_string())?;
 
     if let Some(r) = row {
-        use sqlx::Row;
         let topic_id: String = r.get("topic_id");
         let owner_id: String = r.get("owner_id");
         let owner_type: String = r.get("owner_type");
@@ -1620,9 +1631,14 @@ async fn mark_message_as_error<R: Runtime>(
             .map_err(|e| e.to_string())?;
         let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
 
-        let error_placeholder = match custom_error {
+        let error_suffix = match custom_error {
             Some(err) => format!("\n\n> VCP流式错误: {}", err),
             None => "\n\n> VCP流式错误: 生成意外中断".to_string(),
+        };
+        let final_content = if existing_content.is_empty() {
+            error_suffix
+        } else {
+            format!("{}{}", existing_content, error_suffix)
         };
 
         crate::vcp_modules::chat::message_service::finalize_stream_message(
@@ -1632,7 +1648,7 @@ async fn mark_message_as_error<R: Runtime>(
             &owner_type,
             topic_id,
             msg_id.to_string(),
-            error_placeholder,
+            final_content,
             false,
             Some("error".to_string()),
             None,
@@ -1640,9 +1656,20 @@ async fn mark_message_as_error<R: Runtime>(
         )
         .await?;
     } else {
+        let error_suffix = match custom_error {
+            Some(err) => format!("\n\n> VCP流式错误: {}", err),
+            None => "\n\n> VCP流式错误: 生成意外中断".to_string(),
+        };
+        let final_content = if existing_content.is_empty() {
+            error_suffix
+        } else {
+            format!("{}{}", existing_content, error_suffix)
+        };
+
         sqlx::query(
-            "UPDATE messages SET finish_reason = 'error', is_thinking = 0 WHERE msg_id = ?",
+            "UPDATE messages SET content = ?, finish_reason = 'error', is_thinking = 0 WHERE msg_id = ?",
         )
+        .bind(final_content)
         .bind(msg_id)
         .execute(pool)
         .await
@@ -1659,23 +1686,20 @@ async fn mark_message_as_error<R: Runtime>(
 
 fn clean_old_cache_files(cache_dir: &std::path::Path) {
     let sse_cache_dir = cache_dir.join("sse_cache");
-    if sse_cache_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(sse_cache_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().map_or(false, |ext| ext == "json") {
-                    if let Ok(metadata) = entry.metadata() {
-                        if let Ok(modified) = metadata.modified() {
-                            if let Ok(elapsed) = modified.elapsed() {
-                                if elapsed.as_secs() > 24 * 3600 {
-                                    log::info!("[VCPClient] Deleting orphaned cache file older than 24 hours: {:?}", path);
-                                    let _ = std::fs::remove_file(path);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    if !sse_cache_dir.exists() { return; }
+    let Ok(entries) = std::fs::read_dir(sse_cache_dir) else { return; };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().map_or(true, |ext| ext != "json") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else { continue; };
+        let Ok(modified) = metadata.modified() else { continue; };
+        let Ok(elapsed) = modified.elapsed() else { continue; };
+        if elapsed.as_secs() > 24 * 3600 {
+            log::info!("[VCPClient] Deleting orphaned cache file older than 24 hours: {:?}", path);
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -1866,7 +1890,8 @@ pub async fn recover_active_generation<R: Runtime>(
                     log::info!("[VCPClient] Session is still streaming in helper. Returning status and content to frontend.");
                     return Ok(json!({
                         "status": "streaming",
-                        "content": content
+                        "content": content,
+                        "lastEventIndex": resp["lastEventIndex"]
                     }));
                 } else {
                     log::warn!("[VCPClient] Session status is 'not_found' in helper.");
@@ -1905,16 +1930,29 @@ pub async fn resume_stream<R: Runtime>(
     owner_id: String,
     owner_type: String,
     stream_channel: Channel<StreamEvent>,
+    initial_content: Option<String>,
+    last_event_index: Option<i64>,
 ) -> Result<Value, String> {
     log::info!(
-        "[VCPClient] resume_stream called for messageId: {}, topicId: {}",
+        "[VCPClient] resume_stream called for messageId: {}, topicId: {}, lastEventIndex: {:?}",
         msg_id,
-        topic_id
+        topic_id,
+        last_event_index
     );
 
     let client = Client::builder()
         .build()
         .map_err(|e| e.to_string())?;
+
+    let pool = app.state::<DbState>().pool.clone();
+
+    if let Some(ref content) = initial_content {
+        let _ = sqlx::query("UPDATE messages SET content = ? WHERE msg_id = ?")
+            .bind(content)
+            .bind(&msg_id)
+            .execute(&pool)
+            .await;
+    }
 
     let (abort_tx, abort_rx) = oneshot::channel();
     state.0.insert(msg_id.clone(), abort_tx);
@@ -1937,19 +1975,16 @@ pub async fn resume_stream<R: Runtime>(
         abort_rx,
         state.0.clone(),
         Some(stream_channel.clone()),
-        Some("local_resume".to_string()),
-        None,
+        true,
+        last_event_index,
+        initial_content.clone(),
     )
     .await
     {
         Ok(val) => val,
         Err(e) => {
             log::error!("[VCPClient] resume_stream failed during handle_streaming_request: {}", e);
-            let pool = app.state::<DbState>().pool.clone();
-            let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
-                .bind(&msg_id)
-                .execute(&pool)
-                .await;
+            let _ = mark_message_as_error(&app, &pool, &msg_id, Some(format!("接续失败: {}", e))).await;
             return Err(e);
         }
     };

@@ -469,6 +469,13 @@ pub async fn delete_agent(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 级联清除该 Agent 下的所有活跃生成，杜绝已删除消息复活
+    sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'agent'")
+        .bind(&agent_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     state.caches.remove(&agent_id);
     state.locks.remove(&agent_id);
 

@@ -233,6 +233,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       }
       loading.value = false;
       isLoadingHistory.value = false;
+
+      // 🆕 串行化安全保障：首次加载历史记录成功后，安全且串行地触发活跃流的检查与接续，杜绝对齐竞态
+      if (offset === 0 && !signal.aborted && sessionStore.currentTopicId === topicId) {
+        const streamStore = useChatStreamStore();
+        streamStore.checkAndRecoverInterruptedStreams().catch((err) => {
+          console.error("[ChatHistoryStore] Failed to trigger stream recovery after loading history:", err);
+        });
+      }
     }
   };
 

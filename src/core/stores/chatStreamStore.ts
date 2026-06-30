@@ -604,19 +604,33 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       
       let msg = activeStreamMessages.get(msgId);
       if (!msg) {
-        msg = reactive<ChatMessage>({
-          id: msgId,
-          role: "assistant",
-          name: undefined,
-          content: "",
-          timestamp: gen.createdAt || Date.now(),
-          isThinking: false,
-          isReconnecting: true,
-          agentId: ownerType === "agent" ? ownerId : undefined,
-          groupId: ownerType === "group" ? ownerId : undefined,
-          isGroupMessage: ownerType === "group",
-          shell: computeShell({ role: "assistant", agentId: ownerType === "agent" ? ownerId : undefined }),
-        });
+        const historyStore = useChatHistoryStore();
+        const existingMsg = historyStore.currentChatHistory.find(x => x.id === msgId);
+        
+        if (existingMsg) {
+          msg = existingMsg;
+          msg.isReconnecting = true;
+        } else {
+          msg = reactive<ChatMessage>({
+            id: msgId,
+            role: "assistant",
+            name: undefined,
+            content: "",
+            timestamp: gen.createdAt || Date.now(),
+            isThinking: false,
+            isReconnecting: true,
+            agentId: ownerType === "agent" ? ownerId : undefined,
+            groupId: ownerType === "group" ? ownerId : undefined,
+            isGroupMessage: ownerType === "group",
+            shell: computeShell({ role: "assistant", agentId: ownerType === "agent" ? ownerId : undefined }),
+          });
+          
+          // 如果是当前展示的话题，且历史中没有，立即推入历史中展示
+          if (topicId === sessionStore.currentTopicId) {
+            historyStore.currentChatHistory.push(msg);
+            historyStore.currentChatHistory.sort((a, b) => a.timestamp - b.timestamp);
+          }
+        }
         activeStreamMessages.set(msgId, msg);
       } else {
         msg.isReconnecting = true;
@@ -634,7 +648,21 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     try {
       for (const gen of activeGens) {
         const { msgId, topicId, ownerId, owner_type: ownerType } = gen;
-        const msg = activeStreamMessages.get(msgId);
+        
+        const isWarm = activeStreamMessages.has(msgId);
+        let msg = activeStreamMessages.get(msgId);
+        const originalContent = msg?.content || "";
+        const originalBlocks = msg?.blocks ? [...msg.blocks] : [];
+
+        if (!msg) {
+          // 说明是冷启动后第一次加载或者流不在活跃池中
+          const historyStore = useChatHistoryStore();
+          const existing = historyStore.currentChatHistory.find((x) => x.id === msgId);
+          if (existing) {
+            msg = existing;
+            activeStreamMessages.set(msgId, msg);
+          }
+        }
 
         const res = await invoke<any>("recover_active_generation", { msgId });
         console.log(`[ChatStreamStore] Recovery status for ${msgId}:`, res);
@@ -644,7 +672,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (msg) {
             msg.isReconnecting = false;
             msg.isThinking = false;
-            msg.content = res.content || "";
+            
+            if (!isWarm) {
+              // 🆕 冷接续：内存 AST 状态已丢，必须清空并由本地 TCP 从 0 回放重建，防止 AST 渲染器崩溃
+              msg.content = "";
+              msg.blocks = [];
+            }
           }
 
           const streamChannel = new Channel<any>();
@@ -665,18 +698,28 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           });
 
           // 唤醒流接续 (在 Rust 侧执行)
+          // 如果是温接续 (isWarm = true)，从 res.lastEventIndex 开始接续
+          // 如果是冷接续 (isWarm = false)，从 0 开始回放 (lastEventIndex = null)
+          const lastEventIndex = isWarm && res.lastEventIndex !== undefined && res.lastEventIndex !== null
+            ? res.lastEventIndex
+            : null;
+
           invoke("resume_stream", {
             msgId,
             topicId,
             ownerId,
             ownerType,
             streamChannel,
+            initialContent: isWarm ? (res.content || "") : null,
+            lastEventIndex,
           }).catch(err => {
             console.error(`[ChatStreamStore] Failed to resume stream for ${msgId}:`, err);
             if (msg) {
               msg.isReconnecting = false;
               msg.finishReason = "error";
-              msg.content += "\n\n> VCP流式错误: 接续失败";
+              // 恢复原始内容，并追加错误标记，防止接续失败时内容被清空
+              msg.content = originalContent + "\n\n> VCP流式错误: 接续失败";
+              msg.blocks = originalBlocks;
             }
             removeSessionStream(ownerId, topicId, msgId);
           });
@@ -684,13 +727,26 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           // completed 或 failed
           if (msg) {
             msg.isReconnecting = false;
+            msg.isThinking = false;
+            msg.content = res.content || "";
+            
+            // 编译 blocks 以便立即在 UI 上高质量渲染，避免整页 reload 闪烁
+            invoke<any>("process_message_content", {
+              content: msg.content,
+            }).then((compiledBlocks) => {
+              msg.blocks = compiledBlocks;
+            }).catch((e) => {
+              console.error("[ChatStreamStore] Failed to compile blocks for recovered message:", e);
+            });
           }
           removeSessionStream(ownerId, topicId, msgId);
           
-          // 如果当前正处于该话题，重新加载历史展示最新状态
+          // 如果当前正处于该话题，且历史列表中确实没有这个消息，才进行重载
           if (topicId === sessionStore.currentTopicId) {
             const historyStore = useChatHistoryStore();
-            historyStore.loadHistory(ownerId, ownerType, topicId);
+            if (!historyStore.currentChatHistory.some(x => x.id === msgId)) {
+              historyStore.loadHistory(ownerId, ownerType, topicId);
+            }
           }
         }
       }

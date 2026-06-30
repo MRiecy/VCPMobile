@@ -226,6 +226,13 @@ pub async fn delete_topic(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 级联清除活跃生成注册表，杜绝已删除消息复活
+    sqlx::query("DELETE FROM active_generations WHERE topic_id = ?")
+        .bind(&topic_id)
+        .execute(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
             data_type: SyncDataType::Topic,

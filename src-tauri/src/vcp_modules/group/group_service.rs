@@ -572,6 +572,13 @@ pub async fn delete_group(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 级联清除该 Group 下的所有活跃生成，杜绝已删除消息复活
+    sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'group'")
+        .bind(&group_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
     state.caches.remove(&group_id);
     state.locks.remove(&group_id);
 

@@ -365,6 +365,29 @@ pub async fn cleanup_single_orphaned_attachment(
 /// 3. 初始化自动维护逻辑 (在 App 启动时调用)
 ///    如果距离上次清理超过 3 天，则自动触发一次 WebView 缓存清理
 pub async fn init_automatic_maintenance(app: AppHandle) {
+    // 异步清理超过 24 小时的孤立 SSE 缓存文件，防止磁盘文件泄露
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(cache_dir) = app_clone.path().app_cache_dir() else { return; };
+        let sse_cache_dir = cache_dir.join("sse_cache");
+        if !sse_cache_dir.exists() { return; }
+        let Ok(entries) = std::fs::read_dir(sse_cache_dir) else { return; };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().map_or(true, |ext| ext != "json") {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else { continue; };
+            let Ok(modified) = metadata.modified() else { continue; };
+            let Ok(elapsed) = modified.elapsed() else { continue; };
+            if elapsed.as_secs() > 24 * 3600 {
+                log::info!("[Maintenance] Deleting orphaned SSE cache file older than 24 hours: {:?}", path);
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    });
+
     let settings_state = app.state::<SettingsState>();
 
     // 获取当前设置
