@@ -1583,12 +1583,37 @@ async fn mark_message_as_error<R: Runtime>(
     Ok(())
 }
 
+fn clean_old_cache_files(cache_dir: &std::path::Path) {
+    let sse_cache_dir = cache_dir.join("sse_cache");
+    if sse_cache_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(sse_cache_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "json") {
+                    if let Ok(metadata) = entry.metadata() {
+                        if let Ok(modified) = metadata.modified() {
+                            if let Ok(elapsed) = modified.elapsed() {
+                                if elapsed.as_secs() > 24 * 3600 {
+                                    log::info!("[VCPClient] Deleting orphaned cache file older than 24 hours: {:?}", path);
+                                    let _ = std::fs::remove_file(path);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn recover_active_generation<R: Runtime>(
     app: AppHandle<R>,
     active_requests: tauri::State<'_, ActiveRequests>,
     msg_id: String,
 ) -> Result<Value, String> {
+    log::info!("[VCPClient] recover_active_generation called for msg_id: {}", msg_id);
+
     // 1. 如果此消息在当前 active_requests 中，说明后台流式任务仍在正常进行/重连接续中
     if active_requests.0.contains_key(&msg_id) {
         log::info!(
@@ -1598,106 +1623,187 @@ pub async fn recover_active_generation<R: Runtime>(
         return Ok(json!({ "status": "streaming" }));
     }
 
-    // 2. 如果不在 active_requests 中，在 Android 上检查是否存在本地 sse_cache 临时文件
-    #[cfg(target_os = "android")]
-    {
-        if let Ok(cache_dir) = app.path().app_cache_dir() {
-            let cache_file = cache_dir.join("sse_cache").join(format!("sse_cache_{}.txt", msg_id));
-            if cache_file.exists() {
-                log::info!("[VCPClient] Found local sse_cache file for msg_id: {}. Attempting recovery.", msg_id);
-                if let Ok(content) = std::fs::read_to_string(&cache_file) {
-                    let mut accumulated_text = String::new();
-                    let mut stream_ended = false;
-                    let mut last_finish_reason = None;
+    let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    
+    // 异步清理超过 24 小时的孤立缓存文件
+    let cache_dir_clone = cache_dir.clone();
+    tokio::spawn(async move {
+        clean_old_cache_files(&cache_dir_clone);
+    });
 
-                    for line in content.lines() {
-                        if line.trim().is_empty() {
-                            continue;
-                        }
-                        if let Ok(val) = serde_json::from_str::<Value>(line) {
-                            let event_type = val["type"].as_str().unwrap_or("");
-                            let event_data = val["data"].as_str().unwrap_or("");
+    // 2. 检查是否存在 5 分钟超时后由助手转存的本地 JSON 恢复文件 (24小时内认领有效)
+    let recovered_file = cache_dir.join("sse_cache").join(format!("sse_recovered_{}.json", msg_id));
+    if recovered_file.exists() {
+        log::info!("[VCPClient] Found local sse_recovered JSON file for msg_id: {}. Recovering from disk.", msg_id);
+        if let Ok(content_str) = std::fs::read_to_string(&recovered_file) {
+            if let Ok(val) = serde_json::from_str::<Value>(&content_str) {
+                let timestamp = val["timestamp"].as_i64().unwrap_or(0);
+                let now = chrono::Utc::now().timestamp_millis();
+                
+                // 检查是否超过 24 小时 (24 * 3600 * 1000 ms)
+                if now - timestamp > 24 * 3600 * 1000 {
+                    log::warn!("[VCPClient] Recovered JSON file is older than 24 hours. Deleting and failing.");
+                    let _ = std::fs::remove_file(&recovered_file);
+                } else {
+                    let content = val["content"].as_str().unwrap_or("").to_string();
+                    let finish_reason = val["finishReason"].as_str().map(|s| s.to_string());
+                    
+                    log::info!("[VCPClient] Successfully read recovered JSON: content_len={}, finish_reason={:?}", content.len(), finish_reason);
+                    
+                    let db = app.state::<DbState>();
+                    let row = sqlx::query(
+                        "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
+                    )
+                    .bind(&msg_id)
+                    .fetch_optional(&db.pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-                            if event_type == "message" {
-                                if event_data == "[DONE]" {
-                                    stream_ended = true;
-                                    break;
-                                }
-                                if let Ok(data_val) = serde_json::from_str::<Value>(event_data) {
-                                    if let Some(reason) = data_val.get("finish_reason").and_then(|r| r.as_str()) {
-                                        last_finish_reason = Some(reason.to_string());
-                                    }
-                                    if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                        accumulated_text.push_str(delta);
-                                    }
-                                }
-                            } else if event_type == "closed" {
-                                stream_ended = true;
-                                break;
-                            }
-                        }
-                    }
+                    if let Some(r) = row {
+                        use sqlx::Row;
+                        let topic_id: String = r.get("topic_id");
+                        let owner_id: String = r.get("owner_id");
+                        let owner_type: String = r.get("owner_type");
 
-                    if stream_ended {
-                        log::info!("[VCPClient] Stream was fully completed in background cache. Finalizing message.");
-                        let db = app.state::<DbState>();
-                        let row = sqlx::query(
-                            "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
+                        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+                            .bind(&msg_id)
+                            .fetch_optional(&db.pool)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+
+                        crate::vcp_modules::chat::message_service::finalize_stream_message(
+                            app.clone(),
+                            &db.pool,
+                            &owner_id,
+                            &owner_type,
+                            topic_id,
+                            msg_id.clone(),
+                            content.clone(),
+                            false,
+                            finish_reason.or(Some("completed".to_string())),
+                            None,
+                            agent_id,
                         )
-                        .bind(&msg_id)
-                        .fetch_optional(&db.pool)
-                        .await
-                        .map_err(|e| e.to_string())?;
-
-                        if let Some(r) = row {
-                            use sqlx::Row;
-                            let topic_id: String = r.get("topic_id");
-                            let owner_id: String = r.get("owner_id");
-                            let owner_type: String = r.get("owner_type");
-
-                            let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
-                                .bind(&msg_id)
-                                .fetch_optional(&db.pool)
-                                .await
-                                .map_err(|e| e.to_string())?;
-                            let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
-
-                            crate::vcp_modules::chat::message_service::finalize_stream_message(
-                                app.clone(),
-                                &db.pool,
-                                &owner_id,
-                                &owner_type,
-                                topic_id,
-                                msg_id.clone(),
-                                accumulated_text.clone(),
-                                false,
-                                last_finish_reason.or(Some("completed".to_string())),
-                                None,
-                                agent_id,
-                            )
-                            .await?;
-                        }
-
-                        // 清理本地缓存文件
-                        let _ = std::fs::remove_file(&cache_file);
-
-                        return Ok(json!({
-                            "status": "completed",
-                            "content": accumulated_text
-                        }));
-                    } else {
-                        log::info!("[VCPClient] Stream is incomplete in background cache. Returning streaming status for resumption.");
-                        return Ok(json!({
-                            "status": "streaming",
-                            "content": accumulated_text
-                        }));
+                        .await?;
                     }
+                    
+                    let _ = std::fs::remove_file(&recovered_file);
+                    return Ok(json!({
+                        "status": "completed",
+                        "content": content
+                    }));
                 }
             }
         }
     }
 
-    // 3. 如果本地缓存不存在，说明在后台挂起期间进程已被杀死且无可用保活缓存（或者任务从未启动/已被用户中止）
+    // 3. 在 Android 上通过 TCP 套接字向助手查询该会话状态 (5 分钟内的内存数据)
+    #[cfg(target_os = "android")]
+    {
+        log::info!("[VCPClient] Querying helper process via TCP for msg_id: {}", msg_id);
+        let query_res = async {
+            let port = get_helper_port(&app)?;
+            log::info!("[VCPClient] Helper port discovered: {}", port);
+            let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+                .await
+                .map_err(|e| format!("TCP connection failed: {}", e))?;
+            
+            let cmd = json!({
+                "action": "query",
+                "requestId": msg_id
+            });
+            
+            use tokio::io::AsyncWriteExt;
+            let cmd_line = cmd.to_string() + "\n";
+            stream.write_all(cmd_line.as_bytes()).await.map_err(|e| e.to_string())?;
+            stream.flush().await.map_err(|e| e.to_string())?;
+            
+            log::info!("[VCPClient] Query command sent, waiting for response line...");
+            let mut reader = FramedRead::new(stream, LinesCodec::new());
+            if let Some(Ok(line)) = reader.next().await {
+                let resp = serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())?;
+                return Ok::<Value, String>(resp);
+            }
+            Err("No query response received (EOF)".to_string())
+        }.await;
+
+        match query_res {
+            Ok(resp) => {
+                let status = resp["status"].as_str().unwrap_or("not_found");
+                let content = resp["content"].as_str().unwrap_or("").to_string();
+                let last_finish_reason = resp["lastFinishReason"].as_str().map(|s| s.to_string());
+                
+                log::info!(
+                    "[VCPClient] Query response received: status={}, content_len={}, finish_reason={:?}",
+                    status,
+                    content.len(),
+                    last_finish_reason
+                );
+                
+                if status == "completed" {
+                    log::info!("[VCPClient] Session completed in helper memory. Finalizing message in SQLite database.");
+                    let db = app.state::<DbState>();
+                    let row = sqlx::query(
+                        "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
+                    )
+                    .bind(&msg_id)
+                    .fetch_optional(&db.pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                    if let Some(r) = row {
+                        use sqlx::Row;
+                        let topic_id: String = r.get("topic_id");
+                        let owner_id: String = r.get("owner_id");
+                        let owner_type: String = r.get("owner_type");
+
+                        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+                            .bind(&msg_id)
+                            .fetch_optional(&db.pool)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+
+                        crate::vcp_modules::chat::message_service::finalize_stream_message(
+                            app.clone(),
+                            &db.pool,
+                            &owner_id,
+                            &owner_type,
+                            topic_id,
+                            msg_id.clone(),
+                            content.clone(),
+                            false,
+                            last_finish_reason.or(Some("completed".to_string())),
+                            None,
+                            agent_id,
+                        )
+                        .await?;
+                    }
+                    
+                    log::info!("[VCPClient] Finalization complete. Sending stop command to helper to release memory.");
+                    let _ = send_stop_to_helper(&app, &msg_id).await;
+                    
+                    return Ok(json!({
+                        "status": "completed",
+                        "content": content
+                    }));
+                } else if status == "streaming" {
+                    log::info!("[VCPClient] Session is still streaming in helper. Returning status and content to frontend.");
+                    return Ok(json!({
+                        "status": "streaming",
+                        "content": content
+                    }));
+                } else {
+                    log::warn!("[VCPClient] Session status is 'not_found' in helper.");
+                }
+            }
+            Err(e) => {
+                log::warn!("[VCPClient] Failed to query helper via TCP socket: {}", e);
+            }
+        }
+    }
+
     log::warn!(
         "[VCPClient] Active generation {} not found in active_requests and no local cache available. Marking as failed.",
         msg_id
@@ -1764,6 +1870,7 @@ pub async fn resume_stream<R: Runtime>(
     {
         Ok(val) => val,
         Err(e) => {
+            log::error!("[VCPClient] resume_stream failed during handle_streaming_request: {}", e);
             let pool = app.state::<DbState>().pool.clone();
             let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
                 .bind(&msg_id)
@@ -1781,6 +1888,7 @@ pub async fn resume_stream<R: Runtime>(
 
     let pool = app.state::<DbState>().pool.clone();
 
+    log::info!("[VCPClient] resume_stream completed. Finalizing message.");
     crate::vcp_modules::chat::message_service::finalize_stream_message(
         app.clone(),
         &pool,

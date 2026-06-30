@@ -405,12 +405,67 @@ class SseProxyService : Service() {
 
     private fun cleanupSessionIfCompletedAndDisconnected(session: StreamSession) {
         synchronized(session) {
-            if (session.isCompleted && session.activeSocketWriter == null) {
-                Log.i(TAG, "Session id=${session.requestId} is completed and disconnected. Cleaning up.")
-                activeSessions.remove(session.requestId)
+            if (session.isCompleted) {
+                if (session.activeSocketWriter == null) {
+                    // 主进程已断开：延迟 5 分钟清理，给冷启动恢复留出时间
+                    Log.i(TAG, "Session id=${session.requestId} completed while disconnected. Scheduling cleanup in 5 minutes.")
+                    serviceScope.launch(Dispatchers.IO) {
+                        kotlinx.coroutines.delay(5 * 60 * 1000L)
+                        synchronized(session) {
+                            if (activeSessions[session.requestId] === session && session.activeSocketWriter == null) {
+                                Log.i(TAG, "Session id=${session.requestId} 5-min timeout. Dumping to cache file and removing.")
+                                dumpSessionToFile(session)
+                                activeSessions.remove(session.requestId)
+                                updateLocks()
+                            }
+                        }
+                    }
+                } else {
+                    // 主进程在线：等待主进程发送 stop 指令，不需要自动清理
+                    Log.i(TAG, "Session id=${session.requestId} completed while connected. Waiting for client stop command.")
+                }
             }
         }
         updateLocks()
+    }
+
+    private fun dumpSessionToFile(session: StreamSession) {
+        try {
+            val cacheDir = File(applicationContext.cacheDir, "sse_cache")
+            if (!cacheDir.exists()) {
+                cacheDir.mkdirs()
+            }
+            val file = File(cacheDir, "sse_recovered_${session.requestId}.json")
+            
+            val fullText = StringBuilder()
+            for (event in session.eventBuffer) {
+                if (event.getString("eventType") == "message") {
+                    val eventData = event.getString("eventData")
+                    if (eventData != "[DONE]") {
+                        try {
+                            val dataVal = JSONObject(eventData)
+                            val choices = dataVal.optJSONArray("choices")
+                            if (choices != null && choices.length() > 0) {
+                                val delta = choices.getJSONObject(0).optJSONObject("delta")
+                                val content = delta?.optString("content", "") ?: ""
+                                fullText.append(content)
+                            }
+                        } catch (ignored: Exception) {}
+                    }
+                }
+            }
+            
+            val dumpObj = JSONObject().apply {
+                put("content", fullText.toString())
+                put("finishReason", session.lastFinishReason ?: "completed")
+                put("timestamp", System.currentTimeMillis())
+            }
+            
+            file.writeText(dumpObj.toString())
+            Log.i(TAG, "Successfully dumped session ${session.requestId} to file: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to dump session to file", e)
+        }
     }
 
     @Synchronized

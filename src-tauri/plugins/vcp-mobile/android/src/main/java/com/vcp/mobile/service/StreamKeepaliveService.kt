@@ -61,7 +61,7 @@ class StreamKeepaliveService : Service() {
             Log.e(TAG, "Failed to startForeground", e)
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {

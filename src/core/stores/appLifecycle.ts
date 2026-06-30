@@ -5,6 +5,8 @@ import { useAssistantStore } from './assistant';
 import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
 import { useNotificationStore } from './notification';
+import { useChatSessionStore } from './chatSessionStore';
+import { useTopicStore } from './topicListManager';
 import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
 
 export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR';
@@ -146,10 +148,23 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       updatePhaseLabel('正在并发预加载配置与助手数据...');
       console.log('[Lifecycle] [Concurrent] START Preloading Settings and AgentsAndGroups');
 
-      await Promise.all([
+      const sessionStore = useChatSessionStore();
+      const topicStore = useTopicStore();
+
+      const promises: Promise<any>[] = [
         settingsStore.fetchSettings(),
         assistantStore.fetchAgentsAndGroups()
-      ]);
+      ];
+
+      // 🆕 如果从 Pinia 中恢复了活跃会话，在预加载阶段同步加载其对应的话题列表，确保顶部标题与返回逻辑正常
+      if (sessionStore.currentSelectedItem?.id) {
+        const ownerId = sessionStore.currentSelectedItem.id;
+        const ownerType = sessionStore.currentSelectedItem.type || 'agent';
+        console.log(`[Lifecycle] Restored session detected for ${ownerType} ${ownerId}, preloading topic list...`);
+        promises.push(topicStore.loadTopicList(ownerId, ownerType));
+      }
+
+      await Promise.all(promises);
 
       console.log(`[Lifecycle] [Concurrent] DONE Preloading in ${Date.now() - startTime}ms`);
       updatePhaseLabel('核心数据预加载完成');
