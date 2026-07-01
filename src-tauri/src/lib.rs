@@ -21,7 +21,7 @@ use vcp_modules::context_injection::{
 use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::message_service::delete_message_attachment;
 use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
-// use vcp_modules::db_manager::DbState;
+use vcp_modules::db_manager::search_messages_fts;
 use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
@@ -258,6 +258,7 @@ pub fn run() {
             patch_single_message,
             delete_messages,
             delete_message_attachment,
+            search_messages_fts,
             truncate_history_after_timestamp,
             process_message_content,
             rebuild_all_pre_renders,

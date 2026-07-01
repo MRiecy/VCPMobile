@@ -554,10 +554,40 @@ impl DbWriteQueue {
                 let refs_render: Vec<&dyn rusqlite::ToSql> =
                     params_render.iter().map(|p| p.as_ref()).collect();
                 stmt_render.execute(&*refs_render)?;
-            }
         }
+    }
 
-        // Phase 4: Attachment Optimization
+    // Phase 3.5: 全文检索 FTS5 批量同步
+    let msg_ids_for_fts: Vec<String> = messages.iter().map(|msg| msg.id.clone()).collect();
+    for chunk in msg_ids_for_fts.chunks(999) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql_del_fts = format!("DELETE FROM messages_fts WHERE msg_id IN ({})", placeholders);
+        let mut stmt_del_fts = tx.prepare_cached(&sql_del_fts)?;
+        stmt_del_fts.execute(rusqlite::params_from_iter(chunk))?;
+    }
+
+    const PARAMS_PER_FTS: usize = 3;
+    let fts_chunk_size = MAX_PARAMS / PARAMS_PER_FTS;
+    for chunk in messages.chunks(fts_chunk_size) {
+        let mut sql_ins_fts = String::from("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES ");
+        for i in 0..chunk.len() {
+            if i > 0 {
+                sql_ins_fts.push_str(", ");
+            }
+            sql_ins_fts.push_str("(?, ?, ?)");
+        }
+        let mut stmt_ins_fts = tx.prepare_cached(&sql_ins_fts)?;
+        let mut params_fts: Vec<String> = Vec::new();
+        for msg in chunk {
+            let search_content = crate::vcp_modules::db_manager::preprocess_fts_text(&msg.content);
+            params_fts.push(msg.id.clone());
+            params_fts.push(topic_id.to_string());
+            params_fts.push(search_content);
+        }
+        stmt_ins_fts.execute(rusqlite::params_from_iter(params_fts))?;
+    }
+
+    // Phase 4: Attachment Optimization
         let mut msg_ids = Vec::new();
         let mut all_relations = Vec::new();
 

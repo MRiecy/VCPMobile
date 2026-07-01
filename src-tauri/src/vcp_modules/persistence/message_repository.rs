@@ -391,6 +391,22 @@ impl MessageRepository {
         .await
         .map_err(|e| e.to_string())?;
 
+        // 2.2 同步写入全文检索 FTS5 虚拟表 (仅在消息未删除时同步明文，FTS5 不支持 ON CONFLICT)
+        let search_content = crate::vcp_modules::db_manager::preprocess_fts_text(&message.content);
+        sqlx::query("DELETE FROM messages_fts WHERE msg_id = ?")
+            .bind(&message.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
+            .bind(&message.id)
+            .bind(topic_id)
+            .bind(&search_content)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
         // Handle attachments
         if let Some(ref attachments) = message.attachments {
             Self::upsert_attachments_for_message(
