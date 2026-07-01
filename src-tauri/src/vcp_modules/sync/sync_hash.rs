@@ -526,3 +526,89 @@ impl HashInitializer {
         serde_json::Value::Object(tags)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcp_modules::sync_dto::{AgentSyncDTO, AgentTopicSyncDTO, GroupTopicSyncDTO};
+
+    #[test]
+    fn test_message_fingerprint_ignores_attachment_order() {
+        let a = HashAggregator::compute_message_fingerprint(
+            "hello",
+            &["hash-b".to_string(), "hash-a".to_string()],
+        );
+        let b = HashAggregator::compute_message_fingerprint(
+            "hello",
+            &["hash-a".to_string(), "hash-b".to_string()],
+        );
+
+        assert_eq!(a, b);
+        assert_ne!(
+            a,
+            HashAggregator::compute_message_fingerprint("hello!", &["hash-a".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_agent_config_hash_rounds_temperature_to_two_decimals() {
+        let base = AgentSyncDTO {
+            name: "Nova".to_string(),
+            system_prompt: "system".to_string(),
+            model: "model-a".to_string(),
+            temperature: 0.704,
+            context_token_limit: 1000,
+            max_output_tokens: 2000,
+            stream_output: true,
+        };
+        let mut rounded_same = base.clone();
+        rounded_same.temperature = 0.70;
+        let mut rounded_diff = base.clone();
+        rounded_diff.temperature = 0.706;
+
+        assert_eq!(
+            HashAggregator::compute_agent_config_hash(&base),
+            HashAggregator::compute_agent_config_hash(&rounded_same)
+        );
+        assert_ne!(
+            HashAggregator::compute_agent_config_hash(&base),
+            HashAggregator::compute_agent_config_hash(&rounded_diff)
+        );
+    }
+
+    #[test]
+    fn test_topic_metadata_hash_excludes_owner_id() {
+        let topic_a = AgentTopicSyncDTO {
+            id: "topic-1".to_string(),
+            name: "Topic".to_string(),
+            created_at: 123,
+            locked: true,
+            unread: false,
+            owner_id: "agent-a".to_string(),
+        };
+        let mut topic_b = topic_a.clone();
+        topic_b.owner_id = "agent-b".to_string();
+
+        assert_eq!(
+            HashAggregator::compute_agent_topic_metadata_hash(&topic_a),
+            HashAggregator::compute_agent_topic_metadata_hash(&topic_b)
+        );
+    }
+
+    #[test]
+    fn test_group_topic_metadata_hash_excludes_locked_unread_conceptually() {
+        let group_topic = GroupTopicSyncDTO {
+            id: "topic-1".to_string(),
+            name: "Topic".to_string(),
+            created_at: 123,
+            owner_id: "group-a".to_string(),
+        };
+        let mut same_metadata_other_owner = group_topic.clone();
+        same_metadata_other_owner.owner_id = "group-b".to_string();
+
+        assert_eq!(
+            HashAggregator::compute_group_topic_metadata_hash(&group_topic),
+            HashAggregator::compute_group_topic_metadata_hash(&same_metadata_other_owner)
+        );
+    }
+}

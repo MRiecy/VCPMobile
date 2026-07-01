@@ -896,110 +896,44 @@ pub fn try_extract_text(path: &std::path::Path, mime_type: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-    use std::fs;
-    use std::path::Path;
 
     #[test]
-    fn test_extract_sample_files() {
-        let test_dir = Path::new("g:\\VCPMobile\\scripts\\test");
-        if !test_dir.exists() {
-            println!("测试目录不存在: {:?}", test_dir);
-            return;
-        }
+    fn test_extension_classifiers_recognize_text_code_and_structured_docs() {
+        assert!(is_text_or_code_extension("rs"));
+        assert!(is_text_or_code_extension("jsonc"));
+        assert!(!is_text_or_code_extension("exe"));
 
-        let files = vec![
-            (
-                "上机实验一：蒙特卡罗模拟原理与方法.pptx",
-                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            ),
-            ("模拟模型——仓库卸货问题.pdf", "application/pdf"),
-            (
-                "蒙特卡洛计算π值.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ),
-            (
-                "蒙特卡罗模拟实验报告.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ),
-            (
-                "计划书【四稿】new.docx",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ),
-            ("计划书【四稿】new.pdf", "application/pdf"),
-            ("银杏科技.pdf", "application/pdf"),
-        ];
+        assert!(is_structured_doc_extension("pdf"));
+        assert!(is_structured_doc_extension("docx"));
+        assert!(is_extractable_extension("xlsx"));
+        assert!(!is_extractable_extension("png"));
+    }
 
-        for (filename, mime) in files {
-            let file_path = test_dir.join(filename);
-            if !file_path.exists() {
-                println!("警告: 测试文件不存在 {:?}", file_path);
-                continue;
-            }
+    #[test]
+    fn test_supported_attachment_extension_is_case_insensitive_and_includes_media() {
+        assert!(is_supported_attachment_extension("PNG"));
+        assert!(is_supported_attachment_extension("Mp4"));
+        assert!(is_supported_attachment_extension("PDF"));
+        assert!(is_supported_attachment_extension("RS"));
+        assert!(!is_supported_attachment_extension("exe"));
+    }
 
-            // 如果是 PDF，我们进行详细诊断
-            if filename.ends_with(".pdf") {
-                use pdf_oxide::PdfDocument;
-                match PdfDocument::open(&file_path) {
-                    Ok(doc) => {
-                        let pages_count = doc.page_count().unwrap_or(0);
-                        println!("PDF 成功载入! 总页数: {}", pages_count);
-                        for i in 0..pages_count {
-                            match doc.extract_text(i) {
-                                Ok(page_text) => {
-                                    println!(
-                                        "  - 页码 {}: 成功提取 {} 字符",
-                                        i + 1,
-                                        page_text.chars().count()
-                                    );
-                                }
-                                Err(e) => {
-                                    println!("  - 页码 {}: 提取文本失败: {:?}", i + 1, e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        println!("PDF 载入失败: {:?}", e);
-                    }
-                }
-            }
+    #[test]
+    fn test_simple_xml_unescape_decodes_common_entities() {
+        assert_eq!(
+            simple_xml_unescape("A&amp;B &lt;tag&gt; &quot;q&quot; &apos;x&apos;"),
+            "A&B <tag> \"q\" 'x'"
+        );
+    }
 
-            let start_time = std::time::Instant::now();
-            let extracted_text = try_extract_text(&file_path, mime);
-            let duration = start_time.elapsed();
-
-            if let Some(text) = extracted_text {
-                println!(
-                    "【成功】提取文件: {}, 大小: {} 字节, 字符数: {}, 耗时: {:?}",
-                    filename,
-                    fs::metadata(&file_path).unwrap().len(),
-                    text.chars().count(),
-                    duration
-                );
-
-                // 1. 保存为 .extracted.md，以供人工直观走查 Markdown 渲染效果
-                let md_path = test_dir.join(format!("{}.extracted.md", filename));
-                fs::write(&md_path, &text).expect("写入 md 文件失败");
-
-                // 2. 保存为包含元数据的结构化 .extracted.json
-                let json_meta = json!({
-                    "file_name": filename,
-                    "file_size_bytes": fs::metadata(&file_path).unwrap().len(),
-                    "extracted_at": chrono::Utc::now().to_rfc3339(),
-                    "extraction_duration_ms": duration.as_millis(),
-                    "char_count": text.chars().count(),
-                    "content": text
-                });
-                let json_path = test_dir.join(format!("{}.extracted.json", filename));
-                fs::write(
-                    &json_path,
-                    serde_json::to_string_pretty(&json_meta).unwrap(),
-                )
-                .expect("写入 json 文件失败");
-            } else {
-                println!("【失败】提取文件: {}，结果为 None", filename);
-            }
-        }
+    #[test]
+    fn test_col_name_to_index_handles_excel_columns() {
+        assert_eq!(col_name_to_index("A1"), 0);
+        assert_eq!(col_name_to_index("Z9"), 25);
+        assert_eq!(col_name_to_index("AA10"), 26);
+        assert_eq!(col_name_to_index("AB"), 27);
+        assert_eq!(col_name_to_index(""), 0);
+        assert_eq!(col_name_to_index("123"), 0);
     }
 }
+

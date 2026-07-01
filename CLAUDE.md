@@ -109,8 +109,8 @@
   │   ├── refresh_manifest.cjs    # 重建 plans/Memory_Manifest.md 与 .gemini_snapshot.json
   │   └── update_frontmatter.cjs  # 为 plans/ 内文档自动分配结构化 ID
   ├── .github/workflows/
-  │   ├── ci.yml                  # 类型检查 + cargo fmt + cargo clippy
-  │   └── release.yml             # Android Release APK 构建与上传
+  │   ├── ci.yml                  # PR CI：vue-tsc + Vitest + Rust 单测/集成 + Gradle 插件单测 + bench 编译检查 + fmt + clippy
+  │   └── release.yml             # Android Release APK 构建 + 签名验证 + APK size JSON 上传
   ├── package.json                # pnpm 脚本与前端依赖
   ├── vite.config.ts              # Vite 配置（端口 1420/1421，Tauri 感知）
   ├── uno.config.ts               # UnoCSS 预设、主题色、快捷类
@@ -257,17 +257,139 @@
 
   ## 5. 测试策略
 
-  **当前项目没有前端自动化测试。**
+  本项目已建立覆盖 Rust 后端、Tauri 插件、Vue 前端、Android E2E 与性能稳定性的完整测试体系。全局架构约束文件见 `docs/Test_Architecture_Constraints.md`。测试代码与业务代码物理隔离，禁止以"方便测试"为由修改业务接口。
 
-  - `package.json` 不含任何测试脚本（无 `test`, `test:unit`, `test:e2e`）。
-  - 未安装 Vitest、Jest、Cypress、Playwright 等测试框架。
-  - Rust 侧仅有极少量单元测试，分布在以下模块：
-    - `vcp_modules/sync/sync_retry.rs`（5 个 `#[tokio::test]`，测试重试逻辑）
-    - `vcp_modules/chat/context_sanitizer.rs`（3 个 `#[test]`，测试内容清洗）
-    - `vcp_modules/sync/sync_logger.rs`（测试模块存在）
-  - **核心模块**（`infra/vcp_client.rs`, `sync/sync_service.rs`, `persistence/db_manager.rs`, `infra/file_manager.rs`, `chat/message_service.rs` 等）**均无自动化测试**。
+  ### 5.1 测试分层（L1-L8）
 
-  **验证手段**: 以 `pnpm check`（静态类型分析）和真机/模拟器手动测试为主。
+  | 层级 | 名称 | 覆盖范围 | 触发频率 | 主要工具 |
+  |------|------|----------|----------|----------|
+  | L1 | Rust 内联单测 | 纯函数/算法/DTO/状态机 | 每次 PR | cargo test |
+  | L2 | Rust 集成测试 | Tauri command + mock DB/FS/HTTP | 每次 PR | tauri::test, tempfile, wiremock |
+  | L3 | Android 插件 JVM 单测 | Kotlin 纯逻辑 / Robolectric Shadow | 每次 PR | JUnit 4, Robolectric, MockK |
+  | L4 | 前端组件/Store 测试 | Vue 原子组件, Pinia Store | 每次 PR | Vitest, @vue/test-utils, happy-dom |
+  | L5 | 契约测试 | Rust 命令↔TS 调用 / 权限声明 / Kotlin 方法名 | 每次 PR | 文本/反射快照测试 |
+  | L6 | Android 仪器测试 | Service/Activity/权限生命周期 | nightly | AndroidX Test |
+  | L7 | Android E2E Smoke | 真机关键旅程 | release 前 | adb smoke scripts |
+  | L8 | 性能/稳定性 | 启动/APK 体积/Criterion 基准/长稳 soak | nightly/release | cargo bench, adb scripts |
+
+  ### 5.2 Rust 后端测试（41 内联 + 10 集成 + Criterion 基准）
+
+  **内联单元测试**（`src-tauri/src/vcp_modules/` 内 `#[cfg(test)] mod tests`）：
+  
+  - 41 个测试，分布：`ast_diff`(6)、`markdown_parser`(7)、`stream_block_parser`(2)、`aurora_pipeline`(2)、`content_parser`(2)、`context_sanitizer`(3)、`sync_types`(4)、`sync_hash`(4)、`sync_dto`(4)、`topic_types`(2)、`file_extractor`(4)、`utils`(1)
+  - 纯函数优先；fixture 使用 `include_str!` / `include_bytes!` 编译期内嵌，**严禁绝对路径**
+  - 新增测试优先补纯逻辑模块（如 `sync_hash`、`sync_types`、`sync_dto`、`file_extractor` helper），而非需要 mock AppHandle/DB/网络的模块
+
+  **集成测试**（`src-tauri/tests/`）：
+
+  - `file_extractor_integration.rs`：DOCX/XLSX/PDF/PPTX 真实样本提取 + BOM 编码 + OOM 防护
+  - fixture 样本：`src-tauri/tests/fixtures/file_extractor/sample.{docx,xlsx,pdf,pptx}`（从 `scripts/attach-test/` 整理）
+
+  **Criterion 基准**（`src-tauri/benches/ast_tail_bench.rs`）：
+
+  - 4 组：单帧全链路 / Syntect 高亮 / 累计流式开销 / 端到端 AuroraBuffer
+  - 运行：`cargo bench --profile perf`（`profile.perf` 继承 release 优化等级，`panic=unwind`）
+  - 不加自动回归门禁（阈值需随机器调整），退化检测通过人工看报告
+
+  **铁律**：测试文件禁止绝对路径（如 `G:\VCPMobile\...`）；禁止无断言的纯 `println`"诊断测试"。
+
+  ### 5.3 Vue 前端测试（8 文件 / 23 测试）
+
+  **基础设施**：Vitest + happy-dom + `@vue/test-utils` + `@pinia/testing`
+
+  - 配置：`vitest.config.ts`（独立配置），`@/` alias 对齐 `tsconfig.json` paths
+  - setup：`src/tests/setup.ts` + `src/tests/mocks/tauri.ts` + `src/tests/mocks/browser.ts`
+  - Tauri API 已统一 mock：`invoke`（命令路由式）、`listen`（事件注册表）、`Channel`（手动 emit）、`convertFileSrc`、plugin guest-js
+  - 浏览器 API fallback：ResizeObserver / IntersectionObserver / matchMedia / rAF / clipboard / URL.createObjectURL / visualViewport
+
+  **现有测试**（`src/tests/unit/`）：
+
+  - 设置组件：`SettingsSwitch` / `SettingsActionButton` / `SettingsTextField` / `SettingsInlineStatus`
+  - UI 组件：`SlidePage` / `VcpScrollArea`
+  - Chat 工具：`AttachmentClassifier` / `useAttachmentPreview`（`formatFileSize` / `canPreview` / `getStats`）
+
+  **测试原则**：
+
+  - 不断言 UnoCSS 完整 className 串；只断言语义关键类（如 `z-dialog`、`disabled`、`text-red-500`）
+  - 动态渲染（KaTeX / Mermaid / 代码高亮 / HTML 预览）不断言白盒 DOM
+  - 安全边界（HtmlPreviewBlock / ToolBlock / astRenderer raw_html）需单独覆盖
+
+  ### 5.4 Android 插件测试
+
+  **目录**：`src-tauri/plugins/vcp-mobile/android/src/test/java/com/vcp/mobile/`
+
+  **依赖**：JUnit 4, Robolectric 4.13, MockK, `android-all:9-robolectric-4913185-2`（显式声明避免运行时下载）
+
+  **现有测试**：
+
+  - `contract/PluginContractTest.kt`（3 个 JVM 文本快照）：
+    - Rust 插件注册命令必须出现在 `permissions/default.toml` allow 列表
+    - guest-js `stopStreamService(agentName)` 必须正确传参
+    - Rust `run_mobile_plugin("methodName")` 的方法名必须存在于 `VcpMobilePlugin.kt`
+  - `service/ForegroundGuardianTest.kt`（4 个 Robolectric 测试）：
+    - 引用计数 acquire/release / 优先级 label 聚合 / screenKeepOn / 幂等性
+    - `@Config(sdk = [28])` 覆盖 Android O+ `startForegroundService` 路径
+
+  **运行**：`cd src-tauri/gen/android; ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest`
+
+  ### 5.5 Android E2E Smoke 脚本
+
+  目录：`tests/e2e-android/scripts/`
+
+  - `adb-env.cjs`：adb 发现 / 设备信息 / 包名管理（支持 `ANDROID_SERIAL`）
+  - `install-apk.cjs`：安装/卸载/清数据（`--clean` / `--mode debug|release`）
+  - `grant-permissions.cjs`：best-effort pm grant + appops + deviceidle whitelist
+  - `adb-smoke.cjs`：monkey 启动 → 等待 5s → 采集 activity/logcat/process
+
+  仅依赖 Node.js + adb，不引入 Maestro/Appium。
+
+  ### 5.6 性能脚本
+
+  目录：`tests/perf/scripts/`
+
+  - `measure_apk_size.cjs`：APK 体积与内部分布（lib/dex/assets/res）
+  - `measure_startup_adb.cjs`：`am start -W` 冷启动采样（min/median/p95/max）
+  - `collect_android_dumpsys.cjs`：meminfo/power/wifi/dropbox/logcat 快照
+  - `run_rust_bench.cjs`：封装 `cargo bench --profile perf` 并归档 artifact
+
+  ### 5.7 测试命令速查
+
+  ```powershell
+  pnpm check                  # 完整静态检查（vue-tsc + cargo check）
+  pnpm test:run               # 前端 Vitest 单测
+  pnpm test:unit              # 仅 src/tests/unit
+  pnpm test:integration       # 仅 src/tests/integration
+  cargo test --lib            # Rust 内联单元测试
+  cargo test --test file_extractor_integration  # Rust 集成测试
+  cargo bench --profile perf  # Rust Criterion 性能基准
+  # Android 插件测试（在 src-tauri/gen/android/ 下执行）：
+  ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
+  # E2E / 性能（需连接 Android 设备）：
+  pnpm e2e:android:smoke      # adb 启动并采集状态
+  pnpm perf:apk-size          # APK 体积报告
+  pnpm perf:startup           # 冷启动采样
+  pnpm perf:collect           # dumpsys/logcat 快照
+  pnpm perf:rust-bench        # 运行 Rust 基准并归档
+  ```
+
+  ### 5.8 测试代码组织
+
+  ```
+  VCPMobile/
+  ├── src/tests/                         # 前端测试
+  │   ├── setup.ts                       # 全局 setup
+  │   ├── mocks/{tauri,browser}.ts       # 统一 mock
+  │   ├── utils/{mount,flush}.ts         # 测试工具
+  │   └── unit/components/{settings,ui}/ # 原子组件测试
+  ├── src-tauri/tests/                   # Rust 集成测试
+  │   ├── fixtures/file_extractor/       # 二进制测试样本
+  │   └── file_extractor_integration.rs
+  ├── src-tauri/benches/                 # Criterion 基准
+  │   └── ast_tail_bench.rs
+  ├── src-tauri/plugins/vcp-mobile/android/src/test/  # Kotlin 插件测试
+  ├── tests/e2e-android/scripts/         # adb smoke 脚本
+  └── tests/perf/scripts/               # 性能采集脚本
+  ```
 
   ---
 
@@ -336,16 +458,16 @@
 
   ### CI/CD（GitHub Actions）
 
-  - **`.github/workflows/ci.yml`**:
+  - **`.github/workflows/ci.yml`**（PR CI）:
     - 触发条件：`push` / `pull_request` 到 `main` / `master`。
-    - 执行 `vue-tsc --noEmit` 前端类型检查。
-    - 安装 Tauri Linux 依赖，执行 `cargo fmt -- --check` 与 `cargo clippy -- -D warnings`。
-  - **`.github/workflows/release.yml`**:
+    - 步骤：`vue-tsc --noEmit` → `pnpm test:run` → `cargo test --lib` → `cargo test --test file_extractor_integration` → Gradle 插件单测 → `cargo bench --profile perf --no-run`（编译检查，不跑实际基准）→ `cargo fmt -- --check` → `cargo clippy -- -D warnings`。
+    - 需要 Java 17 + Android SDK + Tauri Linux 依赖。
+  - **`.github/workflows/release.yml`**（Release）:
     - 触发条件：GitHub Release 被 `published`。
     - 环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。
     - 从 `secrets.ANDROID_KEYSTORE_BASE64` 恢复密钥库。
     - 构建命令：`pnpm tauri android build --apk --target aarch64`。
-    - 自动发现 `*-release.apk`，重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk` 并上传回 Release 附件。
+    - 自动发现 `*-release.apk`，重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`，产出 `apk-size-v{VERSION}.json`（APK 体积报告），一并上传回 Release 附件。
 
   ### 本地发布
 
@@ -434,7 +556,15 @@
   | `src-tauri/plugins/vcp-mobile/Cargo.toml`   | 插件 Rust 依赖：`tauri = 2.11.1`, `jni = 0.21`（Android only） |
   | `src-tauri/plugins/vcp-mobile/android/`     | Kotlin 源码与 AndroidManifest.xml                            |
   | `src-tauri/plugins/vcp-mobile/permissions/` | Tauri v2 权限声明：default.toml + autogenerated schemas      |
+  | `vitest.config.ts`                          | 前端测试配置（Vitest + happy-dom + @vue/test-utils）          |
+  | `src/tests/`                                | 前端测试代码（setup/mocks/utils/unit/integration）            |
+  | `src-tauri/tests/`                          | Rust 仓库级集成测试（file_extractor）                        |
+  | `src-tauri/benches/`                        | Rust Criterion 性能基准（ast_tail_bench）                    |
+  | `src-tauri/plugins/vcp-mobile/android/src/test/` | Android 插件单元测试（Kotlin JVM + Robolectric）         |
+  | `tests/e2e-android/scripts/`                | adb smoke 脚本（安装/授权/启动/信息采集）                    |
+  | `tests/perf/scripts/`                       | 性能脚本（APK体积/启动/bench/快照）                          |
+  | `docs/Test_Architecture_Constraints.md` | 测试体系架构约束文档（全局约束）               |
 
   ---
 
-  *最后更新：2026-06-24 | VCP Mobile v1.1.2。若项目结构发生重大变化，请同步更新本文件。*
+  *最后更新：2026-07-02 | VCP Mobile v1.1.2。若项目结构发生重大变化，请同步更新本文件。*

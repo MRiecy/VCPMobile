@@ -729,12 +729,11 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_code_block_precipitation_failure() {
-        let file_path = "g:\\VCPMobile\\scripts\\tail-test\\测试文档.txt";
-        let mut text = fs::read_to_string(file_path).expect("Failed to read test document");
+        // 真实样本 测试文档.txt（include_str! 编译期内嵌，杜绝绝对路径与 CI panic）
+        let mut text = include_str!("../../../../scripts/tail-test/测试文档.txt").to_string();
 
         // 兼容处理：如果是转义过的 JSON Payload，使用 serde_json 进行 unescape
         if text.contains("\\n") || text.contains("\\\"") {
@@ -747,45 +746,15 @@ mod tests {
             }
         }
 
-        println!("====== REGEX DIRECT MATCH DIAGNOSIS (ORIGINAL UNESCAPED TEXT) ======");
-        let fence_start_re = &crate::vcp_modules::content_parser::HTML_FENCE_START;
-        let fence_end_re = &crate::vcp_modules::content_parser::GENERIC_CODE_FENCE_END;
-
-        if let Some(m_start) = fence_start_re.find(&text) {
-            println!(
-                "HTML_FENCE_START matched at: {}..{}",
-                m_start.start(),
-                m_start.end()
-            );
-            let search_area = &text[m_start.end()..];
-            println!(
-                "Search area first 200 chars: {:?}",
-                &search_area[..200.min(search_area.len())]
-            );
-
-            if let Some(m_end) = fence_end_re.find(search_area) {
-                println!(
-                    "GENERIC_CODE_FENCE_END matched in search_area at relative: {}..{}",
-                    m_end.start(),
-                    m_end.end()
-                );
-            } else {
-                println!("GENERIC_CODE_FENCE_END FAILED TO MATCH search_area!");
-            }
-        } else {
-            println!("HTML_FENCE_START failed to match!");
-        }
-
-        // 构造包含 HtmlContainer 的测试文本
+        // 构造包含 HtmlContainer 的测试文本，验证解析器能沉淀出稳定块
         let html_container_text =
             "\n<div class=\"chat-container\">\n<p>Hello inside container</p>\n</div>\n";
         let combined_text = format!("{}{}", text, html_container_text);
 
         let mut parser = StreamBlockParser::new();
         let blocks = parser.finalize(&combined_text);
-        println!("====== RUST UNIT TEST PRECIPITATION DIAGNOSIS ======");
-        println!("Blocks count: {}", blocks.len());
 
+        // 断言：解析器应成功沉淀出至少一个稳定块
         assert!(
             !blocks.is_empty(),
             "Parser should successfully yield stable blocks"

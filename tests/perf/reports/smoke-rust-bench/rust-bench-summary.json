@@ -1,0 +1,7 @@
+{
+  "generated_at": "2026-07-01T14:10:16.879Z",
+  "command": "cargo bench --profile perf --no-run",
+  "status": 0,
+  "out_dir": "G:\\VCPMobile\\tests\\perf\\reports\\smoke-rust-bench",
+  "note": "Criterion raw report remains under src-tauri/target/criterion when benchmarks are executed."
+}

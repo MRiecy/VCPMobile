@@ -6,6 +6,7 @@ commands.allow = [
     "clear_keep_screen_on",
     "start_streaming_service",
     "stop_streaming_service",
+    "start_helper_service",
     "check_all_permissions",
     "request_android_permission",
     "move_task_to_back",

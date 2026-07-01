@@ -19,17 +19,30 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22' # 建议使用 LTS 版本
+          cache: pnpm
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v4
         with:
           version: 10
 
       - name: Install Node Dependencies
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: Vue & TypeScript Type Check
         run: pnpm exec vue-tsc --noEmit
+
+      - name: Frontend Unit Tests
+        run: pnpm test:run
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -49,6 +62,22 @@ jobs:
       - name: Rust Formatting Check
         working-directory: ./src-tauri
         run: cargo fmt -- --check
+
+      - name: Rust Unit Tests
+        working-directory: ./src-tauri
+        run: cargo test --lib
+
+      - name: Rust Integration Tests
+        working-directory: ./src-tauri
+        run: cargo test --test file_extractor_integration
+
+      - name: Android Plugin Unit Tests
+        working-directory: ./src-tauri/gen/android
+        run: ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
+
+      - name: Rust Benchmark Compile Check
+        working-directory: ./src-tauri
+        run: cargo bench --profile perf --no-run
 
       - name: Rust Clippy (Lint & Check)
         working-directory: ./src-tauri

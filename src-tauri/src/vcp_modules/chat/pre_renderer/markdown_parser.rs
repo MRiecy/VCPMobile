@@ -1749,12 +1749,8 @@ mod tests {
 
     #[test]
     fn test_user_reproduce() {
-        let text = std::fs::read_to_string("G:\\VCPMobile\\scripts\\tail-test\\Strong.txt")
-            .unwrap_or_else(|_| {
-                include_str!("../../../../../scripts/tail-test/Strong.txt").to_string()
-            });
-
-        let nodes = parse_markdown_to_ast(&text);
+        let text = include_str!("../../../../../scripts/tail-test/Strong.txt");
+        let nodes = parse_markdown_to_ast(text);
 
         // 查找包含“自愈判定阀”的 Strong 节点
         let mut found = false;
@@ -1796,32 +1792,15 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_txt_16() {
-        let text = std::fs::read_to_string("G:\\VCPMobile\\scripts\\tail-test\\pre.txt").unwrap();
-        let nodes = parse_markdown_to_ast(&text);
-        for (i, node) in nodes.iter().enumerate() {
-            if let MarkdownNode::CodeBlock { lang, code, .. } = node {
-                println!(
-                    "CodeBlock [{}]: lang={:?}, code_len={}",
-                    i,
-                    lang,
-                    code.len()
-                );
-                if code.contains("nested") {
-                    println!("FOUND NESTED CODEBLOCK:\n{:#?}", node);
-                }
-            }
-        }
-    }
-
-    #[test]
     fn test_brk_text_37() {
-        let text = std::fs::read_to_string("G:\\VCPMobile\\scripts\\tail-test\\brk.txt").unwrap();
+        // 真实样本 brk.txt，覆盖 parse_content 切分（include_str! 编译期内嵌，杜绝绝对路径）
+        let text = include_str!("../../../../../scripts/tail-test/brk.txt");
         // 模拟 content_parser.rs 的 parse_content 切分
-        let blocks = crate::vcp_modules::content_parser::parse_content(&text);
-        println!("TOTAL BLOCKS: {}", blocks.len());
-        for (idx, block) in blocks.iter().enumerate() {
-            println!("Block [{}]: type={:?}", idx, block);
-        }
+        let blocks = crate::vcp_modules::content_parser::parse_content(text);
+        // 断言切分出至少一个块（原诊断 println 已转为 assert）
+        assert!(
+            !blocks.is_empty(),
+            "brk.txt 经 parse_content 后应至少切分出一个块"
+        );
     }
 }

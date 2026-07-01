@@ -25,6 +25,10 @@ android {
             jniLibs.srcDirs("src/main/jniLibs")
         }
     }
+
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
 }
 
 dependencies {
@@ -41,4 +45,18 @@ dependencies {
     // 原生轻量级推送监听器所需的 SSE 长连接支持
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.13")
+    // Robolectric 默认会在测试运行期动态拉取 android-all；显式声明可让 Gradle 预解析并缓存，避免运行期 socket 失败。
+    testImplementation("org.robolectric:android-all:9-robolectric-4913185-2")
+    testImplementation("io.mockk:mockk:1.13.12")
+    testImplementation("androidx.test:core:1.6.1")
+    testImplementation("androidx.test.ext:junit:1.2.1")
+
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("io.mockk:mockk-android:1.13.12")
 }

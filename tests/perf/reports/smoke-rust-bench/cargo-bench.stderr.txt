@@ -1,0 +1,5 @@
+    Finished `perf` profile [optimized] target(s) in 0.47s
+  Executable benches src\lib.rs (target\perf\deps\vcp_mobile_lib-77d0393dfcd077d5.exe)
+  Executable benches src\bin\compress_test.rs (target\perf\deps\compress_test-22b9c38f888dca31.exe)
+  Executable benches src\main.rs (target\perf\deps\vcp_mobile-07b6d911d19c5d66.exe)
+  Executable benches\ast_tail_bench.rs (target\perf\deps\ast_tail_bench-7c525a7a97a4efa6.exe)

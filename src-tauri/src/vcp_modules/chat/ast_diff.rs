@@ -605,12 +605,8 @@ mod tests {
 
     #[test]
     fn test_real_agent_stream_simulation() {
-        // 读取真实的 9.8KB Agent 输出样张文档
-        let text =
-            std::fs::read_to_string("../scripts/tail-test/测试文档.txt").unwrap_or_else(|_| {
-                std::fs::read_to_string("scripts/tail-test/测试文档.txt")
-                    .expect("Failed to find or read 测试文档.txt in scripts/tail-test")
-            });
+        // 读取真实的 9.8KB Agent 输出样张文档（编译期内嵌，杜绝运行时路径依赖）
+        let text = include_str!("../../../../scripts/tail-test/测试文档.txt");
 
         let mut rng = SimpleRng::new(42); // 固定 seed 保证测试具有确定的可复现性
         let mut buffer = AuroraBuffer::new();
