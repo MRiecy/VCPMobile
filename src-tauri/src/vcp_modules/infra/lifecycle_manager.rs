@@ -48,8 +48,29 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             });
 
             // 运行数据库解压升级迁移 (若有旧版压缩数据，将在此处展示进度并安全拦截启动流程)
-            if let Err(e) = crate::vcp_modules::db_manager::decompress_database_migration(&handle).await {
-                log::error!("[Lifecycle] Decompress database migration failed: {}", e);
+            match crate::vcp_modules::db_manager::decompress_database_migration(&handle).await {
+                Ok(true) => {
+                    log::info!("[Lifecycle] Decompress database migration completed. Halting boot sequence for restart.");
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // 不需要解压迁移，继续引导
+                }
+                Err(e) => {
+                    let err_msg = format!("数据库解压迁移失败: {}", e);
+                    *lifecycle.last_error.write().await = Some(err_msg.clone());
+                    *lifecycle.status.write().await = CoreStatus::Error;
+                    let _ = handle.emit(
+                        "vcp-system-event",
+                        serde_json::json!({
+                            "type": "vcp-core-status",
+                            "status": "error",
+                            "message": &err_msg,
+                            "source": "Core"
+                        }),
+                    );
+                    return Err(err_msg);
+                }
             }
 
             p
@@ -266,6 +287,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 #[derive(Debug, Serialize, Clone)]
 pub struct SystemSnapshot {
     pub core: CoreStatus,
+    pub message: String,
     pub log: String,
     pub sync: String,
     pub distributed: String,
@@ -277,6 +299,7 @@ pub async fn get_system_snapshot(
     app: AppHandle,
 ) -> Result<SystemSnapshot, String> {
     let core = *state.status.read().await;
+    let message = state.status_message.read().await.clone();
 
     // 获取 VCPLog 状态
     let log = crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal().await;
@@ -303,6 +326,7 @@ pub async fn get_system_snapshot(
 
     Ok(SystemSnapshot {
         core,
+        message,
         log,
         sync,
         distributed,

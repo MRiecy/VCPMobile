@@ -559,11 +559,17 @@ impl DbWriteQueue {
 
     // Phase 3.5: 全文检索 FTS5 批量同步
     let msg_ids_for_fts: Vec<String> = messages.iter().map(|msg| msg.id.clone()).collect();
-    for chunk in msg_ids_for_fts.chunks(999) {
+    for chunk in msg_ids_for_fts.chunks(998) { // SQLite 参数上限，预留 1 个给 topic_id
         let placeholders = vec!["?"; chunk.len()].join(", ");
-        let sql_del_fts = format!("DELETE FROM messages_fts WHERE msg_id IN ({})", placeholders);
+        let sql_del_fts = format!("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN ({})", placeholders);
         let mut stmt_del_fts = tx.prepare_cached(&sql_del_fts)?;
-        stmt_del_fts.execute(rusqlite::params_from_iter(chunk))?;
+        
+        let mut params: Vec<String> = Vec::with_capacity(chunk.len() + 1);
+        params.push(topic_id.to_string());
+        for id in chunk {
+            params.push(id.clone());
+        }
+        stmt_del_fts.execute(rusqlite::params_from_iter(params))?;
     }
 
     const PARAMS_PER_FTS: usize = 3;

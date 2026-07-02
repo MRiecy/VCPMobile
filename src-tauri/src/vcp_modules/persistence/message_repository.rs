@@ -392,7 +392,8 @@ impl MessageRepository {
 
         // 2.2 同步写入全文检索 FTS5 虚拟表 (仅在消息未删除时同步明文，FTS5 不支持 ON CONFLICT)
         let search_content = crate::vcp_modules::db_manager::preprocess_fts_text(&message.content);
-        sqlx::query("DELETE FROM messages_fts WHERE msg_id = ?")
+        sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
+            .bind(topic_id)
             .bind(&message.id)
             .execute(&mut **tx)
             .await

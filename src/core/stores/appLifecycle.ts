@@ -213,6 +213,10 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
             settled = true;
             cleanup();
             resolve();
+          } else if (newStatus === 'decompression-complete') {
+            settled = true;
+            cleanup();
+            reject(new Error('DATABASE_MIGRATION_COMPLETED'));
           } else if (newStatus === 'error') {
             settled = true;
             cleanup();
@@ -292,6 +296,10 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         await waitForCoreReady();
         await startPreloading();
       } catch (error) {
+        if (error instanceof Error && error.message === 'DATABASE_MIGRATION_COMPLETED') {
+          console.log('[Lifecycle] Database migration completed, halting boot for restart.');
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         fail(message);
         throw error;
@@ -302,7 +310,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     stopMigrationWatch = watch(
       () => notificationStore.vcpCoreStatus,
       (coreStatus) => {
-        if (coreStatus.status === 'decompressing') {
+        if (coreStatus.status === 'decompressing' || coreStatus.status === 'optimizing') {
           state.value = 'MIGRATING';
           currentPhaseLabel.value = coreStatus.message;
         } else if (coreStatus.status === 'decompression-complete') {

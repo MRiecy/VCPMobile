@@ -84,6 +84,57 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
     // 运行结构版本迁移引擎
     run_migrations(&pool).await?;
 
+    // 检测 page_size 是否需要物理升级至 16KB 闪存友好对齐
+    let page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(4096);
+    if page_size != 16384 {
+        log::info!("[DBManager] Legacy page_size {} detected. Running page size VACUUM optimization...", page_size);
+        
+        let lifecycle = app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
+        {
+            let mut status_lock = lifecycle.status.write().await;
+            *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Optimizing;
+            let mut msg_lock = lifecycle.status_message.write().await;
+            *msg_lock = "正在优化数据库存储以提高运行效率...".to_string();
+        }
+
+        let _ = app_handle.emit(
+            "vcp-system-event",
+            serde_json::json!({
+                "type": "vcp-core-status",
+                "status": "optimizing",
+                "message": "正在优化数据库存储以提高运行效率...",
+                "source": "Core"
+            }),
+        );
+        
+        // SQLite 在 WAL 模式下不允许变更 page_size。
+        // 我们必须临时切换出 WAL 模式（改为 DELETE），设置 page_size，执行 VACUUM，再切换回 WAL 模式。
+        match pool.acquire().await {
+            Ok(mut conn) => {
+                let _ = sqlx::query("PRAGMA journal_mode = DELETE").execute(&mut *conn).await;
+                let _ = sqlx::query("PRAGMA page_size = 16384").execute(&mut *conn).await;
+                if let Err(e) = sqlx::query("VACUUM").execute(&mut *conn).await {
+                    log::error!("[DBManager] Page size VACUUM optimization failed: {}", e);
+                } else {
+                    log::info!("[DBManager] Page size successfully upgraded to 16KB.");
+                }
+                let _ = sqlx::query("PRAGMA journal_mode = WAL").execute(&mut *conn).await;
+            }
+            Err(e) => {
+                log::error!("[DBManager] Failed to acquire connection for page size optimization: {}", e);
+            }
+        }
+
+        // 整理完成后重置回 Initializing 状态以继续引导
+        {
+            let mut status_lock = lifecycle.status.write().await;
+            *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Initializing;
+        }
+    }
+
     // 运行系统内置高级规则的多模态无损同步器
     crate::vcp_modules::chat::context_injection::sync_system_preset_rules(&pool)
         .await
@@ -326,12 +377,24 @@ pub fn preprocess_fts_text(text: &str) -> String {
     result.trim().to_string()
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FtsSearchFilter {
+    pub query: String,
+    pub topic_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub role: Option<String>,
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub limit: Option<i64>,
+}
+
 #[tauri::command]
 pub async fn search_messages_fts(
     db_state: tauri::State<'_, DbState>,
-    query: String,
+    filter: FtsSearchFilter,
 ) -> Result<Vec<FtsSearchResult>, String> {
-    let trimmed = query.trim();
+    let trimmed = filter.query.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
@@ -347,8 +410,8 @@ pub async fn search_messages_fts(
     }
     let fts_query = terms.join(" AND ");
 
-    // 执行全文检索，并联查 messages 获取正文明文，确保格式完美
-    let rows = sqlx::query(
+    // 动态构建 SQL 语句，联合复合主键 (topic_id, msg_id) 过滤
+    let mut sql = String::from(
         "SELECT 
             m.msg_id, 
             m.topic_id, 
@@ -357,16 +420,54 @@ pub async fn search_messages_fts(
             m.timestamp, 
             t.title AS topic_title
          FROM messages_fts fts
-         INNER JOIN messages m ON fts.msg_id = m.msg_id
+         INNER JOIN messages m ON fts.msg_id = m.msg_id AND fts.topic_id = m.topic_id
          INNER JOIN topics t ON m.topic_id = t.topic_id
-         WHERE fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL
-         ORDER BY m.timestamp DESC
-         LIMIT 100"
-    )
-    .bind(&fts_query)
-    .fetch_all(&db_state.pool)
-    .await
-    .map_err(|e| format!("全文检索执行失败: {}", e))?;
+         WHERE fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL"
+    );
+
+    // 动态添加过滤条件
+    if filter.topic_id.is_some() {
+        sql.push_str(" AND m.topic_id = ?");
+    }
+    if filter.agent_id.is_some() {
+        sql.push_str(" AND m.agent_id = ?");
+    }
+    if filter.role.is_some() {
+        sql.push_str(" AND m.role = ?");
+    }
+    if filter.start_time.is_some() {
+        sql.push_str(" AND m.timestamp >= ?");
+    }
+    if filter.end_time.is_some() {
+        sql.push_str(" AND m.timestamp <= ?");
+    }
+
+    sql.push_str(" ORDER BY m.timestamp DESC LIMIT ?");
+
+    // 重新按顺序绑定参数
+    let mut final_query = sqlx::query(&sql).bind(&fts_query);
+    if let Some(ref tid) = filter.topic_id {
+        final_query = final_query.bind(tid);
+    }
+    if let Some(ref aid) = filter.agent_id {
+        final_query = final_query.bind(aid);
+    }
+    if let Some(ref r) = filter.role {
+        final_query = final_query.bind(r);
+    }
+    if let Some(st) = filter.start_time {
+        final_query = final_query.bind(st);
+    }
+    if let Some(et) = filter.end_time {
+        final_query = final_query.bind(et);
+    }
+    let limit_val = filter.limit.unwrap_or(100);
+    final_query = final_query.bind(limit_val);
+
+    let rows = final_query
+        .fetch_all(&db_state.pool)
+        .await
+        .map_err(|e| format!("全文检索执行失败: {}", e))?;
 
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
@@ -390,7 +491,7 @@ pub async fn search_messages_fts(
     Ok(results)
 }
 
-pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(), String> {
+pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
@@ -403,10 +504,18 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
     .unwrap_or(false);
 
     if !needs_upgrade {
-        return Ok(());
+        return Ok(false);
     }
 
     log::info!("[DBManager] Compressed messages detected in database. Intercepting bootstrap for decompression migration...");
+
+    let lifecycle = app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
+    {
+        let mut status_lock = lifecycle.status.write().await;
+        *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Decompressing;
+        let mut msg_lock = lifecycle.status_message.write().await;
+        *msg_lock = "正在准备解压历史消息... 0%".to_string();
+    }
 
     // 2. 查询待解压总条数
     let total_count: i64 = sqlx::query_scalar(
@@ -417,7 +526,7 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
     .map_err(|e| format!("Failed to query compressed messages count: {}", e))?;
 
     if total_count == 0 {
-        return Ok(());
+        return Ok(false);
     }
 
     log::info!("[DBManager] Decompressing {} messages in background...", total_count);
@@ -438,9 +547,9 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
     let batch_size = 200;
 
     loop {
-        // 读取未解压的批次
+        // 读取未解压的批次，获取 deleted_at 以避免 FTS 索引污染
         let rows = sqlx::query(
-            "SELECT msg_id, topic_id, content FROM messages WHERE typeof(content) = 'blob' ORDER BY rowid LIMIT ?"
+            "SELECT msg_id, topic_id, content, deleted_at FROM messages WHERE typeof(content) = 'blob' ORDER BY rowid LIMIT ?"
         )
         .bind(batch_size)
         .fetch_all(pool)
@@ -458,10 +567,29 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
             let msg_id: String = row.get("msg_id");
             let topic_id: String = row.get("topic_id");
             let content_bytes: Vec<u8> = row.get("content");
+            let deleted_at: Option<i64> = row.get("deleted_at");
 
-            // 解压缩旧的二进制数据
-            let content = crate::vcp_modules::persistence::message_repository::ContentCompressor::decompress(&content_bytes)
-                .unwrap_or_else(|_| String::from_utf8_lossy(&content_bytes).to_string());
+            // 校验 zstd 压缩魔数头：[0x28, 0xB5, 0x2F, 0xFD] (Little Endian for 0xFD2FB528)
+            let is_zstd = content_bytes.len() >= 4
+                && content_bytes[0] == 0x28
+                && content_bytes[1] == 0xB5
+                && content_bytes[2] == 0x2F
+                && content_bytes[3] == 0xFD;
+
+            let content = if is_zstd {
+                match crate::vcp_modules::persistence::message_repository::ContentCompressor::decompress(&content_bytes) {
+                    Ok(decompressed) => decompressed,
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to decompress message {} in topic {}: {}. Migration aborted to prevent data corruption.",
+                            msg_id, topic_id, e
+                        ));
+                    }
+                }
+            } else {
+                // 如果不是 zstd 压缩的，说明是原本就作为 BLOB 插入的明文文本（或损坏的文本）
+                String::from_utf8_lossy(&content_bytes).to_string()
+            };
 
             // 1. 更新写回为明文 String (SQLite 动态类型会自动将 typeof 转为 'text')
             sqlx::query("UPDATE messages SET content = ? WHERE msg_id = ? AND topic_id = ?")
@@ -472,21 +600,24 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
                 .await
                 .map_err(|e| format!("Failed to update decompressed message: {}", e))?;
 
-            // 2. 同步写入 FTS5 虚拟索引表，解决历史数据无法检索的逻辑漏洞
-            let search_content = preprocess_fts_text(&content);
-            sqlx::query("DELETE FROM messages_fts WHERE msg_id = ?")
+            // 2. 同步写入 FTS5 虚拟索引表，删除陈旧的索引项，仅在消息未逻辑删除时插入，防止软删除索引泄漏
+            sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
+                .bind(&topic_id)
                 .bind(&msg_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("Failed to delete stale FTS entry: {}", e))?;
 
-            sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
-                .bind(&msg_id)
-                .bind(&topic_id)
-                .bind(&search_content)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;
+            if deleted_at.is_none() {
+                let search_content = preprocess_fts_text(&content);
+                sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
+                    .bind(&msg_id)
+                    .bind(&topic_id)
+                    .bind(&search_content)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;
+            }
         }
 
         tx.commit().await.map_err(|e| format!("Failed to commit batch transaction: {}", e))?;
@@ -497,19 +628,29 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
         let pct = (processed_count * 100) / (total_count as usize);
         log::info!("[DBManager] Decompression progress: {}% ({}/{})", pct, processed_count, total_count);
 
+        let msg = format!("正在重构本地数据库... {}%", pct);
+        {
+            let mut msg_lock = lifecycle.status_message.write().await;
+            *msg_lock = msg.clone();
+        }
+
         let _ = app_handle.emit(
             "vcp-system-event",
             serde_json::json!({
                 "type": "vcp-core-status",
                 "status": "decompressing",
-                "message": format!("正在重构本地数据库... {}%", pct),
+                "message": msg,
                 "source": "Core"
             }),
         );
     }
 
-    // 5. 迁移完成后执行 VACUUM 释放物理空间
+    // 5. 物理页收尾整理
     log::info!("[DBManager] Decompression complete. Reclaiming database disk space via VACUUM...");
+    {
+        let mut msg_lock = lifecycle.status_message.write().await;
+        *msg_lock = "正在优化数据库存储空间...".to_string();
+    }
     let _ = app_handle.emit(
         "vcp-system-event",
         serde_json::json!({
@@ -523,20 +664,24 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(),
 
     // 6. 发射升级完成信号，等待重启
     log::info!("[DBManager] Database migration completed successfully. Waiting for user restart confirmation...");
+    let final_msg = "本地数据库格式重构成功，请确认重启应用。".to_string();
+    {
+        let mut status_lock = lifecycle.status.write().await;
+        *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::DecompressionComplete;
+        let mut msg_lock = lifecycle.status_message.write().await;
+        *msg_lock = final_msg.clone();
+    }
     let _ = app_handle.emit(
         "vcp-system-event",
         serde_json::json!({
             "type": "vcp-core-status",
             "status": "decompression-complete",
-            "message": "本地数据库格式重构成功，请确认重启应用。",
+            "message": final_msg,
             "source": "Core"
         }),
     );
 
-    // 7. 进入无限睡眠状态，阻塞后续初始化进程，避免业务逻辑调用报错
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
+    Ok(true)
 }
 
 #[cfg(test)]

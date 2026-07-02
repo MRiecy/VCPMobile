@@ -869,10 +869,10 @@ pub async fn delete_messages(
 
     // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
     let delete_fts_query = format!(
-        "DELETE FROM messages_fts WHERE msg_id IN ({})",
+        "DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_fts = sqlx::query(&delete_fts_query);
+    let mut q_fts = sqlx::query(&delete_fts_query).bind(topic_id);
     for id in &msg_ids {
         q_fts = q_fts.bind(id);
     }
@@ -916,8 +916,8 @@ pub async fn truncate_history_after_timestamp(
         .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
     // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
-    sqlx::query("DELETE FROM messages_fts WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
-        .bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
+        .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ?")

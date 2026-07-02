@@ -18,7 +18,7 @@ export interface VcpNotification {
 }
 
 export interface VcpStatus {
-  status: 'open' | 'closed' | 'error' | 'connecting' | 'connected' | 'disconnected' | 'ready' | 'initializing' | 'decompressing' | 'decompression-complete';
+  status: 'open' | 'closed' | 'error' | 'connecting' | 'connected' | 'disconnected' | 'ready' | 'initializing' | 'decompressing' | 'decompression-complete' | 'optimizing';
   message: string;
   source: string;
 }
