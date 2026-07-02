@@ -2,7 +2,7 @@ use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
 use crate::vcp_modules::message_repository::MessageRepository;
-use crate::vcp_modules::message_repository::{ContentCompressor, MessageRenderCompiler};
+use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::settings_manager;
 use sqlx::Row;
 use std::path::Path;
@@ -60,8 +60,7 @@ pub async fn load_multi_topic_messages(
         let render_content: Option<Vec<u8>> = row.get("render_content");
         let blocks = parse_render_bytes(render_content);
 
-        let content_bytes: Vec<u8> = row.get("content");
-        let content = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
+        let content: String = row.get("content");
         let content_hash_raw: String = row.get("content_hash");
         let content_hash = if content_hash_raw.is_empty() {
             None
@@ -327,21 +326,21 @@ pub async fn load_chat_history_internal(
         let role: String = row.get("role");
         let name: Option<String> = row.get("name");
 
-        let content_bytes: Vec<u8> = row.get("content");
+        let content: String = row.get("content");
         let render_content: Option<Vec<u8>> = row.get("render_content");
 
         // 懒渲染策略：render_cache 命中则直接用，未命中则实时编译
         let (blocks, content) = if let Some(ref rb) = render_content {
             let blocks = parse_render_bytes(Some(rb.clone()));
             let content = if include_content {
-                ContentCompressor::decompress(&content_bytes).unwrap_or_default()
+                content
             } else {
                 String::new()
             };
             (blocks, content)
         } else {
-            // 未命中：解压 content → 编译 blocks → 异步回写 cache
-            let decompressed = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
+            // 未命中：直接用明文 content → 编译 blocks → 异步回写 cache
+            let decompressed = content.clone();
             if decompressed.is_empty() {
                 (None, String::new())
             } else {
@@ -535,8 +534,7 @@ pub async fn load_chat_text_history_for_context(
         let role: String = row.get("role");
         let name: Option<String> = row.get("name");
 
-        let content_bytes: Vec<u8> = row.get("content");
-        let content = ContentCompressor::decompress(&content_bytes).unwrap_or_default();
+        let content: String = row.get("content");
 
         let content_hash_raw: String = row.get("content_hash");
         let content_hash = if content_hash_raw.is_empty() {
@@ -720,13 +718,7 @@ pub async fn fetch_raw_message_content(
 
     match row {
         Some(r) => {
-            let bytes: Vec<u8> = r.get(0);
-            let content = ContentCompressor::decompress(&bytes).map_err(|e| {
-                format!(
-                    "Failed to decompress content for message {}: {}",
-                    message_id, e
-                )
-            })?;
+            let content: String = r.get(0);
             Ok(content)
         }
         None => Err(format!("Message {} not found", message_id)),
@@ -751,13 +743,7 @@ pub async fn re_render_message(
 
     match row {
         Some(r) => {
-            let bytes: Vec<u8> = r.get("content");
-            let decompressed = ContentCompressor::decompress(&bytes).map_err(|e| {
-                format!(
-                    "Failed to decompress content for message {} in topic {}: {}",
-                    message_id, topic_id, e
-                )
-            })?;
+            let decompressed: String = r.get("content");
 
             let compiled = MessageRenderCompiler::compile(&decompressed);
             let serialized = MessageRenderCompiler::serialize(&compiled)?;
@@ -881,6 +867,17 @@ pub async fn delete_messages(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
+    let delete_fts_query = format!(
+        "DELETE FROM messages_fts WHERE msg_id IN ({})",
+        msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
+    );
+    let mut q_fts = sqlx::query(&delete_fts_query);
+    for id in &msg_ids {
+        q_fts = q_fts.bind(id);
+    }
+    q_fts.execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
     )
@@ -917,6 +914,11 @@ pub async fn truncate_history_after_timestamp(
 
     sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
         .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+    // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
+    sqlx::query("DELETE FROM messages_fts WHERE msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
+        .bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ?")
         .bind(now)

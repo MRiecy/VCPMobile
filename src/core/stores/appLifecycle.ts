@@ -9,7 +9,7 @@ import { useChatSessionStore } from './chatSessionStore';
 import { useTopicStore } from './topicListManager';
 import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
 
-export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR';
+export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
 
 export interface CoreStatus {
   status: 'initializing' | 'ready' | 'error' | 'none';
@@ -29,26 +29,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const lastTransitionAt = ref<number | null>(null);
   const isBackground = ref(false);
 
-  const initListeners = () => {
-    if (typeof window === 'undefined') return;
 
-    document.addEventListener('visibilitychange', () => {
-      isBackground.value = document.hidden;
-      console.log(`[Lifecycle Store] Visibility changed: hidden=${document.hidden}`);
-    });
-
-    window.addEventListener('vcp-lifecycle', (e: any) => {
-      const stateVal = e.detail?.state;
-      console.log(`[Lifecycle Store] Received vcp-lifecycle: state=${stateVal}`);
-      if (stateVal === 'stop' || stateVal === 'pause') {
-        isBackground.value = true;
-      } else if (stateVal === 'resume') {
-        isBackground.value = false;
-      }
-    });
-  };
-
-  initListeners();
 
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
@@ -69,6 +50,10 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         return '正在连接核心服务...';
       case 'PRELOADING':
         return currentPhaseLabel.value || '正在预加载核心数据...';
+      case 'MIGRATING':
+        return '正在升级数据库...';
+      case 'MIGRATED':
+        return '数据库升级完成';
       case 'ERROR':
         return errorMsg.value || '启动失败';
       case 'READY':
@@ -312,6 +297,24 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         throw error;
       }
     })();
+
+    let stopMigrationWatch: (() => void) | null = null;
+    stopMigrationWatch = watch(
+      () => notificationStore.vcpCoreStatus,
+      (coreStatus) => {
+        if (coreStatus.status === 'decompressing') {
+          state.value = 'MIGRATING';
+          currentPhaseLabel.value = coreStatus.message;
+        } else if (coreStatus.status === 'decompression-complete') {
+          state.value = 'MIGRATED';
+          currentPhaseLabel.value = coreStatus.message;
+          // 迁移最终态已捕获，销毁 watcher，避免多次 bootstrap() 时累积
+          stopMigrationWatch?.();
+          stopMigrationWatch = null;
+        }
+      },
+      { deep: true }
+    );
 
     return bootstrapPromise;
   };

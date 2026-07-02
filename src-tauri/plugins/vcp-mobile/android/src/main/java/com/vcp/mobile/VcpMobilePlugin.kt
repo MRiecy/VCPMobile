@@ -944,7 +944,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         webViewRef = webView
 
         keyboardInsetsManager.attach(webView)
-        lifecycleBridge.attach(activity, webView, this)
+        lifecycleBridge.attach(activity, this)
 
         // 冷启动：处理传递给 Activity 的初始 intent
         shareIntentHandler.handleShareIntent(activity.intent)

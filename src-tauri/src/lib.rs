@@ -42,7 +42,7 @@ use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot,
     reconcile_distributed_node_cmd, reconcile_local_server_cmd, set_app_foreground_state,
-    LifecycleState,
+    LifecycleState, restart_or_exit_app,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
@@ -354,6 +354,7 @@ pub fn run() {
             clear_frontend_updates,
             confirm_frontend_boot,
             tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
+            restart_or_exit_app,
         ])
         .build(context)
         .expect("error while building tauri application");
@@ -368,8 +369,10 @@ pub fn run() {
                 "[Lifecycle] Native WindowEvent::Focused: focused={}",
                 focused
             );
-            vcp_modules::lifecycle_manager::APP_IN_FOREGROUND
-                .store(focused, std::sync::atomic::Ordering::SeqCst);
+            let handle = _app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, focused).await;
+            });
         }
         _ => {}
     });

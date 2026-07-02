@@ -39,6 +39,7 @@ impl MessageRenderCompiler {
 pub struct ContentCompressor;
 
 impl ContentCompressor {
+    #[allow(dead_code)]
     pub fn compress(text: &str) -> Result<Vec<u8>, String> {
         zstd::bulk::compress(text.as_bytes(), 3)
             .map_err(|e| format!("zstd compress content failed: {}", e))
@@ -82,10 +83,10 @@ fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Conn
     Ok(conn)
 }
 
-/// 分页流式读取已有渲染缓存的消息的 (topic_id, msg_id, content_bytes)，不做任何解压
+/// 分页流式读取已有渲染缓存的消息的 (topic_id, msg_id, content)，content 为明文字符串
 async fn stream_cached_message_contents(
     pool: &sqlx::SqlitePool,
-    tx: mpsc::Sender<(String, String, Vec<u8>)>,
+    tx: mpsc::Sender<(String, String, String)>,
 ) -> Result<(), String> {
     let mut last_rowid = 0i64;
     const FETCH_SIZE: i64 = 500;
@@ -112,8 +113,8 @@ async fn stream_cached_message_contents(
                 for row in rows {
                     let topic_id: String = row.get("topic_id");
                     let msg_id: String = row.get("msg_id");
-                    let content_bytes: Vec<u8> = row.get("content");
-                    if tx.send((topic_id, msg_id, content_bytes)).await.is_err() {
+                    let content: String = row.get("content");
+                    if tx.send((topic_id, msg_id, content)).await.is_err() {
                         return Ok(());
                     }
                 }
@@ -268,15 +269,13 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 
     // --- Stage 1: Reader ---
     let reader_handle = tokio::spawn(async move {
-        let (tx_inner, mut rx_inner) = mpsc::channel::<(String, String, Vec<u8>)>(1000);
+        let (tx_inner, mut rx_inner) = mpsc::channel::<(String, String, String)>(1000);
 
         let stream_handle = tokio::spawn(async move {
             let _ = stream_cached_message_contents(&pool, tx_inner).await;
         });
 
-        while let Some((topic_id, msg_id, content_bytes)) = rx_inner.recv().await {
-            let content = ContentCompressor::decompress(&content_bytes)
-                .unwrap_or_else(|_| String::from_utf8_lossy(&content_bytes).to_string());
+        while let Some((topic_id, msg_id, content)) = rx_inner.recv().await {
             if tx_compiler.send((topic_id, msg_id, content)).await.is_err() {
                 break;
             }
@@ -363,7 +362,7 @@ impl MessageRepository {
         .bind(&message.role)
         .bind(&message.name)
         .bind(&message.agent_id)
-        .bind(ContentCompressor::compress(&message.content)?)
+        .bind(&message.content)
         .bind(message.timestamp as i64)
         .bind(message.is_group_message.unwrap_or(false))
         .bind(&message.group_id)

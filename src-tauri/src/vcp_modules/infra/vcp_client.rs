@@ -978,9 +978,7 @@ async fn handle_streaming_request<R: Runtime>(
                 }
             }
             State::Resuming => {
-                while !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                while !crate::vcp_modules::infra::lifecycle_manager::is_app_in_foreground(_app) {
                     log::info!(
                         "[VCPClient] App is in background. Suspending reconnection for message: {}",
                         message_id_inner

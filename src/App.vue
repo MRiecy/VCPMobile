@@ -16,7 +16,10 @@ import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
 import { useAssistantStore } from "./core/stores/assistant";
 import { useSettingsStore } from "./core/stores/settings";
-import { useChatStreamStore } from "./core/stores/chatStreamStore";
+import { useAppLifecycle } from "./core/composables/useAppLifecycle";
+
+// 初始化应用生命周期监听
+useAppLifecycle();
 
 
 // Native safe-area bridge: CSS env(safe-area-inset-bottom) often reports 0
@@ -194,24 +197,7 @@ const bootstrapApp = async () => {
   }
 };
 
-const handleLifecycleState = (e: Event) => {
-  const detail = (e as CustomEvent<{ state?: string }>).detail;
-  if (detail && detail.state === "resume") {
-    console.log("[App] App resumed from background. Triggering stream recovery.");
-    const streamStore = useChatStreamStore();
-    streamStore.checkAndRecoverInterruptedStreams().catch(err => {
-      console.error("[App] Failed to recover streams on resume:", err);
-    });
-  }
-};
 
-const handleOnline = () => {
-  console.log("[App] Device online. Triggering stream recovery.");
-  const streamStore = useChatStreamStore();
-  streamStore.checkAndRecoverInterruptedStreams().catch(err => {
-    console.error("[App] Failed to recover streams on network restored:", err);
-  });
-};
 
 const backgroundStyle = computed(() => {
   const themeInfo = themeStore.currentThemeInfo || themeStore.availableThemes.find(
@@ -308,20 +294,7 @@ const handleExitRequest = async () => {
 };
 
 
-watch(() => lifecycleStore.isBackground, (newVal) => {
-  if (isAssistant.value) return;
 
-  if (newVal) {
-    document.documentElement.classList.add("vcp-paused-animations");
-    console.log("[App] App moved to background, pausing animations.");
-  } else {
-    document.documentElement.classList.remove("vcp-paused-animations");
-    console.log("[App] App moved to foreground, resuming animations and hydrating status.");
-    lifecycleStore.hydrateSystemStatus().catch((err) => {
-      console.error("[Lifecycle] Failed to hydrate system status:", err);
-    });
-  }
-}, { immediate: true });
 
 const handleFloatingBallClick = async () => {
   console.log("[App] Floating ball clicked. Resolving assistant window...");
@@ -373,8 +346,7 @@ onMounted(async () => {
   window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.addEventListener("vcp-share-intent", handleShareIntent);
   window.addEventListener("vcp-keyboard-inset", handleSafeAreaInset);
-  window.addEventListener("vcp-lifecycle", handleLifecycleState);
-  window.addEventListener("online", handleOnline);
+
 
   // 初始化全局表情包修复器
   initGlobalFixer();
@@ -409,8 +381,7 @@ onUnmounted(() => {
   window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
   window.removeEventListener("vcp-keyboard-inset", handleSafeAreaInset);
-  window.removeEventListener("vcp-lifecycle", handleLifecycleState);
-  window.removeEventListener("online", handleOnline);
+
 });
 </script>
 

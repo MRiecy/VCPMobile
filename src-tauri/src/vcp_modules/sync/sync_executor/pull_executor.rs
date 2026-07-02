@@ -105,12 +105,12 @@ async fn process_topic_messages<R: Runtime>(
         // 3. 将预渲染和 Zstd 压缩等 CPU 密集型任务完美剥离至 spawn_blocking 线程池，解除 Tokio Worker 线程阻塞
         let t_block_start = std::time::Instant::now();
         let topic_id_clone = topic_id.to_string();
-        let (parsed_messages_back, content_hashes, render_bytes_list, compressed_contents) =
+        let (parsed_messages_back, content_hashes, render_bytes_list, contents) =
             tokio::task::spawn_blocking(move || {
                 let count = parsed_messages.len();
                 let mut content_hashes = Vec::with_capacity(count);
                 let mut render_bytes_list = Vec::with_capacity(count);
-                let mut compressed_contents = Vec::with_capacity(count);
+                let mut contents = Vec::with_capacity(count);
 
                 for msg in &parsed_messages {
                     // A. 计算/直读指纹
@@ -131,12 +131,11 @@ async fn process_topic_messages<R: Runtime>(
                         _ => HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes),
                     };
 
-                    // B. 文本压缩（始终执行）+ 预渲染（按开关控制）
+                    // B. 预渲染（按开关控制）
                     let content = &msg.content;
                     let topic_id_log = topic_id_clone.clone();
                     let msg_id_log = msg.id.clone();
 
-                    let cc = crate::vcp_modules::persistence::message_repository::ContentCompressor::compress(content).unwrap_or_default();
                     let rb = if prerender_enabled {
                         let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let blocks = MessageRenderCompiler::compile(content);
@@ -158,10 +157,10 @@ async fn process_topic_messages<R: Runtime>(
 
                     content_hashes.push(content_hash);
                     render_bytes_list.push(rb);
-                    compressed_contents.push(cc);
+                    contents.push(content.clone());
                 }
 
-                (parsed_messages, content_hashes, render_bytes_list, compressed_contents)
+                (parsed_messages, content_hashes, render_bytes_list, contents)
             })
             .await
             .map_err(|e| format!("Spawn blocking failed: {}", e))?;
@@ -173,7 +172,7 @@ async fn process_topic_messages<R: Runtime>(
             .submit(DbWriteTask::TopicMessages {
                 topic_id: topic_id.to_string(),
                 messages: parsed_messages_back,
-                compressed_contents,
+                contents,
                 render_bytes: render_bytes_list,
                 content_hashes,
                 skip_bubble: true,

@@ -1,7 +1,6 @@
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite, Row};
 use std::fs;
-use tauri::AppHandle;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 
 pub struct DbState {
     pub pool: Pool<Sqlite>,
@@ -170,363 +169,122 @@ fn archive_corrupt_db(db_path: &std::path::Path) {
     }
 }
 
-struct Migration {
-    version: i32,
-    description: &'static str,
-    sql: &'static str,
+async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), String> {
+    let migrator = sqlx::migrate!("./migrations");
+    // 处理 1.1.2 存量用户（有业务表但无任何迁移追踪记录）
+    bootstrap_legacy_if_needed(pool, &migrator).await?;
+    // sqlx 内置迁移引擎：底层用 sqlite3_exec()，原生支持触发器等多语句 DDL
+    migrator
+        .run(pool)
+        .await
+        .map_err(|e| format!("数据库初始化失败: {}", e))
 }
 
-static MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        description: "create_initial_tables",
-        sql: "
-        -- 1. avatars 全局多态头像表 (真理之源)
-        CREATE TABLE IF NOT EXISTS avatars (
-            owner_type TEXT NOT NULL,     -- 'agent', 'group', 'user', 'system'
-            owner_id TEXT NOT NULL,       -- 对应实体的 UUID 或 'user_avatar'
-            avatar_hash TEXT NOT NULL,    -- SHA-256 摘要，用于 WS 快速 Diff
-            mime_type TEXT NOT NULL,      -- e.g., 'image/webp', 'image/png'
-            image_data BLOB NOT NULL,     -- 物理二进制数据
-            dominant_color TEXT,          -- 预计算的主色调 (rgb/hex)
-            updated_at BIGINT NOT NULL,   -- 逻辑时钟/时间戳
-            PRIMARY KEY (owner_type, owner_id)
-        );
-
-        -- 2. agents 表 (智能体配置 - 物理删除了 current_topic_id)
-        CREATE TABLE IF NOT EXISTS agents (
-            agent_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            system_prompt TEXT NOT NULL DEFAULT '',
-            mobile_system_prompt TEXT NOT NULL DEFAULT '',
-            model TEXT NOT NULL,
-            temperature REAL NOT NULL DEFAULT 1,
-            context_token_limit INTEGER NOT NULL DEFAULT 0,
-            max_output_tokens INTEGER NOT NULL DEFAULT 0,
-            stream_output INTEGER NOT NULL DEFAULT 1,
-            use_temperature INTEGER NOT NULL DEFAULT 0,
-            config_hash TEXT NOT NULL DEFAULT '',  -- 配置内容指纹
-            content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
-            updated_at BIGINT NOT NULL,
-            deleted_at BIGINT
-        );
-
-        -- 3. groups 表 (群组配置 - 物理删除了 current_topic_id)
-        CREATE TABLE IF NOT EXISTS groups (
-            group_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'sequential',
-            group_prompt TEXT,
-            invite_prompt TEXT,
-            use_unified_model INTEGER NOT NULL DEFAULT 0,
-            unified_model TEXT,
-            tag_match_mode TEXT,
-            config_hash TEXT NOT NULL DEFAULT '',  -- 配置内容指纹
-            content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Config + Topics)
-            created_at BIGINT NOT NULL DEFAULT 0,
-            updated_at BIGINT NOT NULL,
-            deleted_at BIGINT
-        );
-
-        -- 4. group_members 表
-        CREATE TABLE IF NOT EXISTS group_members (
-            group_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            member_tag TEXT,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            updated_at BIGINT NOT NULL,
-            PRIMARY KEY (group_id, agent_id)
-        );
-
-        -- 5. topics 表 (主题管理)
-        CREATE TABLE IF NOT EXISTS topics (
-            topic_id TEXT PRIMARY KEY,
-            owner_type TEXT NOT NULL,
-            owner_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL,
-            locked INTEGER NOT NULL DEFAULT 1,
-            unread INTEGER NOT NULL DEFAULT 0,
-            unread_count INTEGER NOT NULL DEFAULT 0,
-            msg_count INTEGER NOT NULL DEFAULT 0,
-            config_hash TEXT NOT NULL DEFAULT '',  -- 配置内容指纹 (Topic Meta Hash)
-            content_hash TEXT NOT NULL DEFAULT '', -- 聚合指纹 (Messages Root)
-            deleted_at BIGINT
-        );
-
-        -- 6. messages 表 (消息历史 - 已物理删除 is_thinking 列)
-        CREATE TABLE IF NOT EXISTS messages (
-            msg_id TEXT NOT NULL,
-            topic_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            name TEXT,
-            agent_id TEXT,
-            content TEXT NOT NULL,
-            timestamp BIGINT NOT NULL,
-            is_group_message INTEGER NOT NULL DEFAULT 0,
-            group_id TEXT,
-            finish_reason TEXT,
-            content_hash TEXT NOT NULL DEFAULT '',  -- 消息内容指纹 (用于快速 Diff 和聚合指纹计算,包含附件指纹)
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL,
-            deleted_at BIGINT,
-            PRIMARY KEY (topic_id, msg_id)
-        );
-
-        -- 7. render_cache 表
-        CREATE TABLE IF NOT EXISTS render_cache (
-            topic_id TEXT NOT NULL,
-            msg_id TEXT NOT NULL,
-            render_content BLOB,
-            updated_at BIGINT NOT NULL,
-            PRIMARY KEY (topic_id, msg_id),
-            FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
-        );
-
-        -- 8. message_attachments 表
-        CREATE TABLE IF NOT EXISTS message_attachments (
-            topic_id TEXT NOT NULL,
-            msg_id TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            attachment_order INTEGER NOT NULL,
-            display_name TEXT NOT NULL,
-            src TEXT,
-            status TEXT,
-            created_at BIGINT NOT NULL,
-            PRIMARY KEY (topic_id, msg_id, attachment_order),
-            FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
-        );
-
-        -- 9. attachments 表 (物理文件真理之源)
-        CREATE TABLE IF NOT EXISTS attachments (
-            hash TEXT PRIMARY KEY,            -- 内容摘要 SHA-256
-            mime_type TEXT NOT NULL,          -- e.g., 'image/webp'
-            size BIGINT NOT NULL,             -- 文件大小
-            internal_path TEXT NOT NULL,      -- 本地物理存储路径
-            extracted_text TEXT,              -- OCR 或解析文本
-            image_frames TEXT,                -- 视频帧或 PDF 图片 (JSON Array)
-            thumbnail_path TEXT,              -- 缩略图路径
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL
-        );
-
-        -- 10. settings 表 (存储全局配置)
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at BIGINT NOT NULL
-        );
-
-        -- 11. model_favorites 表
-        CREATE TABLE IF NOT EXISTS model_favorites (
-            model_id TEXT PRIMARY KEY,
-            created_at BIGINT NOT NULL
-        );
-
-        -- 12. model_usage_stats 表
-        CREATE TABLE IF NOT EXISTS model_usage_stats (
-            model_id TEXT PRIMARY KEY,
-            usage_count INTEGER NOT NULL DEFAULT 0,
-            updated_at BIGINT NOT NULL
-        );
-
-        -- 13. emoticon_library 表 (表情包修复库)
-        CREATE TABLE IF NOT EXISTS emoticon_library (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            filename TEXT NOT NULL,
-            url TEXT NOT NULL UNIQUE,
-            search_key TEXT NOT NULL
-        );
-
-        -- 14. tarven_rules 表 (VCPChatTarven 规则库)
-        CREATE TABLE IF NOT EXISTS tarven_rules (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            rule_type TEXT NOT NULL,
-            is_enabled INTEGER NOT NULL DEFAULT 1,
-            content TEXT NOT NULL,
-            scope TEXT NOT NULL,
-            wrap INTEGER NOT NULL DEFAULT 1,
-            role TEXT,
-            depth INTEGER,
-            position TEXT,
-            sort_order INTEGER NOT NULL DEFAULT 0,
-            created_at BIGINT NOT NULL,
-            updated_at BIGINT NOT NULL
-        );
-
-        -- 15. active_generations 活跃生成注册表 (用于云端无状态断点恢复的事务日志)
-        CREATE TABLE IF NOT EXISTS active_generations (
-            msg_id TEXT PRIMARY KEY,
-            topic_id TEXT NOT NULL,
-            owner_id TEXT NOT NULL,
-            owner_type TEXT NOT NULL,
-            created_at BIGINT NOT NULL
-        );
-
-        -- 索引 (共 9 个)
-        CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_id, owner_type, created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category);
-        CREATE INDEX IF NOT EXISTS idx_messages_topic_time ON messages(topic_id, timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at);
-        CREATE INDEX IF NOT EXISTS idx_group_members_agent ON group_members(agent_id);
-        CREATE INDEX IF NOT EXISTS idx_message_attachments_hash ON message_attachments(hash);
-        CREATE INDEX IF NOT EXISTS idx_message_attachments_msg ON message_attachments(topic_id, msg_id);
-        CREATE INDEX IF NOT EXISTS idx_render_cache_msg ON render_cache(topic_id, msg_id);
-        CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC);
-        "
-    },
-    Migration {
-        version: 2,
-        description: "add_deleted_at_to_message_attachments",
-        sql: "-- ⚡ 增量热迁移：为 message_attachments 表增加 deleted_at 逻辑删除字段
-              ALTER TABLE message_attachments ADD COLUMN deleted_at BIGINT;"
-    },
-    Migration {
-        version: 3,
-        description: "create_messages_fts_table",
-        sql: "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-                  msg_id UNINDEXED,
-                  topic_id UNINDEXED,
-                  content,
-                  tokenize = 'unicode61'
-              );
-
-              CREATE TRIGGER IF NOT EXISTS after_messages_physical_delete
-              AFTER DELETE ON messages
-              BEGIN
-                  DELETE FROM messages_fts WHERE msg_id = old.msg_id;
-              END;
-
-              CREATE TRIGGER IF NOT EXISTS after_messages_logical_delete
-              AFTER UPDATE OF deleted_at ON messages
-              WHEN new.deleted_at IS NOT NULL
-              BEGIN
-                  DELETE FROM messages_fts WHERE msg_id = new.msg_id;
-              END;"
-    }
-];
-
-async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), String> {
-    // 1. 确保版本控制系统表 schema_migrations 存在
-    let has_migration_table: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')"
+/// 为 1.1.2 原始用户（有业务表但无迁移追踪表）构建初始迁移状态。
+///
+/// sqlx::migrate!() 使用 _sqlx_migrations 表追踪版本，并通过 SHA-384
+/// checksum 校验每个已执行迁移的文件内容。此函数通过检查 Schema 状态推断
+/// 哪些迁移已在历史上执行过，并向 _sqlx_migrations 写入带真实 checksum
+/// 的虚拟记录，告知 sqlx「这些迁移已执行，跳过它们」。
+///
+/// Checksum 直接取自 migrator.migrations[i].checksum，这是编译期由
+/// sqlx::migrate!() 宏对 .sql 文件内容计算的 SHA-384，与 sqlx 运行期
+/// 校验使用的值完全一致，无需手动计算。
+async fn bootstrap_legacy_if_needed(
+    pool: &Pool<Sqlite>,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<(), String> {
+    // 检测是否为 1.1.2 用户：有业务表但没有 sqlx 迁移追踪表
+    let has_messages: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')"
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| format!("Failed to check schema_migrations table: {}", e))?;
+    .unwrap_or(false);
 
-    if !has_migration_table {
-        // 检测是否是无迁移表的历史老版本数据库
-        let has_legacy_messages: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')"
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false);
+    let has_sqlx_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
 
-        // 创建版本控制元数据表
-        sqlx::query(
-            "CREATE TABLE schema_migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at BIGINT NOT NULL
-            )"
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Failed to create schema_migrations table: {}", e))?;
-
-        if has_legacy_messages {
-            log::info!("[DBManager] Legacy database detected. Reconciling schema state...");
-            // 老版本可能已经通过旧有的 setup_tables 执行过 ALTER 增加了 deleted_at。
-            // 我们通过检查列信息来判断应该打上哪些版本标记。
-            let columns = sqlx::query("PRAGMA table_info(message_attachments)")
-                .fetch_all(pool)
-                .await
-                .unwrap_or_default();
-            
-            let has_deleted_at = columns.iter().any(|row| {
-                let name: String = row.get("name");
-                name == "deleted_at"
-            });
-
-            let now = chrono::Utc::now().timestamp_millis();
-            sqlx::query(
-                "INSERT INTO schema_migrations (version, description, applied_at) VALUES (1, 'create_initial_tables', ?)"
-            )
-            .bind(now)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to seed legacy migration 1: {}", e))?;
-
-            if has_deleted_at {
-                sqlx::query(
-                    "INSERT INTO schema_migrations (version, description, applied_at) VALUES (2, 'add_deleted_at_to_message_attachments', ?)"
-                )
-                .bind(now)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("Failed to seed legacy migration 2: {}", e))?;
-                log::info!("[DBManager] Legacy database successfully seeded at version 2.");
-            } else {
-                log::info!("[DBManager] Legacy database seeded at version 1 (missing deleted_at).");
-            }
-        }
+    // 不是遗留用户（全新安装），或桥接已完成
+    if !has_messages || has_sqlx_table {
+        return Ok(());
     }
 
-    // 2. 获取已应用的迁移历史
-    let applied_versions: std::collections::HashSet<i32> = sqlx::query_scalar(
-        "SELECT version FROM schema_migrations"
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to query applied migrations: {}", e))?
-    .into_iter()
-    .collect();
+    log::info!("[DBManager] Legacy 1.1.2 database detected. Bootstrapping migration state...");
 
-    // 3. 按版本顺序执行所有缺失的迁移
-    for migration in MIGRATIONS {
-        if !applied_versions.contains(&migration.version) {
+    // 检测各迁移在历史上是否已执行（通过当前 Schema 状态推断）
+    let columns = sqlx::query("PRAGMA table_info(message_attachments)")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+    let has_deleted_at = columns.iter().any(|row| {
+        row.try_get::<String, _>("name").unwrap_or_default() == "deleted_at"
+    });
+
+    let has_fts: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts')"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    // 向 _sqlx_migrations 写入虚拟记录（migrator.run() 会自动建表后再读取）
+    // 此处借用 pool 直接执行，因为 _sqlx_migrations 尚不存在，
+    // 所以先让 migrator 自己建表，再插入记录。
+    // 实际顺序：run() → 建表 → 读记录（发现已有记录）→ 跳过对应版本
+    //
+    // 由于 _sqlx_migrations 在此时不存在，我们需要手动创建它，
+    // 或者利用 sqlx 提供的 ensure_migrations_table() 方法。
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+            version        BIGINT PRIMARY KEY,
+            description    TEXT NOT NULL,
+            installed_on   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            success        BOOLEAN NOT NULL,
+            checksum       BLOB NOT NULL,
+            execution_time BIGINT NOT NULL
+        )"
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Bootstrap: failed to create _sqlx_migrations: {}", e))?;
+
+    for migration in migrator.migrations.iter() {
+        let already_applied = match migration.version {
+            1 => true,           // 初始表必然存在（用户能运行说明 Migration 1 已执行）
+            2 => has_deleted_at, // deleted_at 列存在则 Migration 2 已执行
+            3 => has_fts,        // messages_fts 表存在则 Migration 3 已执行
+            _ => false,
+        };
+
+        if already_applied {
+            sqlx::query(
+                "INSERT OR IGNORE INTO _sqlx_migrations
+                 (version, description, installed_on, success, checksum, execution_time)
+                 VALUES (?, ?, datetime('now'), 1, ?, 0)"
+            )
+            .bind(migration.version)
+            .bind(migration.description.as_ref())
+            .bind(migration.checksum.as_ref())
+            .execute(pool)
+            .await
+            .map_err(|e| format!(
+                "Bootstrap: failed to seed migration v{}: {}", migration.version, e
+            ))?;
+
             log::info!(
-                "[DBManager] Applying migration {}: {}",
+                "[DBManager] Bootstrap: seeded migration v{} ({}).",
                 migration.version,
                 migration.description
             );
-
-            // 开启排他性事务运行该迁移
-            let mut tx = pool.begin().await.map_err(|e| format!("Failed to start migration transaction: {}", e))?;
-
-            // SQLite 无法在一个 prepared statement 中同时处理多条以分号分隔的 SQL
-            // 故在内存中安全分割后逐条执行
-            for statement in migration.sql.split(';') {
-                let trimmed = statement.trim();
-                if !trimmed.is_empty() {
-                    sqlx::query(trimmed)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| format!("Failed to execute query in migration {}: {}", migration.version, e))?;
-                }
-            }
-
-            // 记录版本日志
-            let now = chrono::Utc::now().timestamp_millis();
-            sqlx::query(
-                "INSERT INTO schema_migrations (version, description, applied_at) VALUES (?, ?, ?)"
-            )
-            .bind(migration.version)
-            .bind(migration.description)
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| format!("Failed to log migration {} to schema_migrations: {}", migration.version, e))?;
-
-            tx.commit().await.map_err(|e| format!("Failed to commit migration transaction: {}", e))?;
-            log::info!("[DBManager] Migration {} applied successfully.", migration.version);
         }
     }
+
+    log::info!("[DBManager] Legacy bootstrap complete. Handing over to sqlx migrator.");
     Ok(())
 }
 
@@ -589,13 +347,13 @@ pub async fn search_messages_fts(
     }
     let fts_query = terms.join(" AND ");
 
-    // 执行全文检索，并联查 messages 获取压缩正文，最后由 Rust 统一解压，确保格式完美
+    // 执行全文检索，并联查 messages 获取正文明文，确保格式完美
     let rows = sqlx::query(
         "SELECT 
             m.msg_id, 
             m.topic_id, 
             m.role, 
-            m.content AS compressed_content, 
+            m.content, 
             m.timestamp, 
             t.title AS topic_title
          FROM messages_fts fts
@@ -615,13 +373,9 @@ pub async fn search_messages_fts(
         let msg_id: String = row.get("msg_id");
         let topic_id: String = row.get("topic_id");
         let role: String = row.get("role");
-        let compressed_content: Vec<u8> = row.get("compressed_content");
+        let content: String = row.get("content");
         let timestamp: i64 = row.get("timestamp");
         let topic_title: String = row.get("topic_title");
-
-        // 使用 ContentCompressor 解压正文明文
-        let content = crate::vcp_modules::persistence::message_repository::ContentCompressor::decompress(&compressed_content)
-            .unwrap_or_else(|_| String::from_utf8_lossy(&compressed_content).to_string());
 
         results.push(FtsSearchResult {
             msg_id,
@@ -634,6 +388,155 @@ pub async fn search_messages_fts(
     }
 
     Ok(results)
+}
+
+pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<(), String> {
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+
+    // 1. 检测是否含有需要升级的压缩数据
+    let needs_upgrade: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE typeof(content) = 'blob')"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if !needs_upgrade {
+        return Ok(());
+    }
+
+    log::info!("[DBManager] Compressed messages detected in database. Intercepting bootstrap for decompression migration...");
+
+    // 2. 查询待解压总条数
+    let total_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE typeof(content) = 'blob'"
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to query compressed messages count: {}", e))?;
+
+    if total_count == 0 {
+        return Ok(());
+    }
+
+    log::info!("[DBManager] Decompressing {} messages in background...", total_count);
+
+    // 发射初始进度
+    let _ = app_handle.emit(
+        "vcp-system-event",
+        serde_json::json!({
+            "type": "vcp-core-status",
+            "status": "decompressing",
+            "message": "正在准备解压历史消息... 0%",
+            "source": "Core"
+        }),
+    );
+
+    // 3. 分批解压并写回
+    let mut processed_count = 0;
+    let batch_size = 200;
+
+    loop {
+        // 读取未解压的批次
+        let rows = sqlx::query(
+            "SELECT msg_id, topic_id, content FROM messages WHERE typeof(content) = 'blob' ORDER BY rowid LIMIT ?"
+        )
+        .bind(batch_size)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch compressed batch: {}", e))?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        // 开启本批次事务
+        let mut tx = pool.begin().await.map_err(|e| format!("Failed to start batch transaction: {}", e))?;
+
+        for row in &rows {
+            let msg_id: String = row.get("msg_id");
+            let topic_id: String = row.get("topic_id");
+            let content_bytes: Vec<u8> = row.get("content");
+
+            // 解压缩旧的二进制数据
+            let content = crate::vcp_modules::persistence::message_repository::ContentCompressor::decompress(&content_bytes)
+                .unwrap_or_else(|_| String::from_utf8_lossy(&content_bytes).to_string());
+
+            // 1. 更新写回为明文 String (SQLite 动态类型会自动将 typeof 转为 'text')
+            sqlx::query("UPDATE messages SET content = ? WHERE msg_id = ? AND topic_id = ?")
+                .bind(&content)
+                .bind(&msg_id)
+                .bind(&topic_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to update decompressed message: {}", e))?;
+
+            // 2. 同步写入 FTS5 虚拟索引表，解决历史数据无法检索的逻辑漏洞
+            let search_content = preprocess_fts_text(&content);
+            sqlx::query("DELETE FROM messages_fts WHERE msg_id = ?")
+                .bind(&msg_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to delete stale FTS entry: {}", e))?;
+
+            sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
+                .bind(&msg_id)
+                .bind(&topic_id)
+                .bind(&search_content)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;
+        }
+
+        tx.commit().await.map_err(|e| format!("Failed to commit batch transaction: {}", e))?;
+
+        processed_count += rows.len();
+
+        // 4. 定期发射 progress 信号
+        let pct = (processed_count * 100) / (total_count as usize);
+        log::info!("[DBManager] Decompression progress: {}% ({}/{})", pct, processed_count, total_count);
+
+        let _ = app_handle.emit(
+            "vcp-system-event",
+            serde_json::json!({
+                "type": "vcp-core-status",
+                "status": "decompressing",
+                "message": format!("正在重构本地数据库... {}%", pct),
+                "source": "Core"
+            }),
+        );
+    }
+
+    // 5. 迁移完成后执行 VACUUM 释放物理空间
+    log::info!("[DBManager] Decompression complete. Reclaiming database disk space via VACUUM...");
+    let _ = app_handle.emit(
+        "vcp-system-event",
+        serde_json::json!({
+            "type": "vcp-core-status",
+            "status": "decompressing",
+            "message": "正在优化数据库存储空间...",
+            "source": "Core"
+        }),
+    );
+    sqlx::query("VACUUM").execute(pool).await.unwrap_or_default();
+
+    // 6. 发射升级完成信号，等待重启
+    log::info!("[DBManager] Database migration completed successfully. Waiting for user restart confirmation...");
+    let _ = app_handle.emit(
+        "vcp-system-event",
+        serde_json::json!({
+            "type": "vcp-core-status",
+            "status": "decompression-complete",
+            "message": "本地数据库格式重构成功，请确认重启应用。",
+            "source": "Core"
+        }),
+    );
+
+    // 7. 进入无限睡眠状态，阻塞后续初始化进程，避免业务逻辑调用报错
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 #[cfg(test)]

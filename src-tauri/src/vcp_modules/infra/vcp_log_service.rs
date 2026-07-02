@@ -57,7 +57,7 @@ pub async fn reconnect_log_connections(app: &AppHandle, log_url: String, log_key
 }
 
 fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
-    if !crate::vcp_modules::infra::lifecycle_manager::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
+    if !crate::vcp_modules::infra::lifecycle_manager::is_app_in_foreground(app) {
         // App 处于后台时，不直接发射到 WebView，而是缓存在 Rust 侧，防止内存泄漏，并在返回前台时补发
         if let Ok(mut cache) = BACKGROUND_LOG_CACHE.lock() {
             cache.push(payload);

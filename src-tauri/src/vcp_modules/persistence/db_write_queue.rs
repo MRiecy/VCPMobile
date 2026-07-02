@@ -41,7 +41,7 @@ pub enum DbWriteTask {
     TopicMessages {
         topic_id: String,
         messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
-        compressed_contents: Vec<Vec<u8>>,
+        contents: Vec<String>,
         render_bytes: Vec<Vec<u8>>,
         content_hashes: Vec<String>,
         skip_bubble: bool,
@@ -171,11 +171,11 @@ impl DbWriteQueue {
                                     Self::rusqlite_upsert_group_topic(&tx, &tid, &dto)?;
                                 }
                             }
-                            DbWriteTask::TopicMessages { topic_id, messages, compressed_contents, render_bytes, content_hashes, skip_bubble } => {
+                            DbWriteTask::TopicMessages { topic_id, messages, contents, render_bytes, content_hashes, skip_bubble } => {
                                 if !skip_bubble {
                                     affected_topics.insert(topic_id.clone());
                                 }
-                                Self::rusqlite_upsert_messages_batch(&tx, &topic_id, messages, compressed_contents, render_bytes, content_hashes)?;
+                                Self::rusqlite_upsert_messages_batch(&tx, &topic_id, messages, contents, render_bytes, content_hashes)?;
                             }
                             DbWriteTask::Flush { .. } => unreachable!(),
                         }
@@ -441,7 +441,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         topic_id: &str,
         messages: Vec<ChatMessage>,
-        compressed_contents: Vec<Vec<u8>>,
+        contents: Vec<String>,
         render_bytes: Vec<Vec<u8>>,
         content_hashes: Vec<String>,
     ) -> rusqlite::Result<()> {
@@ -501,7 +501,7 @@ impl DbWriteQueue {
                 params_msgs.push(Box::new(msg.role.clone()));
                 params_msgs.push(Box::new(msg.name.clone()));
                 params_msgs.push(Box::new(msg.agent_id.clone()));
-                params_msgs.push(Box::new(compressed_contents[*idx].clone()));
+                params_msgs.push(Box::new(contents[*idx].clone()));
                 params_msgs.push(Box::new(msg.timestamp as i64));
                 params_msgs.push(Box::new(msg.is_group_message.unwrap_or(false)));
                 params_msgs.push(Box::new(msg.group_id.clone()));

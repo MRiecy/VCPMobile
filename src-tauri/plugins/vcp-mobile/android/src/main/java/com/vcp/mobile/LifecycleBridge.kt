@@ -16,12 +16,10 @@ import java.lang.ref.WeakReference
  */
 class LifecycleBridge : DefaultLifecycleObserver {
 
-    private var webViewRef: WeakReference<WebView>? = null
     private var activityRef: WeakReference<Activity>? = null
     private var pluginRef: WeakReference<VcpMobilePlugin>? = null
 
-    fun attach(activity: Activity, webView: WebView, plugin: VcpMobilePlugin) {
-        webViewRef = WeakReference(webView)
+    fun attach(activity: Activity, plugin: VcpMobilePlugin) {
         activityRef = WeakReference(activity)
         pluginRef = WeakReference(plugin)
         // 升级为进程级生命周期监听，完美防抖，免疫 Activity 重建与切换
@@ -43,7 +41,6 @@ class LifecycleBridge : DefaultLifecycleObserver {
                 androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
             } catch (_: Exception) {}
         }
-        webViewRef = null
         activityRef = null
         pluginRef = null
     }
@@ -54,48 +51,32 @@ class LifecycleBridge : DefaultLifecycleObserver {
     }
 
     override fun onResume(owner: LifecycleOwner) {
-        emit("vcp-lifecycle", mapOf("state" to "resume"))
+        emit(mapOf("state" to "resume"))
     }
 
     override fun onPause(owner: LifecycleOwner) {
-        emit("vcp-lifecycle", mapOf("state" to "pause"))
+        emit(mapOf("state" to "pause"))
     }
 
     override fun onStop(owner: LifecycleOwner) {
-        emit("vcp-lifecycle", mapOf("state" to "stop"))
+        emit(mapOf("state" to "stop"))
     }
 
     fun onConfigurationChanged(newConfig: Configuration) {
         val uiMode = newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK
         val isDark = uiMode == Configuration.UI_MODE_NIGHT_YES
-        emit("vcp-lifecycle", mapOf(
+        emit(mapOf(
             "state" to "config-changed",
             "isDarkMode" to isDark
         ))
     }
 
     fun onLowMemory() {
-        emit("vcp-lifecycle", mapOf("state" to "low-memory"))
+        emit(mapOf("state" to "low-memory"))
     }
 
-    private fun emit(eventName: String, detail: Map<String, Any?>) {
-        val json = org.json.JSONObject(detail).toString()
-        val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
-        val activity = activityRef?.get()
-        val webView = webViewRef?.get()
-        if (webView != null) {
-            if (activity != null) {
-                activity.runOnUiThread {
-                    webView.evaluateJavascript(script, null)
-                }
-            } else {
-                webView.post {
-                    webView.evaluateJavascript(script, null)
-                }
-            }
-        }
-
-        // 同时向 Rust 侧派发强类型的原生生命周期事件，规避 WebView 被冻结时 JS 无法执行的痛点
+    private fun emit(detail: Map<String, Any?>) {
+        // 向 Rust 侧派发强类型的原生生命周期事件，规避 WebView 被冻结时 JS 无法执行的痛点
         val plugin = pluginRef?.get()
         if (plugin != null) {
             val triggerData = JSObject()
@@ -112,3 +93,4 @@ class LifecycleBridge : DefaultLifecycleObserver {
         }
     }
 }
+
