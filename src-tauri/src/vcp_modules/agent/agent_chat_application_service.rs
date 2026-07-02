@@ -35,7 +35,7 @@ pub async fn handle_agent_chat_message(
         active_requests,
         payload,
         stream_channel,
-        true, // append_user_msg
+        false, // append_user_msg
     )
     .await
 }

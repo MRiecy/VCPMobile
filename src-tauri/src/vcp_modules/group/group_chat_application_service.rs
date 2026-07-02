@@ -377,7 +377,7 @@ pub async fn handle_group_chat_message(
             vcp_api_key: payload.vcp_api_key,
             stream_channel: Some(stream_channel),
         },
-        true, // append_user_msg
+        false, // append_user_msg
     )
     .await
 }
