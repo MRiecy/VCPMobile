@@ -93,6 +93,7 @@ pub async fn load_chat_history_streamed(
     offset: Option<usize>,
     on_message: tauri::ipc::Channel<HistoryChunk>,
 ) -> Result<usize, String> {
+    let t_start = std::time::Instant::now();
     let messages = crate::vcp_modules::message_service::load_chat_history_internal(
         &app_handle,
         &owner_id,
@@ -104,6 +105,13 @@ pub async fn load_chat_history_streamed(
         false, // include_extracted_text: 前端列表加载不需要大体积的提取文本内容
     )
     .await?;
+    let t_db = std::time::Instant::now();
+    log::info!(
+        "[load_chat_history_streamed] DB load took {:?} for topic: {}",
+        t_db.duration_since(t_start),
+        topic_id
+    );
+
     let total = messages.len();
     for (index, message) in messages.into_iter().enumerate() {
         let is_last = index == total.saturating_sub(1);
@@ -113,6 +121,11 @@ pub async fn load_chat_history_streamed(
             is_last,
         });
     }
+    log::info!(
+        "[load_chat_history_streamed] Channel push of {} items took {:?}",
+        total,
+        std::time::Instant::now().duration_since(t_db)
+    );
     Ok(total)
 }
 
@@ -125,7 +138,8 @@ pub async fn load_chat_history(
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Vec<ChatMessage>, String> {
-    crate::vcp_modules::message_service::load_chat_history_internal(
+    let t_entry = std::time::Instant::now();
+    let result = crate::vcp_modules::message_service::load_chat_history_internal(
         &app_handle,
         &owner_id,
         &owner_type,
@@ -133,9 +147,16 @@ pub async fn load_chat_history(
         limit,
         offset,
         false,
-        false, // include_extracted_text: 前端历史加载不需要大体积的提取文本内容
+        false,
     )
-    .await
+    .await;
+    let t_db = std::time::Instant::now();
+    log::info!(
+        "[load_chat_history] DB+serialize took {:?} for topic: {}",
+        t_db.duration_since(t_entry),
+        topic_id
+    );
+    result
 }
 
 #[tauri::command]

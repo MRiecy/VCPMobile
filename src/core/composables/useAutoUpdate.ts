@@ -66,7 +66,8 @@ export function useAutoUpdate() {
     () => lifecycleStore.state,
     (newState) => {
       if (newState === 'READY') {
-        performCheck();
+        // 延迟 2s 执行，避开首屏渲染与聊天历史加载的 CPU 密集期
+        setTimeout(() => performCheck(), 2000);
       }
     },
   );

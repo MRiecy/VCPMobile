@@ -20,6 +20,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const hasMoreHistory = ref(true);    // 是否还有更多旧消息
   const isLoadingHistory = ref(false); // 防止并发重复触发
 
+  // 启动预加载缓存：PRELOADING 阶段提前拉取首屏历史，ChatView mount 后直接消费
+  const preloadedHistory = ref<{ topicId: string; messages: ChatMessage[] } | null>(null);
+
   // 用于拦截重新生成时的输入框补全
   const editMessageContent = ref("");
   // 用于标记当前是否正在“编辑重发”某条历史消息
@@ -34,6 +37,28 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
   const topicStore = useTopicStore();
+
+  /**
+   * 启动预加载：在 PRELOADING 阶段提前拉取首屏聊天历史
+   * 让 DB + IPC 开销与 Vue 组件挂载并行，ChatView mount 后直接命中缓存
+   */
+  const preloadHistory = async (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+    limit: number = 5,
+  ) => {
+    try {
+      const messages = await invoke<ChatMessage[]>('load_chat_history', {
+        ownerId, ownerType, topicId, limit, offset: 0,
+      });
+      preloadedHistory.value = { topicId, messages };
+      console.log(`[ChatHistoryStore] Preloaded ${messages.length} messages for topic ${topicId}`);
+    } catch (e) {
+      console.error('[ChatHistoryStore] Preload failed:', e);
+      preloadedHistory.value = null;
+    }
+  };
 
   /**
    * 尝试为话题生成 AI 总结标题
@@ -91,6 +116,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     offset: number = 0
   ) => {
     const loadType = offset === 0 ? "initial" : "pagination";
+    const tStart = performance.now();
     console.log(
       `[ChatHistoryStore] Loading history [${loadType}] for ${ownerId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`,
     );
@@ -104,87 +130,90 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     currentLoadAbortController = controller;
     const { signal } = controller;
 
-    let pendingHistory: ChatMessage[] = [];
     let flushRafId: number | null = null;
 
     try {
+      // ============================================================
+      // Fast Path: offset=0 initial load uses batch invoke (skip Channel + RAF)
+      // Channel per-item push + RAF 30Hz delays 5-message screen to 1s+
+      // Batch return assigns atomically, total ~80ms
+      // ============================================================
+      if (offset === 0) {
+        let messages: ChatMessage[];
+
+        // Check preloaded cache from PRELOADING phase — zero-latency if hit
+        if (preloadedHistory.value && preloadedHistory.value.topicId === topicId) {
+          messages = preloadedHistory.value.messages;
+          preloadedHistory.value = null;
+          console.log(`[ChatHistoryStore] Using preloaded cache: ${messages.length} messages in ${(performance.now() - tStart).toFixed(2)}ms`);
+        } else {
+          // Normal invoke path: clear any pending preload for this topic to prevent
+          // stale cache poisoning if preload resolves after this real fetch completes
+          if (preloadedHistory.value && preloadedHistory.value.topicId === topicId) {
+            preloadedHistory.value = null;
+          }
+          const tInvokeStart = performance.now();
+          messages = await invoke<ChatMessage[]>('load_chat_history', {
+            ownerId, ownerType, topicId, limit, offset,
+          });
+          console.log(`[ChatHistoryStore] load_chat_history (batch) resolved in ${(performance.now() - tInvokeStart).toFixed(2)}ms, count: ${messages.length}`);
+        }
+
+        if (signal.aborted || sessionStore.currentTopicId !== topicId) {
+          console.warn(`[ChatHistoryStore] Topic changed/aborted during batch load, discarding.`);
+          return;
+        }
+
+        // Object hydration: prefer reactive proxy from active streams
+        const hydrated = messages.map(msg =>
+          streamStore.activeStreamMessages.get(msg.id) || msg,
+        );
+
+        currentChatHistory.value = hydrated;
+        historyOffset.value = hydrated.length;
+        hasMoreHistory.value = hydrated.length >= limit;
+
+        // Resolve attachment paths (sync, no IPC)
+        hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
+
+        console.log(`[ChatHistoryStore] Loaded ${hydrated.length} messages [initial] in ${(performance.now() - tStart).toFixed(2)}ms`);
+        return;
+      }
+
+      // ============================================================
+      // Channel Path: pagination (offset > 0) streaming logic unchanged
+      // ============================================================
       const channel = new Channel<HistoryChunk>();
       const buffer: ChatMessage[] = [];
       let receivedCount = 0;
       let resolveComplete: (() => void) | null = null;
       const completePromise = new Promise<void>((resolve) => { resolveComplete = resolve; });
 
-      let lastFlushTime = 0;
-      const FLUSH_INTERVAL = 33.3; // 30Hz
-
-      const flushHistory = (force = false) => {
-        if (pendingHistory.length === 0) return;
-        const now = performance.now();
-        if (force || now - lastFlushTime >= FLUSH_INTERVAL) {
-          currentChatHistory.value = [...currentChatHistory.value, ...pendingHistory];
-          pendingHistory = [];
-          lastFlushTime = now;
-        }
-      };
-
-      const scheduleHistoryFlush = () => {
-        if (flushRafId) return;
-        flushRafId = requestAnimationFrame(() => {
-          flushRafId = null;
-          flushHistory(false);
-          if (pendingHistory.length > 0) {
-            scheduleHistoryFlush();
-          }
-        });
-      };
-
       channel.onmessage = (chunk) => {
-        // 1. 唯一性与话题一致性防御性校验：若请求已中止，或当前话题已被切换，直接丢弃该过时流数据
+        // 唯一性与话题一致性防御性校验
         if (signal.aborted || sessionStore.currentTopicId !== topicId) {
           return;
         }
 
-        // 2. [关键修复] 消息对象劫持 (Object Hydration)
-        // 如果该消息正在活跃生成中，则从全局流池中取出“活的”响应式对象
-        // 这确保了即使是刚从 DB 拉回来的骨架，也能瞬间恢复流式动画与渲染状态
+        // 对象劫持 (Object Hydration)：活跃流中的响应式对象优先
         const activeMsg = streamStore.activeStreamMessages.get(chunk.message.id);
         const msgToUse = activeMsg || chunk.message;
 
-        if (offset === 0) {
-          if (chunk.index === 0) {
-            currentChatHistory.value = [];
-            hasMoreHistory.value = true;
-          }
-          pendingHistory.push(msgToUse);
-          receivedCount++;
-          scheduleHistoryFlush();
-        } else {
-          buffer.push(msgToUse);
-          receivedCount++;
-        }
+        buffer.push(msgToUse);
+        receivedCount++;
 
         if (chunk.is_last) {
-          if (offset > 0) {
-            currentChatHistory.value = [...buffer, ...currentChatHistory.value];
-            historyOffset.value += buffer.length;
-            if (buffer.length < limit) {
-              hasMoreHistory.value = false;
-            }
-          } else {
-            if (flushRafId !== null) {
-              cancelAnimationFrame(flushRafId);
-              flushRafId = null;
-            }
-            flushHistory(true);
-            historyOffset.value = receivedCount;
-            if (receivedCount < limit) {
-              hasMoreHistory.value = false;
-            }
+          console.log(`[ChatHistoryStore] Received chunk.is_last at ${(performance.now() - tStart).toFixed(2)}ms`);
+          currentChatHistory.value = [...buffer, ...currentChatHistory.value];
+          historyOffset.value += buffer.length;
+          if (buffer.length < limit) {
+            hasMoreHistory.value = false;
           }
           resolveComplete?.();
         }
       };
 
+      const tInvokeStart = performance.now();
       const total = await invoke<number>('load_chat_history_streamed', {
         ownerId,
         ownerType,
@@ -193,34 +222,27 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         offset,
         onMessage: channel,
       });
+      const tInvokeEnd = performance.now();
+      console.log(`[ChatHistoryStore] load_chat_history_streamed invoke resolved in ${(tInvokeEnd - tInvokeStart).toFixed(2)}ms, total: ${total}`);
 
       if (total === 0) {
-        if (offset === 0) {
-          currentChatHistory.value = [];
-          historyOffset.value = 0;
-        }
         hasMoreHistory.value = false;
         (resolveComplete as (() => void) | null)?.();
       }
 
       await completePromise;
+      console.log(`[ChatHistoryStore] completePromise resolved in ${(performance.now() - tInvokeEnd).toFixed(2)}ms`);
 
-      const loadedCount = offset === 0 ? total : buffer.length;
       console.log(
-        `[ChatHistoryStore] Loaded ${loadedCount} messages [${loadType}] for ${ownerId}, topic: ${topicId}`,
+        `[ChatHistoryStore] Loaded ${buffer.length} messages [pagination] for ${ownerId}, topic: ${topicId} in ${(performance.now() - tStart).toFixed(2)}ms`,
       );
 
       if (signal.aborted || sessionStore.currentTopicId !== topicId) {
-        console.warn(`[ChatHistoryStore] Topic changed or request aborted during load, discarding results.`);
+        console.warn(`[ChatHistoryStore] Topic changed or request aborted during pagination, discarding.`);
         return;
       }
 
-      const messagesToResolve = offset === 0 ? currentChatHistory.value : buffer;
-      await Promise.all(
-        messagesToResolve.map(async (msg) => {
-          attachmentStore.resolveMessageAssets(msg);
-        }),
-      );
+      buffer.forEach(msg => attachmentStore.resolveMessageAssets(msg));
     } catch (e) {
       console.error("[ChatHistoryStore] Failed to stream history:", e);
     } finally {
@@ -608,6 +630,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     isLoadingHistory,
     editMessageContent,
     editingOriginalMessageId,
+    preloadedHistory,
+    preloadHistory,
     loadHistory,
     loadHistoryPaginated,
     loadMoreHistory,
