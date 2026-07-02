@@ -401,7 +401,7 @@ onUnmounted(() => {
       :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
 
     <!-- 2. 主内容区先渲染，抽屉与遮罩在后声明，靠 DOM 顺位自然覆盖 -->
-    <main class="flex-1 min-w-0 relative overflow-hidden">
+    <main v-if="lifecycleStore.state === 'READY'" class="flex-1 min-w-0 relative overflow-hidden">
       <router-view v-slot="{ Component }">
         <component v-if="Component" :is="Component" />
       </router-view>

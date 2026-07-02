@@ -188,7 +188,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
-      let timeoutId: ReturnType<typeof setTimeout>;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
       let unwatch: (() => void);
 
       const cleanup = () => {
@@ -209,6 +209,15 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         () => notificationStore.vcpCoreStatus.status,
         (newStatus) => {
           if (settled) return;
+
+          // ⚡ 若进入解压或优化迁移状态，立即取消 15s 的就绪超时定时器，防止大体积数据库迁移被误判为启动超时
+          if (newStatus === 'decompressing' || newStatus === 'optimizing') {
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+              timeoutId = undefined;
+            }
+          }
+
           if (newStatus === 'ready') {
             settled = true;
             cleanup();
