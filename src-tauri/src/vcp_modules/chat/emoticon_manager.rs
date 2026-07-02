@@ -144,7 +144,45 @@ struct EmojiListResponse {
 /// Internal (non-Tauri-command) version callable from lifecycle/bootstrap.
 pub async fn refresh_emoticon_library_internal<R: Runtime>(
     app_handle: &AppHandle<R>,
+    force: bool,
 ) -> Result<usize, String> {
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+
+    // 检查表情包库是否为空以及上一次同步时间
+    let db_count = match sqlx::query("SELECT COUNT(*) as count FROM emoticon_library")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(row) => {
+            let count: i64 = row.get("count");
+            count as usize
+        }
+        Err(_) => 0,
+    };
+
+    if !force && db_count > 0 {
+        let last_sync_row = sqlx::query("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(row) = last_sync_row {
+            let last_sync_str: String = row.get("value");
+            if let Ok(last_sync) = last_sync_str.parse::<i64>() {
+                let now = crate::vcp_modules::infra::utils::now_millis();
+                // 3 days = 3 * 24 * 60 * 60 * 1000 = 259_200_000 ms
+                if now - last_sync < 259_200_000 {
+                    log::info!(
+                        "[EmoticonManager] Emoticon library last synced at {} (less than 3 days ago). Skipping sync.",
+                        last_sync
+                    );
+                    return Ok(db_count);
+                }
+            }
+        }
+    }
+
     // 1. 获取配置
     let settings_state = app_handle.state::<SettingsState>();
     let settings = read_settings(app_handle.clone(), settings_state).await?;
@@ -199,9 +237,6 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         .map_err(|e| format!("Failed to parse emoji JSON: {}", e))?;
 
     // 4. 处理并保存到数据库
-    let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
-
     let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
 
     // 清空旧库
@@ -246,6 +281,15 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         }
     }
 
+    // 保存最后同步时间戳
+    let now = crate::vcp_modules::infra::utils::now_millis();
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('emoticon_last_sync', ?, ?)")
+        .bind(&now.to_string())
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+
     transaction.commit().await.map_err(|e| e.to_string())?;
 
     let count = library.len();
@@ -265,7 +309,7 @@ pub async fn regenerate_emoticon_library<R: Runtime>(
     _settings_state: State<'_, SettingsState>,
     _emoticon_state: State<'_, EmoticonManagerState>,
 ) -> Result<usize, String> {
-    refresh_emoticon_library_internal(&app_handle).await
+    refresh_emoticon_library_internal(&app_handle, true).await
 }
 
 pub async fn internal_load_library<R: Runtime>(

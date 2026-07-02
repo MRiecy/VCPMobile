@@ -152,7 +152,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             }
 
             // Best-effort refresh from server (does not block startup)
-            match refresh_emoticon_library_internal(&h).await {
+            match refresh_emoticon_library_internal(&h, false).await {
                 Ok(count) => info!(
                     "[Lifecycle] Emoticon library auto-refreshed: {} items",
                     count
@@ -187,12 +187,52 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         tokio::spawn(async move {
             // 启动延时 10 秒后执行首航清理，完美避开冷启动黄金 IO 密集期
             tokio::time::sleep(Duration::from_secs(10)).await;
-            use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-            let _ = DeleteExecutor::cleanup_old_deleted_records(&h, 30).await;
+
+            let db_state = h.state::<DbState>();
+            let pool = &db_state.pool;
+
+            let mut should_cleanup = true;
+            {
+                use sqlx::Row;
+                if let Ok(Some(row)) = sqlx::query("SELECT value FROM settings WHERE key = 'delete_executor_last_cleanup'")
+                    .fetch_optional(pool)
+                    .await
+                {
+                    let last_cleanup_str: String = row.get("value");
+                    if let Ok(last_cleanup) = last_cleanup_str.parse::<i64>() {
+                        let now = crate::vcp_modules::infra::utils::now_millis();
+                        // 24h = 86_400_000 ms
+                        if now - last_cleanup < 86_400_000 {
+                            log::info!("[Lifecycle] DeleteExecutor last cleanup ran at {} (less than 24h ago). Skipping startup cleanup.", last_cleanup);
+                            should_cleanup = false;
+                        }
+                    }
+                }
+            }
+
+            if should_cleanup {
+                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                if DeleteExecutor::cleanup_old_deleted_records(&h, 30).await.is_ok() {
+                    let now = crate::vcp_modules::infra::utils::now_millis();
+                    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
+                        .bind(&now.to_string())
+                        .bind(now)
+                        .execute(pool)
+                        .await;
+                }
+            }
 
             loop {
                 tokio::time::sleep(Duration::from_secs(86400)).await;
-                let _ = DeleteExecutor::cleanup_old_deleted_records(&h, 30).await;
+                use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                if DeleteExecutor::cleanup_old_deleted_records(&h, 30).await.is_ok() {
+                    let now = crate::vcp_modules::infra::utils::now_millis();
+                    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
+                        .bind(&now.to_string())
+                        .bind(now)
+                        .execute(pool)
+                        .await;
+                }
             }
         });
     }
@@ -230,52 +270,84 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         let h = handle.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            info!("[FrontendUpdate] Starting background check...");
 
-            match crate::vcp_modules::frontend_update_manager::check_for_frontend_update(h.clone())
-                .await
+            let db_state = h.state::<DbState>();
+            let pool = &db_state.pool;
+
+            let mut skip_check = false;
             {
-                Ok(info) => {
-                    if info.has_update {
-                        if let Some(url) = info.download_url {
-                            info!(
-                                "[FrontendUpdate] New version available: {}, downloading...",
-                                info.remote_version
-                            );
-                            match crate::vcp_modules::frontend_update_manager::download_frontend_update_inner(
-                                &h,
-                                &url,
-                                None,
-                            )
-                            .await
-                            {
-                                Ok(zip_path) => {
-                                    if let Err(e) = crate::vcp_modules::frontend_update_manager::apply_frontend_update(
-                                        h.clone(),
-                                        zip_path,
-                                        info.remote_version.clone(),
-                                    )
-                                    .await
-                                    {
-                                        log::error!("[FrontendUpdate] Apply failed: {}", e);
-                                    } else {
-                                        info!(
-                                            "[FrontendUpdate] Version {} downloaded and applied. Will take effect on next cold start.",
-                                            info.remote_version
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("[FrontendUpdate] Download failed: {}", e);
-                                }
-                            }
+                use sqlx::Row;
+                if let Ok(Some(row)) = sqlx::query("SELECT value FROM settings WHERE key = 'frontend_update_last_check'")
+                    .fetch_optional(pool)
+                    .await
+                {
+                    let last_check_str: String = row.get("value");
+                    if let Ok(last_check) = last_check_str.parse::<i64>() {
+                        let now = crate::vcp_modules::infra::utils::now_millis();
+                        // 24h = 86_400_000 ms
+                        if now - last_check < 86_400_000 {
+                            log::info!("[FrontendUpdate] Last check ran at {} (less than 24h ago). Skipping startup check.", last_check);
+                            skip_check = true;
                         }
-                    } else {
-                        info!("[FrontendUpdate] No frontend update available.");
                     }
                 }
-                Err(e) => {
-                    log::error!("[FrontendUpdate] Check failed: {}", e);
+            }
+
+            if !skip_check {
+                info!("[FrontendUpdate] Starting background check...");
+                match crate::vcp_modules::frontend_update_manager::check_for_frontend_update(h.clone())
+                    .await
+                {
+                    Ok(info) => {
+                        // 更新最后检查时间戳
+                        let now = crate::vcp_modules::infra::utils::now_millis();
+                        let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('frontend_update_last_check', ?, ?)")
+                            .bind(&now.to_string())
+                            .bind(now)
+                            .execute(pool)
+                            .await;
+
+                        if info.has_update {
+                            if let Some(url) = info.download_url {
+                                info!(
+                                    "[FrontendUpdate] New version available: {}, downloading...",
+                                    info.remote_version
+                                );
+                                match crate::vcp_modules::frontend_update_manager::download_frontend_update_inner(
+                                    &h,
+                                    &url,
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(zip_path) => {
+                                        if let Err(e) = crate::vcp_modules::frontend_update_manager::apply_frontend_update(
+                                            h.clone(),
+                                            zip_path,
+                                            info.remote_version.clone(),
+                                        )
+                                        .await
+                                        {
+                                            log::error!("[FrontendUpdate] Apply failed: {}", e);
+                                        } else {
+                                            info!(
+                                                "[FrontendUpdate] Version {} downloaded and applied. Will take effect on next cold start.",
+                                                info.remote_version
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::error!("[FrontendUpdate] Download failed: {}", e);
+                                    }
+                                }
+                            }
+                        } else {
+                            info!("[FrontendUpdate] No frontend update available.");
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("[FrontendUpdate] Check failed: {}", e);
+                    }
                 }
             }
         });
