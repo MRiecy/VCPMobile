@@ -109,6 +109,51 @@ pub async fn get_avatar<R: Runtime>(
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchAvatarItem {
+    pub owner_type: String,
+    pub owner_id: String,
+    pub mime_type: String,
+    pub image_data: Vec<u8>,
+    pub dominant_color: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Tauri IPC Command: 批量获取所有头像二进制数据
+#[tauri::command]
+pub async fn batch_get_avatars<R: Runtime>(
+    app_handle: AppHandle<R>,
+) -> Result<Vec<BatchAvatarItem>, String> {
+    let db_state = app_handle.state::<DbState>();
+    let pool = &db_state.pool;
+
+    let rows = sqlx::query(
+        "SELECT owner_type, owner_id, mime_type, image_data, dominant_color, updated_at 
+         FROM avatars 
+         WHERE owner_type IN ('agent', 'group', 'user')"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        use sqlx::Row;
+        results.push(BatchAvatarItem {
+            owner_type: row.get("owner_type"),
+            owner_id: row.get("owner_id"),
+            mime_type: row.get("mime_type"),
+            image_data: row.get("image_data"),
+            dominant_color: row.get("dominant_color"),
+            updated_at: row.get("updated_at"),
+        });
+    }
+
+    Ok(results)
+}
+
+
 /// Tauri IPC Command: 为已有头像存储前端计算好的 dominant_color
 #[tauri::command]
 pub async fn store_dominant_color(

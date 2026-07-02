@@ -9,7 +9,7 @@ use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config,
     save_agent_config, update_agent_config,
 };
-use vcp_modules::avatar_service::{get_avatar, save_avatar_data, store_dominant_color};
+use vcp_modules::avatar_service::{get_avatar, save_avatar_data, store_dominant_color, batch_get_avatars};
 use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
@@ -280,6 +280,7 @@ pub fn run() {
             update_agent_config,
             save_avatar_data,
             get_avatar,
+            batch_get_avatars,
             store_dominant_color,
             read_settings,
             write_settings,

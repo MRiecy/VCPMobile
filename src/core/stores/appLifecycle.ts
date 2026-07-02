@@ -9,6 +9,7 @@ import { useChatSessionStore } from './chatSessionStore';
 import { useChatHistoryStore } from './chatHistoryStore';
 import { useTopicStore } from './topicListManager';
 import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
+import { useAvatarStore } from './avatar';
 
 export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
 
@@ -36,6 +37,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const settingsStore = useSettingsStore();
   const themeStore = useThemeStore();
   const notificationStore = useNotificationStore();
+  const avatarStore = useAvatarStore();
 
   let bootstrapPromise: Promise<void> | null = null;
   let coreReadyUnlisten: (() => void) | null = null;
@@ -139,7 +141,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
       const promises: Promise<any>[] = [
         settingsStore.fetchSettings(),
-        assistantStore.fetchAgentsAndGroups()
+        assistantStore.fetchAgentsAndGroups(),
+        avatarStore.preloadAll()
       ];
 
       // 启动预加载：若 Pinia 恢复了活跃会话，提前拉取首屏聊天历史
@@ -296,11 +299,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         errorMsg.value = null;
         hasBootstrapped.value = false;
 
-        setState('PERMISSIONS', '检查系统权限完整性');
         const pStatus = await invoke<{ notification: boolean; storage: boolean; battery: boolean }>('plugin:vcp-mobile|check_all_permissions');
         const listenerRes = await invoke<{ enabled: boolean }>('plugin:vcp-mobile|check_notification_listener_permission');
         if (!pStatus.notification || !pStatus.storage || !pStatus.battery || !listenerRes.enabled) {
           console.log('[Lifecycle] Missing permissions, waiting for user action');
+          // 仅在确认缺失权限时才将状态设为 PERMISSIONS，避免权限完整时引导页一闪而过
+          setState('PERMISSIONS', '权限缺失，展示引导界面');
           // 清除 Promise，以便下次点击“进入应用”时能重新触发
           bootstrapPromise = null;
           isBootstrapping.value = false;

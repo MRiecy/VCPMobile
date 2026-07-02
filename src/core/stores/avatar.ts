@@ -234,11 +234,47 @@ export const useAvatarStore = defineStore("avatar", () => {
     dominantColors.delete(key);
   };
 
-  /**
-   * 同步获取已缓存的 dominant_color，未缓存时返回 undefined
-   */
   const getDominantColor = (ownerType: string, ownerId: string): string | undefined => {
     return dominantColors.get(`${ownerType}:${ownerId}`);
+  };
+
+  /**
+   * 批量预热获取所有头像到本地 Map 缓存中
+   */
+  const preloadAll = async (): Promise<void> => {
+    const startTime = Date.now();
+    try {
+      console.log("[AvatarStore] Starting preloadAll...");
+      const results = await invoke<any[]>("batch_get_avatars");
+      if (results && results.length > 0) {
+        for (const item of results) {
+          const key = `${item.ownerType}:${item.ownerId}`;
+          
+          if (item.dominantColor) {
+            dominantColors.set(key, item.dominantColor);
+          }
+
+          if (item.imageData && item.imageData.length > 0) {
+            const bytes = new Uint8Array(item.imageData);
+            const blob = new Blob([bytes], { type: item.mimeType });
+            const blobUrl = URL.createObjectURL(blob);
+
+            const existing = cache.get(key);
+            if (existing) {
+              URL.revokeObjectURL(existing.blobUrl);
+            }
+
+            cache.set(key, {
+              blobUrl,
+              version: item.updatedAt,
+            });
+          }
+        }
+      }
+      console.log(`[AvatarStore] preloadAll complete in ${Date.now() - startTime}ms. Cached ${results?.length || 0} avatars.`);
+    } catch (err) {
+      console.error("[AvatarStore] Failed to preload all avatars:", err);
+    }
   };
 
   return {
@@ -246,5 +282,7 @@ export const useAvatarStore = defineStore("avatar", () => {
     getAvatarUrl,
     clearCache,
     getDominantColor,
+    preloadAll,
   };
 });
+
