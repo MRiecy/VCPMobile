@@ -89,7 +89,8 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .fetch_one(&pool)
         .await
         .unwrap_or(4096);
-    if page_size != 16384 {
+
+    let pool = if page_size != 16384 {
         log::info!("[DBManager] Legacy page_size {} detected. Running page size VACUUM optimization...", page_size);
         
         let lifecycle = app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
@@ -111,29 +112,45 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         );
         
         // SQLite 在 WAL 模式下不允许变更 page_size。
-        // 我们必须临时切换出 WAL 模式（改为 DELETE），设置 page_size，执行 VACUUM，再切换回 WAL 模式。
-        match pool.acquire().await {
-            Ok(mut conn) => {
-                let _ = sqlx::query("PRAGMA journal_mode = DELETE").execute(&mut *conn).await;
-                let _ = sqlx::query("PRAGMA page_size = 16384").execute(&mut *conn).await;
-                if let Err(e) = sqlx::query("VACUUM").execute(&mut *conn).await {
+        // 我们必须彻底关闭当前 pool 释放所有锁，然后使用单连接临时切换出 WAL 模式并执行 VACUUM。
+        pool.close().await;
+
+        let temp_options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
+
+        use sqlx::Connection;
+        match sqlx::sqlite::SqliteConnection::connect_with(&temp_options).await {
+            Ok(mut temp_conn) => {
+                let _ = sqlx::query("PRAGMA page_size = 16384").execute(&mut temp_conn).await;
+                if let Err(e) = sqlx::query("VACUUM").execute(&mut temp_conn).await {
                     log::error!("[DBManager] Page size VACUUM optimization failed: {}", e);
                 } else {
                     log::info!("[DBManager] Page size successfully upgraded to 16KB.");
                 }
-                let _ = sqlx::query("PRAGMA journal_mode = WAL").execute(&mut *conn).await;
+                let _ = temp_conn.close().await;
             }
             Err(e) => {
-                log::error!("[DBManager] Failed to acquire connection for page size optimization: {}", e);
+                log::error!("[DBManager] Failed to open temp connection for page size optimization: {}", e);
             }
         }
+
+        // 重新打开正常的 WAL 连接池并接管连接
+        let pool = match open_and_check_db(&connect_options, &db_path).await {
+            Ok(p) => p,
+            Err(err) => return Err(format!("重建连接池失败: {}", err)),
+        };
 
         // 整理完成后重置回 Initializing 状态以继续引导
         {
             let mut status_lock = lifecycle.status.write().await;
             *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Initializing;
         }
-    }
+        pool
+    } else {
+        pool
+    };
 
     // 运行系统内置高级规则的多模态无损同步器
     crate::vcp_modules::chat::context_injection::sync_system_preset_rules(&pool)
