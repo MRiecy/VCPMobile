@@ -2,6 +2,7 @@ mod distributed;
 mod vcp_modules;
 
 use tauri::{Listener, Manager};
+use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::agent_chat_application_service::{
     handle_agent_chat_message, handle_assistant_chat_stream,
 };
@@ -9,7 +10,9 @@ use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config,
     save_agent_config, update_agent_config,
 };
-use vcp_modules::avatar_service::{get_avatar, save_avatar_data, store_dominant_color, batch_get_avatars};
+use vcp_modules::avatar_service::{
+    batch_get_avatars, get_avatar, save_avatar_data, store_dominant_color,
+};
 use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
@@ -19,10 +22,7 @@ use vcp_modules::context_injection::{
     save_tarven_rule, toggle_rule_enabled,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
-use vcp_modules::message_service::delete_message_attachment;
-use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 use vcp_modules::db_manager::search_messages_fts;
-use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
@@ -41,19 +41,21 @@ use vcp_modules::group_service::{
 use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot,
-    reconcile_distributed_node_cmd, reconcile_local_server_cmd, set_app_foreground_state,
-    LifecycleState, restart_or_exit_app,
+    reconcile_distributed_node_cmd, reconcile_local_server_cmd, restart_or_exit_app,
+    set_app_foreground_state, LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
     init_automatic_maintenance, reconstruct_system_cache,
 };
 use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
+use vcp_modules::message_service::delete_message_attachment;
 use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
 use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     start_batch_model_test, stop_all_model_tests, test_model_connectivity, toggle_favorite_model,
 };
+use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
 
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
@@ -372,7 +374,8 @@ pub fn run() {
             );
             let handle = _app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, focused).await;
+                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, focused)
+                    .await;
             });
         }
         _ => {}

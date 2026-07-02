@@ -256,7 +256,8 @@ async fn diagnose_connection_failure(
             return ConnectionErrorDiagnosis {
                 error_code: "HTTP_HANDSHAKE_REJECTED".to_string(),
                 error_message: format!("握手被服务器拒绝 (HTTP {})", status.as_u16()),
-                solution: "握手请求被服务器拒绝。请检查服务器状态、端口配置或尝试重启电脑端服务。".to_string(),
+                solution: "握手请求被服务器拒绝。请检查服务器状态、端口配置或尝试重启电脑端服务。"
+                    .to_string(),
                 error_detail: err_detail.clone(),
             };
         }
@@ -484,7 +485,9 @@ async fn run_sync_session(
                                         if payload.get("type").and_then(|v| v.as_str())
                                             == Some("VERSION_ACK")
                                         {
-                                            if let Some(v) = payload.get("version").and_then(|v| v.as_str()) {
+                                            if let Some(v) =
+                                                payload.get("version").and_then(|v| v.as_str())
+                                            {
                                                 return Ok(v.to_string());
                                             }
                                         }
@@ -522,7 +525,14 @@ async fn run_sync_session(
                                     ),
                                 )
                                 .await;
-                                emit_sync_log(&handle_clone, "error", &format!("❌ 插件版本不匹配: 桌面端版本 v{}，期望版本 v{}", plugin_version, EXPECTED_PLUGIN_VERSION));
+                                emit_sync_log(
+                                    &handle_clone,
+                                    "error",
+                                    &format!(
+                                        "❌ 插件版本不匹配: 桌面端版本 v{}，期望版本 v{}",
+                                        plugin_version, EXPECTED_PLUGIN_VERSION
+                                    ),
+                                );
                                 emit_sync_log(&handle_clone, "error", "👉 排查建议: 请前往 https://github.com/MRiecy/VCPMobile/releases 下载最新同步插件");
                                 break;
                             }
@@ -531,7 +541,11 @@ async fn run_sync_session(
                             let code: u16 = frame.code.into();
                             let reason = &frame.reason;
                             if code == 4001 {
-                                emit_sync_log(&handle_clone, "error", "❌ 同步连接失败 [TOKEN_MISMATCH]: 身份认证失败（Token 错误）");
+                                emit_sync_log(
+                                    &handle_clone,
+                                    "error",
+                                    "❌ 同步连接失败 [TOKEN_MISMATCH]: 身份认证失败（Token 错误）",
+                                );
                                 emit_sync_log(&handle_clone, "error", "👉 排查建议: 移动端设置的同步令牌与桌面端不匹配。请检查移动端设置中的『同步令牌』是否与电脑端 VCPMobileSync 插件的 config.env 中的 SYNC_TOKEN 完全一致。");
                                 publish_sync_status(
                                     &handle_clone,
@@ -541,9 +555,20 @@ async fn run_sync_session(
                                 )
                                 .await;
                             } else {
-                                let err_msg = format!("连接被服务器关闭 (code: {}, reason: {})", code, reason);
-                                emit_sync_log(&handle_clone, "error", &format!("❌ 同步连接失败 [WS_CLOSED]: {}", err_msg));
-                                emit_sync_log(&handle_clone, "error", "👉 排查建议: 请检查桌面端控制台日志以获取详细关闭原因。");
+                                let err_msg = format!(
+                                    "连接被服务器关闭 (code: {}, reason: {})",
+                                    code, reason
+                                );
+                                emit_sync_log(
+                                    &handle_clone,
+                                    "error",
+                                    &format!("❌ 同步连接失败 [WS_CLOSED]: {}", err_msg),
+                                );
+                                emit_sync_log(
+                                    &handle_clone,
+                                    "error",
+                                    "👉 排查建议: 请检查桌面端控制台日志以获取详细关闭原因。",
+                                );
                                 publish_sync_status(
                                     &handle_clone,
                                     &connection_status_for_task,
@@ -555,7 +580,11 @@ async fn run_sync_session(
                             break;
                         }
                         Ok(Err(None)) => {
-                            emit_sync_log(&handle_clone, "error", "❌ 同步连接失败 [CONNECTION_CLOSED]: 连接在版本验证前被意外关闭");
+                            emit_sync_log(
+                                &handle_clone,
+                                "error",
+                                "❌ 同步连接失败 [CONNECTION_CLOSED]: 连接在版本验证前被意外关闭",
+                            );
                             emit_sync_log(&handle_clone, "error", "👉 排查建议: 请确认桌面端服务正常运行，且同步 Token 与网络无异常。");
                             publish_sync_status(
                                 &handle_clone,
@@ -567,7 +596,11 @@ async fn run_sync_session(
                             break;
                         }
                         Err(_) => {
-                            emit_sync_log(&handle_clone, "error", "❌ 同步连接失败 [VERSION_CHECK_TIMEOUT]: 版本验证超时");
+                            emit_sync_log(
+                                &handle_clone,
+                                "error",
+                                "❌ 同步连接失败 [VERSION_CHECK_TIMEOUT]: 版本验证超时",
+                            );
                             emit_sync_log(&handle_clone, "error", "👉 排查建议: 桌面端服务响应缓慢，或者当前网络异常。请检查局域网连接，或尝试重启电脑端服务。");
                             publish_sync_status(
                                 &handle_clone,
@@ -1250,9 +1283,24 @@ async fn run_sync_session(
                     || diagnosis.error_code == "WS_PATH_INVALID";
 
                 if is_fatal || retry_count >= MAX_RETRIES {
-                    emit_sync_log(&handle_clone, "error", &format!("❌ 同步连接失败 [{}]: {}", diagnosis.error_code, diagnosis.error_message));
-                    emit_sync_log(&handle_clone, "error", &format!("👉 排查建议: {}", diagnosis.solution));
-                    emit_sync_log(&handle_clone, "error", &format!("🔍 调试细节: {}", diagnosis.error_detail));
+                    emit_sync_log(
+                        &handle_clone,
+                        "error",
+                        &format!(
+                            "❌ 同步连接失败 [{}]: {}",
+                            diagnosis.error_code, diagnosis.error_message
+                        ),
+                    );
+                    emit_sync_log(
+                        &handle_clone,
+                        "error",
+                        &format!("👉 排查建议: {}", diagnosis.solution),
+                    );
+                    emit_sync_log(
+                        &handle_clone,
+                        "error",
+                        &format!("🔍 调试细节: {}", diagnosis.error_detail),
+                    );
 
                     publish_sync_status(
                         &handle_clone,
@@ -1264,7 +1312,12 @@ async fn run_sync_session(
                     break;
                 }
 
-                let warn_msg = format!("连接失败，第 {} 次重试 | {} ({})", retry_count + 1, diagnosis.error_message, diagnosis.error_code);
+                let warn_msg = format!(
+                    "连接失败，第 {} 次重试 | {} ({})",
+                    retry_count + 1,
+                    diagnosis.error_message,
+                    diagnosis.error_code
+                );
                 emit_sync_log(&handle_clone, "warning", &warn_msg);
 
                 retry_count += 1;
@@ -1546,13 +1599,19 @@ mod tests {
     fn test_check_loopback_on_mobile() {
         // Test Android mode (is_android = true)
         assert!(check_loopback_on_mobile("ws://127.0.0.1:3000", true));
-        assert!(check_loopback_on_mobile("ws://localhost:8080/ws-sync", true));
+        assert!(check_loopback_on_mobile(
+            "ws://localhost:8080/ws-sync",
+            true
+        ));
         assert!(!check_loopback_on_mobile("ws://192.168.1.100:3000", true));
         assert!(!check_loopback_on_mobile("ws://my-pc.local:3000", true));
 
         // Test non-Android mode (is_android = false)
         assert!(!check_loopback_on_mobile("ws://127.0.0.1:3000", false));
-        assert!(!check_loopback_on_mobile("ws://localhost:8080/ws-sync", false));
+        assert!(!check_loopback_on_mobile(
+            "ws://localhost:8080/ws-sync",
+            false
+        ));
     }
 
     #[tokio::test]
@@ -1599,25 +1658,32 @@ mod tests {
     #[tokio::test]
     async fn test_diagnose_connection_refused() {
         // Simulate a connection refused error on localhost on port 1.
-        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let io_err =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
         let err = WsError::Io(io_err);
 
-        let diagnosis = diagnose_connection_failure(
-            "ws://127.0.0.1:1/ws-sync",
-            "http://127.0.0.1:1",
-            &err,
-        )
-        .await;
+        let diagnosis =
+            diagnose_connection_failure("ws://127.0.0.1:1/ws-sync", "http://127.0.0.1:1", &err)
+                .await;
 
-        assert!(diagnosis.error_code == "CONNECTION_REFUSED" || diagnosis.error_code == "NETWORK_TIMEOUT");
-        assert!(diagnosis.error_message.contains("连接被拒绝") || diagnosis.error_message.contains("连接超时"));
+        assert!(
+            diagnosis.error_code == "CONNECTION_REFUSED"
+                || diagnosis.error_code == "NETWORK_TIMEOUT"
+        );
+        assert!(
+            diagnosis.error_message.contains("连接被拒绝")
+                || diagnosis.error_message.contains("连接超时")
+        );
         assert!(diagnosis.solution.contains("启动") || diagnosis.solution.contains("同一个 WiFi"));
     }
 
     #[tokio::test]
     async fn test_diagnose_network_unreachable() {
         // Simulate an unreachable address error.
-        let io_err = std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "address not available");
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "address not available",
+        );
         let err = WsError::Io(io_err);
 
         let diagnosis = diagnose_connection_failure(
@@ -1628,7 +1694,10 @@ mod tests {
         .await;
 
         assert_eq!(diagnosis.error_code, "NETWORK_UNREACHABLE");
-        assert!(diagnosis.error_message.contains("网络不可达") || diagnosis.error_message.contains("地址无效"));
+        assert!(
+            diagnosis.error_message.contains("网络不可达")
+                || diagnosis.error_message.contains("地址无效")
+        );
         assert!(diagnosis.solution.contains("网络状态"));
     }
 }

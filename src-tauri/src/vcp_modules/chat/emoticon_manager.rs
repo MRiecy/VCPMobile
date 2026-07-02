@@ -162,10 +162,11 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     };
 
     if !force && db_count > 0 {
-        let last_sync_row = sqlx::query("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let last_sync_row =
+            sqlx::query("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| e.to_string())?;
 
         if let Some(row) = last_sync_row {
             let last_sync_str: String = row.get("value");
@@ -284,7 +285,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     // 保存最后同步时间戳
     let now = crate::vcp_modules::infra::utils::now_millis();
     sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('emoticon_last_sync', ?, ?)")
-        .bind(&now.to_string())
+        .bind(now.to_string())
         .bind(now)
         .execute(&mut *transaction)
         .await

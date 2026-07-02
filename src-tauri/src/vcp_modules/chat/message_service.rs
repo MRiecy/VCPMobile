@@ -1,8 +1,8 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
-use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
+use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::settings_manager;
 use sqlx::Row;
 use std::path::Path;

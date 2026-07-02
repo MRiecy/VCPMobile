@@ -166,8 +166,12 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                 let _ =
                     init_vcp_log_connection_internal(h.clone(), s_url.clone(), s_key.clone()).await;
                 info!("[Lifecycle] Auto-connecting VCP Info...");
-                let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection(h.clone(), s_url, s_key)
-                    .await;
+                let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection(
+                    h.clone(),
+                    s_url,
+                    s_key,
+                )
+                .await;
             }
         });
     }
@@ -194,9 +198,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             let mut should_cleanup = true;
             {
                 use sqlx::Row;
-                if let Ok(Some(row)) = sqlx::query("SELECT value FROM settings WHERE key = 'delete_executor_last_cleanup'")
-                    .fetch_optional(pool)
-                    .await
+                if let Ok(Some(row)) = sqlx::query(
+                    "SELECT value FROM settings WHERE key = 'delete_executor_last_cleanup'",
+                )
+                .fetch_optional(pool)
+                .await
                 {
                     let last_cleanup_str: String = row.get("value");
                     if let Ok(last_cleanup) = last_cleanup_str.parse::<i64>() {
@@ -212,10 +218,13 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
             if should_cleanup {
                 use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                if DeleteExecutor::cleanup_old_deleted_records(&h, 30).await.is_ok() {
+                if DeleteExecutor::cleanup_old_deleted_records(&h, 30)
+                    .await
+                    .is_ok()
+                {
                     let now = crate::vcp_modules::infra::utils::now_millis();
                     let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
-                        .bind(&now.to_string())
+                        .bind(now.to_string())
                         .bind(now)
                         .execute(pool)
                         .await;
@@ -225,10 +234,13 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             loop {
                 tokio::time::sleep(Duration::from_secs(86400)).await;
                 use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                if DeleteExecutor::cleanup_old_deleted_records(&h, 30).await.is_ok() {
+                if DeleteExecutor::cleanup_old_deleted_records(&h, 30)
+                    .await
+                    .is_ok()
+                {
                     let now = crate::vcp_modules::infra::utils::now_millis();
                     let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
-                        .bind(&now.to_string())
+                        .bind(now.to_string())
                         .bind(now)
                         .execute(pool)
                         .await;
@@ -277,9 +289,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             let mut skip_check = false;
             {
                 use sqlx::Row;
-                if let Ok(Some(row)) = sqlx::query("SELECT value FROM settings WHERE key = 'frontend_update_last_check'")
-                    .fetch_optional(pool)
-                    .await
+                if let Ok(Some(row)) = sqlx::query(
+                    "SELECT value FROM settings WHERE key = 'frontend_update_last_check'",
+                )
+                .fetch_optional(pool)
+                .await
                 {
                     let last_check_str: String = row.get("value");
                     if let Ok(last_check) = last_check_str.parse::<i64>() {
@@ -295,14 +309,16 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
             if !skip_check {
                 info!("[FrontendUpdate] Starting background check...");
-                match crate::vcp_modules::frontend_update_manager::check_for_frontend_update(h.clone())
-                    .await
+                match crate::vcp_modules::frontend_update_manager::check_for_frontend_update(
+                    h.clone(),
+                )
+                .await
                 {
                     Ok(info) => {
                         // 更新最后检查时间戳
                         let now = crate::vcp_modules::infra::utils::now_millis();
                         let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('frontend_update_last_check', ?, ?)")
-                            .bind(&now.to_string())
+                            .bind(now.to_string())
                             .bind(now)
                             .execute(pool)
                             .await;
@@ -422,12 +438,12 @@ pub async fn reconcile_local_server_cmd(
 }
 
 #[tauri::command]
-pub async fn reconcile_distributed_node_cmd(
-    app_handle: AppHandle,
-) -> Result<bool, String> {
+pub async fn reconcile_distributed_node_cmd(app_handle: AppHandle) -> Result<bool, String> {
     // 读取全局 settings，对齐当前状态
     let settings_state = app_handle.state::<SettingsState>();
-    let settings = read_settings(app_handle.clone(), settings_state).await.map_err(|e| e.to_string())?;
+    let settings = read_settings(app_handle.clone(), settings_state)
+        .await
+        .map_err(|e| e.to_string())?;
     log::info!(
         "[Lifecycle] reconcile_distributed_node_cmd called: enable={}",
         settings.distributed_enabled
@@ -447,7 +463,9 @@ pub async fn get_last_error(state: State<'_, LifecycleState>) -> Result<Option<S
 }
 
 #[tauri::command]
-pub async fn restart_or_exit_app(#[allow(unused_variables)] app: tauri::AppHandle) -> Result<(), String> {
+pub async fn restart_or_exit_app(
+    #[allow(unused_variables)] app: tauri::AppHandle,
+) -> Result<(), String> {
     log::info!("[Lifecycle] Requesting application restart/exit...");
 
     #[cfg(target_os = "android")]
@@ -455,7 +473,9 @@ pub async fn restart_or_exit_app(#[allow(unused_variables)] app: tauri::AppHandl
         use tokio::sync::oneshot;
         let (tx, rx) = oneshot::channel();
 
-        let window = app.get_webview_window("main").ok_or("main window not found")?;
+        let window = app
+            .get_webview_window("main")
+            .ok_or("main window not found")?;
         let res = window.as_ref().with_webview(move |webview| {
             webview.jni_handle().exec(move |env, activity, _webview| {
                 match restart_android_app(env, &activity) {
@@ -490,30 +510,43 @@ pub async fn restart_or_exit_app(#[allow(unused_variables)] app: tauri::AppHandl
 }
 
 #[cfg(target_os = "android")]
-fn restart_android_app(env: &mut jni::JNIEnv<'_>, activity: &jni::objects::JObject<'_>) -> Result<(), String> {
+fn restart_android_app(
+    env: &mut jni::JNIEnv<'_>,
+    activity: &jni::objects::JObject<'_>,
+) -> Result<(), String> {
     use jni::objects::JValue;
 
     // 1. Get Context
     let context = env
-        .call_method(activity, "getApplicationContext", "()Landroid/content/Context;", &[])
+        .call_method(
+            activity,
+            "getApplicationContext",
+            "()Landroid/content/Context;",
+            &[],
+        )
         .map_err(|e| format!("getApplicationContext failed: {:?}", e))?
         .l()
         .map_err(|e| format!("getApplicationContext returned non-object: {:?}", e))?;
-    
+
     // 2. Get PackageManager
     let pm = env
-        .call_method(&context, "getPackageManager", "()Landroid/content/pm/PackageManager;", &[])
+        .call_method(
+            &context,
+            "getPackageManager",
+            "()Landroid/content/pm/PackageManager;",
+            &[],
+        )
         .map_err(|e| format!("getPackageManager failed: {:?}", e))?
         .l()
         .map_err(|e| format!("getPackageManager returned non-object: {:?}", e))?;
-    
+
     // 3. Get PackageName
     let package_name = env
         .call_method(&context, "getPackageName", "()Ljava/lang/String;", &[])
         .map_err(|e| format!("getPackageName failed: {:?}", e))?
         .l()
         .map_err(|e| format!("getPackageName returned non-object: {:?}", e))?;
-    
+
     // 4. Get Launch Intent
     let intent = env
         .call_method(
@@ -525,7 +558,7 @@ fn restart_android_app(env: &mut jni::JNIEnv<'_>, activity: &jni::objects::JObje
         .map_err(|e| format!("getLaunchIntentForPackage failed: {:?}", e))?
         .l()
         .map_err(|e| format!("getLaunchIntentForPackage returned non-object: {:?}", e))?;
-    
+
     if intent.is_null() {
         return Err("Launch intent not found".to_string());
     }
@@ -538,7 +571,6 @@ fn restart_android_app(env: &mut jni::JNIEnv<'_>, activity: &jni::objects::JObje
         &[JValue::Object(&intent)],
     )
     .map_err(|e| format!("startActivity failed: {:?}", e))?;
-    
+
     Ok(())
 }
-

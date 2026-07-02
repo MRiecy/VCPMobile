@@ -936,4 +936,3 @@ mod tests {
         assert_eq!(col_name_to_index("123"), 0);
     }
 }
-

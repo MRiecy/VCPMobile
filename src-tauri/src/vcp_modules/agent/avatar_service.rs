@@ -131,7 +131,7 @@ pub async fn batch_get_avatars<R: Runtime>(
     let rows = sqlx::query(
         "SELECT owner_type, owner_id, mime_type, image_data, dominant_color, updated_at 
          FROM avatars 
-         WHERE owner_type IN ('agent', 'group', 'user')"
+         WHERE owner_type IN ('agent', 'group', 'user')",
     )
     .fetch_all(pool)
     .await
@@ -152,7 +152,6 @@ pub async fn batch_get_avatars<R: Runtime>(
 
     Ok(results)
 }
-
 
 /// Tauri IPC Command: 为已有头像存储前端计算好的 dominant_color
 #[tauri::command]

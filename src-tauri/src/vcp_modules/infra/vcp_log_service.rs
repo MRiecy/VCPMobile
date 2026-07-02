@@ -76,7 +76,10 @@ pub fn flush_background_logs<R: tauri::Runtime>(app: &AppHandle<R>) {
         }
     };
     if !logs.is_empty() {
-        log::info!("[VCPLog] Flashing {} cached background logs to WebView.", logs.len());
+        log::info!(
+            "[VCPLog] Flashing {} cached background logs to WebView.",
+            logs.len()
+        );
         for log in logs {
             let _ = app.emit("vcp-system-event", log);
         }

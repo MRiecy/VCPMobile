@@ -95,7 +95,9 @@ pub struct ListenerPermissionResponse {
 }
 
 #[tauri::command]
-pub fn check_notification_listener_permission<R: Runtime>(app: AppHandle<R>) -> Result<ListenerPermissionResponse, String> {
+pub fn check_notification_listener_permission<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ListenerPermissionResponse, String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
@@ -103,7 +105,10 @@ pub fn check_notification_listener_permission<R: Runtime>(app: AppHandle<R>) -> 
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         let res = plugin_handle
-            .run_mobile_plugin::<ListenerPermissionResponse>("check_notification_listener_permission", serde_json::json!({}))
+            .run_mobile_plugin::<ListenerPermissionResponse>(
+                "check_notification_listener_permission",
+                serde_json::json!({}),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
         Ok(res)
     }
@@ -115,7 +120,9 @@ pub fn check_notification_listener_permission<R: Runtime>(app: AppHandle<R>) -> 
 }
 
 #[tauri::command]
-pub fn request_notification_listener_permission<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub fn request_notification_listener_permission<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
@@ -123,7 +130,10 @@ pub fn request_notification_listener_permission<R: Runtime>(app: AppHandle<R>) -
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("request_notification_listener_permission", serde_json::json!({}))
+            .run_mobile_plugin::<serde_json::Value>(
+                "request_notification_listener_permission",
+                serde_json::json!({}),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
     }
     #[cfg(not(target_os = "android"))]

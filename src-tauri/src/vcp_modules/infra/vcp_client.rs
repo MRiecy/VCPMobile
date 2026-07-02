@@ -620,8 +620,13 @@ async fn connect_to_helper<R: Runtime>(
     if port_file.exists() {
         if let Ok(content) = std::fs::read_to_string(&port_file) {
             if let Ok(port) = content.trim().parse::<u16>() {
-                if let Ok(stream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
-                    log::info!("[VCPClient] Connected to existing sse helper socket on 127.0.0.1:{}", port);
+                if let Ok(stream) =
+                    tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await
+                {
+                    log::info!(
+                        "[VCPClient] Connected to existing sse helper socket on 127.0.0.1:{}",
+                        port
+                    );
                     return send_command_to_stream(stream, action, msg_id, extra_params).await;
                 }
             }
@@ -629,7 +634,9 @@ async fn connect_to_helper<R: Runtime>(
     }
 
     // 2. 如果连接失败或文件不存在，启动/唤醒 helper 服务
-    log::info!("[VCPClient] Helper not responding or port file missing. Starting/Waking helper service...");
+    log::info!(
+        "[VCPClient] Helper not responding or port file missing. Starting/Waking helper service..."
+    );
     let _ = tauri_plugin_vcp_mobile::stream::start_helper_service(app.clone());
 
     // 3. 循环等待新端口文件并尝试连接（最多尝试 60 次，每次间隔 50ms，总计 3 秒超时）
@@ -710,11 +717,17 @@ async fn send_command_to_stream(
             }
         }
     }
-    
+
     use tokio::io::AsyncWriteExt;
     let cmd_line = cmd.to_string() + "\n";
-    stream.write_all(cmd_line.as_bytes()).await.map_err(|e| format!("Write command error: {}", e))?;
-    stream.flush().await.map_err(|e| format!("Flush command error: {}", e))?;
+    stream
+        .write_all(cmd_line.as_bytes())
+        .await
+        .map_err(|e| format!("Write command error: {}", e))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("Flush command error: {}", e))?;
     Ok(stream)
 }
 
@@ -724,15 +737,18 @@ async fn send_stop_to_helper<R: Runtime>(app: &AppHandle<R>, msg_id: &str) -> Re
     let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
         .await
         .map_err(|e| e.to_string())?;
-    
+
     let cmd = json!({
         "action": "stop",
         "requestId": msg_id
     });
-    
+
     use tokio::io::AsyncWriteExt;
     let cmd_line = cmd.to_string() + "\n";
-    stream.write_all(cmd_line.as_bytes()).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(cmd_line.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     stream.flush().await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -858,7 +874,7 @@ async fn handle_streaming_request<R: Runtime>(
 
     type BoxedLineStream =
         Box<dyn futures_util::Stream<Item = Result<String, std::io::Error>> + Unpin + Send>;
-    
+
     let to_line_stream = |resp: reqwest::Response| -> BoxedLineStream {
         let stream = resp.bytes_stream().map_err(std::io::Error::other);
         let reader = StreamReader::new(stream);
@@ -1002,12 +1018,12 @@ async fn handle_streaming_request<R: Runtime>(
                         "[VCPClient] Resuming SSE from local proxy socket for message: {}",
                         message_id_inner
                     );
-                    
+
                     let start_idx = last_received_index.map(|idx| idx + 1).unwrap_or(0);
                     let params = json!({
                         "startIndex": start_idx
                     });
-                    
+
                     match connect_to_helper(_app, "resume", &message_id_inner, Some(params)).await {
                         Ok(stream) => {
                             log::info!("[VCPClient] Successfully reconnected to sse helper socket");
@@ -1051,11 +1067,11 @@ async fn handle_streaming_request<R: Runtime>(
                                             if let Ok(event) = serde_json::from_str::<Value>(&line) {
                                                 let event_type = event["eventType"].as_str().unwrap_or("");
                                                 let event_data = event["eventData"].as_str().unwrap_or("");
-                                                
+
                                                 if let Some(idx) = event.get("index").and_then(|v| v.as_i64()) {
                                                     last_received_index = Some(idx);
                                                 }
-                                                
+
                                                 if event_type == "message" {
                                                     if event_data == "[DONE]" {
                                                         stream_ended_normally = true;
@@ -1684,19 +1700,32 @@ async fn mark_message_as_error<R: Runtime>(
 
 fn clean_old_cache_files(cache_dir: &std::path::Path) {
     let sse_cache_dir = cache_dir.join("sse_cache");
-    if !sse_cache_dir.exists() { return; }
-    let Ok(entries) = std::fs::read_dir(sse_cache_dir) else { return; };
+    if !sse_cache_dir.exists() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(sse_cache_dir) else {
+        return;
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() || path.extension().map_or(true, |ext| ext != "json") {
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else { continue; };
-        let Ok(modified) = metadata.modified() else { continue; };
-        let Ok(elapsed) = modified.elapsed() else { continue; };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(elapsed) = modified.elapsed() else {
+            continue;
+        };
         if elapsed.as_secs() > 24 * 3600 {
-            log::info!("[VCPClient] Deleting orphaned cache file older than 24 hours: {:?}", path);
+            log::info!(
+                "[VCPClient] Deleting orphaned cache file older than 24 hours: {:?}",
+                path
+            );
             let _ = std::fs::remove_file(path);
         }
     }
@@ -1708,7 +1737,10 @@ pub async fn recover_active_generation<R: Runtime>(
     active_requests: tauri::State<'_, ActiveRequests>,
     msg_id: String,
 ) -> Result<Value, String> {
-    log::info!("[VCPClient] recover_active_generation called for msg_id: {}", msg_id);
+    log::info!(
+        "[VCPClient] recover_active_generation called for msg_id: {}",
+        msg_id
+    );
 
     // 1. 如果此消息在当前 active_requests 中，说明后台流式任务仍在正常进行/重连接续中
     if active_requests.0.contains_key(&msg_id) {
@@ -1720,7 +1752,7 @@ pub async fn recover_active_generation<R: Runtime>(
     }
 
     let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
-    
+
     // 异步清理超过 24 小时的孤立缓存文件
     let cache_dir_clone = cache_dir.clone();
     tokio::spawn(async move {
@@ -1728,14 +1760,19 @@ pub async fn recover_active_generation<R: Runtime>(
     });
 
     // 2. 检查是否存在 5 分钟超时后由助手转存的本地 JSON 恢复文件 (24小时内认领有效)
-    let recovered_file = cache_dir.join("sse_cache").join(format!("sse_recovered_{}.json", msg_id));
+    let recovered_file = cache_dir
+        .join("sse_cache")
+        .join(format!("sse_recovered_{}.json", msg_id));
     if recovered_file.exists() {
-        log::info!("[VCPClient] Found local sse_recovered JSON file for msg_id: {}. Recovering from disk.", msg_id);
+        log::info!(
+            "[VCPClient] Found local sse_recovered JSON file for msg_id: {}. Recovering from disk.",
+            msg_id
+        );
         if let Ok(content_str) = std::fs::read_to_string(&recovered_file) {
             if let Ok(val) = serde_json::from_str::<Value>(&content_str) {
                 let timestamp = val["timestamp"].as_i64().unwrap_or(0);
                 let now = chrono::Utc::now().timestamp_millis();
-                
+
                 // 检查是否超过 24 小时 (24 * 3600 * 1000 ms)
                 if now - timestamp > 24 * 3600 * 1000 {
                     log::warn!("[VCPClient] Recovered JSON file is older than 24 hours. Deleting and failing.");
@@ -1743,9 +1780,9 @@ pub async fn recover_active_generation<R: Runtime>(
                 } else {
                     let content = val["content"].as_str().unwrap_or("").to_string();
                     let finish_reason = val["finishReason"].as_str().map(|s| s.to_string());
-                    
+
                     log::info!("[VCPClient] Successfully read recovered JSON: content_len={}, finish_reason={:?}", content.len(), finish_reason);
-                    
+
                     let db = app.state::<DbState>();
                     let row = sqlx::query(
                         "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
@@ -1761,12 +1798,14 @@ pub async fn recover_active_generation<R: Runtime>(
                         let owner_id: String = r.get("owner_id");
                         let owner_type: String = r.get("owner_type");
 
-                        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
-                            .bind(&msg_id)
-                            .fetch_optional(&db.pool)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+                        let agent_id_row =
+                            sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+                                .bind(&msg_id)
+                                .fetch_optional(&db.pool)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        let agent_id =
+                            agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
 
                         crate::vcp_modules::chat::message_service::finalize_stream_message(
                             app.clone(),
@@ -1783,7 +1822,7 @@ pub async fn recover_active_generation<R: Runtime>(
                         )
                         .await?;
                     }
-                    
+
                     let _ = std::fs::remove_file(&recovered_file);
                     return Ok(json!({
                         "status": "completed",
@@ -1797,24 +1836,30 @@ pub async fn recover_active_generation<R: Runtime>(
     // 3. 在 Android 上通过 TCP 套接字向助手查询该会话状态 (5 分钟内的内存数据)
     #[cfg(target_os = "android")]
     {
-        log::info!("[VCPClient] Querying helper process via TCP for msg_id: {}", msg_id);
+        log::info!(
+            "[VCPClient] Querying helper process via TCP for msg_id: {}",
+            msg_id
+        );
         let query_res = async {
             let port = get_helper_port(&app)?;
             log::info!("[VCPClient] Helper port discovered: {}", port);
             let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
                 .await
                 .map_err(|e| format!("TCP connection failed: {}", e))?;
-            
+
             let cmd = json!({
                 "action": "query",
                 "requestId": msg_id
             });
-            
+
             use tokio::io::AsyncWriteExt;
             let cmd_line = cmd.to_string() + "\n";
-            stream.write_all(cmd_line.as_bytes()).await.map_err(|e| e.to_string())?;
+            stream
+                .write_all(cmd_line.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
             stream.flush().await.map_err(|e| e.to_string())?;
-            
+
             log::info!("[VCPClient] Query command sent, waiting for response line...");
             let mut reader = FramedRead::new(stream, LinesCodec::new());
             if let Some(Ok(line)) = reader.next().await {
@@ -1822,21 +1867,22 @@ pub async fn recover_active_generation<R: Runtime>(
                 return Ok::<Value, String>(resp);
             }
             Err("No query response received (EOF)".to_string())
-        }.await;
+        }
+        .await;
 
         match query_res {
             Ok(resp) => {
                 let status = resp["status"].as_str().unwrap_or("not_found");
                 let content = resp["content"].as_str().unwrap_or("").to_string();
                 let last_finish_reason = resp["lastFinishReason"].as_str().map(|s| s.to_string());
-                
+
                 log::info!(
                     "[VCPClient] Query response received: status={}, content_len={}, finish_reason={:?}",
                     status,
                     content.len(),
                     last_finish_reason
                 );
-                
+
                 if status == "completed" {
                     log::info!("[VCPClient] Session completed in helper memory. Finalizing message in SQLite database.");
                     let db = app.state::<DbState>();
@@ -1854,12 +1900,14 @@ pub async fn recover_active_generation<R: Runtime>(
                         let owner_id: String = r.get("owner_id");
                         let owner_type: String = r.get("owner_type");
 
-                        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
-                            .bind(&msg_id)
-                            .fetch_optional(&db.pool)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
+                        let agent_id_row =
+                            sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
+                                .bind(&msg_id)
+                                .fetch_optional(&db.pool)
+                                .await
+                                .map_err(|e| e.to_string())?;
+                        let agent_id =
+                            agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
 
                         crate::vcp_modules::chat::message_service::finalize_stream_message(
                             app.clone(),
@@ -1876,10 +1924,10 @@ pub async fn recover_active_generation<R: Runtime>(
                         )
                         .await?;
                     }
-                    
+
                     log::info!("[VCPClient] Finalization complete. Sending stop command to helper to release memory.");
                     let _ = send_stop_to_helper(&app, &msg_id).await;
-                    
+
                     return Ok(json!({
                         "status": "completed",
                         "content": content
@@ -1920,6 +1968,7 @@ pub async fn recover_active_generation<R: Runtime>(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+#[allow(clippy::too_many_arguments)]
 pub async fn resume_stream<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, ActiveRequests>,
@@ -1938,9 +1987,7 @@ pub async fn resume_stream<R: Runtime>(
         last_event_index
     );
 
-    let client = Client::builder()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = Client::builder().build().map_err(|e| e.to_string())?;
 
     let pool = app.state::<DbState>().pool.clone();
 
@@ -1981,8 +2028,12 @@ pub async fn resume_stream<R: Runtime>(
     {
         Ok(val) => val,
         Err(e) => {
-            log::error!("[VCPClient] resume_stream failed during handle_streaming_request: {}", e);
-            let _ = mark_message_as_error(&app, &pool, &msg_id, Some(format!("接续失败: {}", e))).await;
+            log::error!(
+                "[VCPClient] resume_stream failed during handle_streaming_request: {}",
+                e
+            );
+            let _ =
+                mark_message_as_error(&app, &pool, &msg_id, Some(format!("接续失败: {}", e))).await;
             return Err(e);
         }
     };
@@ -2007,7 +2058,11 @@ pub async fn resume_stream<R: Runtime>(
         is_aborted,
         finish_reason,
         Some(stream_channel),
-        if owner_type == "agent" { Some(owner_id.clone()) } else { None },
+        if owner_type == "agent" {
+            Some(owner_id.clone())
+        } else {
+            None
+        },
     )
     .await?;
 

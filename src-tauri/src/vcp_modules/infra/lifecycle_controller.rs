@@ -1,8 +1,8 @@
+use crate::vcp_modules::infra::lifecycle_state::LifecycleState;
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
-use crate::vcp_modules::infra::lifecycle_state::LifecycleState;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 
 pub fn is_app_in_foreground<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     if let Some(state) = app.try_state::<LifecycleState>() {
@@ -63,8 +63,14 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
                 token.cancel();
             }
         }
-        state.linger.is_log_disconnected.store(false, Ordering::SeqCst);
-        state.linger.is_dist_disconnected.store(false, Ordering::SeqCst);
+        state
+            .linger
+            .is_log_disconnected
+            .store(false, Ordering::SeqCst);
+        state
+            .linger
+            .is_dist_disconnected
+            .store(false, Ordering::SeqCst);
 
         // 1.1b 申请持有 vcp_log 对应的原生进程级前台锁，以保证 10 分钟内后台存活
         let _ = tauri_plugin_vcp_mobile::stream::acquire_foreground_inner(
@@ -96,7 +102,9 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
                 if let Some(s) = app_clone.try_state::<LifecycleState>() {
                     s.linger.is_log_disconnected.store(true, Ordering::SeqCst);
                     // 10 分钟到期，释放 vcp_log 的前台锁
-                    let _ = tauri_plugin_vcp_mobile::stream::release_foreground_inner(&app_clone, "vcp_log");
+                    let _ = tauri_plugin_vcp_mobile::stream::release_foreground_inner(
+                        &app_clone, "vcp_log",
+                    );
                 }
             },
         );
@@ -118,7 +126,9 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
                     dist_token,
                     move || async move {
                         log::info!("[Lifecycle] Background distributed linger expired (5m). Stopping distributed client cleanly.");
-                        if let Some(dist_state) = app_clone.try_state::<crate::distributed::DistributedState>() {
+                        if let Some(dist_state) =
+                            app_clone.try_state::<crate::distributed::DistributedState>()
+                        {
                             let client = dist_state.client.read().await;
                             client.stop(&app_clone).await;
                         }
@@ -155,8 +165,14 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
         }
 
         // 2.3 若此前已冷断开，一键拉起恢复
-        let was_log_disconnected = state.linger.is_log_disconnected.swap(false, Ordering::SeqCst);
-        let was_dist_disconnected = state.linger.is_dist_disconnected.swap(false, Ordering::SeqCst);
+        let was_log_disconnected = state
+            .linger
+            .is_log_disconnected
+            .swap(false, Ordering::SeqCst);
+        let was_dist_disconnected = state
+            .linger
+            .is_dist_disconnected
+            .swap(false, Ordering::SeqCst);
 
         let settings_state = app.state::<SettingsState>();
         if let Ok(settings) = read_settings(app.clone(), settings_state).await {
@@ -176,8 +192,13 @@ pub async fn set_app_foreground_state_internal(app: AppHandle, is_foreground: bo
             }
 
             if was_dist_disconnected && settings.distributed_enabled {
-                log::info!("[Lifecycle] App returned to foreground. Reconnecting distributed client.");
-                crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node(&app, true, false).await;
+                log::info!(
+                    "[Lifecycle] App returned to foreground. Reconnecting distributed client."
+                );
+                crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node(
+                    &app, true, false,
+                )
+                .await;
             }
         }
     }

@@ -1,4 +1,4 @@
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite, Row};
+use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::fs;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -91,9 +91,13 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .unwrap_or(4096);
 
     let pool = if page_size != 16384 {
-        log::info!("[DBManager] Legacy page_size {} detected. Running page size VACUUM optimization...", page_size);
-        
-        let lifecycle = app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
+        log::info!(
+            "[DBManager] Legacy page_size {} detected. Running page size VACUUM optimization...",
+            page_size
+        );
+
+        let lifecycle =
+            app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
         {
             let mut status_lock = lifecycle.status.write().await;
             *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Optimizing;
@@ -110,7 +114,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
                 "source": "Core"
             }),
         );
-        
+
         // SQLite 在 WAL 模式下不允许变更 page_size。
         // 我们必须彻底关闭当前 pool 释放所有锁，然后使用单连接临时切换出 WAL 模式并执行 VACUUM。
         pool.close().await;
@@ -123,7 +127,9 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         use sqlx::Connection;
         match sqlx::sqlite::SqliteConnection::connect_with(&temp_options).await {
             Ok(mut temp_conn) => {
-                let _ = sqlx::query("PRAGMA page_size = 16384").execute(&mut temp_conn).await;
+                let _ = sqlx::query("PRAGMA page_size = 16384")
+                    .execute(&mut temp_conn)
+                    .await;
                 if let Err(e) = sqlx::query("VACUUM").execute(&mut temp_conn).await {
                     log::error!("[DBManager] Page size VACUUM optimization failed: {}", e);
                 } else {
@@ -132,7 +138,10 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
                 let _ = temp_conn.close().await;
             }
             Err(e) => {
-                log::error!("[DBManager] Failed to open temp connection for page size optimization: {}", e);
+                log::error!(
+                    "[DBManager] Failed to open temp connection for page size optimization: {}",
+                    e
+                );
             }
         }
 
@@ -192,10 +201,8 @@ async fn open_and_check_db(
     };
 
     // 如果数据库文件先前已存在，则在冷启动时运行轻量化快速自检
-    if db_path.exists() {
-        if !check_integrity(&pool).await {
-            return Err("PRAGMA quick_check(1) failed".to_string());
-        }
+    if db_path.exists() && !check_integrity(&pool).await {
+        return Err("PRAGMA quick_check(1) failed".to_string());
     }
 
     Ok(pool)
@@ -264,14 +271,14 @@ async fn bootstrap_legacy_if_needed(
 ) -> Result<(), String> {
     // 检测是否为 1.1.2 用户：有业务表但没有 sqlx 迁移追踪表
     let has_messages: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')"
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')",
     )
     .fetch_one(pool)
     .await
     .unwrap_or(false);
 
     let has_sqlx_table: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')"
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
     )
     .fetch_one(pool)
     .await
@@ -289,12 +296,12 @@ async fn bootstrap_legacy_if_needed(
         .fetch_all(pool)
         .await
         .unwrap_or_default();
-    let has_deleted_at = columns.iter().any(|row| {
-        row.try_get::<String, _>("name").unwrap_or_default() == "deleted_at"
-    });
+    let has_deleted_at = columns
+        .iter()
+        .any(|row| row.try_get::<String, _>("name").unwrap_or_default() == "deleted_at");
 
     let has_fts: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts')"
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts')",
     )
     .fetch_one(pool)
     .await
@@ -315,7 +322,7 @@ async fn bootstrap_legacy_if_needed(
             success        BOOLEAN NOT NULL,
             checksum       BLOB NOT NULL,
             execution_time BIGINT NOT NULL
-        )"
+        )",
     )
     .execute(pool)
     .await
@@ -333,16 +340,19 @@ async fn bootstrap_legacy_if_needed(
             sqlx::query(
                 "INSERT OR IGNORE INTO _sqlx_migrations
                  (version, description, installed_on, success, checksum, execution_time)
-                 VALUES (?, ?, datetime('now'), 1, ?, 0)"
+                 VALUES (?, ?, datetime('now'), 1, ?, 0)",
             )
             .bind(migration.version)
             .bind(migration.description.as_ref())
             .bind(migration.checksum.as_ref())
             .execute(pool)
             .await
-            .map_err(|e| format!(
-                "Bootstrap: failed to seed migration v{}: {}", migration.version, e
-            ))?;
+            .map_err(|e| {
+                format!(
+                    "Bootstrap: failed to seed migration v{}: {}",
+                    migration.version, e
+                )
+            })?;
 
             log::info!(
                 "[DBManager] Bootstrap: seeded migration v{} ({}).",
@@ -439,7 +449,7 @@ pub async fn search_messages_fts(
          FROM messages_fts fts
          INNER JOIN messages m ON fts.msg_id = m.msg_id AND fts.topic_id = m.topic_id
          INNER JOIN topics t ON m.topic_id = t.topic_id
-         WHERE fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL"
+         WHERE fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL",
     );
 
     // 动态添加过滤条件
@@ -513,12 +523,11 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
     let pool = &db_state.pool;
 
     // 1. 检测是否含有需要升级的压缩数据
-    let needs_upgrade: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM messages WHERE typeof(content) = 'blob')"
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
+    let needs_upgrade: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE typeof(content) = 'blob')")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
 
     if !needs_upgrade {
         return Ok(false);
@@ -526,7 +535,8 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
 
     log::info!("[DBManager] Compressed messages detected in database. Intercepting bootstrap for decompression migration...");
 
-    let lifecycle = app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
+    let lifecycle =
+        app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
     {
         let mut status_lock = lifecycle.status.write().await;
         *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Decompressing;
@@ -535,18 +545,20 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
     }
 
     // 2. 查询待解压总条数
-    let total_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE typeof(content) = 'blob'"
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| format!("Failed to query compressed messages count: {}", e))?;
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE typeof(content) = 'blob'")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("Failed to query compressed messages count: {}", e))?;
 
     if total_count == 0 {
         return Ok(false);
     }
 
-    log::info!("[DBManager] Decompressing {} messages in background...", total_count);
+    log::info!(
+        "[DBManager] Decompressing {} messages in background...",
+        total_count
+    );
 
     // 发射初始进度
     let _ = app_handle.emit(
@@ -578,7 +590,10 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
         }
 
         // 开启本批次事务
-        let mut tx = pool.begin().await.map_err(|e| format!("Failed to start batch transaction: {}", e))?;
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to start batch transaction: {}", e))?;
 
         for row in &rows {
             let msg_id: String = row.get("msg_id");
@@ -627,23 +642,32 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
 
             if deleted_at.is_none() {
                 let search_content = preprocess_fts_text(&content);
-                sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
-                    .bind(&msg_id)
-                    .bind(&topic_id)
-                    .bind(&search_content)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;
+                sqlx::query(
+                    "INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)",
+                )
+                .bind(&msg_id)
+                .bind(&topic_id)
+                .bind(&search_content)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;
             }
         }
 
-        tx.commit().await.map_err(|e| format!("Failed to commit batch transaction: {}", e))?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit batch transaction: {}", e))?;
 
         processed_count += rows.len();
 
         // 4. 定期发射 progress 信号
         let pct = (processed_count * 100) / (total_count as usize);
-        log::info!("[DBManager] Decompression progress: {}% ({}/{})", pct, processed_count, total_count);
+        log::info!(
+            "[DBManager] Decompression progress: {}% ({}/{})",
+            pct,
+            processed_count,
+            total_count
+        );
 
         let msg = format!("正在重构本地数据库... {}%", pct);
         {
@@ -677,14 +701,18 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
             "source": "Core"
         }),
     );
-    sqlx::query("VACUUM").execute(pool).await.unwrap_or_default();
+    sqlx::query("VACUUM")
+        .execute(pool)
+        .await
+        .unwrap_or_default();
 
     // 6. 发射升级完成信号，等待重启
     log::info!("[DBManager] Database migration completed successfully. Waiting for user restart confirmation...");
     let final_msg = "本地数据库格式重构成功，请确认重启应用。".to_string();
     {
         let mut status_lock = lifecycle.status.write().await;
-        *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::DecompressionComplete;
+        *status_lock =
+            crate::vcp_modules::infra::lifecycle_state::CoreStatus::DecompressionComplete;
         let mut msg_lock = lifecycle.status_message.write().await;
         *msg_lock = final_msg.clone();
     }
@@ -713,5 +741,3 @@ mod tests {
         assert_eq!(preprocess_fts_text(""), "");
     }
 }
-
-

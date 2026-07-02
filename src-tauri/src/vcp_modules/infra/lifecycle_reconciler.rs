@@ -1,7 +1,7 @@
-use tauri::{AppHandle, Manager};
 use crate::vcp_modules::infra::lifecycle_state::LifecycleState;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::infra::local_server;
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use tauri::{AppHandle, Manager};
 
 /// 根据设置决定启动或停止划词助手本地服务器
 pub async fn reconcile_local_server(

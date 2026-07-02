@@ -128,7 +128,10 @@ async fn process_topic_messages<R: Runtime>(
                     // ⚡ 优化：如果桌面端下发了 content_hash，则直接秒级复用，免去重算开销
                     let content_hash = match msg.content_hash {
                         Some(ref h) if !h.is_empty() => h.clone(),
-                        _ => HashAggregator::compute_message_fingerprint(&msg.content, &attachment_hashes),
+                        _ => HashAggregator::compute_message_fingerprint(
+                            &msg.content,
+                            &attachment_hashes,
+                        ),
                     };
 
                     // B. 预渲染（按开关控制）
@@ -137,16 +140,18 @@ async fn process_topic_messages<R: Runtime>(
                     let msg_id_log = msg.id.clone();
 
                     let rb = if prerender_enabled {
-                        let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let blocks = MessageRenderCompiler::compile(content);
-                            MessageRenderCompiler::serialize(&blocks).unwrap_or_default()
-                        }));
+                        let comp_res =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let blocks = MessageRenderCompiler::compile(content);
+                                MessageRenderCompiler::serialize(&blocks).unwrap_or_default()
+                            }));
                         match comp_res {
                             Ok(val) => val,
                             Err(_) => {
                                 log::warn!(
                                     "[PullExecutor] Compile panicked for msg {} (topic {})",
-                                    msg_id_log, topic_id_log
+                                    msg_id_log,
+                                    topic_id_log
                                 );
                                 Vec::new()
                             }

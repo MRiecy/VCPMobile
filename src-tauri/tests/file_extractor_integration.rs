@@ -70,8 +70,7 @@ fn test_extract_xlsx_returns_expected_text() {
 fn test_extract_pdf_scanned_fallback_message() {
     let pdf_bytes = include_bytes!("fixtures/file_extractor/sample.pdf");
     let file = write_fixture(pdf_bytes, "pdf");
-    let text = try_extract_text(file.path(), "application/pdf")
-        .expect("PDF 提取不应返回 None");
+    let text = try_extract_text(file.path(), "application/pdf").expect("PDF 提取不应返回 None");
 
     assert!(
         text.contains("扫描件") || text.contains("图片型 PDF") || !text.trim().is_empty(),
@@ -100,9 +99,9 @@ fn test_extract_text_file_with_bom() {
     // UTF-8 BOM 头的纯文本应能被 read_text_with_mmap 正确解码
     let bom_text = "\u{FEFF}Hello, 文本提取测试";
     let mut file = NamedTempFile::with_suffix(".txt").expect("创建临时文件失败");
-    file.write_all(bom_text.as_bytes()).expect("写入临时文件失败");
-    let text = try_extract_text(file.path(), "text/plain")
-        .expect("文本文件提取不应返回 None");
+    file.write_all(bom_text.as_bytes())
+        .expect("写入临时文件失败");
+    let text = try_extract_text(file.path(), "text/plain").expect("文本文件提取不应返回 None");
     assert!(
         text.contains("Hello") && text.contains("文本提取测试"),
         "BOM 文本应被正确解码，实际: {text:?}"
