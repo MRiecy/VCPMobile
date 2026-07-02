@@ -22,6 +22,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
   // 启动预加载缓存：PRELOADING 阶段提前拉取首屏历史，ChatView mount 后直接消费
   const preloadedHistory = ref<{ topicId: string; messages: ChatMessage[] } | null>(null);
+  let preloadConsumed = false;
 
   // 用于拦截重新生成时的输入框补全
   const editMessageContent = ref("");
@@ -115,10 +116,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     limit: number = 15,
     offset: number = 0
   ) => {
-    const loadType = offset === 0 ? "initial" : "pagination";
-    const tStart = performance.now();
     console.log(
-      `[ChatHistoryStore] Loading history [${loadType}] for ${ownerId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`,
+      `[ChatHistoryStore] Loading history for ${ownerId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`,
     );
     loading.value = true;
     isLoadingHistory.value = true;
@@ -130,33 +129,23 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     currentLoadAbortController = controller;
     const { signal } = controller;
 
-    let flushRafId: number | null = null;
-
     try {
-      // ============================================================
       // Fast Path: offset=0 initial load uses batch invoke (skip Channel + RAF)
-      // Channel per-item push + RAF 30Hz delays 5-message screen to 1s+
-      // Batch return assigns atomically, total ~80ms
-      // ============================================================
       if (offset === 0) {
         let messages: ChatMessage[];
 
         // Check preloaded cache from PRELOADING phase — zero-latency if hit
-        if (preloadedHistory.value && preloadedHistory.value.topicId === topicId) {
+        if (!preloadConsumed && preloadedHistory.value?.topicId === topicId) {
           messages = preloadedHistory.value.messages;
           preloadedHistory.value = null;
-          console.log(`[ChatHistoryStore] Using preloaded cache: ${messages.length} messages in ${(performance.now() - tStart).toFixed(2)}ms`);
+          preloadConsumed = true;
+          console.log(`[ChatHistoryStore] Using preloaded cache: ${messages.length} messages`);
         } else {
-          // Normal invoke path: clear any pending preload for this topic to prevent
-          // stale cache poisoning if preload resolves after this real fetch completes
-          if (preloadedHistory.value && preloadedHistory.value.topicId === topicId) {
-            preloadedHistory.value = null;
-          }
-          const tInvokeStart = performance.now();
+          // Normal invoke path
+          preloadConsumed = true;
           messages = await invoke<ChatMessage[]>('load_chat_history', {
             ownerId, ownerType, topicId, limit, offset,
           });
-          console.log(`[ChatHistoryStore] load_chat_history (batch) resolved in ${(performance.now() - tInvokeStart).toFixed(2)}ms, count: ${messages.length}`);
         }
 
         if (signal.aborted || sessionStore.currentTopicId !== topicId) {
@@ -176,16 +165,13 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         // Resolve attachment paths (sync, no IPC)
         hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
 
-        console.log(`[ChatHistoryStore] Loaded ${hydrated.length} messages [initial] in ${(performance.now() - tStart).toFixed(2)}ms`);
+        console.log(`[ChatHistoryStore] Loaded ${hydrated.length} messages [initial]`);
         return;
       }
 
-      // ============================================================
       // Channel Path: pagination (offset > 0) streaming logic unchanged
-      // ============================================================
       const channel = new Channel<HistoryChunk>();
       const buffer: ChatMessage[] = [];
-      let receivedCount = 0;
       let resolveComplete: (() => void) | null = null;
       const completePromise = new Promise<void>((resolve) => { resolveComplete = resolve; });
 
@@ -200,10 +186,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         const msgToUse = activeMsg || chunk.message;
 
         buffer.push(msgToUse);
-        receivedCount++;
 
         if (chunk.is_last) {
-          console.log(`[ChatHistoryStore] Received chunk.is_last at ${(performance.now() - tStart).toFixed(2)}ms`);
           currentChatHistory.value = [...buffer, ...currentChatHistory.value];
           historyOffset.value += buffer.length;
           if (buffer.length < limit) {
@@ -213,7 +197,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         }
       };
 
-      const tInvokeStart = performance.now();
       const total = await invoke<number>('load_chat_history_streamed', {
         ownerId,
         ownerType,
@@ -222,8 +205,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         offset,
         onMessage: channel,
       });
-      const tInvokeEnd = performance.now();
-      console.log(`[ChatHistoryStore] load_chat_history_streamed invoke resolved in ${(tInvokeEnd - tInvokeStart).toFixed(2)}ms, total: ${total}`);
 
       if (total === 0) {
         hasMoreHistory.value = false;
@@ -231,10 +212,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       }
 
       await completePromise;
-      console.log(`[ChatHistoryStore] completePromise resolved in ${(performance.now() - tInvokeEnd).toFixed(2)}ms`);
 
       console.log(
-        `[ChatHistoryStore] Loaded ${buffer.length} messages [pagination] for ${ownerId}, topic: ${topicId} in ${(performance.now() - tStart).toFixed(2)}ms`,
+        `[ChatHistoryStore] Loaded ${buffer.length} messages [pagination] for ${ownerId}, topic: ${topicId}`,
       );
 
       if (signal.aborted || sessionStore.currentTopicId !== topicId) {
@@ -248,10 +228,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     } finally {
       if (currentLoadAbortController === controller) {
         currentLoadAbortController = null;
-      }
-      if (flushRafId !== null) {
-        cancelAnimationFrame(flushRafId);
-        flushRafId = null;
       }
       loading.value = false;
       isLoadingHistory.value = false;

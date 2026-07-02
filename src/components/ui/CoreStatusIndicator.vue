@@ -5,6 +5,18 @@ import { useNotificationStore } from '../../core/stores/notification';
 const notificationStore = useNotificationStore();
 
 const statusConfig = computed(() => {
+  // P0 优先级：VCPLog 未连接时，覆盖 Core 状态显示红灯
+  const logStatus = notificationStore.vcpStatus.status;
+  if (logStatus !== 'connected') {
+    return {
+      color: 'bg-red-500',
+      shadow: 'shadow-red-500/50',
+      animate: 'animate-pulse',
+      text: 'VCPLog 未连接'
+    };
+  }
+
+  // 正常模式：显示 Core 引擎状态
   const s = notificationStore.vcpCoreStatus.status;
   switch (s) {
     case 'ready':
