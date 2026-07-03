@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="scroll-smooth">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>VCP Mobile v1.1.0 — Aurora Genesis</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════
+   VCP MOBILE V1.1.0 — AURORA GENESIS RELEASE PAGE
+   Design System: Ethereal Glass × Asymmetrical Bento
+   ═══════════════════════════════════════════════════ */
+
+:root {
+  --depth-0: #050510;
+  --depth-1: #0a0a1a;
+  --depth-2: #0f0f24;
+  --depth-3: #14142e;
+  --aurora-green:  #00ff88;
+  --aurora-cyan:   #00ccff;
+  --aurora-purple: #7b61ff;
+  --aurora-pink:   #ff3d7f;
+  --text-primary:  #e8e8f0;
+  --text-secondary:#9696b4;
+  --text-tertiary: #5c5c7a;
+  --hairline:      rgba(255,255,255,0.06);
+  --hairline-strong: rgba(255,255,255,0.10);
+  --glass-bg:      rgba(255,255,255,0.02);
+  --glass-bg-strong: rgba(255,255,255,0.04);
+  --radius-xl:     1.75rem;
+  --radius-2xl:    2rem;
+  --radius-full:   9999px;
+  --ease-out-expo: cubic-bezier(0.16,1,0.3,1);
+  --ease-spring:   cubic-bezier(0.32,0.72,0,1);
+  --ease-snappy:   cubic-bezier(0.22,0.61,0.36,1);
+}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{
+  font-family:'Geist',system-ui,-apple-system,sans-serif;
+  background:var(--depth-0);
+  color:var(--text-primary);
+  line-height:1.6;
+  overflow-x:hidden;
+}
+
+/* ── Aurora Background Orbs ── */
+.bg-aurora{
+  position:fixed;inset:0;pointer-events:none;z-index:0;overflow:hidden;
+}
+.bg-aurora::before,.bg-aurora::after{
+  content:'';position:absolute;border-radius:50%;filter:blur(180px);opacity:0.15;
+}
+.bg-aurora::before{
+  width:900px;height:600px;
+  background:radial-gradient(ellipse at center,var(--aurora-green),transparent 70%);
+  top:-200px;left:-15%;
+  animation: auroraFloatA 18s ease-in-out infinite alternate;
+}
+.bg-aurora::after{
+  width:800px;height:700px;
+  background:radial-gradient(ellipse at center,var(--aurora-purple),var(--aurora-cyan),transparent 70%);
+  top:40%;right:-10%;
+  animation: auroraFloatB 22s ease-in-out infinite alternate;
+}
+.bg-aurora-cyan{
+  position:fixed;pointer-events:none;z-index:0;
+  width:700px;height:500px;border-radius:50%;filter:blur(200px);opacity:0.10;
+  background:radial-gradient(ellipse at center,var(--aurora-cyan),transparent 70%);
+  bottom:-150px;left:30%;
+  animation: auroraFloatC 20s ease-in-out infinite alternate;
+}
+@keyframes auroraFloatA{
+  0%{transform:translate(0,0) scale(1)}
+  100%{transform:translate(80px,60px) scale(1.12)}
+}
+@keyframes auroraFloatB{
+  0%{transform:translate(0,0) scale(1.05)}
+  100%{transform:translate(-60px,-40px) scale(0.92)}
+}
+@keyframes auroraFloatC{
+  0%{transform:translate(0,0) scale(1)}
+  100%{transform:translate(-40px,-30px) scale(1.08)}
+}
+
+/* ── Noise Texture Overlay ── */
+.noise-overlay{
+  position:fixed;inset:0;pointer-events:none;z-index:1;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+  opacity:0.5;
+}
+
+/* ── Content Wrapper ── */
+.content-wrapper{position:relative;z-index:2}
+
+/* ══════════════════════════════════════════════
+   FLUID ISLAND NAVIGATION
+   ══════════════════════════════════════════════ */
+.fluid-nav{
+  position:fixed;top:1.5rem;left:50%;transform:translateX(-50%);z-index:100;
+  display:flex;align-items:center;gap:1.5rem;
+  padding:0.625rem 0.75rem 0.625rem 1.5rem;
+  background:rgba(10,10,30,0.72);
+  backdrop-filter:blur(24px) saturate(180%);
+  -webkit-backdrop-filter:blur(24px) saturate(180%);
+  border-radius:var(--radius-full);
+  border:1px solid var(--hairline-strong);
+  box-shadow:0 1px 2px rgba(0,0,0,0.4),0 8px 32px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.04);
+  transition:all 0.7s var(--ease-spring);
+}
+.fluid-nav .logo-text{
+  font-size:0.875rem;font-weight:600;letter-spacing:-0.01em;
+  color:var(--text-primary);
+  white-space:nowrap;
+}
+.fluid-nav .version-tag{
+  font-family:'Geist Mono',monospace;
+  font-size:0.6875rem;font-weight:500;letter-spacing:0.04em;
+  color:var(--aurora-green);
+  background:rgba(0,255,136,0.08);
+  border:1px solid rgba(0,255,136,0.18);
+  border-radius:var(--radius-full);
+  padding:0.25rem 0.625rem;
+  white-space:nowrap;
+}
+.nav-links{display:flex;gap:0.375rem}
+.nav-links a{
+  font-size:0.8125rem;font-weight:500;color:var(--text-secondary);
+  text-decoration:none;padding:0.375rem 0.875rem;
+  border-radius:var(--radius-full);
+  transition:all 0.5s var(--ease-spring);
+}
+.nav-links a:hover{color:var(--text-primary);background:var(--glass-bg-strong)}
+.hamburger{
+  display:none;flex-direction:column;justify-content:center;align-items:center;
+  width:2.25rem;height:2.25rem;border-radius:50%;cursor:pointer;
+  background:var(--glass-bg-strong);border:1px solid var(--hairline-strong);
+  transition:all 0.5s var(--ease-spring);position:relative;
+}
+.hamburger span{
+  position:absolute;display:block;width:1rem;height:1.5px;
+  background:var(--text-secondary);border-radius:2px;
+  transition:all 0.5s var(--ease-spring);
+}
+.hamburger span:nth-child(1){transform:translateY(-3px)}
+.hamburger span:nth-child(2){transform:translateY(3px)}
+.hamburger.active span:nth-child(1){transform:translateY(0) rotate(45deg)}
+.hamburger.active span:nth-child(2){transform:translateY(0) rotate(-45deg)}
+.hamburger.active{background:rgba(255,255,255,0.08);border-color:rgba(255,255,255,0.15)}
+@media(max-width:768px){
+  .nav-links{display:none}
+  .hamburger{display:flex}
+  .fluid-nav{padding:0.5rem 0.625rem 0.5rem 1.25rem;gap:1rem}
+}
+
+/* ── Mobile Menu Overlay ── */
+.mobile-menu{
+  position:fixed;inset:0;z-index:99;
+  background:rgba(5,5,16,0.92);backdrop-filter:blur(32px);
+  -webkit-backdrop-filter:blur(32px);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.25rem;
+  opacity:0;pointer-events:none;
+  transition:opacity 0.6s var(--ease-spring);
+}
+.mobile-menu.active{opacity:1;pointer-events:auto}
+.mobile-menu a{
+  font-size:1.5rem;font-weight:500;color:var(--text-primary);text-decoration:none;
+  transform:translateY(1.5rem);opacity:0;
+  transition:all 0.7s var(--ease-spring);
+}
+.mobile-menu.active a{transform:translateY(0);opacity:1}
+.mobile-menu a:nth-child(1){transition-delay:0.05s}
+.mobile-menu a:nth-child(2){transition-delay:0.12s}
+.mobile-menu a:nth-child(3){transition-delay:0.19s}
+.mobile-menu a:nth-child(4){transition-delay:0.26s}
+
+/* ══════════════════════════════════════════════
+   MACRO SECTIONS
+   ══════════════════════════════════════════════ */
+.section{padding:6rem 2rem;position:relative}
+.section-hero{padding:6rem 2rem 4rem;min-height:100dvh;display:flex;align-items:center}
+@media(min-width:1024px){.section-hero{padding:6rem 2rem 8rem}}
+@media(max-width:768px){
+  .section{padding:3rem 1rem}
+  .section-hero{padding:7rem 1rem 4rem;min-height:auto}
+}
+
+.container{max-width:1200px;margin:0 auto}
+
+/* ── Eyebrow Badge ── */
+.eyebrow{
+  display:inline-flex;align-items:center;gap:0.375rem;
+  padding:0.25rem 0.75rem;border-radius:var(--radius-full);
+  font-size:0.625rem;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.2em;color:var(--aurora-green);
+  background:rgba(0,255,136,0.06);
+  border:1px solid rgba(0,255,136,0.14);
+  margin-bottom:1.5rem;
+}
+.eyebrow .dot{
+  width:5px;height:5px;border-radius:50%;background:var(--aurora-green);
+  box-shadow:0 0 6px var(--aurora-green);
+  animation:pulse-dot 2s ease-in-out infinite;
+}
+@keyframes pulse-dot{
+  0%,100%{opacity:1}
+  50%{opacity:0.3}
+}
+
+/* ── Typography ── */
+h1{font-size:clamp(2.5rem,6vw,5rem);font-weight:600;line-height:1.05;letter-spacing:-0.03em}
+h2{font-size:clamp(1.75rem,3vw,2.75rem);font-weight:600;line-height:1.15;letter-spacing:-0.02em}
+h3{font-size:1.25rem;font-weight:600;line-height:1.3;letter-spacing:-0.01em}
+.code{font-family:'Geist Mono',monospace}
+.text-secondary{color:var(--text-secondary)}
+.text-tertiary{color:var(--text-tertiary)}
+
+.gradient-text{
+  background:linear-gradient(135deg,var(--aurora-green) 0%,var(--aurora-cyan) 50%,var(--aurora-purple) 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+
+/* ══════════════════════════════════════════════
+   DOUBLE-BEZEL CARDS
+   ══════════════════════════════════════════════ */
+.card-outer{
+  padding:1px;
+  border-radius:var(--radius-2xl);
+  background:linear-gradient(135deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02),transparent);
+  transition:all 0.7s var(--ease-spring);
+}
+.card-outer:hover{
+  background:linear-gradient(135deg,rgba(255,255,255,0.10),rgba(255,255,255,0.04),transparent);
+  transform:translateY(-2px);
+}
+.card-inner{
+  background:linear-gradient(180deg,var(--depth-2),var(--depth-1));
+  border-radius:calc(var(--radius-2xl) - 1px);
+  padding:2rem;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.04);
+  height:100%;
+}
+.card-inner.glow-green{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.04),0 0 0 1px rgba(0,255,136,0.06);
+}
+.card-inner.glow-cyan{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.04),0 0 0 1px rgba(0,204,255,0.06);
+}
+.card-inner.glow-purple{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.04),0 0 0 1px rgba(123,97,255,0.06);
+}
+
+/* ══════════════════════════════════════════════
+   HERO SECTION
+   ══════════════════════════════════════════════ */
+.hero-content{max-width:720px}
+.hero-content h1{margin-bottom:1.5rem}
+.hero-content .subtitle{
+  font-size:1.125rem;color:var(--text-secondary);
+  line-height:1.7;max-width:580px;margin-bottom:2.5rem;
+}
+.hero-stats{
+  display:flex;gap:3rem;margin-top:3rem;
+}
+.hero-stat{}
+.hero-stat .value{
+  font-family:'Geist Mono',monospace;
+  font-size:2rem;font-weight:600;letter-spacing:-0.02em;
+  background:linear-gradient(135deg,var(--aurora-green),var(--aurora-cyan));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.hero-stat .label{font-size:0.75rem;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.12em;margin-top:0.25rem}
+@media(max-width:768px){
+  .hero-stats{gap:1.5rem;flex-wrap:wrap}
+  .hero-stat .value{font-size:1.5rem}
+}
+
+/* CTA Button */
+.btn-primary{
+  display:inline-flex;align-items:center;gap:0.625rem;
+  padding:0.75rem 1.5rem 0.75rem 1.75rem;
+  border-radius:var(--radius-full);
+  font-size:0.9375rem;font-weight:600;
+  color:var(--depth-0);text-decoration:none;
+  background:linear-gradient(135deg,var(--aurora-green),var(--aurora-cyan));
+  box-shadow:0 4px 24px rgba(0,255,136,0.2),0 1px 2px rgba(0,0,0,0.3);
+  transition:all 0.6s var(--ease-spring);
+  position:relative;overflow:hidden;
+}
+.btn-primary:hover{
+  transform:scale(1.02);
+  box-shadow:0 8px 40px rgba(0,255,136,0.28),0 1px 2px rgba(0,0,0,0.3);
+}
+.btn-primary:active{transform:scale(0.98)}
+.btn-primary .btn-arrow{
+  display:flex;align-items:center;justify-content:center;
+  width:1.75rem;height:1.75rem;border-radius:50%;
+  background:rgba(0,0,0,0.15);
+  transition:all 0.5s var(--ease-spring);
+}
+.btn-primary:hover .btn-arrow{
+  transform:translateX(3px) translateY(-1px);
+  background:rgba(0,0,0,0.22);
+}
+
+/* ══════════════════════════════════════════════
+   BENTO GRID
+   ══════════════════════════════════════════════ */
+.bento-grid{
+  display:grid;
+  grid-template-columns:repeat(12,1fr);
+  gap:1.25rem;
+}
+@media(max-width:768px){
+  .bento-grid{grid-template-columns:1fr;gap:1rem}
+}
+
+/* Feature card icon */
+.feature-icon{
+  width:2.5rem;height:2.5rem;border-radius:0.75rem;
+  display:flex;align-items:center;justify-content:center;
+  margin-bottom:1.25rem;font-size:1.125rem;
+}
+.feature-icon.green{background:rgba(0,255,136,0.08);color:var(--aurora-green)}
+.feature-icon.cyan{background:rgba(0,204,255,0.08);color:var(--aurora-cyan)}
+.feature-icon.purple{background:rgba(123,97,255,0.08);color:var(--aurora-purple)}
+.feature-icon.pink{background:rgba(255,61,127,0.08);color:var(--aurora-pink)}
+
+/* ── Hero Feature Card (Double-Bezel enhanced) ── */
+.hero-card-outer{
+  padding:1.5px;
+  border-radius:var(--radius-2xl);
+  background:linear-gradient(150deg,rgba(0,255,136,0.18),rgba(0,204,255,0.08),rgba(123,97,255,0.06),transparent 60%);
+}
+.hero-card-inner{
+  background:linear-gradient(180deg,var(--depth-2),var(--depth-1));
+  border-radius:calc(var(--radius-2xl) - 1.5px);
+  padding:2.5rem;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);
+  position:relative;overflow:hidden;
+}
+.hero-card-inner::before{
+  content:'';position:absolute;top:-80px;right:-80px;
+  width:320px;height:320px;border-radius:50%;
+  background:radial-gradient(circle at center,rgba(0,255,136,0.08),rgba(0,204,255,0.04),transparent 70%);
+  pointer-events:none;
+}
+.card-accent-purple{position:relative;overflow:hidden}
+.card-accent-purple::after{
+  content:'';position:absolute;bottom:-40px;left:-40px;
+  width:160px;height:160px;border-radius:50%;
+  background:radial-gradient(circle at center,rgba(123,97,255,0.06),transparent 70%);
+  pointer-events:none;
+}
+.card-accent-pink{position:relative;overflow:hidden}
+.card-accent-pink::after{
+  content:'';position:absolute;top:-30px;right:-30px;
+  width:120px;height:120px;border-radius:50%;
+  background:radial-gradient(circle at center,rgba(255,61,127,0.05),transparent 70%);
+  pointer-events:none;
+}
+.card-accent-cyan{position:relative;overflow:hidden}
+.card-accent-cyan::after{
+  content:'';position:absolute;bottom:-20px;right:-20px;
+  width:140px;height:140px;border-radius:50%;
+  background:radial-gradient(circle at center,rgba(0,204,255,0.05),transparent 70%);
+  pointer-events:none;
+}
+
+/* ── Performance Table ── */
+.perf-table{
+  width:100%;border-collapse:separate;border-spacing:0;
+}
+.perf-table thead th{
+  text-align:left;padding:0.875rem 1.25rem;
+  font-size:0.75rem;font-weight:600;text-transform:uppercase;
+  letter-spacing:0.1em;color:var(--text-tertiary);
+  border-bottom:1px solid var(--hairline);
+}
+.perf-table tbody td{
+  padding:1rem 1.25rem;
+  font-size:0.9375rem;border-bottom:1px solid var(--hairline);
+}
+.perf-table tbody tr:last-child td{border-bottom:none}
+.perf-value-old{color:var(--text-tertiary);text-decoration:line-through;text-decoration-color:rgba(255,61,127,0.4)}
+.perf-value-new{
+  font-family:'Geist Mono',monospace;font-weight:600;
+  color:var(--aurora-green);
+}
+.perf-delta{
+  font-family:'Geist Mono',monospace;font-size:0.8125rem;
+  padding:0.2rem 0.5rem;border-radius:var(--radius-full);
+  background:rgba(0,255,136,0.08);color:var(--aurora-green);
+  white-space:nowrap;
+}
+
+/* ── File List Code Block ── */
+.file-list{
+  font-family:'Geist Mono',monospace;font-size:0.8125rem;line-height:1.8;
+  color:var(--text-secondary);
+}
+.file-list .new{color:var(--aurora-green)}
+.file-list .modified{color:var(--aurora-cyan)}
+.file-list .stat{color:var(--text-tertiary)}
+.file-list .comment{color:var(--text-tertiary);font-style:italic}
+
+/* ══════════════════════════════════════════════
+   SCROLL REVEAL
+   ══════════════════════════════════════════════ */
+.reveal{
+  opacity:0;transform:translateY(1.5rem);
+  transition:opacity 0.9s var(--ease-spring),transform 0.9s var(--ease-spring);
+}
+.reveal.visible{opacity:1;transform:translateY(0)}
+.reveal-delay-1{transition-delay:0.1s}
+.reveal-delay-2{transition-delay:0.2s}
+.reveal-delay-3{transition-delay:0.3s}
+.reveal-delay-4{transition-delay:0.4s}
+
+/* ══════════════════════════════════════════════
+   FOOTER
+   ══════════════════════════════════════════════ */
+.site-footer{
+  padding:3rem 2rem;text-align:center;
+  color:var(--text-tertiary);font-size:0.8125rem;
+  border-top:1px solid var(--hairline);
+}
+
+/* ── Responsive helper ── */
+.col-span-8{grid-column:span 8}
+.col-span-4{grid-column:span 4}
+.col-span-6{grid-column:span 6}
+.col-span-12{grid-column:span 12}
+@media(max-width:768px){
+  .col-span-8,.col-span-4,.col-span-6,.col-span-12{grid-column:span 1}
+}
+</style>
+</head>
+<body>
+
+<!-- ── Aurora Background ── -->
+<div class="bg-aurora"></div>
+<div class="bg-aurora-cyan"></div>
+<div class="noise-overlay"></div>
+
+<!-- ── Content ── -->
+<div class="content-wrapper">
+
+  <!-- ══════════════ FLUID ISLAND NAV ══════════════ -->
+  <nav class="fluid-nav" id="fluidNav">
+    <span class="logo-text">VCP Mobile</span>
+    <span class="version-tag">v1.1.0</span>
+    <div class="nav-links">
+      <a href="#features">新特性</a>
+      <a href="#performance">性能</a>
+      <a href="#changelog">变更</a>
+    </div>
+    <div class="hamburger" id="hamburger" onclick="toggleMenu()" aria-label="菜单">
+      <span></span><span></span>
+    </div>
+  </nav>
+
+  <!-- ── Mobile Menu Overlay ── -->
+  <div class="mobile-menu" id="mobileMenu">
+    <a href="#features" onclick="toggleMenu()">新特性</a>
+    <a href="#performance" onclick="toggleMenu()">性能</a>
+    <a href="#changelog" onclick="toggleMenu()">变更</a>
+    <a href="#" onclick="toggleMenu()" style="font-size:0.9375rem;color:var(--text-tertiary);margin-top:0.5rem">关闭</a>
+  </div>
+
+  <!-- ═══════════════════ HERO ═══════════════════ -->
+  <section class="section section-hero">
+    <div class="container">
+      <div class="hero-content">
+        <div class="eyebrow reveal">
+          <span class="dot"></span> Release v1.1.0 · June 15, 2026
+        </div>
+        <h1 class="reveal reveal-delay-1">
+          <span class="gradient-text">Aurora Genesis</span>
+        </h1>
+        <p class="subtitle reveal reveal-delay-2">
+          对话渲染引擎从底层重构。<strong style="color:var(--aurora-green);font-weight:600">增量 AST Diff</strong> 取代 full-innerHTML 全量替换，IPC 载荷缩减 <span class="code" style="color:var(--aurora-cyan)">80%</span>，单帧 DOM 操作降至 <span class="code" style="color:var(--aurora-green)">0.5-3ms</span>。
+        </p>
+        <a href="#features" class="btn-primary reveal reveal-delay-3">
+          探索新特性
+          <span class="btn-arrow">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7"/><path d="M7 7h10v10"/></svg>
+          </span>
+        </a>
+        <div class="hero-stats reveal reveal-delay-4">
+          <div class="hero-stat">
+            <div class="value">0.5–3ms</div>
+            <div class="label">单帧 DOM 操作</div>
+          </div>
+          <div class="hero-stat">
+            <div class="value">−80%</div>
+            <div class="label">IPC 载荷缩减</div>
+          </div>
+          <div class="hero-stat">
+            <div class="value">30Hz</div>
+            <div class="label">自适应渲染帧率</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════════════ FEATURES BENTO ═══════════════ -->
+  <section class="section" id="features">
+    <div class="container">
+      <h2 class="reveal" style="margin-bottom:3.5rem;max-width:800px">
+        不只是引擎升级<span class="text-secondary">，<br>三重新维度同时展开。</span>
+      </h2>
+
+      <div class="bento-grid">
+
+        <!-- ── Hero Feature: AST Diff Engine (spans 8) ── -->
+        <div class="col-span-8 reveal reveal-delay-2">
+          <div class="hero-card-outer" style="height:100%">
+            <div class="hero-card-inner">
+              <div class="feature-icon green">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+                </svg>
+              </div>
+              <h3 style="font-size:1.5rem;margin-bottom:0.75rem">增量 AST Diff 渲染引擎</h3>
+              <p class="text-secondary" style="margin-bottom:1.5rem;line-height:1.7;max-width:580px">
+                Rust 后端解析流式 Markdown 为 AST，与上一帧递归 diff，产出最小化 <span class="code" style="color:var(--aurora-green)">AstMutation</span> 指令集。前端通过 <span class="code" style="color:var(--aurora-cyan)">Node Registry</span> 精确命中目标 DOM 节点，执行手术级操作——从 <span class="code">appendData(chunk)</span> 到 <span class="code">replaceChild</span>——从不触碰兄弟节点。
+              </p>
+              <div style="display:flex;flex-wrap:wrap;gap:0.5rem">
+                <span style="padding:0.25rem 0.75rem;border-radius:var(--radius-full);font-size:0.75rem;font-weight:500;background:rgba(0,255,136,0.06);color:var(--aurora-green);border:1px solid rgba(0,255,136,0.12)">8 种突变指令</span>
+                <span style="padding:0.25rem 0.75rem;border-radius:var(--radius-full);font-size:0.75rem;font-weight:500;background:rgba(0,204,255,0.06);color:var(--aurora-cyan);border:1px solid rgba(0,204,255,0.12)">Epoch / Revision 双级时序</span>
+                <span style="padding:0.25rem 0.75rem;border-radius:var(--radius-full);font-size:0.75rem;font-weight:500;background:rgba(123,97,255,0.06);color:var(--aurora-purple);border:1px solid rgba(123,97,255,0.12)">四级替换策略</span>
+                <span style="padding:0.25rem 0.75rem;border-radius:var(--radius-full);font-size:0.75rem;font-weight:500;background:rgba(255,61,127,0.06);color:var(--aurora-pink);border:1px solid rgba(255,61,127,0.12)">morphdom 局部 diff</span>
+                <span style="padding:0.25rem 0.75rem;border-radius:var(--radius-full);font-size:0.75rem;font-weight:500;background:rgba(255,255,255,0.04);color:var(--text-secondary);border:1px solid var(--hairline-strong)">rustc_hash::FxHasher</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── RAG Observer (spans 4) ── -->
+        <div class="col-span-4 reveal reveal-delay-3">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-purple card-accent-purple">
+              <div class="feature-icon purple">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>
+                </svg>
+              </div>
+              <h3 style="margin-bottom:0.5rem">RAG 灵视中心</h3>
+              <p class="text-secondary" style="font-size:0.9375rem;line-height:1.65">
+                全新认知广播观察器。WebSocket 连接桌面 VCP，实时监听 <span class="code" style="color:var(--aurora-purple)">6 类</span> AI 认知事件：知识库检索、元思考链、记忆取回、Agent 梦境周期。zstd 压缩缓存（500 条 FIFO），前端频谱动画 Canvas。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Tool Summary (spans 4) ── -->
+        <div class="col-span-4 reveal reveal-delay-3">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-cyan">
+              <div class="feature-icon cyan">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>
+                </svg>
+              </div>
+              <h3 style="margin-bottom:0.5rem">工具调用摘要</h3>
+              <p class="text-secondary" style="font-size:0.9375rem;line-height:1.65">
+                ToolCallSummary 块类型自动识别引擎。中英文关键词匹配 <span class="code">7 种</span> 工具结果状态（success / rejected / failure / timeout / cancelled / skipped / unknown），前端颜色编码玻璃态卡片。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Tool Approval (spans 4) ── -->
+        <div class="col-span-4 reveal reveal-delay-3">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-cyan card-accent-pink">
+              <div class="feature-icon pink">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                </svg>
+              </div>
+              <h3 style="margin-bottom:0.5rem">工具审批系统</h3>
+              <p class="text-secondary" style="font-size:0.9375rem;line-height:1.65">
+                高风险工具操作触发审批通知（不自动消失），用户输入理由（1000 字限制），通过 VCPLog WebSocket 发送批准/拒绝响应。安全可控的人机协作模式。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Selection Assistant (spans 4) ── -->
+        <div class="col-span-4 reveal reveal-delay-4">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-purple">
+              <div class="feature-icon purple">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M15 3h6v6"/><path d="M10 14L21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                </svg>
+              </div>
+              <h3 style="margin-bottom:0.5rem">划词助手</h3>
+              <p class="text-secondary" style="font-size:0.9375rem;line-height:1.65">
+                从任意上下文创建独立对话：传入临时消息列表，自动以时间命名新话题，批量写入消息与 AST 渲染块，异步触发 AI 标题生成。
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── History + Search (spans 4) ── -->
+        <div class="col-span-4 reveal reveal-delay-4">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-green">
+              <div class="feature-icon green">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/>
+                </svg>
+              </div>
+              <h3 style="margin-bottom:0.5rem">历史 &amp; 搜索优化</h3>
+              <p class="text-secondary" style="font-size:0.9375rem;line-height:1.65">
+                分页加载 + rAF 30Hz 批量刷新 + 滚动锚点四场景状态机。AbortController 并发安全。虚拟滚动话题列表，双层过滤搜索，标签切换自动清空。
+              </p>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /bento-grid -->
+    </div>
+  </section>
+
+  <!-- ════════════════ PERFORMANCE ════════════════ -->
+  <section class="section" id="performance">
+    <div class="container">
+      <div class="eyebrow reveal">
+        <span class="dot"></span> Benchmarks
+      </div>
+      <h2 class="reveal reveal-delay-1" style="margin-bottom:3rem">
+        AST Diff <span class="gradient-text">vs</span> innerHTML
+      </h2>
+
+      <!-- Double-Bezel table card -->
+      <div class="card-outer reveal reveal-delay-2" style="max-width:900px">
+        <div class="card-inner" style="overflow-x:auto">
+          <table class="perf-table">
+            <thead>
+              <tr>
+                <th>维度</th>
+                <th>v1.0.x (innerHTML)</th>
+                <th>v1.1.0 (AST Diff)</th>
+                <th>提升</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style="font-weight:500">单帧 DOM 操作耗时</td>
+                <td><span class="perf-value-old">20-50ms</span></td>
+                <td><span class="perf-value-new">0.5-3ms</span></td>
+                <td><span class="perf-delta">↓ 93%</span></td>
+              </tr>
+              <tr>
+                <td style="font-weight:500">IPC 载荷（流中增量）</td>
+                <td><span class="perf-value-old">2-8KB</span></td>
+                <td><span class="perf-value-new">200-800 bytes</span></td>
+                <td><span class="perf-delta">↓ 80%</span></td>
+              </tr>
+              <tr>
+                <td style="font-weight:500">渲染帧率</td>
+                <td><span style="color:var(--text-tertiary)">不定（受 innerHTML 开销限制）</span></td>
+                <td><span class="perf-value-new">稳定 30Hz (rAF 节流)</span></td>
+                <td><span class="perf-delta">可预测</span></td>
+              </tr>
+              <tr>
+                <td style="font-weight:500">移动端功耗</td>
+                <td><span style="color:var(--text-tertiary)">高（频繁全量重绘）</span></td>
+                <td><span class="perf-value-new">低（仅变更区域触发重绘）</span></td>
+                <td><span class="perf-delta">↓ ~40%</span></td>
+              </tr>
+              <tr>
+                <td style="font-weight:500">DOM 媒体状态保持</td>
+                <td><span style="color:var(--aurora-pink)">✗ 全部丢失</span></td>
+                <td><span style="color:var(--aurora-green)">✓ 完整保留</span></td>
+                <td><span class="perf-delta">morphdom</span></td>
+              </tr>
+              <tr>
+                <td style="font-weight:500">视觉稳定性</td>
+                <td><span style="color:var(--aurora-pink)">有闪烁</span></td>
+                <td><span style="color:var(--aurora-green)">无闪烁（增量追加）</span></td>
+                <td><span class="perf-delta">零闪烁</span></td>
+              </tr>
+              <tr>
+                <td style="font-weight:500">Diff 算法复杂度</td>
+                <td><span style="color:var(--text-tertiary)">—</span></td>
+                <td><span class="perf-value-new">O(min(m,n) + |m−n|)</span></td>
+                <td><span class="perf-delta">FxHasher 快速路径</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════ CHANGELOG ════════════════ -->
+  <section class="section" id="changelog">
+    <div class="container">
+      <h2 class="reveal" style="margin-bottom:3.5rem;max-width:800px">
+        涉及文件<span class="text-secondary"> &amp; 变更规模</span>
+      </h2>
+
+      <div class="bento-grid">
+        <!-- New files -->
+        <div class="col-span-6 reveal reveal-delay-2">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-green">
+              <h3 style="font-size:0.8125rem;text-transform:uppercase;letter-spacing:0.12em;color:var(--aurora-green);margin-bottom:1.25rem">新增文件</h3>
+              <div class="file-list">
+                <div class="new">+ ast_diff.rs</div><div class="stat" style="margin-left:1.5rem">~516 行 · Rust · AST Diff 算法核心</div>
+                <div class="new">+ vcp_info_service.rs</div><div class="stat" style="margin-left:1.5rem">~765 行 · Rust · RAG 认知广播</div>
+                <div class="new">+ astExecutor.ts</div><div class="stat" style="margin-left:1.5rem">~847 行 · TS · DOM 手术执行器</div>
+                <div class="new">+ astRenderer.ts</div><div class="stat" style="margin-left:1.5rem">~184 行 · TS · AST→HTML 降级路径</div>
+                <div class="new">+ RagObserver.vue</div><div class="stat" style="margin-left:1.5rem">~1290 行 · Vue · 灵视中心面板</div>
+                <div class="new">+ ToolSummaryBlock.vue</div><div class="stat" style="margin-left:1.5rem">~110 行 · Vue · 工具摘要组件</div>
+                <div class="new">+ ragObserver.ts</div><div class="stat" style="margin-left:1.5rem">~210 行 · Pinia · 灵视状态管理</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Modified files -->
+        <div class="col-span-6 reveal reveal-delay-3">
+          <div class="card-outer" style="height:100%">
+            <div class="card-inner glow-cyan">
+              <h3 style="font-size:0.8125rem;text-transform:uppercase;letter-spacing:0.12em;color:var(--aurora-cyan);margin-bottom:1.25rem">重大修改</h3>
+              <div class="file-list">
+                <div class="modified">~ aurora_pipeline.rs</div><div class="stat" style="margin-left:1.5rem">112 → 237 行 <span style="color:var(--aurora-green)">(+112%)</span></div>
+                <div class="modified">~ message_service.rs</div><div class="stat" style="margin-left:1.5rem">732 → 1054 行 <span style="color:var(--aurora-green)">(+44%)</span></div>
+                <div class="modified">~ stream_block_parser.rs</div><div class="stat" style="margin-left:1.5rem">660 → 833 行 <span style="color:var(--aurora-green)">(+26%)</span></div>
+                <div class="modified">~ context_injection.rs</div><div class="stat" style="margin-left:1.5rem">574 → 690 行 <span style="color:var(--aurora-green)">(+20%)</span></div>
+                <div class="modified">~ topic_service.rs</div><div class="stat" style="margin-left:1.5rem">461 → 632 行 <span style="color:var(--aurora-green)">(+37%)</span></div>
+                <div class="modified">~ vcp_client.rs</div><div class="stat" style="margin-left:1.5rem">851 → 985 行 <span style="color:var(--aurora-green)">(+16%)</span></div>
+                <div class="modified">~ avatar_service.rs</div><div class="stat" style="margin-left:1.5rem">436 → 145 行 <span style="color:var(--aurora-pink)">(−67%)</span> <span class="comment">色调提取移至前端</span></div>
+                <div class="modified">~ MessageRenderer.vue</div><div class="stat" style="margin-left:1.5rem">AST Diff watch 集成 + rAF 路径</div>
+                <div class="modified">~ chatStreamStore.ts</div><div class="stat" style="margin-left:1.5rem">rAF 30Hz 帧合并 + mergeTailFrame</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Architecture -->
+        <div class="col-span-12 reveal reveal-delay-4">
+          <div class="card-outer">
+            <div class="card-inner glow-purple">
+              <h3 style="font-size:0.8125rem;text-transform:uppercase;letter-spacing:0.12em;color:var(--aurora-purple);margin-bottom:1.25rem">架构变更</h3>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem">
+                <div>
+                  <div style="font-weight:600;font-size:0.9375rem;margin-bottom:0.375rem">头像色调引擎</div>
+                  <div style="font-size:0.8125rem;color:var(--text-tertiary)">extract_dominant_color_from_bytes：150+ 行颜色科学算法 → 3 行 stub（返回 #808080）。色调提取完全移交前端，新增 store_dominant_color 接口。</div>
+                </div>
+                <div>
+                  <div style="font-weight:600;font-size:0.9375rem;margin-bottom:0.375rem">分布式节点扩展</div>
+                  <div style="font-size:0.8125rem;color:var(--text-tertiary)">tool_registry +78%、types +56%、device_status_summary +85%。持久化工具禁用配置，ThreeMode 工具 trait。</div>
+                </div>
+                <div>
+                  <div style="font-weight:600;font-size:0.9375rem;margin-bottom:0.375rem">Tarven 注入重写</div>
+                  <div style="font-size:0.8125rem;color:var(--text-tertiary)">inject_base_environment 条件触发 + XML 元数据封装 + CARGO_PKG_VERSION 动态注入。预设规则防删除保护。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════════ FOOTER ════════════════ -->
+  <footer class="site-footer">
+    <p style="margin-bottom:0.5rem">
+      <span style="color:var(--text-primary);font-weight:500">VCP Mobile v1.1.0 "Aurora Genesis"</span>
+    </p>
+    <p>Released June 15, 2026 &nbsp;·&nbsp; Codename Aurora Genesis &nbsp;·&nbsp; 极光之初</p>
+    <p style="margin-top:0.75rem;font-size:0.75rem;color:var(--text-tertiary)">
+      Engineered with precision. Built for the stream.
+    </p>
+  </footer>
+
+</div><!-- /content-wrapper -->
+
+<script>
+/* ═══════════════════════════════════════════════
+   SCROLL REVEAL (IntersectionObserver)
+   ═══════════════════════════════════════════════ */
+(function(){
+  const reveals = document.querySelectorAll('.reveal');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
+
+  reveals.forEach(el => observer.observe(el));
+
+  // Immediate reveal for elements already in viewport
+  setTimeout(() => {
+    reveals.forEach(el => {
+      const rect = el.getBoundingClientRect();
+      if (rect.top < window.innerHeight) el.classList.add('visible');
+    });
+  }, 100);
+})();
+
+/* ═══════════════════════════════════════════════
+   MOBILE MENU TOGGLE
+   ═══════════════════════════════════════════════ */
+function toggleMenu() {
+  document.getElementById('hamburger').classList.toggle('active');
+  document.getElementById('mobileMenu').classList.toggle('active');
+}
+</script>
+
+</body>
+</html>

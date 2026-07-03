@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn test_code_block_precipitation_failure() {
         // 真实样本 测试文档.txt（include_str! 编译期内嵌，杜绝绝对路径与 CI panic）
-        let mut text = include_str!("../../../../scripts/tail-test/测试文档.txt").to_string();
+        let mut text = include_str!("fixtures/测试文档.txt").to_string();
 
         // 兼容处理：如果是转义过的 JSON Payload，使用 serde_json 进行 unescape
         if text.contains("\\n") || text.contains("\\\"") {

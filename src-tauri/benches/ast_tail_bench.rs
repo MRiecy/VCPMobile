@@ -28,7 +28,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 
 /// 读取 40k 测试 HTML 源（827 行）。编译期内嵌，杜绝运行时路径依赖。
 fn load_genesis_html() -> &'static str {
-    include_str!("../../scripts/tail-test/v1.1.0-aurora-genesis.html")
+    include_str!("fixtures/v1.1.0-aurora-genesis.html")
 }
 
 /// 按字节上限安全截断到 char 边界。
