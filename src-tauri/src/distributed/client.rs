@@ -42,6 +42,7 @@ struct SessionContext {
     registry: Arc<ToolRegistry>,
     re_register_rx: tokio::sync::mpsc::Receiver<()>,
     reconnect_rx: tokio::sync::mpsc::Receiver<()>,
+    session_id: u64,
 }
 
 /// Handle to an active connection session — created by start(), dropped by stop().
@@ -81,7 +82,7 @@ impl DistributedClient {
         registry: Arc<ToolRegistry>,
     ) -> Result<(), String> {
         // Prevent duplicate activation using ConnectionState.
-        {
+        let next_session_id = {
             let mut s = self.status.write().await;
             if s.state == ConnectionState::Connected || s.state == ConnectionState::Connecting {
                 log::info!(
@@ -95,12 +96,17 @@ impl DistributedClient {
             s.server_id = None;
             s.client_id = None;
             s.last_error = None;
-        }
+            s.session_id += 1;
+            s.session_id
+        };
 
         // Gracefully shut down any existing session before creating a new one.
-        if let Some(old_session) = self.session.lock().await.take() {
-            old_session.cancel_token.cancel();
-            let _ = old_session.task_handle.await;
+        let old_session = {
+            self.session.lock().await.take()
+        };
+        if let Some(session) = old_session {
+            session.cancel_token.cancel();
+            let _ = session.task_handle.await;
         }
 
         // Create fresh channels and cancellation token — no state reuse from previous cycles.
@@ -129,6 +135,7 @@ impl DistributedClient {
             registry,
             re_register_rx,
             reconnect_rx,
+            session_id: next_session_id,
         };
         let loop_token = cancel_token.clone();
 
@@ -166,12 +173,12 @@ impl DistributedClient {
         }
 
         // Take the session out and gracefully shut it down.
-        // cancel() signals the connection_loop to exit; task_handle.await waits for
-        // the loop's tail cleanup (which sets Disconnected + emits status).
-        if let Some(session) = self.session.lock().await.take() {
+        let old_session = {
+            self.session.lock().await.take()
+        };
+        if let Some(session) = old_session {
             session.cancel_token.cancel();
             let _ = session.task_handle.await;
-            // session drops here → re_register_tx, reconnect_tx naturally close
         }
 
         // Safety net: ensure final Disconnected state if loop didn't clean up properly.
@@ -205,14 +212,14 @@ impl DistributedClient {
     /// Trigger re-registration of tools.
     pub async fn re_register_tools(&self) {
         if let Some(session) = self.session.lock().await.as_ref() {
-            let _ = session.re_register_tx.send(()).await;
+            let _ = session.re_register_tx.try_send(());
         }
     }
 
     /// Trigger immediate reconnection.
     pub async fn trigger_reconnect(&self) {
         if let Some(session) = self.session.lock().await.as_ref() {
-            let _ = session.reconnect_tx.send(()).await;
+            let _ = session.reconnect_tx.try_send(());
         }
     }
 
@@ -228,10 +235,11 @@ impl DistributedClient {
     ) {
         let mut reconnect_interval = Duration::from_secs(5);
         let max_reconnect_interval = Duration::from_secs(60);
-        let re_register_rx = Arc::new(Mutex::new(ctx.re_register_rx));
+        let mut re_register_rx = ctx.re_register_rx;
         let mut reconnect_rx = ctx.reconnect_rx;
         let status = ctx.status;
         let registry = ctx.registry;
+        let session_id = ctx.session_id;
 
         loop {
             // Check cancellation before connecting.
@@ -272,20 +280,23 @@ impl DistributedClient {
                         &cancel_token,
                         &status,
                         &registry,
-                        re_register_rx.clone(),
+                        &mut re_register_rx,
+                        session_id,
                     )
                     .await;
 
                     // Session ended — update status.
                     {
                         let mut s = status.write().await;
-                        if s.state != ConnectionState::Disconnecting {
-                            s.state = ConnectionState::Connecting;
+                        if s.session_id == session_id {
+                            if s.state != ConnectionState::Disconnecting {
+                                s.state = ConnectionState::Connecting;
+                            }
+                            s.connected = false;
+                            s.server_id = None;
+                            s.client_id = None;
+                            s.last_error = Some(exit_reason);
                         }
-                        s.connected = false;
-                        s.server_id = None;
-                        s.client_id = None;
-                        s.last_error = Some(exit_reason);
                     }
                     Self::emit_status(&app, &status).await;
                 }
@@ -293,11 +304,13 @@ impl DistributedClient {
                     log::warn!("[Distributed] Connection failed: {}", e);
                     {
                         let mut s = status.write().await;
-                        if s.state != ConnectionState::Disconnecting {
-                            s.state = ConnectionState::Connecting;
+                        if s.session_id == session_id {
+                            if s.state != ConnectionState::Disconnecting {
+                                s.state = ConnectionState::Connecting;
+                            }
+                            s.connected = false;
+                            s.last_error = Some(format!("Connection failed: {}", e));
                         }
-                        s.connected = false;
-                        s.last_error = Some(format!("Connection failed: {}", e));
                     }
                     Self::emit_status(&app, &status).await;
                 }
@@ -333,10 +346,12 @@ impl DistributedClient {
 
         {
             let mut s = status.write().await;
-            s.state = ConnectionState::Disconnected;
-            s.connected = false;
-            s.server_id = None;
-            s.client_id = None;
+            if s.session_id == session_id {
+                s.state = ConnectionState::Disconnected;
+                s.connected = false;
+                s.server_id = None;
+                s.client_id = None;
+            }
         }
         Self::emit_status(&app, &status).await;
         log::info!("[Distributed] Connection loop exited.");
@@ -355,7 +370,8 @@ impl DistributedClient {
         cancel_token: &CancellationToken,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
-        re_register_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<()>>>,
+        re_register_rx: &mut tokio::sync::mpsc::Receiver<()>,
+        session_id: u64,
     ) -> String {
         use tokio_tungstenite::tungstenite::Message;
 
@@ -393,6 +409,7 @@ impl DistributedClient {
                                 &ws_tx,
                                 status,
                                 registry,
+                                session_id,
                             ).await;
                         }
                         Some(Ok(Message::Ping(data))) => {
@@ -420,22 +437,17 @@ impl DistributedClient {
                 }
 
                 // --- Out-of-band re-registration request ---
-                opt = async {
-                    let mut rx = re_register_rx.lock().await;
-                    rx.recv().await
-                } => {
+                opt = re_register_rx.recv() => {
                     if opt.is_some() {
                         log::info!("[Distributed] Re-registering tools due to configuration change.");
-                        Self::register_tools(device_name, &ws_tx, registry, status).await;
+                        Self::register_tools(device_name, &ws_tx, registry, status, session_id).await;
                         Self::emit_status_with_app(app, status).await;
                     }
                 }
 
                 // --- Periodic static placeholder push ---
                 _ = placeholder_interval.tick() => {
-                    acquire_wake_lock_helper(app);
                     Self::push_static_placeholders(app, device_name, &ws_tx, registry).await;
-                    release_wake_lock_helper(app);
                 }
 
                 // --- Cancellation signal ---
@@ -471,6 +483,7 @@ impl DistributedClient {
         ws_tx: &WsSink,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
+        session_id: u64,
     ) {
         let envelope: IncomingEnvelope = match serde_json::from_str(text) {
             Ok(e) => e,
@@ -494,16 +507,18 @@ impl DistributedClient {
                 // Update status
                 {
                     let mut s = status.write().await;
-                    s.state = ConnectionState::Connected;
-                    s.connected = true;
-                    s.server_id = Some(server_id.clone());
-                    s.client_id = Some(client_id.clone());
-                    s.last_error = None;
+                    if s.session_id == session_id {
+                        s.state = ConnectionState::Connected;
+                        s.connected = true;
+                        s.server_id = Some(server_id.clone());
+                        s.client_id = Some(client_id.clone());
+                        s.last_error = None;
+                    }
                 }
                 Self::emit_status_with_app(app, status).await;
 
                 // Register tools — mirrors registerTools()
-                Self::register_tools(device_name, ws_tx, registry, status).await;
+                Self::register_tools(device_name, ws_tx, registry, status, session_id).await;
                 Self::emit_status_with_app(app, status).await;
 
                 // Report IP — mirrors reportIPAddress()
@@ -528,12 +543,26 @@ impl DistributedClient {
                     request_id
                 );
 
-                // Execute and return result.
-                acquire_wake_lock_helper(app);
-                let response =
-                    Self::execute_tool(app, &request_id, &tool_name, tool_args, registry).await;
-                Self::send_message(ws_tx, &response).await;
-                release_wake_lock_helper(app);
+                // Execute and return result asynchronously to avoid blocking the main WS receiver loop.
+                let app_clone = app.clone();
+                let ws_tx_clone = ws_tx.clone();
+                let registry_clone = registry.clone();
+                let request_id_clone = request_id.clone();
+                let tool_name_clone = tool_name.clone();
+
+                tokio::spawn(async move {
+                    acquire_wake_lock_helper(&app_clone);
+                    let response = Self::execute_tool(
+                        &app_clone,
+                        &request_id_clone,
+                        &tool_name_clone,
+                        tool_args,
+                        &registry_clone,
+                    )
+                    .await;
+                    Self::send_message(&ws_tx_clone, &response).await;
+                    release_wake_lock_helper(&app_clone);
+                });
             }
 
             IncomingMessage::Unknown(msg_type) => {
@@ -553,6 +582,7 @@ impl DistributedClient {
         ws_tx: &WsSink,
         registry: &Arc<ToolRegistry>,
         status: &Arc<RwLock<DistributedStatus>>,
+        session_id: u64,
     ) {
         let tools = registry.get_all_manifests();
 
@@ -571,7 +601,9 @@ impl DistributedClient {
         // Update status with tool count
         {
             let mut s = status.write().await;
-            s.registered_tools = count;
+            if s.session_id == session_id {
+                s.registered_tools = count;
+            }
         }
 
         log::info!("[Distributed] Registered {} tools with main server.", count);
@@ -620,7 +652,7 @@ impl DistributedClient {
         log::info!("[Distributed] IP report sent.");
     }
 
-    /// Push static placeholder values.
+    /// Push static placeholder values asynchronously to avoid blocking.
     /// VCPChat ref: pushStaticPlaceholderValues() line 374-398
     async fn push_static_placeholders(
         app: &AppHandle,
@@ -628,17 +660,23 @@ impl DistributedClient {
         ws_tx: &WsSink,
         registry: &Arc<ToolRegistry>,
     ) {
-        let placeholders = registry.get_all_placeholder_values(app);
+        let app_clone = app.clone();
+        let device_name_clone = device_name.to_string();
+        let ws_tx_clone = ws_tx.clone();
+        let registry_clone = registry.clone();
 
-        if placeholders.is_empty() {
-            return;
-        }
-
-        let msg = OutgoingMessage::UpdateStaticPlaceholders {
-            server_name: device_name.to_string(),
-            placeholders,
-        };
-        Self::send_message(ws_tx, &msg).await;
+        tokio::spawn(async move {
+            acquire_wake_lock_helper(&app_clone);
+            let placeholders = registry_clone.get_all_placeholder_values(&app_clone);
+            if !placeholders.is_empty() {
+                let msg = OutgoingMessage::UpdateStaticPlaceholders {
+                    server_name: device_name_clone,
+                    placeholders,
+                };
+                Self::send_message(&ws_tx_clone, &msg).await;
+            }
+            release_wake_lock_helper(&app_clone);
+        });
     }
 
     /// Execute a tool and return the result message.

@@ -64,12 +64,14 @@ pub fn format_kb(kb: u64) -> String {
 
 /// Self-throttling cache for low-frequency sensors.
 /// Stores a cached value and only refreshes when the interval has elapsed.
+#[allow(dead_code)]
 pub struct ThrottledCache {
     interval: Duration,
     last_read: Mutex<Option<Instant>>,
     cached_value: Mutex<String>,
 }
 
+#[allow(dead_code)]
 impl ThrottledCache {
     pub fn new(interval_secs: u64) -> Self {
         Self {

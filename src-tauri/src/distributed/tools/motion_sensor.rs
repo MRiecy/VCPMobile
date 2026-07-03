@@ -29,38 +29,9 @@ impl StreamingTool for MotionSensorTool {
     }
 
     fn read_current(&self, app: &AppHandle) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            use tauri::Manager;
-            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
-            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard
-                .as_ref()
-                .ok_or("VcpMobile plugin not initialized")?;
-
-            #[derive(serde::Deserialize)]
-            struct SensorResponse {
-                value: String,
-            }
-
-            let res = plugin_handle
-                .run_mobile_plugin::<SensorResponse>(
-                    "getSensorData",
-                    serde_json::json!({ "type": "motion" }),
-                )
-                .map_err(|e| format!("JNI call failed: {}", e))?;
-            Ok(res.value)
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            let brief = "状态: 静止 (模拟)";
-            let detail = "状态: 静止 | 平均加速度: 9.80m/s² (峰值: 9.80m/s²) (模拟)";
-            let folded = format!(
-                "[===vcp_fold: 0.0 ::desc: 物理运动姿态粗略状态(静止、步行、步行中或剧烈移动)===]\n{}\n\n[===vcp_fold: 0.50 ::desc: 九轴高频遥测指标、旋转角速度、加速度峰值、三轴磁敏度物理强度===]\n{}",
-                brief, detail
-            );
-            Ok(folded)
-        }
+        use tauri::Manager;
+        let dist_state = app.state::<crate::distributed::DistributedState>();
+        let motion = dist_state.telemetry.get_motion_info(app);
+        Ok(motion)
     }
 }

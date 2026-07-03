@@ -12,7 +12,7 @@ mod gpu_info;
 mod memory_info;
 mod network_info;
 mod storage_info;
-mod sysfs_utils;
+pub mod sysfs_utils;
 
 mod ambient_sensor;
 mod device_status_summary;

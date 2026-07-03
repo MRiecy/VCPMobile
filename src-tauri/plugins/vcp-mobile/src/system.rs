@@ -906,6 +906,79 @@ pub fn run_root_command<R: Runtime>(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ClipboardReadResult {
+    pub content: String,
+}
+
+pub fn write_clipboard_native<R: Runtime>(app: AppHandle<R>, content: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        plugin_handle
+            .run_mobile_plugin::<()>(
+                "writeClipboard",
+                serde_json::json!({ "content": content }),
+            )
+            .map_err(|e| format!("JNI writeClipboard failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = content;
+    }
+    Ok(())
+}
+
+pub fn read_clipboard_native<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let res = plugin_handle
+            .run_mobile_plugin::<ClipboardReadResult>(
+                "readClipboard",
+                serde_json::json!({}),
+            )
+            .map_err(|e| format!("JNI readClipboard failed: {}", e))?;
+        Ok(res.content)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok("Desktop Clipboard Placeholder".to_string())
+    }
+}
+
+pub fn send_notification_native<R: Runtime>(
+    app: AppHandle<R>,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        plugin_handle
+            .run_mobile_plugin::<()>(
+                "sendLocalNotification",
+                serde_json::json!({ "title": title, "body": body }),
+            )
+            .map_err(|e| format!("JNI sendLocalNotification failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = title;
+        let _ = body;
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRootManagerResult {

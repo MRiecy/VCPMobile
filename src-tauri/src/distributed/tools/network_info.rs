@@ -27,53 +27,9 @@ impl StreamingTool for NetworkInfoTool {
     }
 
     fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            use tauri::Manager;
-            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
-            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard
-                .as_ref()
-                .ok_or("VcpMobile plugin not initialized")?;
-
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct NetworkResponse {
-                connected: bool,
-                r#type: String,
-                down_speed_kbps: i32,
-                up_speed_kbps: i32,
-                ip: String,
-            }
-
-            let res = plugin_handle
-                .run_mobile_plugin::<NetworkResponse>("getNetworkStatus", serde_json::json!({}))
-                .map_err(|e| format!("JNI call failed: {}", e))?;
-
-            if !res.connected {
-                return Ok("网络: 未连接".to_string());
-            }
-
-            // 对带宽速度做人性化换算
-            let format_speed = |kbps: i32| -> String {
-                if kbps >= 1000 {
-                    format!("{:.1}Mbps", kbps as f64 / 1000.0)
-                } else {
-                    format!("{}Kbps", kbps)
-                }
-            };
-            let down_str = format_speed(res.down_speed_kbps);
-            let up_str = format_speed(res.up_speed_kbps);
-
-            Ok(format!(
-                "类型: {} | IP: {} | 下行: {} | 上行: {}",
-                res.r#type, res.ip, down_str, up_str
-            ))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            Ok("网络: 未连接".to_string())
-        }
+        use tauri::Manager;
+        let dist_state = app.state::<crate::distributed::DistributedState>();
+        let network_info = dist_state.telemetry.get_network_info(app);
+        Ok(network_info)
     }
 }

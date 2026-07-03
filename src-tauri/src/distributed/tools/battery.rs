@@ -27,49 +27,9 @@ impl StreamingTool for BatteryInfoTool {
     }
 
     fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            use tauri::Manager;
-            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
-            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard
-                .as_ref()
-                .ok_or("VcpMobile plugin not initialized")?;
-
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct BatteryResponse {
-                level: i32,
-                is_power_save_mode: bool,
-                status: Option<String>,
-                temperature: Option<f64>,
-            }
-
-            let res = plugin_handle
-                .run_mobile_plugin::<BatteryResponse>("getBatteryStatus", serde_json::json!({}))
-                .map_err(|e| format!("JNI call failed: {}", e))?;
-
-            let status_str = res.status.unwrap_or_else(|| "未知".to_string());
-            let temp_str = match res.temperature {
-                Some(t) if t >= 0.0 => format!("{:.1}°C", t),
-                _ => "N/A".to_string(),
-            };
-
-            let pwr_save = if res.is_power_save_mode {
-                " (低功耗模式)"
-            } else {
-                ""
-            };
-
-            Ok(format!(
-                "电量: {}%{} | 状态: {} | 温度: {}",
-                res.level, pwr_save, status_str, temp_str
-            ))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            Ok("电池信息不可用".to_string())
-        }
+        use tauri::Manager;
+        let dist_state = app.state::<crate::distributed::DistributedState>();
+        let battery_info = dist_state.telemetry.get_battery_info(app);
+        Ok(battery_info)
     }
 }

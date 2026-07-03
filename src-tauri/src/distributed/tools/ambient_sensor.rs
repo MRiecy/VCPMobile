@@ -29,38 +29,9 @@ impl StreamingTool for AmbientSensorTool {
     }
 
     fn read_current(&self, app: &AppHandle) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            use tauri::Manager;
-            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
-            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard
-                .as_ref()
-                .ok_or("VcpMobile plugin not initialized")?;
-
-            #[derive(serde::Deserialize)]
-            struct SensorResponse {
-                value: String,
-            }
-
-            let res = plugin_handle
-                .run_mobile_plugin::<SensorResponse>(
-                    "getSensorData",
-                    serde_json::json!({ "type": "ambient" }),
-                )
-                .map_err(|e| format!("JNI call failed: {}", e))?;
-            Ok(res.value)
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            let brief = "环境光: 150 lux (室内) (模拟)";
-            let detail = "环境光: 150 lux (室内) | 气压: 1013 hPa (模拟)";
-            let folded = format!(
-                "[===vcp_fold: 0.0 ::desc: 当前所处的物理环境光照度大体描述(如暗、室内、户外)===]\n{}\n\n[===vcp_fold: 0.45 ::desc: 物理环境大气压强、精确光照度数值与场景气压监测===]\n{}",
-                brief, detail
-            );
-            Ok(folded)
-        }
+        use tauri::Manager;
+        let dist_state = app.state::<crate::distributed::DistributedState>();
+        let ambient = dist_state.telemetry.get_ambient_info(app);
+        Ok(ambient)
     }
 }

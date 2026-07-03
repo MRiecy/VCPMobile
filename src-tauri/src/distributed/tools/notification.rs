@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::distributed::tool_registry::OneShotTool;
 use crate::distributed::types::ToolManifest;
@@ -52,13 +52,8 @@ body:「始」通知内容「末」\n\
             .unwrap_or("")
             .to_string();
 
-        // Emit to Vue frontend to show the notification via system API.
-        // The frontend listens for "distributed-notification" and calls the native notification API.
-        app.emit(
-            "distributed-notification",
-            json!({ "title": title, "body": body }),
-        )
-        .map_err(|e| format!("Failed to emit notification event: {}", e))?;
+        tauri_plugin_vcp_mobile::system::send_notification_native(app.clone(), title.clone(), body)
+            .map_err(|e| format!("Native notification send failed: {}", e))?;
 
         Ok(json!({
             "status": "success",

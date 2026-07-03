@@ -655,6 +655,82 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun writeClipboard(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(WriteClipboardArgs::class.java)
+            activity.runOnUiThread {
+                try {
+                    val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clip = android.content.ClipData.newPlainText("VCP Distributed Copy", args.content)
+                    clipboard.setPrimaryClip(clip)
+                    invoke.resolve()
+                } catch (e: Exception) {
+                    invoke.reject(e.message ?: "Failed to write clipboard on UI thread")
+                }
+            }
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: "Failed to parse arguments")
+        }
+    }
+
+    @Command
+    fun readClipboard(invoke: Invoke) {
+        try {
+            activity.runOnUiThread {
+                try {
+                    val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    val clipData = clipboard.primaryClip
+                    val content = if (clipData != null && clipData.itemCount > 0) {
+                        clipData.getItemAt(0).text?.toString() ?: ""
+                    } else {
+                        ""
+                    }
+                    val result = JSObject().apply {
+                        put("content", content)
+                    }
+                    invoke.resolve(result)
+                } catch (e: Exception) {
+                    invoke.reject(e.message ?: "Failed to read clipboard on UI thread")
+                }
+            }
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: "Failed to execute readClipboard")
+        }
+    }
+
+    @Command
+    fun sendLocalNotification(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(SendLocalNotificationArgs::class.java)
+            val context = activity.applicationContext
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            
+            val channelId = "vcp_distributed_alert"
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                val channel = android.app.NotificationChannel(
+                    channelId,
+                    "VCP 分布式节点提醒",
+                    android.app.NotificationManager.IMPORTANCE_HIGH
+                )
+                notificationManager.createNotificationChannel(channel)
+            }
+
+            val notification = androidx.core.app.NotificationCompat.Builder(context, channelId)
+                .setContentTitle(args.title)
+                .setContentText(args.body)
+                .setSmallIcon(context.applicationInfo.icon)
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .build()
+
+            notificationManager.notify((System.currentTimeMillis() % 100000).toInt(), notification)
+            invoke.resolve()
+        } catch (e: Exception) {
+            invoke.reject(e.message ?: "Failed to send notification")
+        }
+    }
+
+    @Command
     fun runRootCommand(invoke: Invoke) {
         try {
             val args = invoke.parseArgs(RunRootCommandArgs::class.java)
@@ -2300,6 +2376,17 @@ class AcquireForegroundArgs {
 @InvokeArg
 class ReleaseForegroundArgs {
     lateinit var tag: String
+}
+
+@InvokeArg
+class WriteClipboardArgs {
+    lateinit var content: String
+}
+
+@InvokeArg
+class SendLocalNotificationArgs {
+    lateinit var title: String
+    lateinit var body: String
 }
 
 

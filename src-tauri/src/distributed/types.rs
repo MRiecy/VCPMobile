@@ -282,4 +282,5 @@ pub struct DistributedStatus {
     pub client_id: Option<String>,
     pub registered_tools: usize,
     pub last_error: Option<String>,
+    pub session_id: u64, // 新增：会话版本识别标识
 }

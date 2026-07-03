@@ -48,65 +48,9 @@ impl StreamingTool for GpuInfoTool {
     }
 
     fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            use tauri::Manager;
-            // 1. 静态获取 GPU 型号 (OpenGL ES glGetString)
-            let gpu_renderer = (|| -> Result<String, String> {
-                let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
-                let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-                let plugin_handle = handle_guard
-                    .as_ref()
-                    .ok_or("VcpMobile plugin not initialized")?;
-
-                #[derive(serde::Deserialize)]
-                struct GpuResponse {
-                    renderer: String,
-                }
-
-                let res = plugin_handle
-                    .run_mobile_plugin::<GpuResponse>("getGpuStatus", serde_json::json!({}))
-                    .map_err(|e| format!("JNI call failed: {}", e))?;
-
-                Ok(res.renderer)
-            })()
-            .unwrap_or_else(|_| "Unknown GPU".to_string());
-
-            // 2. 尝试利用 Root 提权获取实时 GPU 负载
-            // === Adreno gpubusy ===
-            if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(
-                app,
-                "cat /sys/class/kgsl/kgsl-3d0/gpubusy",
-            ) {
-                if let Some(load) = self.parse_adreno_gpubusy(&raw_busy) {
-                    return Ok(format!("GPU: {} | 使用率: {}%", gpu_renderer, load));
-                }
-            }
-
-            // === Mali utilization fallback (best effort root) ===
-            // Try common paths
-            let mali_paths = [
-                "cat /sys/devices/platform/14ac0000.mali/utilization",
-                "cat /sys/devices/platform/14ac0000.mali/mali/utilization",
-                "cat /sys/devices/platform/gpu/utilization",
-                "cat /sys/devices/platform/mali/utilization",
-            ];
-            for path in &mali_paths {
-                if let Some(raw_busy) = super::sysfs_utils::execute_root_command_safe(app, path) {
-                    let clean = raw_busy.trim().trim_end_matches('%');
-                    if let Ok(load) = clean.parse::<u64>() {
-                        return Ok(format!("GPU: {} | 使用率: {}%", gpu_renderer, load));
-                    }
-                }
-            }
-
-            // 3. 无 Root 权限，降级退回显示“受系统安全限制”
-            Ok(format!("GPU: {} | 实时负载: 受系统安全限制", gpu_renderer))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            Ok("GPU: 信息不可用".to_string())
-        }
+        use tauri::Manager;
+        let dist_state = app.state::<crate::distributed::DistributedState>();
+        let gpu_info = dist_state.telemetry.get_gpu_info(app);
+        Ok(gpu_info)
     }
 }

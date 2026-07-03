@@ -28,32 +28,9 @@ impl StreamingTool for LocationTool {
     }
 
     fn read_current(&self, app: &AppHandle) -> Result<String, String> {
-        #[cfg(target_os = "android")]
-        {
-            use tauri::Manager;
-            let state = app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>();
-            let handle_guard = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle_guard
-                .as_ref()
-                .ok_or("VcpMobile plugin not initialized")?;
-
-            #[derive(serde::Deserialize)]
-            struct SensorResponse {
-                value: String,
-            }
-
-            let res = plugin_handle
-                .run_mobile_plugin::<SensorResponse>(
-                    "getSensorData",
-                    serde_json::json!({ "type": "location" }),
-                )
-                .map_err(|e| format!("JNI call failed: {}", e))?;
-            Ok(res.value)
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            Ok("坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m (模拟)".to_string())
-        }
+        use tauri::Manager;
+        let dist_state = app.state::<crate::distributed::DistributedState>();
+        let loc = dist_state.telemetry.get_location_info(app);
+        Ok(loc)
     }
 }

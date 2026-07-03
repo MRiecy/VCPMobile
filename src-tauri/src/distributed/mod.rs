@@ -4,6 +4,7 @@
 // To remove: delete this directory + 3 references in lib.rs → cargo check passes.
 
 pub mod client;
+pub mod telemetry_center;
 pub mod tool_registry;
 pub mod tools;
 pub mod types;
@@ -18,6 +19,7 @@ use tokio::sync::RwLock;
 pub struct DistributedState {
     pub client: RwLock<DistributedClient>,
     pub registry: Arc<tool_registry::ToolRegistry>,
+    pub telemetry: Arc<telemetry_center::TelemetryCenter>,
 }
 
 impl DistributedState {
@@ -26,6 +28,7 @@ impl DistributedState {
         Self {
             client: RwLock::new(DistributedClient::new()),
             registry,
+            telemetry: Arc::new(telemetry_center::TelemetryCenter::new()),
         }
     }
 }

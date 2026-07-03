@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::distributed::tool_registry::OneShotTool;
 use crate::distributed::types::ToolManifest;
@@ -54,9 +54,8 @@ content:「始」需要写入的内容「末」\n\
                     .unwrap_or("")
                     .to_string();
 
-                // Emit to frontend — Vue will call navigator.clipboard.writeText()
-                app.emit("distributed-clipboard-write", json!({ "content": content }))
-                    .map_err(|e| format!("Failed to emit clipboard write: {}", e))?;
+                tauri_plugin_vcp_mobile::system::write_clipboard_native(app.clone(), content)
+                    .map_err(|e| format!("Native clipboard write failed: {}", e))?;
 
                 Ok(json!({
                     "status": "success",
@@ -64,15 +63,12 @@ content:「始」需要写入的内容「末」\n\
                 }))
             }
             "read" => {
-                // Reading clipboard requires frontend round-trip (navigator.clipboard.readText()).
-                // For Phase 2, we emit a request and return a placeholder.
-                // Full Interactive round-trip will be refined in Phase 3.
-                app.emit("distributed-clipboard-read", json!({}))
-                    .map_err(|e| format!("Failed to emit clipboard read: {}", e))?;
+                let content = tauri_plugin_vcp_mobile::system::read_clipboard_native(app.clone())
+                    .map_err(|e| format!("Native clipboard read failed: {}", e))?;
 
                 Ok(json!({
                     "status": "success",
-                    "message": "Clipboard read request sent to device. Content will be available in the next interaction."
+                    "content": content
                 }))
             }
             _ => Err(format!("Unknown clipboard action: '{}'", action)),
