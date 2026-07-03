@@ -387,8 +387,10 @@ class SseProxyService : Service() {
                                   val choices = dataVal.optJSONArray("choices")
                                 if (choices != null && choices.length() > 0) {
                                     val delta = choices.getJSONObject(0).optJSONObject("delta")
-                                    val content = delta?.optString("content", "") ?: ""
-                                    fullText.append(content)
+                                    val contentObj = delta?.opt("content")
+                                    if (contentObj != null && contentObj !== JSONObject.NULL) {
+                                        fullText.append(contentObj.toString())
+                                    }
                                 }
                             } catch (ignored: Exception) {}
                         }
@@ -494,8 +496,10 @@ class SseProxyService : Service() {
                                 val choices = dataVal.optJSONArray("choices")
                                 if (choices != null && choices.length() > 0) {
                                     val delta = choices.getJSONObject(0).optJSONObject("delta")
-                                    val content = delta?.optString("content", "") ?: ""
-                                    fullText.append(content)
+                                    val contentObj = delta?.opt("content")
+                                    if (contentObj != null && contentObj !== JSONObject.NULL) {
+                                        fullText.append(contentObj.toString())
+                                    }
                                 }
                             } catch (ignored: Exception) {}
                         }
@@ -863,8 +867,10 @@ class SseProxyService : Service() {
                                 val choices = dataVal.optJSONArray("choices")
                                 if (choices != null && choices.length() > 0) {
                                     val delta = choices.getJSONObject(0).optJSONObject("delta")
-                                    val content = delta?.optString("content", "") ?: ""
-                                    fullText.append(content)
+                                    val contentObj = delta?.opt("content")
+                                    if (contentObj != null && contentObj !== JSONObject.NULL) {
+                                        fullText.append(contentObj.toString())
+                                    }
                                 }
                             } catch (ignored: Exception) {}
                         }
