@@ -44,9 +44,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
-        run: sdkmanager "ndk;29.0.13846066"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,9 +70,6 @@ jobs:
       - name: Rust Integration Tests
         working-directory: ./src-tauri
         run: cargo test --test file_extractor_integration
-
-      - name: Initialize Android Project
-        run: pnpm tauri android init --ci
 
       - name: Android Plugin Unit Tests
         working-directory: ./src-tauri/gen/android
