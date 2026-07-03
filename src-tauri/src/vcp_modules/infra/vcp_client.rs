@@ -13,6 +13,8 @@ use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
 use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, LinesCodec};
+#[cfg(target_os = "android")]
+use tokio_util::codec::LengthDelimitedCodec;
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -719,9 +721,15 @@ async fn send_command_to_stream(
     }
 
     use tokio::io::AsyncWriteExt;
-    let cmd_line = cmd.to_string() + "\n";
+    let cmd_str = cmd.to_string();
+    let cmd_bytes = cmd_str.as_bytes();
+    let len = cmd_bytes.len() as u32;
     stream
-        .write_all(cmd_line.as_bytes())
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| format!("Write command length error: {}", e))?;
+    stream
+        .write_all(cmd_bytes)
         .await
         .map_err(|e| format!("Write command error: {}", e))?;
     stream
@@ -744,9 +752,15 @@ async fn send_stop_to_helper<R: Runtime>(app: &AppHandle<R>, msg_id: &str) -> Re
     });
 
     use tokio::io::AsyncWriteExt;
-    let cmd_line = cmd.to_string() + "\n";
+    let cmd_str = cmd.to_string();
+    let cmd_bytes = cmd_str.as_bytes();
+    let len = cmd_bytes.len() as u32;
     stream
-        .write_all(cmd_line.as_bytes())
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(cmd_bytes)
         .await
         .map_err(|e| e.to_string())?;
     stream.flush().await.map_err(|e| e.to_string())?;
@@ -884,7 +898,7 @@ async fn handle_streaming_request<R: Runtime>(
     };
 
     #[cfg(target_os = "android")]
-    let mut tcp_reader: Option<FramedRead<tokio::net::TcpStream, LinesCodec>> = None;
+    let mut tcp_reader: Option<FramedRead<tokio::net::TcpStream, LengthDelimitedCodec>> = None;
 
     #[cfg(not(target_os = "android"))]
     let mut lines: Option<BoxedLineStream> = None;
@@ -934,7 +948,7 @@ async fn handle_streaming_request<R: Runtime>(
 
                     match connect_to_helper(_app, "start", &message_id_inner, Some(params)).await {
                         Ok(stream) => {
-                            tcp_reader = Some(FramedRead::new(stream, LinesCodec::new()));
+                            tcp_reader = Some(FramedRead::new(stream, LengthDelimitedCodec::new()));
                             state = State::Streaming;
                         }
                         Err(e) => {
@@ -1027,7 +1041,7 @@ async fn handle_streaming_request<R: Runtime>(
                     match connect_to_helper(_app, "resume", &message_id_inner, Some(params)).await {
                         Ok(stream) => {
                             log::info!("[VCPClient] Successfully reconnected to sse helper socket");
-                            tcp_reader = Some(FramedRead::new(stream, LinesCodec::new()));
+                            tcp_reader = Some(FramedRead::new(stream, LengthDelimitedCodec::new()));
                             retry_count = 0;
                             backoff = Duration::from_millis(500);
                             state = State::Streaming;
@@ -1064,7 +1078,7 @@ async fn handle_streaming_request<R: Runtime>(
                                 next_line = reader.next() => {
                                     match next_line {
                                         Some(Ok(line)) => {
-                                            if let Ok(event) = serde_json::from_str::<Value>(&line) {
+                                            if let Ok(event) = serde_json::from_slice::<Value>(&line) {
                                                 let event_type = event["eventType"].as_str().unwrap_or("");
                                                 let event_data = event["eventData"].as_str().unwrap_or("");
 
@@ -1760,9 +1774,10 @@ pub async fn recover_active_generation<R: Runtime>(
     });
 
     // 2. 检查是否存在 5 分钟超时后由助手转存的本地 JSON 恢复文件 (24小时内认领有效)
+    let safe_msg_id = crate::vcp_modules::infra::utils::calculate_sha256(msg_id.as_bytes());
     let recovered_file = cache_dir
         .join("sse_cache")
-        .join(format!("sse_recovered_{}.json", msg_id));
+        .join(format!("sse_recovered_{}.json", safe_msg_id));
     if recovered_file.exists() {
         log::info!(
             "[VCPClient] Found local sse_recovered JSON file for msg_id: {}. Recovering from disk.",
@@ -1853,17 +1868,23 @@ pub async fn recover_active_generation<R: Runtime>(
             });
 
             use tokio::io::AsyncWriteExt;
-            let cmd_line = cmd.to_string() + "\n";
+            let cmd_str = cmd.to_string();
+            let cmd_bytes = cmd_str.as_bytes();
+            let len = cmd_bytes.len() as u32;
             stream
-                .write_all(cmd_line.as_bytes())
+                .write_all(&len.to_be_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
+            stream
+                .write_all(cmd_bytes)
                 .await
                 .map_err(|e| e.to_string())?;
             stream.flush().await.map_err(|e| e.to_string())?;
 
-            log::info!("[VCPClient] Query command sent, waiting for response line...");
-            let mut reader = FramedRead::new(stream, LinesCodec::new());
+            log::info!("[VCPClient] Query command sent, waiting for response frame...");
+            let mut reader = FramedRead::new(stream, LengthDelimitedCodec::new());
             if let Some(Ok(line)) = reader.next().await {
-                let resp = serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())?;
+                let resp = serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())?;
                 return Ok::<Value, String>(resp);
             }
             Err("No query response received (EOF)".to_string())

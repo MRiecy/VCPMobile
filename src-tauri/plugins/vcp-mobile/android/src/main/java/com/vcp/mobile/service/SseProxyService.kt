@@ -69,7 +69,7 @@ class SseProxyService : Service() {
         val eventBuffer: MutableList<JSONObject> = mutableListOf(),
         var isCompleted: Boolean = false,
         var lastFinishReason: String? = null,
-        var activeSocketWriter: BufferedWriter? = null
+        var activeSocketOutputStream: java.io.OutputStream? = null
     )
 
     private val httpClient: OkHttpClient by lazy {
@@ -187,15 +187,13 @@ class SseProxyService : Service() {
      */
     private fun handleClientSocket(socket: Socket) {
         serviceScope.launch(Dispatchers.IO) {
-            var reader: BufferedReader? = null
-            var writer: BufferedWriter? = null
             var boundRequestId: String? = null
             try {
-                reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-                writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+                val inputStream = socket.getInputStream()
+                val outputStream = socket.getOutputStream()
                 
-                val requestLine = reader.readLine() ?: return@launch
-                val request = JSONObject(requestLine)
+                val commandJson = readLengthPrefixed(inputStream) ?: return@launch
+                val request = JSONObject(commandJson)
                 val action = request.getString("action")
                 val requestId = request.getString("requestId")
                 boundRequestId = requestId
@@ -207,16 +205,16 @@ class SseProxyService : Service() {
                         val url = request.getString("url")
                         val headersJson = request.optString("headers", "{}")
                         val body = request.optString("body", "")
-                        handleStartStream(requestId, url, headersJson, body, writer)
-                        readSocketUntilClose(socket, reader, requestId)
+                        handleStartStream(requestId, url, headersJson, body, outputStream)
+                        readSocketUntilClose(socket, inputStream, requestId)
                     }
                     "resume" -> {
                         val startIndex = request.optInt("startIndex", 0)
-                        handleResumeStream(requestId, startIndex, writer)
-                        readSocketUntilClose(socket, reader, requestId)
+                        handleResumeStream(requestId, startIndex, outputStream)
+                        readSocketUntilClose(socket, inputStream, requestId)
                     }
                     "query" -> {
-                        handleQueryStream(requestId, writer)
+                        handleQueryStream(requestId, outputStream)
                         socket.close()
                     }
                     "stop" -> {
@@ -231,10 +229,10 @@ class SseProxyService : Service() {
         }
     }
 
-    private fun readSocketUntilClose(socket: Socket, reader: BufferedReader, requestId: String) {
+    private fun readSocketUntilClose(socket: Socket, inputStream: java.io.InputStream, requestId: String) {
         try {
-            val buf = CharArray(1024)
-            while (reader.read(buf) != -1) {
+            val buf = ByteArray(1024)
+            while (inputStream.read(buf) != -1) {
                 // 仅维持连接读取，阻塞直到客户端断开连接
             }
         } catch (ignored: Exception) {
@@ -243,9 +241,9 @@ class SseProxyService : Service() {
             val session = activeSessions[requestId]
             if (session != null) {
                 synchronized(session) {
-                    if (session.activeSocketWriter != null) {
-                        try { session.activeSocketWriter?.close() } catch (ignored: Exception) {}
-                        session.activeSocketWriter = null
+                    if (session.activeSocketOutputStream != null) {
+                        try { session.activeSocketOutputStream?.close() } catch (ignored: Exception) {}
+                        session.activeSocketOutputStream = null
                     }
                 }
                 cleanupSessionIfCompletedAndDisconnected(session)
@@ -260,66 +258,73 @@ class SseProxyService : Service() {
         url: String,
         headersJson: String,
         body: String,
-        writer: BufferedWriter
+        outputStream: java.io.OutputStream
     ) {
-        val session = StreamSession(requestId, activeSocketWriter = writer)
+        val session = StreamSession(requestId, activeSocketOutputStream = outputStream)
         activeSessions[requestId] = session
         
-        val requestBuilder = Request.Builder().url(url)
         try {
-            val headersObj = JSONObject(headersJson)
-            val keys = headersObj.keys()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                requestBuilder.header(key, headersObj.getString(key))
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse headers", e)
-        }
-        
-        if (body.isNotEmpty()) {
-            val mediaType = "application/json; charset=utf-8".toMediaType()
-            requestBuilder.post(body.toRequestBody(mediaType))
-        }
-        
-        val listener = object : EventSourceListener() {
-            override fun onOpen(eventSource: EventSource, response: Response) {
-                Log.i(TAG, "SSE Connected: id=$requestId")
-                sendEventToSession(session, "open", "")
-            }
-            
-            override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
-                sendEventToSession(session, "message", data)
-            }
-            
-            override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
-                val errorMsg = t?.message ?: response?.message ?: "Unknown network error"
-                Log.w(TAG, "SSE Failed: id=$requestId, error=$errorMsg")
-                val errObj = JSONObject().apply {
-                    put("error", errorMsg)
-                    put("status", response?.code ?: 0)
+            val requestBuilder = Request.Builder().url(url)
+            try {
+                val headersObj = JSONObject(headersJson)
+                val keys = headersObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    requestBuilder.header(key, headersObj.getString(key))
                 }
-                session.isCompleted = true
-                session.lastFinishReason = "error"
-                sendEventToSession(session, "error", errObj.toString())
-                cleanupSessionIfCompletedAndDisconnected(session)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse headers", e)
             }
             
-            override fun onClosed(eventSource: EventSource) {
-                Log.i(TAG, "SSE Closed: id=$requestId")
-                session.isCompleted = true
-                session.lastFinishReason = "completed"
-                sendEventToSession(session, "closed", "")
-                cleanupSessionIfCompletedAndDisconnected(session)
+            if (body.isNotEmpty()) {
+                val mediaType = "application/json; charset=utf-8".toMediaType()
+                requestBuilder.post(body.toRequestBody(mediaType))
             }
+            
+            val listener = object : EventSourceListener() {
+                override fun onOpen(eventSource: EventSource, response: Response) {
+                    Log.i(TAG, "SSE Connected: id=$requestId")
+                    sendEventToSession(session, "open", "")
+                }
+                
+                override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) {
+                    sendEventToSession(session, "message", data)
+                }
+                
+                override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                    val errorMsg = t?.message ?: response?.message ?: "Unknown network error"
+                    Log.w(TAG, "SSE Failed: id=$requestId, error=$errorMsg")
+                    val errObj = JSONObject().apply {
+                        put("error", errorMsg)
+                        put("status", response?.code ?: 0)
+                    }
+                    session.isCompleted = true
+                    session.lastFinishReason = "error"
+                    sendEventToSession(session, "error", errObj.toString())
+                    cleanupSessionIfCompletedAndDisconnected(session)
+                }
+                
+                override fun onClosed(eventSource: EventSource) {
+                    Log.i(TAG, "SSE Closed: id=$requestId")
+                    session.isCompleted = true
+                    session.lastFinishReason = "completed"
+                    sendEventToSession(session, "closed", "")
+                    cleanupSessionIfCompletedAndDisconnected(session)
+                }
+            }
+            
+            val source = EventSources.createFactory(httpClient).newEventSource(requestBuilder.build(), listener)
+            session.eventSource = source
+            updateLocks()
+        } catch (e: Exception) {
+            activeSessions.remove(requestId)
+            Log.e(TAG, "Failed to start stream source for $requestId", e)
+            updateLocks()
+            throw e
         }
-        
-        val source = EventSources.createFactory(httpClient).newEventSource(requestBuilder.build(), listener)
-        session.eventSource = source
-        updateLocks()
     }
 
-    private fun handleResumeStream(requestId: String, startIndex: Int, writer: BufferedWriter) {
+    private fun handleResumeStream(requestId: String, startIndex: Int, outputStream: java.io.OutputStream) {
         val session = activeSessions[requestId]
         if (session == null) {
             Log.w(TAG, "resume: Session not found for id=$requestId")
@@ -328,36 +333,32 @@ class SseProxyService : Service() {
                 put("eventType", "error")
                 put("eventData", JSONObject().apply { put("error", "Session not found") }.toString())
             }
-            writer.write(errEvent.toString() + "\n")
-            writer.flush()
+            try {
+                writeLengthPrefixed(outputStream, errEvent.toString())
+            } catch (ignored: Exception) {}
             return
         }
         
         Log.i(TAG, "Resuming session id=$requestId, playing back events from $startIndex.")
         
         synchronized(session) {
-            session.activeSocketWriter = writer
+            session.activeSocketOutputStream = outputStream
             val bufferSize = session.eventBuffer.size
             for (i in startIndex until bufferSize) {
                 try {
                     val event = session.eventBuffer[i]
-                    writer.write(event.toString() + "\n")
+                    writeLengthPrefixed(outputStream, event.toString())
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed playing back events to socket", e)
-                    session.activeSocketWriter = null
+                    session.activeSocketOutputStream = null
                     return
                 }
-            }
-            try {
-                writer.flush()
-            } catch (e: Exception) {
-                session.activeSocketWriter = null
             }
         }
         updateLocks()
     }
 
-    private fun handleQueryStream(requestId: String, writer: BufferedWriter) {
+    private fun handleQueryStream(requestId: String, outputStream: java.io.OutputStream) {
         val session = activeSessions[requestId]
         val resp = JSONObject()
         resp.put("requestId", requestId)
@@ -378,7 +379,7 @@ class SseProxyService : Service() {
                         if (eventData != "[DONE]") {
                             try {
                                 val dataVal = JSONObject(eventData)
-                                val choices = dataVal.optJSONArray("choices")
+                                  val choices = dataVal.optJSONArray("choices")
                                 if (choices != null && choices.length() > 0) {
                                     val delta = choices.getJSONObject(0).optJSONObject("delta")
                                     val content = delta?.optString("content", "") ?: ""
@@ -393,8 +394,7 @@ class SseProxyService : Service() {
         }
         
         try {
-            writer.write(resp.toString() + "\n")
-            writer.flush()
+            writeLengthPrefixed(outputStream, resp.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write query response", e)
         }
@@ -406,9 +406,9 @@ class SseProxyService : Service() {
         if (session != null) {
             synchronized(session) {
                 session.eventSource?.cancel()
-                if (session.activeSocketWriter != null) {
-                    try { session.activeSocketWriter?.close() } catch (ignored: Exception) {}
-                    session.activeSocketWriter = null
+                if (session.activeSocketOutputStream != null) {
+                    try { session.activeSocketOutputStream?.close() } catch (ignored: Exception) {}
+                    session.activeSocketOutputStream = null
                 }
             }
         }
@@ -426,13 +426,12 @@ class SseProxyService : Service() {
         synchronized(session) {
             session.eventBuffer.add(eventObj)
             
-            session.activeSocketWriter?.let { writer ->
+            session.activeSocketOutputStream?.let { out ->
                 try {
-                    writer.write(eventObj.toString() + "\n")
-                    writer.flush()
+                    writeLengthPrefixed(out, eventObj.toString())
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to write event to socket, client might be suspended. id=${session.requestId}")
-                    session.activeSocketWriter = null
+                    session.activeSocketOutputStream = null
                 }
             }
         }
@@ -441,7 +440,7 @@ class SseProxyService : Service() {
     private fun cleanupSessionIfCompletedAndDisconnected(session: StreamSession) {
         synchronized(session) {
             if (session.isCompleted) {
-                if (session.activeSocketWriter == null) {
+                if (session.activeSocketOutputStream == null) {
                     // 主进程已断开：立即将数据转储到磁盘缓存，确保在释放 WakeLock / 进程休眠前数据已落盘！
                     Log.i(TAG, "Session id=${session.requestId} completed while disconnected. Dumping to disk immediately.")
                     dumpSessionToFile(session)
@@ -451,7 +450,7 @@ class SseProxyService : Service() {
                     serviceScope.launch(Dispatchers.IO) {
                         kotlinx.coroutines.delay(5 * 60 * 1000L)
                         synchronized(session) {
-                            if (activeSessions[session.requestId] === session && session.activeSocketWriter == null) {
+                            if (activeSessions[session.requestId] === session && session.activeSocketOutputStream == null) {
                                 Log.i(TAG, "Session id=${session.requestId} 5-min timeout. Removing from memory.")
                                 activeSessions.remove(session.requestId)
                                 updateLocks()
@@ -473,7 +472,8 @@ class SseProxyService : Service() {
             if (!cacheDir.exists()) {
                 cacheDir.mkdirs()
             }
-            val file = File(cacheDir, "sse_recovered_${session.requestId}.json")
+            val safeId = sha256(session.requestId)
+            val file = File(cacheDir, "sse_recovered_$safeId.json")
             
             val fullText = StringBuilder()
             for (event in session.eventBuffer) {
@@ -651,6 +651,7 @@ class SseProxyService : Service() {
         return builder.build()
     }
 
+    @Synchronized
     private fun ensureSilentAudioFile(): File {
         val file = File(cacheDir, "silent.wav")
         if (file.exists() && file.length() > 0) {
@@ -725,5 +726,46 @@ class SseProxyService : Service() {
         }
         mediaPlayer = null
         Log.i(TAG, "Silent playback stopped.")
+    }
+
+    private fun sha256(input: String): String {
+        return try {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val hash = digest.digest(input.toByteArray(Charsets.UTF_8))
+            hash.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            input.hashCode().toString()
+        }
+    }
+
+    private fun writeLengthPrefixed(out: java.io.OutputStream, json: String) {
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        val buffer = java.nio.ByteBuffer.allocate(4 + bytes.size)
+        buffer.putInt(bytes.size)
+        buffer.put(bytes)
+        out.write(buffer.array())
+        out.flush()
+    }
+
+    private fun readLengthPrefixed(inputStream: java.io.InputStream): String? {
+        val lengthBuffer = ByteArray(4)
+        var bytesRead = 0
+        while (bytesRead < 4) {
+            val read = inputStream.read(lengthBuffer, bytesRead, 4 - bytesRead)
+            if (read == -1) return null
+            bytesRead += read
+        }
+        val length = java.nio.ByteBuffer.wrap(lengthBuffer).int
+        if (length <= 0 || length > 10 * 1024 * 1024) { // Limit to 10MB to prevent OOM
+            return null
+        }
+        val dataBuffer = ByteArray(length)
+        var dataBytesRead = 0
+        while (dataBytesRead < length) {
+            val read = inputStream.read(dataBuffer, dataBytesRead, length - dataBytesRead)
+            if (read == -1) return null
+            dataBytesRead += read
+        }
+        return String(dataBuffer, Charsets.UTF_8)
     }
 }
