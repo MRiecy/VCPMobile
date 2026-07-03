@@ -131,6 +131,22 @@ fn parse_log_url(url: &str, key: &str) -> Result<Url, String> {
     Url::parse(&url_with_key).map_err(|e| format!("Invalid URL: {}", e))
 }
 
+fn append_device_name(url: &Url, device_name: &str) -> Url {
+    let mut new_url = url.clone();
+    let query = new_url.query();
+
+    let has_device_name = query.map_or(false, |q| q.contains("deviceName="));
+    if !has_device_name {
+        let encoded_device_name = urlencoding::encode(device_name);
+        let new_query = match query {
+            Some(q) if !q.is_empty() => format!("{}&deviceName={}", q, encoded_device_name),
+            _ => format!("deviceName={}", encoded_device_name),
+        };
+        new_url.set_query(Some(&new_query));
+    }
+    new_url
+}
+
 #[tauri::command]
 pub async fn init_vcp_log_connection(
     app: AppHandle,
@@ -218,271 +234,278 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }),
         );
 
-        let mut request = match ws_url.as_str().into_client_request() {
-            Ok(req) => req,
-            Err(e) => {
-                {
-                    *CURRENT_LOG_STATUS.write().await = "error".to_string();
-                }
-                log::error!(
-                    "[VCPLog] Failed to build request: {}. Retrying in 5 seconds...",
-                    e
-                );
-                emit_log_event(
-                    &app_handle,
-                    serde_json::json!({
-                        "type": "vcp-log-status",
-                        "status": "error",
-                        "message": "连接错误",
-                        "source": "VCPLog"
-                    }),
-                );
+        let new_url = append_device_name(&ws_url, "VCPChat-Mobile");
+        let old_url = ws_url.clone();
 
-                // 错误卡片 1：请求构建失败 (例如 URL 格式错误)
-                emit_log_event(
-                    &app_handle,
-                    serde_json::json!({
-                        "type": "vcp-log-message",
-                        "data": {
-                            "id": "vcp_log_connection_status",
-                            "status": "error",
-                            "tool_name": "VCPLog 请求异常",
-                            "content": format!("❌ 无法构造请求: {}\n\n提示：请检查配置的 URL 格式是否正确。", e),
-                            "source": "VCPLog"
-                        }
-                    }),
-                );
-
-                tokio::select! {
-                    _ = url_rx.changed() => {},
-                    _ = sleep(retry_delay) => {},
-                }
-                retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-                continue;
-            }
+        let urls_to_try = if new_url == old_url {
+            vec![new_url]
+        } else {
+            vec![new_url, old_url]
         };
 
-        if let Some(host) = ws_url.host_str() {
-            let host_with_port = if let Some(port) = ws_url.port() {
-                format!("{}:{}", host, port)
+        let mut connection_succeeded = false;
+        let mut ws_stream_opt = None;
+        let mut final_ws_url = ws_url.clone();
+        let mut connection_error = None;
+
+        for (i, trial_url) in urls_to_try.iter().enumerate() {
+            let trial_masked_url = if trial_url.as_str().contains("VCP_Key=") {
+                let parts: Vec<&str> = trial_url.as_str().split("VCP_Key=").collect();
+                format!("{}VCP_Key=********", parts[0])
             } else {
-                host.to_string()
+                trial_url.to_string()
             };
-            if let Ok(val) = host_with_port.parse() {
-                request.headers_mut().insert("Host", val);
+
+            log::info!(
+                "[VCPLog] Attempting connection trial {}/{}: {}...",
+                i + 1,
+                urls_to_try.len(),
+                trial_masked_url
+            );
+
+            let mut request = match trial_url.as_str().into_client_request() {
+                Ok(req) => req,
+                Err(e) => {
+                    log::error!(
+                        "[VCPLog] Failed to build request for trial {} ({}): {}",
+                        i + 1,
+                        trial_masked_url,
+                        e
+                    );
+                    connection_error = Some(format!("Request construction error: {}", e));
+                    continue;
+                }
+            };
+
+            if let Some(host) = trial_url.host_str() {
+                let host_with_port = if let Some(port) = trial_url.port() {
+                    format!("{}:{}", host, port)
+                } else {
+                    host.to_string()
+                };
+                if let Ok(val) = host_with_port.parse() {
+                    request.headers_mut().insert("Host", val);
+                }
+
+                let origin_scheme = match trial_url.scheme() {
+                    "wss" => "https",
+                    _ => "http",
+                };
+                let origin = if let Some(port) = trial_url.port() {
+                    format!("{}://{}:{}", origin_scheme, host, port)
+                } else {
+                    format!("{}://{}", origin_scheme, host)
+                };
+                if let Ok(val) = origin.parse() {
+                    request.headers_mut().insert("Origin", val);
+                }
             }
 
-            let origin_scheme = match ws_url.scheme() {
-                "wss" => "https",
-                _ => "http",
-            };
-            let origin = if let Some(port) = ws_url.port() {
-                format!("{}://{}:{}", origin_scheme, host, port)
-            } else {
-                format!("{}://{}", origin_scheme, host)
-            };
-            if let Ok(val) = origin.parse() {
-                request.headers_mut().insert("Origin", val);
+            request.headers_mut().insert(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".parse().unwrap()
+            );
+
+            match tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await {
+                Ok(connection_result) => match connection_result {
+                    Ok((ws_stream, _)) => {
+                        ws_stream_opt = Some(ws_stream);
+                        final_ws_url = trial_url.clone();
+                        connection_succeeded = true;
+                        break;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[VCPLog] Connection failed for trial {} ({}): {}",
+                            i + 1,
+                            trial_masked_url,
+                            e
+                        );
+                        connection_error = Some(e.to_string());
+                    }
+                },
+                Err(_) => {
+                    log::warn!(
+                        "[VCPLog] Connection timed out (5s) for trial {} ({})",
+                        i + 1,
+                        trial_masked_url
+                    );
+                    connection_error = Some("Connection timed out (5s)".to_string());
+                }
             }
         }
 
-        request.headers_mut().insert(
-            "User-Agent",
-            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".parse().unwrap()
-        );
-
-        match tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await {
-            Ok(connection_result) => match connection_result {
-                Ok((ws_stream, _)) => {
-                    retry_delay = Duration::from_millis(1000);
-                    {
-                        *CURRENT_LOG_STATUS.write().await = "connected".to_string();
-                    }
-                    log::info!("[VCPLog] Connected successfully to {}", masked_url);
-
-                    let (mut ws_write, mut ws_read) = ws_stream.split();
-
-                    emit_log_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-log-status",
-                            "status": "connected",
-                            "message": "已连接",
-                            "source": "VCPLog"
-                        }),
-                    );
-
-                    // 额外发送一条连接成功的通知卡片
-                    emit_log_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-log-message",
-                            "data": {
-                                "id": "vcp_log_connection_status",
-                                "status": "success",
-                                "tool_name": "VCPLog",
-                                "content": "✅ VCPLog 连接成功！已建立实时数据通道。",
-                                "source": "VCPLog"
-                            }
-                        }),
-                    );
-
-                    let (reset_tx, mut reset_rx) = mpsc::channel::<()>(8);
-                    {
-                        let mut tx_lock = HEARTBEAT_RESET_TX.lock().await;
-                        *tx_lock = Some(reset_tx);
-                    }
-
-                    let initial_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
-                    let mut heartbeat_timer = Box::pin(sleep(Duration::from_millis(initial_ms)));
-
-                    loop {
-                        tokio::select! {
-                            // 监听 URL 变更
-                            _ = url_rx.changed() => {
-                                log::info!("[VCPLog] URL changed, closing current connection.");
-                                break;
-                            }
-                            // 监听心跳重置信号
-                            Some(_) = reset_rx.recv() => {
-                                let current_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
-                                log::info!("[VCPLog] Heartbeat interval updated to {}ms, resetting timer.", current_ms);
-                                heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_ms));
-                            }
-                            // 心跳周期触发
-                            _ = &mut heartbeat_timer => {
-                                if let Err(e) = ws_write.send(Message::Ping(vec![].into())).await {
-                                    log::error!("[VCPLog] Failed to send Ping: {}", e);
-                                    break;
-                                }
-                                let current_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
-                                heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_ms));
-                            }
-                            // 处理接收到的消息
-                            msg_result = ws_read.next() => {
-                                match msg_result {
-                                    Some(Ok(msg)) => {
-                                        if msg.is_text() {
-                                            let text = msg.to_text().unwrap_or_default();
-                                            match serde_json::from_str::<Value>(text) {
-                                                Ok(payload) => {
-                                                    emit_log_event(&app_handle, payload);
-                                                }
-                                                Err(_) => {
-                                                    emit_log_event(&app_handle, serde_json::json!({
-                                                        "type": "raw_text",
-                                                        "data": text
-                                                    }));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Some(Err(e)) => {
-                                        log::error!("[VCPLog] WebSocket error during read: {}", e);
-                                        break;
-                                    }
-                                    None => {
-                                        log::warn!("[VCPLog] Connection closed by server.");
-                                        break;
-                                    }
-                                }
-                            }
-                            // 处理待发送的消息
-                            payload_opt = rx.recv() => {
-                                if let Some(payload) = payload_opt {
-                                    if let Ok(text) = serde_json::to_string(&payload) {
-                                        if let Err(e) = ws_write.send(Message::Text(text.into())).await {
-                                            log::error!("[VCPLog] Failed to send message: {}", e);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    {
-                        let mut tx_lock = HEARTBEAT_RESET_TX.lock().await;
-                        *tx_lock = None;
-                    }
-
-                    log::info!("[VCPLog] Disconnected from {}.", ws_url);
-                    {
-                        *CURRENT_LOG_STATUS.write().await = "closed".to_string();
-                    }
-                    emit_log_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-log-status",
-                            "status": "closed",
-                            "message": "连接已断开",
-                            "source": "VCPLog"
-                        }),
-                    );
-                }
-                Err(e) => {
-                    {
-                        *CURRENT_LOG_STATUS.write().await = "error".to_string();
-                    }
-                    log::error!("[VCPLog] Connection Error: {}. Status: {}", e, e);
-                    emit_log_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-log-status",
-                            "status": "error",
-                            "message": "连接错误",
-                            "source": "VCPLog"
-                        }),
-                    );
-
-                    // 额外发送一条连接错误的通知卡片，辅助排查 (错误卡片 2)
-                    emit_log_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-log-message",
-                            "data": {
-                                "id": "vcp_log_connection_status",
-                                "status": "error",
-                                "tool_name": "VCPLog 连接失败",
-                                "content": format!("❌ 连接错误: {}\n\n提示：\n1. 请检查桌面端 VCP 是否已开启且 VCPLog 服务正常。\n2. 检查 VCP API 地址和 Key 配置是否正确。", e),
-                                "source": "VCPLog"
-                            }
-                        }),
-                    );
-                }
-            },
-            Err(_) => {
+        if connection_succeeded {
+            if let Some(ws_stream) = ws_stream_opt {
+                retry_delay = Duration::from_millis(1000);
                 {
-                    *CURRENT_LOG_STATUS.write().await = "error".to_string();
+                    *CURRENT_LOG_STATUS.write().await = "connected".to_string();
                 }
-                log::error!(
-                    "[VCPLog] Connection timed out after 5 seconds. Retrying in 5 seconds..."
-                );
+
+                let final_masked_url = if final_ws_url.as_str().contains("VCP_Key=") {
+                    let parts: Vec<&str> = final_ws_url.as_str().split("VCP_Key=").collect();
+                    format!("{}VCP_Key=********", parts[0])
+                } else {
+                    final_ws_url.to_string()
+                };
+                log::info!("[VCPLog] Connected successfully to {}", final_masked_url);
+
+                let (mut ws_write, mut ws_read) = ws_stream.split();
+
                 emit_log_event(
                     &app_handle,
                     serde_json::json!({
                         "type": "vcp-log-status",
-                        "status": "error",
-                        "message": "连接错误",
+                        "status": "connected",
+                        "message": "已连接",
                         "source": "VCPLog"
                     }),
                 );
 
-                // 错误卡片 3：连接超时
+                // 额外发送一条连接成功的通知卡片
                 emit_log_event(
                     &app_handle,
                     serde_json::json!({
                         "type": "vcp-log-message",
                         "data": {
                             "id": "vcp_log_connection_status",
-                            "status": "error",
-                            "tool_name": "VCPLog 连接超时",
-                            "content": "❌ 连接 VCPLog 超时 (5s)。\n\n提示：\n1. 请检查桌面端是否处于运行状态。\n2. 确认手机与电脑是否处于同一局域网。",
+                            "status": "success",
+                            "tool_name": "VCPLog",
+                            "content": "✅ VCPLog 连接成功！已建立实时数据通道。",
                             "source": "VCPLog"
                         }
                     }),
                 );
+
+                let (reset_tx, mut reset_rx) = mpsc::channel::<()>(8);
+                {
+                    let mut tx_lock = HEARTBEAT_RESET_TX.lock().await;
+                    *tx_lock = Some(reset_tx);
+                }
+
+                let initial_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
+                let mut heartbeat_timer = Box::pin(sleep(Duration::from_millis(initial_ms)));
+
+                loop {
+                    tokio::select! {
+                        // 监听 URL 变更
+                        _ = url_rx.changed() => {
+                            log::info!("[VCPLog] URL changed, closing current connection.");
+                            break;
+                        }
+                        // 监听心跳重置信号
+                        Some(_) = reset_rx.recv() => {
+                            let current_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
+                            log::info!("[VCPLog] Heartbeat interval updated to {}ms, resetting timer.", current_ms);
+                            heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_ms));
+                        }
+                        // 心跳周期触发
+                        _ = &mut heartbeat_timer => {
+                            if let Err(e) = ws_write.send(Message::Ping(vec![].into())).await {
+                                log::error!("[VCPLog] Failed to send Ping: {}", e);
+                                break;
+                            }
+                            let current_ms = HEARTBEAT_INTERVAL_MS.load(Ordering::SeqCst);
+                            heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_ms));
+                        }
+                        // 处理接收到的消息
+                        msg_result = ws_read.next() => {
+                            match msg_result {
+                                Some(Ok(msg)) => {
+                                    if msg.is_text() {
+                                        let text = msg.to_text().unwrap_or_default();
+                                        match serde_json::from_str::<Value>(text) {
+                                            Ok(payload) => {
+                                                emit_log_event(&app_handle, payload);
+                                            }
+                                            Err(_) => {
+                                                emit_log_event(&app_handle, serde_json::json!({
+                                                    "type": "raw_text",
+                                                    "data": text
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                                Some(Err(e)) => {
+                                    log::error!("[VCPLog] WebSocket error during read: {}", e);
+                                    break;
+                                }
+                                None => {
+                                    log::warn!("[VCPLog] Connection closed by server.");
+                                    break;
+                                }
+                            }
+                        }
+                        // 处理待发送的消息
+                        payload_opt = rx.recv() => {
+                            if let Some(payload) = payload_opt {
+                                if let Ok(text) = serde_json::to_string(&payload) {
+                                    if let Err(e) = ws_write.send(Message::Text(text.into())).await {
+                                        log::error!("[VCPLog] Failed to send message: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                {
+                    let mut tx_lock = HEARTBEAT_RESET_TX.lock().await;
+                    *tx_lock = None;
+                }
+
+                log::info!("[VCPLog] Disconnected from {}.", final_ws_url);
+                {
+                    *CURRENT_LOG_STATUS.write().await = "closed".to_string();
+                }
+                emit_log_event(
+                    &app_handle,
+                    serde_json::json!({
+                        "type": "vcp-log-status",
+                        "status": "closed",
+                        "message": "连接已断开",
+                        "source": "VCPLog"
+                    }),
+                );
             }
+        } else {
+            {
+                *CURRENT_LOG_STATUS.write().await = "error".to_string();
+            }
+            let last_error = connection_error.unwrap_or_else(|| "Unknown connection error".to_string());
+            log::error!(
+                "[VCPLog] All connection attempts failed. Last error: {}. Retrying...",
+                last_error
+            );
+            emit_log_event(
+                &app_handle,
+                serde_json::json!({
+                    "type": "vcp-log-status",
+                    "status": "error",
+                    "message": "连接错误",
+                    "source": "VCPLog"
+                }),
+            );
+
+            // 额外发送一条连接错误的通知卡片，辅助排查
+            emit_log_event(
+                &app_handle,
+                serde_json::json!({
+                    "type": "vcp-log-message",
+                    "data": {
+                        "id": "vcp_log_connection_status",
+                        "status": "error",
+                        "tool_name": "VCPLog 连接失败",
+                        "content": format!(
+                            "❌ 连接失败: {}\n\n提示：\n1. 请检查桌面端 VCP 是否已开启且 VCPLog 服务正常。\n2. 检查 VCP API 地址和 Key 配置是否正确。",
+                            last_error
+                        ),
+                        "source": "VCPLog"
+                    }
+                }),
+            );
         }
 
         tokio::select! {
