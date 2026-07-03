@@ -7,16 +7,12 @@
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-
-
 pub struct CpuInfoTool;
 
 impl CpuInfoTool {
     pub fn new() -> Self {
         Self
     }
-
-
 }
 
 impl StreamingTool for CpuInfoTool {

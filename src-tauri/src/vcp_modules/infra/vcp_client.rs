@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
 use tokio::sync::oneshot;
-use tokio_util::codec::{FramedRead, LinesCodec};
 #[cfg(target_os = "android")]
 use tokio_util::codec::LengthDelimitedCodec;
+use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
 use url::Url;
 
@@ -948,7 +948,9 @@ async fn handle_streaming_request<R: Runtime>(
                         if let Some(topic_id) = ctx.get("topicId").and_then(|v| v.as_str()) {
                             sse_context["topicId"] = json!(topic_id);
                         }
-                        let owner_id = ctx.get("groupId").and_then(|v| v.as_str())
+                        let owner_id = ctx
+                            .get("groupId")
+                            .and_then(|v| v.as_str())
                             .or_else(|| ctx.get("agentId").and_then(|v| v.as_str()));
                         if let Some(oid) = owner_id {
                             sse_context["ownerId"] = json!(oid);

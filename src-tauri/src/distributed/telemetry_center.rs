@@ -81,7 +81,10 @@ impl TelemetryCenter {
     // =================================================================
 
     pub fn get_cpu_usage(&self, app: &AppHandle) -> String {
-        let mut guard = self.cpu_usage_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .cpu_usage_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
@@ -91,7 +94,10 @@ impl TelemetryCenter {
     }
 
     pub fn get_cpu_temp(&self, app: &AppHandle) -> String {
-        let mut guard = self.cpu_temp_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .cpu_temp_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
@@ -101,7 +107,10 @@ impl TelemetryCenter {
     }
 
     pub fn get_cpu_freq(&self) -> String {
-        let mut guard = self.cpu_freq_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .cpu_freq_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
@@ -161,7 +170,10 @@ impl TelemetryCenter {
     }
 
     pub fn get_location_info(&self, app: &AppHandle) -> String {
-        let mut guard = self.location_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .location_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
@@ -195,7 +207,10 @@ impl TelemetryCenter {
     // =================================================================
 
     fn capture_cpu_usage(&self, app: &AppHandle) -> String {
-        let content = match crate::distributed::tools::sysfs_utils::execute_root_command_safe(app, "cat /proc/stat") {
+        let content = match crate::distributed::tools::sysfs_utils::execute_root_command_safe(
+            app,
+            "cat /proc/stat",
+        ) {
             Some(out) => out,
             None => crate::distributed::tools::sysfs_utils::read_sysfs("/proc/stat"),
         };
@@ -219,7 +234,10 @@ impl TelemetryCenter {
 
         match current_sample {
             Some(current) => {
-                let mut prev = self.cpu_prev_sample.lock().unwrap_or_else(|e| e.into_inner());
+                let mut prev = self
+                    .cpu_prev_sample
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 let result = match prev.as_ref() {
                     Some(prev_sample) => {
                         let total_diff = current.total.saturating_sub(prev_sample.total);
@@ -227,7 +245,8 @@ impl TelemetryCenter {
                         if total_diff == 0 {
                             "0%".to_string()
                         } else {
-                            let usage = ((total_diff - idle_diff) as f64 / total_diff as f64) * 100.0;
+                            let usage =
+                                ((total_diff - idle_diff) as f64 / total_diff as f64) * 100.0;
                             format!("{:.0}%", usage)
                         }
                     }
@@ -325,7 +344,8 @@ impl TelemetryCenter {
                 "cat /sys/devices/platform/mali/utilization",
             ];
             for path in &mali_paths {
-                if let Some(raw_busy) = crate::distributed::tools::sysfs_utils::execute_root_command_safe(app, path)
+                if let Some(raw_busy) =
+                    crate::distributed::tools::sysfs_utils::execute_root_command_safe(app, path)
                 {
                     let clean = raw_busy.trim().trim_end_matches('%');
                     if let Ok(load) = clean.parse::<u64>() {
@@ -349,8 +369,15 @@ impl TelemetryCenter {
                     Some(t) if t >= 0.0 => format!("{:.1}°C", t),
                     _ => "N/A".to_string(),
                 };
-                let pwr_save = if status.is_power_save_mode { " (低功耗模式)" } else { "" };
-                Ok(format!("电量: {}%{} | 状态: {} | 温度: {}", status.level, pwr_save, status_str, temp_str))
+                let pwr_save = if status.is_power_save_mode {
+                    " (低功耗模式)"
+                } else {
+                    ""
+                };
+                Ok(format!(
+                    "电量: {}%{} | 状态: {} | 温度: {}",
+                    status.level, pwr_save, status_str, temp_str
+                ))
             })();
 
             result.unwrap_or_else(|e| format!("电量: N/A | 错误: {}", e))
@@ -420,7 +447,8 @@ impl TelemetryCenter {
     fn capture_storage_info(&self) -> String {
         #[cfg(unix)]
         unsafe {
-            let path = std::ffi::CString::new("/data").unwrap_or_else(|_| std::ffi::CString::new("/").unwrap());
+            let path = std::ffi::CString::new("/data")
+                .unwrap_or_else(|_| std::ffi::CString::new("/").unwrap());
             let mut stat: libc::statvfs = std::mem::zeroed();
             let ret = libc::statvfs(path.as_ptr(), &mut stat);
             if ret != 0 {
@@ -489,8 +517,15 @@ impl TelemetryCenter {
         #[cfg(target_os = "android")]
         {
             let result: Result<String, String> = (|| {
-                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(app.clone(), "location".to_string())?;
-                let val = data.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(
+                    app.clone(),
+                    "location".to_string(),
+                )?;
+                let val = data
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Ok(val)
             })();
             result.unwrap_or_else(|e| format!("定位信息采集失败: {}", e))
@@ -506,8 +541,15 @@ impl TelemetryCenter {
         #[cfg(target_os = "android")]
         {
             let result: Result<String, String> = (|| {
-                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(app.clone(), "motion".to_string())?;
-                let val = data.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(
+                    app.clone(),
+                    "motion".to_string(),
+                )?;
+                let val = data
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Ok(val)
             })();
             result.unwrap_or_else(|e| format!("运动传感器采集失败: {}", e))
@@ -528,8 +570,15 @@ impl TelemetryCenter {
         #[cfg(target_os = "android")]
         {
             let result: Result<String, String> = (|| {
-                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(app.clone(), "ambient".to_string())?;
-                let val = data.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(
+                    app.clone(),
+                    "ambient".to_string(),
+                )?;
+                let val = data
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 Ok(val)
             })();
             result.unwrap_or_else(|e| format!("环境传感器采集失败: {}", e))
@@ -559,9 +608,17 @@ impl TelemetryCenter {
         let mut avail = 0u64;
         for line in content.lines() {
             if line.starts_with("MemTotal:") {
-                total = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                total = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
             } else if line.starts_with("MemAvailable:") {
-                avail = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                avail = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
             }
         }
         if total > 0 {
@@ -589,8 +646,12 @@ impl TelemetryCenter {
         #[cfg(not(target_os = "android"))]
         {
             let _ = app;
-            let cap = crate::distributed::tools::sysfs_utils::read_sysfs("/sys/class/power_supply/battery/capacity");
-            let status = crate::distributed::tools::sysfs_utils::read_sysfs("/sys/class/power_supply/battery/status");
+            let cap = crate::distributed::tools::sysfs_utils::read_sysfs(
+                "/sys/class/power_supply/battery/capacity",
+            );
+            let status = crate::distributed::tools::sysfs_utils::read_sysfs(
+                "/sys/class/power_supply/battery/status",
+            );
             if cap.is_empty() {
                 return "电量:N/A".to_string();
             }
@@ -655,7 +716,10 @@ impl TelemetryCenter {
     pub fn get_motion_brief(&self, app: &AppHandle) -> String {
         let motion = self.get_motion_info(app);
         if motion.starts_with("状态: ") {
-            if let Some(m) = motion.strip_prefix("状态: ").and_then(|s| s.split(" | ").next()) {
+            if let Some(m) = motion
+                .strip_prefix("状态: ")
+                .and_then(|s| s.split(" | ").next())
+            {
                 return m.to_string();
             }
         }

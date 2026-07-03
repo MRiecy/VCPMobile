@@ -911,17 +911,17 @@ pub struct ClipboardReadResult {
     pub content: String,
 }
 
-pub fn write_clipboard_native<R: Runtime>(app: AppHandle<R>, content: String) -> Result<(), String> {
+pub fn write_clipboard_native<R: Runtime>(
+    app: AppHandle<R>,
+    content: String,
+) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
         let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
         plugin_handle
-            .run_mobile_plugin::<()>(
-                "writeClipboard",
-                serde_json::json!({ "content": content }),
-            )
+            .run_mobile_plugin::<()>("writeClipboard", serde_json::json!({ "content": content }))
             .map_err(|e| format!("JNI writeClipboard failed: {}", e))?;
     }
     #[cfg(not(target_os = "android"))]
@@ -939,10 +939,7 @@ pub fn read_clipboard_native<R: Runtime>(app: AppHandle<R>) -> Result<String, St
         let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
         let res = plugin_handle
-            .run_mobile_plugin::<ClipboardReadResult>(
-                "readClipboard",
-                serde_json::json!({}),
-            )
+            .run_mobile_plugin::<ClipboardReadResult>("readClipboard", serde_json::json!({}))
             .map_err(|e| format!("JNI readClipboard failed: {}", e))?;
         Ok(res.content)
     }
@@ -1084,7 +1081,10 @@ pub fn get_pending_notification<R: Runtime>(
         let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
 
         let notification_data = plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("getPendingNotification", serde_json::Value::Null)
+            .run_mobile_plugin::<serde_json::Value>(
+                "getPendingNotification",
+                serde_json::Value::Null,
+            )
             .map_err(|e| format!("run_mobile_plugin getPendingNotification failed: {}", e))?;
         Ok(notification_data)
     }

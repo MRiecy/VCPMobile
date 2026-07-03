@@ -101,9 +101,7 @@ impl DistributedClient {
         };
 
         // Gracefully shut down any existing session before creating a new one.
-        let old_session = {
-            self.session.lock().await.take()
-        };
+        let old_session = { self.session.lock().await.take() };
         if let Some(session) = old_session {
             session.cancel_token.cancel();
             let _ = session.task_handle.await;
@@ -182,9 +180,7 @@ impl DistributedClient {
         }
 
         // Take the session out and gracefully shut it down.
-        let old_session = {
-            self.session.lock().await.take()
-        };
+        let old_session = { self.session.lock().await.take() };
         if let Some(session) = old_session {
             session.cancel_token.cancel();
             let _ = session.task_handle.await;
@@ -370,6 +366,7 @@ impl DistributedClient {
     // Session handler — processes one WS connection lifetime
     // ================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_session(
         app: &AppHandle,
         ws_stream: tokio_tungstenite::WebSocketStream<
@@ -760,14 +757,22 @@ fn acquire_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
         "[分布式连接]",
         false, // screen_keep_on = false
     ) {
-        log::warn!("[Distributed] Failed to acquire native wake lock with tag {}: {}", tag, e);
+        log::warn!(
+            "[Distributed] Failed to acquire native wake lock with tag {}: {}",
+            tag,
+            e
+        );
     }
 }
 
 #[cfg(target_os = "android")]
 fn release_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
     if let Err(e) = tauri_plugin_vcp_mobile::stream::release_foreground_inner(app, tag) {
-        log::warn!("[Distributed] Failed to release native wake lock with tag {}: {}", tag, e);
+        log::warn!(
+            "[Distributed] Failed to release native wake lock with tag {}: {}",
+            tag,
+            e
+        );
     }
 }
 

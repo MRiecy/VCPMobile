@@ -311,69 +311,69 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                 loop {
                     tokio::select! {
-                        // 监听 URL 变更并防止 Flapping 瞬断
-                        _ = url_rx.changed() => {
-                            let new_val = url_rx.borrow().clone();
-                            if let Some(new_u) = new_val {
-                                if new_u != ws_url {
-                                    log::info!("[VCPInfo] URL changed, closing current connection.");
-                                    break;
-                                } else {
-                                    log::info!("[VCPInfo] URL changed event fired but value is identical. Ignoring to prevent flapping.");
-                                }
+                    // 监听 URL 变更并防止 Flapping 瞬断
+                    _ = url_rx.changed() => {
+                        let new_val = url_rx.borrow().clone();
+                        if let Some(new_u) = new_val {
+                            if new_u != ws_url {
+                                log::info!("[VCPInfo] URL changed, closing current connection.");
+                                break;
                             } else {
-                                log::info!("[VCPInfo] URL cleared, closing connection.");
+                                log::info!("[VCPInfo] URL changed event fired but value is identical. Ignoring to prevent flapping.");
+                            }
+                        } else {
+                            log::info!("[VCPInfo] URL cleared, closing connection.");
+                            break;
+                        }
+                    }
+                        // 心跳周期触发
+                        _ = &mut heartbeat_timer => {
+                            if let Err(e) = ws_write.send(Message::Ping(vec![].into())).await {
+                                log::error!("[VCPInfo] Failed to send Ping: {}", e);
                                 break;
                             }
+                            heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(15));
                         }
-                            // 心跳周期触发
-                            _ = &mut heartbeat_timer => {
-                                if let Err(e) = ws_write.send(Message::Ping(vec![].into())).await {
-                                    log::error!("[VCPInfo] Failed to send Ping: {}", e);
-                                    break;
-                                }
-                                heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(15));
-                            }
-                            // 处理接收到的消息
-                            msg_result = ws_read.next() => {
-                                match msg_result {
-                                    Some(Ok(msg)) => {
-                                        if msg.is_text() {
-                                            let text = msg.to_text().unwrap_or_default();
-                                            if let Ok(payload) = serde_json::from_str::<Value>(text) {
-                                                // 提取、缓存并推送消息
-                                                process_incoming_vcp_info(&app_handle, payload, text).await;
-                                            }
+                        // 处理接收到的消息
+                        msg_result = ws_read.next() => {
+                            match msg_result {
+                                Some(Ok(msg)) => {
+                                    if msg.is_text() {
+                                        let text = msg.to_text().unwrap_or_default();
+                                        if let Ok(payload) = serde_json::from_str::<Value>(text) {
+                                            // 提取、缓存并推送消息
+                                            process_incoming_vcp_info(&app_handle, payload, text).await;
                                         }
                                     }
-                                    Some(Err(e)) => {
-                                        log::error!("[VCPInfo] WebSocket error during read: {}", e);
-                                        break;
-                                    }
-                                    None => {
-                                        log::warn!("[VCPInfo] Connection closed by server.");
-                                        break;
-                                    }
+                                }
+                                Some(Err(e)) => {
+                                    log::error!("[VCPInfo] WebSocket error during read: {}", e);
+                                    break;
+                                }
+                                None => {
+                                    log::warn!("[VCPInfo] Connection closed by server.");
+                                    break;
                                 }
                             }
                         }
                     }
-
-                    log::info!("[VCPInfo] Disconnected from {}.", ws_url);
-                    {
-                        *CURRENT_INFO_STATUS.write().await = "closed".to_string();
-                    }
-                    emit_info_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-info-status",
-                            "status": "closed",
-                            "message": "连接已断开",
-                            "source": "VCPInfo"
-                        }),
-                    );
                 }
+
+                log::info!("[VCPInfo] Disconnected from {}.", ws_url);
+                {
+                    *CURRENT_INFO_STATUS.write().await = "closed".to_string();
+                }
+                emit_info_event(
+                    &app_handle,
+                    serde_json::json!({
+                        "type": "vcp-info-status",
+                        "status": "closed",
+                        "message": "连接已断开",
+                        "source": "VCPInfo"
+                    }),
+                );
             }
+        }
 
         tokio::select! {
             _ = url_rx.changed() => log::info!("[VCPInfo] URL changed during retry wait."),

@@ -5,8 +5,6 @@
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-
-
 pub struct StorageInfoTool;
 
 impl StorageInfoTool {

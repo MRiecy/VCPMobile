@@ -48,7 +48,11 @@ impl StreamingTool for DeviceStatusSummaryTool {
             battery_str,
             mem_str,
             net_str,
-            if cpu_temp.is_empty() || cpu_temp == "N/A" { "正常".to_string() } else { cpu_temp.clone() }
+            if cpu_temp.is_empty() || cpu_temp == "N/A" {
+                "正常".to_string()
+            } else {
+                cpu_temp.clone()
+            }
         );
 
         let cpu_block = if cpu_temp.is_empty() || cpu_temp == "N/A" {

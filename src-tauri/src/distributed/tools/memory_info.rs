@@ -4,11 +4,7 @@
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
-
-
 pub struct MemoryInfoTool;
-
-
 
 impl StreamingTool for MemoryInfoTool {
     fn manifest(&self) -> ToolManifest {

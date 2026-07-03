@@ -135,7 +135,7 @@ fn append_device_name(url: &Url, device_name: &str) -> Url {
     let mut new_url = url.clone();
     let query = new_url.query();
 
-    let has_device_name = query.map_or(false, |q| q.contains("deviceName="));
+    let has_device_name = query.is_some_and(|q| q.contains("deviceName="));
     if !has_device_name {
         let encoded_device_name = urlencoding::encode(device_name);
         let new_query = match query {
@@ -274,7 +274,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         e
                     );
                     connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
-                        std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()),
                     ));
                     continue;
                 }
@@ -356,10 +356,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             // 只有当收到 HTTP 握手响应错误（如 404/400，表示 TCP 连通但握手协议细节被拒）时，才尝试 old_url 降级。
             // 底层网络错误（如连接被拒、超时等），降级尝试毫无意义，直接提前终止。
             if i + 1 < urls_to_try.len() {
-                let should_fallback = match &connection_error {
-                    Some(tokio_tungstenite::tungstenite::Error::Http(_)) => true,
-                    _ => false,
-                };
+                let should_fallback = matches!(
+                    &connection_error,
+                    Some(tokio_tungstenite::tungstenite::Error::Http(_))
+                );
                 if !should_fallback {
                     log::info!(
                         "[VCPLog] Underlying network error or timeout during trial {}. Skipping further fallback trials.",
