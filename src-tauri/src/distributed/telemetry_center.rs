@@ -68,7 +68,7 @@ impl TelemetryCenter {
             memory_cache: Mutex::new(CacheItem::new(15)),
             storage_cache: Mutex::new(CacheItem::new(120)),
             network_cache: Mutex::new(CacheItem::new(30)),
-            location_cache: Mutex::new(CacheItem::new(60)),
+            location_cache: Mutex::new(CacheItem::new(120)),
             motion_cache: Mutex::new(CacheItem::new(15)),
             ambient_cache: Mutex::new(CacheItem::new(30)),
 

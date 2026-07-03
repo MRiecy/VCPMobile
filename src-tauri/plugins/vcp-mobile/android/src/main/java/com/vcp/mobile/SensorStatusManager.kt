@@ -26,6 +26,13 @@ class SensorStatusManager(private val context: Context) {
         private const val BURST_ACTIVE_DURATION = 2000L // 2s sampling
         private const val BURST_SLEEP_DURATION = 28000L // 28s sleep
         private const val SAMPLING_PERIOD_US = 100000 // 100ms = 10Hz
+
+        // Location update tuning
+        private const val LOCATION_UPDATE_MIN_TIME_MS = 30000L      // 30s
+        private const val LOCATION_UPDATE_MIN_DISTANCE_M = 5f       // 5m
+        private const val LOCATION_FAST_FIX_TIMEOUT_MS = 30000L     // 30s aggressive first fix
+        private const val LOCATION_FAST_FIX_MIN_TIME_MS = 1000L     // 1s
+        private const val LOCATION_FAST_FIX_MIN_DISTANCE_M = 0f     // 0m
     }
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -38,6 +45,8 @@ class SensorStatusManager(private val context: Context) {
 
     private var isRunning = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var hasReceivedFirstLocation = false
+    private var fastFixRunnable: Runnable? = null
 
     // Sensor instances
     private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -121,6 +130,12 @@ class SensorStatusManager(private val context: Context) {
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             updateLocationString(location)
+            if (!hasReceivedFirstLocation) {
+                hasReceivedFirstLocation = true
+                cancelFastFixTimeout()
+                Log.i(TAG, "First location fix received, switching to steady update interval")
+                registerSteadyLocationUpdates()
+            }
         }
         @Deprecated("Deprecated in Java")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
@@ -132,6 +147,8 @@ class SensorStatusManager(private val context: Context) {
     fun start() {
         if (isRunning) return
         isRunning = true
+        hasReceivedFirstLocation = false
+        cancelFastFixTimeout()
         Log.i(TAG, "Starting SensorStatusManager collection services")
 
         // 1. Start Location Listening
@@ -153,6 +170,8 @@ class SensorStatusManager(private val context: Context) {
     fun stop() {
         if (!isRunning) return
         isRunning = false
+        hasReceivedFirstLocation = false
+        cancelFastFixTimeout()
         Log.i(TAG, "Stopping SensorStatusManager collection services")
 
         // Unregister location
@@ -199,35 +218,19 @@ class SensorStatusManager(private val context: Context) {
         }
 
         try {
-            // Register for network provider
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    120000L, // 120s
-                    10f,     // 10m
-                    locationListener,
-                    Looper.getMainLooper()
-                )
-                val lastKnown = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                if (lastKnown != null) {
-                    updateLocationString(lastKnown)
-                }
+            // 1. Seed from last known location immediately
+            seedLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            seedLastKnownLocation(LocationManager.GPS_PROVIDER)
+
+            // 2. If we still don't have a fix, ask for a single-shot update right now
+            if (!hasValidLocation()) {
+                requestSingleUpdate(LocationManager.NETWORK_PROVIDER)
+                requestSingleUpdate(LocationManager.GPS_PROVIDER)
             }
-            
-            // Register for GPS provider
-            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    120000L, // 120s
-                    10f,     // 10m
-                    locationListener,
-                    Looper.getMainLooper()
-                )
-                val lastKnown = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                if (lastKnown != null) {
-                    updateLocationString(lastKnown)
-                }
-            }
+
+            // 3. Start aggressive fast-fix listener: 1s / 0m for 30s
+            registerFastFixUpdates()
+            scheduleFastFixTimeout()
         } catch (e: SecurityException) {
             latestLocationStr = "位置信息: 获取异常 (${e.message})"
             Log.e(TAG, "SecurityException registering location updates", e)
@@ -235,6 +238,119 @@ class SensorStatusManager(private val context: Context) {
             latestLocationStr = "位置信息: 未开启定位服务"
             Log.e(TAG, "Exception registering location updates", e)
         }
+    }
+
+    private fun seedLastKnownLocation(provider: String) {
+        try {
+            if (locationManager.isProviderEnabled(provider)) {
+                val lastKnown = locationManager.getLastKnownLocation(provider)
+                if (lastKnown != null) {
+                    updateLocationString(lastKnown)
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "SecurityException getting last known location from $provider", e)
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception getting last known location from $provider", e)
+        }
+    }
+
+    private fun requestSingleUpdate(provider: String) {
+        try {
+            if (locationManager.isProviderEnabled(provider)) {
+                locationManager.requestSingleUpdate(provider, locationListener, Looper.getMainLooper())
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "SecurityException requesting single update from $provider", e)
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception requesting single update from $provider", e)
+        }
+    }
+
+    private fun registerFastFixUpdates() {
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER,
+                    LOCATION_FAST_FIX_MIN_TIME_MS,
+                    LOCATION_FAST_FIX_MIN_DISTANCE_M,
+                    locationListener,
+                    Looper.getMainLooper()
+                )
+            }
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    LOCATION_FAST_FIX_MIN_TIME_MS,
+                    LOCATION_FAST_FIX_MIN_DISTANCE_M,
+                    locationListener,
+                    Looper.getMainLooper()
+                )
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "SecurityException registering fast-fix updates", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception registering fast-fix updates", e)
+        }
+    }
+
+    private fun registerSteadyLocationUpdates() {
+        // Remove the aggressive listener before installing the steady one
+        try {
+            locationManager.removeUpdates(locationListener)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "SecurityException removing fast-fix updates", e)
+        } catch (e: Exception) {
+            Log.w(TAG, "Exception removing fast-fix updates", e)
+        }
+
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                    LocationManager.NETWORK_PROVIDER,
+                    LOCATION_UPDATE_MIN_TIME_MS,
+                    LOCATION_UPDATE_MIN_DISTANCE_M,
+                    locationListener,
+                    Looper.getMainLooper()
+                )
+            }
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestLocationUpdates(
+                    LocationManager.GPS_PROVIDER,
+                    LOCATION_UPDATE_MIN_TIME_MS,
+                    LOCATION_UPDATE_MIN_DISTANCE_M,
+                    locationListener,
+                    Looper.getMainLooper()
+                )
+            }
+        } catch (e: SecurityException) {
+            latestLocationStr = "位置信息: 获取异常 (${e.message})"
+            Log.e(TAG, "SecurityException registering steady location updates", e)
+        } catch (e: Exception) {
+            latestLocationStr = "位置信息: 未开启定位服务"
+            Log.e(TAG, "Exception registering steady location updates", e)
+        }
+    }
+
+    private fun scheduleFastFixTimeout() {
+        val runnable = Runnable {
+            if (!hasReceivedFirstLocation) {
+                Log.w(TAG, "Fast-fix timeout reached without location fix")
+                latestLocationStr = "位置信息: 定位超时，请检查定位开关或移动到开阔地带"
+                registerSteadyLocationUpdates()
+            }
+        }
+        fastFixRunnable = runnable
+        mainHandler.postDelayed(runnable, LOCATION_FAST_FIX_TIMEOUT_MS)
+    }
+
+    private fun cancelFastFixTimeout() {
+        fastFixRunnable?.let { mainHandler.removeCallbacks(it) }
+        fastFixRunnable = null
+    }
+
+    private fun hasValidLocation(): Boolean {
+        return latestLocationStr.startsWith("坐标:")
     }
 
     private fun updateLocationString(loc: Location) {

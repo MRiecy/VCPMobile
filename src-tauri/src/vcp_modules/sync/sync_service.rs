@@ -226,6 +226,25 @@ async fn diagnose_connection_failure(
 ) -> ConnectionErrorDiagnosis {
     let err_detail = err.to_string();
 
+    // 如果系统已经明确报告地址/网络不可达，直接返回 NETWORK_UNREACHABLE，
+    // 避免依赖外部网络状态的 HTTP 探测导致误判（也消除相关单元测试的脆弱性）。
+    if let tokio_tungstenite::tungstenite::error::Error::Io(io_err) = err {
+        if matches!(
+            io_err.kind(),
+            std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::NetworkUnreachable
+                | std::io::ErrorKind::HostUnreachable
+        ) {
+            return ConnectionErrorDiagnosis {
+                error_code: "NETWORK_UNREACHABLE".to_string(),
+                error_message: "网络不可达或地址无效".to_string(),
+                solution: "无法建立连接。请检查手机网络状态，确保 WiFi 已连接且配置了正确的电脑端局域网 IP 和端口。"
+                    .to_string(),
+                error_detail: err_detail.clone(),
+            };
+        }
+    }
+
     let is_android = cfg!(target_os = "android");
     if check_loopback_on_mobile(_ws_url, is_android) {
         return ConnectionErrorDiagnosis {
