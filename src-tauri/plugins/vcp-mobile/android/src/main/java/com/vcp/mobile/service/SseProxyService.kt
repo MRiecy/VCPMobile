@@ -149,7 +149,7 @@ class SseProxyService : Service() {
         
         for (session in activeSessions.values) {
             session.eventSource?.cancel()
-            try { session.activeSocketWriter?.close() } catch (ignored: Exception) {}
+            try { session.activeSocketOutputStream?.close() } catch (ignored: Exception) {}
         }
         activeSessions.clear()
         
