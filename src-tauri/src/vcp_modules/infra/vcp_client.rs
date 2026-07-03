@@ -940,10 +940,26 @@ async fn handle_streaming_request<R: Runtime>(
                         "Authorization": format!("Bearer {}", api_key),
                         "Content-Type": "application/json"
                     });
+                    let mut sse_context = json!({});
+                    if let Some(ref ctx) = context_inner {
+                        if let Some(agent_name) = ctx.get("agentName").and_then(|v| v.as_str()) {
+                            sse_context["agentName"] = json!(agent_name);
+                        }
+                        if let Some(topic_id) = ctx.get("topicId").and_then(|v| v.as_str()) {
+                            sse_context["topicId"] = json!(topic_id);
+                        }
+                        let owner_id = ctx.get("groupId").and_then(|v| v.as_str())
+                            .or_else(|| ctx.get("agentId").and_then(|v| v.as_str()));
+                        if let Some(oid) = owner_id {
+                            sse_context["ownerId"] = json!(oid);
+                        }
+                    }
+
                     let params = json!({
                         "url": final_url,
                         "headers": headers_json.to_string(),
-                        "body": request_body.to_string()
+                        "body": request_body.to_string(),
+                        "context": sse_context
                     });
 
                     match connect_to_helper(_app, "start", &message_id_inner, Some(params)).await {

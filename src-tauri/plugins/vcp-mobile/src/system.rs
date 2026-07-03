@@ -1072,3 +1072,25 @@ pub fn start_network_monitoring<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     }
     Ok(())
 }
+
+#[tauri::command]
+pub fn get_pending_notification<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        let notification_data = plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("getPendingNotification", serde_json::Value::Null)
+            .map_err(|e| format!("run_mobile_plugin getPendingNotification failed: {}", e))?;
+        Ok(notification_data)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(serde_json::json!({}))
+    }
+}

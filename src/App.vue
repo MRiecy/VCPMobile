@@ -176,6 +176,44 @@ const handleShareSelectorClose = () => {
   showShareSelector.value = false;
 };
 
+// --- Notification Click Routing State & Logic ---
+const handleNotificationClick = (e: Event) => {
+  const detail = (e as CustomEvent).detail;
+  processNotificationClick(detail);
+};
+
+const processNotificationClick = (detail: any) => {
+  console.log("[App] Notification click received:", detail);
+  if (!detail?.ownerId || !detail?.topicId) return;
+
+  if (lifecycleStore.state !== "READY") {
+    console.log("[App] Core not ready yet, deferring notification click routing...");
+    const unwatch = watch(
+      () => lifecycleStore.state,
+      (state) => {
+        if (state === "READY") {
+          unwatch();
+          processNotificationClick(detail);
+        }
+      }
+    );
+    return;
+  }
+
+  // 1. 关闭所有弹出的 Modals
+  const { closeTopModal, modalStackLength } = useModalHistory();
+  while (modalStackLength() > 0) {
+    closeTopModal();
+  }
+  
+  // 2. 关闭侧边栏
+  layoutStore.setLeftDrawer(false);
+  layoutStore.setRightDrawer(false);
+
+  // 3. 切换话题
+  sessionStore.selectTopicById(detail.ownerId, detail.topicId);
+};
+
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
 useSidebarSwipe(appRootRef, { type: "global" });
@@ -345,6 +383,7 @@ onMounted(async () => {
   window.addEventListener("vcp-hardware-back", handleExitRequest);
   window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.addEventListener("vcp-share-intent", handleShareIntent);
+  window.addEventListener("vcp-notification-click", handleNotificationClick);
   window.addEventListener("vcp-keyboard-inset", handleSafeAreaInset);
 
 
@@ -372,6 +411,18 @@ onMounted(async () => {
   router.afterEach(() => {
     initRootHistory();
   });
+
+  // 3. 处理冷启动的通知栏点击
+  if (!isAssistant.value) {
+    try {
+      const pending = await invoke<any>("plugin:vcp-mobile|get_pending_notification");
+      if (pending && pending.topicId) {
+        processNotificationClick(pending);
+      }
+    } catch (err) {
+      console.warn("[App] Failed to fetch pending notification click:", err);
+    }
+  }
 });
 
 onUnmounted(() => {
@@ -380,6 +431,7 @@ onUnmounted(() => {
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
   window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
+  window.removeEventListener("vcp-notification-click", handleNotificationClick);
   window.removeEventListener("vcp-keyboard-inset", handleSafeAreaInset);
 
 });

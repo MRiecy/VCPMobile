@@ -65,11 +65,12 @@ class SseProxyService : Service() {
 
     class StreamSession(
         val requestId: String,
-        var eventSource: EventSource? = null,
+        @Volatile var eventSource: EventSource? = null,
         val eventBuffer: MutableList<JSONObject> = mutableListOf(),
-        var isCompleted: Boolean = false,
-        var lastFinishReason: String? = null,
-        var activeSocketOutputStream: java.io.OutputStream? = null
+        @Volatile var isCompleted: Boolean = false,
+        @Volatile var lastFinishReason: String? = null,
+        var activeSocketOutputStream: java.io.OutputStream? = null,
+        val contextJson: JSONObject? = null
     )
 
     private val httpClient: OkHttpClient by lazy {
@@ -205,7 +206,8 @@ class SseProxyService : Service() {
                         val url = request.getString("url")
                         val headersJson = request.optString("headers", "{}")
                         val body = request.optString("body", "")
-                        handleStartStream(requestId, url, headersJson, body, outputStream)
+                        val contextJson = request.optJSONObject("context")
+                        handleStartStream(requestId, url, headersJson, body, contextJson, outputStream)
                         readSocketUntilClose(socket, inputStream, requestId)
                     }
                     "resume" -> {
@@ -258,9 +260,10 @@ class SseProxyService : Service() {
         url: String,
         headersJson: String,
         body: String,
+        contextJson: JSONObject?,
         outputStream: java.io.OutputStream
     ) {
-        val session = StreamSession(requestId, activeSocketOutputStream = outputStream)
+        val session = StreamSession(requestId, activeSocketOutputStream = outputStream, contextJson = contextJson)
         activeSessions[requestId] = session
         
         try {
@@ -301,6 +304,7 @@ class SseProxyService : Service() {
                     session.isCompleted = true
                     session.lastFinishReason = "error"
                     sendEventToSession(session, "error", errObj.toString())
+                    showStreamNotification(session, isSuccess = false, errorMsg = errorMsg)
                     cleanupSessionIfCompletedAndDisconnected(session)
                 }
                 
@@ -309,6 +313,7 @@ class SseProxyService : Service() {
                     session.isCompleted = true
                     session.lastFinishReason = "completed"
                     sendEventToSession(session, "closed", "")
+                    showStreamNotification(session, isSuccess = true, errorMsg = null)
                     cleanupSessionIfCompletedAndDisconnected(session)
                 }
             }
@@ -416,14 +421,13 @@ class SseProxyService : Service() {
     }
 
     private fun sendEventToSession(session: StreamSession, eventType: String, data: String) {
-        val eventObj = JSONObject().apply {
-            put("requestId", session.requestId)
-            put("eventType", eventType)
-            put("eventData", data)
-            put("index", session.eventBuffer.size)
-        }
-        
         synchronized(session) {
+            val eventObj = JSONObject().apply {
+                put("requestId", session.requestId)
+                put("eventType", eventType)
+                put("eventData", data)
+                put("index", session.eventBuffer.size)
+            }
             session.eventBuffer.add(eventObj)
             
             session.activeSocketOutputStream?.let { out ->
@@ -449,12 +453,16 @@ class SseProxyService : Service() {
                     Log.i(TAG, "Scheduling memory cleanup for session id=${session.requestId} in 5 minutes.")
                     serviceScope.launch(Dispatchers.IO) {
                         kotlinx.coroutines.delay(5 * 60 * 1000L)
+                        var shouldUpdate = false
                         synchronized(session) {
                             if (activeSessions[session.requestId] === session && session.activeSocketOutputStream == null) {
                                 Log.i(TAG, "Session id=${session.requestId} 5-min timeout. Removing from memory.")
                                 activeSessions.remove(session.requestId)
-                                updateLocks()
+                                shouldUpdate = true
                             }
+                        }
+                        if (shouldUpdate) {
+                            updateLocks()
                         }
                     }
                 } else {
@@ -476,19 +484,21 @@ class SseProxyService : Service() {
             val file = File(cacheDir, "sse_recovered_$safeId.json")
             
             val fullText = StringBuilder()
-            for (event in session.eventBuffer) {
-                if (event.getString("eventType") == "message") {
-                    val eventData = event.getString("eventData")
-                    if (eventData != "[DONE]") {
-                        try {
-                            val dataVal = JSONObject(eventData)
-                            val choices = dataVal.optJSONArray("choices")
-                            if (choices != null && choices.length() > 0) {
-                                val delta = choices.getJSONObject(0).optJSONObject("delta")
-                                val content = delta?.optString("content", "") ?: ""
-                                fullText.append(content)
-                            }
-                        } catch (ignored: Exception) {}
+            synchronized(session) {
+                for (event in session.eventBuffer) {
+                    if (event.getString("eventType") == "message") {
+                        val eventData = event.getString("eventData")
+                        if (eventData != "[DONE]") {
+                            try {
+                                val dataVal = JSONObject(eventData)
+                                val choices = dataVal.optJSONArray("choices")
+                                if (choices != null && choices.length() > 0) {
+                                    val delta = choices.getJSONObject(0).optJSONObject("delta")
+                                    val content = delta?.optString("content", "") ?: ""
+                                    fullText.append(content)
+                                }
+                            } catch (ignored: Exception) {}
+                        }
                     }
                 }
             }
@@ -597,7 +607,9 @@ class SseProxyService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val notificationManager = getSystemService(NotificationManager::class.java) ?: return
+            
+            val channelService = NotificationChannel(
                 CHANNEL_ID,
                 "VCP 后台连接助手",
                 NotificationManager.IMPORTANCE_HIGH
@@ -607,7 +619,19 @@ class SseProxyService : Service() {
                 enableVibration(false)
                 setSound(null, null)
             }
-            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
+            notificationManager.createNotificationChannel(channelService)
+
+            val channelAlerts = NotificationChannel(
+                "vcp_agent_alerts",
+                "智能体消息提醒",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "接收智能体回复完成或中断的通知"
+                enableLights(true)
+                lightColor = android.graphics.Color.BLUE
+                enableVibration(true)
+            }
+            notificationManager.createNotificationChannel(channelAlerts)
         }
     }
 
@@ -767,5 +791,138 @@ class SseProxyService : Service() {
             dataBytesRead += read
         }
         return String(dataBuffer, Charsets.UTF_8)
+    }
+
+    private fun isAppInForeground(): Boolean {
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return false
+        val appProcesses = activityManager.runningAppProcesses ?: return false
+        val packageName = packageName
+        for (appProcess in appProcesses) {
+            if (appProcess.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND 
+                && appProcess.processName == packageName) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun cleanTextForNotification(text: String): String {
+        var clean = text
+        // 1. 去除元思考链 [--- VCP元思考链:xxx ---] ... [--- 元思考链结束 ---]
+        clean = clean.replace(Regex("\\[--- VCP元思考链:[\\s\\S]*?元思考链结束 ---\\]", RegexOption.IGNORE_CASE), "")
+        // 2. 去除通用 <think>...</think> 标签
+        clean = clean.replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "")
+        // 3. 去除未闭合的 <think> 和元思考链
+        clean = clean.replace(Regex("<think>[\\s\\S]*", RegexOption.IGNORE_CASE), "")
+        clean = clean.replace(Regex("\\[--- VCP元思考链:[\\s\\S]*", RegexOption.IGNORE_CASE), "")
+        // 4. 去除多余空行
+        clean = clean.replace(Regex("\\n\\s*\\n+"), "\n")
+        return clean.trim()
+    }
+
+    private fun showStreamNotification(session: StreamSession, isSuccess: Boolean, errorMsg: String?) {
+        // 只有当主应用在后台时，才进行通知栏提醒
+        if (isAppInForeground()) {
+            Log.d(TAG, "App is in foreground, skipping notification.")
+            return
+        }
+
+        // 检查 session 是否已被主动取消或从 activeSessions 移除
+        if (activeSessions[session.requestId] !== session) {
+            Log.d(TAG, "Session is no longer active in SseProxyService, skipping notification.")
+            return
+        }
+
+        // 忽略主动取消相关的错误提醒
+        if (!isSuccess && errorMsg != null) {
+            if (errorMsg.contains("cancel", ignoreCase = true) || 
+                errorMsg.contains("close", ignoreCase = true)) {
+                Log.d(TAG, "Ignoring notification for manual cancellation: $errorMsg")
+                return
+            }
+        }
+
+        val agentName = session.contextJson?.optString("agentName") ?: "智能体"
+        val topicId = session.contextJson?.optString("topicId")
+        val ownerId = session.contextJson?.optString("ownerId")
+        
+        val title: String
+        val contentText: String
+        
+        if (isSuccess) {
+            title = "✨ $agentName 已回复"
+            
+            val fullText = StringBuilder()
+            synchronized(session) {
+                for (event in session.eventBuffer) {
+                    if (event.getString("eventType") == "message") {
+                        val eventData = event.getString("eventData")
+                        if (eventData != "[DONE]") {
+                            try {
+                                val dataVal = JSONObject(eventData)
+                                val choices = dataVal.optJSONArray("choices")
+                                if (choices != null && choices.length() > 0) {
+                                    val delta = choices.getJSONObject(0).optJSONObject("delta")
+                                    val content = delta?.optString("content", "") ?: ""
+                                    fullText.append(content)
+                                }
+                            } catch (ignored: Exception) {}
+                        }
+                    }
+                }
+            }
+            
+            val replyText = fullText.toString().trim()
+            val cleanReply = cleanTextForNotification(replyText)
+            val singleLineReply = cleanReply.replace("\n", " ").replace("\r", " ").trim()
+            
+            contentText = if (singleLineReply.isNotEmpty()) {
+                if (singleLineReply.length > 80) singleLineReply.take(80) + "..." else singleLineReply
+            } else {
+                "回复内容已生成，点击进入应用查看。"
+            }
+        } else {
+            title = "⚠️ 与 $agentName 的对话中断"
+            contentText = errorMsg ?: "网络连接发生异常"
+        }
+
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        val channelId = "vcp_agent_alerts"
+
+        val openIntent = try {
+            val mainActivityClass = Class.forName("com.vcp.avatar.MainActivity")
+            Intent(this, mainActivityClass).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("requestId", session.requestId)
+                if (topicId != null) putExtra("topicId", topicId)
+                if (ownerId != null) putExtra("ownerId", ownerId)
+            }
+        } catch (_: ClassNotFoundException) {
+            Intent(Intent.ACTION_MAIN).apply {
+                setPackage(packageName)
+                addCategory(Intent.CATEGORY_LAUNCHER)
+            }
+        }
+        
+        val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+            
+        val openPendingIntent = PendingIntent.getActivity(
+            this, session.requestId.hashCode(), openIntent, pendingIntentFlags
+        )
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle(title)
+            .setContentText(contentText)
+            .setSmallIcon(applicationInfo.icon)
+            .setAutoCancel(true)
+            .setContentIntent(openPendingIntent)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setDefaults(Notification.DEFAULT_ALL)
+            .build()
+
+        val notifId = session.requestId.hashCode()
+        notificationManager.notify(notifId, notification)
     }
 }

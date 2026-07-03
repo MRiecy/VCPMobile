@@ -116,6 +116,39 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     val pluginActivity: Activity get() = activity
     var webViewRef: WebView? = null
     private var isAppInForeground = true
+    private var pendingNotificationData: JSObject? = null
+
+    private fun handleNotificationIntent(intent: Intent) {
+        val topicId = intent.getStringExtra("topicId")
+        val ownerId = intent.getStringExtra("ownerId")
+        val requestId = intent.getStringExtra("requestId")
+        if (topicId != null && ownerId != null) {
+            Log.i(TAG, "[handleNotificationIntent] Found notification click: topicId=$topicId, ownerId=$ownerId, requestId=$requestId")
+            val data = JSObject().apply {
+                put("topicId", topicId)
+                put("ownerId", ownerId)
+                put("requestId", requestId ?: "")
+            }
+            pendingNotificationData = data
+            
+            val webView = webViewRef
+            if (webView != null) {
+                val dataJson = data.toString()
+                val safeJson = escapeJsonForJsString(dataJson)
+                val script = "window.dispatchEvent(new CustomEvent('vcp-notification-click', { detail: JSON.parse(\"$safeJson\") }))"
+                activity.runOnUiThread {
+                    webView.evaluateJavascript(script, null)
+                }
+            } else {
+                Log.w(TAG, "[handleNotificationIntent] WebView not ready, caching notification data")
+            }
+            
+            // Consume the intent extras so they don't fire again
+            intent.removeExtra("topicId")
+            intent.removeExtra("ownerId")
+            intent.removeExtra("requestId")
+        }
+    }
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
@@ -1025,6 +1058,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         // 冷启动：处理传递给 Activity 的初始 intent
         shareIntentHandler.handleShareIntent(activity.intent)
         shareIntentHandler.injectShareData(webView)
+        handleNotificationIntent(activity.intent)
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
@@ -1056,6 +1090,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         shareIntentHandler.handleShareIntent(intent)
+        handleNotificationIntent(intent)
     }
 
     // ==================================================================
@@ -2279,6 +2314,17 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             Log.e(TAG, "startHelperService failed", e)
             invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun getPendingNotification(invoke: Invoke) {
+        val data = pendingNotificationData
+        if (data != null) {
+            pendingNotificationData = null
+            invoke.resolve(data)
+        } else {
+            invoke.resolve(JSObject())
         }
     }
 }
