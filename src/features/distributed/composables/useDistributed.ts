@@ -27,18 +27,26 @@ const status = ref<DistributedStatus>({
 
 const loading = ref(false);
 
+let listenPromise: Promise<UnlistenFn> | null = null;
 let unlisten: UnlistenFn | null = null;
 let listenerCount = 0;
 
 async function setupListener() {
   if (unlisten) return;
-  unlisten = await listen<DistributedStatus>(
-    "vcp-distributed-status",
-    (event) => {
-      console.log("[Distributed] State transition:", JSON.stringify(event.payload));
-      status.value = event.payload;
-    },
-  );
+  if (!listenPromise) {
+    listenPromise = listen<DistributedStatus>(
+      "vcp-distributed-status",
+      (event) => {
+        console.log("[Distributed] State transition:", JSON.stringify(event.payload));
+        status.value = event.payload;
+      },
+    );
+  }
+  const resolvedUnlisten = await listenPromise;
+  if (!unlisten) {
+    unlisten = resolvedUnlisten;
+    listenPromise = null;
+  }
 }
 
 function teardownListener() {
