@@ -232,36 +232,100 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".parse().unwrap()
         );
 
-        match tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await {
-            Ok(connection_result) => match connection_result {
-                Ok((ws_stream, _)) => {
-                    retry_delay = Duration::from_millis(1000);
-                    {
-                        *CURRENT_INFO_STATUS.write().await = "connected".to_string();
+        let mut connection_succeeded = false;
+        let mut ws_stream_opt = None;
+        let mut interrupted_by_url_change = false;
+
+        let connect_fut = connect_async(request);
+
+        tokio::select! {
+            _ = url_rx.changed() => {
+                log::info!("[VCPInfo] URL changed during connection attempt, aborting.");
+                interrupted_by_url_change = true;
+            }
+            res = tokio::time::timeout(Duration::from_secs(5), connect_fut) => {
+                match res {
+                    Ok(Ok((ws_stream, _))) => {
+                        ws_stream_opt = Some(ws_stream);
+                        connection_succeeded = true;
                     }
-                    log::info!("[VCPInfo] Connected successfully to {}", masked_url);
+                    Ok(Err(e)) => {
+                        {
+                            *CURRENT_INFO_STATUS.write().await = "error".to_string();
+                        }
+                        log::error!("[VCPInfo] Connection Error: {}", e);
+                        emit_info_event(
+                            &app_handle,
+                            serde_json::json!({
+                                "type": "vcp-info-status",
+                                "status": "error",
+                                "message": "连接错误",
+                                "source": "VCPInfo"
+                            }),
+                        );
+                    }
+                    Err(_) => {
+                        {
+                            *CURRENT_INFO_STATUS.write().await = "error".to_string();
+                        }
+                        log::error!("[VCPInfo] Connection timed out after 5 seconds.");
+                        emit_info_event(
+                            &app_handle,
+                            serde_json::json!({
+                                "type": "vcp-info-status",
+                                "status": "error",
+                                "message": "连接超时",
+                                "source": "VCPInfo"
+                            }),
+                        );
+                    }
+                }
+            }
+        }
 
-                    let (mut ws_write, mut ws_read) = ws_stream.split();
+        if interrupted_by_url_change {
+            continue;
+        }
 
-                    emit_info_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-info-status",
-                            "status": "connected",
-                            "message": "已连接",
-                            "source": "VCPInfo"
-                        }),
-                    );
+        if connection_succeeded {
+            if let Some(ws_stream) = ws_stream_opt {
+                retry_delay = Duration::from_millis(1000);
+                {
+                    *CURRENT_INFO_STATUS.write().await = "connected".to_string();
+                }
+                log::info!("[VCPInfo] Connected successfully to {}", masked_url);
 
-                    let mut heartbeat_timer = Box::pin(sleep(Duration::from_secs(15)));
+                let (mut ws_write, mut ws_read) = ws_stream.split();
 
-                    loop {
-                        tokio::select! {
-                            // 监听 URL 变更
-                            _ = url_rx.changed() => {
-                                log::info!("[VCPInfo] URL changed, closing current connection.");
+                emit_info_event(
+                    &app_handle,
+                    serde_json::json!({
+                        "type": "vcp-info-status",
+                        "status": "connected",
+                        "message": "已连接",
+                        "source": "VCPInfo"
+                    }),
+                );
+
+                let mut heartbeat_timer = Box::pin(sleep(Duration::from_secs(15)));
+
+                loop {
+                    tokio::select! {
+                        // 监听 URL 变更并防止 Flapping 瞬断
+                        _ = url_rx.changed() => {
+                            let new_val = url_rx.borrow().clone();
+                            if let Some(new_u) = new_val {
+                                if new_u != ws_url {
+                                    log::info!("[VCPInfo] URL changed, closing current connection.");
+                                    break;
+                                } else {
+                                    log::info!("[VCPInfo] URL changed event fired but value is identical. Ignoring to prevent flapping.");
+                                }
+                            } else {
+                                log::info!("[VCPInfo] URL cleared, closing connection.");
                                 break;
                             }
+                        }
                             // 心跳周期触发
                             _ = &mut heartbeat_timer => {
                                 if let Err(e) = ws_write.send(Message::Ping(vec![].into())).await {
@@ -309,38 +373,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         }),
                     );
                 }
-                Err(e) => {
-                    {
-                        *CURRENT_INFO_STATUS.write().await = "error".to_string();
-                    }
-                    log::error!("[VCPInfo] Connection Error: {}", e);
-                    emit_info_event(
-                        &app_handle,
-                        serde_json::json!({
-                            "type": "vcp-info-status",
-                            "status": "error",
-                            "message": "连接错误",
-                            "source": "VCPInfo"
-                        }),
-                    );
-                }
-            },
-            Err(_) => {
-                {
-                    *CURRENT_INFO_STATUS.write().await = "error".to_string();
-                }
-                log::error!("[VCPInfo] Connection timed out after 5 seconds.");
-                emit_info_event(
-                    &app_handle,
-                    serde_json::json!({
-                        "type": "vcp-info-status",
-                        "status": "error",
-                        "message": "连接超时",
-                        "source": "VCPInfo"
-                    }),
-                );
             }
-        }
 
         tokio::select! {
             _ = url_rx.changed() => log::info!("[VCPInfo] URL changed during retry wait."),

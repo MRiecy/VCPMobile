@@ -247,6 +247,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         let mut ws_stream_opt = None;
         let mut final_ws_url = ws_url.clone();
         let mut connection_error = None;
+        let mut interrupted_by_url_change = false;
 
         for (i, trial_url) in urls_to_try.iter().enumerate() {
             let trial_masked_url = if trial_url.as_str().contains("VCP_Key=") {
@@ -272,7 +273,9 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         trial_masked_url,
                         e
                     );
-                    connection_error = Some(format!("Request construction error: {}", e));
+                    connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                    ));
                     continue;
                 }
             };
@@ -306,33 +309,69 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".parse().unwrap()
             );
 
-            match tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await {
-                Ok(connection_result) => match connection_result {
-                    Ok((ws_stream, _)) => {
-                        ws_stream_opt = Some(ws_stream);
-                        final_ws_url = trial_url.clone();
-                        connection_succeeded = true;
-                        break;
+            let connect_fut = connect_async(request);
+
+            tokio::select! {
+                _ = url_rx.changed() => {
+                    log::info!("[VCPLog] URL changed during connection trial, aborting.");
+                    interrupted_by_url_change = true;
+                    break;
+                }
+                res = tokio::time::timeout(Duration::from_secs(5), connect_fut) => {
+                    match res {
+                        Ok(Ok((ws_stream, _))) => {
+                            ws_stream_opt = Some(ws_stream);
+                            final_ws_url = trial_url.clone();
+                            connection_succeeded = true;
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            log::warn!(
+                                "[VCPLog] Connection failed for trial {} ({}): {}",
+                                i + 1,
+                                trial_masked_url,
+                                e
+                            );
+                            connection_error = Some(e);
+                        }
+                        Err(_) => {
+                            log::warn!(
+                                "[VCPLog] Connection timed out (5s) for trial {} ({})",
+                                i + 1,
+                                trial_masked_url
+                            );
+                            connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
+                                std::io::Error::new(std::io::ErrorKind::TimedOut, "Connection timed out (5s)")
+                            ));
+                        }
                     }
-                    Err(e) => {
-                        log::warn!(
-                            "[VCPLog] Connection failed for trial {} ({}): {}",
-                            i + 1,
-                            trial_masked_url,
-                            e
-                        );
-                        connection_error = Some(e.to_string());
-                    }
-                },
-                Err(_) => {
-                    log::warn!(
-                        "[VCPLog] Connection timed out (5s) for trial {} ({})",
-                        i + 1,
-                        trial_masked_url
-                    );
-                    connection_error = Some("Connection timed out (5s)".to_string());
                 }
             }
+
+            if interrupted_by_url_change {
+                break;
+            }
+
+            // 关键优化：检查错误类型是否值得降级尝试。
+            // 只有当收到 HTTP 握手响应错误（如 404/400，表示 TCP 连通但握手协议细节被拒）时，才尝试 old_url 降级。
+            // 底层网络错误（如连接被拒、超时等），降级尝试毫无意义，直接提前终止。
+            if i + 1 < urls_to_try.len() {
+                let should_fallback = match &connection_error {
+                    Some(tokio_tungstenite::tungstenite::Error::Http(_)) => true,
+                    _ => false,
+                };
+                if !should_fallback {
+                    log::info!(
+                        "[VCPLog] Underlying network error or timeout during trial {}. Skipping further fallback trials.",
+                        i + 1
+                    );
+                    break;
+                }
+            }
+        }
+
+        if interrupted_by_url_change {
+            continue;
         }
 
         if connection_succeeded {
@@ -388,10 +427,20 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                 loop {
                     tokio::select! {
-                        // 监听 URL 变更
+                        // 监听 URL 变更并防止 Flapping 瞬断
                         _ = url_rx.changed() => {
-                            log::info!("[VCPLog] URL changed, closing current connection.");
-                            break;
+                            let new_val = url_rx.borrow().clone();
+                            if let Some(new_u) = new_val {
+                                if new_u != ws_url {
+                                    log::info!("[VCPLog] URL changed, closing current connection.");
+                                    break;
+                                } else {
+                                    log::info!("[VCPLog] URL changed event fired but value is identical. Ignoring to prevent flapping.");
+                                }
+                            } else {
+                                log::info!("[VCPLog] URL cleared, closing connection.");
+                                break;
+                            }
                         }
                         // 监听心跳重置信号
                         Some(_) = reset_rx.recv() => {
@@ -422,7 +471,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                                                 emit_log_event(&app_handle, serde_json::json!({
                                                     "type": "raw_text",
                                                     "data": text
-                                                }));
+                                                 }));
                                             }
                                         }
                                     }
@@ -474,7 +523,9 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             {
                 *CURRENT_LOG_STATUS.write().await = "error".to_string();
             }
-            let last_error = connection_error.unwrap_or_else(|| "Unknown connection error".to_string());
+            let last_error = connection_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "Unknown connection error".to_string());
             log::error!(
                 "[VCPLog] All connection attempts failed. Last error: {}. Retrying...",
                 last_error
@@ -514,6 +565,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         }
         retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
     }
+    {
+        let mut sender_lock = LOG_SENDER.lock().await;
+        *sender_lock = None;
+    }
     LOG_CONNECTION_ACTIVE.store(false, Ordering::SeqCst);
-    log::info!("[VCPLog] Listener task terminated, connection flag reset.");
+    log::info!("[VCPLog] Listener task terminated, connection flag and sender reset.");
 }
