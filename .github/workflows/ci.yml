@@ -71,9 +71,14 @@ jobs:
         working-directory: ./src-tauri
         run: cargo test --test file_extractor_integration
 
+      - name: Initialize Android Project
+        run: pnpm tauri android init --ci
+
       - name: Android Plugin Unit Tests
         working-directory: ./src-tauri/gen/android
-        run: ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
 
       - name: Rust Benchmark Compile Check
         working-directory: ./src-tauri
