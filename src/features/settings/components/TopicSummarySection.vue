@@ -25,7 +25,7 @@ watch(
   <div class="flex gap-3 items-end px-1">
     <div class="flex-1">
       <SettingsTextField v-model="settings.topicSummaryModel" label="总结专用模型"
-        placeholder="默认: gemini-3.1-flash-lite-preview" mono @blur="emit('save-request')" />
+        placeholder="默认: gemini-3.1-flash-lite" mono @blur="emit('save-request')" />
     </div>
     <SettingsActionButton variant="secondary" @click="emit('open-model-selector')" class="!p-3.5 !rounded-2xl">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"

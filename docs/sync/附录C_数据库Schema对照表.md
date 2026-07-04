@@ -169,7 +169,7 @@ last_updated: 2026-07-04
 | active_generations | owner_type | TEXT | NOT NULL | `'agent'` / `'group'` | — |
 | active_generations | created_at | BIGINT | NOT NULL | 注册时间戳，毫秒 | — |
 
-> **设计说明**：作为云端断点续传的本地事务日志。生成开始时写入，正常结束/错误/中止时删除。详见 `docs/cloud/message_state_management.md`。
+> **设计说明**：作为本地 SSE 代理断点续传的运行时事务日志。生成开始时写入，正常结束/错误/中止时删除。详见 `docs/modules/09_VCP请求客户端.md` §8。
 
 ### 1.10 `messages_fts` — 全文搜索虚拟表
 

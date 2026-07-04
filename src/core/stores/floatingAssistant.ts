@@ -18,6 +18,8 @@ interface AppSettings {
   [key: string]: any;
 }
 
+// [SUSPENDED BETA] 浮动助手（floating assistant）功能当前已暂停使用。
+// SettingsView.vue 中的入口已注释关闭，本 Store 保留以支持后续重启。
 export const useFloatingAssistantStore = defineStore("floatingAssistant", () => {
   const messages = ref<ChatMessage[]>([]);
   const inputText = ref("");

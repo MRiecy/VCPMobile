@@ -22,19 +22,19 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 3. [Agent 领域总览](modules/13_Agent领域总览.md)
 4. [Persistence 领域总览](modules/14_Persistence领域总览.md)
 5. [分布式节点能力](modules/15_分布式节点能力.md)
-6. [本地服务器与浮动助手](modules/22_本地服务器与浮动助手.md) -- v1.0.3 新增
+6. [本地服务器与浮动助手](modules/22_本地服务器与浮动助手.md) -- v1.0.3 新增，v1.1.3 浮动助手功能已暂停使用
 
 ### Vue 前端开发者
 1. [前端总览](vue_docs/00_总览与导航.md)
 2. [应用架构与生命周期](vue_docs/architecture/01_应用架构与生命周期.md)
 3. [状态管理总览](vue_docs/core/02_状态管理总览与Store全景图.md)
 4. [对话引擎总览](vue_docs/features/chat/08_对话引擎总览.md)
-5. [浮动助手系统](vue_docs/features/assistant/24_浮动助手系统.md) -- v1.0.3 新增
+5. [浮动助手系统](vue_docs/features/assistant/24_浮动助手系统.md) -- v1.0.3 新增，v1.1.3 已暂停使用
 
 ### Android 原生开发者
 1. [插件总览](plugins/00_总览与导航.md)
 2. [插件初始化与命令路由](plugins/01_插件初始化与命令路由.md)
-3. [浮动窗口与会话共享](plugins/10_浮动窗口与会话共享.md) -- v1.0.3 新增
+3. [浮动窗口与会话共享](plugins/10_浮动窗口与会话共享.md) -- v1.0.3 新增，v1.1.3 浮动助手功能已暂停使用
 
 ### 同步功能开发者
 1. [同步总览](sync/00_总览与导航.md)

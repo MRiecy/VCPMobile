@@ -430,11 +430,10 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                             let (mime, part_type) = match ext.as_str() {
                                 "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "heic"
                                 | "heif" | "avif" => ("image", "image_url"),
-                                "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
-                                | "amr" => ("audio", "input_audio"),
-                                "mp4" | "webm" | "3gp" | "3g2" | "mov" => {
-                                    ("video", "image_url")
+                                "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus" | "amr" => {
+                                    ("audio", "input_audio")
                                 }
+                                "mp4" | "webm" | "3gp" | "3g2" | "mov" => ("video", "image_url"),
                                 _ => ("application", "file_url"), // 非支持多模态格式退化回退
                             };
 

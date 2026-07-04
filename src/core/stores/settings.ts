@@ -21,6 +21,7 @@ export interface AppSettings {
   groupOrder: string[];
   currentThemeMode?: string;
   syncPrerenderEnabled?: boolean;
+  // [SUSPENDED BETA] 浮动助手（划词悬浮球）功能当前已暂停使用，保留字段供后续重启
   enableAssistant?: boolean;
   assistantAgentId?: string;
   distributedEnabled?: boolean;

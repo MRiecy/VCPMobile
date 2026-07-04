@@ -1,4 +1,6 @@
 <script setup lang="ts">
+// [SUSPENDED BETA] 划词悬浮助手设置面板当前已暂停使用，SettingsView.vue 中的入口已注释关闭。
+// 保留组件代码供后续重启该功能时恢复。
 import { ref, onMounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore, type AppSettings } from "../../../core/stores/settings";

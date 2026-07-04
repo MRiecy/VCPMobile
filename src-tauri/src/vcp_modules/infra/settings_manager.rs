@@ -120,7 +120,7 @@ pub fn create_default_settings() -> Settings {
         admin_username: "".to_string(),
         admin_password: "".to_string(),
         file_key: "".to_string(),
-        topic_summary_model: "gemini-2.5-flash".to_string(),
+        topic_summary_model: "gemini-3.1-flash-lite".to_string(),
         sync_log_level: "INFO".to_string(),
         sync_prerender_enabled: false,
         enable_assistant: false,

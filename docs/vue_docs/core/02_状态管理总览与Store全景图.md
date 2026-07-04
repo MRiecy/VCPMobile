@@ -12,7 +12,7 @@ date: 2026-06-05
 
 ### 1.1 领域定位
 
-`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 18 个 Pinia Store。这些 Store 按领域边界划分为 6 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式、浮动助手六大业务域。
+`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 18 个 Pinia Store。这些 Store 按领域边界划分为 6 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式、浮动助手六大业务域（浮动助手在 v1.1.3 已暂停使用）。
 
 与 Rust 后端不同，前端 Store 不负责数据持久化（SQLite 由后端托管），而是承担以下职责：
 
@@ -47,7 +47,7 @@ date: 2026-06-05
 | 系统与设置 | `rebuildSession.ts` | `useRebuildSessionStore` | 预渲染重建任务会话（状态机 + 进度监听） | ❌ |
 | 同步与分布式 | `syncSession.ts` | `useSyncSessionStore` | 手动同步会话（WebSocket 连接、日志、进度） | ❌ |
 | 系统与设置 | `tarvenStore.ts` | `useTarvenStore` | Tarven 注入规则列表、启用状态、选择器开关 | ❌ |
-| 浮动助手 | `floatingAssistant.ts` | `useFloatingAssistantStore` | 浮动窗口 WebSocket IPC、消息队列、剪贴板、双模发送 | ❌ |
+| 浮动助手 | `floatingAssistant.ts` | `useFloatingAssistantStore` | 浮动窗口 WebSocket IPC、消息队列、剪贴板、双模发送（v1.1.3 已暂停使用） | ❌ |
 
 > **持久化说明**：
 > - ✅ = `pinia-plugin-persistedstate` 自动持久化到 `localStorage`
@@ -562,11 +562,13 @@ overlayStore.openSyncSession()
 
 ---
 
-### 2.6 浮动助手类
+### 2.6 浮动助手类（v1.1.3 已暂停使用）
 
 #### floatingAssistant —— 浮动窗口 WebSocket IPC
 
 > 文件位置：`src/core/stores/floatingAssistant.ts`（~352 行）
+
+> **⚠️ SUSPENDED BETA**：浮动助手功能在 v1.1.3 中已暂停使用，`SettingsView.vue` 入口已关闭，但 Store 代码保留。
 
 `useFloatingAssistantStore` 是 VCP Mobile 浮动助手 **Mini-App 的唯一 Pinia Store**。它为 Android 悬浮 WebView 提供完整的消息管理、WebSocket IPC、剪贴板读取、设置镜像与内置 Toast 系统。
 

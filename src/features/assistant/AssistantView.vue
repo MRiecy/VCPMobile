@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// [SUSPENDED BETA] 浮动助手窗口当前已暂停使用，SettingsView.vue 中的入口已关闭。
 import { ref, onMounted, nextTick, watch } from "vue";
 import { useFloatingAssistantStore } from "../../core/stores/floatingAssistant";
 import AssistantMessageCard from "./AssistantMessageCard.vue";

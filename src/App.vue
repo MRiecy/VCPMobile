@@ -83,6 +83,7 @@ const router = useRouter();
 
 const { initRootHistory } = useModalHistory();
 
+// [SUSPENDED BETA] isAssistant 用于标识浮动助手窗口模式，当前入口已关闭，保留以支持后续重启
 const isAssistant = ref(false);
 
 // --- Share Intent State ---
@@ -334,6 +335,7 @@ const handleExitRequest = async () => {
 
 
 
+// [SUSPENDED BETA] 悬浮球点击打开浮动助手窗口，当前功能已暂停使用，事件监听保留但入口关闭
 const handleFloatingBallClick = async () => {
   console.log("[App] Floating ball clicked. Resolving assistant window...");
   try {
@@ -381,6 +383,7 @@ onMounted(async () => {
   // 1. 同步挂载基础物理按键与系统事件监听 (混合应用黄金铁律：物理拦截最优先挂载，杜绝初始化阻塞失效)
   window.addEventListener("vcp-exit-requested", handleExitRequest);
   window.addEventListener("vcp-hardware-back", handleExitRequest);
+  // [SUSPENDED BETA] 悬浮球点击事件保留，但浮动助手功能当前已暂停使用
   window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.addEventListener("vcp-share-intent", handleShareIntent);
   window.addEventListener("vcp-notification-click", handleNotificationClick);
