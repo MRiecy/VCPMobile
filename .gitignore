@@ -39,7 +39,7 @@ plans_back.zip
 VCPMobile.code-workspace
 
 # Large Assets & Scripts
-scripts/
+/scripts/
 plans/Archive_Assets/
 # Local Release Artifacts
 releases/
