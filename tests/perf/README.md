@@ -1,6 +1,6 @@
 # Performance and stability scripts
 
-This directory contains lightweight performance/stability helpers.
+This directory contains lightweight performance/stability helpers intended for **local development and manual debugging only**. They are **not executed in CI Release builds** and their outputs are **not uploaded as Release assets**.
 
 Current scope:
 

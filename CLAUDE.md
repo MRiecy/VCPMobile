@@ -347,10 +347,10 @@
 
   目录：`tests/perf/scripts/`
 
-  - `measure_apk_size.cjs`：APK 体积与内部分布（lib/dex/assets/res）
-  - `measure_startup_adb.cjs`：`am start -W` 冷启动采样（min/median/p95/max）
-  - `collect_android_dumpsys.cjs`：meminfo/power/wifi/dropbox/logcat 快照
-  - `run_rust_bench.cjs`：封装 `cargo bench --profile perf` 并归档 artifact
+  - `measure_apk_size.cjs`：APK 体积与内部分布（lib/dex/assets/res），仅本地运行，不进入 Release asset
+  - `measure_startup_adb.cjs`：`am start -W` 冷启动采样（min/median/p95/max），仅本地运行
+  - `collect_android_dumpsys.cjs`：meminfo/power/wifi/dropbox/logcat 快照，仅本地运行
+  - `run_rust_bench.cjs`：封装 `cargo bench --profile perf` 并归档 artifact，仅本地运行
 
   ### 5.7 测试命令速查
 
@@ -467,7 +467,7 @@
     - 环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。
     - 从 `secrets.ANDROID_KEYSTORE_BASE64` 恢复密钥库。
     - 构建命令：`pnpm tauri android build --apk --target aarch64`。
-    - 自动发现 `*-release.apk`，重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`，产出 `apk-size-v{VERSION}.json`（APK 体积报告），一并上传回 Release 附件。
+    - 自动发现 `*-release.apk`，重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`，与 `frontend-dist-v{VERSION}.zip` 一并上传回 Release 附件。
 
   ### 本地发布
 
@@ -562,7 +562,7 @@
   | `src-tauri/benches/`                        | Rust Criterion 性能基准（ast_tail_bench）                    |
   | `src-tauri/plugins/vcp-mobile/android/src/test/` | Android 插件单元测试（Kotlin JVM + Robolectric）         |
   | `tests/e2e-android/scripts/`                | adb smoke 脚本（安装/授权/启动/信息采集）                    |
-  | `tests/perf/scripts/`                       | 性能脚本（APK体积/启动/bench/快照）                          |
+  | `tests/perf/scripts/`                       | 本地性能脚本（APK体积/启动/bench/快照），不进入 CI Release |
   | `docs/Test_Architecture_Constraints.md` | 测试体系架构约束文档（全局约束）               |
 
   ---
