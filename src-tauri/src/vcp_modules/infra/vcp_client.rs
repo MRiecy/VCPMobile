@@ -421,24 +421,24 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                             let path_buf = std::path::PathBuf::from(&clean_path);
 
                             let mut converted = false;
-                            if path_buf.exists() {
-                                // 提取扩展名决定 mime_type
-                                let ext = path_buf
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("")
-                                    .to_lowercase();
-                                let (mime, part_type) = match ext.as_str() {
-                                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "heic"
-                                    | "heif" | "avif" => ("image", "image_url"),
-                                    "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
-                                    | "amr" => ("audio", "input_audio"),
-                                    "mp4" | "webm" | "3gp" | "3g2" | "mov" => {
-                                        ("video", "image_url")
-                                    }
-                                    _ => ("application", "file_url"), // 非支持多模态格式退化回退
-                                };
+                            // 提取扩展名决定 mime_type（在文件存在判断之前，确保降级提示也能按类型区分）
+                            let ext = path_buf
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or("")
+                                .to_lowercase();
+                            let (mime, part_type) = match ext.as_str() {
+                                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "heic"
+                                | "heif" | "avif" => ("image", "image_url"),
+                                "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus"
+                                | "amr" => ("audio", "input_audio"),
+                                "mp4" | "webm" | "3gp" | "3g2" | "mov" => {
+                                    ("video", "image_url")
+                                }
+                                _ => ("application", "file_url"), // 非支持多模态格式退化回退
+                            };
 
+                            if path_buf.exists() {
                                 if mime == "image" {
                                     // 图片类型：长边 > 1120px 时缩放，避免多模态 payload 过大
                                     let path_buf_clone = path_buf.clone();

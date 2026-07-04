@@ -1,7 +1,8 @@
 # Android 插件管理体系规范
 
 > **文档编号**: ARCH-ANDROID-001  
-> **版本**: 1.0.3
+> **版本**: 1.1.3
+> **日期**: 2026-07-04
 > **附录新增**: 2026-05-19 | 附录 A（插件生态速查）+ 附录 B（权限实战手册）  
 > **状态**: 已迁移至 `tauri-plugin-vcp-mobile`  
 > **适用范围**: `src-tauri/plugins/vcp-mobile` 及 Android 原生层全部自定义代码
@@ -17,11 +18,12 @@ VCP Mobile 采用**单一自定义插件** `tauri-plugin-vcp-mobile` 统一管�
 | 屏幕常亮 | `src/screen.rs` | — | Rust 侧 Raw JNI |
 | 前台锁协同 | `src/stream.rs` | `service/ForegroundGuardian.kt` | `PluginHandle.run_mobile_plugin`（v1.1.2 新增） |
 | 流式前台保活 | `src/stream.rs` | `service/StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin` |
+| SSE 代理（`:helper` 进程） | `src/stream.rs` | `service/SseProxyService.kt` | `startForegroundService` + 本地 TCP |
 | 键盘 Insets | — | `KeyboardInsetsManager.kt` | `evaluateJavascript` 注入 CustomEvent |
 | 返回键拦截 | — | `MainActivity.onWebViewCreate()` | `OnBackPressedDispatcher` |
-| 生命周期事件 | — | `LifecycleBridge.kt` | `evaluateJavascript` 注入 CustomEvent |
+| 生命周期事件 | — | `LifecycleBridge.kt` | `plugin.trigger("lifecycle")` → Rust `listen_any` → Tauri Event `vcp-lifecycle-changed`（v1.1.2/v1.1.3 升级） |
 | 麦克风权限 | `src/system.rs` | `VcpMobilePlugin.kt` | `requestPermissionForAlias("microphone")`（Tauri 别名机制） |
-| 通知栏监听 | `src/system.rs` | `VcpMobilePlugin.kt` | 跳转 `ACTION_NOTIFICATION_LISTENER_SETTINGS` |
+| 通知栏监听 | `src/system.rs` | `service/VcpNotificationListenerService.kt` | 跳转 `ACTION_NOTIFICATION_LISTENER_SETTINGS` |
 | 自启动/电源管理 | `src/system.rs` | `VcpMobilePlugin.kt` | 厂商 Intent 链 + 设置页兜底 |
 
 ---
@@ -96,15 +98,37 @@ src-tauri/plugins/vcp-mobile/
 ### 3.3 服务声明
 
 ```xml
+<!-- 主进程前台服务通知壳（由 ForegroundGuardian 调度） -->
 <service
     android:name=".service.StreamKeepaliveService"
     android:enabled="true"
     android:exported="false"
     android:foregroundServiceType="remoteMessaging"
     android:stopWithTask="true" />
+
+<!-- :helper 进程 SSE 代理，独立管理锁与断线缓存 -->
+<service
+    android:name=".service.SseProxyService"
+    android:process=":helper"
+    android:enabled="true"
+    android:exported="false"
+    android:foregroundServiceType="remoteMessaging"
+    android:stopWithTask="false" />
+
+<!-- 系统通知栏监听占位服务，配合权限引导 -->
+<service
+    android:name=".service.VcpNotificationListenerService"
+    android:label="VCP 连接守护助手"
+    android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+    android:exported="true">
+    <intent-filter>
+        <action android:name="android.service.notification.NotificationListenerService" />
+    </intent-filter>
+</service>
 ```
 
-> **v1.1.2 变更**：`stopWithTask` 从 `false` 改为 `true`。ForegroundGuardian 已接管全部锁管理，进程被划掉后锁即消亡，残留前台服务无实际保活作用。
+> **v1.1.2 变更**：`StreamKeepaliveService` 的 `stopWithTask` 从 `false` 改为 `true`。ForegroundGuardian 已接管全部锁管理，进程被划掉后锁即消亡，残留前台服务无实际保活作用。
+> **v1.1.3 新增**：`SseProxyService` 运行在独立的 `:helper` 进程，`stopWithTask="false"`，与主进程生命周期解耦。`VcpNotificationListenerService` 为系统通知栏监听占位服务，需在系统设置中手动授权。
 
 ---
 
@@ -114,15 +138,17 @@ src-tauri/plugins/vcp-mobile/
 
 | 通道 | 前端监听方式 | 适用场景 | 当前使用 |
 |------|-------------|----------|---------|
-| `Plugin.trigger()` | `listen()` from `@tauri-apps/api/event` | Tauri 官方插件事件通道 | 未使用（trigger 与 listen 不互通） |
-| `evaluateJavascript` + `CustomEvent` | `window.addEventListener()` | 需要前端 window 级别事件兼容性 | `vcp-keyboard-inset`、`vcp-hardware-back`、`vcp-exit-requested` 等（v1.1.3 起生命周期事件已迁移至 Tauri Event `vcp-lifecycle-changed`） |
-| `PluginHandle.run_mobile_plugin` | 无需监听，直接 invoke | Rust 到 Kotlin 单向命令调用 | `startStreamingService`、`acquireForeground`、`releaseForeground`（v1.1.2 新增） |
+| `Plugin.trigger()` | Rust `listen_any("vcp-mobile://<channel>")` → `app.emit("<event>")` → 前端 `listen()` | Tauri 官方插件事件通道 | `lifecycle` → `vcp-lifecycle-changed`、`vcp-network-status-changed` |
+| `evaluateJavascript` + `CustomEvent` | `window.addEventListener()` | 需要前端 window 级别事件兼容性 | `vcp-keyboard-inset`、`vcp-hardware-back`、`vcp-exit-requested`、`vcp-share-intent`、`vcp-permission-change` 等（生命周期事件 v1.1.3 起已迁移至 Tauri Event `vcp-lifecycle-changed`） |
+| `PluginHandle.run_mobile_plugin` | 无需监听，直接 invoke | Rust 到 Kotlin 单向命令调用 | `startStreamingService`、`acquireForeground`、`releaseForeground`、`startHelperService`、`checkAllPermissions` 等 |
 
-### 4.2 关键约束：trigger() 与 listen() 不互通
+### 4.2 关键约束：trigger() 与前端 listen() 不直接互通
 
-`Plugin.trigger()` 只能向通过 `registerListener` 注册的内部插件频道发射事件，而前端 `@tauri-apps/api/event` 的 `listen()` 使用全局事件总线。两者**不互通**。
+`Plugin.trigger()` 发射到 Tauri 插件内部频道，Rust 侧通过 `listen_any("vcp-mobile://<channel>")` 接收并处理后，再通过 `app.emit("<event>")` 转发到前端全局事件总线。前端 `@tauri-apps/api/event` 的 `listen()` 监听的是 Rust 转发后的全局事件，而非直接监听 `Plugin.trigger()`。
 
-因此，若前端使用 `window.addEventListener()` 监听，Kotlin 侧**必须**使用 `evaluateJavascript` 注入 `CustomEvent`。
+因此：
+- 若事件需要 Rust 侧参与处理（如生命周期状态、网络状态变化），使用 `Plugin.trigger()` + Rust 转发。
+- 若前端使用 `window.addEventListener()` 监听，Kotlin 侧**必须**使用 `evaluateJavascript` 注入 `CustomEvent`。
 
 ### 4.3 evaluateJavascript 事件格式标准
 
@@ -728,3 +754,7 @@ window.addEventListener('vcp-permission-change', (e: CustomEvent) => {
 | Android 10 Scoped Storage | https://developer.android.com/training/data-storage#scoped-storage |
 | Activity Result API 官方文档 | https://developer.android.com/training/basics/intents/result |
 | Jetpack Permissions 示例 | https://github.com/android/permissions-samples |
+
+---
+
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

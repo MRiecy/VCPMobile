@@ -364,13 +364,13 @@ state.caches.insert(agent_id.to_string(), new_config.clone());
 
 ### 3.7 获取全部 Agent（get_agents）
 
-> 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 165–190 行
+> 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 189–255 行
 
-1. 查询 `agents` 表中所有 `deleted_at IS NULL` 的 `agent_id`
-2. 对每个 ID 调用 `read_agent_config`（会自动利用缓存）
-3. 收集成功的结果，返回 `Vec<AgentConfig>`
+1. 一次性 SQL 查询 `agents` 表中所有 `deleted_at IS NULL` 的 Agent 基础配置，并通过 `LEFT JOIN avatars` 获取 `dominant_color`
+2. 将每行直接映射为 `AgentConfig`，其中 `topics` 字段固定为 `vec![]`（**懒加载**：话题列表不在侧边栏初始化时拉取，待用户进入具体 Agent 后再由 `read_agent_config` 按需加载）
+3. 将结果预热到 `AgentConfigState.caches`，返回 `Vec<AgentConfig>`
 
-> 此函数是前端 Agent 侧边栏的数据源。由于 `read_agent_config` 内部有缓存，首次调用后后续读取速度极快。
+> 此函数是前端 Agent 侧边栏的数据源。采用单条批量查询替代了早期版本中对每个 Agent 调用 `read_agent_config` 的 N+1 模式，显著降低侧边栏初始化延迟。
 
 ### 3.8 删除 Agent（delete_agent）
 
@@ -880,3 +880,7 @@ v1.1.3 之前，`avatar_service.rs` 包含 150+ 行后端颜色科学代码，�
 | 同步联动 | Sync Notification | 本地数据变更后向 `sync_service` 发送通知，触发多端同步 | `agent_service`, `avatar_service` |
 | StreamEvent | — | Rust 通过 SSE Channel 向前端推送的流式事件，类型包括 thinking / data / aurora / end / error | `vcp_client`, `agent_chat_application_service` |
 | Channel<StreamEvent> | — | Tauri v2 提供的类型化 IPC 通道，用于后端向前端实时推送流式事件 | `agent_chat_application_service` |
+
+---
+
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

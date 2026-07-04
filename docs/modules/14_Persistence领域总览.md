@@ -85,12 +85,11 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 
 **流程**（L11–L64）：
 
-1. **路径解析**：通过 `app_handle.path().app_config_dir()` 获取配置目录，追加 `vcp_avatar.db`（L13–L24）。在 Android 上，该路径通常为 `/data/user/0/com.vcp.avatar/files/vcp_avatar.db`。
-2. ~~旧数据迁移~~：`migrate_legacy_attachments` 已在 v0.9.14 彻底移除，附件目录结构由启动流程直接确保。
-3. **连接选项配置**（L32–L51）：链式配置 SQLite PRAGMA。
-4. **连接池创建**：`SqlitePoolOptions::new().max_connections(5).connect_with(...)`（L53–L57）。
-5. **建表**：调用 `setup_tables(&pool).await`（L60）。
-6. **返回**：`(pool, db_path)`，由调用方（`lib.rs` 生命周期管理器）组装为 `DbState` 并挂载到 App State。
+1. **路径解析**：通过 `app_handle.path().app_config_dir()` 获取配置目录，追加 `vcp_avatar.db`（L26–L39）。在 Android 上，该路径通常为 `/data/user/0/com.vcp.avatar/files/vcp_avatar.db`。
+2. **连接选项配置**（L44–L65）：链式配置 SQLite PRAGMA。
+3. **连接池创建**：`SqlitePoolOptions::new().max_connections(5).connect_with(...)`（L67）。
+4. **运行版本化迁移**：调用 `run_migrations(&pool).await?`（L85），由 `sqlx::migrate!("./migrations")` 应用 `src-tauri/migrations/` 下的全部 SQL 迁移。
+5. **返回**：`(pool, db_path)`，由调用方（`lib.rs` 生命周期管理器）组装为 `DbState` 并挂载到 App State。
 
 ### 2.3 WAL 模式与深度性能调优
 
@@ -143,7 +142,7 @@ v1.1.3 起，数据库 Schema 不再通过 `setup_tables` 函数硬编码创建�
 | 表名 | 主键 | 核心用途 |
 |------|------|---------|
 | `avatars` | `(owner_type, owner_id)` | 全局多态头像，含二进制 BLOB 与预计算主色调 |
-| `agents` | `agent_id` | 智能体配置，含 `config_hash` / `content_hash` 指纹 |
+| `agents` | `agent_id` | 智能体配置，含 `mobile_system_prompt` / `use_temperature` / `config_hash` / `content_hash` |
 | `groups` | `group_id` | 群组配置，含成员关系外键 |
 | `group_members` | `(group_id, agent_id)` | 群组成员与标签 |
 | `topics` | `topic_id` | 话题元数据，`owner_type` + `owner_id` 区分归属 |
@@ -212,7 +211,7 @@ CREATE TABLE messages (
 |------|------|
 | `content` | 存储明文消息文本。v1.1.3 起由 zstd 压缩 BLOB 迁移为 TEXT，以支持 FTS5 全文搜索与直接读取 |
 | `content_hash` | 消息内容与附件 hash 的聚合指纹，用于同步 Diff；同步下载时若桌面端已提供则直接复用 |
-| `is_thinking` | **已弃用**。v0.9.14 起所有查询均硬编码为 `Some(false)`，字段保留仅作历史兼容 |
+| `is_thinking` | **已弃用**。v0.9.14 起数据库 `messages` 表已移除该列；应用层 `ChatMessage` / Sync DTO 仍保留字段，读取时固定为 `Some(false)` |
 | `finish_reason` | 流式输出的结束原因（如 `stop`、`length`、`error`） |
 | `deleted_at` | 软删除时间戳，`NULL` 表示未删除。同步系统依赖此字段识别删除状态 |
 
@@ -324,6 +323,7 @@ pub enum DbWriteTask {
     TopicMessages {
         topic_id: String,
         messages: Vec<ChatMessage>,
+        contents: Vec<String>,
         render_bytes: Vec<Vec<u8>>,
         content_hashes: Vec<String>,
         skip_bubble: bool,
@@ -341,7 +341,7 @@ pub enum DbWriteTask {
 | `TopicMessages` | 同步服务 / 聊天发送 | `messages` + `render_cache` + `message_attachments` |
 | `Flush` | 同步服务（如 SyncPipeline 结束阶段） | 无实际写入，仅作为事务边界信号 |
 
-`TopicMessages` 是最复杂的变体，承载了消息正文、渲染缓存、附件关联的三重写入。其中 `render_bytes` 与 `messages` 一一对应，由调用方预先通过 `MessageRenderCompiler::serialize` 生成；`content_hashes` 同样一一对应，供消息指纹直接入库；`skip_bubble` 用于控制是否跳过该话题的哈希冒泡（如初始化填充历史数据时不需要实时冒泡）。
+`TopicMessages` 是最复杂的变体，承载了消息正文、渲染缓存、附件关联的三重写入。其中 `render_bytes`、`contents`、`content_hashes` 均与 `messages` 一一对应：`contents` 为明文消息正文，供批量插入时直接绑定；`render_bytes` 由调用方预先通过 `MessageRenderCompiler::serialize` 生成；`content_hashes` 供消息指纹直接入库；`skip_bubble` 用于控制是否跳过该话题的哈希冒泡（如初始化填充历史数据时不需要实时冒泡）。
 
 ### 3.3 批量事务合并
 
@@ -421,7 +421,7 @@ pub async fn flush(&self) {
 **消息批量插入的极限优化**（`rusqlite_upsert_messages_batch`，L431–L635）：
 - `MAX_PARAMS = 999`：SQLite 单条 SQL 的参数上限。
 - `PARAMS_PER_MSG = 13`：messages 表每条记录需 13 个参数（msg_id, topic_id, role, name, agent_id, content, timestamp, is_group_message, group_id, finish_reason, content_hash, created_at, updated_at）。v0.9.14 移除 `is_thinking`。
-- 计算 `chunk_size = 999 / 14 = 71`，即单条 SQL 最多插入 71 条消息。
+- 计算 `chunk_size = 999 / 13 = 76`，即单条 SQL 最多插入 76 条消息。
 - 使用 `String` 拼接动态 SQL，构造 `VALUES (?,?...), (?,?...), ...` 形式。
 - `prepare_cached` 缓存编译后语句，在同事务内的多个 chunk 间复用。
 - 消息正文以明文 `TEXT` 直接绑定（v1.1.3 起由压缩 BLOB 迁移为 TEXT，以支持 FTS5 全文搜索）。
@@ -480,7 +480,7 @@ fn rusqlite_upsert_agent(
 - 计算 `config_hash = HashAggregator::compute_agent_config_hash(dto)`。
 - `INSERT ... ON CONFLICT(agent_id) DO UPDATE SET ...`。
 - 更新字段：name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, updated_at。
-- 注意：不更新 `mobile_system_prompt` 和 `current_topic_id`。`current_topic_id` 已在业务逻辑中弃用（由前端 `sessionStore` 运行时状态接管），保留仅作历史兼容。
+- 注意：不更新 `mobile_system_prompt` 和 `use_temperature`。这两个字段在 `agents` 表 Schema 中存在（默认值 `''` / `0`），但当前同步写入使用数据库默认值，不随 `AgentSyncDTO` 更新；`current_topic_id` 已不再是数据库字段，仅作为前端 `sessionStore` 运行时状态存在。
 
 #### Group 写入（`rusqlite_upsert_group`，L312–L367）
 
@@ -789,8 +789,7 @@ persistence/
 │
 ├── db_manager.rs
 │   ├─→ 被 db_write_queue.rs 引用：db_path 用于 rusqlite::Connection::open
-│   ├─→ 被 message_repository.rs 引用：DbState.pool 用于普通查询
-│   └─→ 内部调用 file_manager::migrate_legacy_attachments（infra/ 领域）
+│   └─→ 被 message_repository.rs 引用：DbState.pool 用于普通查询
 │
 ├── db_write_queue.rs
 │   ├─→ 引用 message_repository.rs：ContentCompressor::compress（消息内容压缩）
@@ -812,13 +811,12 @@ persistence/
 
 | 依赖领域 | 具体模块 | 依赖方向 | 说明 |
 |---------|---------|---------|------|
-| **infra/** | `file_manager.rs` | `db_manager.rs` → `file_manager` | 启动时触发附件目录迁移 |
 | **sync/** | `sync_service.rs`, `sync_pipeline/` | `sync/` → `db_write_queue.rs` | 同步流水线将解析后的 DTO 批量提交给写入队列 |
 | **chat/** | `chat_manager.rs` | 双向 | `chat_manager` 定义 `ChatMessage` / `Attachment` 类型，被 persistence/ 消费；`chat_manager` 调用 `MessageRepository::upsert_message` 实时落盘 |
 | **sync/** | `sync_hash.rs`, `sync_types.rs` | `db_write_queue.rs` / `message_repository.rs` → `sync/` | 哈希计算与 Merkle Root 工具由同步子系统提供 |
 | **parser/** | `content_parser.rs` | `message_repository.rs` → `content_parser` | 渲染编译依赖内容解析器 |
 
-**依赖原则**：persistence/ 作为底层领域，原则上**不主动调用**上层业务逻辑。唯一的例外是启动阶段的 `migrate_legacy_attachments`（属于跨领域初始化协调，已被广泛接受）。所有上层写入均通过 `DbWriteQueue` 或 `MessageRepository` 的显式 API 进入 persistence/。
+**依赖原则**：persistence/ 作为底层领域，**不主动调用**上层业务逻辑。所有上层写入均通过 `DbWriteQueue` 或 `MessageRepository` 的显式 API 进入 persistence/。
 
 ### 5.3 数据一致性边界
 

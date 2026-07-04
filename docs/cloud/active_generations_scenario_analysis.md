@@ -87,7 +87,7 @@ let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context))
 
 **结果**：✅ 注册和注销均正常。非流式也会经历完整的 INSERT → DELETE 生命周期。
 
-#### 🚨 1.1.4 流式/非流式 + 上游网络错误（HTTP 级失败）
+#### ✅ 1.1.4 流式/非流式 + 上游网络错误（HTTP 级失败）
 
 ```
 时序：
@@ -101,18 +101,13 @@ let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context))
   agent_chat_application_service:
     match result {
         Err(e) => {
-            log::error!(...);  // ← 仅打日志
+            log::error!(...);
+            // ✅ v1.1.3 修复：DELETE FROM active_generations WHERE msg_id = ?
         }
     }
-    // finalize_stream_message 未被调用！
-    // ❌ active_generations 记录未被清理！
 ```
 
-**结果**：🚨 **BUG — 注册表泄漏！** 当 `perform_vcp_request` 返回 `Err` 时，`finalize_stream_message` 不会被调用，导致 `active_generations` 中的记录永久残留。
-
-**同样的问题存在于**：
-- `group_chat_application_service.rs:L313`：`if let Err(e) = res_result { log::error!(...); }` — 没有清理注册表。
-- `vcp_client.rs:L185` (`sendToVCP`)：`perform_vcp_request(...).await?` — `?` 直接传播错误，`finalize_stream_message` 被跳过。
+**结果**：✅ **已修复。** 当前 `agent_chat_application_service.rs:L189-194`、`group_chat_application_service.rs:L313-322` 以及 `vcp_client.rs:sendToVCP` 的 `Err` 分支（`vcp_client.rs:191-199`，仅流式模式）均会执行 `DELETE FROM active_generations WHERE msg_id = ?`，网络错误路径不再泄漏注册表记录。
 
 #### ✅ 1.1.5 流式 + SSE 流中途读取错误
 
@@ -254,7 +249,7 @@ let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context))
 
 **结果**：✅ 已完成的 Agent 已清理，被中止的 Agent 通过 finalize 清理，未执行的 Agent 不会产生注册。
 
-#### 🚨 1.4.3 群组接力赛 — Speaker B 网络错误
+#### ✅ 1.4.3 群组接力赛 — Speaker B 网络错误
 
 ```
 时序：
@@ -262,13 +257,12 @@ let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context))
   Speaker B:
     → 前端收到 thinking → INSERT active_generations (msg_B)
     → perform_vcp_request 返回 Err
-    → group_chat_application_service: if let Err(e) = res_result { log::error!(...); }
-    → ❌ finalize_stream_message 未调用
-    → ❌ active_generations (msg_B) 未被清理
+    → group_chat_application_service: if let Err(e) = res_result { log::error!(...); DELETE active_generations (msg_B); }
+    → ✅ active_generations (msg_B) 已被清理
   Speaker C: 继续执行（可能正常或异常）
 ```
 
-**结果**：🚨 **BUG — 注册表泄漏！** 与 1.1.4 相同的问题。
+**结果**：✅ **已修复。** `group_chat_application_service.rs` 的 `Err` 分支现已删除对应 `active_generations` 记录，不再泄漏。
 
 ---
 
@@ -297,39 +291,28 @@ match result {
 }
 ```
 
-**结果**：🚨 **BUG — 注册表永久泄漏！** 每次浮动助手对话都会在 `active_generations` 中留下一条永远不会被清理的记录。
+**结果**：🔶 **待确认。** Rust 后端 `handle_assistant_chat_stream` 确实不调用 `finalize_stream_message`，但注册表是否真正泄漏取决于前端 `chatStreamStore.ts` 在 `topicId === "assistant_chat"` 时是否仍会调用 `invoke("append_single_message")`。若前端仍调用，则 `active_generations` 会被插入但无法被后端清理；若前端已过滤，则无泄漏。需人工核对前端 `chatStreamStore.ts` 后确认。
 
 ---
 
 ## 2. 已发现 BUG 汇总与修复建议
 
-### 🚨 BUG-1：`perform_vcp_request` 返回 `Err` 时注册表泄漏
+### ✅ BUG-1（已修复）：`perform_vcp_request` 返回 `Err` 时注册表泄漏
 
-**影响范围**：
-- `agent_chat_application_service.rs:L189` — Agent 单聊 Err 分支
-- `group_chat_application_service.rs:L313` — 群组接力 Err 分支
-- `vcp_client.rs:L185` (`sendToVCP`) — `?` 传播 Err
+**影响范围（v1.1.3 已修复）**：
+- `agent_chat_application_service.rs:L189-194` — Agent 单聊 Err 分支执行 `DELETE FROM active_generations WHERE msg_id = ?`
+- `group_chat_application_service.rs:L313-322` — 群组接力 Err 分支执行同样的删除
+- `vcp_client.rs:sendToVCP` 的流式请求 Err 分支（`vcp_client.rs:191-199`）也会清理注册表
 
-**修复方案**：在 Err 分支中追加 `DELETE FROM active_generations`：
+**修复状态**：当前代码已在上述三个入口的错误路径中主动删除 `active_generations` 记录，`perform_vcp_request` 返回 `Err` 时不再泄漏。
 
-```rust
-Err(e) => {
-    log::error!("[AgentChatAppService] perform_vcp_request failed: {}", e);
-    // 修复：清理活跃生成注册表中的记录
-    let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
-        .bind(&thinking_id)
-        .execute(&db_state.pool)
-        .await;
-}
-```
+### 🔶 BUG-2（待确认）：浮动助手路径是否泄漏
 
-### 🚨 BUG-2：浮动助手路径永久泄漏
+**影响范围**：`handle_assistant_chat_stream` 不调用 `finalize_stream_message`；若前端 `chatStreamStore.ts` 仍对 `assistant_chat` 调用 `append_single_message`，则会导致 `active_generations` 插入后无人清理。
 
-**影响范围**：`handle_assistant_chat_stream` 不调用 `finalize_stream_message`。
-
-**修复方案**（二选一）：
-- **方案 A（推荐）**：在前端 `chatStreamStore.ts` 的骨架持久化中，过滤掉 `topicId === "assistant_chat"` 的情况，不触发 `invoke("append_single_message")`。浮动助手本就不持久化，无需写入任何注册。
-- **方案 B**：在 `handle_assistant_chat_stream` 结束时追加 `DELETE FROM active_generations WHERE msg_id = ?`。
+**待确认项**：
+- 前端 `chatStreamStore.ts` 当前是否已过滤 `topicId === "assistant_chat"` 的骨架写入。
+- 若未过滤，推荐在**前端**过滤（浮动助手不持久化，不应写入注册表），或在 `handle_assistant_chat_stream` 的 `Ok/Err` 双分支末尾追加 `DELETE FROM active_generations WHERE msg_id = ?` 作为兜底。
 
 ---
 
@@ -337,11 +320,11 @@ Err(e) => {
 
 | 场景 | 流式 | 非流式 | 用户中止 | 上游中断 | App被杀 | 多Agent | 浮动助手 |
 |------|:----:|:------:|:--------:|:--------:|:-------:|:-------:|:--------:|
-| 连接保持 | ✅ | ✅ | ✅ | ✅* | N/A | ✅* | ✅* |
-| 温回归 | ✅ | ✅ | ✅ | ✅* | N/A | ✅* | ✅* |
-| 冷启动 | ✅ | 🔶 | ✅ | ✅* | ✅ | ✅* | ✅* |
+| 连接保持 | ✅ | ✅ | ✅ | ✅* | N/A | ✅* | 🔶 |
+| 温回归 | ✅ | ✅ | ✅ | ✅* | N/A | ✅* | 🔶 |
+| 冷启动 | ✅ | 🔶 | ✅ | ✅* | ✅ | ✅* | 🔶 |
 
-> `✅*` = 修复 BUG-1 和 BUG-2 后可达到  
+> `✅*` = 修复 BUG-1（已完成）并确认/修复 BUG-2 后可达到  
 > `🔶` = 非流式冷启动恢复依赖服务端是否缓存结果（属于后续服务端工作）
 
 ---
@@ -354,3 +337,7 @@ Err(e) => {
 2. **浮动助手路径的注册表隔离**（浮动助手不走 finalize_stream_message，但前端会触发骨架写入）
 
 修复这两个问题后，该方案可以在所有场景下实现注册表的完美闭环，为后续的云端断点恢复提供可靠的本地事务日志。
+
+---
+
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

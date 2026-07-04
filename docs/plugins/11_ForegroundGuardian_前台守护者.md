@@ -42,7 +42,7 @@ related_files:
 ## 2. 代码结构
 
 ```
-ForegroundGuardian.kt (211 lines)
+ForegroundGuardian.kt (257 lines)
 ├── 优先级常量 (4 级)
 ├── consumers: ConcurrentHashMap<String, ConsumerEntry>   // 消费者注册表
 ├── wakeLock: PowerManager.WakeLock?                      // 全局 CPU 锁
@@ -84,7 +84,7 @@ const val PRIORITY_DISTRIBUTED = 10 // 分布式后台保活 — 低，不保持
 | `"sync"` | 40 | ✅ | `[数据同步]` | `VcpMobilePlugin.startStreamingService()` 识别人工 Agent 名 |
 | `"prerender"` | 30 | ✅ | `[预渲染重建]` | `VcpMobilePlugin.startStreamingService()` 识别人工 Agent 名 |
 | `"stream:{AgentName}"` | 20 | ❌ | 用户可见 Agent 名 | `stream.rs` → `start_stream_service_inner()` |
-| `"distributed"` | 10 | ❌ | `[分布式后台保活]` | `stream.rs` → `set_keepalive_mode_inner()` / `vcp_log_service` linger |
+| `"distributed"` | 10 | ❌ | `distributed`（`StreamKeepaliveService.buildNotification` 将其映射为"分布式后台连接维系中..."） | `stream.rs` → `set_keepalive_mode_inner()` / `vcp_log_service` linger |
 | `"manual_keepalive"` | 10 | ❌ | `[后台保活]` | `VcpMobilePlugin.acquireWakeLock()`（旧 API 兼容） |
 
 > **通知文案选择逻辑**：`getNotificationLabel()` 遍历 `consumers.values`，返回 `maxByOrNull { it.priority }?.displayLabel`。若有同步任务在运行，通知始终展示"正在与云端服务器进行高精度同步..."而非普通 Agent 名。
@@ -149,6 +149,11 @@ release(context, tag)
 ```kotlin
 @Synchronized
 fun releaseAllLocks() {
+    // 取消所有待执行的超时任务
+    for (runnable in timeoutRunnables.values) {
+        handler.removeCallbacks(runnable)
+    }
+    timeoutRunnables.clear()
     consumers.clear()
     releaseLocks()
 }
@@ -511,3 +516,7 @@ ForegroundGuardian.release(context, "manual_keepalive")
 ---
 
 > **维护提示**：ForegroundGuardian 是进程级单例，新增消费者 tag 时请遵循优先级分层：40=同步，30=预渲染，20=流式，10=后台/分布式。不要创造新的"优先级 50"破坏现有调度逻辑。
+
+---
+
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

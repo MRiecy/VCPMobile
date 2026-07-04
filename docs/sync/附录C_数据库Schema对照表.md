@@ -19,7 +19,7 @@ last_updated: 2026-07-04
 
 ## 表1：移动端 SQLite Schema（VCPMobile）
 
-移动端数据库文件位于应用配置目录（Android 下为 `/data/user/0/com.vcp.avatar/files/vcp_avatar.db`）。所有同步相关表均定义于 `db_manager.rs` 的 `setup_tables` 函数中。
+移动端数据库文件位于应用配置目录（Android 下为 `/data/user/0/com.vcp.avatar/files/vcp_avatar.db`）。v1.1.3 起所有同步相关表均定义于 `src-tauri/migrations/` 下的版本化 SQL 迁移文件中，由 `sqlx::migrate!` 在启动时应用。
 
 ### 1.1 `avatars` — 全局多态头像表
 
@@ -42,14 +42,15 @@ last_updated: 2026-07-04
 | agents | agent_id | TEXT | PRIMARY KEY | Agent 唯一标识（UUID 格式） | `entity_index.id`（type=`agent`） |
 | agents | name | TEXT | NOT NULL | 智能体显示名称 | `config.json` → `name` |
 | agents | system_prompt | TEXT | NOT NULL DEFAULT '' | 系统提示词（System Prompt） | `config.json` → `systemPrompt` |
+| agents | mobile_system_prompt | TEXT | NOT NULL DEFAULT '' | 移动端专用系统提示词（不同步，仅本机生效） | — |
 | agents | model | TEXT | NOT NULL | 模型标识，如 `gemini-2.5-flash` | `config.json` → `model` |
 | agents | temperature | REAL | NOT NULL DEFAULT 1 | 采样温度，范围通常为 0.0–2.0 | `config.json` → `temperature` |
 | agents | context_token_limit | INTEGER | NOT NULL DEFAULT 0 | 上下文 Token 上限 | `config.json` → `contextTokenLimit` |
 | agents | max_output_tokens | INTEGER | NOT NULL DEFAULT 0 | 单次输出 Token 上限 | `config.json` → `maxOutputTokens` |
 | agents | stream_output | INTEGER | NOT NULL DEFAULT 1 | 是否启用流式输出（SQLite 无原生 bool，0/1） | `config.json` → `streamOutput` |
+| agents | use_temperature | INTEGER | NOT NULL DEFAULT 0 | 是否发送 `temperature` 参数（0/1） | — |
 | agents | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹（SHA-256），用于 Diff 阶段 | `entity_index.hash` |
 | agents | content_hash | TEXT | NOT NULL DEFAULT '' | V2 聚合指纹（Config + Topics Merkle Root） | `entity_index.aggregated_hash` |
-| agents | current_topic_id | TEXT | — | 最后活跃话题 ID，纯本地 UI 状态 | — |
 | agents | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `entity_index.updated_at` |
 | agents | deleted_at | BIGINT | — | 软删除时间戳，非空即视为已删除 | `entity_index.deleted_at` |
 
@@ -69,7 +70,6 @@ last_updated: 2026-07-04
 | groups | tag_match_mode | TEXT | — | 标签匹配模式：`strict`、`fuzzy` | `config.json` → `tagMatchMode` |
 | groups | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹 | `entity_index.hash` |
 | groups | content_hash | TEXT | NOT NULL DEFAULT '' | V2 聚合指纹（Config + Topics） | `entity_index.aggregated_hash` |
-| groups | current_topic_id | TEXT | — | 最后活跃话题 ID，纯本地 UI 状态 | — |
 | groups | created_at | BIGINT | NOT NULL DEFAULT 0 | 创建时间戳，毫秒 | `config.json` → `createdAt` |
 | groups | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `entity_index.updated_at` |
 | groups | deleted_at | BIGINT | — | 软删除时间戳 | `entity_index.deleted_at` |
@@ -110,18 +110,16 @@ last_updated: 2026-07-04
 
 | 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
 |-----|-------|-----|-----|-----|----------|
-| messages | msg_id | TEXT | PRIMARY KEY | 消息唯一标识 | `history.json` 数组项 → `id` |
-| messages | topic_id | TEXT | NOT NULL | 所属 Topic ID | 父级目录 `{topicId}` |
+| messages | msg_id | TEXT | NOT NULL, PK(1) | 消息唯一标识 | `history.json` 数组项 → `id` |
+| messages | topic_id | TEXT | NOT NULL, PK(2) | 所属 Topic ID | 父级目录 `{topicId}` |
 | messages | role | TEXT | NOT NULL | 角色：`user`、`assistant`、`system` | `history.json` → `role` |
 | messages | name | TEXT | — | 消息发送者显示名称 | `history.json` → `name` |
 | messages | agent_id | TEXT | — | 发送者 Agent ID（Agent/Group 消息有效） | `history.json` → `agentId` |
 | messages | content | TEXT | NOT NULL | 消息文本内容（Markdown 或纯文本；v1.1.3 起为明文 TEXT，此前为 zstd 压缩 BLOB） | `history.json` → `content` |
 | messages | timestamp | BIGINT | NOT NULL | 消息时间戳，毫秒 | `history.json` → `timestamp` |
-| messages | is_thinking | INTEGER | `NOT NULL DEFAULT 0` | **已弃用**。v0.9.14 起 bulk INSERT 移除该列，`PARAMS_PER_MSG` 14→13 | `history.json` → `isThinking`（协议层保留） |
 | messages | is_group_message | INTEGER | NOT NULL DEFAULT 0 | 是否为群组消息（0/1） | `history.json` → `isGroupMessage` |
 | messages | group_id | TEXT | — | 所属 Group ID（群组消息有效） | `history.json` → `groupId` |
 | messages | finish_reason | TEXT | — | 模型结束原因，如 `stop`、`length` | `history.json` → `finishReason` |
-| messages | render_content | BLOB | — | 预渲染结构化内容（如工具调用结果） | `history.json` → `renderContent` |
 | messages | content_hash | TEXT | NOT NULL DEFAULT '' | 消息内容指纹（SHA-256） | `message_index.hash` |
 | messages | created_at | BIGINT | NOT NULL | 创建时间戳 | `history.json` → `createdAt` |
 | messages | updated_at | BIGINT | NOT NULL | 更新时间戳 | `message_index.updated_at` |
@@ -149,9 +147,10 @@ last_updated: 2026-07-04
 
 | 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
 |-----|-------|-----|-----|-----|----------|
-| message_attachments | msg_id | TEXT | NOT NULL, PK(1) | 消息 ID | `message_attachments.msg_id` |
+| message_attachments | topic_id | TEXT | NOT NULL, PK(1) | 所属 Topic ID | `message_attachments.topic_id` |
+| message_attachments | msg_id | TEXT | NOT NULL, PK(2) | 消息 ID | `message_attachments.msg_id` |
 | message_attachments | hash | TEXT | NOT NULL | 附件内容哈希，外键指向 `attachments.hash` | `message_attachments.hash` |
-| message_attachments | attachment_order | INTEGER | NOT NULL, PK(2) | 附件在消息内的展示排序 | `message_attachments.attachment_order` |
+| message_attachments | attachment_order | INTEGER | NOT NULL, PK(3) | 附件在消息内的展示排序 | `message_attachments.attachment_order` |
 | message_attachments | display_name | TEXT | NOT NULL | 原始文件名（保留用户上传时的名称） | `message_attachments.display_name` |
 | message_attachments | src | TEXT | — | 来源 URL（网络资源时有效） | — |
 | message_attachments | status | TEXT | — | 附件状态，如 `removed` | — |
@@ -227,6 +226,8 @@ last_updated: 2026-07-04
 | `idx_messages_updated_at` | messages | `(updated_at)` | 同步阶段快速筛选增量消息 |
 | `idx_group_members_agent` | group_members | `(agent_id)` | 反向查询 Agent 所属群组 |
 | `idx_message_attachments_hash` | message_attachments | `(hash)` | 按哈希查找关联消息 |
+| `idx_message_attachments_msg` | message_attachments | `(topic_id, msg_id)` | 加载单条消息的附件列表 |
+| `idx_render_cache_msg` | render_cache | `(topic_id, msg_id)` | 快速命中渲染缓存 |
 | `idx_emoticon_category` | emoticon_library | `(category)` | 表情包分类浏览 |
 | `idx_tarven_rules_active` | tarven_rules | `(rule_type, is_enabled, sort_order ASC)` | 按类型与启用状态加载 Tarven 规则 |
 
@@ -349,7 +350,7 @@ last_updated: 2026-07-04
 | 头像哈希 | `avatars.avatar_hash` | `avatar_index.hash` | WebSocket Diff 快速比对 |
 | 头像二进制 | `avatars.image_data` | `Agents/{id}/avatar.{ext}` 等 | 移动端 BLOB；桌面端独立文件 |
 | 头像更新时间 | `avatars.updated_at` | `avatar_index.updated_at` | 直接映射 |
-| 消息附件关联 | `message_attachments.(msg_id, hash, order)` | `message_attachments.(msg_id, hash, order)` | 双端表结构基本一致，仅桌面端缺 `src`、`status` |
+| 消息附件关联 | `message_attachments.(topic_id, msg_id, hash, order)` | `message_attachments.(msg_id, hash, order)` | 移动端主键含 `topic_id`，桌面端缺 `src`、`status` |
 | 消息附件文件名 | `message_attachments.display_name` | `message_attachments.display_name` | 直接映射 |
 
 ---
@@ -408,8 +409,12 @@ Rust 端通过 `serde` 的自定义序列化将这些字段映射为 `bool`，�
 |---|------|------|
 | 移动端 | 单字段 TEXT 主键（UUID） | `agents.agent_id` |
 | 移动端 | 复合主键（TEXT + TEXT） | `avatars.(owner_type, owner_id)` |
-| 移动端 | 复合主键（TEXT + INTEGER） | `message_attachments.(msg_id, attachment_order)` |
+| 移动端 | 复合主键（TEXT + TEXT + INTEGER） | `message_attachments.(topic_id, msg_id, attachment_order)` |
 | 桌面端 | 复合主键（TEXT + TEXT） | `entity_index.(id, type)` |
 | 桌面端 | 单字段 TEXT 主键 | `message_index.msg_id` |
 
 移动端倾向于使用自然语义复合主键（如多态头像的所有者类型+ID），桌面端插件索引库在 `entity_index` 中采用 `(id, type)` 复合主键以区分同名 ID 的不同实体类型（尽管实际场景中 UUID 已足够唯一）。
+
+---
+
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

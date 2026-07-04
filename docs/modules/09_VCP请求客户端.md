@@ -533,7 +533,7 @@ FramedRead::new(stream, LengthDelimitedCodec::new())
 | `start` | `url`, `headers`, `body`, `context` | 启动新的 SSE 会话 |
 | `stop` | `requestId` | 通知 Helper 停止指定会话并释放资源 |
 | `resume` | `startIndex` | 从指定事件索引续接已有会话 |
-| `query` | `requestId` | 查询 Helper 内存中会话当前状态 |
+| `query` | `requestId` | 查询 Helper 内存中会话当前状态（`recover_active_generation` 使用） |
 
 Helper 向主进程回传的事件帧：
 

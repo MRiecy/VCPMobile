@@ -2,8 +2,8 @@
 id: VUE-NOTI-017
 title: 通知中心与Toast联动
 description: VCP Mobile 前端通知列表、Toast 气泡、剪贴板联动与 VCP System Event 处理
-version: 1.1.2
-date: 2026-06-24
+version: 1.1.3
+date: 2026-07-04
 ---
 
 # 17. 通知中心与Toast联动
@@ -38,7 +38,7 @@ date: 2026-06-24
 │                        Vue 3 渲染层                          │
 │  ┌──────────────┐  ┌─────────────┐  ┌───────────────────┐   │
 │  │ ToastManager │  │ RightSidebar│  │ GlobalOverlayMgr  │   │
-│  │  (z-toast)   │  │ (z-drawer)  │  │   (z-overlay)     │   │
+│  │  (z-toast)   │  │ (z-drawer)  │  │   (z-toast)       │   │
 │  └──────┬───────┘  └──────┬──────┘  └───────────────────┘   │
 │         │                 │                                   │
 │  ┌──────▼───────┐  ┌──────▼──────┐                           │
@@ -166,6 +166,19 @@ App.vue ──▶ layoutStore.toggleRightSidebar() ──▶ RightSidebar.vue �
 
 抽屉打开时：`isDrawerOpen = true`，此时所有新通知被抑制 Toast 弹出（仅入历史），且自动调用 `markAllRead()`。
 
+### 3.1.1 抽屉底部快捷入口
+
+`RightSidebar.vue` 在通知列表下方提供 2×2 快捷按钮网格（位于抽屉底部安全区之上）：
+
+| 按钮 | 触发 | 用途 |
+|------|------|------|
+| **插件中心** | `overlayStore.openDistributed()` | 打开分布式功能面板 `DistributedView` |
+| **灵视中心** | `overlayStore.openRagObserver()` | 打开 RAG 灵视观察页 `RagObserverView` |
+| 待开发 | — | 占位 |
+| 待开发 | — | 占位 |
+
+这两个入口将分布式与 RAG 能力从设置页中抽出，放在通知抽屉这一高频入口，降低功能发现成本。
+
 ### 3.2 列表结构
 
 ```vue
@@ -241,10 +254,24 @@ const emit = defineEmits<{
 当 `item.actions` 存在时渲染按钮行：
 
 ```vue
-<div v-if="item.actions && item.actions.length > 0" class="mt-2 flex gap-1.5">
-  <button v-for="action in item.actions" :key="action.label" @click="handleAction(action)">
-    {{ action.label }}
-  </button>
+<div v-if="item.actions && item.actions.length > 0" class="mt-2 flex flex-col gap-2">
+  <!-- 审批理由输入框（仅 tool_approval_request） -->
+  <div v-if="item.type === 'warning' && item.rawPayload?.type === 'tool_approval_request'" class="flex flex-col gap-1 w-full">
+    <textarea
+      v-model="reasonText"
+      placeholder="可选：告诉 AI 为什么通过或拒绝"
+      maxlength="1000"
+      class="w-full text-[10px] p-1.5 rounded border ..."
+      style="height: calc(3.5 * 1.4em + 12px);"
+    />
+    <span class="text-[9px] opacity-40">拒绝时建议填写可执行的修正建议，最多 1000 字。</span>
+  </div>
+
+  <div class="flex gap-3.5">
+    <button v-for="action in item.actions" :key="action.label" @click="handleAction(action)">
+      {{ action.label }}
+    </button>
+  </div>
 </div>
 ```
 
@@ -522,14 +549,14 @@ User
 NotificationCard.handleAction(action)
  │
  ▼
-notificationStore.executeAction(notificationId, action)
+notificationStore.executeAction(notificationId, action, reason?)
  │
  ├──▶ 查找 historyList 中对应 item
  │
  ├──▶ 构造 approval response payload
  │     {
  │       type: 'tool_approval_response',
- │       data: { requestId, approved: action.value }
+ │       data: { requestId, approved: action.value, reason?: string }
  │     }
  │
  ├──▶ invoke('send_vcp_log_message', { payload })
@@ -538,7 +565,7 @@ notificationStore.executeAction(notificationId, action)
  │
  └──▶ UI 反馈
        - item.actions = []（按钮置空）
-       - item.message = `[已处理] 操作: ${action.label}`
+       - item.message = `[已处理] 操作: ${action.label}${reason ? ` (理由: ${reason})` : ''}`
        - 从 activeToasts 过滤掉该通知
 ```
 
@@ -551,21 +578,22 @@ notificationStore.executeAction(notificationId, action)
 | Command | 调用方 | 参数 | 用途 |
 |---------|--------|------|------|
 | `send_vcp_log_message` | `notificationStore.executeAction()` | `{ payload: JSON }` | 向前端 VCPLog WebSocket 通道回传审批响应 |
-| `init_vcp_log_connection` | `App.vue` bootstrap | `{ url: string, key: string }` | 初始化 WebSocket/SSE 连接，后续事件通过 `vcp-system-event` 推送 |
-| `set_vcp_log_heartbeat` | 设置页面 | `{ interval_ms: number }` | 调整心跳间隔 |
+| `plugin:vcp-mobile\|check_all_permissions` | `appLifecycleStore.bootstrap()` | 无 | 检查通知/存储/电池权限 |
+
+> **v1.1.3 已移除**：前端不再调用 `init_vcp_log_connection` / `set_vcp_log_heartbeat`。VCPLog 连接的初始化与心跳管理已下沉到 Rust 核心层，由 `vcp_log_service` 在启动时自动完成。
 
 ### 10.2 事件监听表
 
 | 事件名 | 监听方 | 发射方 | Payload 结构 | 用途 |
 |--------|--------|--------|-------------|------|
 | `vcp-system-event` | `App.vue` | `vcp_log_service.rs` | `{ type, data?, ... }` | 核心通知通道：状态、日志、审批、视频状态等 |
-| `distributed-notification` | `ToolInteractionOverlay.vue` | `distributed/tools/notification.rs` | `{ title, body }` | AI 触发的移动设备本地通知（浏览器 Notification API） |
+| `vcp-lifecycle-changed` | `useAppLifecycle.ts` | Rust `lifecycle_controller.rs` | `{ state: 'pause' \| 'stop' \| 'resume' }` | 应用前后台切换 |
 
 **Android 原生通知联动**：
 
 - `tauri-plugin-vcp-mobile` 的 Kotlin 侧声明了 `POST_NOTIFICATIONS` 权限（Android 13+）。
 - `StreamKeepaliveService.kt` 使用 `startForeground(NOTIFICATION_ID, notification)` 维持前台服务通知，确保流式会话期间不被 OEM 杀后台。
-- `distributed/tools/notification.rs` 中的 `NotificationTool` 通过 `app.emit("distributed-notification")` 将事件投递到前端，前端再调用浏览器 `Notification` API 或降级为 console 日志。
+- `distributed/tools/notification.rs` 中的 `NotificationTool` 已改为直接调用 Android 原生插件 `send_notification_native` 完成系统通知，不再向前端投递 `distributed-notification` 事件。
 
 ---
 
@@ -616,4 +644,4 @@ notificationStore.executeAction(notificationId, action)
 | `POST_NOTIFICATIONS` | Android 13+ 必需权限，由 `tauri-plugin-vcp-mobile` 管理 |
 
 ---
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

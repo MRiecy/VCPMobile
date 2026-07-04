@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 2. **精准对齐**:
    若查询到有遗留的 `msg_id`（说明上次运行时该生成被异常打断）：
    * 客户端携带该 `msg_id` 向服务端发起状态查询：`GET /api/chat/messages/{msg_id}`。
+     > **待确认：** 服务端接口 `GET /api/chat/messages/{msg_id}` 与 `GET /api/chat/stream?msg_id={msg_id}` 定义于 `VCPToolBox` 工程，当前仓库无法直接校验其路径、响应字段与缓存策略，需人工对照服务端代码确认。
    * **若云端已生成完毕 (`completed`)**:
      服务端返回全量文本，客户端更新本地 `messages` 文本并置 `finish_reason = 'completed'`，随后从 `active_generations` 中 `DELETE` 该记录。
    * **若云端仍在生成中 (`streaming`)**:
@@ -88,7 +89,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ### 3.1 移动端 SQLite 建表与注入
 在 `db_manager.rs` 中：
-1. 在 `setup_tables` 末尾追加 `active_generations` 建表 SQL。
+1. `active_generations` 建表 SQL 位于 `src-tauri/migrations/0001_create_initial_tables.sql`，由 `run_migrations(&pool).await?` 在启动时统一应用，不再在 `db_manager.rs` 的硬编码 `setup_tables` 中维护。
 2. 将启动自查函数修改为扫描 `active_generations` 表，而不是扫描 `messages` 表。
 
 ### 3.2 移动端消息写入与注销
@@ -103,3 +104,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
   读取 `message_cache` 表，返回 `{ status: "streaming"|"completed"|"failed", content: "..." }`。
 * **`GET /api/chat/stream?msg_id={msg_id}`**:
   支持从 `Last-Event-ID` 偏移量处截取缓存文本进行补发，并桥接后台持续运行的生成任务。
+
+---
+
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*

@@ -2,8 +2,8 @@
 id: VUE-AGEN-013
 title: Agent与群组设置面板
 description: VCP Mobile 前端 AgentSettingsView 与 GroupSettingsView 的表单设计、头像裁剪与配置持久化
-version: 1.1.2
-date: 2026-06-24
+version: 1.1.3
+date: 2026-07-04
 ---
 
 # 13. Agent与群组设置面板
@@ -23,15 +23,15 @@ date: 2026-06-24
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| `AgentSettingsView.vue` | 400 | Agent 个人设置面板：基本信息、模型参数、提示词 |
-| `GroupSettingsView.vue` | 445 | 群组设置面板：成员管理、发言策略、统一模型、提示词 |
+| `AgentSettingsView.vue` | 398 | Agent 个人设置面板：基本信息、模型参数、提示词 |
+| `GroupSettingsView.vue` | 440 | 群组设置面板：成员管理、发言策略、统一模型、提示词 |
 | `AgentsCreator.vue` | 107 | Agent / Group 创建触发器，创建成功后自动打开对应设置面板 |
-| `assistant.ts` | 261 | Pinia Store：封装 IPC 调用，提供 `saveAgent` / `saveGroup` / `saveAvatar` 等 Action |
-| `avatar.ts` | 250 | 头像缓存、Blob URL 管理、Canvas 主色调提取 |
-| `chatSessionStore.ts` | 103 | 会话切换，删除 Agent/Group 时清空当前选中项 |
+| `assistant.ts` | 327 | Pinia Store：封装 IPC 调用，提供 `saveAgent` / `saveGroup` / `saveAvatar` 等 Action |
+| `avatar.ts` | 288 | 头像缓存、Blob URL 管理、Canvas 主色调提取 |
+| `chatSessionStore.ts` | 188 | 会话切换，删除 Agent/Group 时清空当前选中项 |
 | `AvatarCropper.vue` | 144 | `vue-cropper` 封装：圆形裁剪、旋转、缩放、确认输出 Blob |
-| `ModelSelector.vue` | 420 | BottomSheet 风格模型选择器：搜索、Tag 过滤、虚拟滚动 |
-| `VcpAvatar.vue` | 111 | 头像展示组件：缓存优先加载、Fallback 首字母、主色调边框 |
+| `ModelSelector.vue` | 525 | BottomSheet 风格模型选择器：搜索、Tag 过滤、延迟测试 |
+| `VcpAvatar.vue` | 128 | 头像展示组件：缓存优先加载、Fallback 首字母、主色调边框 |
 
 ### 1.3 在整体架构中的位置
 
@@ -150,8 +150,7 @@ interface AgentConfig {
   name: string;
   avatar?: string;
   avatarCalculatedColor?: string;
-  systemPrompt: string;
-  mobileSystemPrompt?: string;
+  mobileSystemPrompt?: string;  // 本机专用提示词，留空则回退到后端 `systemPrompt`
   model: string;
   temperature: number;
   contextTokenLimit: number;
@@ -223,7 +222,7 @@ interface AgentConfig {
 ```
 
 数据流：
-1. 打开面板时调用 `invoke("get_agents")` 拉取全部 Agent 列表（`allAgents`）
+1. 打开面板时读取 `assistantStore.agents` 填充全部 Agent 列表（`allAgents`）
 2. 勾选 Agent 时将其 ID 加入 `groupConfig.members`，并自动以 Agent 名称初始化 `memberTags[agentId]`
 3. 取消勾选时从 `members` 和 `memberTags` 中移除
 4. `memberTags` 的值将作为该 Agent 在群组中的**触发标签**（如 `@Planner`），供 `naturerandom` 模式匹配
@@ -354,9 +353,9 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
 
 ---
 
-## 5. 配置保存策略（v1.1.2: 关闭时保存）
+## 5. 配置保存策略（关闭时保存）
 
-### 5.1 关闭时保存（saveOnClose）— v1.1.2 重构
+### 5.1 关闭时保存（saveOnClose）— v1.1.2 重构，v1.1.3 沿用
 
 v1.1.2 将保存策略从**深度 Watch + 防抖自动保存**改为**关闭时保存（Save-on-Close）**。核心变化：
 
@@ -490,7 +489,7 @@ originalConfig.value = JSON.parse(JSON.stringify(config))
 VcpAvatar 自动加载头像（cache hit 时同步显示）
 ```
 
-### 7.2 修改配置后的保存时序
+### 7.2 修改配置后的保存时序（Save-on-Close）
 
 ```
 用户修改 input (如 name)
@@ -499,20 +498,25 @@ VcpAvatar 自动加载头像（cache hit 时同步显示）
 v-model ──→ agentConfig.name 变更
     │
     ▼
-deep watch 触发
+用户继续编辑，期间不触发保存
+    │
+    ▼
+用户点击返回 / overlayStore.closeAgentSettings()
+    │
+    ▼
+props.isOpen 变为 false
+    │
+    ▼
+watch(isOpen) 触发 saveOnClose()
     │
     ▼
 JSON.stringify 比对 originalConfig → 发现差异
     │
     ▼
-clearTimeout(saveTimeout)
-setTimeout(autoSave, 800)
+isSaving = true
     │
     ▼
-(800ms 内无新输入)
-    │
-    ▼
-autoSave() ──→ isSaving = true
+originalConfig 先同步更新为当前值（防重入）
     │
     ▼
 assistantStore.saveAgent(agentConfig.value)
@@ -527,9 +531,10 @@ Rust: 按 Agent ID 取锁 → BEGIN TRANSACTION → UPSERT → COMMIT
 返回成功
     │
     ▼
-saveSuccess = true; originalConfig = 最新快照
-fetchAgents() ──→ 刷新侧边栏列表
-Toast 通知: "Agent 配置保存成功"
+saveSuccess = true（2s 后熄灭）
+    │
+    ▼
+若保存失败 → originalConfig 回滚为 previousSnapshot，Toast 提示用户
 ```
 
 ### 7.3 头像上传的时序
@@ -694,4 +699,4 @@ if (!groupConfig.value.memberTags[agentId]) {
 | **JSON Patch 风格** | `update_agent_config` 的更新方式：读取 → 合并 → 写入 | `agent_service.rs:193` |
 
 ---
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*
