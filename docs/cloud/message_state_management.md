@@ -1,12 +1,14 @@
 # VCP Mobile 消息状态管理与云端恢复体检报告 (基于活跃生成注册表重构)
 
-根据自查函数的实际运行输出：
+> **v1.1.3 更新**：当前代码已实现活跃生成注册表（`active_generations`）以及配套的 `get_active_generations` / `recover_active_generation` / `resume_stream` 接口。本文档结合历史分析背景与当前真实实现进行描述。
+
+根据 v1.1.3 之前自查函数的实际运行输出：
 * 历史数据中存在 **232 条 `assistant` 消息** 且 `finish_reason IS NULL`。
 * 存在 **2420 条 `user` 消息** 且 `finish_reason IS NULL`。
 
 **结论**: 由于历史版本的遗留问题，我们**绝不能**简单地使用 `finish_reason IS NULL` 作为冷启动时判定“未完成/异常中断消息”的依据，否则会导致大量历史已完成的正常消息被误判为“活跃生成中”，从而引发频繁的无效网络同步甚至接口报错。
 
-为了彻底解决“历史数据污染”并保证极低的重构风险，我们推荐引入 **“活跃生成注册表（Active Generation Registry）”** 的架构设计。
+为了彻底解决“历史数据污染”并保证极低的重构风险，v1.1.3 引入了 **“活跃生成注册表（Active Generation Registry）”** 架构设计。
 
 ---
 
@@ -17,7 +19,7 @@
 该表充当 AI 生成任务的 **“前向写日志（Write-Ahead Log / WAL）”**。它只记录当前**正在发生**的流式生成任务。一旦任务结束，该记录即被清除。
 
 ### 1.1 注册表 Schema 设计
-在 `db_manager.rs` 中新增建表语句：
+建表语句位于 `src-tauri/migrations/0001_create_initial_tables.sql`（v1.1.3 起由 sqlx 迁移引擎管理）：
 ```sql
 CREATE TABLE IF NOT EXISTS active_generations (
     msg_id TEXT PRIMARY KEY,          -- 正在生成的助手消息 ID

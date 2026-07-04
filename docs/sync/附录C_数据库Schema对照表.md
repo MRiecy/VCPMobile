@@ -1,8 +1,8 @@
 ---
 title: 附录C - 数据库Schema对照表
 scope: 双端
-version: 0.9.13
-last_updated: 2026-05-13
+version: 1.1.3
+last_updated: 2026-07-04
 ---
 
 # 附录C - 数据库 Schema 对照表
@@ -10,6 +10,8 @@ last_updated: 2026-05-13
 ## 引言
 
 本文档以表格形式精确列出 VCPMobile（移动端）与 VCPMobileSync（桌面端插件）在同步场景下涉及的全部数据库表结构。移动端使用原生 SQLite（WAL 模式）持久化实体全量数据；桌面端插件使用 `better-sqlite3` 维护轻量级索引库，用于快速 Diff 与哈希比对，实体正文仍存储于桌面端原有 JSON 文件系统中。
+
+> **v1.1.3 变更**：移动端 Schema 管理由硬编码 `setup_tables` 改为 `src-tauri/migrations/` 下的版本化 SQL 迁移；新增 `active_generations`、`messages_fts`、`tarven_rules` 等表；`messages.content` 由 zstd 压缩 BLOB 改为明文 TEXT；`message_attachments` 新增 `deleted_at` 字段。
 
 阅读本文档时，建议配合 `02_数据模型与类型系统.md` 理解字段默认值、DTO 映射与哈希计算规则。
 
@@ -113,7 +115,7 @@ last_updated: 2026-05-13
 | messages | role | TEXT | NOT NULL | 角色：`user`、`assistant`、`system` | `history.json` → `role` |
 | messages | name | TEXT | — | 消息发送者显示名称 | `history.json` → `name` |
 | messages | agent_id | TEXT | — | 发送者 Agent ID（Agent/Group 消息有效） | `history.json` → `agentId` |
-| messages | content | TEXT | NOT NULL | 消息文本内容（Markdown 或纯文本） | `history.json` → `content` |
+| messages | content | TEXT | NOT NULL | 消息文本内容（Markdown 或纯文本；v1.1.3 起为明文 TEXT，此前为 zstd 压缩 BLOB） | `history.json` → `content` |
 | messages | timestamp | BIGINT | NOT NULL | 消息时间戳，毫秒 | `history.json` → `timestamp` |
 | messages | is_thinking | INTEGER | `NOT NULL DEFAULT 0` | **已弃用**。v0.9.14 起 bulk INSERT 移除该列，`PARAMS_PER_MSG` 14→13 | `history.json` → `isThinking`（协议层保留） |
 | messages | is_group_message | INTEGER | NOT NULL DEFAULT 0 | 是否为群组消息（0/1） | `history.json` → `isGroupMessage` |
@@ -154,10 +156,51 @@ last_updated: 2026-05-13
 | message_attachments | src | TEXT | — | 来源 URL（网络资源时有效） | — |
 | message_attachments | status | TEXT | — | 附件状态，如 `removed` | — |
 | message_attachments | created_at | BIGINT | NOT NULL | 关联创建时间戳，毫秒 | `message_attachments.created_at` |
+| message_attachments | deleted_at | BIGINT | — | 软删除时间戳（v1.1.3 Migration 0002 新增） | `message_attachments.deleted_at` |
 
 > **逻辑引用设计**：`attachments` 表存储物理文件（真理之源），`message_attachments` 表存储逻辑引用上下文。同一附件可被多条消息引用，实现去重与空间节省。
 
-### 1.9 其他辅助表（不参与同步）
+### 1.9 `active_generations` — 活跃生成注册表
+
+| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
+|-----|-------|-----|-----|-----|----------|
+| active_generations | msg_id | TEXT | PRIMARY KEY | 正在生成的助手消息 ID | — |
+| active_generations | topic_id | TEXT | NOT NULL | 所属话题 ID | — |
+| active_generations | owner_id | TEXT | NOT NULL | 智能体/群组 ID | — |
+| active_generations | owner_type | TEXT | NOT NULL | `'agent'` / `'group'` | — |
+| active_generations | created_at | BIGINT | NOT NULL | 注册时间戳，毫秒 | — |
+
+> **设计说明**：作为云端断点续传的本地事务日志。生成开始时写入，正常结束/错误/中止时删除。详见 `docs/cloud/message_state_management.md`。
+
+### 1.10 `messages_fts` — 全文搜索虚拟表
+
+| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
+|-----|-------|-----|-----|-----|----------|
+| messages_fts | msg_id | TEXT | UNINDEXED | 消息 ID（不建立 FTS 索引） | — |
+| messages_fts | topic_id | TEXT | UNINDEXED | 话题 ID（不建立 FTS 索引） | — |
+| messages_fts | content | TEXT | — | 经过 CJK 分词预处理的消息文本 | — |
+
+> **设计说明**：FTS5 虚拟表，使用 `tokenize = 'unicode61'`。通过 `after_messages_physical_delete` 与 `after_messages_logical_delete` 触发器与 `messages` 表保持同步。详见 `src-tauri/migrations/0003_create_messages_fts.sql` 与 `0004_fix_fts_triggers.sql`。
+
+### 1.11 `tarven_rules` — VCPChatTarven 规则库
+
+| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
+|-----|-------|-----|-----|-----|----------|
+| tarven_rules | id | TEXT | PRIMARY KEY | 规则唯一标识 | — |
+| tarven_rules | name | TEXT | NOT NULL | 规则名称 | — |
+| tarven_rules | rule_type | TEXT | NOT NULL | 规则类型 | — |
+| tarven_rules | is_enabled | INTEGER | NOT NULL DEFAULT 1 | 是否启用 | — |
+| tarven_rules | content | TEXT | NOT NULL | 规则内容 | — |
+| tarven_rules | scope | TEXT | NOT NULL | 作用范围 | — |
+| tarven_rules | wrap | INTEGER | NOT NULL DEFAULT 1 | 包装方式 | — |
+| tarven_rules | role | TEXT | — | 角色 | — |
+| tarven_rules | depth | INTEGER | — | 深度 | — |
+| tarven_rules | position | TEXT | — | 位置 | — |
+| tarven_rules | sort_order | INTEGER | NOT NULL DEFAULT 0 | 排序 | — |
+| tarven_rules | created_at | BIGINT | NOT NULL | 创建时间戳 | — |
+| tarven_rules | updated_at | BIGINT | NOT NULL | 更新时间戳 | — |
+
+### 1.12 其他辅助表（不参与同步）
 
 | 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
 |-----|-------|-----|-----|-----|----------|
@@ -185,6 +228,7 @@ last_updated: 2026-05-13
 | `idx_group_members_agent` | group_members | `(agent_id)` | 反向查询 Agent 所属群组 |
 | `idx_message_attachments_hash` | message_attachments | `(hash)` | 按哈希查找关联消息 |
 | `idx_emoticon_category` | emoticon_library | `(category)` | 表情包分类浏览 |
+| `idx_tarven_rules_active` | tarven_rules | `(rule_type, is_enabled, sort_order ASC)` | 按类型与启用状态加载 Tarven 规则 |
 
 ---
 
@@ -320,6 +364,9 @@ last_updated: 2026-05-13
 | `model_favorites` | 收藏模型列表 | 用户本地标记的常用模型 |
 | `model_usage_stats` | 模型使用统计 | 调用次数与最近使用时间 |
 | `emoticon_library` | 表情包修复库 | 远程表情包资源的本地缓存索引 |
+| `tarven_rules` | VCPChatTarven 规则库 | 本地规则缓存 |
+| `active_generations` | 活跃生成注册表 | 断点续传事务日志，不参与标准三阶段同步 |
+| `messages_fts` | FTS5 全文搜索虚拟表 | 本地搜索索引，不参与同步 |
 
 桌面端插件索引库**不包含**桌面端主程序的 `forum.config.json`、`emoticon_library.json`、`settings.json` 等系统文件，这些文件由桌面端原有逻辑独立维护。
 
@@ -340,7 +387,7 @@ last_updated: 2026-05-13
 - 移动端：`deleted_at` 字段由 `BIGINT` 标记，非空即视为已删除。
 - 桌面端：`deleted_at` 字段由 `INTEGER DEFAULT NULL` 标记。
 
-桌面端插件提供 `cleanupOldDeletedRecords()` 函数，自动清理 `deleted_at` 超过 30 天的记录。移动端目前依赖数据库清理策略，由 `db_write_queue.rs` 批量写入时自动过滤已删除实体。
+桌面端插件提供 `cleanupOldDeletedRecords()` 函数，自动清理 `deleted_at` 超过 30 天的记录。移动端由 `DeleteExecutor::cleanup_old_deleted_records` 执行相同清理，并在软删除 Agent/Group/Topic 时级联清理 `active_generations` 注册表，杜绝已删除消息复活。
 
 ### 布尔值的 SQLite 表达
 

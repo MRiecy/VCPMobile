@@ -525,9 +525,13 @@ async fn preprocess_multimodal_messages<R: Runtime>(
 
                             // 若文件不存在或读取失败，至少保留文本描述，避免内容静默丢失
                             if !converted {
+                                let mut warn_msg = format!("[附件文件: {}]", clean_path);
+                                if mime == "image" {
+                                    warn_msg = format!("[附件文件: {}]\n<system_meta>[系统提示]：由于硬件环境限制或原图过大，该图片的视觉信息提取失败，已转为纯文本占位符，请提醒用户注意。</system_meta>", clean_path);
+                                }
                                 new_parts.push(json!({
                                     "type": "text",
-                                    "text": format!("[附件文件: {}]", clean_path)
+                                    "text": warn_msg
                                 }));
                             }
                         }

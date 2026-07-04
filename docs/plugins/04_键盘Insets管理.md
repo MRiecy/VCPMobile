@@ -14,7 +14,7 @@ related_files:
 
 监听 Android 系统软键盘的弹出与收起事件，将键盘高度、可见性状态及安全区域底部距离通过 `evaluateJavascript` 实时注入前端，使 Vue 层能够动态调整输入框和消息列表的布局，避免键盘遮挡内容。
 
-> **设计决策**：使用 `evaluateJavascript` + `CustomEvent` 而非 Tauri 官方事件通道（`Plugin.trigger()`），因为前端使用 `window.addEventListener` 监听，与 `vcp-lifecycle` 事件保持一致的接收范式。参见 `docs/ANDROID_PLUGIN_MANAGEMENT.md` §4.1。
+> **设计决策**：使用 `evaluateJavascript` + `CustomEvent` 而非 Tauri 官方事件通道（`Plugin.trigger()`），因为前端使用 `window.addEventListener` 监听，与 `vcp-hardware-back`、`vcp-exit-requested` 等窗口级事件保持一致的接收范式。v1.1.3 起生命周期事件已迁移至 Tauri Event `vcp-lifecycle-changed`。参见 `docs/ANDROID_PLUGIN_MANAGEMENT.md` §4.1。
 
 ---
 

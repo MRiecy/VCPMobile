@@ -1,10 +1,10 @@
 ---
 id: MOD-PERSISTENCE-014
-version: "1.1.0"
-date: 2026-06-14
+version: "1.1.3"
+date: 2026-07-04
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
-related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs]
+related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs, message_service.rs]
 ---
 
 # 14_持久化层与数据访问（Persistence 领域总览）
@@ -59,7 +59,7 @@ Vue 3 前端 / Rust 业务层
 
 ## 2. 数据库管理器（`db_manager.rs`）
 
-`db_manager.rs`（533 行）是 persistence/ 领域的入口模块，负责 SQLite 数据库的初始化、连接池配置、Schema 创建与存量迁移。
+`db_manager.rs`（约 740 行）是 persistence/ 领域的入口模块，负责 SQLite 数据库的初始化、连接池配置、**基于 sqlx 迁移引擎的版本化 Schema 管理**、页面大小优化与损坏自愈。
 
 ### 2.1 DbState
 
@@ -94,7 +94,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 
 ### 2.3 WAL 模式与深度性能调优
 
-连接选项通过链式 `pragma` 调用实现 8 项深度优化（L43–L51）：
+连接选项通过链式 `pragma` 调用实现 9 项深度优化（`db_manager.rs:56-65`）：
 
 | PRAGMA | 设置值 | 作用 |
 |--------|--------|------|
@@ -106,6 +106,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 | `page_size` | `16384` (16 KB) | 匹配现代闪存页大小，提升顺序 I/O 效率 |
 | `cache_size` | `-8000` (8000 页 ≈ 128 MB) | 负值表示以页为单位，增大数据页缓存 |
 | `auto_vacuum` | `2` (INCREMENTAL) | 增量清理逻辑，配合后续维护任务物理回收空间 |
+| `foreign_keys` | `1` | 开启外键约束，支持级联删除 |
 
 **WAL 模式的移动端优势**：
 - 传统 `DELETE` 日志模式下，写操作会阻塞所有读操作。
@@ -124,9 +125,18 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 | 读并发需求 | 前端同时可能进行：消息列表加载、话题列表加载、附件查询、设置读取，5 个连接足以覆盖 |
 | Tauri IPC 并发 | 前端同时发起的 invoke 调用通常不超过 3–4 个，5 个连接有充足余量 |
 
-### 2.5 Schema 初始化与版本迁移
+### 2.5 Schema 初始化与版本迁移（v1.1.3 重构）
 
-`setup_tables`（L66–L533）不仅负责新安装的建表，还承担存量数据库的**渐进式迁移**。该函数被设计为**幂等可重入**：多次调用不会产生副作用。
+v1.1.3 起，数据库 Schema 不再通过 `setup_tables` 函数硬编码创建，而是使用 **`sqlx::migrate!("./migrations")`** 进行版本化迁移管理，配合 `db_manager.rs` 中的 `run_migrations()` 与 `bootstrap_legacy_if_needed()` 实现从 1.1.2 平滑升级。
+
+**迁移文件清单**（`src-tauri/migrations/`）：
+
+| 文件 | 版本 | 说明 |
+|------|------|------|
+| `0001_create_initial_tables.sql` | 1 | 初始化全部业务表与 9 个索引 |
+| `0002_add_deleted_at_to_message_attachments.sql` | 2 | 为 `message_attachments` 增加 `deleted_at` 软删除字段 |
+| `0003_create_messages_fts.sql` | 3 | 创建 `messages_fts` FTS5 虚拟表及删除同步触发器 |
+| `0004_fix_fts_triggers.sql` | 4 | 修复触发器使用复合主键 `(topic_id, msg_id)`，避免跨话题误删索引 |
 
 **核心表结构**（按创建顺序）：
 
@@ -137,41 +147,42 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 | `groups` | `group_id` | 群组配置，含成员关系外键 |
 | `group_members` | `(group_id, agent_id)` | 群组成员与标签 |
 | `topics` | `topic_id` | 话题元数据，`owner_type` + `owner_id` 区分归属 |
-| `messages` | `(topic_id, msg_id)` | 消息历史（复合主键），`content` 存储 zstd 压缩二进制 |
+| `messages` | `(topic_id, msg_id)` | 消息历史（复合主键），`content` 为明文 TEXT |
 | `render_cache` | `(topic_id, msg_id)` | 预渲染 AST 二进制缓存，独立表避免消息表膨胀 |
-| `message_attachments` | `(topic_id, msg_id, attachment_order)` | 消息-附件关联关系 |
+| `message_attachments` | `(topic_id, msg_id, attachment_order)` | 消息-附件关联关系（v1.1.3 新增 `deleted_at`） |
 | `attachments` | `hash` | 附件物理文件真理之源（内容寻址） |
 | `settings` | `key` | 全局键值配置 |
 | `model_favorites` | `model_id` | 收藏模型 |
 | `model_usage_stats` | `model_id` | 模型使用计数 |
 | `emoticon_library` | `id` (AUTOINCREMENT) | 表情包修复库 |
+| `tarven_rules` | `id` | VCPChatTarven 规则库 |
+| `active_generations` | `msg_id` | 活跃生成注册表（断点续传事务日志） |
+| `messages_fts` | 虚拟表 | FTS5 全文搜索索引 |
 
-**关键迁移逻辑 1：messages 复合主键迁移**（L188–L373）
+**关键迁移逻辑 1：1.1.2 遗留用户桥接**（`bootstrap_legacy_if_needed`，`db_manager.rs:268-367`）
 
-这是 persistence/ 领域最复杂的迁移操作，涉及三张表的结构重建与数据回补。
+- **检测**：存在 `messages` 表但不存在 `_sqlx_migrations` 表时，判定为 1.1.2 遗留数据库。
+- **推断**：通过 `PRAGMA table_info(message_attachments)` 检查 `deleted_at` 列，以及 `messages_fts` 表存在性，推断 Migration 2/3 是否已实际执行。
+- **播种**：手动创建 `_sqlx_migrations` 表，并插入对应版本的虚拟记录（checksum 取自 `migrator.migrations[i].checksum`），让 sqlx 迁移器跳过已执行的迁移。
+- **安全**：仅对真实存在的 Schema 状态播种，避免重复执行 DDL。
 
-- **检测**：查询 `pragma_table_info('messages') WHERE pk > 1`（L188–L193）。若存在多列主键标记，说明已是新 Schema。
-- **旧表重命名**：将 `messages`、`render_cache`、`message_attachments` 依次重命名为 `_old` 后缀（L202–L215）。
-- **新表创建**：按复合主键 Schema 创建三张表，其中 `render_cache` 和 `message_attachments` 均声明外键 `FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE`（L242–L272）。
-- **数据迁移**：
-  - `messages_old` 直接全量 `INSERT INTO messages SELECT * FROM messages_old`（L275–L278）。
-  - `render_cache_old` 和 `message_attachments_old` 通过 `JOIN messages_old` 补全 `topic_id` 后插入（L280–L298）。这是因为在旧 Schema 中，这些表仅以 `msg_id` 为键，而新 Schema 要求复合键。
-- **清理旧表**：`DROP TABLE ..._old`（L301–L312）。
-- **事务包裹**：整个迁移过程在单事务内完成，要么全部成功，要么全部回滚。
+**关键迁移逻辑 2：页面大小升级与 VACUUM**（`db_manager.rs:87-162`）
 
-**关键迁移逻辑 2：render_content 列迁移**（L376–L398）
+- 启动时检测 `PRAGMA page_size`，若不等于 `16384`：
+  1. 关闭当前 WAL 连接池。
+  2. 以 `journal_mode = DELETE` 打开临时单连接。
+  3. 执行 `PRAGMA page_size = 16384; VACUUM;`。
+  4. 关闭临时连接，重新打开标准 WAL 连接池。
+- 该过程会触发 `CoreStatus::Optimizing` 状态广播到前端。
 
-- 检测 `messages` 表是否仍存在 `render_content` 列（早期版本将渲染缓存直接存于消息表）。
-- 若存在，将非空数据 `INSERT OR IGNORE` 到 `render_cache` 表（L387–L392）。
-- 然后 `ALTER TABLE messages DROP COLUMN render_content` 移除旧列（L395–L397）。
-- 此迁移依赖 SQLite 3.35+ 的 `DROP COLUMN` 支持。
+**关键迁移逻辑 3：历史压缩数据解压**（`decompress_database_migration`，`db_manager.rs:521-730`）
 
-**关键迁移逻辑 3：字段级增量添加**（L108–L114, L140–L142, L182–L184）
-
-- `agents` 表追加 `current_topic_id`、`mobile_system_prompt`。（注：`current_topic_id` 已在业务逻辑中弃用，保留仅作历史兼容）
-- `groups` 表追加 `current_topic_id`。（同上，已弃用）
-- `topics` 表追加 `config_hash`。
-- 所有 `ALTER TABLE ... ADD COLUMN` 均使用 `let _ = ...` 忽略已存在错误，实现幂等迁移。这种设计允许旧版本应用平滑升级到新 Schema，无需版本号比对。
+- v1.1.3 将 `messages.content` 从 zstd 压缩 BLOB 改回明文 TEXT。
+- 启动时若检测到 `typeof(content) = 'blob'` 的记录，进入解压迁移：
+  1. 分批读取压缩消息（每批 200 条）。
+  2. 校验 zstd 魔数头 `[0x28, 0xB5, 0x2F, 0xFD]`，解压缩后写回 `TEXT`。
+  3. 同步重建 `messages_fts` 全文索引（仅对未删除消息）。
+  4. 最后执行 `VACUUM` 回收空间，并进入 `DecompressionComplete` 状态等待用户重启。
 
 ### 2.6 关键表字段详解
 
@@ -184,7 +195,7 @@ CREATE TABLE messages (
     role TEXT NOT NULL,
     name TEXT,
     agent_id TEXT,
-    content TEXT NOT NULL,          -- zstd 压缩二进制
+    content TEXT NOT NULL,          -- 明文消息文本（v1.1.3 起由压缩 BLOB 解压为 TEXT）
     timestamp BIGINT NOT NULL,
     is_group_message INTEGER NOT NULL DEFAULT 0,
     group_id TEXT,
@@ -199,7 +210,7 @@ CREATE TABLE messages (
 
 | 字段 | 说明 |
 |------|------|
-| `content` | 存储 zstd 压缩后的原始消息文本，非明文。读取时需 `ContentCompressor::decompress` |
+| `content` | 存储明文消息文本。v1.1.3 起由 zstd 压缩 BLOB 迁移为 TEXT，以支持 FTS5 全文搜索与直接读取 |
 | `content_hash` | 消息内容与附件 hash 的聚合指纹，用于同步 Diff；同步下载时若桌面端已提供则直接复用 |
 | `is_thinking` | **已弃用**。v0.9.14 起所有查询均硬编码为 `Some(false)`，字段保留仅作历史兼容 |
 | `finish_reason` | 流式输出的结束原因（如 `stop`、`length`、`error`） |
@@ -223,9 +234,32 @@ CREATE TABLE render_cache (
 | `render_content` | `MessageRenderCompiler::serialize` 生成的 zstd 压缩 JSON，存储 `Vec<ContentBlock>` |
 | `ON DELETE CASCADE` | 消息被删除时，渲染缓存自动级联删除，无需应用层处理 |
 
-### 2.7 索引策略
+### 2.7 新增表：`active_generations`（v1.1.3）
 
-`setup_tables` 末尾创建 8 个索引（L467–L530），覆盖高频查询路径：
+```sql
+CREATE TABLE IF NOT EXISTS active_generations (
+    msg_id TEXT PRIMARY KEY,
+    topic_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    owner_type TEXT NOT NULL,
+    created_at BIGINT NOT NULL
+);
+```
+
+| 字段 | 说明 |
+|------|------|
+| `msg_id` | 正在生成的助手消息 ID |
+| `topic_id` / `owner_id` / `owner_type` | 消息归属，用于恢复时定位上下文 |
+| `created_at` | 注册时间戳，辅助判断超时 |
+
+**生命周期**：
+- **INSERT**：`message_service::append_single_message` 在收到 `thinking` 事件、写入 `messages` 骨架时，对 `role = assistant` 且 `finish_reason IS NULL` 的消息执行 `INSERT OR REPLACE`（`message_service.rs:669-682`）。
+- **DELETE**：`message_service::finalize_stream_message` 在流正常结束/中止/错误后执行 `DELETE FROM active_generations WHERE msg_id = ?`（`message_service.rs:1065-1070`）。
+- **清理**：`delete_executor` 在软删除 Agent/Group/Topic 时级联清理相关活跃生成记录；`topic_service` 删除话题时清理。
+
+### 2.8 索引策略
+
+迁移 `0001_create_initial_tables.sql` 创建 9 个索引，覆盖高频查询路径：
 
 | 索引名 | 字段 | 服务场景 |
 |--------|------|---------|
@@ -237,6 +271,7 @@ CREATE TABLE render_cache (
 | `idx_message_attachments_msg` | `(topic_id, msg_id)` | 加载单条消息的附件列表 |
 | `idx_render_cache_msg` | `(topic_id, msg_id)` | 快速命中渲染缓存 |
 | `idx_emoticon_category` | `(category)` | 表情包按分类检索 |
+| `idx_tarven_rules_active` | `(rule_type, is_enabled, sort_order ASC)` | 按规则类型与启用状态加载 Tarven 规则 |
 
 **索引设计原则**：所有索引均围绕**实体归属**（owner_id）、**时间线排序**（timestamp DESC）、**同步扫描**（updated_at）三大查询模式构建，避免过度索引带来的写入开销。
 
@@ -389,7 +424,7 @@ pub async fn flush(&self) {
 - 计算 `chunk_size = 999 / 14 = 71`，即单条 SQL 最多插入 71 条消息。
 - 使用 `String` 拼接动态 SQL，构造 `VALUES (?,?...), (?,?...), ...` 形式。
 - `prepare_cached` 缓存编译后语句，在同事务内的多个 chunk 间复用。
-- 消息正文通过 `ContentCompressor::compress` 预先压缩为 zstd 二进制，减少参数体积和存储占用。
+- 消息正文以明文 `TEXT` 直接绑定（v1.1.3 起由压缩 BLOB 迁移为 TEXT，以支持 FTS5 全文搜索）。
 
 **附件批量处理**（L553–L632）：
 - 对同一批消息，先执行 `Chunked Delete`：按 `msg_id` IN 列表分块删除旧关系，上限 999 个 ID。
@@ -844,7 +879,7 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 
 ---
 
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*
 
 > **关键设计决策备忘**
 >

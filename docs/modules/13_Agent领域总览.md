@@ -2,8 +2,8 @@
 id: MOD-AGENT-013
 title: Agent 服务与类型系统
 description: Agent 领域总览——CRUD 服务、类型契约、头像颜色生成、应用层服务
-version: "1.1.0"
-date: 2026-06-14
+version: "1.1.3"
+date: 2026-07-04
 ---
 
 # 13. Agent 服务与类型系统
@@ -112,6 +112,7 @@ date: 2026-06-14
 | `context_token_limit` | `i32` | `default_context_limit` (`1000000`) | 上下文 Token 上限 |
 | `max_output_tokens` | `i32` | `default_max_output` (`64000`) | 单次输出最大 Token 数 |
 | `stream_output` | `bool` | `default_true` (`true`) | 是否启用流式输出 |
+| `use_temperature` | `bool` | `default_true` (`true`) | 是否在请求中发送 `temperature` 参数，关闭可兼容不支持温度的模型 |
 | `avatar_calculated_color` | `Option<String>` | `default` (`None`) | 头像主色调（十六进制），由 `avatars` 表派生 |
 | `topics` | `Vec<Topic>` | `default` (空数组) | 该 Agent 下的话题列表 |
 
@@ -190,6 +191,8 @@ pub struct AgentConfigState {
 
 > 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 59–145 行
 
+> **安全变更（v1.1.3）**：公共 Tauri Command `read_agent_config` 在返回前会**强行清空** `system_prompt` 字段（设为 `""`），以防止系统提示词通过 IPC 泄露到前端；后端业务逻辑、群聊组装或同步推送必须调用 `read_agent_config_internal` 获取完整配置。
+
 **三级读取策略**：
 
 ```
@@ -227,7 +230,7 @@ pub struct AgentConfigState {
 
 **数据库查询细节**：
 
-- **`agents` 表**：读取 `name`、`system_prompt`、`mobile_system_prompt`、`model`、`temperature`、`context_token_limit`、`max_output_tokens`、`stream_output`
+- **`agents` 表**：读取 `name`、`system_prompt`、`mobile_system_prompt`、`model`、`temperature`、`context_token_limit`、`max_output_tokens`、`stream_output`、`use_temperature`
 - **`avatars` 表（LEFT JOIN）**：通过 `owner_id = agent_id AND owner_type = 'agent'` 关联，提取 `dominant_color` 映射到 `avatar_calculated_color`
 - **`topics` 表**：读取该 Agent 下全部未删除话题，按 `updated_at DESC` 排序，反序列化为 `Vec<Topic>`
 
@@ -235,9 +238,11 @@ pub struct AgentConfigState {
 
 ### 3.4 保存配置（save_agent_config）
 
-> 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 147–163 行
+> 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 147–185 行
 
 公共 Tauri Command，接收完整的 `AgentConfig` 对象，执行原子化写入。
+
+> **安全变更（v1.1.3）**：由于公共 `read_agent_config` 已清空 `system_prompt`，前端传入的配置对象中 `system_prompt` 可能为空。`save_agent_config` 在写入前会执行**防擦除合并**：优先从内存缓存读取原 `system_prompt`；缓存未命中则调用 `read_agent_config_internal` 从数据库读取完整配置并回填，确保系统提示词不会因前端 IPC 而意外丢失。
 
 ```
 输入: AgentConfig
@@ -250,6 +255,11 @@ pub struct AgentConfigState {
 ┌─────────────────────┐
 │ acquire_lock(id)    │──> 获取该 Agent 的专属互斥锁
 │ .lock().await       │
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│ 防擦除合并原        │──> 从缓存/数据库读取原 system_prompt
+│ system_prompt        │    回填到待保存配置
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
@@ -364,9 +374,9 @@ state.caches.insert(agent_id.to_string(), new_config.clone());
 
 ### 3.8 删除 Agent（delete_agent）
 
-> 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 351–382 行
+> 函数位置：`src-tauri/src/vcp_modules/agent/agent_service.rs` 第 438–489 行
 
-采用**软删除**策略：
+采用**软删除**策略，但对关联数据执行级联清理：
 
 ```sql
 UPDATE agents SET deleted_at = ? WHERE agent_id = ?
@@ -374,10 +384,14 @@ UPDATE agents SET deleted_at = ? WHERE agent_id = ?
 
 而非物理删除，以保留历史数据并支持未来可能的回收站功能。
 
-副作用：
-- 清除内存缓存：`state.caches.remove(&agent_id)`
-- 释放该 Agent 的锁：`state.locks.remove(&agent_id)`
-- 通知同步中心：发送 `SyncCommand::NotifyDelete { data_type: Agent, id: agent_id }`
+级联副作用：
+1. **话题软删除**：将该 Agent 下所有未删除的 `topics` 记录设置 `deleted_at`
+2. **消息软删除**：将上述话题下所有未删除的 `messages` 记录设置 `deleted_at`
+3. **活跃生成清理**：从 `active_generations` 表中物理删除 `owner_id = agent_id` 且 `owner_type = 'agent'` 的记录，防止已删除消息“复活”
+4. **缓存与锁释放**：
+   - 清除内存缓存：`state.caches.remove(&agent_id)`
+   - 释放该 Agent 的锁：`state.locks.remove(&agent_id)`
+5. **同步通知**：发送 `SyncCommand::NotifyDelete { data_type: Agent, id: agent_id }`
 
 ### 3.9 创建 Agent（create_agent）
 
@@ -416,7 +430,7 @@ let agent_id = format!("{}_{}", base_id, timestamp);
 
 ## 4. 头像颜色服务（avatar_service.rs）
 
-`avatar_service.rs` 负责 Agent（及未来可能扩展的 Group）头像的二进制数据存储、读取，以及**主色调（Dominant Color）**的计算。该模块包含 436 行代码，其中约 250 行为颜色科学算法与单元测试，是视觉工程密度最高的模块之一。
+`avatar_service.rs` 负责 Agent / Group / User 头像的二进制数据存储、读取，以及主色调（Dominant Color）的**持久化**（颜色计算已前移到前端）。该模块在 v1.1.3 中大幅瘦身，移除了后端 FFmpeg 解码与颜色科学算法，以避免权限问题、同步开销和 IPC 阻塞。
 
 > 文件位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs`
 
@@ -440,7 +454,7 @@ pub struct AvatarResult {
 
 ### 4.2 保存头像（save_avatar_data）
 
-> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 10–83 行
+> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 10–69 行
 
 **完整流程**：
 
@@ -454,8 +468,8 @@ pub struct AvatarResult {
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
-│ 2. 提取主色调        │──> spawn_blocking 隔离 CPU 密集型计算
-│    (Dominant Color)  │    避免阻塞 tokio 异步运行时
+│ 2. 主色调初始化为 None│──> 后端不再提取颜色，由前端计算后调用
+│    (Dominant Color)  │    store_dominant_color 回填
 └──────────┬──────────┘
            ▼
 ┌─────────────────────┐
@@ -468,6 +482,8 @@ pub struct AvatarResult {
 │    (若启用同步)      │    data_type = SyncDataType::Avatar
 └─────────────────────┘
 ```
+
+> **设计变更（v1.1.3）**：`save_avatar_data` 不再调用 CPU 密集型的主色调提取算法，而是将 `dominant_color` 直接设为 `None` 后落库。颜色计算由前端在头像裁剪/上传后异步完成，并通过 `store_dominant_color` 写回数据库。这一改动消除了后端对图像解码库与权限的依赖，同时减少跨进程序列化开销。
 
 **avatars 表结构**：
 
@@ -483,7 +499,7 @@ pub struct AvatarResult {
 
 ### 4.3 获取头像（get_avatar）
 
-> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 94–123 行
+> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 80–110 行
 
 简单查询：
 
@@ -495,113 +511,39 @@ WHERE owner_type = ? AND owner_id = ?
 
 返回 `Option<AvatarResult>`，无记录时返回 `Ok(None)`，前端应做好空态处理（如展示首字母占位 Avatar）。
 
-### 4.4 存量数据主色调补算（compute_and_store_dominant_color）
+### 4.4 批量获取头像（batch_get_avatars）
 
-> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 126–167 行
+> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 112–154 行
 
-用于迁移场景：当 `avatars` 表中已有 `image_data` 但 `dominant_color` 为 NULL 时，提取二进制数据并计算颜色后回写。此命令可在应用升级后由前端批量调用，完成存量数据修复。
+v1.1.3 新增的 Tauri Command，用于启动/同步场景一次性拉取所有头像二进制数据，避免前端逐个 IPC 请求。
 
-### 4.5 主色调提取算法（extract_dominant_color_from_bytes）
-
-> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 221–368 行
-
-这是整个模块最复杂的纯算法函数，也是 VCP Mobile 视觉一致性的核心基础。其设计目标是从任意头像图片中提取一个**既具有代表性又适合作为 UI 主题色**的十六进制颜色。
-
-#### 4.5.1 整体策略
-
-| 步骤 | 技术 | 目的 |
-|------|------|------|
-| ① 自适应降采样 | FFmpeg 内存解码 | 将大图缩放到 ≤128×128，避免高分辨率带来的计算浪费 |
-| ② 量化直方图 | 512-bin（每通道 3bit）| 快速统计颜色分布，找出峰值 |
-| ③ 背景过滤 | 排除纯黑/纯白/近灰 bin | 避免默认头像或低饱和背景干扰 |
-| ④ HSV 饱和过滤 | s < 0.15 或 v > 0.88 的像素跳过 | 过滤过灰或过曝像素 |
-| ⑤ 色彩增强 | 亮度 -5%，饱和度 +15% | 让最终颜色在 UI 上更具表现力 |
-| ⑥ 多级回退 | bin 内全过滤 → bin 平均 → 全局平均 | 确保任何输入都能产出有效颜色 |
-
-#### 4.5.2 自适应分辨率降采样
-
-```rust
-let rgba_data = crate::vcp_modules::media_processor::image_extractor::decode_avatar_to_rgba(data)
-    .map_err(|e| format!("Image decode failed: {}", e))?;
+```sql
+SELECT owner_type, owner_id, mime_type, image_data, dominant_color, updated_at
+FROM avatars
+WHERE owner_type IN ('agent', 'group', 'user')
 ```
 
-- 调用 `media_processor` 领域的纯 Rust `image` crate 直接解码
-- 大图限制为 128×128，小图保持原样
-- 采用降级策略：优先尝试 native decoder，无法处理时返回错误
-- 输出为 Raw RGBA 字节流，避免写入临时文件
+返回 `Vec<BatchAvatarItem>`，每项包含 `owner_type`、`owner_id` 及完整的 `AvatarResult` 字段。注意：该接口会在一次 IPC 中传输全部头像二进制，适用于头像数量可控的移动端场景。
 
-#### 4.5.3 512-bin 直方图峰值检测
+### 4.5 存储前端计算的主色调（store_dominant_color）
 
-```rust
-let bin = ((r / 32) as usize) * 64 + ((g / 32) as usize) * 8 + (b / 32) as usize;
+> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 156–182 行
+
+v1.1.3 新增的 Tauri Command，接收前端计算好的十六进制颜色字符串，回写 `avatars.dominant_color`：
+
+```sql
+UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?
 ```
 
-- 每通道分为 8 级（0–7），共 8³ = 512 个 bin
-- 同时累加每个 bin 的 R/G/B 总和（`r_sums`、`g_sums`、`b_sums`），供后续平均计算
+前端通常在头像上传后通过 Canvas / 颜色量化库计算主色调，再调用此接口完成持久化。后端仅负责存储，不参与任何图像解码或颜色算法。
 
-**过滤规则**：
+### 4.6 兜底颜色提取（extract_dominant_color_from_bytes）
 
-1. **纯黑过滤**：`bin == 0`（对应 RGB 全部为 0）
-2. **纯白过滤**：`bin == 511`（对应 RGB 全部为 255）
-3. **近灰过滤**：`|r_bin - g_bin| ≤ 1 && |g_bin - b_bin| ≤ 1`
+> 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 184–189 行
 
-#### 4.5.4 HSV 饱和过滤与色彩增强
+原后端主色调提取算法已在 v1.1.3 中移除。为保留协议层兜底入口，该函数现在固定返回 `"#808080"`（中性灰），复杂度为 O(1)，不再涉及任何图像解码、FFmpeg 或颜色科学计算。
 
-在最佳 bin 内二次遍历像素，执行更精细的过滤：
-
-```rust
-let (h, s, v) = rgb_to_hsv(r as f32, g as f32, b as f32);
-
-if s < 0.15 || v > 0.88 {
-    continue; // 跳过低饱和或过亮像素
-}
-
-let v = (v * 0.95).min(1.0);  // 亮度压制 -5%
-let s = (s * 1.15).min(1.0);  // 饱和度提升 +15%
-let (nr, ng, nb) = hsv_to_rgb(h, s, v);
-```
-
-#### 4.5.5 回退链
-
-```
-┌─────────────────────────────────────────────┐
-│ 最佳 bin 存在?                              │
-└──────────────┬──────────────────────────────┘
-      Yes      │           No
-      ┌────────┘             └────────┐
-      ▼                               ▼
-┌─────────────────┐          ┌─────────────────┐
-│ bin 内有过滤后  │  Yes     │ 回退到全局算术  │
-│ 的有效像素?     ├────────► │ 平均颜色        │
-└────────┬────────┘          └─────────────────┘
-   No    │
-   ┌─────┘
-   ▼
-┌─────────────────┐
-│ 回退到该 bin 的 │
-│ 原始平均颜色    │
-└─────────────────┘
-```
-
-- 若所有像素均透明 → 返回 `"#808080"`（中性灰）
-
-### 4.6 RGB/HSV 转换辅助函数
-
-> 定义位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 169–217 行
-
-`rgb_to_hsv` 与 `hsv_to_rgb` 为标准颜色空间转换实现，支持完整的 0°–360° 色相环。两者均有单元测试覆盖（见 4.7）。
-
-### 4.7 单元测试
-
-> 测试模块位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 370–435 行
-
-`avatar_service.rs` 是 Agent 领域中**唯一包含自动化测试**的模块，共 3 个测试：
-
-| 测试名 | 验证内容 |
-|--------|----------|
-| `test_rgb_to_hsv_pure_colors` | 纯红/纯绿/纯蓝的 HSV 转换正确性 |
-| `test_hsv_to_rgb_pure_colors` | 纯红/纯绿/纯蓝的 RGB 逆转换正确性 |
-| `test_rgb_hsv_roundtrip` | 多组颜色的 RGB → HSV → RGB 往返一致性（允许 ±1 舍入误差） |
+> **算法移除说明（v1.1.3）**：后端原有的 512-bin 直方图、HSV 过滤、色彩增强、`rgb_to_hsv` / `hsv_to_rgb` 转换及相应单元测试均已移除。颜色科学计算已迁移到前端，Rust 侧仅保留固定灰色兜底和 `store_dominant_color` 持久化接口。
 
 ---
 
@@ -853,9 +795,10 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 | `update_agent_config(app_handle, state, agent_id, updates) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String`, `serde_json::Value` | 更新后的配置对象 | 快速修改单个字段（如切换模型） |
 | `delete_agent(app_handle, state, agent_id) -> Result<bool, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String` | `true` | 删除 Agent |
 | `create_agent(app_handle, state, name, initial_config) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String`, `Option<Value>` | 新 Agent 配置 | 新建 Agent |
-| `save_avatar_data(app_handle, owner_type, owner_id, mime_type, image_data) -> Result<String, String>` | `avatar_service` | `AppHandle`, `String`×3, `Vec<u8>` | SHA-256 哈希 | 头像裁剪后上传 |
+| `save_avatar_data(app_handle, owner_type, owner_id, mime_type, image_data) -> Result<String, String>` | `avatar_service` | `AppHandle`, `String`×3, `Vec<u8>` | SHA-256 哈希 | 头像裁剪后上传；v1.1.3 起不再后端提取主色调 |
 | `get_avatar(app_handle, owner_type, owner_id) -> Result<Option<AvatarResult>, String>` | `avatar_service` | `AppHandle`, `String`, `String` | 头像二进制 + 元数据 | 加载头像展示 |
-| `compute_and_store_dominant_color(db_state, owner_type, owner_id) -> Result<String, String>` | `avatar_service` | `DbState`, `String`, `String` | 十六进制颜色 | 存量数据迁移修复 |
+| `batch_get_avatars(app_handle) -> Result<Vec<BatchAvatarItem>, String>` | `avatar_service` | `AppHandle` | 全部头像二进制列表 | 启动/同步场景一次性拉取 |
+| `store_dominant_color(db_state, owner_type, owner_id, color) -> Result<(), String>` | `avatar_service` | `DbState`, `String`×2, `String` | — | 前端计算主色调后回写数据库 |
 | `handle_agent_chat_message(app_handle, agent_state, db_state, active_requests, payload, stream_channel) -> Result<Value, String>` | `agent_chat_application_service` | `AppHandle`, `AgentConfigState`, `DbState`, `ActiveRequests`, `AgentChatPayload`, `Channel<StreamEvent>` | `{ status: "sent", messageId }` | 用户发送消息 |
 
 ### 7.2 内部函数（不暴露给前端）
@@ -867,9 +810,7 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 | `internal_write_agent_config(...)` | `agent_service` | private | `save_agent_config`, `update_agent_config`, 同步导入 |
 | `acquire_lock(&self, agent_id)` | `agent_service` | `pub` | `save_agent_config`, `update_agent_config` |
 | `internal_process_agent_chat_message(...)` | `agent_chat_application_service` | `pub` | `handle_agent_chat_message`, 同步/重放场景 |
-| `extract_dominant_color_from_bytes(data)` | `avatar_service` | `pub` | `save_avatar_data`, `compute_and_store_dominant_color`, 协议层兜底 |
-| `rgb_to_hsv(r, g, b)` | `avatar_service` | private | `extract_dominant_color_from_bytes` |
-| `hsv_to_rgb(h, s, v)` | `avatar_service` | private | `extract_dominant_color_from_bytes` |
+| `extract_dominant_color_from_bytes(data)` | `avatar_service` | `pub` | 协议层兜底，固定返回 `#808080` |
 
 ---
 
@@ -883,15 +824,22 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 
 `mobile_system_prompt` 是 Agent 配置中的特殊字段，其设计意图是让同一 Agent 在桌面端与移动端拥有差异化的系统提示词（例如移动端强调简洁回复、触控友好格式）。若参与同步，桌面端修改后会覆盖移动端的专用提示词，破坏移动端体验。因此该字段仅在本地 SQLite 的 `agents` 表中存储，同步 DTO（`AgentSyncDTO`）中不包含此字段。
 
-### 8.3 头像主色调算法的"过度设计"？
+### 8.3 为何将主色调计算迁移到前端？
 
-`extract_dominant_color_from_bytes` 包含 150+ 行颜色科学代码，对于头像展示似乎过于复杂。但这一设计服务于 VCP Mobile 的**视觉宪法**：
+v1.1.3 之前，`avatar_service.rs` 包含 150+ 行后端颜色科学代码，依赖 `media_processor/image_extractor.rs` 对头像做 FFmpeg 内存解码。实践中暴露出三个问题：
 
-- 首字母占位 Avatar 使用 `dominant_color` 作为背景色
-- Glassmorphism 面板需要与环境色协调的 accent 色
-- 简单的算术平均会产生大量灰/白/黑结果，在 UI 上表现为"死气沉沉"
+1. **权限与稳定性**：Android 端后台进行图像解码容易触发权限/进程限制，且会增加 APK 体积。
+2. **同步开销**：后端在保存头像时同步计算颜色，拖慢 IPC 返回，阻塞前端交互。
+3. **计算重复**：前端展示头像时本身已有 Canvas / ImageData，完全可以就地计算。
 
-512-bin 直方图 + HSV 过滤 + 色彩增强的组合，确保了即使是风景照或暗色调头像，也能产出具有**视觉活力**的主题色。
+因此 v1.1.3 将颜色算法迁移到前端，后端仅负责：
+
+- 接收二进制头像并计算 SHA-256 哈希
+- 保存 `dominant_color = None`
+- 提供 `store_dominant_color` 供前端回填计算结果
+- 保留 `extract_dominant_color_from_bytes` 作为固定灰色的协议兜底
+
+前端可在头像裁剪后立即用 Canvas 抽样计算主色调，再异步调用 `store_dominant_color`，不影响上传主流程。
 
 ### 8.4 前台服务保活的容错设计
 

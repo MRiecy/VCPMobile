@@ -1,9 +1,9 @@
 ---
 id: PLUGIN-GUARDIAN-011
 title: ForegroundGuardian 前台守护者
-description: 进程级单例，统一管理 WakeLock + WifiLock + 前台服务的引用计数与优先级调度。v1.1.2 新增
-version: 1.1.2
-date: 2026-06-24
+description: 进程级单例，统一管理 WakeLock + WifiLock + 前台服务的引用计数与优先级调度。v1.1.2 新增，v1.1.3 新增超时自动释放。
+version: 1.1.3
+date: 2026-07-04
 related_files:
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/service/ForegroundGuardian.kt
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/service/StreamKeepaliveService.kt
@@ -112,8 +112,9 @@ data class ConsumerEntry(
 ### 4.2 Acquire 流程
 
 ```
-acquire(context, tag, priority, label, screenKeepOn)
+acquire(context, tag, priority, label, screenKeepOn, timeoutMs = -1)
   │
+  ├── 取消该 tag 已有的超时任务（若存在）
   ├── wasEmpty = consumers.isEmpty()
   ├── consumers[tag] = ConsumerEntry(priority, label, screenKeepOn)
   │
@@ -121,8 +122,10 @@ acquire(context, tag, priority, label, screenKeepOn)
   │   ├── acquireLocks(context)   //    → 物理获取 WakeLock + WifiLock
   │   └── startFgs(context)       //    → 启动 StreamKeepaliveService 前台服务
   │
-  └── else:                       // 已有消费者
-      └── updateFgs(context)      //    → 仅触发 onStartCommand 更新通知
+  ├── else:                       // 已有消费者
+  │   └── updateFgs(context)      //    → 仅触发 onStartCommand 更新通知
+  │
+  └── 调度超时自动释放任务（见 §4.5）
 ```
 
 ### 4.3 Release 流程
@@ -154,6 +157,61 @@ fun releaseAllLocks() {
 `releaseAllLocks()` 被以下路径调用：
 - `StreamKeepaliveService.onDestroy()`：前台服务被系统杀死或 `stopFgs()` 触发的自杀，作为兜底清扫防止锁泄漏。
 - `VcpMobilePlugin.stopStreamingService()` 空参数分支：前端发出"全部停止"信号时。
+
+### 4.5 超时自动释放（v1.1.3 新增）
+
+`acquire()` 增加了 `timeoutMs: Long = -1` 参数，用于防止业务层异常崩溃后 tag 永远残留在 `consumers` 中导致锁泄漏。
+
+**默认超时策略**（当 `timeoutMs < 0` 时按 tag 类型自动选择）：
+
+| 消费者 Tag 类型 | 默认超时 | 设计意图 |
+|----------------|---------|---------|
+| `stream:{name}` | 10 分钟 | 普通 Agent 流式对话，防止前端未正常调用 stop 时无限持锁 |
+| `sync` | 30 分钟 | 数据同步可能耗时较长 |
+| `prerender` | 30 分钟 | 预渲染重建可能耗时较长 |
+| `distributed` / `manual_keepalive` | 2 小时 | 后台/分布式保活允许更长周期 |
+| 其他 | 15 分钟 | 默认兜底 |
+
+实现要点：
+
+```kotlin
+// ForegroundGuardian.kt:67
+@Synchronized
+fun acquire(
+    context: Context,
+    tag: String,
+    priority: Int,
+    label: String,
+    screenKeepOn: Boolean = false,
+    timeoutMs: Long = -1
+) {
+    // 1. 取消该 tag 已有的超时任务
+    timeoutRunnables.remove(tag)?.let { handler.removeCallbacks(it) }
+
+    // ... 注册/更新消费者，获取或更新物理锁 ...
+
+    // 2. 计算实际超时并调度自动释放
+    val actualTimeout = if (timeoutMs >= 0) timeoutMs else when {
+        tag.startsWith("stream:") -> 10 * 60 * 1000L
+        tag == "sync" -> 30 * 60 * 1000L
+        tag == "prerender" -> 30 * 60 * 1000L
+        tag == "distributed" || tag == "manual_keepalive" -> 2 * 60 * 60 * 1000L
+        else -> 15 * 60 * 1000L
+    }
+
+    if (actualTimeout > 0) {
+        val runnable = Runnable {
+            release(context, tag)
+        }
+        timeoutRunnables[tag] = runnable
+        handler.postDelayed(runnable, actualTimeout)
+    }
+}
+```
+
+- 每次对同一 tag 重复调用 `acquire()` 都会**重置**超时计时器（覆盖更新），避免正常长流被误释放。
+- `release()` 和 `releaseAllLocks()` 在清理消费者的同时会移除对应超时任务，防止已释放的 tag 仍触发 `release()`。
+- 超时释放走正常的 `release(context, tag)` 路径，因此会正确触发"最后一个消费者退出 → 停服务/放锁"的完整清理。
 
 ---
 
@@ -343,33 +401,59 @@ pub fn set_keepalive_mode_inner(app, is_keepalive) {
 ### 9.3 Kotlin `VcpMobilePlugin.kt` — startStreamingService 重构
 
 ```kotlin
-@Command fun startStreamingService(invoke: Invoke) {
-    val args = parseArgs(StartStreamArgs)
-    val name = args.agentName
+@Command
+fun startStreamingService(invoke: Invoke) {
+    val args = invoke.parseArgs(StartStreamArgs::class.java)
+    val hasKeepaliveParam = args.isKeepaliveMode != null
+    val isKeepalive = args.isKeepaliveMode ?: false
 
-    when {
-        // 空名 + 保活模式 → 分布式标签
-        name.isEmpty() && args.isKeepalive == true ->
-            ForegroundGuardian.acquire(context, "distributed", PRIORITY_DISTRIBUTED, "distributed")
-
-        // 空名 + 非保活 → 释放全部同步/渲染/流式标签
-        name.isEmpty() -> {
-            ForegroundGuardian.release(context, "sync")
-            ForegroundGuardian.release(context, "prerender")
-            ForegroundGuardian.release(context, "stream_default")
+    if (args.agentName.isEmpty()) {
+        if (hasKeepaliveParam) {
+            if (!isKeepalive) {
+                com.vcp.mobile.service.ForegroundGuardian.release(activity, "distributed")
+            } else {
+                com.vcp.mobile.service.ForegroundGuardian.acquire(
+                    activity, "distributed",
+                    com.vcp.mobile.service.ForegroundGuardian.PRIORITY_DISTRIBUTED, "distributed"
+                )
+            }
+        } else {
+            // 老版 Rust 停止信号：释放所有流式相关的默认锁
+            com.vcp.mobile.service.ForegroundGuardian.release(activity, "sync")
+            com.vcp.mobile.service.ForegroundGuardian.release(activity, "prerender")
+            com.vcp.mobile.service.ForegroundGuardian.release(activity, "stream_default")
         }
-
-        // 同步 Agent → PRIORITY_SYNC + 屏幕常亮
-        name.contains("[数据同步]") ->
-            ForegroundGuardian.acquire(context, "sync", PRIORITY_SYNC, name, true)
-
-        // 预渲染 Agent → PRIORITY_PRERENDER + 屏幕常亮
-        name.contains("[预渲染重建]") ->
-            ForegroundGuardian.acquire(context, "prerender", PRIORITY_PRERENDER, name, true)
-
-        // 普通 Agent → PRIORITY_STREAM
-        else -> ForegroundGuardian.acquire(context, "stream:$name", PRIORITY_STREAM, name, false)
+        invoke.resolve()
+        return
     }
+
+    if (args.agentName.contains("[数据同步]")) {
+        com.vcp.mobile.service.ForegroundGuardian.acquire(
+            activity, "sync",
+            com.vcp.mobile.service.ForegroundGuardian.PRIORITY_SYNC,
+            args.agentName, true
+        )
+        activity.runOnUiThread {
+            activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    } else if (args.agentName.contains("[预渲染重建]")) {
+        com.vcp.mobile.service.ForegroundGuardian.acquire(
+            activity, "prerender",
+            com.vcp.mobile.service.ForegroundGuardian.PRIORITY_PRERENDER,
+            args.agentName, true
+        )
+        activity.runOnUiThread {
+            activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    } else {
+        com.vcp.mobile.service.ForegroundGuardian.acquire(
+            activity, "stream:${args.agentName}",
+            com.vcp.mobile.service.ForegroundGuardian.PRIORITY_STREAM,
+            args.agentName, false
+        )
+    }
+
+    invoke.resolve()
 }
 ```
 

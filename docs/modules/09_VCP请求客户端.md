@@ -1,10 +1,10 @@
 ---
 id: MOD-VCP-CLI-009
-version: "1.1.0"
-date: 2026-06-14
+version: "1.1.3"
+date: 2026-07-04
 module: vcp_client.rs
 scope: src-tauri/src/vcp_modules/
-related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs]
+related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs, message_service.rs]
 ---
 
 # 09_VCP 请求客户端（VCP Client）
@@ -13,7 +13,9 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 ### 1.1 模块定位
 
-`vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（985 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
+`vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（约 2100 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
+
+> **v1.1.3 关键变更**：Android 平台引入本地 SSE 代理助手进程（`StreamKeepaliveService` + SSE Helper），流式请求通过 `LengthDelimitedCodec` 帧协议与助手通信；新增活跃生成注册表联动、`recover_active_generation` / `resume_stream` 断点续传能力。
 
 其核心职责包括：
 - 将前端传入的 `VcpRequestPayload` 转换为标准化 HTTP 请求
@@ -35,6 +37,9 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 | Aurora 语义沉淀驱动 | 每收到文本 chunk 追加到 `AuroraBuffer`，触发增量块解析与推测渲染 | `perform_vcp_request:591` |
 | 请求中止 | `ActiveRequests` + `oneshot::Sender` + RAII Guard 三层防护 | `ActiveRequests:106`, `interruptRequest:730` |
 | 连接测试 | 对齐桌面端逻辑的 `/v1/models` 探测与模型计数 | `test_vcp_connection:762` |
+| 活跃生成恢复 | 查询 `active_generations`、本地 `sse_cache` 及助手内存，恢复异常中断的流 | `get_active_generations:1611`, `recover_active_generation:1767` |
+| 流式断点续传 | Android 通过 SSE Helper 代理按事件索引 `startIndex` 续接流 | `resume_stream:2011`, `handle_streaming_request:770` |
+| 助手进程通信 | `LengthDelimitedCodec` 帧协议：4 字节大端长度 + JSON payload | `send_command_to_stream:705`, `connect_to_helper:612` |
 
 ### 1.3 调用入口
 
@@ -84,7 +89,7 @@ pub struct VcpRequestPayload {
 - `model_config` 由前端组装，必须包含 `stream: bool` 字段以决定处理模式。
 - `context` 原样透传，最终会出现在 `StreamEvent.context` 中，供前端路由到正确的消息气泡。
 
-### 2.2 StreamEvent（v1.1.0 更新）
+### 2.2 StreamEvent
 
 ```rust
 #[derive(Debug, Serialize, Clone, Default)]
@@ -98,7 +103,7 @@ pub struct StreamEvent {
     pub error: Option<String>,
     pub aurora: Option<AuroraUpdate>,      // 语义沉淀快照（仅 aurora）
     pub blocks: Option<Vec<ContentBlock>>, // 预渲染块（仅 end）
-    pub timestamp: Option<u64>,            // 🆕 v1.1.0 物理落笔时间戳（仅 end，由 finalize_stream_message 设置）
+    pub timestamp: Option<u64>,            // 物理落笔时间戳（仅 end，由 finalize_stream_message 设置）
 }
 ```
 
@@ -110,7 +115,8 @@ pub struct StreamEvent {
 | `aurora` | AuroraBuffer 的 stable/tail 发生变化，或 33ms / 1024 字节双阈值节流到期 | 增量更新已闭合块列表 + 尾部推测渲染 + AST Diff 突变执行 |
 | `thinking` | 后端在流式请求开始前主动发射 | 创建 thinking 占位消息骨架（is_thinking = true） |
 | `end` | 流正常结束或被中止后，携带 timestamp 和最终 blocks | 隐藏"输入中"状态，显示最终 finish_reason |
-| `error` | HTTP 错误、流读取异常、25s SSE 空闲超时 | 显示错误提示，终止渲染 |
+| `error` | HTTP 错误、流读取异常、SSE 空闲超时 | 显示错误提示，终止渲染 |
+| `reconnecting` | Android 流式代理重连期间 | 前端展示“重连中”状态 |
 
 ### 2.3 ActiveRequests
 
@@ -214,9 +220,9 @@ pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
 
 | 扩展名 | MIME | part_type | 处理方式 | 降级策略 |
 |--------|------|-----------|---------|---------|
-| png/jpg/jpeg/webp/gif | image | `image_url` | ffmpeg 转 webp，长边缩放到 ≤1120px | 保留文本占位 `[附件文件: {path}]` |
-| mp4/mkv/webm/avi/mov/flv/m4v/3gp | video | `image_url` | 场景检测 + 均匀采样抽帧 → JPEG base64 | 同上 |
-| mp3/wav/ogg/flac/aac/m4a/opus/wma | audio | `input_audio` | ffmpeg 提取 16kHz 单声道 WAV → base64 | 同上 |
+| png/jpg/jpeg/webp/gif/bmp/heic/heif/avif | image | `image_url` | ffmpeg 转 webp，长边缩放到 ≤1120px | 保留文本占位 `[附件文件: {path}]` |
+| mp4/webm/3gp/3g2/mov | video | `image_url` | 场景检测 + 均匀采样抽帧 → JPEG base64 | 同上 |
+| mp3/wav/ogg/flac/aac/m4a/opus/amr | audio | `input_audio` | ffmpeg 提取 MP3/AAC（32kbps）→ base64 | 同上 |
 | 其他 | application | `file_url` | 不支持多模态，直接降级为文本占位 | — |
 
 关键实现细节：
@@ -225,34 +231,15 @@ pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
 - 图片/视频/音频处理均在 `tokio::task::spawn_blocking` 中执行，避免阻塞 async 运行时
 - 视频抽帧有**硬上限 300 帧**，防止极端长视频导致 OOM 或 API 超时
 
-### 3.3 动态路由与上下文注入（阶段 1–2）
+### 3.3 动态路由（阶段 1–2）
 
 **动态路由**：
 - 若 `enableVcpToolInjection = true`，强制将路径替换为 `/v1/chatvcp/completions`（工具增强路由）
 - 否则调用 `normalize_vcp_url()`，确保 URL 以 `/v1/chat/completions` 结尾
 
-**上下文注入到 System Message**：
+> **v1.1.3 变更说明**：历史版本中 `vcp_client.rs` 曾直接读取 `music_state.json` / `songlist.json` 并向 System Message 注入音乐状态与 UI 规范。当前代码中该逻辑已移除，所有上下文注入（System Prompt、Tavern 规则、历史消息压缩等）由 `context_assembler.rs` 在调用 `perform_vcp_request` 之前完成。`vcp_client.rs` 仅负责将已组装好的 `messages` 数组原样序列化并发送。
 
-```
-System Message 最终结构：
-
-[top_parts]
-  ├── [播放列表——
-  │    {title1}
-  │    {title2}
-  │   ]          ← 仅当 agentMusicControl = true 且 songlist.json 非空
-  └── ...
-
-{original_system_content}  ← 原始系统消息内容
-
-[bottom_parts]
-  ├── [当前播放音乐：{title} - {artist} ({album})]  ← 从 music_state.json 读取
-  ├── 点歌台{{VCPMusicController}}               ← 仅当 agentMusicControl = true
-  └── 输出规范要求：{{VarDivRender}}             ← 仅当 enableAgentBubbleTheme = true
-```
-
-- 若消息列表中无 System Message，自动在头部插入空内容的 System 角色作为注入载体
-- 注入内容使用 `\n\n` 连接，最终 `trim()` 去除首尾空白
+- 若消息列表中无 System Message，当前实现仍会自动在头部插入空内容的 System 角色，以保持与部分旧版模型的兼容性。
 
 ### 3.4 流式处理模式（阶段 6）
 
@@ -279,23 +266,18 @@ let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 10
 ├─ abort_rx 触发 → 请求尚未建立，直接返回 aborted
 └─ response_res 到达 → 进入第二层
 
-第二层 select!（SSE 读取循环内，三路并发）
+第二层 select!（SSE 读取循环内，两路并发）
 ├─ abort_rx 触发 → 深层轮询捕获中止
 │   ├─ aurora_buffer.finalize()
 │   ├─ 发送最终 aurora 事件（含 cancelled_by_user）
 │   └─ break 循环
-├─ 🆕 sleep_future 触发（25s SSE 空闲超时）
-│   ├─ log::warn!("Stream idle timeout (25s) reached")
-│   ├─ flush_aurora_parse(force=true)
-│   ├─ aurora_buffer.finalize()
-│   ├─ 发送 aurora 事件（error="连接超时：超过 25 秒未收到服务器响应"）
-│   ├─ 发送 error 类型 StreamEvent
-│   └─ break 循环
-└─ lines.next() 到达 → 重置 last_activity 时钟 → 解析单行
+└─ lines.next() 到达 → 解析单行
     ├─ "data: [DONE]" → 正常结束
     ├─ "data: {...}" → 提取 delta.content，追加到 AuroraBuffer
     └─ Err/None → 错误处理或容错结束
 ```
+
+> **注意**：v1.1.3 代码中**不存在**独立的 SSE 空闲超时（如 25s）分支。长连接由 TCP keepalive（20s）与 Android SSE Helper 的本地代理重连机制共同维护。若连接意外断开，非 Android 桌面调试场景会进入 `Retrying` 状态进行最多 3 次退避重连；Android 生产场景则依赖 Helper 进程的本地缓存与 `resume_stream` 接续。
 
 **Aurora 驱动节流**（v1.1.0 更新）：
 - 每收到非空文本 chunk，追加到 pending_chunk 缓冲区
@@ -387,6 +369,7 @@ pub async fn sendToVCP<R: Runtime>(
 - `stream_channel` 为 `Channel<StreamEvent>`，支持服务端向前端推送事件流
 - 流式模式下，函数返回后仍会通过 `stream_channel` 持续发送事件，直到 `end` 或 `error`
 - 返回的 `Value` 在流式模式下包含 `{ fullContent, streamingStarted, finishReason }`
+- **v1.1.3 变更**：当 `perform_vcp_request` 返回 `Err` 且为流式模式时，`sendToVCP` 会主动 `DELETE FROM active_generations WHERE msg_id = ?`，防止异常路径下活跃生成注册表泄漏（`vcp_client.rs:191-202`）
 
 ### 4.2 interruptRequest
 
@@ -494,8 +477,10 @@ async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf
 | 指标 | 数值/策略 | 说明 |
 |------|----------|------|
 | SSE 行缓冲区 | 512 KB | 防止极端长行导致内存爆炸 |
-| Aurora 节流间隔 | 33 ms（`AURORA_PARSE_INTERVAL_MS`）+ 1024 字节阈值（`AURORA_FORCE_PARSE_BYTES`） | 双阈值互备：时间或字节量任一满足即触发 flush |
+| Aurora 节流间隔 | 自适应：33 ms / 100 ms / 200 ms，按尾部长度分段 | 避免长文本尾部频繁触发小粒度解析 |
+| Aurora 字节阈值 | 自适应：1024 B / 4096 B / 8192 B，按尾部长度分段 | 长文本尾部累积更多内容再 flush，降低 CPU |
 | TCP Keepalive | 20 s | 维持长连接活性，避免 NAT 超时 |
+| Android 代理帧 | 4 字节大端长度前缀 + JSON payload | `LengthDelimitedCodec` 封装，助手与客户端统一帧格式 |
 | 图片长边限制 | 1120 px | 控制多模态 payload 大小 |
 | 视频最大帧数 | 300 帧 | 防止极端视频导致 OOM/API 超时 |
 | 视频去重阈值 | 1.5 秒 | 时间戳差小于此值视为重复帧 |
@@ -508,7 +493,90 @@ async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf
 
 ---
 
-## 8. 与相关模块的关系
+## 8. Android 流式代理与断点续传（v1.1.3）
+
+### 8.1 为什么需要本地 SSE 代理
+
+Android 端在 v1.1.3 引入独立的 SSE Helper 进程（由 `tauri-plugin-vcp-mobile` 的 `stream` 模块管理）：
+- 当 App 切后台或被系统限制网络时，`reqwest` 长连接可能被 OEM 策略中断。
+- Helper 以独立前台服务形式维持与 VCP 服务器的 SSE 连接，即使主进程短暂被杀也能继续接收 Token。
+- 主进程通过本地 TCP 套接字（`127.0.0.1:<sse_helper.port>`）与 Helper 通信，避免直接持有可能被系统回收的长连接。
+
+### 8.2 LengthDelimitedCodec 帧协议
+
+主进程 ↔ Helper 的所有命令与事件均采用统一的长度前缀帧：
+
+```rust
+// 发送端（vcp_client.rs:705-739）
+let cmd_str = cmd.to_string();
+let cmd_bytes = cmd_str.as_bytes();
+let len = cmd_bytes.len() as u32;
+stream.write_all(&len.to_be_bytes()).await?;
+stream.write_all(cmd_bytes).await?;
+stream.flush().await?;
+
+// 接收端（vcp_client.rs:969, 1062）
+FramedRead::new(stream, LengthDelimitedCodec::new())
+```
+
+| 字段 | 长度 | 说明 |
+|------|------|------|
+| 帧长度 | 4 字节（u32 big-endian） | 后续 JSON payload 的字节数 |
+| payload | 变长 | JSON 对象，包含 `action`、`requestId`、`eventType`、`eventData`、`index` 等字段 |
+
+### 8.3 命令协议
+
+主进程向 Helper 发送的命令：
+
+| action | 参数 | 用途 |
+|--------|------|------|
+| `start` | `url`, `headers`, `body`, `context` | 启动新的 SSE 会话 |
+| `stop` | `requestId` | 通知 Helper 停止指定会话并释放资源 |
+| `resume` | `startIndex` | 从指定事件索引续接已有会话 |
+| `query` | `requestId` | 查询 Helper 内存中会话当前状态 |
+
+Helper 向主进程回传的事件帧：
+
+| eventType | eventData | 含义 |
+|-----------|-----------|------|
+| `message` | SSE `data:` 内容（含 `[DONE]`） | 正常 Token 帧 |
+| `closed` | — | 服务器关闭连接 |
+| `error` | JSON `{ error }` | 代理层错误，立即失败 |
+
+### 8.4 活跃生成注册表联动
+
+`vcp_client.rs` 不直接写入 `active_generations` 表（由 `message_service::append_single_message` 在收到 `thinking` 事件后写入），但在异常路径负责清理或恢复：
+
+| 场景 | 行为 | 代码位置 |
+|------|------|---------|
+| `sendToVCP` 流式请求返回 `Err` | 删除 `active_generations` 中对应 `msg_id` | `vcp_client.rs:191-199` |
+| `recover_active_generation` | 依次查询 Helper 内存、本地 `sse_cache`、最终标记为 `failed` | `vcp_client.rs:1767-2006` |
+| `resume_stream` | 以 `is_resume=true` 进入 `handle_streaming_request`，从 `last_event_index` 续接 | `vcp_client.rs:2011-2109` |
+
+### 8.5 恢复流程
+
+```text
+recover_active_generation(msg_id)
+    │
+    ├─ 若 msg_id 仍在 ActiveRequests 中 → 返回 { status: "streaming" }
+    │
+    ├─ 清理超过 24h 的本地 sse_cache 文件
+    │
+    ├─ 读取本地 sse_recovered_{hash}.json（24h 内有效）
+    │   └─ 命中 → finalize_stream_message → 返回 completed
+    │
+    ├─ Android: 通过 TCP 向 Helper 查询会话状态
+    │   ├─ completed → finalize → 返回 completed
+    │   ├─ streaming → 返回 streaming + content + lastEventIndex
+    │   └─ not_found → 继续下一步
+    │
+    └─ 标记消息为 error，删除 active_generations 记录
+       └─ 返回 { status: "failed" }
+```
+
+---
+
+## 9. 与相关模块的关系
 
 ```
                     ┌─────────────────┐
@@ -542,15 +610,16 @@ async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf
 
 ---
 
-## 9. 动态心跳优化（vcp_log_service）
+## 10. 动态心跳与前后台状态（vcp_log_service）
 
-`vcp_log_service.rs` 与 `vcp_client.rs` 同属 `infra/` 领域，负责 WebSocket 日志通道的生命周期管理。近期新增了可配置心跳机制，以适配移动端前后台切换场景。
+`vcp_log_service.rs` 与 `vcp_client.rs` 同属 `infra/` 领域，负责 WebSocket 日志通道的生命周期管理。v1.1.3 将心跳自适应逻辑从**前端主动调用**迁移到**后端根据生命周期状态自动调整**，减少前后台切换时的竞态窗口。
 
-### 9.1 运行时心跳配置
+### 10.1 运行时心跳配置
 
-新增 Tauri Command：
+保留 Tauri Command 供手动/调试覆盖：
 
 ```rust
+// src-tauri/src/vcp_modules/infra/vcp_log_service.rs:89
 #[tauri::command]
 pub async fn set_vcp_log_heartbeat(interval_ms: u64) -> Result<(), String>
 ```
@@ -559,34 +628,74 @@ pub async fn set_vcp_log_heartbeat(interval_ms: u64) -> Result<(), String>
 - **动态生效**：调用后立即通过 `HEARTBEAT_RESET_TX` mpsc 通道向 WebSocket 监听循环发送重置信号
 - 监听循环内通过 `tokio::select!` 捕获 `reset_rx.recv()`，读取最新原子值后重新校准 `heartbeat_timer`（`tokio::time::Sleep::reset`），无需断开重连
 
-### 9.2 前后台自适应
+> **注意**：v1.1.3 前端（`App.vue` / `useAppLifecycle`）不再在生命周期切换时调用此命令。日常运行的心跳调整由 Rust 侧的 `handle_foreground_state_change` 自动完成。
 
-`App.vue` 监听 Android 生命周期事件 `vcp-lifecycle`（由 `LifecycleBridge.kt` 通过 `evaluateJavascript` 注入 `CustomEvent`）：
+### 10.2 前后台自适应（后端自动）
+
+Rust 生命周期控制器在收到 `set_app_foreground_state` 调用时，会同步调用 `vcp_log_service::handle_foreground_state_change`：
+
+```rust
+// src-tauri/src/vcp_modules/infra/vcp_log_service.rs:27
+pub async fn handle_foreground_state_change(_app: &AppHandle, is_foreground: bool) {
+    let heartbeat_ms = if is_foreground { 15000 } else { 120000 };
+    HEARTBEAT_INTERVAL_MS.store(heartbeat_ms, Ordering::SeqCst);
+    {
+        let tx_lock = HEARTBEAT_RESET_TX.lock().await;
+        if let Some(tx) = tx_lock.as_ref() {
+            let _ = tx.send(()).await;
+        }
+    }
+}
+```
 
 | 生命周期状态 | 心跳间隔 | 设计意图 |
 |-------------|---------|---------|
-| `resume`（前台） | 15000 ms | 保持连接活性，确保日志与系统通知实时到达 |
-| `stop` / `pause`（后台） | 120000 ms | 降低功耗与网络占用，减少 OEM 杀后台概率 |
+| 前台 (`is_foreground = true`) | 15000 ms | 保持连接活性，确保日志与系统通知实时到达 |
+| 后台 (`is_foreground = false`) | 120000 ms | 降低功耗与网络占用，减少 OEM 杀后台概率 |
 
-```typescript
-// App.vue 中的监听逻辑
-const handleVcpLifecycle = async (e: Event) => {
-  const state = (e as CustomEvent).detail?.state;
-  if (state === "stop" || state === "pause") {
-    await invoke("set_vcp_log_heartbeat", { intervalMs: 120000 });
-  } else if (state === "resume") {
-    await invoke("set_vcp_log_heartbeat", { intervalMs: 15000 });
-  }
-};
+触发链路：
+
+```
+Kotlin LifecycleBridge / App.vue visibilitychange
+    │
+    ▼
+Rust lifecycle_controller::set_app_foreground_state(is_foreground)
+    │
+    ▼
+vcp_log_service::handle_foreground_state_change(is_foreground)
+    │
+    ▼
+HEARTBEAT_INTERVAL_MS 原子更新 → WebSocket 循环 reset 心跳定时器
 ```
 
-### 9.3 性能与稳定性收益
+### 10.3 后台日志缓存
+
+为避免后台期间 WebView 积压消息，`vcp_log_service.rs` 在 `emit_log_event` 中增加了后台缓存逻辑：
+
+```rust
+// src-tauri/src/vcp_modules/infra/vcp_log_service.rs:59
+fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
+    if !crate::vcp_modules::infra::lifecycle_manager::is_app_in_foreground(app) {
+        if let Ok(mut cache) = BACKGROUND_LOG_CACHE.lock() {
+            cache.push(payload);
+        }
+        return;
+    }
+    let _ = app.emit("vcp-system-event", payload);
+}
+```
+
+- 应用处于后台时，日志消息缓存在 Rust 侧 `BACKGROUND_LOG_CACHE`，不直接推送到 WebView
+- 返回前台后通过 `flush_background_logs` 一次性补发，防止内存泄漏和前端消息积压
+
+### 10.4 性能与稳定性收益
 
 - **后台降频**：120s 心跳使 WebSocket 在后台维持最低限度的 NAT/防火墙保活，避免高频 Ping 唤醒 CPU 与射频模块
 - **快速恢复**：前台切回时 15s 间隔立即恢复，日志通道无需重新握手
-- **与 StreamKeepaliveService 协同**：前台保活服务（`START_STICKY` + `IMPORTANCE_HIGH`）维持进程存活，而自适应心跳则在进程内部降低网络层消耗
+- **状态一致性**：心跳调整与生命周期状态在同一 Rust 调用链中完成，避免前端调用 `set_vcp_log_heartbeat` 与 `vcp-lifecycle-changed` 事件之间的时序窗口
+- **与 StreamKeepaliveService 协同**：主进程前台保活服务维持进程存活，`:helper` 进程 SSE 代理维持流连接，自适应心跳降低网络层消耗
 
 ---
 
-*最后更新：2026-06-14 | VCP Mobile v1.1.0*
-*文档基于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（985 行）及 `src-tauri/src/vcp_modules/chat/aurora_pipeline.rs`（~237行）的源码分析生成。*
+*最后更新：2026-07-04 | VCP Mobile v1.1.3*
+*文档基于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（约 2100 行）及 `src-tauri/src/vcp_modules/chat/aurora_pipeline.rs`（~237行）的源码分析生成。*
