@@ -4,12 +4,12 @@
   <p><em>From Desktop Client to Cyber-Physical Avatar.</em></p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.0.3-blue" alt="version">
+    <img src="https://img.shields.io/badge/version-1.1.3-blue" alt="version">
     <img src="https://img.shields.io/badge/platform-Android-green?logo=android" alt="platform">
-    <img src="https://img.shields.io/badge/framework-Tauri%20v2%20%7C%20Vue%203-26A17B?logo=tauri" alt="framework">
+    <img src="https://img.shields.io/badge/framework-Tauri%202.11.2%20%7C%20Vue%203.5.33-26A17B?logo=tauri" alt="framework">
     <img src="https://img.shields.io/badge/backend-Rust%20%7C%20Tokio-000000?logo=rust" alt="backend">
-    <img src="https://img.shields.io/badge/UI-UnoCSS%20%7C%20Glassmorphism-4f46e5" alt="UI">
-    <img src="https://img.shields.io/badge/license-MIT-yellow" alt="license">
+    <img src="https://img.shields.io/badge/UI-UnoCSS%20%7C%20Minimalist-4f46e5" alt="UI">
+    <img src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-lightgrey" alt="license">
   </p>
 
 
@@ -40,7 +40,7 @@
 与市面上其他移动端 AI 应用相比，VCP Mobile 的独特之处在于：
 - **Backend-Driven Streaming**：消息生命周期完全由后端 SSE 事件驱动，前端不做任何预创建或状态猜测
 - **自定义增量同步协议**：不依赖第三方云服务，移动端与桌面端通过 WebSocket + HTTP 双通道直接同步
-- **14+ 设备能力工具**：将手机本身变成一个分布式计算节点，AI 可直接调用位置、传感器、CPU/GPU 信息等原生能力
+- **14 设备能力工具**：将手机本身变成一个分布式计算节点，AI 可直接调用位置、传感器、CPU/GPU 信息等原生能力
 
 ### 演进历程
 
@@ -52,6 +52,11 @@
 | v0.9.10 ~ v0.9.12 | 同步 V2 协议实现，群组对话，附件分类与预览体系 |
 | v0.9.13 ~ v0.9.14 | 分布式节点模块，设备能力工具集，Model 管理器，WebGL 特效 |
 | v1.0.0 | Avatar 正式发布：Backend-Driven Streaming、Tarven 上下文注入、Semantic Z-Index、SlidePage 虚拟导航 |
+| v1.0.3 | 分布式节点系统、Root 访问支持、CPU/GPU/Network 硬件状态、WakeLock/WifiLock 双锁保活 |
+| v1.1.0 Aurora Genesis | 增量 AST Diff 渲染引擎、Epoch/Revision 双级时序、ToolCallSummary、工具审批系统、聊天历史分页 |
+| v1.1.1 | AST 节点树合并剪枝、正则算法兼容性优化、动态帧率降级、虚拟按键兼容 |
+| v1.1.2 | RAG 灵视中心（认知广播观察器） |
+| v1.1.3 Guardian Protocol | ForegroundGuardian 进程级锁调度、StreamKeepaliveService 降级为通知壳、SSE 代理 `:helper` 进程、ProcessLifecycleOwner、前端 vitest 测试框架 |
 
 项目从首个 commit 起即采用 Tauri v2 + Vue 3 + Rust 栈，不存在 Node.js / Electron 或 Tauri v1 的历史阶段。Rust 的所有权模型和零成本抽象为移动端提供了编译期内存安全保障，Tokio 异步运行时确保网络 IO 不阻塞主线程，这对流式聊天体验至关重要。
 
@@ -123,6 +128,30 @@
 - `ModelSelector` BottomSheet 弹层：收藏 > 热门 > 字母序三级排序
 - 与 `AgentSettingsView` 深度联动，切换模型即时生效
 
+### 🌌 RAG 灵视中心
+
+v1.1.2 引入的认知广播观察面板，让 AI 在 RAG 检索、工具调用、长链推理时的中间状态可视化。
+
+- `ragObserverStore` 订阅后端认知广播事件，实时展示检索阶段、来源文档、置信度
+- `rag/` 功能模块提供认知广播面板 + 载荷详情浮层
+- 与 `chatStreamStore` 联动，将隐式的 RAG 过程显式映射到对话上下文
+
+### 🧑‍🚀 浮动助手（Floating Assistant）
+
+`assistant/` 模块提供全局悬浮窗快捷对话入口，可在任何界面快速唤起轻量级 AI 交互。
+
+- `floatingAssistantStore` 管理悬浮窗位置、折叠状态、会话上下文
+- 与主应用共享 `agentStore` / `modelStore`，保证模型与智能体选择一致
+- 独立的渲染入口 `floating-main.ts`，生命周期与主窗口解耦
+
+### 🔔 通知中心
+
+`notification/` 模块集中管理本地通知、Toast、权限状态与系统通知监听。
+
+- `notificationStore` 统一处理本地通知创建、点击恢复、待处理数据
+- 与 Android `VcpNotificationListenerService` 联动，支持通知权限引导
+- 级联逻辑删除同步：代理/群组/话题删除时同步标记相关消息
+
 ### 🏗️ Semantic Z-Index / SlidePage 虚拟导航
 
 11 级语义化层级系统，彻底消灭 `z-[999]` 魔法数字。
@@ -146,9 +175,9 @@
 - SlidePage 虚拟页面栈：非路由跳转，通过 `overlayStore` 管理，动态 Z-Index = `40 + stackIndex`
 - Operation Aegis 模态历史栈支持物理返回键 LIFO 消费
 
-### 🔧 14+ 设备能力工具（分布式节点）— TODO
+### 🔧 14 设备能力工具（分布式节点）
 
-`distributed/` 模块将手机转化为 AI 可直接调用的分布式计算节点，提供 14+ 原生设备能力：
+`distributed/` 模块将手机转化为 AI 可直接调用的分布式计算节点，提供 14 个原生设备能力：
 
 - `device_info` / `device_status_summary` — 设备综合信息
 - `location` — GPS 与网络定位
@@ -159,6 +188,7 @@
 - `ambient_sensor` / `motion_sensor` — 环境传感器与运动传感器
 - `notification` — 本地通知推送
 - `frontend_bridge` — 前后端能力桥接
+- `telemetry_center` — 分布式遥测聚合
 
 ### 🤖 Agent / Group 交互
 
@@ -234,7 +264,7 @@ Vue → invoke("start_sync") → Rust sync service
 
 ### 3.3 状态管理
 
-全局状态由 **18 个 Pinia Stores** 组成，全部使用 **Composition API 风格**（`defineStore('id', () => { ... })`），摒弃 Options API。
+全局状态由 **20 个 Pinia Stores** 与 **16 个 Composables** 组成，全部使用 **Composition API 风格**（`defineStore('id', () => { ... })` / `useXxx()`），摒弃 Options API。
 
 | Store | 职责 |
 |-------|------|
@@ -244,6 +274,10 @@ Vue → invoke("start_sync") → Rust sync service
 | `attachmentStore` | 附件选择、上传队列、MIME 识别、进度追踪 |
 | `overlayStore` | SlidePage 栈、BottomSheet、Dialog 队列、Z-Index 管理 |
 | `agentStore` | Agent / Group 列表、排序、缓存、卡片级手势状态 |
+| `modelStore` | 模型列表、收藏状态、热门排行、TTL 缓存 |
+| `ragObserverStore` | RAG 认知广播观察、检索阶段与载荷详情 |
+| `floatingAssistantStore` | 浮动助手位置、折叠状态、独立会话上下文 |
+| `notificationStore` | 本地通知、Toast、权限状态、点击恢复 |
 | `themeStore` | 主题切换、CSS 变量注入、跟随系统深色模式 |
 
 ### 3.4 Android 原生插件通信分层
@@ -253,14 +287,19 @@ Vue → invoke("start_sync") → Rust sync service
 | 功能 | Rust 模块 | Kotlin 模块 | 通信方式 |
 |------|-----------|-------------|----------|
 | 屏幕常亮 | `src/screen.rs` | — | Raw JNI（`jni` crate 直接调用 Activity）|
-| 流式前台保活 | `src/stream.rs` | `StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin` |
+| 前台锁协同 / 流式保活 | `src/stream.rs` | `ForegroundGuardian.kt` / `StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin` |
 | 键盘 Insets | — | `KeyboardInsetsManager.kt` | `evaluateJavascript` 注入 CustomEvent |
-| 生命周期事件 | — | `LifecycleBridge.kt` | `evaluateJavascript` 注入 CustomEvent |
+| 生命周期事件 | — | `LifecycleBridge.kt` | `PluginHandle.run_mobile_plugin` → `listen_any` → Tauri Event |
 | 权限与系统控制 | `src/system.rs` | `VcpMobilePlugin.kt` | `PluginHandle.run_mobile_plugin` |
+| SSE 代理 | `src/stream.rs` | `SseProxyService.kt` | `PluginHandle.run_mobile_plugin`；主/`:helper` 进程通过 127.0.0.1 TCP 通信 |
+| 硬件/传感器状态 | `src/system.rs` | `BatteryStatusManager.kt` / `NetworkStatusManager.kt` 等 | `PluginHandle.run_mobile_plugin` |
 
 关键设计决策：
-- `KeyboardInsetsManager` 和 `LifecycleBridge` 不使用 Tauri 标准事件通道，而是通过 `evaluateJavascript` 直接注入 `window.CustomEvent`
-- `StreamKeepaliveService` 使用 `START_STICKY` + `IMPORTANCE_HIGH` + Android 14+ `FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING`
+- `ForegroundGuardian` 是进程级 Kotlin 单例，统一调度 WakeLock + WifiLock + 前台服务引用计数，支持四级优先级（`SYNC=40 / PRERENDER=30 / STREAM=20 / DISTRIBUTED=10`）
+- `StreamKeepaliveService` 在 v1.1.3 降级为纯粹的“通知壳”，锁管理已移交 `ForegroundGuardian`；`stopWithTask="true"` 确保进程被划掉后通知随之消亡
+- `LifecycleBridge` v1.1.3 升级为 `ProcessLifecycleOwner` 进程级观察，并通过 `plugin.trigger("lifecycle")` → Rust `listen_any` → `app.emit("vcp-lifecycle-changed")` 转发
+- `SseProxyService` 运行在独立 `:helper` 进程，通过本地 TCP 套接字与主进程通信，支持 SSE 断线缓存与动态锁控
+- `KeyboardInsetsManager` 不使用 Tauri 标准事件通道，而是通过 `evaluateJavascript` 直接注入 `window.CustomEvent`
 - 屏幕常亮使用 Raw JNI 而非 PluginHandle，避免跨语言序列化开销
 
 ---
@@ -273,21 +312,23 @@ VCPMobile/
 │   ├── main.ts                   # 应用入口
 │   ├── App.vue                   # 根布局（引导流程 + 侧边栏手势）
 │   ├── core/
-│   │   ├── stores/               # 18 Pinia Stores（Composition API）
-│   │   ├── composables/          # 15 个全局组合式函数
+│   │   ├── stores/               # 20 Pinia Stores（Composition API）
+│   │   ├── composables/          # 16 个全局组合式函数
 │   │   ├── router/               # Hash 模式路由
 │   │   ├── directives/           # v-intersection-observer, v-longpress
 │   │   ├── types/                # 全局 TypeScript 类型
 │   │   ├── constants/            # 层级常量、主题 Token
 │   │   └── utils/                # 同步服务、通用工具
 │   ├── features/                 # 领域功能模块（Feature Co-location）
-│   │   ├── chat/                 # 对话引擎、消息渲染、输入增强
 │   │   ├── agent/                # Agent/Group CRUD、设置面板、拖拽排序
-│   │   ├── topic/                # 主题管理
-│   │   ├── settings/             # 全局设置、主题选择
+│   │   ├── assistant/            # 浮动助手（全局悬浮窗快捷对话）
+│   │   ├── chat/                 # 对话引擎、消息渲染、输入增强
+│   │   ├── distributed/          # 设备工具调用 UI
 │   │   ├── notification/         # 通知中心与 Toast
+│   │   ├── rag/                  # RAG 灵视中心（认知广播面板 + 载荷详情）
+│   │   ├── settings/             # 全局设置、主题选择
 │   │   ├── sync/                 # 同步状态 UI
-│   │   └── distributed/          # 设备工具调用 UI
+│   │   └── topic/                # 主题管理
 │   ├── components/
 │   │   ├── layout/               # AgentSidebar, BootScreen, RightSidebar
 │   │   ├── ui/                   # BottomSheet, ToastManager 等原语
@@ -312,10 +353,10 @@ VCPMobile/
 │   │   └── permissions/          # Tauri v2 权限声明
 │   └── Cargo.toml                # Rust 依赖与 Release 优化配置
 ├── docs/                         # 四层技术文档体系
-│   ├── vue_docs/                 # 前端文档（24 份）
-│   ├── modules/                  # Rust 模块文档（17 份）
+│   ├── vue_docs/                 # 前端文档（26 份）
+│   ├── modules/                  # Rust 模块文档（30 份）
 │   ├── sync/                     # 同步协议文档（20 份）
-│   ├── plugins/                  # 原生插件文档（9 份）
+│   ├── plugins/                  # 原生插件文档（13 份）
 │   └── *.md                      # 顶层规范（架构、UI 层级、依赖管理）
 ├── plans/                        # 知识治理体系（5 层目录）
 ├── scripts/                      # 开发辅助脚本
@@ -338,9 +379,10 @@ VCPMobile/
 | `src-tauri/src/vcp_modules/chat/chat_manager.rs` | 对话生命周期管理、消息发送编排 |
 | `src-tauri/src/vcp_modules/infra/vcp_client.rs` | HTTP 客户端（reqwest + rustls-tls）、SSE 解析 |
 | `src-tauri/src/vcp_modules/sync/sync_service.rs` | 三阶段增量同步主控（WebSocket + HTTP） |
-| `src-tauri/src/distributed/tools/device_info.rs` | 设备信息工具（14+ 设备能力之一） |
-| `src-tauri/plugins/vcp-mobile/android/.../StreamKeepaliveService.kt` | Android 14+ 前台保活服务 |
-| `docs/SYNC_ARCHITECTURE.md` | 增量同步协议完整规范 |
+| `src-tauri/src/distributed/tools/device_info.rs` | 设备信息工具（14 设备能力之一） |
+| `src-tauri/plugins/vcp-mobile/android/.../ForegroundGuardian.kt` | v1.1.3 进程级 WakeLock/WifiLock 调度单例 |
+| `docs/ARCHIVED_SYNC_ARCHITECTURE.md` | 增量同步协议历史规范 |
+| `docs/sync/00_总览与导航.md` | 同步 V2 子文档导航 |
 | `docs/UI_LAYER_ARCHITECTURE.md` | 全局 UI 层级与 Z-Index 语义化规范 |
 | `scripts/tauri_android_dev.cjs` | WiFi/USB 双模式真机调试启动器 |
 | `uno.config.ts` | UnoCSS 主题色、快捷类、断点配置 |
@@ -368,7 +410,8 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 | Frontend Style | UnoCSS | 66.6.8 | Atomic CSS |
 | Frontend Build | Vite | 6.4.2 | Build tool |
 | Frontend Type | TypeScript | ~5.6.3 | Type system |
-| Backend Framework | Tauri | 2.11.1 | Cross-platform framework |
+| Frontend Test | Vitest | 4.1.9 | Unit / integration tests |
+| Backend Framework | Tauri | 2.11.2 | Cross-platform framework |
 | Backend Runtime | Tokio | 1.x | Async runtime |
 | Backend Storage | sqlx + rusqlite | 0.8.6 / 0.32.1 | SQLite async driver |
 | Backend Network | reqwest + tokio-tungstenite | 0.12 / 0.26 | HTTP + WebSocket |
@@ -393,10 +436,10 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 
 | Knowledge Base | Path | Docs Count | Scope | Audience |
 |----------------|------|:----------:|-------|----------|
-| Frontend Docs | `docs/vue_docs/` | 24 | 全部 Vue/TS 源码 | 前端开发者 |
-| Rust Modules | `docs/modules/` | 17 | `vcp_modules/` + `distributed/` | 后端开发者 |
+| Frontend Docs | `docs/vue_docs/` | 26 | 全部 Vue/TS 源码 | 前端开发者 |
+| Rust Modules | `docs/modules/` | 30 | `vcp_modules/` + `distributed/` | 后端开发者 |
 | Sync Protocol | `docs/sync/` | 20 | Delta Sync V2 全链路 | 同步功能开发者 |
-| Plugin Docs | `docs/plugins/` | 9 | `tauri-plugin-vcp-mobile` | 原生插件开发者 |
+| Plugin Docs | `docs/plugins/` | 13 | `tauri-plugin-vcp-mobile` | 原生插件开发者 |
 
 ### 6.2 快速决策树
 
@@ -404,7 +447,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 
 - **"Message rendering pipeline 如何工作？"** → `docs/vue_docs/features/chat/09_...`
 - **"Tarven injection rules 的判定逻辑是什么？"** → `docs/modules/16_...`
-- **"Sync hash detection 如何检测冲突？"** → `docs/sync/03_...`
+- **"Sync hash detection 如何检测冲突？"** → `docs/sync/03_哈希体系与变更检测.md`
 - **"Frontend store 的架构约定是什么？"** → `docs/vue_docs/core/stores/...`
 - **"Android lifecycle bridge 的事件流向？"** → `docs/plugins/...`
 - **"Attachment upload protocol 的分块策略？"** → `docs/modules/07_...`
@@ -412,6 +455,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 - **"Android 权限管理与前台服务规范？"** → `docs/ANDROID_PLUGIN_MANAGEMENT.md`
 - **"Backend-Driven Streaming 的消息生命周期？"** → `docs/vue_docs/features/chat/...`
 - **"Release 构建优化配置详解？"** → `docs/modules/...`
+- **"同步协议历史规范？"** → `docs/ARCHIVED_SYNC_ARCHITECTURE.md` / `docs/sync/00_总览与导航.md`
 
 ### 6.3 前后端交叉引用
 
@@ -433,7 +477,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 
 ### 7.1 用户安装（普通用户）
 
-1. 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 下载最新 `VCPMobile_v1.0.3_arm64-v8a.apk`
+1. 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 下载最新 `VCPMobile_v1.1.3_arm64-v8a.apk`
 2. 安装到 Android 设备（minSdk 26，推荐 Android 10+）
 3. 启动应用，完成权限引导（通知、存储、电池优化白名单）
 4. 配置 VCP 服务器地址与 API Key
@@ -485,6 +529,11 @@ pnpm tauri android build --apk --target aarch64
 |------|------|------|
 | `pnpm dev` | `vite` | 前端开发服务器（端口 1420）|
 | `pnpm build` | `vue-tsc && vite build` | 前端生产构建 |
+| `pnpm check` | `vue-tsc --noEmit && cd src-tauri && cargo check` | 全量静态检查（前端类型 + Rust 编译）|
+| `pnpm dev:android` | `node scripts/tauri_android_dev.cjs` | WiFi 模式真机调试 |
+| `pnpm dev:usb` | `node scripts/tauri_android_dev.cjs --usb` | USB 模式真机调试（adb reverse）|
+| `pnpm test` | `vitest` | 前端单元/集成测试（交互式）|
+| `pnpm test:run` | `vitest run` | 前端测试一次性运行 |
 | `pnpm tauri android dev` | — | Android 开发调试 |
 | `pnpm tauri android build --apk --target aarch64` | — | Release APK 构建 |
 
@@ -503,12 +552,16 @@ strip = true
 
 ### 8.3 测试策略
 
-- **前端**：无自动化测试。验证依赖 `vue-tsc --noEmit`（静态类型）+ 真机手动测试。
+- **前端单元/集成测试**：v1.1.3 引入 Vitest 框架，覆盖组件与工具函数
+  - `src/tests/unit/chat/...`
+  - `src/tests/unit/components/ui/...`
+  - `src/tests/unit/components/settings/...`
+- **Android E2E 与性能测试**：`tests/e2e-android/`（adb 环境/权限/冒烟脚本）、`tests/perf/`（APK 体积/启动耗时/Rust bench）
 - **Rust 单元测试**：
   - `vcp_modules/sync/sync_retry.rs`（5 个测试）
   - `vcp_modules/chat/context_sanitizer.rs`（3 个测试）
   - `vcp_modules/sync/sync_logger.rs`
-- **核心模块**（`vcp_client`, `sync_service`, `db_manager` 等）无自动化测试。
+- **核心模块**（`vcp_client`, `sync_service`, `db_manager` 等）自动化测试仍待补齐。
 
 ---
 
@@ -593,7 +646,7 @@ A: 确保安装 Android NDK `29.0.13846066`，并在 `local.properties` 或环�
 ## 11. License & Credits
 
 ```
-MIT License © 2026 MRiecy (Nova)
+CC BY-NC-SA 4.0 International © 2026 MRiecy (Nova)
 
 Created and evolved by Nova (VCP Evolutionary Architect).
 From Desktop Client to Cyber-Physical Avatar.

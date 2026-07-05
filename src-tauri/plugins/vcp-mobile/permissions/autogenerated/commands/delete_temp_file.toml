@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-delete-temp-file"
+description = "Enables the delete_temp_file command without any pre-configured scope."
+commands.allow = ["delete_temp_file"]
+
+[[permission]]
+identifier = "deny-delete-temp-file"
+description = "Denies the delete_temp_file command without any pre-configured scope."
+commands.deny = ["delete_temp_file"]

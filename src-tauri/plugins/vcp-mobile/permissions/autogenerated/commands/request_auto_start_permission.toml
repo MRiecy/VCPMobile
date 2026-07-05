@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-request-auto-start-permission"
+description = "Enables the request_auto_start_permission command without any pre-configured scope."
+commands.allow = ["request_auto_start_permission"]
+
+[[permission]]
+identifier = "deny-request-auto-start-permission"
+description = "Denies the request_auto_start_permission command without any pre-configured scope."
+commands.deny = ["request_auto_start_permission"]

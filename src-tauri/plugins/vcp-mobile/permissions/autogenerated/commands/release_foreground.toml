@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-release-foreground"
+description = "Enables the release_foreground command without any pre-configured scope."
+commands.allow = ["release_foreground"]
+
+[[permission]]
+identifier = "deny-release-foreground"
+description = "Denies the release_foreground command without any pre-configured scope."
+commands.deny = ["release_foreground"]

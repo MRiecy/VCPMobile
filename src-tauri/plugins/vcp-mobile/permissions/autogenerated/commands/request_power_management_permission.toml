@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-request-power-management-permission"
+description = "Enables the request_power_management_permission command without any pre-configured scope."
+commands.allow = ["request_power_management_permission"]
+
+[[permission]]
+identifier = "deny-request-power-management-permission"
+description = "Denies the request_power_management_permission command without any pre-configured scope."
+commands.deny = ["request_power_management_permission"]

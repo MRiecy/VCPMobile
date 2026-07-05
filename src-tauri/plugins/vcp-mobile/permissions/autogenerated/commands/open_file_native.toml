@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-open-file-native"
+description = "Enables the open_file_native command without any pre-configured scope."
+commands.allow = ["open_file_native"]
+
+[[permission]]
+identifier = "deny-open-file-native"
+description = "Denies the open_file_native command without any pre-configured scope."
+commands.deny = ["open_file_native"]
