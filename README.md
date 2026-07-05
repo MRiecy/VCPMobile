@@ -11,7 +11,7 @@
     <img src="https://img.shields.io/badge/UI-UnoCSS%20%7C%20Minimalist-4f46e5" alt="UI">
     <img src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-lightgrey" alt="license">
   </p>
-
+</div>
 
 ---
 

@@ -4,39 +4,26 @@
 
 ---
 
-## ⛔ 0. 工作区隔离铁律（ALL CLI — 违反即灾难）
+## ⛔ 0. 工作区隔离铁律
 
-> **本 CLI 的工作空间同时包含了 VCPMobile、VCPToolBox、VCPChat 等多个项目目录，但：**
+> 工作空间包含多个项目，但**只有 `G:\VCPMobile` 是当前开发目标**：
 >
-> | 目录 | 身份 | 规则 |
-> |------|------|------|
-> | `G:\VCPMobile` | **唯一正式开发目标** | ✅ 可读可写，所有修改仅限此目录 |
-> | `G:\VCPToolBox` | 参考工程（仅供查阅） | ❌ **绝对禁止修改任何文件** |
-> | `G:\VCPChat` | 参考工程（仅供查阅） | ❌ **绝对禁止修改任何文件** |
+> | 目录            | 规则                 |
+> | --------------- | -------------------- |
+> | `G:\VCPMobile`  | ✅ 可读可写           |
+> | `G:\VCPToolBox` | ❌ 参考工程，禁止修改 |
+> | `G:\VCPChat`    | ❌ 参考工程，禁止修改 |
 >
-> **无论你在参考目录中发现多么"离谱"的错误、陈旧依赖、安全漏洞、或是不符合本工程规范的代码——碰都不要碰。它们是参考用的历史快照，不是你的工作目标。擅自修改会导致其他工程损坏、协同混乱、用户数据丢失。**
->
-> **一句话：你的世界只有 `G:\VCPMobile`。其他地方只读，再烂也别动。**
+> 参考目录中的代码再有问题也不要动。你的世界只有 `G:\VCPMobile`。
 
 ---
 
 ## 1. 项目概览
 
-**VCP Mobile**（代号：Project Avatar）是 VCPChat 的移动端进化版，一个基于 **Tauri v2 + Vue 3 + Rust** 的 Android 应用。核心目标是将 AI Agent 的交互能力以低延迟、高内存安全性的方式带入物理移动端。
+**VCP Mobile**（代号：Project Avatar）是 VCPChat 的移动端版本，基于 **Tauri v2 + Vue 3 + Rust**，目标平台 Android（`aarch64-linux-android`，minSdk 26）。架构上为 Rust 核心层、Tauri IPC 层、Vue 3 渲染层三层隔离。
 
-- **版本**: `1.1.3`
-- **包名/Identifier**: `com.vcp.avatar`
-- **目标平台**: Android（`aarch64-linux-android`，minSdk 26）
-- **架构风格**: Double-Track 3-Tier（双轨三层）—— Rust 核心层、Tauri IPC 桥接层、Vue 3 渲染层物理隔离。
-
-### 技术栈
-
-| 层级 | 技术                                                         |
-| ---- | ------------------------------------------------------------ |
-| 前端 | Vue 3.5 (`<script setup>`), Vue Router 5, Pinia 3, UnoCSS 66, TypeScript ~5.6 |
-| 后端 | Rust (Edition 2021), Tauri 2, Tokio, sqlx (SQLite), reqwest, tokio-tungstenite, zip (OOXML), lopdf (PDF) |
-| 构建 | Vite 6, `@vitejs/plugin-vue`, `unocss/vite`, `vue-tsc`       |
-| 网络 | SSE 流式解析 (LinesCodec), WebSocket (同步与日志), HTTP REST |
+- 版本：`1.1.3`
+- 包名：`com.vcp.avatar`
 
 ---
 
@@ -45,77 +32,77 @@
 ```
 VCPMobile/
 ├── src/                        # Vue 3 前端源码
-│   ├── main.ts                 # 应用入口：创建 Vue/Pinia/Router，注册指令，初始化监听
-│   ├── App.vue                 # 根布局：引导流程、侧边栏手势、全局事件监听
+│   ├── main.ts                 # 应用入口
+│   ├── App.vue                 # 根布局
 │   ├── core/                   # 基础设施
-│   │   ├── stores/             # 20 个 Pinia Store（Composition API 风格）
-│   │   ├── composables/        # 15 个全局组合式函数（useXxx）
-│   │   ├── router/index.ts     # Hash 路由，仅 /chat 一条主路由
-│   │   ├── directives/         # v-intersection-observer, v-longpress
-│   │   ├── types/              # 共享类型定义（chat.ts, overlay.ts）
-│   │   ├── constants/          # 语义化 Z-Index 常量（layers.ts）
-│   │   └── utils/              # 工具函数（astExecutor.ts, astRenderer.ts）
+│   │   ├── stores/             # Pinia Store
+│   │   ├── composables/        # 全局组合式函数
+│   │   ├── router/             # Hash 路由
+│   │   ├── directives/         # 自定义指令
+│   │   ├── types/              # 共享类型
+│   │   ├── constants/          # 常量（如 Z-Index）
+│   │   └── utils/              # 工具函数
 │   ├── features/               # 按领域划分的功能模块
-│   │   ├── chat/               # 对话引擎、消息渲染、附件策略、输入增强、Tarven 规则
-│   │   ├── agent/              # 智能体与群组的 CRUD、设置面板、卡片级 Swipe 手势、拖拽排序
+│   │   ├── chat/               # 对话引擎
+│   │   ├── agent/              # 智能体管理
 │   │   ├── topic/              # 话题管理
-│   │   ├── notification/       # 通知中心与 Toast
-│   │   ├── settings/           # 全局设置、主题选择
-│   │   ├── sync/               # 同步会话前端
-│   │   ├── distributed/        # 分布式能力前端交互
-│   │   ├── rag/                # RAG 灵视中心（认知广播面板 + 载荷详情）
-│   │   └── assistant/          # 浮动助手（全局悬浮窗快捷对话）
+│   │   ├── notification/       # 通知与 Toast
+│   │   ├── settings/           # 全局设置
+│   │   ├── sync/               # 同步前端
+│   │   ├── distributed/        # 分布式能力
+│   │   ├── rag/                # RAG 灵视中心
+│   │   └── assistant/          # 浮动助手
 │   ├── components/             # 共享组件
-│   │   ├── layout/             # 布局外壳（AgentSidebar, BootScreen, RightSidebar）
-│   │   ├── settings/           # 设置页原子 UI 组件
-│   │   └── ui/                 # 通用 UI 原语（BottomSheet, ToastManager 等）
-│   └── assets/                 # 主题 CSS、Logo 预览
+│   │   ├── layout/             # 布局外壳
+│   │   ├── settings/           # 设置页原子组件
+│   │   └── ui/                 # 通用 UI 原语
+│   └── assets/                 # 主题与静态资源
 ├── src-tauri/                  # Tauri v2 + Rust 后端
 │   ├── src/
 │   │   ├── main.rs             # Windows 二进制入口
-│   │   ├── lib.rs              # Tauri 命令注册、managed state、启动流程
-│   │   ├── vcp_modules/        # 全部业务逻辑（74 个 .rs 文件，按领域重组为 7 大目录）
-│   │   │   ├── agent/          # 智能体领域：agent_service, agent_types, avatar_service, agent_chat_application_service
-│   │   │   ├── chat/           # 对话领域：chat_manager, message_service, topic_*, stream_block_parser, aurora_pipeline, ast_diff, content_parser, context_*, context_injection, emoticon_manager, pre_renderer/
-│   │   │   ├── group/          # 群组领域：group_service, group_types, group_chat_application_service, group_context_assembler, group_speaking_policy
-│   │   │   ├── infra/          # 基础设施领域：vcp_client, file_manager, file_extractor, high_speed_channel, settings_manager, model_manager, lifecycle_manager, maintenance_manager, vcp_log_service, vcp_info_service, media_processor/
-│   │   │   ├── persistence/    # 持久化领域：db_manager, db_write_queue, message_repository
-│   │   │   ├── sync/           # 同步领域：sync_service, sync_hash, sync_types, sync_dto, sync_logger, sync_executor/, sync_pipeline/, sync_finalize
-│   │   │   └── updater/        # 更新领域：update_manager, frontend_update_manager, ota_assets
-│   │   └── distributed/        # 分布式计算与设备工具（与 vcp_modules 同级）
+│   │   ├── lib.rs              # 命令注册与启动流程
+│   │   ├── vcp_modules/        # 业务逻辑（按领域组织）
+│   │   │   ├── agent/          # 智能体领域
+│   │   │   ├── chat/           # 对话领域
+│   │   │   ├── group/          # 群组领域
+│   │   │   ├── infra/          # 基础设施
+│   │   │   ├── persistence/    # 持久化
+│   │   │   ├── sync/           # 同步
+│   │   │   └── updater/        # 更新
+│   │   └── distributed/        # 分布式计算与设备工具
 │   │       ├── client.rs, tool_registry.rs, types.rs
-│   │       └── tools/          # 13 个设备能力工具：device_info, location, battery, clipboard, cpu_info, gpu_info, memory_info, storage_info, network_info, ambient_sensor, motion_sensor, notification, device_status_summary
-│   ├── Cargo.toml              # Rust 依赖（含 zip、lopdf、syntect with regex-fancy）、Android 构建目标、Release 优化配置
-│   ├── tauri.conf.json         # Tauri 构建配置、窗口、安全策略
+│   │       └── tools/          # 设备能力工具
+│   ├── Cargo.toml              # Rust 依赖与构建配置
+│   ├── tauri.conf.json         # Tauri 配置
 │   └── plugins/
-│       └── vcp-mobile/         # Tauri v2 Android 原生插件（详见 §2.2）
-│           ├── src/            # Rust 侧：screen/stream/system + lib.rs 初始化
-│           ├── android/        # Kotlin 侧：VcpMobilePlugin / ForegroundGuardian / KeyboardInsetsManager / LifecycleBridge / StreamKeepaliveService
-│           ├── guest-js/       # 前端 TypeScript 调用封装
-│           └── permissions/    # Tauri v2 权限声明（default.toml + autogenerated schemas）
-├── plans/                      # 项目知识/记忆管理体系（详见第 6 节）
+│       └── vcp-mobile/         # Android 原生插件（详见 §2.2）
+│           ├── src/            # 插件 Rust 侧
+│           ├── android/        # 插件 Kotlin 侧
+│           ├── guest-js/       # 前端调用封装
+│           └── permissions/    # Tauri v2 权限声明
+├── plans/                      # 项目知识/记忆管理（详见第 6 节）
 ├── docs/                       # 技术文档体系（详见 §2.1）
-│   ├── vue_docs/               # 前端 Vue/TS 知识库（26 份，~15,000 行）
-│   ├── modules/                # 稳定 Rust 模块文档集（30 份，含 ast-diff/ 专栏 6 份，~13,000 行）
-│   ├── sync/                   # 同步 V2 子系统文档集（20 份）
-│   ├── plugins/                # Android 原生插件代码文档集（13 份，~4,200 行，含 v1.1.2 新增 ForegroundGuardian）
-│   ├── ANDROID_PLUGIN_MANAGEMENT.md  # Android 插件管理规范与权限血训
-│   ├── UI_LAYER_ARCHITECTURE.md      # UI 层级架构规范（Z-Index 语义化体系）
-│   ├── DEPENDENCY_MANAGEMENT.md      # 前端/后端依赖管理规范
-│   └── SYNC_ARCHITECTURE.md          # 三阶段增量同步协议深度规范
-├── scripts/
-│   ├── tauri_android_dev.cjs   # Android 调试启动器（WiFi/USB 双模式，Anti-TUN + ADB Reverse）
-│   ├── nova_utils.cjs          # 安全文件 IO（绕过 PowerShell 编码问题）
-│   ├── refresh_manifest.cjs    # 重建 plans/Memory_Manifest.md 与 .gemini_snapshot.json
-│   └── update_frontmatter.cjs  # 为 plans/ 内文档自动分配结构化 ID
-├── .github/workflows/
-│   ├── ci.yml                  # PR CI：vue-tsc + Vitest + Rust 单测/集成 + Gradle 插件单测 + bench 编译检查 + fmt + clippy
-│   └── release.yml             # Android Release APK 构建 + 签名验证 + APK size JSON 上传
-├── package.json                # pnpm 脚本与前端依赖
-├── vite.config.ts              # Vite 配置（端口 1420/1421，Tauri 感知）
-├── uno.config.ts               # UnoCSS 预设、主题色、快捷类
-├── tsconfig.json               # TS 严格模式，含 noUnusedLocals/noUnusedParameters
-└── build_android_release.ps1   # 本地 Android 发布脚本（含密钥库密码，已 gitignore）
+│   ├── vue_docs/               # 前端知识库
+│   ├── modules/                # Rust 模块文档
+│   ├── sync/                   # 同步子系统文档
+│   ├── plugins/                # 插件文档
+│   ├── ANDROID_PLUGIN_MANAGEMENT.md
+│   ├── UI_LAYER_ARCHITECTURE.md
+│   ├── DEPENDENCY_MANAGEMENT.md
+│   └── SYNC_ARCHITECTURE.md
+├── scripts/                    # 辅助脚本
+│   ├── tauri_android_dev.cjs   # Android 调试启动器
+│   ├── nova_utils.cjs          # 安全文件 IO
+│   ├── refresh_manifest.cjs    # 重建记忆清单
+│   └── update_frontmatter.cjs  # 文档 ID 维护
+├── .github/workflows/          # CI / Release
+│   ├── ci.yml
+│   └── release.yml
+├── package.json                # 前端依赖与脚本
+├── vite.config.ts              # Vite 配置
+├── uno.config.ts               # UnoCSS 配置
+├── tsconfig.json               # TypeScript 配置
+└── build_android_release.ps1   # 本地发布脚本
 ```
 
 ### 2.1 文档体系三层结构
@@ -136,71 +123,77 @@ VCPMobile/
 - `docs/plugins/`：回答"代码是**怎么**做的"（接口签名、数据流、实现细节）
 - `UI_LAYER_ARCHITECTURE.md`：全局 UI 层级规范，与 `src/core/constants/layers.ts` + `uno.config.ts` + `src/assets/themes.css` 三重机制对应
 
-### 2.1a Backend-Driven Streaming 架构
-
-流式聊天的消息生命周期已从“前端预创建 thinking 消息”全面转为“后端 SSE 事件驱动”，显著简化了 `chatHistoryStore` 并重构了 `chatStreamStore`。
-
 ### 2.2 Android 原生插件（`tauri-plugin-vcp-mobile`）
 
-项目采用**单一自定义插件** `tauri-plugin-vcp-mobile` 统一管理全部 Android 原生能力，位于 `src-tauri/plugins/vcp-mobile/`。
+项目用**单一自定义插件** `tauri-plugin-vcp-mobile` 统一管理全部 Android 原生能力，源码位于 `src-tauri/plugins/vcp-mobile/`。
 
-**通信方式分层**：
+#### 插件入口与命令注册
 
-| 功能           | Rust 模块       | Kotlin 模块                         | 通信方式                                             |
-| -------------- | --------------- | ----------------------------------- | ---------------------------------------------------- |
-| 屏幕常亮       | `src/screen.rs` | —                                   | Rust 侧 **Raw JNI**（`jni` crate 直接调用 Activity） |
-| 前台锁协同     | `src/stream.rs` | `service/ForegroundGuardian.kt`     | `PluginHandle.run_mobile_plugin`（v1.1.2 新增）      |
-| 流式前台保活   | `src/stream.rs` | `service/StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin`                     |
-| 键盘 Insets    | —               | `KeyboardInsetsManager.kt`          | **`evaluateJavascript`** 注入 `CustomEvent`          |
-| 生命周期事件   | —               | `LifecycleBridge.kt`                | **`evaluateJavascript`** 注入 `CustomEvent`          |
-| 权限与系统控制 | `src/system.rs` | `VcpMobilePlugin.kt`（权限部分）    | `PluginHandle.run_mobile_plugin`                     |
+- `src/lib.rs` 是插件唯一入口，注册全部 Tauri 命令（约 43 条，详见 `docs/plugins/01_插件初始化与命令路由.md` §4）。
+- 命令按领域分为三个 Rust 模块：
+  - `screen.rs`：屏幕常亮（2 条）
+  - `stream.rs`：流式保活、前台锁、分布式保活、`:helper` 进程 SSE 代理（5 条以上）
+  - `system.rs`：权限、系统控制、硬件状态、文件选择、Root 等（30 条以上）
+- `setup` 中注册 Android 插件 `com.vcp.mobile / VcpMobilePlugin`，将 `PluginHandle` 注入 `VcpMobileState`，供后续 `run_mobile_plugin` 调用 Kotlin 方法。
+- **新增命令必须四重注册**：`lib.rs` 的 `invoke_handler` → `build.rs` 的 `COMMANDS` 数组 → `permissions/*.toml` → `guest-js/index.ts`。参见 §2.3。
 
-**关键设计决策**：
+#### 通信方式分层
 
-- `KeyboardInsetsManager` 和 `LifecycleBridge` 不使用 Tauri 标准事件通道（`Plugin.trigger`），而是通过 `evaluateJavascript` 直接注入 `window.CustomEvent`。前端通过 `window.addEventListener` 接收，无需 Tauri 事件通道注册。
-- `ForegroundGuardian`（v1.1.2 新增）是进程级 Kotlin 单例，统一管理 WakeLock + WifiLock + 前台服务的引用计数与四级优先级调度（SYNC=40/PRERENDER=30/STREAM=20/DISTRIBUTED=10）。所有流式保活、分布式保活、手动保活均经由 `acquire(tag, priority, label, screenKeepOn)` / `release(tag)` 统一调配。
-- `StreamKeepaliveService` 在 v1.1.2 中降级为纯粹的"通知壳"——WakeLock/WifiLock 管理已移交 ForegroundGuardian。仍使用 `START_STICKY` + `IMPORTANCE_HIGH` + `FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING`。
-- `LifecycleBridge` v1.1.2 升级为进程级生命周期观察（`ProcessLifecycleOwner`），替代旧版单 Activity 级观察。
-- `stopWithTask` 从 `false` 改为 `true`（v1.1.2）——进程被划掉后锁即消亡，残留通知无意义。
-- 屏幕常亮使用 Raw JNI 而非 PluginHandle，是因为该操作只需获取 Window 并添加/清除 `FLAG_KEEP_SCREEN_ON` 标志，无需跨语言序列化开销。
+前端与原生层有四条独立通道：
+
+| 通道                                                         | 典型功能                                                     | 数据流                                                       | 前端接收方式                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ | ---------------------------------------------------- |
+| **Tauri invoke → Rust command → `run_mobile_plugin` → Kotlin** | 权限请求、流式保活、电池/网络/CPU 状态、文件选择、Root 命令等 | `invoke('plugin:vcp-mobile\|xxx')` → `lib.rs` 路由 → `screen.rs`/`stream.rs`/`system.rs` → `PluginHandle.run_mobile_plugin("method", payload)` → `VcpMobilePlugin.kt` | `invoke` 返回值 / `Promise`                          |
+| **Raw JNI**                                                  | 屏幕常亮                                                     | `screen.rs` 直接通过 `jni` crate 调用 `activity.getWindow().add/clearFlags(FLAG_KEEP_SCREEN_ON)` | `invoke` 返回值                                      |
+| **`evaluateJavascript` → `window.CustomEvent`**              | 键盘 Insets                                                  | `KeyboardInsetsManager` 监听 `WindowInsets` 后注入 `vcp-keyboard-inset` 事件 | `window.addEventListener('vcp-keyboard-inset', ...)` |
+| **`plugin.trigger("lifecycle")` → Rust → `app.emit`**        | 前后台生命周期                                               | `LifecycleBridge` 进程级观察 → Rust 监听内部通道 → 发射 `vcp-lifecycle-changed` | `listen('vcp-lifecycle-changed', ...)`               |
+
+> **注意**：生命周期事件 v1.1.2 后已改为 Tauri 事件通道，不再走 `evaluateJavascript`。旧版 2.2 中"生命周期事件用 evaluateJavascript"的描述已过时。
+
+#### 核心组件职责
+
+| 组件                             | 位置                                                    | 职责                                                         |
+| -------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------ |
+| `VcpMobileState`                 | `src/lib.rs`                                            | 持有 `PluginHandle`；桌面端用 `PhantomData` 占位             |
+| `VcpMobilePlugin`                | `android/.../VcpMobilePlugin.kt`                        | Kotlin 侧命令路由；持有 Battery/CPU/GPU/Network/Sensor/FloatingWindow/ShareIntent 等管理器 |
+| `ForegroundGuardian`             | `android/.../service/ForegroundGuardian.kt`             | 进程级单例；统一调度 WakeLock + WifiLock + 前台服务；四级优先级（SYNC=40 / PRERENDER=30 / STREAM=20 / DISTRIBUTED=10） |
+| `StreamKeepaliveService`         | `android/.../service/StreamKeepaliveService.kt`         | 前台服务"通知壳"，只负责 `startForeground()`；锁管理已移交 ForegroundGuardian |
+| `SseProxyService`                | `android/.../service/SseProxyService.kt`                | 运行在独立 `:helper` 进程；本地 TCP + SSE 代理 + 断线内存缓存；自行管理双锁 |
+| `KeyboardInsetsManager`          | `android/.../KeyboardInsetsManager.kt`                  | 监听软键盘 Insets，推送 `vcp-keyboard-inset` 事件            |
+| `LifecycleBridge`                | `android/.../LifecycleBridge.kt`                        | 通过 `ProcessLifecycleOwner` 进程级观察生命周期，经 Rust 中转给前端 |
+| 硬件状态管理器                   | `android/.../BatteryStatusManager.kt` 等                | 采集电量、CPU 热状态、GPU、网络、传感器等                    |
+| `VcpNotificationListenerService` | `android/.../service/VcpNotificationListenerService.kt` | 通知栏监听占位服务（当前不做实际处理，保护隐私）             |
+
+#### 关键设计决策
+
+- **所有主进程侧保活统一走 `ForegroundGuardian`**：通过 `acquire(tag, priority, label, screenKeepOn)` / `release(tag)` 申请与释放。`StreamKeepaliveService` 不再自行管理锁。
+- **`ForegroundGuardian` 是进程级单例**：同一 tag 重复 `acquire` 幂等覆盖；最后一个消费者退出时自动释放物理锁并停止前台服务；支持超时自动释放（默认 10–120 分钟）。
+- **屏幕常亮与 `ForegroundGuardian` 解耦**：屏幕常亮由前端 `useScreenKeeper` 引用计数 + Raw JNI 独立管理；`ForegroundGuardian` 只在消费者 `screenKeepOn=true` 时通过 Activity 生命周期协同添加 Window flag。
+- **`StreamKeepaliveService.stopWithTask=true`**：进程被用户划掉后服务随 Task 停止，避免僵尸通知。`:helper` 进程的 `SseProxyService` 因自行管理锁，保留 `stopWithTask=false`。
+- **权限/保活/硬件命令走 `run_mobile_plugin`**；屏幕常亮走 Raw JNI；键盘 Insets 走 `evaluateJavascript`；生命周期走 `plugin.trigger` → Rust → Tauri Event。选择通信方式时先看事件频率与可靠性要求。
+
+#### 排查参考
+
+- 命令注册表与数据流：`docs/plugins/01_插件初始化与命令路由.md`
+- 屏幕常亮：`docs/plugins/02_屏幕常亮控制.md`
+- 流式保活与 `ForegroundGuardian`：`docs/plugins/03_流式前台保活服务.md`、`docs/plugins/11_ForegroundGuardian_前台守护者.md`
+- 键盘 Insets：`docs/plugins/04_键盘Insets管理.md`
+- 生命周期桥接：`docs/plugins/05_生命周期桥接.md`
+- 权限与系统控制：`docs/plugins/06_权限与系统控制.md`
+- Guest JS API：`docs/plugins/07_Guest JS API.md`
+- 总览与导航：`docs/plugins/00_总览与导航.md`
 
 ### 2.3 插件权限声明（`permissions/`）
 
-Tauri v2 要求每个 command 都必须被 capability 显式授权。`vcp-mobile` 插件的权限分三层：
+Tauri v2 要求每个 command 被 capability 显式授权。新增插件命令时，必须同时更新以下三处，否则前端调用会报 `not allowed`：
 
-| 文件 | 作用 | 是否自动生成 |
-|------|------|--------------|
-| `build.rs` | `COMMANDS` 数组是权限生成的**唯一源头**，`cargo check` 时据此生成 `autogenerated/commands/*.toml` 和 `schemas/schema.json` | 否（手工维护） |
-| `default.toml` | 权限集合，标识符 `vcp-mobile:default`，打包一组常用命令 | 否（手工维护） |
-| `all.toml` | 权限集合，标识符 `vcp-mobile:allow-all`，本项目 capability 实际引用的就是这个 | 否（手工维护） |
-| `capabilities/default.json` | App 级 capability 文件，决定前端窗口能使用哪个权限集合 | 否（手工维护） |
+1. `src-tauri/plugins/vcp-mobile/src/lib.rs` 的 `invoke_handler`
+2. `src-tauri/plugins/vcp-mobile/permissions/default.toml` 和 `all.toml` 的 `commands.allow`
+3. `src-tauri/plugins/vcp-mobile/build.rs` 的 `COMMANDS` 数组
 
-**数据流**：
+修改后执行 `pnpm check` 重新生成 autogenerated 文件和 schema。若从 `lib.rs` 移除命令，应手动删除对应的 `permissions/autogenerated/commands/<命令名>.toml`，避免残留僵尸权限。
 
-```
-lib.rs invoke_handler 里的命令
-        ↓
-    build.rs (COMMANDS 列表)
-        ↓
-    生成 autogenerated/*.toml + schema.json
-        ↓
-    default.toml / all.toml (权限包)
-        ↓
-    capabilities/default.json (选择权限包)
-        ↓
-    前端 invoke 调用
-```
-
-**重要约定**：
-
-- 本项目 `capabilities/default.json` 使用的是 `"vcp-mobile:allow-all"`，因此**运行时真正生效的是 `all.toml`**。
-- `default.toml` 当前与 `all.toml` 内容一致，但仅作为插件默认权限包存在；Capability 未引用它。
-- 新增插件命令时，必须同时更新以下三处，否则前端调用会报 `not allowed`：
-  1. `src-tauri/plugins/vcp-mobile/src/lib.rs` 的 `invoke_handler`
-  2. `src-tauri/plugins/vcp-mobile/permissions/default.toml` 和 `all.toml` 的 `commands.allow`
-  3. `src-tauri/plugins/vcp-mobile/build.rs` 的 `COMMANDS` 数组
-- 修改后执行 `cd src-tauri && cargo check`（或 `pnpm check`），重新生成 autogenerated 文件和 schema。
-- 若从 `lib.rs` 移除命令，应手动删除对应的 `permissions/autogenerated/commands/<命令名>.toml`，否则 schema 中会残留僵尸权限。
+> 本项目 capability 引用的是 `vcp-mobile:allow-all`，运行时真正生效的是 `all.toml`。`default.toml` 仅作为插件默认权限包存在。
 
 ---
 
@@ -209,37 +202,12 @@ lib.rs invoke_handler 里的命令
 所有命令均在 Windows PowerShell 5.1 环境下执行。项目使用 **pnpm** 作为包管理器。
 
 ```powershell
-# 前端开发服务器（端口 1420）
-pnpm dev
-
 # 完整静态检查（TypeScript + Rust）
 pnpm check                  # 等价于 vue-tsc --noEmit && cd src-tauri && cargo check
 
-# Android 真机调试 — WiFi 模式（需手机与电脑在同一局域网）
-pnpm dev:android
-
 # Android 真机调试 — USB 模式（纯数据线，无需 WiFi/热点）
 pnpm dev:usb
-
-# Android Release APK 构建（仅 aarch64）
-pnpm tauri android build --apk --target aarch64
 ```
-
-### Android 调试双模式
-
-项目通过 `scripts/tauri_android_dev.cjs` 提供两种 Android 真机调试模式：
-
-| 模式     | 命令               | 原理                                                         | 适用场景                        |
-| -------- | ------------------ | ------------------------------------------------------------ | ------------------------------- |
-| **WiFi** | `pnpm dev:android` | 自动探测物理局域网 IP（过滤 TUN/VPN 虚拟网卡），注入 `TAURI_DEV_HOST` | 手机与电脑在同一局域网          |
-| **USB**  | `pnpm dev:usb`     | 通过 `adb reverse tcp:1420/1421` 建立 USB 端口反向转发，使用 `127.0.0.1` | 无 WiFi 环境，纯 USB 数据线调试 |
-
-**USB 模式细节**：
-
-- 自动探测 ADB 路径（搜索 PATH → `ANDROID_HOME` → `%LOCALAPPDATA%\Android\Sdk\platform-tools`）
-- 启动前自动执行 `adb reverse` 建立端口转发（Vite 1420 + HMR 1421）
-- 退出时自动清理 `adb reverse --remove-all`
-- 需要手机开启 USB 调试（开发者选项）
 
 ### Rust 发布优化
 
@@ -270,8 +238,6 @@ pnpm tauri android build --apk --target aarch64
 - **模块边界**: 业务逻辑必须位于 `src-tauri/src/vcp_modules/`。`lib.rs` 仅作为命令路由与启动钩子挂载点。
 - **错误处理**: Tauri command handler 中**严禁使用 `unwrap()` 或 `expect()`**。必须转换为 `Result<T, String>`（`map_err(|e| e.to_string())?`）。
 - **异步 IO**: 所有网络、文件、数据库操作必须异步，基于 `tokio`。
-- **内存安全**: **禁止将完整文件缓冲加载到内存**。流式读取、分块上传（`init_chunked_upload` / `append_chunk`）。
-- **正则**: 使用 `fancy-regex`，并通过 `lazy_static!` 缓存。
 - **状态共享**: 使用 Tauri `app.manage(...)` 注入单例状态。并发结构偏好 `DashMap`/`DashSet`、`tokio::sync::RwLock`、`AtomicU32`。
 
 ### 4.3 跨层与工程纪律
@@ -280,7 +246,7 @@ pnpm tauri android build --apk --target aarch64
 - **现有文件修改原则**: 对于任何已存在的文件，哪怕只改 1 行，**严禁使用全文件覆盖**，必须使用原子级、外科手术式的编辑（如 `replace`），以防幻觉灾难。
 - **Shell 安全（Windows）**:
   - 禁止使用 Unix 风格链式操作符（`&&`, `||`）。使用 `;` 分隔无关命令。
-  - 禁止使用 PowerShell/CMD 重定向（`>`, `>>`）写入 UTF-8 内容。必须使用 `pnpm io:write` / `pnpm io:append`。
+  - 禁止使用 PowerShell/CMD 重定向（`>`, `>>`）写入 UTF-8 内容。请使用自带的代码编辑工具。
 
 ### 4.4 UI 美学宪法（生产力优先极简主义）
 
@@ -289,7 +255,7 @@ pnpm tauri android build --apk --target aarch64
 - **高密度线性布局**: 列表重于卡片。严禁大面积圆角（>1.5rem）与厚重投影。
 - **技术精确感**: ID、UUID、状态码强制使用 Monospace 字体。灰度优先，彩色仅用于状态指示（黄=收藏、蓝=选中、红=错误）。
 - **内敛交互**: 禁止大幅度缩放与弹跳。使用 2px 高亮侧边条（Accent Bar）或透明度变化作为反馈。
-- **禁止毛玻璃 / backdrop-blur**: 严禁在滚动容器、卡片、列表项或任何内容区域使用 `backdrop-filter: blur()`（含 `-webkit-backdrop-filter`）。毛玻璃在移动端 GPU 上的开销极大——每帧需对下层像素做卷积采样，在 90/120Hz 高刷屏下直接导致滚动掉帧、电池续航骤降和热降频。**仅允许**在 fixed/sticky 单例元素（如顶部导航 Floating Island）上使用轻度 blur（≤ 12px），且必须在 DevTools Performance 验证无 Composite Layer 尖峰后方可保留。
+- **禁止毛玻璃 / backdrop-blur**: 严禁在滚动容器、卡片、列表项或任何内容区域使用 `backdrop-filter: blur()`（含 `-webkit-backdrop-filter`）。毛玻璃在移动端 GPU 上的开销极大。**仅允许**在 fixed/sticky 单例元素（如顶部导航 Floating Island）上使用轻度 blur（≤ 12px），且必须在 DevTools Performance 验证无 Composite Layer 尖峰后方可保留。
 
 ---
 
@@ -299,16 +265,16 @@ pnpm tauri android build --apk --target aarch64
 
 ### 5.1 测试分层（L1-L8）
 
-| 层级 | 名称 | 覆盖范围 | 触发频率 | 主要工具 |
-|------|------|----------|----------|----------|
-| L1 | Rust 内联单测 | 纯函数/算法/DTO/状态机 | 每次 PR | cargo test |
-| L2 | Rust 集成测试 | Tauri command + mock DB/FS/HTTP | 每次 PR | tauri::test, tempfile, wiremock |
-| L3 | Android 插件 JVM 单测 | Kotlin 纯逻辑 / Robolectric Shadow | 每次 PR | JUnit 4, Robolectric, MockK |
-| L4 | 前端组件/Store 测试 | Vue 原子组件, Pinia Store | 每次 PR | Vitest, @vue/test-utils, happy-dom |
-| L5 | 契约测试 | Rust 命令↔TS 调用 / 权限声明 / Kotlin 方法名 | 每次 PR | 文本/反射快照测试 |
-| L6 | Android 仪器测试 | Service/Activity/权限生命周期 | nightly | AndroidX Test |
-| L7 | Android E2E Smoke | 真机关键旅程 | release 前 | adb smoke scripts |
-| L8 | 性能/稳定性 | 启动/APK 体积/Criterion 基准/长稳 soak | nightly/release | cargo bench, adb scripts |
+| 层级 | 名称                  | 覆盖范围                                     | 触发频率        | 主要工具                           |
+| ---- | --------------------- | -------------------------------------------- | --------------- | ---------------------------------- |
+| L1   | Rust 内联单测         | 纯函数/算法/DTO/状态机                       | 每次 PR         | cargo test                         |
+| L2   | Rust 集成测试         | Tauri command + mock DB/FS/HTTP              | 每次 PR         | tauri::test, tempfile, wiremock    |
+| L3   | Android 插件 JVM 单测 | Kotlin 纯逻辑 / Robolectric Shadow           | 每次 PR         | JUnit 4, Robolectric, MockK        |
+| L4   | 前端组件/Store 测试   | Vue 原子组件, Pinia Store                    | 每次 PR         | Vitest, @vue/test-utils, happy-dom |
+| L5   | 契约测试              | Rust 命令↔TS 调用 / 权限声明 / Kotlin 方法名 | 每次 PR         | 文本/反射快照测试                  |
+| L6   | Android 仪器测试      | Service/Activity/权限生命周期                | nightly         | AndroidX Test                      |
+| L7   | Android E2E Smoke     | 真机关键旅程                                 | release 前      | adb smoke scripts                  |
+| L8   | 性能/稳定性           | 启动/APK 体积/Criterion 基准/长稳 soak       | nightly/release | cargo bench, adb scripts           |
 
 ### 5.2 Rust 后端测试（41 内联 + 10 集成 + Criterion 基准）
 
@@ -374,10 +340,7 @@ pnpm tauri android build --apk --target aarch64
 
 目录：`tests/e2e-android/scripts/`
 
-- `adb-env.cjs`：adb 发现 / 设备信息 / 包名管理（支持 `ANDROID_SERIAL`）
-- `install-apk.cjs`：安装/卸载/清数据（`--clean` / `--mode debug|release`）
-- `grant-permissions.cjs`：best-effort pm grant + appops + deviceidle whitelist
-- `adb-smoke.cjs`：monkey 启动 → 等待 5s → 采集 activity/logcat/process
+详见目录README.md
 
 仅依赖 Node.js + adb，不引入 Maestro/Appium。
 
@@ -385,10 +348,7 @@ pnpm tauri android build --apk --target aarch64
 
 目录：`tests/perf/scripts/`
 
-- `measure_apk_size.cjs`：APK 体积与内部分布（lib/dex/assets/res），仅本地运行，不进入 Release asset
-- `measure_startup_adb.cjs`：`am start -W` 冷启动采样（min/median/p95/max），仅本地运行
-- `collect_android_dumpsys.cjs`：meminfo/power/wifi/dropbox/logcat 快照，仅本地运行
-- `run_rust_bench.cjs`：封装 `cargo bench --profile perf` 并归档 artifact，仅本地运行
+详见目录README.md
 
 ### 5.7 测试命令速查
 
@@ -452,28 +412,7 @@ VCPMobile/
 | `boot`    | 100  | BootScreen（启动屏）                              | `z-boot`    | `--layer-boot`    | `LAYER_BOOT`      |
 | `gate`    | 110  | PermissionGate（权限引导页）                      | `z-gate`    | `--layer-gate`    | `LAYER_GATE`      |
 
-### 6.2 使用方式
-
-**Vue Template 中**：
-
-```vue
-<div class="fixed inset-0 z-dialog">...</div>
-```
-
-**`<style scoped>` 中**：
-
-```css
-.my-component { z-index: var(--layer-drawer); }
-```
-
-**TypeScript 中**：
-
-```ts
-import { LAYER_PAGE_BASE, getPageZIndex } from '@/core/constants/layers';
-const zIndex = getPageZIndex(stackIndex);
-```
-
-### 6.3 规则
+### 6.2 规则
 
 1. **全局宏观层级必须使用语义化命名**；局部微观层级（组件内部角标、hover 覆盖等）可使用 `z-10`/`z-20` 等常规数值。
 2. **创建新的覆盖层组件前**，先检查现有层级表，若无法归入已有层级再提议新增。
@@ -576,32 +515,32 @@ pnpm tauri android build --apk --split-per-abi
 
 ## 10. 关键配置文件速查
 
-| 文件                                        | 说明                                                         |
-| ------------------------------------------- | ------------------------------------------------------------ |
-| `package.json`                              | 前端依赖、pnpm 脚本                                          |
-| `src-tauri/Cargo.toml`                      | Rust 依赖、Android 构建目标、Release 优化                    |
-| `src-tauri/tauri.conf.json`                 | Tauri 窗口、安全、Bundle、beforeDevCommand/beforeBuildCommand |
-| `vite.config.ts`                            | Vite 插件、Tauri 感知端口（1420/1421）                       |
-| `uno.config.ts`                             | UnoCSS 预设、主题色、快捷类、断点                            |
-| `tsconfig.json`                             | TS 严格模式、路径包含/排除规则                               |
-| `docs/SYNC_ARCHITECTURE.md`                 | 三阶段增量同步协议的完整规范（WebSocket + HTTP + SHA-256 Hash 差异） |
-| `docs/vue_docs/`                            | 前端 Vue/TS 知识库（26 份，含架构总览、Store 全景、Feature 详解） |
-| `docs/modules/`                             | 稳定 Rust 模块技术文档集（30 份，含 AST Diff 专栏与快速决策树） |
-| `docs/sync/`                                | 同步 V2 子系统文档集（20 份）                                |
-| `docs/plugins/`                             | Android 原生插件代码文档集（13 份）                          |
-| `docs/ANDROID_PLUGIN_MANAGEMENT.md`         | Android 插件管理规范：权限血训、前台服务、通知渠道           |
-| `docs/UI_LAYER_ARCHITECTURE.md`             | UI 层级架构规范：11 级语义化 Z-Index 体系                    |
-| `src-tauri/plugins/vcp-mobile/Cargo.toml`   | 插件 Rust 依赖：`tauri = 2.11.1`, `jni = 0.21`（Android only） |
-| `src-tauri/plugins/vcp-mobile/android/`     | Kotlin 源码与 AndroidManifest.xml                            |
-| `src-tauri/plugins/vcp-mobile/permissions/` | Tauri v2 权限声明：default.toml + autogenerated schemas      |
-| `vitest.config.ts`                          | 前端测试配置（Vitest + happy-dom + @vue/test-utils）          |
-| `src/tests/`                                | 前端测试代码（setup/mocks/utils/unit/integration）            |
-| `src-tauri/tests/`                          | Rust 仓库级集成测试（file_extractor）                        |
-| `src-tauri/benches/`                        | Rust Criterion 性能基准（ast_tail_bench）                    |
-| `src-tauri/plugins/vcp-mobile/android/src/test/` | Android 插件单元测试（Kotlin JVM + Robolectric）         |
-| `tests/e2e-android/scripts/`                | adb smoke 脚本（安装/授权/启动/信息采集）                    |
-| `tests/perf/scripts/`                       | 本地性能脚本（APK体积/启动/bench/快照），不进入 CI Release |
-| `docs/Test_Architecture_Constraints.md` | 测试体系架构约束文档（全局约束）               |
+| 文件                                             | 说明                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| `package.json`                                   | 前端依赖、pnpm 脚本                                          |
+| `src-tauri/Cargo.toml`                           | Rust 依赖、Android 构建目标、Release 优化                    |
+| `src-tauri/tauri.conf.json`                      | Tauri 窗口、安全、Bundle、beforeDevCommand/beforeBuildCommand |
+| `vite.config.ts`                                 | Vite 插件、Tauri 感知端口（1420/1421）                       |
+| `uno.config.ts`                                  | UnoCSS 预设、主题色、快捷类、断点                            |
+| `tsconfig.json`                                  | TS 严格模式、路径包含/排除规则                               |
+| `docs/SYNC_ARCHITECTURE.md`                      | 三阶段增量同步协议的完整规范（WebSocket + HTTP + SHA-256 Hash 差异） |
+| `docs/vue_docs/`                                 | 前端 Vue/TS 知识库（26 份，含架构总览、Store 全景、Feature 详解） |
+| `docs/modules/`                                  | 稳定 Rust 模块技术文档集（30 份，含 AST Diff 专栏与快速决策树） |
+| `docs/sync/`                                     | 同步 V2 子系统文档集（20 份）                                |
+| `docs/plugins/`                                  | Android 原生插件代码文档集（13 份）                          |
+| `docs/ANDROID_PLUGIN_MANAGEMENT.md`              | Android 插件管理规范：权限血训、前台服务、通知渠道           |
+| `docs/UI_LAYER_ARCHITECTURE.md`                  | UI 层级架构规范：11 级语义化 Z-Index 体系                    |
+| `src-tauri/plugins/vcp-mobile/Cargo.toml`        | 插件 Rust 依赖：`tauri = 2.11.1`, `jni = 0.21`（Android only） |
+| `src-tauri/plugins/vcp-mobile/android/`          | Kotlin 源码与 AndroidManifest.xml                            |
+| `src-tauri/plugins/vcp-mobile/permissions/`      | Tauri v2 权限声明：default.toml + autogenerated schemas      |
+| `vitest.config.ts`                               | 前端测试配置（Vitest + happy-dom + @vue/test-utils）         |
+| `src/tests/`                                     | 前端测试代码（setup/mocks/utils/unit/integration）           |
+| `src-tauri/tests/`                               | Rust 仓库级集成测试（file_extractor）                        |
+| `src-tauri/benches/`                             | Rust Criterion 性能基准（ast_tail_bench）                    |
+| `src-tauri/plugins/vcp-mobile/android/src/test/` | Android 插件单元测试（Kotlin JVM + Robolectric）             |
+| `tests/e2e-android/scripts/`                     | adb smoke 脚本（安装/授权/启动/信息采集）                    |
+| `tests/perf/scripts/`                            | 本地性能脚本（APK体积/启动/bench/快照），不进入 CI Release   |
+| `docs/Test_Architecture_Constraints.md`          | 测试体系架构约束文档（全局约束）                             |
 
 ---
 

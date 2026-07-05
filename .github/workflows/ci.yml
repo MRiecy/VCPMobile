@@ -71,6 +71,9 @@ jobs:
         working-directory: ./src-tauri
         run: cargo test --test file_extractor_integration
 
+      - name: Regenerate Android Tauri settings
+        run: pnpm tauri android init --ci
+
       - name: Android Plugin Unit Tests
         working-directory: ./src-tauri/gen/android
         run: |
