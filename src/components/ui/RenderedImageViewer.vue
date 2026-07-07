@@ -361,8 +361,9 @@ function guessFileName(): string {
       const parsed = new URL(state.src);
       const segment = parsed.pathname.split("/").filter(Boolean).pop();
       if (segment) return normalizeFileName(decodeURIComponent(segment));
-    } catch {
-      // fall through to timestamp fallback
+    } catch (e) {
+      // 容错：解析 URL 失败时回退到时间戳命名，记录 debug 日志
+      console.debug('[RenderedImageViewer] Failed to parse URL for file name:', e);
     }
   }
 

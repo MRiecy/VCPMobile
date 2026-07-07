@@ -5,6 +5,8 @@ import AttachmentViewer from "./AttachmentViewer.vue";
 import AttachmentRenderer from './AttachmentRenderer.vue';
 
 import { useChatHistoryStore } from "../../../core/stores/chatHistoryStore";
+import { useOverlayStore } from "../../../core/stores/overlay";
+import { useNotificationStore } from "../../../core/stores/notification";
 
 interface Attachment {
   type: string;
@@ -31,6 +33,9 @@ const props = defineProps<{
 
 const isViewerOpen = ref(false);
 const activeFile = ref<Attachment | null>(null);
+
+const overlayStore = useOverlayStore();
+const notificationStore = useNotificationStore();
 
 const IMAGE_WHITELIST = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "heic", "heif", "avif"];
 const TEXT_WHITELIST = [
@@ -86,7 +91,11 @@ const removeAttachment = async (index: number) => {
   const att = props.attachments[index];
   if (!att || !att.hash || !props.messageId || !props.topicId) return;
 
-  const confirmed = confirm("是否确定要移除该附件？该操作仅会隐藏历史消息中的附件，您仍能继续使用此模型进行对话。");
+  const confirmed = await overlayStore.showConfirm({
+    title: "移除附件",
+    message: "是否确定要移除该附件？该操作仅会隐藏历史消息中的附件，您仍能继续使用此模型进行对话。",
+    isDanger: true
+  });
   if (!confirmed) return;
 
   try {
@@ -94,7 +103,11 @@ const removeAttachment = async (index: number) => {
     await historyStore.deleteAttachment(props.topicId, props.messageId, att.hash);
   } catch (err) {
     console.error("[AttachmentPreview] Failed to delete attachment:", err);
-    alert("删除附件失败，请重试");
+    notificationStore.addNotification({
+      type: "error",
+      message: "删除附件失败，请重试",
+      toastOnly: true
+    });
   }
 };
 </script>

@@ -183,7 +183,10 @@ export function useNotificationProcessor() {
               message = prefix ? `${prefix}${prefix.endsWith(':') ? ' ' : ': '}${errorMsg}` : errorMsg;
               isPreformatted = false;
             }
-          } catch (e) { }
+          } catch (e) {
+            // 容错：探测解析，如果不是 JSON 格式则忽略该错误，保留原始前缀格式
+            console.debug('[useNotificationProcessor] Failed to parse error JSON part:', e);
+          }
         }
 
         // 尝试解析内部元数据 (MaidName, timestamp)
@@ -212,7 +215,10 @@ export function useNotificationProcessor() {
             message = "✅ 日记内容已成功记录到本地知识库。";
             isPreformatted = false;
           }
-        } catch (e) { }
+        } catch (e) {
+          // 容错：探测解析，如果内容不是 JSON，则直接跳过元数据读取，使用默认内容展示
+          console.debug('[useNotificationProcessor] Content is not JSON metadata, skipping:', e);
+        }
       } else if (vcpData.source === 'DistPluginManager' || vcpData.source === 'Distributed') {
         title = '分布式服务器';
         message = vcpData.content || JSON.stringify(vcpData);

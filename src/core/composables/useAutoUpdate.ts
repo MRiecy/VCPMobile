@@ -78,8 +78,9 @@ export function useAutoUpdate() {
     try {
       await downloadAndInstall(updateInfo.value.downloadUrl);
       updateStore.closePrompt();
-    } catch {
+    } catch (err) {
       // 错误已由 useUpdateDownloader 记录并存入 store，此处不关闭弹窗
+      console.debug('[AutoUpdate] downloadAndInstall failed (logged by downloader):', err);
     }
   };
 

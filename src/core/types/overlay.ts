@@ -22,3 +22,13 @@ export interface EditorConfig {
   initialValue: string;
   onSave: (newContent: string) => void;
 }
+
+export interface ConfirmConfig {
+  title: string;
+  message: string;
+  isDanger?: boolean;
+  onlyConfirm?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+

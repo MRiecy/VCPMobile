@@ -4,12 +4,14 @@ import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import { useTopicStore } from '../../core/stores/topicListManager';
 import { useLayoutStore } from '../../core/stores/layout';
+import { useNotificationStore } from '../../core/stores/notification';
 
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
 const topicListStore = useTopicStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
+const notificationStore = useNotificationStore();
 
 const handleCreateAgent = async () => {
   console.info('[AgentsCreator] create-agent clicked');
@@ -40,7 +42,11 @@ const handleCreateAgent = async () => {
         }
       } catch (error) {
         console.error('[AgentsCreator] create-agent failed', error);
-        window.alert('创建 Agent 失败');
+        notificationStore.addNotification({
+          type: 'error',
+          message: '创建 Agent 失败',
+          toastOnly: true
+        });
       }
     }
   });
@@ -75,7 +81,11 @@ const handleCreateGroup = async () => {
           }
       } catch (error) {
         console.error('[AgentsCreator] create-group failed', error);
-        window.alert('创建 Group 失败');
+        notificationStore.addNotification({
+          type: 'error',
+          message: '创建群组失败',
+          toastOnly: true
+        });
       }
     }
   });

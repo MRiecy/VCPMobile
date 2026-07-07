@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
+import { useOverlayStore } from "../../core/stores/overlay";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
@@ -47,6 +48,7 @@ const emit = defineEmits(["close"]);
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 
 const groupConfig = ref<GroupConfig>({
   id: props.id,
@@ -218,15 +220,24 @@ const onModelSelect = (modelId: string) => {
 };
 
 const handleDelete = async () => {
-  if (confirm("确定要删除这个群组吗？所有聊天记录将被标记为删除。")) {
+  const confirmed = await overlayStore.showConfirm({
+    title: "删除群组",
+    message: "确定要删除这个群组吗？所有聊天记录将被标记为删除。",
+    isDanger: true
+  });
+  if (confirmed) {
     try {
       await assistantStore.deleteGroup(props.id);
       if (sessionStore.currentSelectedItem?.id === props.id) {
         sessionStore.currentSelectedItem = null;
       }
       emit("close");
-    } catch (err) {
-      alert("删除失败: " + err);
+    } catch (err: any) {
+      notificationStore.addNotification({
+        type: 'error',
+        message: "删除失败: " + (err?.message || err),
+        toastOnly: true
+      });
     }
   }
 };

@@ -4,7 +4,7 @@ import { useModalHistory } from '../composables/useModalHistory';
 import { LAYER_PAGE_BASE, LAYER_PAGE_MAX_OFFSET } from '../constants/layers';
 import { useSyncSessionStore } from './syncSession';
 import { useRebuildSessionStore } from './rebuildSession';
-import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
+import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig, ConfirmConfig } from '../types/overlay';
 
 interface PageStackItem {
   type: string;
@@ -16,6 +16,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const { registerModal, unregisterModal } = useModalHistory();
 
   const promptConfig = ref<PromptConfig | null>(null);
+  const confirmConfig = ref<ConfirmConfig | null>(null);
   const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
 
@@ -195,6 +196,38 @@ export const useOverlayStore = defineStore('overlay', () => {
     }
   };
 
+  const showConfirm = (options: { title: string; message: string; isDanger?: boolean; onlyConfirm?: boolean }) => {
+    return new Promise<boolean>((resolve) => {
+      confirmConfig.value = {
+        title: options.title,
+        message: options.message,
+        isDanger: options.isDanger,
+        onlyConfirm: options.onlyConfirm,
+        onConfirm: () => {
+          unregisterModal('Confirm');
+          confirmConfig.value = null;
+          resolve(true);
+        },
+        onCancel: () => {
+          unregisterModal('Confirm');
+          confirmConfig.value = null;
+          resolve(options.onlyConfirm ? true : false);
+        }
+      };
+      registerModal('Confirm', () => {
+        confirmConfig.value = null;
+        resolve(options.onlyConfirm ? true : false);
+      });
+    });
+  };
+
+  const closeConfirm = () => {
+    if (confirmConfig.value) {
+      unregisterModal('Confirm');
+      confirmConfig.value = null;
+    }
+  };
+
   const openContextMenu = (actions: OverlayActionItem[], title?: string) => {
     contextMenuConfig.value = {
       title: title || '',
@@ -260,10 +293,13 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeRagObserver,
     // Modals
     promptConfig,
+    confirmConfig,
     contextMenuConfig,
     editorConfig,
     openPrompt,
     closePrompt,
+    showConfirm,
+    closeConfirm,
     openContextMenu,
     closeContextMenu,
     openEditor,

@@ -556,6 +556,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (existingMsg) existingMsg.content = content;
       return content;
     } catch (e) {
+      console.error(`[ChatHistoryStore] Failed to fetch raw content for message ${messageId}:`, e);
       return "";
     }
   };
@@ -571,7 +572,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         topicId: sessionStore.currentTopicId,
         message: msg,
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error(`[ChatHistoryStore] Failed to persist message blocks for message ${messageId}:`, e);
+    }
   };
 
   const reRenderMessage = async (messageId: string, topicId: string) => {

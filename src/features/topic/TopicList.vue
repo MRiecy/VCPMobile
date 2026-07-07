@@ -143,11 +143,19 @@ const showTopicContextMenu = (topicId: string) => {
     label: "删除话题",
     icon: Trash2,
     danger: true,
-    handler: () => {
-      if (
-        window.confirm(`确定要删除话题 "${topic.name}" 吗？此操作不可逆转。`)
-      ) {
-        if (window.confirm(`【最终确认】真的要永久删除 "${topic.name}" 吗？`)) {
+    handler: async () => {
+      const confirm1 = await overlayStore.showConfirm({
+        title: "删除话题",
+        message: `确定要删除话题 "${topic.name}" 吗？此操作不可逆转。`,
+        isDanger: true
+      });
+      if (confirm1) {
+        const confirm2 = await overlayStore.showConfirm({
+          title: "最终确认",
+          message: `【最终确认】真的要永久删除 "${topic.name}" 吗？`,
+          isDanger: true
+        });
+        if (confirm2) {
           topicListStore.deleteTopic(itemId, ownerType, topic.id);
         }
       }

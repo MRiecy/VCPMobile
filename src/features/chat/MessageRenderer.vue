@@ -715,8 +715,13 @@ const showMessageContextMenu = async () => {
     label: "删除消息",
     icon: Trash2,
     danger: true,
-    handler: () => {
-      if (confirm("确定要删除这条消息吗？")) {
+    handler: async () => {
+      const confirmed = await overlayStore.showConfirm({
+        title: "删除消息",
+        message: "确定要删除这条消息吗？",
+        isDanger: true
+      });
+      if (confirmed) {
         historyStore.deleteMessage(props.message.id);
       }
     },

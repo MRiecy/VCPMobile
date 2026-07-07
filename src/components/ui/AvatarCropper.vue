@@ -2,6 +2,7 @@
 import { ref, reactive, watch } from 'vue';
 import 'vue-cropper/dist/index.css';
 import { VueCropper } from 'vue-cropper';
+import { useNotificationStore } from '../../core/stores/notification';
 
 const props = defineProps<{
   img: string;
@@ -10,10 +11,15 @@ const props = defineProps<{
 const emit = defineEmits(['cancel', 'confirm']);
 
 const cropper = ref<any>(null);
+const notificationStore = useNotificationStore();
 
 const handleConfirm = () => {
   if (!cropper.value) {
-    alert('裁剪器尚未就绪');
+    notificationStore.addNotification({
+      type: 'warning',
+      message: '裁剪器尚未就绪',
+      toastOnly: true
+    });
     return;
   }
   
@@ -22,7 +28,11 @@ const handleConfirm = () => {
   
   if (!realCropper || typeof realCropper.getCropBlob !== 'function') {
     console.error('AvatarCropper: Cannot find getCropBlob on ref', cropper.value);
-    alert('裁剪器组件异常，请重试');
+    notificationStore.addNotification({
+      type: 'error',
+      message: '裁剪器组件异常，请重试',
+      toastOnly: true
+    });
     return;
   }
 

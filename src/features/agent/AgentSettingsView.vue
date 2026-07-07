@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
+import { useOverlayStore } from "../../core/stores/overlay";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
@@ -39,6 +40,7 @@ const emit = defineEmits(["close", "delete"]);
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 
 const agentConfig = ref<AgentConfig>({
   id: props.id || "",
@@ -192,7 +194,12 @@ watch(() => props.isOpen, (val) => {
 });
 
 const handleDelete = async () => {
-  if (confirm("确定要删除这个 Agent 吗？此操作不可撤销。")) {
+  const confirmed = await overlayStore.showConfirm({
+    title: "删除 Agent",
+    message: "确定要删除这个 Agent 吗？此操作不可撤销。",
+    isDanger: true
+  });
+  if (confirmed) {
     try {
       await assistantStore.deleteAgent(agentConfig.value.id);
       if (sessionStore.currentSelectedItem?.id === agentConfig.value.id) {

@@ -5,11 +5,13 @@ import { useTopicStore } from "../../core/stores/topicListManager";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useLayoutStore } from "../../core/stores/layout";
+import { useNotificationStore } from "../../core/stores/notification";
 
 const topicStore = useTopicStore();
 const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
 const layoutStore = useLayoutStore();
+const notificationStore = useNotificationStore();
 const router = useRouter();
 
 const isCreating = ref(false);
@@ -51,7 +53,11 @@ const handleCreateTopic = async () => {
   );
 
   if (!currentItemId.value) {
-    window.alert("请先选择一个助手或群组");
+    notificationStore.addNotification({
+      type: 'warning',
+      message: '请先选择一个助手或群组',
+      toastOnly: true
+    });
     return;
   }
 
