@@ -36,15 +36,15 @@ const isDiskCheckError = ref(false);
 
 const allGranted = computed(() => status.value.notification && status.value.storage && status.value.battery);
 
-// 自启动是否配置好 (小米/HyperOS自动感应，非小米依赖用户勾选)
+// 自启动是否配置好 (小米/红米/VIVO/魅族支持自动感应，非支持机型依赖用户勾选)
 const isAutoStartReady = computed(() => {
   if (autoStartStatus.value === 'true') return true;
   return userConfirmedAutoStart.value;
 });
 
-// 后台省电是否配置好
+// 后台省电是否配置好 (优先自动感应电池优化白名单和无后台限制状态)
 const isPowerReady = computed(() => {
-  return userConfirmedPower.value;
+  return status.value.battery || userConfirmedPower.value;
 });
 
 // 通知监听是否配置好
@@ -295,7 +295,10 @@ onUnmounted(() => {
                     <span class="font-semibold text-gray-900 text-sm">开机与后台自启动</span>
                     <span v-if="autoStartStatus === 'true'" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
                   </div>
-                  <button 
+                  <div v-if="autoStartStatus === 'true'" class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0">
+                    已开启
+                  </div>
+                  <button v-else
                     @click="triggerAutoStartSettings"
                     class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   >
@@ -308,7 +311,7 @@ onUnmounted(() => {
                     关联权限名称：自启动 / 开机自动启动 / 关联启动
                   </span>
                 </p>
-                <!-- 非小米设备，或者小米检测不成功，在点击跳转后，显示勾选防呆机制 -->
+                <!-- 非支持设备，或者检测不成功，在点击跳转后，显示勾选防呆机制 -->
                 <div v-if="autoStartStatus !== 'true' && hasClickedAutoStart" class="mt-2 pl-11 flex items-center gap-2">
                   <input type="checkbox" id="chkAutoStart" v-model="userConfirmedAutoStart" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
                   <label for="chkAutoStart" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已允许自启动</label>
@@ -323,8 +326,12 @@ onUnmounted(() => {
                   </div>
                   <div class="flex-1">
                     <span class="font-semibold text-gray-900 text-sm">省电无限制策略</span>
+                    <span v-if="status.battery" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
                   </div>
-                  <button 
+                  <div v-if="status.battery" class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0">
+                    已开启
+                  </div>
+                  <button v-else
                     @click="triggerPowerManagementSettings"
                     class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   >
@@ -337,7 +344,7 @@ onUnmounted(() => {
                     关联权限名称：允许完全后台行为 / 不限制 / 应用耗电管理
                   </span>
                 </p>
-                <div v-if="hasClickedPower" class="mt-2 pl-11 flex items-center gap-2">
+                <div v-if="!status.battery && hasClickedPower" class="mt-2 pl-11 flex items-center gap-2">
                   <input type="checkbox" id="chkPower" v-model="userConfirmedPower" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
                   <label for="chkPower" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已将本应用省电策略改为「无限制」</label>
                 </div>
@@ -353,7 +360,10 @@ onUnmounted(() => {
                     <span class="font-semibold text-gray-900 text-sm">通知栏监听守护</span>
                     <span v-if="isNotificationListenerReady" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
                   </div>
-                  <button 
+                  <div v-if="isNotificationListenerReady" class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0">
+                    已开启
+                  </div>
+                  <button v-else
                     @click="triggerNotificationListenerSettings"
                     class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   >

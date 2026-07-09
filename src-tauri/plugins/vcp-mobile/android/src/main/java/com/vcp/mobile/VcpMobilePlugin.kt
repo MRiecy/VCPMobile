@@ -223,7 +223,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         val locationGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val isRestricted = if (Build.VERSION.SDK_INT >= 28) {
+            am?.isBackgroundRestricted ?: false
+        } else {
+            false
+        }
+        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName) && !isRestricted
         val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
         val result = JSObject()
@@ -348,7 +354,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun checkAutoStartStatus(): String {
         val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
-        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi")) {
+        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || 
+            manufacturer.contains("vivo") || manufacturer.contains("meizu")) {
             val ops = activity.getSystemService(Context.APP_OPS_SERVICE) as? android.app.AppOpsManager
             if (ops != null) {
                 try {
@@ -358,7 +365,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                         Int::class.javaPrimitiveType,
                         String::class.java
                     )
-                    // 10008 is OP_AUTO_START in MIUI / HyperOS AppOpsManager
+                    // 10008 is OP_AUTO_START in MIUI / HyperOS / Flyme / OriginOS
                     val mode = method.invoke(
                         ops,
                         10008,
@@ -589,7 +596,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         val locationGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        val isRestricted = if (Build.VERSION.SDK_INT >= 28) {
+            am?.isBackgroundRestricted ?: false
+        } else {
+            false
+        }
+        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName) && !isRestricted
         val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
         val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"overlay":$overlayGranted,"location":$locationGranted}"""
