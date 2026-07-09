@@ -46,7 +46,7 @@ releases/
 vector/
 
 # Cargo registry cache
-.cargo
+/.cargo
 temp
 
 .agent
