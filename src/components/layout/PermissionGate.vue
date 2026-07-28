@@ -12,10 +12,20 @@ interface PermissionStatus {
   ring: boolean;
   storage: boolean;
   battery: boolean;
+  backgroundRestricted: boolean;
+  requiresManualPowerManagement: boolean;
+}
+
+type RequestablePermission = "notification" | "ring" | "storage" | "battery";
+type AutoStartStatus = "true" | "false" | "unsupported";
+
+interface DiskSpaceSnapshot {
+  freeGb: number;
+  totalGb: number;
 }
 
 interface PermissionItem {
-  id: keyof PermissionStatus;
+  id: RequestablePermission;
   name: string;
   desc: string;
   icon: string;
@@ -58,20 +68,22 @@ const status = ref<PermissionStatus>({
   ring: false,
   storage: false,
   battery: false,
+  backgroundRestricted: false,
+  requiresManualPowerManagement: false,
 });
 
 const currentStep = ref(1);
-const requesting = ref<keyof PermissionStatus | null>(null);
+const requesting = ref<RequestablePermission | null>(null);
 
 const requiredGranted = computed(
   () =>
     status.value.notification &&
     status.value.ring &&
     status.value.storage &&
-    status.value.battery
+    status.value.battery,
 );
 const ringBlockingMissing = computed(
-  () => status.value.notification && !status.value.ring
+  () => status.value.notification && !status.value.ring,
 );
 
 let checkSequence = 0;
@@ -79,7 +91,7 @@ let requestRecheckTimers: ReturnType<typeof setTimeout>[] = [];
 let requestingResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Step 2 状态
-const autoStartStatus = ref<"true" | "false" | "unsupported">("unsupported");
+const autoStartStatus = ref<AutoStartStatus>("unsupported");
 const hasClickedAutoStart = ref(false);
 const userConfirmedAutoStart = ref(false);
 const hasClickedPower = ref(false);
@@ -93,15 +105,22 @@ const freeDiskSpaceGB = ref(0);
 const totalDiskSpaceGB = ref(0);
 const isDiskCheckError = ref(false);
 
-// 自启动是否配置好 (小米/HyperOS自动感应，非小米依赖用户勾选)
+// 自启动是否配置好（支持检测的系统自动感应，其余系统依赖用户确认）
 const isAutoStartReady = computed(() => {
   if (autoStartStatus.value === "true") return true;
   return userConfirmedAutoStart.value;
 });
 
-// 后台省电是否配置好
+const isSystemPowerReady = computed(
+  () => status.value.battery && !status.value.backgroundRestricted,
+);
+
+// 原生 Android 检测无法覆盖部分厂商的额外后台策略，这些设备仍需人工确认。
 const isPowerReady = computed(() => {
-  return userConfirmedPower.value;
+  if (status.value.requiresManualPowerManagement) {
+    return userConfirmedPower.value;
+  }
+  return isSystemPowerReady.value || userConfirmedPower.value;
 });
 
 // 通知监听是否配置好
@@ -112,55 +131,84 @@ const isListenerReady = computed(() => {
 
 // Step 2 是否满足要求
 const step2Ready = computed(
-  () => isAutoStartReady.value && isPowerReady.value && isListenerReady.value
+  () => isAutoStartReady.value && isPowerReady.value && isListenerReady.value,
 );
 
 // Step 3 存储检测是否合格 (要求 >= 5.0 GB)
 const isStorageSpaceOk = computed(() => freeDiskSpaceGB.value >= 5.0);
 
-const check = async () => {
-  const sequence = ++checkSequence;
+const fetchAutoStartStatus = async (): Promise<AutoStartStatus> => {
   try {
-    const res = await invoke<PermissionStatus>(
-      "plugin:vcp-mobile|check_all_permissions"
+    const result = await invoke<unknown>(
+      "plugin:vcp-mobile|check_auto_start_permission",
     );
-    if (sequence !== checkSequence) return;
-    status.value = res;
-
-    // 如果已经授予存储权限，检测内部存储空间和自启动状态
-    await checkDiskSpace();
-    await checkAutoStart();
-    await checkNotificationListener();
-  } catch (e) {
-    console.error("[PermissionGate] Failed to check permissions:", e);
-  }
-};
-
-const checkAutoStart = async () => {
-  try {
-    const res = await invoke<string>(
-      "plugin:vcp-mobile|check_auto_start_permission"
-    );
-    autoStartStatus.value = res as any;
+    return result === "true" || result === "false" ? result : "unsupported";
   } catch (e) {
     console.error("[PermissionGate] Failed to check auto start permission:", e);
+    return "unsupported";
   }
 };
 
-const checkDiskSpace = async () => {
+const fetchDiskSpace = async (): Promise<DiskSpaceSnapshot | null> => {
   try {
-    const res = await invoke<{
+    const result = await invoke<{
       freeBytes: number;
       freeGb: number;
       totalBytes: number;
       totalGb: number;
     }>("plugin:vcp-mobile|get_free_disk_space");
-    freeDiskSpaceGB.value = res.freeGb;
-    totalDiskSpaceGB.value = res.totalGb;
-    isDiskCheckError.value = false;
+    return { freeGb: result.freeGb, totalGb: result.totalGb };
   } catch (e) {
     console.error("[PermissionGate] Failed to check disk space:", e);
-    isDiskCheckError.value = true;
+    return null;
+  }
+};
+
+const fetchNotificationListenerStatus = async (): Promise<boolean> => {
+  try {
+    const result = await invoke<{ enabled: boolean }>(
+      "plugin:vcp-mobile|check_notification_listener_permission",
+    );
+    return result.enabled === true;
+  } catch (e) {
+    console.error(
+      "[PermissionGate] Failed to check notification listener permission:",
+      e,
+    );
+    return false;
+  }
+};
+
+const check = async (): Promise<boolean> => {
+  const sequence = ++checkSequence;
+  try {
+    const [permissionStatus, diskSpace, nextAutoStartStatus, listenerReady] =
+      await Promise.all([
+        invoke<PermissionStatus>("plugin:vcp-mobile|check_all_permissions"),
+        fetchDiskSpace(),
+        fetchAutoStartStatus(),
+        fetchNotificationListenerStatus(),
+      ]);
+    if (sequence !== checkSequence) return false;
+    status.value = permissionStatus;
+    autoStartStatus.value = nextAutoStartStatus;
+    isNotificationListenerReady.value = listenerReady;
+
+    if (diskSpace) {
+      freeDiskSpaceGB.value = diskSpace.freeGb;
+      totalDiskSpaceGB.value = diskSpace.totalGb;
+      isDiskCheckError.value = false;
+    } else {
+      freeDiskSpaceGB.value = 0;
+      totalDiskSpaceGB.value = 0;
+      isDiskCheckError.value = true;
+    }
+    return true;
+  } catch (e) {
+    if (sequence === checkSequence) {
+      console.error("[PermissionGate] Failed to check permissions:", e);
+    }
+    return false;
   }
 };
 
@@ -172,11 +220,11 @@ const clearRequestRecheckTimers = () => {
 const scheduleRequestRechecks = () => {
   clearRequestRecheckTimers();
   requestRecheckTimers = REQUEST_RECHECK_DELAYS_MS.map((delay) =>
-    setTimeout(check, delay)
+    setTimeout(check, delay),
   );
 };
 
-const resetRequestingLater = (type: keyof PermissionStatus) => {
+const resetRequestingLater = (type: RequestablePermission) => {
   if (requestingResetTimer) clearTimeout(requestingResetTimer);
   requestingResetTimer = setTimeout(() => {
     if (requesting.value === type) {
@@ -185,9 +233,7 @@ const resetRequestingLater = (type: keyof PermissionStatus) => {
   }, 6000);
 };
 
-const request = async (
-  type: "notification" | "ring" | "storage" | "battery"
-) => {
+const request = async (type: RequestablePermission) => {
   requesting.value = type;
   scheduleRequestRechecks();
   resetRequestingLater(type);
@@ -222,21 +268,7 @@ const triggerPowerManagementSettings = async () => {
   } catch (e) {
     console.error(
       "[PermissionGate] Failed to request power management settings:",
-      e
-    );
-  }
-};
-
-const checkNotificationListener = async () => {
-  try {
-    const res = await invoke<{ enabled: boolean }>(
-      "plugin:vcp-mobile|check_notification_listener_permission"
-    );
-    isNotificationListenerReady.value = res.enabled;
-  } catch (e) {
-    console.error(
-      "[PermissionGate] Failed to check notification listener permission:",
-      e
+      e,
     );
   }
 };
@@ -248,7 +280,7 @@ const triggerNotificationListenerSettings = async () => {
   } catch (e) {
     console.error(
       "[PermissionGate] Failed to request notification listener settings:",
-      e
+      e,
     );
   }
 };
@@ -262,11 +294,15 @@ const exitApp = async () => {
 };
 
 const goNext = async () => {
-  await check();
-  if (!requiredGranted.value) return;
+  const sourceStep = currentStep.value;
+  const refreshed = await check();
+  if (!refreshed || currentStep.value !== sourceStep) return;
 
-  if (currentStep.value < 3) {
-    currentStep.value++;
+  if (!requiredGranted.value) return;
+  if (sourceStep === 2 && !step2Ready.value) return;
+
+  if (sourceStep < 3) {
+    currentStep.value = sourceStep + 1;
   }
 };
 
@@ -373,8 +409,8 @@ onUnmounted(() => {
             currentStep === 1
               ? 'border-gray-900'
               : currentStep > 1
-              ? 'border-gray-900 bg-gray-900'
-              : 'border-gray-100'
+                ? 'border-gray-900 bg-gray-900'
+                : 'border-gray-100'
           "
         >
           <div
@@ -399,8 +435,8 @@ onUnmounted(() => {
             currentStep === 2
               ? 'border-gray-900 text-gray-900'
               : currentStep > 2
-              ? 'border-gray-900 bg-gray-900 text-white'
-              : 'border-gray-100 text-gray-300'
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-100 text-gray-300'
           "
         >
           2
@@ -489,8 +525,8 @@ onUnmounted(() => {
                     requesting === item.id
                       ? "检查中"
                       : item.id === "ring" && status.notification
-                      ? "去设置"
-                      : "去授权"
+                        ? "去设置"
+                        : "去授权"
                   }}
                 </button>
               </div>
@@ -570,7 +606,14 @@ onUnmounted(() => {
                       >自动感应 OK</span
                     >
                   </div>
+                  <div
+                    v-if="isAutoStartReady"
+                    class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0"
+                  >
+                    {{ autoStartStatus === "true" ? "已开启" : "已手动确认" }}
+                  </div>
                   <button
+                    v-else
                     @click="triggerAutoStartSettings"
                     class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   >
@@ -583,7 +626,7 @@ onUnmounted(() => {
                     关联权限名称：自启动 / 开机自动启动 / 关联启动
                   </span>
                 </p>
-                <!-- 非小米设备，或者小米检测不成功，在点击跳转后，显示勾选防呆机制 -->
+                <!-- 系统不支持检测或检测未通过时，在跳转后显示手动确认 -->
                 <div
                   v-if="autoStartStatus !== 'true' && hasClickedAutoStart"
                   class="mt-2 pl-11 flex items-center gap-2"
@@ -616,8 +659,29 @@ onUnmounted(() => {
                     <span class="font-semibold text-gray-900 text-sm"
                       >省电无限制策略</span
                     >
+                    <span
+                      v-if="isSystemPowerReady"
+                      class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider"
+                      >{{
+                        status.requiresManualPowerManagement
+                          ? "基础检测 OK"
+                          : "自动感应 OK"
+                      }}</span
+                    >
+                  </div>
+                  <div
+                    v-if="isPowerReady"
+                    class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0"
+                  >
+                    {{
+                      isSystemPowerReady &&
+                      !status.requiresManualPowerManagement
+                        ? "已开启"
+                        : "已手动确认"
+                    }}
                   </div>
                   <button
+                    v-else
                     @click="triggerPowerManagementSettings"
                     class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   >
@@ -631,7 +695,11 @@ onUnmounted(() => {
                   </span>
                 </p>
                 <div
-                  v-if="hasClickedPower"
+                  v-if="
+                    (status.requiresManualPowerManagement ||
+                      !isSystemPowerReady) &&
+                    hasClickedPower
+                  "
                   class="mt-2 pl-11 flex items-center gap-2"
                 >
                   <input
@@ -643,9 +711,30 @@ onUnmounted(() => {
                   <label
                     for="chkPower"
                     class="text-xs text-gray-700 font-bold select-none cursor-pointer"
-                    >我已将本应用省电策略改为「无限制」</label
+                    >{{
+                      status.backgroundRestricted
+                        ? "我已在系统中设为「不限制」，仍要继续"
+                        : status.requiresManualPowerManagement
+                          ? "我已在厂商设置中设为「不限制」"
+                          : "我已将本应用省电策略改为「无限制」"
+                    }}</label
                   >
                 </div>
+                <p
+                  v-if="status.backgroundRestricted && hasClickedPower"
+                  class="pl-11 text-[11px] leading-relaxed text-amber-700"
+                >
+                  系统仍报告后台受限。仅在厂商设置页已确认“不限制”但状态未及时刷新时手动继续，否则后台连接可能中断。
+                </p>
+                <p
+                  v-else-if="
+                    status.requiresManualPowerManagement && hasClickedPower
+                  "
+                  class="pl-11 text-[11px] leading-relaxed text-amber-700"
+                >
+                  当前系统包含额外的厂商后台策略，Android
+                  基础检测无法确认其状态，请以厂商设置页为准。
+                </p>
               </div>
 
               <!-- 卡片 3：通知栏监听守护 (极度稳定的后台常驻) -->
@@ -670,7 +759,14 @@ onUnmounted(() => {
                       >自动感应 OK</span
                     >
                   </div>
+                  <div
+                    v-if="isListenerReady"
+                    class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0"
+                  >
+                    {{ isNotificationListenerReady ? "已开启" : "已手动确认" }}
+                  </div>
                   <button
+                    v-else
                     @click="triggerNotificationListenerSettings"
                     class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                   >
@@ -797,7 +893,7 @@ onUnmounted(() => {
                       :style="{
                         width: `${Math.min(
                           100,
-                          (freeDiskSpaceGB / totalDiskSpaceGB) * 100
+                          (freeDiskSpaceGB / totalDiskSpaceGB) * 100,
                         )}%`,
                       }"
                     ></div>

@@ -143,13 +143,33 @@ const showTopicContextMenu = (topicId: string) => {
     label: "删除话题",
     icon: Trash2,
     danger: true,
-    handler: () => {
-      if (
-        window.confirm(`确定要删除话题 "${topic.name}" 吗？此操作不可逆转。`)
-      ) {
-        if (window.confirm(`【最终确认】真的要永久删除 "${topic.name}" 吗？`)) {
-          topicListStore.deleteTopic(itemId, ownerType, topic.id);
-        }
+    handler: async () => {
+      const confirmed = await overlayStore.showConfirm({
+        title: "删除话题",
+        message: `确定要删除话题“${topic.name}”吗？此操作不可撤销。`,
+        confirmText: "继续",
+        isDanger: true,
+      });
+      if (!confirmed) return;
+
+      const finalConfirmed = await overlayStore.showConfirm({
+        title: "最终确认",
+        message: `永久删除话题“${topic.name}”及其聊天记录？`,
+        confirmText: "永久删除",
+        isDanger: true,
+      });
+      if (!finalConfirmed) return;
+
+      try {
+        await topicListStore.deleteTopic(itemId, ownerType, topic.id);
+      } catch (error) {
+        console.error("[TopicList] Failed to delete topic:", error);
+        notificationStore.addNotification({
+          type: "error",
+          title: "删除话题失败",
+          message: "话题未被删除，请稍后重试。",
+          toastOnly: true,
+        });
       }
     },
   });

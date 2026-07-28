@@ -49,7 +49,9 @@ const handleToggle = async (val: boolean) => {
     // 开启时懒加载 Agent 列表
     try {
       await assistantStore.fetchAgents();
-    } catch (_) {}
+    } catch (error) {
+      console.warn("[AssistantSettings] Failed to preload agents:", error);
+    }
   }
 
   props.settings.enableAssistant = val;
@@ -79,11 +81,15 @@ const handleLifecycleEvent = async (e: any) => {
     if (props.settings.enableAssistant && hasOverlayPermission.value) {
       try {
         await assistantStore.fetchAgents();
-      } catch (_) {}
+      } catch (error) {
+        console.warn("[AssistantSettings] Failed to refresh agents on resume:", error);
+      }
       try {
         await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: true });
         await invoke("reconcile_local_server_cmd", { enable: true });
-      } catch (_) {}
+      } catch (error) {
+        console.error("[AssistantSettings] Failed to restore assistant services:", error);
+      }
     }
   }
 };
@@ -95,11 +101,15 @@ onMounted(async () => {
   if (props.settings.enableAssistant && hasOverlayPermission.value) {
     try {
       await assistantStore.fetchAgents();
-    } catch (_) {}
+    } catch (error) {
+      console.warn("[AssistantSettings] Failed to preload agents on mount:", error);
+    }
     try {
       await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: true });
       await invoke("reconcile_local_server_cmd", { enable: true });
-    } catch (_) {}
+    } catch (error) {
+      console.error("[AssistantSettings] Failed to start assistant services:", error);
+    }
   }
 
   // 监听生命周期 resume 事件以刷新权限状态

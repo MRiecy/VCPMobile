@@ -111,7 +111,11 @@ const sandboxHtml = computed(() => {
       const _originalAlert = window.alert;
       window.alert = function(msg) {
         console.log('[VCP Sandbox Alert]:', msg);
-        try { _originalAlert(msg); } catch (e) {}
+        try {
+          _originalAlert(msg);
+        } catch (e) {
+          console.debug('[VCP Sandbox Alert] Native alert unavailable:', e);
+        }
       };
     <` + `/script>
   `;

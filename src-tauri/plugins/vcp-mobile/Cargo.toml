@@ -17,4 +17,4 @@ log = { workspace = true }
 jni = { workspace = true }
 
 [build-dependencies]
-tauri-plugin = { version = "2.6.2" }
+tauri-plugin = { version = "2.6.2", features = ["build"] }

@@ -22,6 +22,7 @@ const modalStack = ref<ModalInstance[]>([]);
 // POPSTATE_HANDLING: currently processing a browser popstate event (closing top modal)
 // INTERNAL_BACK: triggered an internal history.back() from unregisterModal
 let state: 'IDLE' | 'POPSTATE_HANDLING' | 'INTERNAL_BACK' = 'IDLE';
+let internalBackCompletion: (() => void) | null = null;
 
 /**
  * Initialize root history state to intercept the final back gesture.
@@ -41,6 +42,9 @@ const handlePopState = (event: PopStateEvent) => {
   // 1. Check if this back was triggered by unregisterModal (UI action)
   if (state === 'INTERNAL_BACK') {
     state = 'IDLE';
+    const complete = internalBackCompletion;
+    internalBackCompletion = null;
+    complete?.();
     return;
   }
 
@@ -122,22 +126,63 @@ export function useModalHistory() {
    * Unregisters a modal. Should be called when the modal is closed via UI.
    * If not already processing a popstate, it will trigger history.back().
    * @param id Unique identifier for the modal
+   * @param onHistorySynced Runs after the internal back traversal completes
    */
-  const unregisterModal = (id: string) => {
+  const unregisterModal = (id: string, onHistorySynced?: () => void) => {
     const index = modalStack.value.findIndex(m => m.id === id);
-    if (index === -1) return;
+    if (index === -1) {
+      onHistorySynced?.();
+      return;
+    }
 
     // If we're currently handling a popstate event, don't trigger history.back()
     // to avoid recursive popstate. The modal will be removed from stack regardless.
-    if (state !== 'POPSTATE_HANDLING') {
+    let waitingForHistory = false;
+    if (state === 'IDLE') {
       const currentState = window.history.state;
       if (currentState && currentState.vcpModalId === id) {
         state = 'INTERNAL_BACK';
+        internalBackCompletion = onHistorySynced || null;
         window.history.back();
+        waitingForHistory = true;
       }
     }
 
     modalStack.value.splice(index, 1);
+    if (!waitingForHistory) {
+      onHistorySynced?.();
+    }
+  };
+
+  /**
+   * Atomically replaces the current top modal without adding or removing a
+   * browser history entry. This keeps ContextMenu -> dialog transitions from
+   * leaving a stale sheet entry that would require an extra back action.
+   */
+  const replaceModal = (
+    currentId: string,
+    nextId: string,
+    closeHandler: () => void,
+  ): boolean => {
+    const topIndex = modalStack.value.length - 1;
+    const topModal = modalStack.value[topIndex];
+    const currentHistoryState = window.history.state;
+
+    if (
+      !topModal ||
+      topModal.id !== currentId ||
+      modalStack.value.some((modal, index) => index !== topIndex && modal.id === nextId) ||
+      currentHistoryState?.vcpModalId !== currentId
+    ) {
+      return false;
+    }
+
+    window.history.replaceState(
+      { ...currentHistoryState, vcpRoot: true, vcpModalId: nextId },
+      '',
+    );
+    modalStack.value[topIndex] = { id: nextId, close: closeHandler };
+    return true;
   };
 
   const closeTopModal = (): boolean => {
@@ -164,6 +209,7 @@ export function useModalHistory() {
   return {
     registerModal,
     unregisterModal,
+    replaceModal,
     modalStackLength: () => modalStack.value.length,
     initRootHistory,
     closeTopModal

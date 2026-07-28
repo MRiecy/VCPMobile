@@ -3,6 +3,8 @@ import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
+import { useNotificationStore } from "../../core/stores/notification";
+import { useOverlayStore } from "../../core/stores/overlay";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
@@ -37,6 +39,8 @@ const emit = defineEmits(["close", "delete"]);
 
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
+const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 
 const agentConfig = ref<AgentConfig>({
   id: props.id || "",
@@ -189,16 +193,28 @@ watch(() => props.isOpen, (val) => {
 });
 
 const handleDelete = async () => {
-  if (confirm("确定要删除这个 Agent 吗？此操作不可撤销。")) {
-    try {
-      await assistantStore.deleteAgent(agentConfig.value.id);
-      if (sessionStore.currentSelectedItem?.id === agentConfig.value.id) {
-        sessionStore.currentSelectedItem = null;
-      }
-      emit("close");
-    } catch (err) {
-      console.error("Failed to delete agent:", err);
+  const confirmed = await overlayStore.showConfirm({
+    title: "删除助手",
+    message: `确定要删除助手“${agentConfig.value.name || agentConfig.value.id}”吗？此操作不可撤销。`,
+    confirmText: "删除",
+    isDanger: true,
+  });
+  if (!confirmed) return;
+
+  try {
+    await assistantStore.deleteAgent(agentConfig.value.id);
+    if (sessionStore.currentSelectedItem?.id === agentConfig.value.id) {
+      sessionStore.currentSelectedItem = null;
     }
+    emit("close");
+  } catch (err) {
+    console.error("Failed to delete agent:", err);
+    notificationStore.addNotification({
+      type: "error",
+      title: "删除助手失败",
+      message: "助手未被删除，请稍后重试。",
+      toastOnly: true,
+    });
   }
 };
 

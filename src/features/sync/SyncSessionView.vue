@@ -112,15 +112,16 @@ const logColor = (level: string) => {
 
 const handleClose = async () => {
   if (store.needsReload) {
-    const confirmed = confirm(
-      "同步已完成，数据已更新。点击确认立即刷新以生效。"
-    );
-    if (confirmed) {
-      store.markReloaded();
-      overlayStore.closeSyncSession();
-      await performFullReload();
-      return;
-    }
+    await overlayStore.showConfirm({
+      title: "同步已完成",
+      message: "数据已更新，需要立即刷新才能生效。",
+      confirmText: "立即刷新",
+      onlyConfirm: true,
+    });
+    store.markReloaded();
+    overlayStore.closeSyncSession();
+    await performFullReload();
+    return;
   }
   overlayStore.closeSyncSession();
 };
@@ -169,11 +170,14 @@ const prerenderEnabled = computed(
   () => settingsStore.settings?.syncPrerenderEnabled ?? false
 );
 
-const handlePrerenderToggle = (val: boolean) => {
+const handlePrerenderToggle = async (val: boolean) => {
   if (val) {
-    const ok = confirm(
-      "启用后将在同步时进行预渲染计算，可能导致同步耗时增加，首次同步建议关闭。确认启用？"
-    );
+    const ok = await overlayStore.showConfirm({
+      title: "启用同步预渲染",
+      message:
+        "启用后会在同步时进行预渲染计算，可能延长同步耗时；首次同步建议保持关闭。",
+      confirmText: "仍要启用",
+    });
     if (!ok) return;
   }
   settingsStore.updateSettings({ syncPrerenderEnabled: val });

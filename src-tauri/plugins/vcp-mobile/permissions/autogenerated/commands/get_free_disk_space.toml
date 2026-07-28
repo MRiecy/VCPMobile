@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-free-disk-space"
+description = "Enables the get_free_disk_space command without any pre-configured scope."
+commands.allow = ["get_free_disk_space"]
+
+[[permission]]
+identifier = "deny-get-free-disk-space"
+description = "Denies the get_free_disk_space command without any pre-configured scope."
+commands.deny = ["get_free_disk_space"]

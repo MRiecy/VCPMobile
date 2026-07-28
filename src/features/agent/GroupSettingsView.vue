@@ -3,6 +3,8 @@ import { ref, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
+import { useNotificationStore } from "../../core/stores/notification";
+import { useOverlayStore } from "../../core/stores/overlay";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
@@ -45,6 +47,8 @@ const emit = defineEmits(["close"]);
 
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
+const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 
 const groupConfig = ref<GroupConfig>({
   id: props.id,
@@ -217,16 +221,28 @@ const onModelSelect = (modelId: string) => {
 };
 
 const handleDelete = async () => {
-  if (confirm("确定要删除这个群组吗？所有聊天记录将被标记为删除。")) {
-    try {
-      await assistantStore.deleteGroup(props.id);
-      if (sessionStore.currentSelectedItem?.id === props.id) {
-        sessionStore.currentSelectedItem = null;
-      }
-      emit("close");
-    } catch (err) {
-      alert("删除失败: " + err);
+  const confirmed = await overlayStore.showConfirm({
+    title: "删除群组",
+    message: `确定要删除群组“${groupConfig.value.name || props.id}”吗？相关聊天记录也会被标记为删除。`,
+    confirmText: "删除",
+    isDanger: true,
+  });
+  if (!confirmed) return;
+
+  try {
+    await assistantStore.deleteGroup(props.id);
+    if (sessionStore.currentSelectedItem?.id === props.id) {
+      sessionStore.currentSelectedItem = null;
     }
+    emit("close");
+  } catch (err) {
+    console.error("Failed to delete group:", err);
+    notificationStore.addNotification({
+      type: "error",
+      title: "删除群组失败",
+      message: "群组未被删除，请稍后重试。",
+      toastOnly: true,
+    });
   }
 };
 

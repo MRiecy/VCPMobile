@@ -39,7 +39,7 @@ GEMINI.md
 VCPMobile.code-workspace
 
 # Large Assets & Scripts
-scripts/
+/scripts/
 qa/*
 !qa/
 !qa/*.sh
@@ -49,7 +49,9 @@ releases/
 vector/
 
 # Cargo registry cache
-.cargo
+/.cargo
+# Machine-local Android NDK linker paths; keep the 16 KB page flags local too.
+/src-tauri/.cargo/config.toml
 temp
 
 .claude

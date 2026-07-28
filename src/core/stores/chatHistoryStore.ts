@@ -735,7 +735,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         topicId: sessionStore.currentTopicId,
         message: msg,
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error(
+        `[ChatHistoryStore] Failed to persist message blocks for ${messageId}:`,
+        e
+      );
+    }
   };
 
   const reRenderMessage = async (messageId: string, topicId: string) => {

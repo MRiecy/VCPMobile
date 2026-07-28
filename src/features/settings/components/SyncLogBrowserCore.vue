@@ -2,6 +2,8 @@
 import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { FileText, Trash2, Copy, ChevronLeft, ChevronRight } from 'lucide-vue-next';
+import { useNotificationStore } from '../../../core/stores/notification';
+import { useOverlayStore } from '../../../core/stores/overlay';
 
 interface LogFile {
   filename: string;
@@ -17,6 +19,8 @@ const currentPage = ref(0);
 const linesPerPage = 500;
 const totalPages = ref(0);
 const lines = ref<string[]>([]);
+const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
@@ -72,13 +76,31 @@ const copyCurrentFile = async () => {
 };
 
 const clearOldLogs = async () => {
-  if (!confirm('确定要清理 7 天前的同步日志吗？')) return;
+  const confirmed = await overlayStore.showConfirm({
+    title: '清理同步日志',
+    message: '确定要清理 7 天前的同步日志吗？清理后无法恢复。',
+    confirmText: '清理',
+    isDanger: true,
+  });
+  if (!confirmed) return;
+
   try {
     const removed = await invoke<number>('clear_old_sync_logs', { keepDays: 7 });
     await loadFiles();
-    alert(`已清理 ${removed} 个旧日志文件`);
+    notificationStore.addNotification({
+      type: 'success',
+      title: '日志清理完成',
+      message: `已清理 ${removed} 个旧日志文件。`,
+      toastOnly: true,
+    });
   } catch (e) {
     console.error('[SyncLogBrowser] Clear failed:', e);
+    notificationStore.addNotification({
+      type: 'error',
+      title: '日志清理失败',
+      message: '旧日志未被清理，请稍后重试。',
+      toastOnly: true,
+    });
   }
 };
 

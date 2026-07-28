@@ -124,7 +124,9 @@ const handlePointerDown = (e: PointerEvent) => {
 
   try {
     fullscreenViewportRef.value.setPointerCapture(e.pointerId);
-  } catch (err) {}
+  } catch (err) {
+    console.debug("[MermaidFullScreenViewer] Pointer capture unavailable:", err);
+  }
 
   activePointers.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
   const pointerList = Array.from(activePointers.values());
@@ -170,7 +172,9 @@ const handlePointerUp = (e: PointerEvent) => {
   if (fullscreenViewportRef.value) {
     try {
       fullscreenViewportRef.value.releasePointerCapture(e.pointerId);
-    } catch (err) {}
+    } catch (err) {
+      console.debug("[MermaidFullScreenViewer] Pointer release unavailable:", err);
+    }
   }
 
   activePointers.delete(e.pointerId);

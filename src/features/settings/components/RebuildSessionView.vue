@@ -51,7 +51,12 @@ const progressBarClass = computed(() => {
 
 const handleClose = async () => {
   if (store.needsReload) {
-    alert('重建已完成，数据已更新。点击确认立即刷新以生效。');
+    await overlayStore.showConfirm({
+      title: '重建已完成',
+      message: '数据已更新，需要立即刷新才能生效。',
+      confirmText: '立即刷新',
+      onlyConfirm: true,
+    });
     store.markReloaded();
     overlayStore.closeRebuildSession();
     await performFullReload();

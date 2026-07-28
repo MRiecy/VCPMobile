@@ -6,7 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "vcp-mobile:allow-all",
+    "vcp-mobile:default",
     "core:window:allow-close",
     "core:window:allow-hide",
     "core:webview:allow-create-webview-window",

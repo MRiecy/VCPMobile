@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useOverlayStore } from '../core/stores/overlay';
+import VcpConfirm from './ui/VcpConfirm.vue';
 import VcpPrompt from './ui/VcpPrompt.vue';
 import ToastManager from './ui/ToastManager.vue';
 import ContextMenuSheet from './ui/ContextMenuSheet.vue';
@@ -30,6 +31,12 @@ const handleEditorSave = async (newContent: string) => {
       :title="overlayStore.promptConfig.title" :initial-value="overlayStore.promptConfig.initialValue"
       :placeholder="overlayStore.promptConfig.placeholder" @confirm="handlePromptConfirm"
       @cancel="overlayStore.closePrompt()" @update:isOpen="!$event && overlayStore.closePrompt()" />
+
+    <VcpConfirm v-if="overlayStore.confirmConfig" :is-open="!!overlayStore.confirmConfig"
+      :title="overlayStore.confirmConfig.title" :message="overlayStore.confirmConfig.message"
+      :confirm-text="overlayStore.confirmConfig.confirmText" :cancel-text="overlayStore.confirmConfig.cancelText"
+      :is-danger="overlayStore.confirmConfig.isDanger" :only-confirm="overlayStore.confirmConfig.onlyConfirm"
+      @confirm="overlayStore.resolveConfirm(true)" @cancel="overlayStore.resolveConfirm(false)" />
 
     <!-- 全局 Context Menu -->
     <ContextMenuSheet v-if="overlayStore.contextMenuConfig" :is-open="!!overlayStore.contextMenuConfig"

@@ -122,6 +122,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     var webViewRef: WebView? = null
     private var isAppInForeground = true
     private var pendingNotificationData: JSObject? = null
+    private var autoStartReflectionFailureLogged = false
 
     private fun handleNotificationIntent(intent: Intent) {
         val topicId = intent.getStringExtra("topicId")
@@ -233,6 +234,25 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    private fun isBackgroundExecutionRestricted(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
+        val activityManager = activity.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+        return activityManager?.isBackgroundRestricted ?: false
+    }
+
+    private fun requiresManualPowerManagementConfirmation(): Boolean {
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
+        return manufacturer.contains("xiaomi") ||
+            manufacturer.contains("redmi") ||
+            manufacturer.contains("oppo") ||
+            manufacturer.contains("oneplus") ||
+            manufacturer.contains("realme") ||
+            manufacturer.contains("huawei") ||
+            manufacturer.contains("honor") ||
+            manufacturer.contains("vivo") ||
+            manufacturer.contains("meizu")
+    }
+
     private fun hasAgentMessageRingCapability(notificationGranted: Boolean): Boolean {
         if (!notificationGranted) return false
         if (!androidx.core.app.NotificationManagerCompat.from(activity).areNotificationsEnabled()) return false
@@ -298,6 +318,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val backgroundRestricted = isBackgroundExecutionRestricted()
+        val requiresManualPowerManagement = requiresManualPowerManagementConfirmation()
         val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
         val result = JSObject()
@@ -308,6 +330,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         result.put("camera", cameraGranted)
         result.put("location", locationGranted)
         result.put("battery", batteryOptimizationIgnored)
+        result.put("backgroundRestricted", backgroundRestricted)
+        result.put("requiresManualPowerManagement", requiresManualPowerManagement)
         result.put("overlay", overlayGranted)
         
         invoke.resolve(result)
@@ -446,16 +470,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                         Int::class.javaPrimitiveType,
                         String::class.java
                     )
-                    // 10008 is OP_AUTO_START in MIUI / HyperOS AppOpsManager
+                    // 10008 is OP_AUTO_START in MIUI / HyperOS AppOpsManager.
                     val mode = method.invoke(
                         ops,
                         10008,
                         activity.applicationInfo.uid,
                         activity.packageName
                     ) as Int
+                    autoStartReflectionFailureLogged = false
                     return if (mode == android.app.AppOpsManager.MODE_ALLOWED) "true" else "false"
                 } catch (e: Exception) {
-                    Log.e(TAG, "checkAutoStartStatus: reflection failed", e)
+                    if (!autoStartReflectionFailureLogged) {
+                        autoStartReflectionFailureLogged = true
+                        Log.w(TAG, "checkAutoStartStatus: reflection failed; falling back to manual confirmation", e)
+                    }
                 }
             }
         }
@@ -669,9 +697,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val backgroundRestricted = isBackgroundExecutionRestricted()
+        val requiresManualPowerManagement = requiresManualPowerManagementConfirmation()
         val overlayGranted = floatingWindowManager.hasOverlayPermission()
 
-        val json = """{"notification":$notificationGranted,"ring":$ringGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"overlay":$overlayGranted,"location":$locationGranted}"""
+        val json = """{"notification":$notificationGranted,"ring":$ringGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"backgroundRestricted":$backgroundRestricted,"requiresManualPowerManagement":$requiresManualPowerManagement,"overlay":$overlayGranted,"location":$locationGranted}"""
         val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
         activity.runOnUiThread {
             webViewRef?.evaluateJavascript(script, null)
@@ -2579,6 +2609,18 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             Log.e(TAG, "startHelperService failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
+    }
+
+    @Command
+    fun getPendingNotification(invoke: Invoke) {
+        val data = pendingNotificationData
+        if (data == null) {
+            invoke.resolve(JSObject())
+            return
+        }
+
+        pendingNotificationData = null
+        invoke.resolve(data)
     }
 }
 

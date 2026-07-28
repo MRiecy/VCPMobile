@@ -232,7 +232,9 @@ export function useNotificationProcessor() {
               message = prefix ? `${prefix}${prefix.endsWith(':') ? ' ' : ': '}${errorMsg}` : errorMsg;
               isPreformatted = false;
             }
-          } catch (e) { }
+          } catch {
+            // 探测性解析失败时保留原始错误文本，避免在高频通知路径产生日志噪音。
+          }
         }
 
         // 尝试解析内部元数据 (MaidName, timestamp)
@@ -282,7 +284,9 @@ export function useNotificationProcessor() {
             );
             isPreformatted = false;
           }
-        } catch (e) { }
+        } catch {
+          // 普通文本不是元数据 JSON，继续使用原始内容展示。
+        }
       } else if (vcpData.source === 'DistPluginManager' || vcpData.source === 'Distributed') {
         title = '分布式服务器';
         message = vcpData.content || JSON.stringify(vcpData);

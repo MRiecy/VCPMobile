@@ -6,11 +6,14 @@ use tauri::Manager;
 use tauri::{AppHandle, Runtime};
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionStatus {
     pub notification: bool,
     pub ring: bool,
     pub storage: bool,
     pub battery: bool,
+    pub background_restricted: bool,
+    pub requires_manual_power_management: bool,
     pub microphone: bool,
     pub camera: bool,
     pub overlay: bool,
@@ -38,6 +41,8 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
             ring: true,
             storage: true,
             battery: true,
+            background_restricted: false,
+            requires_manual_power_management: false,
             microphone: true,
             camera: true,
             overlay: true,

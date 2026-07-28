@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-acquire-foreground"
+description = "Enables the acquire_foreground command without any pre-configured scope."
+commands.allow = ["acquire_foreground"]
+
+[[permission]]
+identifier = "deny-acquire-foreground"
+description = "Denies the acquire_foreground command without any pre-configured scope."
+commands.deny = ["acquire_foreground"]

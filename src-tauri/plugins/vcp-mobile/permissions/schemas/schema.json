@@ -301,6 +301,18 @@
           "markdownDescription": "Allow all commands in vcp-mobile plugin"
         },
         {
+          "description": "Enables the acquire_foreground command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-acquire-foreground",
+          "markdownDescription": "Enables the acquire_foreground command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the acquire_foreground command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-acquire-foreground",
+          "markdownDescription": "Denies the acquire_foreground command without any pre-configured scope."
+        },
+        {
           "description": "Enables the acquire_wake_lock command without any pre-configured scope.",
           "type": "string",
           "const": "allow-acquire-wake-lock",
@@ -349,6 +361,30 @@
           "markdownDescription": "Denies the check_all_permissions command without any pre-configured scope."
         },
         {
+          "description": "Enables the check_auto_start_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-auto-start-permission",
+          "markdownDescription": "Enables the check_auto_start_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_auto_start_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-auto-start-permission",
+          "markdownDescription": "Denies the check_auto_start_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the check_notification_listener_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-check-notification-listener-permission",
+          "markdownDescription": "Enables the check_notification_listener_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the check_notification_listener_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-check-notification-listener-permission",
+          "markdownDescription": "Denies the check_notification_listener_permission command without any pre-configured scope."
+        },
+        {
           "description": "Enables the check_root_access command without any pre-configured scope.",
           "type": "string",
           "const": "allow-check-root-access",
@@ -371,6 +407,18 @@
           "type": "string",
           "const": "deny-clear-keep-screen-on",
           "markdownDescription": "Denies the clear_keep_screen_on command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the delete_temp_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-delete-temp-file",
+          "markdownDescription": "Enables the delete_temp_file command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the delete_temp_file command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-delete-temp-file",
+          "markdownDescription": "Denies the delete_temp_file command without any pre-configured scope."
         },
         {
           "description": "Enables the get_battery_status command without any pre-configured scope.",
@@ -397,6 +445,18 @@
           "markdownDescription": "Denies the get_cpu_thermal_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_free_disk_space command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-free-disk-space",
+          "markdownDescription": "Enables the get_free_disk_space command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_free_disk_space command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-free-disk-space",
+          "markdownDescription": "Denies the get_free_disk_space command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_gpu_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-gpu-status",
@@ -419,6 +479,18 @@
           "type": "string",
           "const": "deny-get-network-status",
           "markdownDescription": "Denies the get_network_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_pending_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-pending-notification",
+          "markdownDescription": "Enables the get_pending_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_pending_notification command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-pending-notification",
+          "markdownDescription": "Denies the get_pending_notification command without any pre-configured scope."
         },
         {
           "description": "Enables the get_process_exit_diagnostics command without any pre-configured scope.",
@@ -505,6 +577,18 @@
           "markdownDescription": "Denies the register_shared_files command without any pre-configured scope."
         },
         {
+          "description": "Enables the release_foreground command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-release-foreground",
+          "markdownDescription": "Enables the release_foreground command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the release_foreground command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-release-foreground",
+          "markdownDescription": "Denies the release_foreground command without any pre-configured scope."
+        },
+        {
           "description": "Enables the release_wake_lock command without any pre-configured scope.",
           "type": "string",
           "const": "allow-release-wake-lock",
@@ -529,6 +613,30 @@
           "markdownDescription": "Denies the request_android_permission command without any pre-configured scope."
         },
         {
+          "description": "Enables the request_auto_start_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-auto-start-permission",
+          "markdownDescription": "Enables the request_auto_start_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_auto_start_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-auto-start-permission",
+          "markdownDescription": "Denies the request_auto_start_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_notification_listener_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-notification-listener-permission",
+          "markdownDescription": "Enables the request_notification_listener_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_notification_listener_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-notification-listener-permission",
+          "markdownDescription": "Denies the request_notification_listener_permission command without any pre-configured scope."
+        },
+        {
           "description": "Enables the request_overlay_permission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-request-overlay-permission",
@@ -539,6 +647,18 @@
           "type": "string",
           "const": "deny-request-overlay-permission",
           "markdownDescription": "Denies the request_overlay_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the request_power_management_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-request-power-management-permission",
+          "markdownDescription": "Enables the request_power_management_permission command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the request_power_management_permission command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-request-power-management-permission",
+          "markdownDescription": "Denies the request_power_management_permission command without any pre-configured scope."
         },
         {
           "description": "Enables the run_root_command command without any pre-configured scope.",
@@ -625,6 +745,18 @@
           "markdownDescription": "Denies the start_download_notification command without any pre-configured scope."
         },
         {
+          "description": "Enables the start_helper_service command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-helper-service",
+          "markdownDescription": "Enables the start_helper_service command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_helper_service command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-helper-service",
+          "markdownDescription": "Denies the start_helper_service command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_network_monitoring command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-network-monitoring",
@@ -649,18 +781,6 @@
           "markdownDescription": "Denies the start_sensor_collection command without any pre-configured scope."
         },
         {
-          "description": "Enables the start_stream_service command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-start-stream-service",
-          "markdownDescription": "Enables the start_stream_service command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the start_stream_service command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-start-stream-service",
-          "markdownDescription": "Denies the start_stream_service command without any pre-configured scope."
-        },
-        {
           "description": "Enables the start_streaming_service command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-streaming-service",
@@ -683,18 +803,6 @@
           "type": "string",
           "const": "deny-stop-sensor-collection",
           "markdownDescription": "Denies the stop_sensor_collection command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the stop_stream_service command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-stop-stream-service",
-          "markdownDescription": "Enables the stop_stream_service command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the stop_stream_service command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-stop-stream-service",
-          "markdownDescription": "Denies the stop_stream_service command without any pre-configured scope."
         },
         {
           "description": "Enables the stop_streaming_service command without any pre-configured scope.",

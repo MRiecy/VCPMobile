@@ -164,7 +164,9 @@ function firstToolBodyString(value: unknown, depth = 0): string | null {
       }
       const nested = firstToolBodyString(parsed, depth + 1);
       if (nested) return nested;
-    } catch {}
+    } catch {
+      return trimmed;
+    }
     return trimmed;
   }
 

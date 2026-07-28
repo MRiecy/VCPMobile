@@ -18,6 +18,22 @@ export interface PromptConfig {
   onConfirm: (val: string) => void;
 }
 
+export interface ConfirmOptions {
+  title: string;
+  message: string;
+  confirmText?: string;
+  cancelText?: string;
+  isDanger?: boolean;
+  onlyConfirm?: boolean;
+}
+
+export interface ConfirmConfig extends ConfirmOptions {
+  confirmText: string;
+  cancelText: string;
+  isDanger: boolean;
+  onlyConfirm: boolean;
+}
+
 export interface EditorConfig {
   initialValue: string;
   onSave: (newContent: string) => void;

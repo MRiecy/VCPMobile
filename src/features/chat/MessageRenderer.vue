@@ -851,9 +851,25 @@ const showMessageContextMenu = async () => {
     label: "删除消息",
     icon: Trash2,
     danger: true,
-    handler: () => {
-      if (confirm("确定要删除这条消息吗？")) {
-        historyStore.deleteMessage(props.message.id);
+    handler: async () => {
+      const confirmed = await overlayStore.showConfirm({
+        title: "删除消息",
+        message: "确定要删除这条消息吗？此操作不可撤销。",
+        confirmText: "删除",
+        isDanger: true,
+      });
+      if (!confirmed) return;
+
+      try {
+        await historyStore.deleteMessage(props.message.id);
+      } catch (error) {
+        console.error("[MessageRenderer] Failed to delete message:", error);
+        notificationStore.addNotification({
+          type: "error",
+          title: "删除消息失败",
+          message: "消息未被删除，请稍后重试。",
+          toastOnly: true,
+        });
       }
     },
   });

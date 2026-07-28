@@ -4,7 +4,14 @@ import { useModalHistory } from '../composables/useModalHistory';
 import { LAYER_PAGE_BASE, LAYER_PAGE_MAX_OFFSET } from '../constants/layers';
 import { useSyncSessionStore } from './syncSession';
 import { useRebuildSessionStore } from './rebuildSession';
-import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig } from '../types/overlay';
+import type {
+  ConfirmConfig,
+  ConfirmOptions,
+  ContextMenuConfig,
+  EditorConfig,
+  OverlayActionItem,
+  PromptConfig,
+} from '../types/overlay';
 
 interface PageStackItem {
   type: string;
@@ -12,12 +19,35 @@ interface PageStackItem {
   modalId: string;
 }
 
+interface ConfirmRequest {
+  options: ConfirmOptions;
+  resolve: (confirmed: boolean) => void;
+  settled: boolean;
+}
+
 export const useOverlayStore = defineStore('overlay', () => {
-  const { registerModal, unregisterModal } = useModalHistory();
+  const { registerModal, unregisterModal, replaceModal } = useModalHistory();
 
   const promptConfig = ref<PromptConfig | null>(null);
+  const confirmConfig = ref<ConfirmConfig | null>(null);
   const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
+
+  const confirmQueue: ConfirmRequest[] = [];
+  let activeConfirm: ConfirmRequest | null = null;
+
+  const registerOverlayModal = (modalId: string, closeHandler: () => void) => {
+    if (
+      modalId !== 'ContextMenu' &&
+      contextMenuConfig.value &&
+      replaceModal('ContextMenu', modalId, closeHandler)
+    ) {
+      contextMenuConfig.value = null;
+      return;
+    }
+
+    registerModal(modalId, closeHandler);
+  };
 
   // --- Page Stack (Virtual Navigation Stack) ---
   const pageStack = ref<PageStackItem[]>([]);
@@ -193,7 +223,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
-    registerModal('Prompt', () => { promptConfig.value = null; });
+    registerOverlayModal('Prompt', () => { promptConfig.value = null; });
   };
 
   const closePrompt = () => {
@@ -201,6 +231,67 @@ export const useOverlayStore = defineStore('overlay', () => {
       unregisterModal('Prompt');
       promptConfig.value = null;
     }
+  };
+
+  function activateNextConfirm() {
+    if (activeConfirm || confirmQueue.length === 0) return;
+
+    const request = confirmQueue.shift();
+    if (!request) return;
+
+    activeConfirm = request;
+    confirmConfig.value = {
+      title: request.options.title,
+      message: request.options.message,
+      confirmText: request.options.confirmText || '确认',
+      cancelText: request.options.cancelText || '取消',
+      isDanger: request.options.isDanger ?? false,
+      onlyConfirm: request.options.onlyConfirm ?? false,
+    };
+
+    registerOverlayModal('Confirm', () => {
+      settleConfirm(false, true);
+    });
+  }
+
+  function settleConfirm(confirmed: boolean, fromHistory = false) {
+    const request = activeConfirm;
+    if (!request || request.settled) return;
+
+    request.settled = true;
+    const result = confirmConfig.value?.onlyConfirm ? true : confirmed;
+    confirmConfig.value = null;
+
+    const finalize = () => {
+      if (activeConfirm !== request) return;
+      activeConfirm = null;
+      request.resolve(result);
+
+      if (confirmQueue.length > 0) {
+        queueMicrotask(activateNextConfirm);
+      }
+    };
+
+    if (fromHistory) {
+      finalize();
+    } else {
+      unregisterModal('Confirm', finalize);
+    }
+  }
+
+  const showConfirm = (options: ConfirmOptions): Promise<boolean> => {
+    return new Promise<boolean>((resolve) => {
+      confirmQueue.push({ options, resolve, settled: false });
+      activateNextConfirm();
+    });
+  };
+
+  const resolveConfirm = (confirmed: boolean) => {
+    settleConfirm(confirmed);
+  };
+
+  const closeConfirm = () => {
+    settleConfirm(false);
   };
 
   const openContextMenu = (actions: OverlayActionItem[], title?: string) => {
@@ -220,7 +311,7 @@ export const useOverlayStore = defineStore('overlay', () => {
 
   const openEditor = (config: EditorConfig) => {
     editorConfig.value = config;
-    registerModal('FullScreenEditor', () => { editorConfig.value = null; });
+    registerOverlayModal('FullScreenEditor', () => { editorConfig.value = null; });
   };
 
   const closeEditor = () => {
@@ -271,10 +362,14 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeRagObserver,
     // Modals
     promptConfig,
+    confirmConfig,
     contextMenuConfig,
     editorConfig,
     openPrompt,
     closePrompt,
+    showConfirm,
+    resolveConfirm,
+    closeConfirm,
     openContextMenu,
     closeContextMenu,
     openEditor,
