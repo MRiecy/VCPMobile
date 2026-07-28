@@ -622,7 +622,7 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
                 match client
                     .get(&url)
                     .header("x-sync-token", &settings.sync_token)
-                    .header("Authorization", format!("Bearer {}", &settings.sync_token))
+                    .header("Authorization", format!("Bearer {}", settings.sync_token))
                     .send()
                     .await
                 {
