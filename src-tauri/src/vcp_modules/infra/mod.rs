@@ -9,6 +9,7 @@ pub mod local_server;
 pub mod maintenance_manager;
 pub mod media_processor;
 pub mod model_manager;
+pub mod runtime_diagnostics;
 pub mod settings_manager;
 pub mod utils;
 pub mod vcp_client;

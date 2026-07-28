@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { MarkdownNode, InlineNode } from "../types/chat";
+import { renderMessageRawHtml } from "./safeMessageHtml";
 
 // HTML 缓存：避免重复遍历 AST 拼接相同内容
 const htmlCache = new Map<string, string>();
@@ -104,7 +105,7 @@ function renderNode(node: MarkdownNode, messageId: string): string {
       return `<div class="mermaid-placeholder">${escapeHtml(node.code || '')}</div>`;
     
     case 'raw_html':
-      return node.content || '';
+      return renderMessageRawHtml(node.content || '');
     
     default:
       return '';
@@ -166,7 +167,7 @@ function renderInline(node: InlineNode): string {
       return `<span class="highlighted-alert-tag">${escapeHtml(node.value || '')}</span>`;
     
     case 'raw_html_inline':
-      return node.content || '';
+      return renderMessageRawHtml(node.content || '');
     
     default:
       return '';

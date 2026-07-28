@@ -327,7 +327,7 @@ lazy_static! {
 
     pub(crate) static ref KV_REGEX: Regex = Regex::new(r"^-\s*([^:]+):\s*(.*)").unwrap();
 
-    pub(crate) static ref HTML_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```html[ \t]*\r?$").unwrap();
+    pub(crate) static ref HTML_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*`{3,}html[ \t]*\r?$").unwrap();
     pub(crate) static ref HTML_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
 
     // 修复：强行增加行首锚定符 ^，防止正文中的内联 `<!DOCTYPE html>` 触发解析截断
@@ -346,7 +346,7 @@ lazy_static! {
     pub(crate) static ref HTML_TAG_BLOCK_RE: Regex =
         Regex::new(r"(?im)^[ \t]*<(?:style\b[^>]*>?|html[\s>]|!doctype\s+html|/?(?:div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)").unwrap();
 
-    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
+    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
     pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
 
 
@@ -446,7 +446,7 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
     result
 }
 
-fn find_matching_fence_end(
+pub(crate) fn find_matching_fence_end(
     search_area: &str,
     start_marker_text: &str,
 ) -> (Option<usize>, Option<usize>, bool) {
@@ -489,11 +489,11 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(<think(?:ing)?>)|",                                     // 3
             r"(^[ \t]*\[\[VCP调用结果信息汇总:)|",                     // 4
             r"(^[ \t]*<<<DailyNoteStart>>>)|",                         // 5
-            r"(^[ \t]*```html[ \t]*$)|",                               // 6
+            r"(^[ \t]*`{3,}html[ \t]*$)|",                            // 6
             r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 7
             r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 8
             r"(^[ \t]*<style\b[^>]*>)|",                                      // 9
-            r"(^[ \t]*```[a-zA-Z0-9-]*[ \t]*$)|",                       // 10
+            r"(^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*$)|",                    // 10
             r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)|", // 11
             r"(^[ \t]*\[本轮工具调用摘要:\])"                          // 13
         )).unwrap();
@@ -554,6 +554,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             // 2. 寻找对应的结束标记
             let content_start = end_idx;
             let search_area = &remaining[content_start..];
+            let start_marker_text = &remaining[start_idx..end_idx];
 
             let (end_marker_start, end_marker_end, is_complete) = match block_type {
                 BlockType::Tool => TOOL_END.find(search_area).map_or((None, None, false), |m| {
@@ -584,11 +585,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
                     }),
-                BlockType::HtmlFence => HTML_FENCE_END
-                    .find(search_area)
-                    .map_or((None, None, false), |m| {
-                        (Some(m.start()), Some(m.end()), true)
-                    }),
+                BlockType::HtmlFence => {
+                    find_matching_fence_end(search_area, start_marker_text)
+                }
                 BlockType::HtmlDoc => HTML_DOC_END
                     .find(search_area)
                     .map_or((None, None, false), |m| {
@@ -604,11 +603,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
                     }),
-                BlockType::CodeFence => GENERIC_CODE_FENCE_END
-                    .find(search_area)
-                    .map_or((None, None, false), |m| {
-                        (Some(m.start()), Some(m.end()), true)
-                    }),
+                BlockType::CodeFence => {
+                    find_matching_fence_end(search_area, start_marker_text)
+                }
             };
 
             // 容错处理：未闭合的块（流式中断）降级为普通 Markdown

@@ -104,6 +104,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     init {
         instanceRef = java.lang.ref.WeakReference(this)
+        CrashDiagnostics.install(activity.applicationContext)
         activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
         startHelperServiceInternal()
     }
@@ -171,6 +172,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val sensorStatusManager = SensorStatusManager(activity)
     private val shareIntentHandler = ShareIntentHandler(this)
     private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val oomGuardExecutor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+    private val oomGuardStarted = java.util.concurrent.atomic.AtomicBoolean(false)
     private var cameraTempFile: java.io.File? = null
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var lastConnected: Boolean? = null
@@ -191,6 +194,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 activity.startService(intent)
             }
             Log.i(TAG, "SseProxyService start initiated.")
+        } catch (e: IllegalStateException) {
+            Log.e(
+                TAG,
+                "Foreground service start rejected (ForegroundServiceStartNotAllowedException/IllegalStateException). Waiting for foreground or network recovery retry.",
+                e
+            )
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Foreground service start rejected by permission or service type policy", e)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start SseProxyService: ", e)
         }
@@ -392,22 +403,28 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun startOomScoreGuard() {
-        fileIoExecutor.execute {
+        if (!oomGuardStarted.compareAndSet(false, true)) return
+        oomGuardExecutor.execute {
             try {
                 // 利用 topjohnwu 的 superuser 库检查 root 状态
                 if (Shell.getShell().isRoot) {
                     val pid = android.os.Process.myPid()
                     Log.i(TAG, "OomScoreGuard: Root detected. Locking OOM score adj for PID $pid to -900.")
-                    while (true) {
+                    val applyOomScore = Runnable {
                         try {
                             // 强行把 oom_score_adj 改为 -900
                             Shell.cmd("echo -900 > /proc/$pid/oom_score_adj").exec()
                         } catch (e: Exception) {
                             Log.e(TAG, "OomScoreGuard: Write command failed", e)
                         }
-                        // 每 20 秒循环锁定一次，应对部分定制系统后台回收机制的复原
-                        Thread.sleep(20000)
                     }
+                    applyOomScore.run()
+                    oomGuardExecutor.scheduleWithFixedDelay(
+                        applyOomScore,
+                        20,
+                        20,
+                        TimeUnit.SECONDS
+                    )
                 } else {
                     Log.i(TAG, "OomScoreGuard: Non-root device. Skipping OOM score lock.")
                 }
@@ -1145,6 +1162,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         try {
             fileIoExecutor.shutdown()
         } catch (_: Exception) {}
+        try {
+            oomGuardExecutor.shutdownNow()
+        } catch (_: Exception) {}
         super.onDestroy(activity)
     }
 
@@ -1843,6 +1863,71 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    @Command
+    fun shareFile(invoke: Invoke) {
+        val args = invoke.parseArgs(ShareFileArgs::class.java)
+        val path = args.path
+        if (path.isBlank()) {
+            invoke.reject("Path is empty")
+            return
+        }
+
+        fileIoExecutor.execute {
+            try {
+                val context = activity
+                if (!isSafeLocalPath(context, path)) {
+                    invoke.reject("安全拒绝：禁止分享沙箱外部文件")
+                    return@execute
+                }
+
+                val file = java.io.File(path)
+                if (!file.exists() || !file.isFile) {
+                    invoke.reject("文件不存在: $path")
+                    return@execute
+                }
+
+                val mimeType = MimeTypeMap.getSingleton()
+                    .getMimeTypeFromExtension(file.extension.lowercase()) ?: "application/octet-stream"
+                val uri = try {
+                    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                } catch (error: Exception) {
+                    Log.w(TAG, "[shareFile] Fallback to opener FileProvider authority", error)
+                    FileProvider.getUriForFile(context, "${context.packageName}.opener.fileprovider", file)
+                }
+
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = mimeType
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    clipData = android.content.ClipData.newUri(context.contentResolver, file.name, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val chooser = Intent.createChooser(
+                    shareIntent,
+                    args.title?.takeIf { it.isNotBlank() } ?: "分享文件"
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(chooser)
+                invoke.resolve()
+            } catch (error: Throwable) {
+                Log.e(TAG, "[shareFile] Failed", error)
+                invoke.reject("分享文件失败: ${error.message}")
+            }
+        }
+    }
+
+    @Command
+    fun getProcessExitDiagnostics(invoke: Invoke) {
+        fileIoExecutor.execute {
+            try {
+                invoke.resolve(CrashDiagnostics.collectHistoricalExitReasons(activity.applicationContext))
+            } catch (error: Throwable) {
+                Log.e(TAG, "[getProcessExitDiagnostics] Failed", error)
+                invoke.reject("读取 Android 退出诊断失败: ${error.message}")
+            }
+        }
+    }
+
     // ==================================================================
     // Security Sandbox Boundary & Verification
     // ==================================================================
@@ -2514,6 +2599,12 @@ class OpenFileArgs {
 }
 
 @InvokeArg
+class ShareFileArgs {
+    lateinit var path: String
+    var title: String? = null
+}
+
+@InvokeArg
 class PickFileArgs {
     var mode: String = "file"
 }
@@ -2608,6 +2699,3 @@ class SendLocalNotificationArgs {
     lateinit var title: String
     lateinit var body: String
 }
-
-
-

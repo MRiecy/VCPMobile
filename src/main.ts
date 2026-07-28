@@ -5,6 +5,9 @@ import App from "./App.vue";
 import { router } from "./core/router";
 import { vIntersectionObserver } from "./core/directives/intersectionObserver";
 import { vLongpress } from "./core/directives/longpress";
+import { installRuntimeDiagnostics } from "./core/utils/runtimeDiagnostics";
+import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import 'virtual:uno.css'
 import "@unocss/reset/tailwind.css"
@@ -14,6 +17,8 @@ import "katex/dist/katex.min.css"
 
 const app = createApp(App);
 const pinia = createPinia();
+const currentWin = getCurrentWindow();
+installRuntimeDiagnostics(app, currentWin.label);
 pinia.use(piniaPluginPersistedstate);
 
 app.use(pinia);
@@ -24,9 +29,6 @@ app.directive('longpress', vLongpress);
 app.mount("#app");
 
 // 标记前端启动成功（用于 OTA 回滚保护）
-import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-const currentWin = getCurrentWindow();
 if (currentWin.label === 'main') {
   invoke('confirm_frontend_boot').catch(() => {});
 }

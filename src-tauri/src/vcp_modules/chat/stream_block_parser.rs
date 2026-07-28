@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::chat::daily_note::{self, DailyNoteDetails};
 use crate::vcp_modules::content_parser::{
-    BlockType, ToolCallSummaryItem, ToolResultDetail, BUTTON_CLICK, /* extraction helpers */
-    DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END, GENERIC_CODE_FENCE_START, HTML_DOC_END,
-    HTML_DOC_START, HTML_FENCE_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START,
-    THINK_END, THINK_START, THOUGHT_END, THOUGHT_START, TOOL_END, TOOL_NAME, TOOL_RESULT_END,
+    find_matching_fence_end, BlockType, ToolCallSummaryItem, ToolResultDetail,
+    BUTTON_CLICK, /* extraction helpers */
+    DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
+    HTML_FENCE_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END,
+    THINK_START, THOUGHT_END, THOUGHT_START, TOOL_END, TOOL_NAME, TOOL_RESULT_END,
     TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
@@ -401,24 +402,6 @@ fn find_end_marker(
     let content_start = end;
     let search_area = &remaining[content_start..];
 
-    #[cfg(test)]
-    {
-        if *block_type == BlockType::HtmlFence || *block_type == BlockType::CodeFence {
-            let snippet: String = search_area.chars().take(100).collect();
-            println!(
-                "[DIAG_END] find_end_marker for {:?}: search_area len: {}, starts with: {:?}",
-                block_type,
-                search_area.len(),
-                snippet
-            );
-            let m_direct = GENERIC_CODE_FENCE_END.find(search_area);
-            println!(
-                "[DIAG_END] Direct regex match in find_end_marker: {:?}",
-                m_direct
-            );
-        }
-    }
-
     if let BlockType::HtmlContainer = block_type {
         let marker_text = &remaining[start..end];
         if let Some(caps) =
@@ -440,7 +423,15 @@ fn find_end_marker(
         BlockType::ToolCallSummary => {
             crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_END.find(search_area)
         }
-        BlockType::HtmlFence | BlockType::CodeFence => GENERIC_CODE_FENCE_END.find(search_area),
+        BlockType::HtmlFence | BlockType::CodeFence => {
+            let marker_text = &remaining[start..end];
+            let (marker_start, marker_end, is_complete) =
+                find_matching_fence_end(search_area, marker_text);
+            if is_complete {
+                return marker_start.zip(marker_end);
+            }
+            return None;
+        }
         BlockType::HtmlDoc => HTML_DOC_END.find(search_area),
         BlockType::HtmlContainer => unreachable!(),
         BlockType::RoleDivider => {

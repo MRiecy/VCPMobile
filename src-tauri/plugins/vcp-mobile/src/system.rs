@@ -394,6 +394,82 @@ pub fn open_file_native<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(
     Ok(())
 }
 
+#[tauri::command]
+pub fn share_file_native<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+    title: Option<String>,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "shareFile",
+                serde_json::json!({ "path": path, "title": title }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, path, title);
+        Err("文件分享仅在 Android 端可用".to_string())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitDiagnostic {
+    pub timestamp: i64,
+    pub process_name: String,
+    pub reason: String,
+    pub reason_code: i32,
+    pub status: i32,
+    pub importance: i32,
+    pub pss_kb: i64,
+    pub rss_kb: i64,
+    pub description: Option<String>,
+    pub trace: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitDiagnosticsResponse {
+    pub supported: bool,
+    pub entries: Vec<ProcessExitDiagnostic>,
+}
+
+#[tauri::command]
+pub fn get_process_exit_diagnostics<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessExitDiagnosticsResponse, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
+        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+
+        return plugin_handle
+            .run_mobile_plugin::<ProcessExitDiagnosticsResponse>(
+                "getProcessExitDiagnostics",
+                serde_json::json!({}),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(ProcessExitDiagnosticsResponse {
+            supported: false,
+            entries: Vec::new(),
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowSnapshot {

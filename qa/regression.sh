@@ -73,10 +73,15 @@ for file in \
   src/core/router/index.ts \
   src/core/composables/useNotificationProcessor.ts \
   src/core/utils/agentMessagePayload.ts \
+  src/core/utils/safeMessageHtml.ts \
+  src/core/utils/runtimeDiagnostics.ts \
   src-tauri/Cargo.toml \
   src-tauri/src/lib.rs \
+  src-tauri/src/vcp_modules/infra/runtime_diagnostics.rs \
+  src-tauri/src/vcp_modules/infra/runtime_diagnostics/export.rs \
   src-tauri/src/distributed/tools/mod.rs \
   src-tauri/plugins/vcp-mobile/src/lib.rs \
+  src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/CrashDiagnostics.kt \
   src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt \
   qa/regression.sh \
   qa/robustness.sh
@@ -218,6 +223,19 @@ require_pattern "Heartbeat timeout: no inbound WebSocket frame" src-tauri/src/di
 require_pattern "is_distributed_connection_stale" src-tauri/src/distributed/client.rs
 require_pattern "recover_distributed_node_after_network_restore" src-tauri/src/vcp_modules/infra/lifecycle_manager.rs
 require_pattern "recover_distributed_node_after_network_restore\\(&h\\)" src-tauri/src/lib.rs
+require_pattern "renderMessageRawHtml" src/core/utils/astRenderer.ts
+require_pattern "shouldRenderMessageHtml" src/core/utils/astExecutor.ts
+require_pattern "test_unknown_html_like_tags_remain_visible_text" src-tauri/src/vcp_modules/chat/pre_renderer/markdown_parser.rs
+require_pattern "find_matching_fence_end" src-tauri/src/vcp_modules/chat/stream_block_parser.rs
+require_pattern "installRuntimeDiagnostics" src/main.ts
+require_pattern "export_runtime_diagnostics" src/features/settings/components/MaintenanceSection.vue
+require_pattern "record_frontend_diagnostic" src-tauri/src/lib.rs
+require_pattern "install_panic_hook" src-tauri/src/lib.rs
+require_pattern "getHistoricalProcessExitReasons" src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/CrashDiagnostics.kt
+require_pattern 'File\(context\.dataDir, "diagnostics"\)' src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/CrashDiagnostics.kt
+require_pattern "oomGuardExecutor.scheduleWithFixedDelay" src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt
+require_pattern "share_file_native" src-tauri/plugins/vcp-mobile/src/lib.rs
+reject_pattern 'console\.warn\(`\[AST createDomFromNode\]' src/core/utils/astExecutor.ts
 require_pattern "ForegroundServiceStartNotAllowedException/IllegalStateException" src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt
 require_pattern "onTaskRemoved" src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/service/StreamKeepaliveService.kt
 require_pattern "createRecoveryIntent" src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/service/StreamKeepaliveService.kt

@@ -64,6 +64,7 @@ use vcp_modules::model_manager::{
     record_model_usage, refresh_models, start_batch_model_test, stop_all_model_tests,
     test_model_connectivity, toggle_favorite_model,
 };
+use vcp_modules::runtime_diagnostics::{export_runtime_diagnostics, record_frontend_diagnostic};
 
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, is_sync_active,
@@ -129,6 +130,8 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            vcp_modules::runtime_diagnostics::install_panic_hook(app.handle().clone());
+
             // 2. 初始化核心状态
             app.manage(app.handle().clone());
             app.manage(LifecycleState::new());
@@ -352,6 +355,8 @@ pub fn run() {
             get_active_frontend_version,
             clear_frontend_updates,
             confirm_frontend_boot,
+            record_frontend_diagnostic,
+            export_runtime_diagnostics,
         ])
         .run(context)
         .expect("error while running tauri application");

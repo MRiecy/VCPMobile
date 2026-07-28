@@ -66,6 +66,34 @@ export function openFileNative(path: string): Promise<void> {
   return invoke("plugin:vcp-mobile|open_file_native", { path });
 }
 
+export function shareFileNative(path: string, title?: string): Promise<void> {
+  return invoke("plugin:vcp-mobile|share_file_native", { path, title });
+}
+
+export interface ProcessExitDiagnostic {
+  timestamp: number;
+  processName: string;
+  reason: string;
+  reasonCode: number;
+  status: number;
+  importance: number;
+  pssKb: number;
+  rssKb: number;
+  description?: string;
+  trace?: string;
+}
+
+export interface ProcessExitDiagnosticsResponse {
+  supported: boolean;
+  entries: ProcessExitDiagnostic[];
+}
+
+export function getProcessExitDiagnostics(): Promise<ProcessExitDiagnosticsResponse> {
+  return invoke<ProcessExitDiagnosticsResponse>(
+    "plugin:vcp-mobile|get_process_exit_diagnostics"
+  );
+}
+
 export interface GallerySaveResult {
   uri: string;
   displayName: string;

@@ -9,6 +9,7 @@ const overlayStore = useOverlayStore();
 
 const gcStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 const cacheStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
+const diagnosticStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 
 const cleanupAttachments = async () => {
   gcStatus.value = { type: 'loading', message: '正在深度扫描孤儿附件...' };
@@ -38,6 +39,32 @@ const clearSystemCache = async () => {
 
 const openRebuildSession = () => {
   overlayStore.openRebuildSession('preRender');
+};
+
+const exportDiagnostics = async () => {
+  diagnosticStatus.value = { type: 'loading', message: '正在收集崩溃、内存与运行日志...' };
+  try {
+    const path = await invoke<string>('export_runtime_diagnostics');
+    if (/Android/i.test(navigator.userAgent)) {
+      try {
+        await invoke('plugin:vcp-mobile|share_file_native', {
+          path,
+          title: '分享 VCP Mobile 诊断包',
+        });
+      } catch (shareError) {
+        console.warn('[Maintenance] Native diagnostic sharing failed, falling back to open_file:', shareError);
+        await invoke('open_file', { path });
+      }
+    } else {
+      await invoke('open_file', { path });
+    }
+    diagnosticStatus.value = { type: 'success', message: '诊断包已生成，可通过系统面板保存或分享。' };
+    setTimeout(() => { diagnosticStatus.value = { type: null, message: '' }; }, 8000);
+  } catch (e: any) {
+    console.error('[Maintenance] export_runtime_diagnostics failed:', e);
+    const msg = typeof e === 'string' ? e : (e?.message ?? String(e));
+    diagnosticStatus.value = { type: 'error', message: `导出失败: ${msg}` };
+  }
 };
 </script>
 
@@ -82,6 +109,22 @@ const openRebuildSession = () => {
         button-label="一键重建"
         status-mono
         @action-click="openRebuildSession"
+      />
+    </div>
+
+    <div class="pt-4 border-t border-black/5 dark:border-white/5">
+      <SettingsActionWithStatus
+        title="导出闪退诊断包"
+        description="收集前端异常、Rust panic、Android 上次退出原因与最近运行日志；不含聊天数据库，但可能包含错误现场文本"
+        button-variant="primary"
+        button-size="sm"
+        button-label="生成并分享"
+        :button-loading="diagnosticStatus.type === 'loading'"
+        :status-type="diagnosticStatus.type"
+        :status-message="diagnosticStatus.message"
+        status-mono
+        status-multiline
+        @action-click="exportDiagnostics"
       />
     </div>
   </div>

@@ -10,6 +10,8 @@ const COMMANDS: &[&str] = &[
     "get_battery_status",
     "get_network_status",
     "open_file_native",
+    "share_file_native",
+    "get_process_exit_diagnostics",
     "capture_window_snapshot",
     "save_image_to_gallery",
     "save_image_from_path",

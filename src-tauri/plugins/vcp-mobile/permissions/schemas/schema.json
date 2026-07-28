@@ -421,6 +421,18 @@
           "markdownDescription": "Denies the get_network_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_process_exit_diagnostics command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-process-exit-diagnostics",
+          "markdownDescription": "Enables the get_process_exit_diagnostics command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_process_exit_diagnostics command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-process-exit-diagnostics",
+          "markdownDescription": "Denies the get_process_exit_diagnostics command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_sensor_data command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-sensor-data",
@@ -575,6 +587,18 @@
           "type": "string",
           "const": "deny-set-keep-screen-on",
           "markdownDescription": "Denies the set_keep_screen_on command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the share_file_native command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-share-file-native",
+          "markdownDescription": "Enables the share_file_native command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the share_file_native command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-share-file-native",
+          "markdownDescription": "Denies the share_file_native command without any pre-configured scope."
         },
         {
           "description": "Enables the show_system_notification command without any pre-configured scope.",

@@ -626,6 +626,112 @@ fn is_void_html_tag(tag: &str) -> bool {
     )
 }
 
+fn extract_html_tag_name(fragment: &str) -> Option<&str> {
+    let trimmed = fragment.trim();
+    let bytes = trimmed.as_bytes();
+    if bytes.first().copied() != Some(b'<') || bytes.last().copied() != Some(b'>') {
+        return None;
+    }
+
+    let mut cursor = 1;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if cursor < bytes.len() && bytes[cursor] == b'/' {
+        cursor += 1;
+    }
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    let start = cursor;
+    while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'-') {
+        cursor += 1;
+    }
+
+    (cursor > start).then_some(&trimmed[start..cursor])
+}
+
+fn is_supported_message_html(fragment: &str) -> bool {
+    let trimmed = fragment.trim();
+    if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
+        return true;
+    }
+
+    let Some(tag) = extract_html_tag_name(trimmed) else {
+        return false;
+    };
+
+    matches!(
+        tag.to_ascii_lowercase().as_str(),
+        "a" | "abbr"
+            | "article"
+            | "aside"
+            | "b"
+            | "bdi"
+            | "bdo"
+            | "blockquote"
+            | "br"
+            | "caption"
+            | "cite"
+            | "code"
+            | "col"
+            | "colgroup"
+            | "dd"
+            | "del"
+            | "details"
+            | "dfn"
+            | "div"
+            | "dl"
+            | "dt"
+            | "em"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hr"
+            | "i"
+            | "img"
+            | "ins"
+            | "kbd"
+            | "li"
+            | "main"
+            | "mark"
+            | "ol"
+            | "p"
+            | "pre"
+            | "q"
+            | "s"
+            | "samp"
+            | "section"
+            | "small"
+            | "span"
+            | "strong"
+            | "style"
+            | "sub"
+            | "summary"
+            | "sup"
+            | "table"
+            | "tbody"
+            | "td"
+            | "tfoot"
+            | "th"
+            | "thead"
+            | "time"
+            | "tr"
+            | "u"
+            | "ul"
+            | "var"
+            | "wbr"
+    )
+}
+
 /// 从字符串末尾向前查找匹配的 HTML 闭标签，返回 (close_start, close_end)
 pub(crate) fn find_matching_close_tag(
     text: &str,
@@ -926,11 +1032,29 @@ fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNod
                 }
             }
             Event::Html(html) => {
-                nodes.push(MarkdownNode::raw_html(html.to_string()));
+                if is_supported_message_html(html.as_ref()) {
+                    nodes.push(MarkdownNode::raw_html(html.to_string()));
+                } else {
+                    nodes.push(MarkdownNode::paragraph(vec![InlineNode::text(
+                        html.to_string(),
+                    )]));
+                }
             }
             Event::InlineHtml(html) => {
                 if let Some(top) = stack.last_mut() {
-                    top.push_inline(InlineNode::raw_html_inline(html.to_string()));
+                    if is_supported_message_html(html.as_ref()) {
+                        top.push_inline(InlineNode::raw_html_inline(html.to_string()));
+                    } else {
+                        top.push_inline(InlineNode::text(html.to_string()));
+                    }
+                } else if is_supported_message_html(html.as_ref()) {
+                    nodes.push(MarkdownNode::paragraph(vec![InlineNode::raw_html_inline(
+                        html.to_string(),
+                    )]));
+                } else {
+                    nodes.push(MarkdownNode::paragraph(vec![InlineNode::text(
+                        html.to_string(),
+                    )]));
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -1787,6 +1911,44 @@ mod tests {
 
         // 应该完全没有任何修改，因为这段内容全部在 4 个反引号的代码围栏中
         assert_eq!(fixed, text);
+    }
+
+    #[test]
+    fn test_unknown_html_like_tags_remain_visible_text() {
+        let nodes = parse_markdown_to_ast("前缀 <reason>隐藏内容</reason> 后缀");
+        assert_eq!(nodes.len(), 1);
+
+        let MarkdownNode::Paragraph { children, .. } = &nodes[0] else {
+            panic!("Expected Paragraph");
+        };
+
+        assert_eq!(children.len(), 5);
+        assert_eq!(children[0], InlineNode::text("前缀 ".to_string()));
+        assert_eq!(children[1], InlineNode::text("<reason>".to_string()));
+        assert_eq!(children[2], InlineNode::text("隐藏内容".to_string()));
+        assert_eq!(children[3], InlineNode::text("</reason>".to_string()));
+        assert_eq!(children[4], InlineNode::text(" 后缀".to_string()));
+    }
+
+    #[test]
+    fn test_unknown_block_html_like_tags_remain_visible_text() {
+        let nodes = parse_markdown_to_ast("<reason>\n隐藏内容\n</reason>");
+        let serialized = serde_json::to_string(&nodes).expect("serialize markdown nodes");
+
+        assert!(serialized.contains("<reason>"));
+        assert!(serialized.contains("隐藏内容"));
+        assert!(serialized.contains("</reason>"));
+    }
+
+    #[test]
+    fn test_supported_inline_html_stays_renderable() {
+        let nodes = parse_markdown_to_ast("按 <kbd>Ctrl</kbd> 继续");
+        let MarkdownNode::Paragraph { children, .. } = &nodes[0] else {
+            panic!("Expected Paragraph");
+        };
+
+        assert!(matches!(children[1], InlineNode::RawHtmlInline { .. }));
+        assert!(matches!(children[3], InlineNode::RawHtmlInline { .. }));
     }
 
     #[test]

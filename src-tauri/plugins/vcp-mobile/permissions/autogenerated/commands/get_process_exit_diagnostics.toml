@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-process-exit-diagnostics"
+description = "Enables the get_process_exit_diagnostics command without any pre-configured scope."
+commands.allow = ["get_process_exit_diagnostics"]
+
+[[permission]]
+identifier = "deny-get-process-exit-diagnostics"
+description = "Denies the get_process_exit_diagnostics command without any pre-configured scope."
+commands.deny = ["get_process_exit_diagnostics"]

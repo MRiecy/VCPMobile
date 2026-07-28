@@ -59,6 +59,7 @@ pub use infra::lifecycle_manager;
 pub use infra::maintenance_manager;
 pub use infra::media_processor;
 pub use infra::model_manager;
+pub use infra::runtime_diagnostics;
 pub use infra::settings_manager;
 pub use infra::vcp_client;
 pub use infra::vcp_info_service;

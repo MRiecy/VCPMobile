@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import morphdom from "morphdom";
 import type { MarkdownNode, InlineNode, AstMutation } from "../types/chat";
+import { shouldRenderMessageHtml } from "./safeMessageHtml";
 
 function isAstDebugEnabled(): boolean {
   return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
@@ -173,7 +174,7 @@ function createDomFromNode(
   id: string,
   registry: Map<string, Node>
 ): Node {
-  console.warn(`[AST createDomFromNode] id=${id}, node=${JSON.stringify(node)}`);
+  astDebugLog(`[AST createDomFromNode] id=${id}, node=${JSON.stringify(node)}`);
   let el: HTMLElement;
   switch (node.type) {
     case "paragraph":
@@ -298,16 +299,21 @@ function createDomFromNode(
     case "raw_html": {
       el = document.createElement("div");
       el.className = "vcp-raw-html-container";
+      const rawHtml = node.content || "";
+      if (!shouldRenderMessageHtml(rawHtml)) {
+        el.textContent = rawHtml;
+        break;
+      }
       // 物理防御：由于 node.content 在流式打字期间可能是极度残缺、未闭合的裸 HTML（如 <img src="...），
       // 直接赋给 innerHTML 会导致部分 WebView 解析器因无法定位标签边界而直接丢弃并生成空 DOM。
       // 我们通过外层临时 <div> 进行强行诱导闭合补全，确保浏览器能够正确还原并渲染中间状态节点。
       const temp = document.createElement("div");
-      temp.innerHTML = `<div>${repairHtmlFragment(node.content || "")}</div>`;
+      temp.innerHTML = `<div>${repairHtmlFragment(rawHtml)}</div>`;
       const parsed = temp.firstElementChild;
       if (parsed) {
         el.innerHTML = parsed.innerHTML;
       } else {
-        el.innerHTML = node.content || "";
+        el.innerHTML = rawHtml;
       }
       break;
     }
@@ -431,14 +437,20 @@ function createInlineDom(
 
     case "raw_html_inline": {
       const span = document.createElement("span");
+      const rawHtml = node.content || "";
+      if (!shouldRenderMessageHtml(rawHtml)) {
+        span.textContent = rawHtml;
+        el = span;
+        break;
+      }
       // 物理防御：使用临时 <div> 强行闭合可能未闭合的 inline 标签，防止 WebView 抛弃节点
       const temp = document.createElement("div");
-      temp.innerHTML = `<div>${repairHtmlFragment(node.content || "")}</div>`;
+      temp.innerHTML = `<div>${repairHtmlFragment(rawHtml)}</div>`;
       const parsed = temp.firstElementChild;
       if (parsed) {
         span.innerHTML = parsed.innerHTML;
       } else {
-        span.innerHTML = node.content || "";
+        span.innerHTML = rawHtml;
       }
       el = span;
       break;
@@ -485,7 +497,7 @@ function executeMutation(
   sandbox: HTMLElement
 ): ExecuteMutationResult {
   const registry = getRegistry(messageId);
-  console.warn(`[AST Mutation Exec] op=${mutation.op}, id=${mutation.id}, parent=${(mutation as any).parent || ''}, chunk=${(mutation as any).chunk || ''}, val=${(mutation as any).value || ''}`);
+  astDebugLog(`[AST Mutation Exec] op=${mutation.op}, id=${mutation.id}, parent=${(mutation as any).parent || ''}, chunk=${(mutation as any).chunk || ''}, val=${(mutation as any).value || ''}`);
 
   let status = "success";
   let detail = "";
@@ -654,7 +666,7 @@ function executeMutation(
             newDom.classList.add("vcp-stream-element-fade-in");
           }
           parent.replaceChild(newDom, oldNode);
-          console.warn(`[AST replace success] id=${mutation.id}`);
+          astDebugLog(`[AST replace success] id=${mutation.id}`);
         } else {
           status = "failed";
           detail = "Old node has no parentNode";
@@ -760,7 +772,7 @@ function executeMutation(
       if (node) {
         if (node.parentNode) {
           node.parentNode.removeChild(node);
-          console.warn(`[AST remove success] id=${mutation.id}`);
+          astDebugLog(`[AST remove success] id=${mutation.id}`);
           cleanupSubtreeRefs(mutation.id, registry, true);
         } else {
           status = "failed";

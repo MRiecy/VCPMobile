@@ -39,6 +39,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::get_battery_status,
             system::get_network_status,
             system::open_file_native,
+            system::share_file_native,
+            system::get_process_exit_diagnostics,
             system::capture_window_snapshot,
             system::save_image_to_gallery,
             system::save_image_from_path,
