@@ -858,7 +858,14 @@ fn find_marked_field_end(
     for end_match in MARKED_FIELD_END.find_iter(&source[content_start..]) {
         let start = content_start + end_match.start();
         let end = content_start + end_match.end();
-        if marked_field_mode(&source[start..end]) == expected_mode {
+        let actual_mode = marked_field_mode(&source[start..end]);
+        let mode_matches = match expected_mode {
+            MarkedFieldMode::Escape => actual_mode == MarkedFieldMode::Escape,
+            MarkedFieldMode::Normal | MarkedFieldMode::Exp => {
+                matches!(actual_mode, MarkedFieldMode::Normal | MarkedFieldMode::Exp)
+            }
+        };
+        if mode_matches {
             return Some((start, end));
         }
     }
@@ -1014,8 +1021,7 @@ pub(crate) fn parse_daily_note_tool_request(content: &str) -> Option<ParsedDaily
     } else {
         daily_content
     };
-    if let Some(tag) = extract_marked_field(content, &["Tag"])
-        .filter(|tag| !tag.trim().is_empty())
+    if let Some(tag) = extract_marked_field(content, &["Tag"]).filter(|tag| !tag.trim().is_empty())
     {
         rendered_content.push_str("\n\nTag:");
         rendered_content.push_str(&tag);
@@ -1076,15 +1082,7 @@ fn content_block_from_daily_note(note: ParsedDailyNote) -> ContentBlock {
             content,
         } => {
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-            ContentBlock::diary(
-                maid,
-                valet,
-                date,
-                file_name,
-                folder,
-                content,
-                Some(nodes),
-            )
+            ContentBlock::diary(maid, valet, date, file_name, folder, content, Some(nodes))
         }
         ParsedDailyNote::Update {
             maid,
@@ -1231,9 +1229,7 @@ mod tests {
     use super::*;
 
     fn tool_request(inner: &str) -> String {
-        format!(
-            "<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>"
-        )
+        format!("<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>")
     }
 
     fn first_non_markdown(blocks: &[ContentBlock]) -> &ContentBlock {
@@ -1353,9 +1349,8 @@ mod tests {
 
     #[test]
     fn recognizes_commandless_create_and_update_with_update_precedence() {
-        let create = tool_request(
-            "tool_name:{始}dAiLyNoTe{末}\nContent:{始}commandless create{末}",
-        );
+        let create =
+            tool_request("tool_name:{始}dAiLyNoTe{末}\nContent:{始}commandless create{末}");
         assert!(matches!(
             first_non_markdown(&parse_content(&create)),
             ContentBlock::Diary { content, .. } if content == "commandless create"
@@ -1376,9 +1371,7 @@ mod tests {
 
     #[test]
     fn explicit_daily_note_commands_keep_failure_placeholders() {
-        let create = tool_request(
-            "tool_name:「始」DailyNote「末」\ncommand:「始」create「末」",
-        );
+        let create = tool_request("tool_name:「始」DailyNote「末」\ncommand:「始」create「末」");
         assert!(matches!(
             first_non_markdown(&parse_content(&create)),
             ContentBlock::Diary { content, .. } if content == "[日记内容解析失败]"
@@ -1401,7 +1394,7 @@ mod tests {
         let raw = tool_request(
             "TOOL_NAME:{始}DailyNote{末}\n\
              COMMAND:{始}create{末}\n\
-             Maid:{始EXP}Sakura{末EXP}\n\
+             Maid:{始EXP}Sakura{末}\n\
              Content:{始EsCaPe}first {末}\n\
              <<<[END_TOOL_REQUEST]>>>\n\
              still content{末EsCaPe}",
@@ -1443,7 +1436,8 @@ mod tests {
 
     #[test]
     fn legacy_daily_note_uses_full_body_when_content_label_is_missing() {
-        let raw = "<<<DailyNoteStart>>>\nMaid: Sakura\nDate: 2026-08-10\nlegacy body\n<<<DailyNoteEnd>>>";
+        let raw =
+            "<<<DailyNoteStart>>>\nMaid: Sakura\nDate: 2026-08-10\nlegacy body\n<<<DailyNoteEnd>>>";
         match first_non_markdown(&parse_content(raw)) {
             ContentBlock::Diary {
                 maid,

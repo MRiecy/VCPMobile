@@ -149,50 +149,6 @@ impl StreamBlock {
         }
     }
 
-    pub fn diary(
-        maid: String,
-        valet: String,
-        date: String,
-        file_name: String,
-        folder: String,
-        content: String,
-        nodes: Option<Vec<MarkdownNode>>,
-        hash: String,
-    ) -> Self {
-        Self::Diary {
-            maid,
-            valet,
-            date,
-            file_name,
-            folder,
-            content,
-            nodes,
-            hash,
-        }
-    }
-
-    pub fn diary_update(
-        maid: String,
-        valet: String,
-        folder: String,
-        target: String,
-        replace: String,
-        target_nodes: Option<Vec<MarkdownNode>>,
-        replace_nodes: Option<Vec<MarkdownNode>>,
-        hash: String,
-    ) -> Self {
-        Self::DiaryUpdate {
-            maid,
-            valet,
-            folder,
-            target,
-            replace,
-            target_nodes,
-            replace_nodes,
-            hash,
-        }
-    }
-
     pub fn html_preview(content: String, hash: String) -> Self {
         // 流式打字期间完全不调用 syntect 高亮，彻底避免高频流更新对后端 CPU 能耗的无谓消耗
         let highlighted_content = None;
@@ -472,16 +428,16 @@ fn build_daily_note_stream_block(note: ParsedDailyNote) -> StreamBlock {
             let hash = HashAggregator::compute_content_hash(&format!(
                 "diary:create\u{1f}{maid}\u{1f}{valet}\u{1f}{date}\u{1f}{file_name}\u{1f}{folder}\u{1f}{content}"
             ));
-            StreamBlock::diary(
+            StreamBlock::Diary {
                 maid,
                 valet,
                 date,
                 file_name,
                 folder,
                 content,
-                Some(nodes),
+                nodes: Some(nodes),
                 hash,
-            )
+            }
         }
         ParsedDailyNote::Update {
             maid,
@@ -497,16 +453,16 @@ fn build_daily_note_stream_block(note: ParsedDailyNote) -> StreamBlock {
             let hash = HashAggregator::compute_content_hash(&format!(
                 "diary:update\u{1f}{maid}\u{1f}{valet}\u{1f}{folder}\u{1f}{target}\u{1f}{replace}"
             ));
-            StreamBlock::diary_update(
+            StreamBlock::DiaryUpdate {
                 maid,
                 valet,
                 folder,
                 target,
                 replace,
-                Some(target_nodes),
-                Some(replace_nodes),
+                target_nodes: Some(target_nodes),
+                replace_nodes: Some(replace_nodes),
                 hash,
-            )
+            }
         }
     }
 }
@@ -570,9 +526,7 @@ fn build_stream_block(
             ));
             StreamBlock::tool_result(tool_name, status, details, footer, hash)
         }
-        BlockType::Diary => {
-            build_daily_note_stream_block(parse_legacy_daily_note(inner_content))
-        }
+        BlockType::Diary => build_daily_note_stream_block(parse_legacy_daily_note(inner_content)),
         BlockType::ToolCallSummary => {
             let items = crate::vcp_modules::content_parser::parse_tool_call_summary(inner_content);
             let hash = HashAggregator::compute_content_hash(inner_content);
@@ -784,9 +738,7 @@ mod tests {
     use super::*;
 
     fn tool_request(inner: &str) -> String {
-        format!(
-            "<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>"
-        )
+        format!("<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>")
     }
 
     fn strip_hash(value: &mut serde_json::Value) {

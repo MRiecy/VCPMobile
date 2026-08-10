@@ -3,7 +3,7 @@ id: VUE-NOTI-017
 title: 通知中心与Toast联动
 description: VCP Mobile 前端通知列表、Toast 气泡、剪贴板联动与 VCP System Event 处理
 version: 1.1.3
-date: 2026-07-04
+date: 2026-08-10
 ---
 
 # 17. 通知中心与Toast联动
@@ -452,8 +452,9 @@ useNotificationProcessor.processPayload(payload)
 
 ```ts
 if (vcpData.tool_name && vcpData.status) {
+  const isDailyNote = String(vcpData.tool_name).toLowerCase() === 'dailynote';
   type = vcpData.status === 'error' ? 'error'
-       : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
+       : (isDailyNote ? 'success' : 'tool');
   title = `${vcpData.tool_name} ${vcpData.status}`;
   message = String(vcpData.content || '');
   isPreformatted = true;
@@ -461,16 +462,19 @@ if (vcpData.tool_name && vcpData.status) {
   // 深层解析：提取 original_plugin_output、MaidName、timestamp
   try {
     const inner = JSON.parse(rawContent);
-    if (inner.original_plugin_output) {
-      message = JSON.stringify(inner.original_plugin_output, null, 2);
-    }
-    // DailyNote 成功 Fallback
-    if (vcpData.tool_name === 'DailyNote' && vcpData.status === 'success' && !hasValidOutput) {
-      message = "✅ 日记内容已成功记录到本地知识库。";
+    const pluginMessage = readFriendlyMessage(inner.original_plugin_output);
+    if (pluginMessage) {
+      message = isDailyNote ? `${statusIcon} ${pluginMessage}` : pluginMessage;
+      isPreformatted = false;
+    } else if (isDailyNote && typeof inner.message === 'string') {
+      message = `${statusIcon} ${inner.message}`;
+      isPreformatted = false;
     }
   } catch (e) { /* 保持 rawContent */ }
 }
 ```
+
+DailyNote 的友好消息兼容三种服务端形态：`original_plugin_output` 对象、该字段内再次包装的 JSON 字符串，以及 content 顶层的 `message`。成功/失败分别添加 ✅/❌，只有没有 message 时才使用固定兜底文案；无 message 的普通对象仍以格式化 JSON 展示。
 
 **tool_approval_request（审批请求）**：
 
