@@ -239,11 +239,11 @@ const openFeedback = () => {
 
     <!-- Actions List -->
     <div class="px-4 space-y-4 relative z-10">
-      <SettingsCard class="!py-1.5 !backdrop-blur-3xl shadow-2xl transition-all duration-300">
+      <SettingsCard class="!py-1.5 shadow-2xl transition-all duration-300">
         <UpdateSection />
       </SettingsCard>
 
-      <SettingsCard class="!backdrop-blur-3xl shadow-2xl transition-all duration-300">
+      <SettingsCard class="shadow-2xl transition-all duration-300">
         <div class="divide-y transition-colors duration-300" :class="themeStore.isDarkResolved ? 'divide-white/10' : 'divide-black/5'">
           <SettingsRow 
             title="功能介绍" 
@@ -339,11 +339,10 @@ const openFeedback = () => {
   background-color: #f8fafc !important; /* 强制接管关于页面亮色底盘背景 */
 }
 
-/* 亮色半透明毛玻璃卡片 */
+/* 亮色半透明卡片：滚动内容禁用 backdrop blur，避免移动端合成层抖动。 */
 .theme-light :deep(.settings-card) {
   background-color: rgba(255, 255, 255, 0.65) !important;
   border-color: rgba(0, 0, 0, 0.05) !important;
-  backdrop-filter: blur(24px) !important;
   box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.02) !important;
   color: #1e293b !important;
 }

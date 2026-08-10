@@ -28,7 +28,7 @@ useAppLifecycle();
 // directly, replacing the static 48px floor defined in themes.css.
 const handleSafeAreaInset = (e: Event) => {
   const detail = (e as CustomEvent<{ safeAreaBottom?: number }>).detail;
-  if (detail && typeof detail.safeAreaBottom === 'number' && detail.safeAreaBottom > 0) {
+  if (detail && typeof detail.safeAreaBottom === 'number' && detail.safeAreaBottom >= 0) {
     const dpr = window.devicePixelRatio || 1;
     document.documentElement.style.setProperty(
       '--vcp-safe-bottom',
@@ -204,7 +204,10 @@ const processNotificationClick = (detail: any) => {
   // 1. 关闭所有弹出的 Modals
   const { closeTopModal, modalStackLength } = useModalHistory();
   while (modalStackLength() > 0) {
+    const before = modalStackLength();
     closeTopModal();
+    // 不可 dismiss 的长任务页持有导航权，通知点击不得强制卸载。
+    if (modalStackLength() >= before) break;
   }
   
   // 2. 关闭侧边栏

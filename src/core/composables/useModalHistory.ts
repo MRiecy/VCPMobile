@@ -11,7 +11,8 @@ import { ref } from 'vue';
 
 interface ModalInstance {
   id: string;
-  close: () => void;
+  /** Return false when the current modal owns a non-dismissible operation. */
+  close: () => boolean | void;
 }
 
 // Global stack to track open modals across the entire application
@@ -58,12 +59,19 @@ const handlePopState = (event: PopStateEvent) => {
     const topModal = modalStack.value[modalStack.value.length - 1];
 
     state = 'POPSTATE_HANDLING';
+    let shouldClose = true;
     try {
-      topModal.close();
+      shouldClose = topModal.close() !== false;
     } finally {
-      // 主动从栈中移除，不再依赖 close 回调自行调用 unregisterModal
-      const idx = modalStack.value.findIndex(m => m.id === topModal.id);
-      if (idx !== -1) modalStack.value.splice(idx, 1);
+      if (shouldClose) {
+        // 主动从栈中移除，不再依赖 close 回调自行调用 unregisterModal
+        const idx = modalStack.value.findIndex(m => m.id === topModal.id);
+        if (idx !== -1) modalStack.value.splice(idx, 1);
+      } else {
+        // 返回键已将当前 history entry 弹出；拒绝关闭时立即补回同一个
+        // modal entry，否则下一次系统返回会绕过仍在屏幕上的页面。
+        window.history.pushState({ vcpRoot: true, vcpModalId: topModal.id }, '');
+      }
       state = 'IDLE';
     }
     return;
@@ -107,7 +115,7 @@ export function useModalHistory() {
    * @param id Unique identifier for the modal
    * @param closeHandler Callback to close the modal (triggered by back gesture)
    */
-  const registerModal = (id: string, closeHandler: () => void) => {
+  const registerModal = (id: string, closeHandler: () => boolean | void) => {
     // Avoid double registration
     if (modalStack.value.some(m => m.id === id)) return;
 
@@ -142,16 +150,16 @@ export function useModalHistory() {
 
   const closeTopModal = (): boolean => {
     if (modalStack.value.length > 0) {
-      const topIdx = modalStack.value.length - 1;
-      const topModal = modalStack.value[topIdx];
+      const topModal = modalStack.value[modalStack.value.length - 1];
       
       console.log(`[ModalHistory] Closing top modal: ${topModal.id}`);
 
-      // 先从栈中移除，再调用 close 回调，确保无论回调是否调用 unregisterModal 都不会残留
-      modalStack.value.splice(topIdx, 1);
-      
       try {
-        topModal.close();
+        if (topModal.close() !== false) {
+          // close 回调可能已自行 unregister，因此按 identity 二次兜底。
+          const index = modalStack.value.findIndex(modal => modal.id === topModal.id);
+          if (index !== -1) modalStack.value.splice(index, 1);
+        }
       } catch (err) {
         console.error(`[ModalHistory] Failed to call close on modal ${topModal.id}:`, err);
       }

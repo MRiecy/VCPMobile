@@ -18,6 +18,28 @@ export interface HistoryPageResult {
   aborted?: boolean;
 }
 
+export const MAX_HISTORY_MESSAGES = 500;
+
+const compareMessages = (a: ChatMessage, b: ChatMessage) => {
+  if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+  // 与 SQLite 默认 BINARY collation 对齐，避免同毫秒消息在 keyset 游标处错位。
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+};
+
+const mergeHistoryWindow = (
+  existing: ChatMessage[],
+  incoming: ChatMessage[],
+  loadingOlder: boolean,
+) => {
+  const byId = new Map(existing.map(message => [message.id, message]));
+  incoming.forEach(message => byId.set(message.id, message));
+  const merged = Array.from(byId.values()).sort(compareMessages);
+  if (merged.length <= MAX_HISTORY_MESSAGES) return merged;
+  return loadingOlder
+    ? merged.slice(0, MAX_HISTORY_MESSAGES)
+    : merged.slice(-MAX_HISTORY_MESSAGES);
+};
+
 const sameConversation = (a: ConversationKey | null, b: ConversationKey | null) =>
   Boolean(
     a &&
@@ -36,6 +58,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const historyOffset = ref(0);        // 当前已加载的消息总数（= 下次请求的 offset 起点）
   const hasMoreHistory = ref(true);    // 是否还有更多旧消息
   const isLoadingHistory = ref(false); // 防止并发重复触发
+  const hasEvictedNewer = ref(false);  // 深翻历史触发窗口裁剪后，最新端需要显式重载
   const loadedConversationKey = ref<ConversationKey | null>(null);
 
   // 启动预加载缓存：PRELOADING 阶段提前拉取首屏历史，ChatView mount 后直接消费
@@ -88,6 +111,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     try {
       const messages = await invoke<ChatMessage[]>('load_chat_history', {
         ownerId, ownerType, topicId, limit, offset: 0,
+        beforeTimestamp: null, beforeMessageId: null,
       });
       if (!sessionStore.isConversationCurrent(key)) return;
       preloadedHistory.value = { key, messages };
@@ -163,6 +187,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return { addedCount: 0, aborted: true };
     }
     const loadId = ++currentLoadId;
+    const oldest = offset > 0 ? currentChatHistory.value[0] : undefined;
+    if (offset > 0 && !oldest) return { addedCount: 0, aborted: true };
     console.log(
       `[ChatHistoryStore] Loading history for ${ownerId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`,
     );
@@ -189,7 +215,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       } else {
         preloadConsumed = true;
         messages = await invoke<ChatMessage[]>('load_chat_history', {
-          ownerId, ownerType, topicId, limit, offset,
+          ownerId, ownerType, topicId, limit,
+          // `offset` remains local bookkeeping only; the backend page boundary is stable.
+          offset: offset === 0 ? 0 : null,
+          beforeTimestamp: oldest?.timestamp ?? null,
+          beforeMessageId: oldest?.id ?? null,
         });
       }
 
@@ -204,11 +234,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       const hydrated = messages.map(msg => streamStore.activeStreamMessages.get(msg.id) || msg);
       let addedCount = hydrated.length;
       if (offset === 0) {
-        currentChatHistory.value = hydrated;
+        currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
+        hasEvictedNewer.value = false;
       } else {
         const existingIds = new Set(currentChatHistory.value.map(message => message.id));
         const unique = hydrated.filter(message => !existingIds.has(message.id));
-        currentChatHistory.value = [...unique, ...currentChatHistory.value];
+        if (currentChatHistory.value.length + unique.length > MAX_HISTORY_MESSAGES) {
+          hasEvictedNewer.value = true;
+        }
+        currentChatHistory.value = mergeHistoryWindow(
+          currentChatHistory.value,
+          unique,
+          true,
+        );
         addedCount = unique.length;
       }
       loadedConversationKey.value = key;
@@ -246,6 +284,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     loadedConversationKey.value = null;
     historyOffset.value = 0;
     hasMoreHistory.value = true;
+    hasEvictedNewer.value = false;
     loading.value = false;
     isLoadingHistory.value = false;
   };
@@ -276,6 +315,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       10,
       historyOffset.value,
     );
+  };
+
+  const returnToLatest = async (): Promise<HistoryPageResult> => {
+    if (!hasEvictedNewer.value) return { addedCount: 0 };
+    const key = sessionStore.currentConversationKey;
+    if (!key || !sameConversation(loadedConversationKey.value, key)) {
+      return { addedCount: 0, aborted: true };
+    }
+    return loadHistory(key.ownerId, key.ownerType, key.topicId, 15, 0);
   };
 
   /**
@@ -311,7 +359,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         onMessageCreated: (msg, tid) => {
           if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
             currentChatHistory.value.push(msg);
-            currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
+            currentChatHistory.value = mergeHistoryWindow(
+              currentChatHistory.value,
+              [],
+              false,
+            );
           }
         },
         onStreamFinished: (_mid, tid) => {
@@ -353,8 +405,13 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    * 发送消息
    */
   const sendMessage = async (content: string) => {
+    if (hasEvictedNewer.value && !editingOriginalMessageId.value) {
+      const latest = await returnToLatest();
+      if (latest.error || latest.aborted || hasEvictedNewer.value) return;
+    }
     const key = captureLoadedConversation();
     if (!key || (!content.trim() && attachmentStore.stagedAttachments.length === 0)) return;
+    if (attachmentStore.stagedAttachments.some(attachment => attachment.status !== "done")) return;
 
     if (typeof navigator !== "undefined" && navigator.vibrate) {
       navigator.vibrate(25);
@@ -408,7 +465,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     };
 
     if (canCommitConversation(key)) {
-      currentChatHistory.value.push(userMsg);
+      currentChatHistory.value = mergeHistoryWindow(
+        currentChatHistory.value,
+        [userMsg],
+        false,
+      );
     }
     topicStore.incrementTopicMsgCount(key.topicId);
     await triggerGeneration(userMsg, key);
@@ -556,8 +617,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
         onMessageCreated: (msg, tid) => {
           if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
-            currentChatHistory.value.push(msg);
-            currentChatHistory.value.sort((a, b) => a.timestamp - b.timestamp);
+            currentChatHistory.value = mergeHistoryWindow(
+              currentChatHistory.value,
+              [msg],
+              false,
+            );
           }
         },
         onStreamFinished: (_mid, tid) => {
@@ -654,6 +718,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     historyOffset,
     hasMoreHistory,
     isLoadingHistory,
+    hasEvictedNewer,
     loadedConversationKey,
     editMessageContent,
     editingOriginalMessageId,
@@ -662,6 +727,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     loadHistory,
     loadHistoryPaginated,
     loadMoreHistory,
+    returnToLatest,
     resetHistoryForConversation,
     sendMessage,
     deleteMessage,

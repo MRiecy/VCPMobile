@@ -6,9 +6,7 @@ import { router } from "./core/router";
 import { vIntersectionObserver } from "./core/directives/intersectionObserver";
 import { vLongpress } from "./core/directives/longpress";
 
-import 'virtual:uno.css'
-import "@unocss/reset/tailwind.css"
-import "./assets/themes.css"
+import "./appStyles";
 import "./assets/message-blocks.css"
 import "katex/dist/katex.min.css"
 

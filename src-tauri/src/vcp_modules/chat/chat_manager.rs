@@ -84,6 +84,7 @@ pub struct HistoryChunk {
 // --- 历史记录存取逻辑 ---
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn load_chat_history_streamed(
     app_handle: tauri::AppHandle,
     owner_id: String,
@@ -91,6 +92,8 @@ pub async fn load_chat_history_streamed(
     topic_id: String,
     limit: Option<usize>,
     offset: Option<usize>,
+    before_timestamp: Option<i64>,
+    before_message_id: Option<String>,
     on_message: tauri::ipc::Channel<HistoryChunk>,
 ) -> Result<usize, String> {
     let messages = crate::vcp_modules::message_service::load_chat_history_internal(
@@ -100,6 +103,8 @@ pub async fn load_chat_history_streamed(
         &topic_id,
         limit,
         offset,
+        before_timestamp,
+        before_message_id.as_deref(),
         false,
         false, // include_extracted_text: 前端列表加载不需要大体积的提取文本内容
     )
@@ -118,6 +123,7 @@ pub async fn load_chat_history_streamed(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn load_chat_history(
     app_handle: tauri::AppHandle,
     owner_id: String,
@@ -125,6 +131,8 @@ pub async fn load_chat_history(
     topic_id: String,
     limit: Option<usize>,
     offset: Option<usize>,
+    before_timestamp: Option<i64>,
+    before_message_id: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
     crate::vcp_modules::message_service::load_chat_history_internal(
         &app_handle,
@@ -133,6 +141,8 @@ pub async fn load_chat_history(
         &topic_id,
         limit,
         offset,
+        before_timestamp,
+        before_message_id.as_deref(),
         false,
         false,
     )
@@ -183,22 +193,30 @@ pub async fn patch_single_message(
 #[tauri::command]
 pub async fn delete_messages(
     db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
+    active_requests: tauri::State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
     topic_id: String,
     msg_ids: Vec<String>,
 ) -> Result<(), String> {
-    message_service::delete_messages(&db_state.pool, &topic_id, msg_ids).await
+    message_service::delete_messages(&db_state.pool, &topic_id, msg_ids.clone()).await?;
+    for msg_id in msg_ids {
+        if let Err(error) = active_requests.cancel(&msg_id) {
+            log::warn!("Failed to cancel deleted generation {}: {}", msg_id, error);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn truncate_history_after_timestamp(
     app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
+    active_requests: tauri::State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
     timestamp: i64,
 ) -> Result<(), String> {
-    message_service::truncate_history_after_timestamp(
+    let cancelled_ids = message_service::truncate_history_after_timestamp(
         app_handle,
         &db_state.pool,
         &owner_id,
@@ -206,7 +224,17 @@ pub async fn truncate_history_after_timestamp(
         &topic_id,
         timestamp,
     )
-    .await
+    .await?;
+    for msg_id in cancelled_ids {
+        if let Err(error) = active_requests.cancel(&msg_id) {
+            log::warn!(
+                "Failed to cancel truncated generation {}: {}",
+                msg_id,
+                error
+            );
+        }
+    }
+    Ok(())
 }
 
 // --- 增量同步逻辑 (Delta Sync) (Moved to sync_manager.rs) ---

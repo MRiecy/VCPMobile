@@ -9,7 +9,8 @@ use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as CacheCommitMutex};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 
@@ -19,6 +20,10 @@ pub struct GroupManagerState {
     pub caches: DashMap<String, GroupConfig>,
     /// 任务队列锁: group_id -> Mutex
     pub locks: DashMap<String, Arc<Mutex<()>>>,
+    /// 同步写绕过 Facade 时推进的缓存代次，阻止旧数据库快照迟到回填。
+    cache_generation: AtomicU64,
+    /// 只保护 generation 校验与 DashMap 提交/清空，不跨任何 await。
+    cache_commit: CacheCommitMutex<()>,
 }
 
 impl GroupManagerState {
@@ -26,6 +31,8 @@ impl GroupManagerState {
         Self {
             caches: DashMap::new(),
             locks: DashMap::new(),
+            cache_generation: AtomicU64::new(0),
+            cache_commit: CacheCommitMutex::new(()),
         }
     }
 
@@ -35,6 +42,29 @@ impl GroupManagerState {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .value()
             .clone()
+    }
+
+    fn current_cache_generation(&self) -> u64 {
+        self.cache_generation.load(Ordering::Acquire)
+    }
+
+    fn insert_cache_if_current(&self, group_id: String, config: GroupConfig, generation: u64) {
+        let _commit_guard = self
+            .cache_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.cache_generation.load(Ordering::Acquire) == generation {
+            self.caches.insert(group_id, config);
+        }
+    }
+
+    pub fn invalidate_cache(&self) {
+        let _commit_guard = self
+            .cache_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.caches.clear();
+        self.cache_generation.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -52,9 +82,20 @@ pub async fn read_group_config_internal<R: Runtime>(
     state: &GroupManagerState,
     group_id: &str,
 ) -> Result<GroupConfig, String> {
+    let mutex = state.acquire_lock(group_id).await;
+    let _lock = mutex.lock().await;
+    read_group_config_locked(app_handle, state, group_id).await
+}
+
+async fn read_group_config_locked<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    state: &GroupManagerState,
+    group_id: &str,
+) -> Result<GroupConfig, String> {
     if let Some(cached) = state.caches.get(group_id) {
         return Ok(cached.value().clone());
     }
+    let cache_generation = state.current_cache_generation();
 
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -133,7 +174,7 @@ pub async fn read_group_config_internal<R: Runtime>(
             created_at: row.get("created_at"),
         };
 
-        state.caches.insert(group_id.to_string(), config.clone());
+        state.insert_cache_if_current(group_id.to_string(), config.clone(), cache_generation);
         return Ok(config);
     }
 
@@ -161,7 +202,7 @@ pub async fn save_group_config(
 #[tauri::command]
 pub async fn get_groups(
     app_handle: AppHandle,
-    state: State<'_, GroupManagerState>,
+    _state: State<'_, GroupManagerState>,
 ) -> Result<Vec<GroupConfig>, String> {
     let start_total = std::time::Instant::now();
     let db_state = app_handle.state::<DbState>();
@@ -226,7 +267,7 @@ pub async fn get_groups(
         }
     }
 
-    // 组装并预存缓存
+    // 组装列表；实体缓存只允许在 per-ID 锁内填充。
     let mut groups = Vec::new();
     for row in group_rows {
         use sqlx::Row;
@@ -252,8 +293,6 @@ pub async fn get_groups(
             created_at: row.get("created_at"),
         };
 
-        // 预热内存缓存，供后续 read_group_config_internal 内存级调用
-        state.caches.insert(group_id, config.clone());
         groups.push(config);
     }
     let duration_mapping = start_mapping.elapsed();
@@ -279,7 +318,7 @@ pub async fn update_group_config(
     let mutex = state.acquire_lock(&group_id).await;
     let _lock = mutex.lock().await;
 
-    let config = read_group_config(app_handle.clone(), state.clone(), group_id.clone()).await?;
+    let config = read_group_config_locked(&app_handle, &state, &group_id).await?;
 
     let mut config_val = serde_json::to_value(&config).map_err(|e| e.to_string())?;
 
@@ -304,6 +343,7 @@ pub async fn create_group(
     state: State<'_, GroupManagerState>,
     name: String,
 ) -> Result<GroupConfig, String> {
+    let cache_generation = state.current_cache_generation();
     let timestamp = crate::vcp_modules::infra::utils::now_millis();
 
     let base_id = name
@@ -388,7 +428,7 @@ pub async fn create_group(
     HashAggregator::bubble_group_hash(&mut bubble_tx, &group_id).await?;
     bubble_tx.commit().await.map_err(|e| e.to_string())?;
 
-    state.caches.insert(group_id, config.clone());
+    state.insert_cache_if_current(group_id, config.clone(), cache_generation);
     Ok(config)
 }
 
@@ -400,12 +440,23 @@ async fn internal_write_group_config<R: Runtime>(
     skip_bubble: bool,
     from_sync: bool,
 ) -> Result<bool, String> {
+    let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
     let now = crate::vcp_modules::infra::utils::now_millis();
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    let deleted_at =
+        sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM groups WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if matches!(deleted_at, Some(Some(_))) {
+        return Err(format!("Group {group_id} has been deleted"));
+    }
 
     let dto = GroupSyncDTO::from(config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
@@ -534,7 +585,7 @@ async fn internal_write_group_config<R: Runtime>(
 
     // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 
-    state.caches.insert(group_id.to_string(), config.clone());
+    state.insert_cache_if_current(group_id.to_string(), config.clone(), cache_generation);
 
     Ok(true)
 }
@@ -545,49 +596,67 @@ pub async fn delete_group(
     state: State<'_, GroupManagerState>,
     group_id: String,
 ) -> Result<bool, String> {
+    delete_group_internal(&app_handle, &state, &group_id).await?;
+
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+            data_type: SyncDataType::Group,
+            id: group_id,
+        });
+    }
+
+    Ok(true)
+}
+
+pub async fn delete_group_internal<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    state: &GroupManagerState,
+    group_id: &str,
+) -> Result<(), String> {
+    // 与 save/update 共享同一把实体锁，避免迟到写入在删除后重新填充 cache。
+    // 锁条目有意保留：删除后若同 ID 被重新创建，仍必须沿用同一所有权串行化。
+    let mutex = state.acquire_lock(group_id).await;
+    let _lock = mutex.lock().await;
+
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ?")
         .bind(now)
-        .bind(&group_id)
-        .execute(pool)
+        .bind(group_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联将该 Group 下的所有话题标记为逻辑删除
     sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL")
         .bind(now)
-        .bind(&group_id)
-        .execute(pool)
+        .bind(group_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联将该 Group 下所有话题的所有消息标记为逻辑删除
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'group') AND deleted_at IS NULL")
         .bind(now)
-        .bind(&group_id)
-        .execute(pool)
+        .bind(group_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联清除该 Group 下的所有活跃生成，杜绝已删除消息复活
     sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'group'")
-        .bind(&group_id)
-        .execute(pool)
+        .bind(group_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
-    state.caches.remove(&group_id);
-    state.locks.remove(&group_id);
+    HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
 
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
-            data_type: SyncDataType::Group,
-            id: group_id.clone(),
-        });
-    }
+    tx.commit().await.map_err(|e| e.to_string())?;
 
-    Ok(true)
+    state.caches.remove(group_id);
+    Ok(())
 }

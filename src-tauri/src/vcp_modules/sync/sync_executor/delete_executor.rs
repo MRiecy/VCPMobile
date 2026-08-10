@@ -10,88 +10,16 @@ impl DeleteExecutor {
         app: &AppHandle<R>,
         agent_id: &str,
     ) -> Result<(), String> {
-        let db = app.state::<DbState>();
-        let now = chrono::Utc::now().timestamp_millis();
-
-        sqlx::query("UPDATE agents SET deleted_at = ? WHERE agent_id = ?")
-            .bind(now)
-            .bind(agent_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 级联将该 Agent 下的所有话题标记为逻辑删除
-        sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL")
-            .bind(now)
-            .bind(agent_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 级联将该 Agent 下所有话题的所有消息标记为逻辑删除
-        sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'agent') AND deleted_at IS NULL")
-            .bind(now)
-            .bind(agent_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 级联清除该 Agent 下的所有活跃生成，杜绝已删除消息复活
-        sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'agent'")
-            .bind(agent_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
-        HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
-        tx.commit().await.map_err(|e| e.to_string())?;
-
-        Ok(())
+        let state = app.state::<crate::vcp_modules::agent_service::AgentConfigState>();
+        crate::vcp_modules::agent_service::delete_agent_internal(app, &state, agent_id).await
     }
 
     pub async fn soft_delete_group<R: Runtime>(
         app: &AppHandle<R>,
         group_id: &str,
     ) -> Result<(), String> {
-        let db = app.state::<DbState>();
-        let now = chrono::Utc::now().timestamp_millis();
-
-        sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ?")
-            .bind(now)
-            .bind(group_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 级联将该 Group 下的所有话题标记为逻辑删除
-        sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL")
-            .bind(now)
-            .bind(group_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 级联将该 Group 下所有话题的所有消息标记为逻辑删除
-        sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'group') AND deleted_at IS NULL")
-            .bind(now)
-            .bind(group_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 级联清除该 Group 下的所有活跃生成，杜绝已删除消息复活
-        sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'group'")
-            .bind(group_id)
-            .execute(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
-        HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
-        tx.commit().await.map_err(|e| e.to_string())?;
-
-        Ok(())
+        let state = app.state::<crate::vcp_modules::group_service::GroupManagerState>();
+        crate::vcp_modules::group_service::delete_group_internal(app, &state, group_id).await
     }
 
     pub async fn soft_delete_topic<R: Runtime>(

@@ -3,13 +3,16 @@
 // Mirrors VCPChat/VCPDistributedServer/VCPDistributedServer.js (class DistributedServer)
 // Self-contained — does NOT import anything from vcp_modules/.
 
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::task::JoinSet;
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
@@ -17,17 +20,93 @@ use tokio_util::sync::CancellationToken;
 use super::tool_registry::ToolRegistry;
 use super::types::*;
 
-/// Type alias for the WebSocket sink to avoid excessive complexity in signatures.
-type WsSink = Arc<
-    Mutex<
-        futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            WsMessage,
-        >,
-    >,
->;
+const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const WS_OUTBOUND_CAPACITY: usize = 64;
+
+struct OutboundFrame {
+    message: WsMessage,
+    completion: oneshot::Sender<Result<(), String>>,
+}
+
+type WsSender = mpsc::Sender<OutboundFrame>;
+
+struct SessionTaskTracker {
+    cancel_token: CancellationToken,
+    closed: AtomicBool,
+    tasks: Mutex<JoinSet<()>>,
+}
+
+impl SessionTaskTracker {
+    fn new(cancel_token: CancellationToken) -> Self {
+        Self {
+            cancel_token,
+            closed: AtomicBool::new(false),
+            tasks: Mutex::new(JoinSet::new()),
+        }
+    }
+
+    async fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let cancel_token = self.cancel_token.clone();
+        let mut tasks = self.tasks.lock().await;
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        tasks.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {}
+                _ = future => {}
+            }
+        });
+    }
+
+    async fn close_and_wait(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.cancel_token.cancel();
+        let mut tasks = self.tasks.lock().await;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                log::warn!("[Distributed] Session child task failed: {}", error);
+            }
+        }
+    }
+}
+
+struct WakeLockLease {
+    app: AppHandle,
+    tag: String,
+}
+
+impl WakeLockLease {
+    fn acquire(app: &AppHandle, tag: String) -> Self {
+        acquire_wake_lock_helper(app, &tag);
+        Self {
+            app: app.clone(),
+            tag,
+        }
+    }
+}
+
+impl Drop for WakeLockLease {
+    fn drop(&mut self) {
+        release_wake_lock_helper(&self.app, &self.tag);
+    }
+}
+
+async fn with_scoped_guard<G, F>(guard: G, future: F) -> F::Output
+where
+    F: Future,
+{
+    let _guard = guard;
+    future.await
+}
 
 /// Immutable configuration for a single connection lifecycle.
 struct ConnectionConfig {
@@ -130,14 +209,6 @@ impl DistributedClient {
 
         Self::emit_status(&app, &status).await;
 
-        #[cfg(target_os = "android")]
-        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(&app, true) {
-            log::warn!(
-                "[Distributed] Failed to start keepalive foreground service: {}",
-                e
-            );
-        }
-
         let config = ConnectionConfig {
             ws_url,
             vcp_key,
@@ -176,16 +247,8 @@ impl DistributedClient {
     }
 
     /// Stop the distributed node.
-    pub async fn stop(&self, _app: &AppHandle) {
+    pub async fn stop(&self, app: &AppHandle) {
         let _lifecycle_guard = self.lifecycle.lock().await;
-
-        #[cfg(target_os = "android")]
-        if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(_app, false) {
-            log::warn!(
-                "[Distributed] Failed to stop keepalive foreground service: {}",
-                e
-            );
-        }
 
         let stop_generation = {
             let mut s = self.status.write().await;
@@ -224,7 +287,7 @@ impl DistributedClient {
                 s.client_id = None;
             }
         }
-        Self::emit_status(_app, &self.status).await;
+        Self::emit_status(app, &self.status).await;
     }
 
     /// Get current status snapshot.
@@ -293,12 +356,16 @@ impl DistributedClient {
             );
 
             // Connect with cancellation support — avoids blocking on TCP timeout during shutdown.
-            acquire_wake_lock_helper(&app, "distributed:connect");
-            let connect_result = tokio::select! {
-                result = tokio_tungstenite::connect_async(&connection_url) => Some(result),
-                _ = cancel_token.cancelled() => None,
-            };
-            release_wake_lock_helper(&app, "distributed:connect");
+            let connect_result = with_scoped_guard(
+                WakeLockLease::acquire(&app, "distributed:connect".to_string()),
+                async {
+                    tokio::select! {
+                        result = tokio_tungstenite::connect_async(&connection_url) => Some(result),
+                        _ = cancel_token.cancelled() => None,
+                    }
+                },
+            )
+            .await;
 
             match connect_result {
                 Some(Ok((ws_stream, _response))) => {
@@ -417,10 +484,46 @@ impl DistributedClient {
             );
         }
 
-        let (ws_tx, mut ws_rx) = ws_stream.split();
+        let session_cancel = cancel_token.child_token();
+        let child_tracker = Arc::new(SessionTaskTracker::new(session_cancel.clone()));
+        let (mut ws_sink, mut ws_rx) = ws_stream.split();
+        let (ws_tx, mut outbound_rx) = mpsc::channel::<OutboundFrame>(WS_OUTBOUND_CAPACITY);
 
-        // Wrap tx in Arc<Mutex> so we can send from multiple places.
-        let ws_tx = Arc::new(Mutex::new(ws_tx));
+        let writer_cancel = session_cancel.clone();
+        child_tracker
+            .spawn(async move {
+                loop {
+                    let frame = tokio::select! {
+                        biased;
+                        _ = writer_cancel.cancelled() => break,
+                        frame = outbound_rx.recv() => match frame {
+                            Some(frame) => frame,
+                            None => break,
+                        },
+                    };
+
+                    let send_result = match time::timeout(
+                        WS_OPERATION_TIMEOUT,
+                        ws_sink.send(frame.message),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(format!("WebSocket send failed: {}", error)),
+                        Err(_) => Err("WebSocket send timed out".to_string()),
+                    };
+                    let failed = send_result.is_err();
+                    if let Err(error) = &send_result {
+                        log::warn!("[Distributed] {}", error);
+                    }
+                    let _ = frame.completion.send(send_result);
+                    if failed {
+                        writer_cancel.cancel();
+                        break;
+                    }
+                }
+            })
+            .await;
 
         // Static placeholder push timer — mirrors setupStaticPlaceholderUpdates() (30s interval)
         let mut placeholder_interval = time::interval(Duration::from_secs(30));
@@ -443,12 +546,14 @@ impl DistributedClient {
                                 &ws_tx,
                                 status,
                                 registry,
+                                &child_tracker,
                                 session_id,
                             ).await;
                         }
                         Some(Ok(Message::Ping(data))) => {
-                            let mut tx = ws_tx.lock().await;
-                            let _ = tx.send(Message::Pong(data)).await;
+                            if let Err(error) = Self::send_ws_frame(&ws_tx, Message::Pong(data)).await {
+                                log::warn!("[Distributed] Failed to send pong: {}", error);
+                            }
                         }
                         Some(Ok(Message::Close(reason))) => {
                             let r_str = reason.map(|r| format!("{} (code: {})", r.reason, r.code)).unwrap_or_else(|| "No reason provided".to_string());
@@ -481,17 +586,28 @@ impl DistributedClient {
 
                 // --- Periodic static placeholder push ---
                 _ = placeholder_interval.tick() => {
-                    Self::push_static_placeholders(app, device_name, &ws_tx, registry).await;
+                    Self::push_static_placeholders(
+                        app,
+                        device_name,
+                        &ws_tx,
+                        registry,
+                        &child_tracker,
+                    ).await;
                 }
 
                 // --- Cancellation signal ---
-                _ = cancel_token.cancelled() => {
+                _ = session_cancel.cancelled() => {
                     log::info!("[Distributed] Shutdown signal received, closing session.");
                     exit_reason = "Client requested shutdown".to_string();
                     break;
                 }
             }
         }
+
+        if !session_cancel.is_cancelled() {
+            let _ = Self::send_ws_frame(&ws_tx, Message::Close(None)).await;
+        }
+        child_tracker.close_and_wait().await;
 
         #[cfg(target_os = "android")]
         if let Err(e) = tauri_plugin_vcp_mobile::system::stop_sensor_collection(app.clone()) {
@@ -508,13 +624,15 @@ impl DistributedClient {
     // Incoming message handler
     // ================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_incoming(
         app: &AppHandle,
         text: &str,
         device_name: &str,
-        ws_tx: &WsSink,
+        ws_tx: &WsSender,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
+        child_tracker: &Arc<SessionTaskTracker>,
         session_id: u64,
     ) {
         let envelope: IncomingEnvelope = match serde_json::from_str(text) {
@@ -562,12 +680,15 @@ impl DistributedClient {
                 // Report IP — mirrors reportIPAddress()
                 let device_name_clone = device_name.to_string();
                 let ws_tx_clone = ws_tx.clone();
-                tokio::spawn(async move {
-                    Self::report_ip(&device_name_clone, &ws_tx_clone).await;
-                });
+                child_tracker
+                    .spawn(async move {
+                        Self::report_ip(&device_name_clone, &ws_tx_clone).await;
+                    })
+                    .await;
 
                 // Initial static placeholder push (2s delay in VCPChat, do it immediately here)
-                Self::push_static_placeholders(app, device_name, ws_tx, registry).await;
+                Self::push_static_placeholders(app, device_name, ws_tx, registry, child_tracker)
+                    .await;
             }
 
             IncomingMessage::ExecuteTool {
@@ -588,20 +709,27 @@ impl DistributedClient {
                 let request_id_clone = request_id.clone();
                 let tool_name_clone = tool_name.clone();
 
-                tokio::spawn(async move {
-                    let tag = format!("distributed:tool:{}", request_id_clone);
-                    acquire_wake_lock_helper(&app_clone, &tag);
-                    let response = Self::execute_tool(
-                        &app_clone,
-                        &request_id_clone,
-                        &tool_name_clone,
-                        tool_args,
-                        &registry_clone,
-                    )
+                child_tracker
+                    .spawn(async move {
+                        let tag = format!(
+                            "distributed:tool:{}:{}",
+                            request_id_clone,
+                            uuid::Uuid::new_v4()
+                        );
+                        let _lease = WakeLockLease::acquire(&app_clone, tag);
+                        let response = Self::execute_tool(
+                            &app_clone,
+                            &request_id_clone,
+                            &tool_name_clone,
+                            tool_args,
+                            &registry_clone,
+                        )
+                        .await;
+                        if let Err(error) = Self::send_message(&ws_tx_clone, &response).await {
+                            log::warn!("[Distributed] Failed to return tool result: {}", error);
+                        }
+                    })
                     .await;
-                    Self::send_message(&ws_tx_clone, &response).await;
-                    release_wake_lock_helper(&app_clone, &tag);
-                });
             }
 
             IncomingMessage::Unknown(msg_type) => {
@@ -618,7 +746,7 @@ impl DistributedClient {
     /// VCPChat ref: registerTools() line 271-308
     async fn register_tools(
         device_name: &str,
-        ws_tx: &WsSink,
+        ws_tx: &WsSender,
         registry: &Arc<ToolRegistry>,
         status: &Arc<RwLock<DistributedStatus>>,
         session_id: u64,
@@ -635,7 +763,10 @@ impl DistributedClient {
             server_name: device_name.to_string(),
             tools,
         };
-        Self::send_message(ws_tx, &msg).await;
+        if let Err(error) = Self::send_message(ws_tx, &msg).await {
+            log::warn!("[Distributed] Failed to register tools: {}", error);
+            return;
+        }
 
         // Update status with tool count
         {
@@ -650,7 +781,7 @@ impl DistributedClient {
 
     /// Report IP addresses to the main server.
     /// VCPChat ref: reportIPAddress() line 310-347
-    async fn report_ip(device_name: &str, ws_tx: &WsSink) {
+    async fn report_ip(device_name: &str, ws_tx: &WsSender) {
         // Collect local IPv4 addresses (simplified — no external crate needed)
         let local_ips = Vec::new(); // TODO: enumerate network interfaces in Phase 2
 
@@ -687,8 +818,10 @@ impl DistributedClient {
             local_ips,
             public_ip,
         };
-        Self::send_message(ws_tx, &msg).await;
-        log::info!("[Distributed] IP report sent.");
+        match Self::send_message(ws_tx, &msg).await {
+            Ok(()) => log::info!("[Distributed] IP report sent."),
+            Err(error) => log::warn!("[Distributed] Failed to report IP: {}", error),
+        }
     }
 
     /// Push static placeholder values asynchronously to avoid blocking.
@@ -696,26 +829,34 @@ impl DistributedClient {
     async fn push_static_placeholders(
         app: &AppHandle,
         device_name: &str,
-        ws_tx: &WsSink,
+        ws_tx: &WsSender,
         registry: &Arc<ToolRegistry>,
+        child_tracker: &Arc<SessionTaskTracker>,
     ) {
         let app_clone = app.clone();
         let device_name_clone = device_name.to_string();
         let ws_tx_clone = ws_tx.clone();
         let registry_clone = registry.clone();
 
-        tokio::spawn(async move {
-            acquire_wake_lock_helper(&app_clone, "distributed:placeholder_push");
-            let placeholders = registry_clone.get_all_placeholder_values(&app_clone);
-            if !placeholders.is_empty() {
-                let msg = OutgoingMessage::UpdateStaticPlaceholders {
-                    server_name: device_name_clone,
-                    placeholders,
-                };
-                Self::send_message(&ws_tx_clone, &msg).await;
-            }
-            release_wake_lock_helper(&app_clone, "distributed:placeholder_push");
-        });
+        child_tracker
+            .spawn(async move {
+                let tag = format!("distributed:placeholder_push:{}", uuid::Uuid::new_v4());
+                let _lease = WakeLockLease::acquire(&app_clone, tag);
+                let placeholders = registry_clone.get_all_placeholder_values(&app_clone);
+                if !placeholders.is_empty() {
+                    let msg = OutgoingMessage::UpdateStaticPlaceholders {
+                        server_name: device_name_clone,
+                        placeholders,
+                    };
+                    if let Err(error) = Self::send_message(&ws_tx_clone, &msg).await {
+                        log::warn!(
+                            "[Distributed] Failed to push static placeholders: {}",
+                            error
+                        );
+                    }
+                }
+            })
+            .await;
     }
 
     /// Execute a tool and return the result message.
@@ -772,21 +913,36 @@ impl DistributedClient {
     }
 
     /// Serialize and send a message over WebSocket.
-    async fn send_message(ws_tx: &WsSink, msg: &OutgoingMessage) {
-        match serde_json::to_string(msg) {
-            Ok(json) => {
-                let mut tx = ws_tx.lock().await;
-                if let Err(e) = tx
-                    .send(tokio_tungstenite::tungstenite::Message::Text(json.into()))
-                    .await
-                {
-                    log::warn!("[Distributed] Failed to send message: {}", e);
-                }
-            }
-            Err(e) => {
-                log::error!("[Distributed] Failed to serialize message: {}", e);
-            }
-        }
+    async fn send_message(ws_tx: &WsSender, msg: &OutgoingMessage) -> Result<(), String> {
+        let json = serde_json::to_string(msg)
+            .map_err(|error| format!("Failed to serialize message: {}", error))?;
+        Self::send_ws_frame(ws_tx, WsMessage::Text(json.into())).await
+    }
+
+    async fn send_ws_frame(ws_tx: &WsSender, message: WsMessage) -> Result<(), String> {
+        Self::send_ws_frame_with_timeout(ws_tx, message, WS_OPERATION_TIMEOUT).await
+    }
+
+    async fn send_ws_frame_with_timeout(
+        ws_tx: &WsSender,
+        message: WsMessage,
+        deadline: Duration,
+    ) -> Result<(), String> {
+        time::timeout(deadline, async {
+            let (completion, completed) = oneshot::channel();
+            ws_tx
+                .send(OutboundFrame {
+                    message,
+                    completion,
+                })
+                .await
+                .map_err(|_| "WebSocket writer is closed".to_string())?;
+            completed
+                .await
+                .map_err(|_| "WebSocket writer stopped before send completed".to_string())?
+        })
+        .await
+        .map_err(|_| "WebSocket outbound operation timed out".to_string())?
     }
 
     /// Emit status to the Vue frontend.
@@ -803,6 +959,16 @@ impl DistributedClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn lifecycle_mutex_serializes_transitions() {
@@ -840,6 +1006,68 @@ mod tests {
         assert_eq!(status.state, ConnectionState::Disconnecting);
         assert!(!status.connected);
         assert_eq!(status.session_id, 2);
+    }
+
+    #[tokio::test]
+    async fn session_tracker_cancels_and_joins_children() {
+        let tracker = Arc::new(SessionTaskTracker::new(CancellationToken::new()));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+
+        tracker
+            .spawn(async move {
+                let _drop_signal = DropSignal(Some(dropped_tx));
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            })
+            .await;
+        started_rx.await.expect("child should start");
+
+        time::timeout(Duration::from_secs(1), tracker.close_and_wait())
+            .await
+            .expect("tracker shutdown should be bounded");
+        time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("cancelled child should be dropped")
+            .expect("drop signal should be delivered");
+    }
+
+    #[tokio::test]
+    async fn scoped_guard_is_released_when_connect_await_finishes() {
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+
+        let result = with_scoped_guard(DropSignal(Some(dropped_tx)), async { 42 }).await;
+
+        assert_eq!(result, 42);
+        dropped_rx
+            .await
+            .expect("connect lease must be released before session processing begins");
+    }
+
+    #[tokio::test]
+    async fn bounded_outbound_queue_times_out_instead_of_waiting_forever() {
+        let (ws_tx, mut ws_rx) = mpsc::channel(1);
+        let (completion, _completed) = oneshot::channel();
+        ws_tx
+            .send(OutboundFrame {
+                message: WsMessage::Ping(Vec::new().into()),
+                completion,
+            })
+            .await
+            .expect("first frame should fill the queue");
+
+        let result = DistributedClient::send_ws_frame_with_timeout(
+            &ws_tx,
+            WsMessage::Ping(Vec::new().into()),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(
+            result,
+            Err("WebSocket outbound operation timed out".to_string())
+        );
+        assert!(ws_rx.try_recv().is_ok());
     }
 }
 

@@ -3,7 +3,7 @@ id: PLUGIN-KEYBOARD-004
 title: 键盘 Insets 管理
 description: 通过 WindowInsetsCompat 监听键盘状态并实时推送到前端
 version: 1.1.3
-date: 2026-07-04
+date: 2026-08-11
 related_files:
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/KeyboardInsetsManager.kt
 ---
@@ -184,6 +184,8 @@ override fun load(webView: WebView) {
 
 3. **`safeAreaBottom` 的用途**：部分设备使用手势导航栏（无实体按钮），`safeAreaBottom` 帮助前端区分"键盘高度"和"导航栏高度"，避免双重 padding。
 
+4. **同帧只提交最新快照**：Insets 高频回调先写入 `pending`，再通过 `postOnAnimation` 合并到下一帧；相同 `InsetSnapshot` 不重复执行 `evaluateJavascript`。`detach()` 必须移除已排队的 frame callback 并清空 `pending/lastSent`，防止 Activity 重建后旧 WebView 收到迟到事件。
+
 ---
 
-*最后更新：2026-07-04 | VCP Mobile v1.1.3*
+*最后更新：2026-08-11 | VCP Mobile v1.1.3*

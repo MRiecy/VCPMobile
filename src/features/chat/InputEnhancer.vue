@@ -337,6 +337,10 @@ const isGenerating = computed(() => streamStore.activeStreamingIds.size > 0);
 
 // 是否有内容可发送
 const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.stagedAttachments.length > 0);
+const attachmentsReady = computed(() =>
+  attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
+);
+const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled);
 
 // 监听并接收外部注入的”编辑消息”内容
 watch(() => historyStore.editMessageContent, async (newContent) => {
@@ -367,7 +371,7 @@ watch(() => sessionStore.sharePrefillText, async (newText) => {
 });
 
 const handleSend = () => {
-  if (hasContent.value && !props.disabled) {
+  if (canSend.value) {
     emit('send', input.value);
     input.value = '';
     showAttachMenu.value = false;
@@ -557,8 +561,9 @@ onUnmounted(() => {
             <!-- 发送/中止按钮 -->
             <button v-if="hasContent || isGenerating"
               @click="handleAction"
+              :disabled="!isGenerating && !canSend"
               class="w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 transition-all bg-blue-500 text-white"
-              :class="{ 'bg-red-500': isGenerating }"
+              :class="{ 'bg-red-500': isGenerating, 'opacity-40': !isGenerating && !canSend }"
             >
               <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-lg"></div>
               <div v-else class="i-heroicons-paper-airplane text-[15px] -rotate-45 translate-x-0.2 -translate-y-0.2"></div>

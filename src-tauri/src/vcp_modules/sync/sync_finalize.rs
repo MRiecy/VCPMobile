@@ -8,9 +8,22 @@ use sqlx::Row;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 pub struct SyncFinalizer;
+
+pub fn invalidate_sync_entity_caches(app_handle: &AppHandle) {
+    if let Some(state) =
+        app_handle.try_state::<crate::vcp_modules::agent_service::AgentConfigState>()
+    {
+        state.invalidate_cache();
+    }
+    if let Some(state) =
+        app_handle.try_state::<crate::vcp_modules::group_service::GroupManagerState>()
+    {
+        state.invalidate_cache();
+    }
+}
 
 impl SyncFinalizer {
     pub async fn execute(
@@ -22,7 +35,10 @@ impl SyncFinalizer {
         modified_topics: HashSet<String>,
     ) -> Result<(), String> {
         // 1. 强制落盘数据库写队列
-        write_queue.flush().await;
+        write_queue
+            .flush()
+            .await
+            .map_err(|error| format!("同步写队列落盘失败: {error}"))?;
 
         // 2. 全局 Hash 冒泡
         if !modified_topics.is_empty() {
@@ -172,6 +188,9 @@ impl SyncFinalizer {
                 }
             }
         }
+
+        // 同步写队列绕过业务 Facade；完成后统一失效配置缓存，避免继续命中同步前快照。
+        invalidate_sync_entity_caches(app_handle);
 
         // 3. 推进 Pipeline 状态
         let _ = pipeline.on_messages_done().await;

@@ -13,7 +13,8 @@ use crate::vcp_modules::topic_types::Topic;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as CacheCommitMutex};
 
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
@@ -24,6 +25,10 @@ pub struct AgentConfigState {
     pub caches: DashMap<String, AgentConfig>,
     /// 任务队列锁: agent_id -> Mutex
     pub locks: DashMap<String, Arc<Mutex<()>>>,
+    /// 同步写绕过 Facade 时推进的缓存代次，阻止旧数据库快照迟到回填。
+    cache_generation: AtomicU64,
+    /// 只保护 generation 校验与 DashMap 提交/清空，不跨任何 await。
+    cache_commit: CacheCommitMutex<()>,
 }
 
 impl AgentConfigState {
@@ -31,6 +36,8 @@ impl AgentConfigState {
         Self {
             caches: DashMap::new(),
             locks: DashMap::new(),
+            cache_generation: AtomicU64::new(0),
+            cache_commit: CacheCommitMutex::new(()),
         }
     }
 
@@ -40,6 +47,29 @@ impl AgentConfigState {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .value()
             .clone()
+    }
+
+    fn current_cache_generation(&self) -> u64 {
+        self.cache_generation.load(Ordering::Acquire)
+    }
+
+    fn insert_cache_if_current(&self, agent_id: String, config: AgentConfig, generation: u64) {
+        let _commit_guard = self
+            .cache_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.cache_generation.load(Ordering::Acquire) == generation {
+            self.caches.insert(agent_id, config);
+        }
+    }
+
+    pub fn invalidate_cache(&self) {
+        let _commit_guard = self
+            .cache_commit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.caches.clear();
+        self.cache_generation.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -84,9 +114,21 @@ pub async fn read_agent_config_internal<R: Runtime>(
     agent_id: &str,
     allow_default: Option<bool>,
 ) -> Result<AgentConfig, String> {
+    let mutex = state.acquire_lock(agent_id).await;
+    let _lock = mutex.lock().await;
+    read_agent_config_locked(app_handle, state, agent_id, allow_default).await
+}
+
+async fn read_agent_config_locked<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    state: &AgentConfigState,
+    agent_id: &str,
+    allow_default: Option<bool>,
+) -> Result<AgentConfig, String> {
     if let Some(cached) = state.caches.get(agent_id) {
         return Ok(cached.value().clone());
     }
+    let cache_generation = state.current_cache_generation();
 
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -145,7 +187,7 @@ pub async fn read_agent_config_internal<R: Runtime>(
             topics,
         };
 
-        state.caches.insert(agent_id.to_string(), config.clone());
+        state.insert_cache_if_current(agent_id.to_string(), config.clone(), cache_generation);
         return Ok(config);
     }
 
@@ -176,7 +218,7 @@ pub async fn save_agent_config(
         agent.system_prompt = cached.value().system_prompt.clone();
     } else {
         if let Ok(db_config) =
-            read_agent_config_internal(&app_handle, &state, &agent_id, Some(false)).await
+            read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await
         {
             agent.system_prompt = db_config.system_prompt;
         }
@@ -188,7 +230,7 @@ pub async fn save_agent_config(
 #[tauri::command]
 pub async fn get_agents(
     app_handle: AppHandle,
-    state: State<'_, AgentConfigState>,
+    _state: State<'_, AgentConfigState>,
 ) -> Result<Vec<AgentConfig>, String> {
     let start_total = std::time::Instant::now();
     let db_state = app_handle.state::<DbState>();
@@ -216,7 +258,7 @@ pub async fn get_agents(
     }
 
     let start_mapping = std::time::Instant::now();
-    // 2. 组装并预存缓存
+    // 2. 组装列表；实体缓存只允许在 per-ID 锁内填充。
     let mut agents = Vec::new();
     for row in agent_rows {
         use sqlx::Row;
@@ -238,8 +280,6 @@ pub async fn get_agents(
             topics: vec![], // 优化：不加载 topics 列表，改由前端点击时流式按需懒加载
         };
 
-        // 预热内存缓存，供后续 read_agent_config 内存级调用
-        state.caches.insert(agent_id, config.clone());
         agents.push(config);
     }
     let duration_mapping = start_mapping.elapsed();
@@ -265,13 +305,8 @@ pub async fn update_agent_config<R: Runtime>(
     let _lock = mutex.lock().await;
 
     // 1. 读取当前配置
-    let config = read_agent_config(
-        app_handle.clone(),
-        state.clone(),
-        agent_id.clone(),
-        Some(true),
-    )
-    .await?;
+    let mut config = read_agent_config_locked(&app_handle, &state, &agent_id, Some(true)).await?;
+    config.system_prompt.clear();
 
     // 2. 将更新合并到当前配置 (JSON 层级合并)
     let mut config_val = serde_json::to_value(&config).map_err(|e| e.to_string())?;
@@ -298,6 +333,7 @@ async fn internal_write_agent_config<R: Runtime>(
     skip_bubble: bool,
     from_sync: bool,
 ) -> Result<bool, String> {
+    let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
@@ -323,6 +359,16 @@ async fn internal_write_agent_config<R: Runtime>(
     }
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    let deleted_at =
+        sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM agents WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if matches!(deleted_at, Some(Some(_))) {
+        return Err(format!("Agent {agent_id} has been deleted"));
+    }
 
     // 计算基于 DTO 的决定性哈希
     let dto = AgentSyncDTO::from(&final_config);
@@ -428,9 +474,7 @@ async fn internal_write_agent_config<R: Runtime>(
         bubble_tx.commit().await.map_err(|e| e.to_string())?;
     }
 
-    state
-        .caches
-        .insert(agent_id.to_string(), final_config.clone());
+    state.insert_cache_if_current(agent_id.to_string(), final_config.clone(), cache_generation);
 
     Ok(true)
 }
@@ -442,51 +486,69 @@ pub async fn delete_agent(
     state: State<'_, AgentConfigState>,
     agent_id: String,
 ) -> Result<bool, String> {
+    delete_agent_internal(&app_handle, &state, &agent_id).await?;
+
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+            data_type: SyncDataType::Agent,
+            id: agent_id,
+        });
+    }
+
+    Ok(true)
+}
+
+pub async fn delete_agent_internal<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    state: &AgentConfigState,
+    agent_id: &str,
+) -> Result<(), String> {
+    // 与 save/update 共享同一把实体锁，避免迟到写入在删除后重新填充 cache。
+    // 锁条目有意保留：删除后若同 ID 被重新创建，仍必须沿用同一所有权串行化。
+    let mutex = state.acquire_lock(agent_id).await;
+    let _lock = mutex.lock().await;
+
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     sqlx::query("UPDATE agents SET deleted_at = ? WHERE agent_id = ?")
         .bind(now)
-        .bind(&agent_id)
-        .execute(pool)
+        .bind(agent_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联将该 Agent 下的所有话题标记为逻辑删除
     sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL")
         .bind(now)
-        .bind(&agent_id)
-        .execute(pool)
+        .bind(agent_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联将该 Agent 下所有话题的所有消息标记为逻辑删除
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'agent') AND deleted_at IS NULL")
         .bind(now)
-        .bind(&agent_id)
-        .execute(pool)
+        .bind(agent_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联清除该 Agent 下的所有活跃生成，杜绝已删除消息复活
     sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'agent'")
-        .bind(&agent_id)
-        .execute(pool)
+        .bind(agent_id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
-    state.caches.remove(&agent_id);
-    state.locks.remove(&agent_id);
+    HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
 
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
-            data_type: SyncDataType::Agent,
-            id: agent_id.clone(),
-        });
-    }
+    tx.commit().await.map_err(|e| e.to_string())?;
 
-    Ok(true)
+    state.caches.remove(agent_id);
+    Ok(())
 }
 
 /// 创建 Agent (原子化数据库插入)
@@ -497,6 +559,7 @@ pub async fn create_agent(
     name: String,
     initial_config: Option<serde_json::Value>,
 ) -> Result<AgentConfig, String> {
+    let cache_generation = state.current_cache_generation();
     let timestamp = crate::vcp_modules::infra::utils::now_millis();
 
     let base_id = name
@@ -593,7 +656,7 @@ pub async fn create_agent(
     HashAggregator::bubble_agent_hash(&mut bubble_tx, &agent_id).await?;
     bubble_tx.commit().await.map_err(|e| e.to_string())?;
 
-    state.caches.insert(agent_id.clone(), config.clone());
+    state.insert_cache_if_current(agent_id.clone(), config.clone(), cache_generation);
 
     Ok(config)
 }
@@ -608,19 +671,19 @@ pub struct AssistantsSnapshot {
 
 #[tauri::command]
 pub async fn get_assistants_snapshot(
-    agent_state: State<'_, AgentConfigState>,
-    group_state: State<'_, GroupManagerState>,
+    _agent_state: State<'_, AgentConfigState>,
+    _group_state: State<'_, GroupManagerState>,
     db_state: State<'_, DbState>,
 ) -> Result<AssistantsSnapshot, String> {
     let start_total = std::time::Instant::now();
     let pool = &db_state.pool;
 
-    // 1. 获取 agents (并写入缓存预热)
+    // 1. 获取 agents。批量快照不写实体缓存，避免并发删除后迟到回填 ghost。
     let agent_rows = sqlx::query(
-        "SELECT a.agent_id, a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
+        "SELECT a.agent_id, a.name, a.model, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
-         WHERE a.deleted_at IS NULL"
+         WHERE a.deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await
@@ -634,24 +697,6 @@ pub async fn get_assistants_snapshot(
         let model: String = row.get("model");
         let name: String = row.get("name");
 
-        let config = AgentConfig {
-            id: agent_id.clone(),
-            name: name.clone(),
-            system_prompt: row.get("system_prompt"),
-            mobile_system_prompt: row.get("mobile_system_prompt"),
-            model: model.clone(),
-            temperature: row.get("temperature"),
-            context_token_limit: row.get("context_token_limit"),
-            max_output_tokens: row.get("max_output_tokens"),
-            stream_output: row.get::<i32, _>("stream_output") != 0,
-            use_temperature: row.get::<i32, _>("use_temperature") != 0,
-            avatar_calculated_color: avatar_calculated_color.clone(),
-            topics: vec![],
-        };
-
-        // 预热内存缓存，供后续 read_agent_config 调用
-        agent_state.caches.insert(agent_id.clone(), config);
-
         agents_list.push(AgentListItem {
             id: agent_id,
             name,
@@ -660,19 +705,19 @@ pub async fn get_assistants_snapshot(
         });
     }
 
-    // 2. 获取 groups (并写入缓存预热)
+    // 2. 获取 groups，同样只生成列表快照而不预热实体缓存。
     let group_rows = sqlx::query(
-        "SELECT g.group_id, g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
+        "SELECT g.group_id, g.name, av.dominant_color
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
-         WHERE g.deleted_at IS NULL"
+         WHERE g.deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
 
     let member_rows = sqlx::query(
-        "SELECT group_id, agent_id, member_tag 
+        "SELECT group_id, agent_id
          FROM group_members 
          ORDER BY group_id, sort_order ASC",
     )
@@ -681,25 +726,15 @@ pub async fn get_assistants_snapshot(
     .map_err(|e| e.to_string())?;
 
     let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
-    let mut group_member_tags: HashMap<String, serde_json::Map<String, serde_json::Value>> =
-        HashMap::new();
-
     for mr in member_rows {
         use sqlx::Row;
         let gid: String = mr.get("group_id");
         let aid: String = mr.get("agent_id");
-        let tag: Option<String> = mr.get("member_tag");
 
         group_members
             .entry(gid.clone())
             .or_default()
             .push(aid.clone());
-        if let Some(t) = tag {
-            group_member_tags
-                .entry(gid)
-                .or_default()
-                .insert(aid, serde_json::Value::String(t));
-        }
     }
 
     let mut groups_list = Vec::new();
@@ -710,27 +745,6 @@ pub async fn get_assistants_snapshot(
         let name: String = row.get("name");
 
         let members = group_members.remove(&group_id).unwrap_or_default();
-        let member_tags_map = group_member_tags.remove(&group_id).unwrap_or_default();
-
-        let config = crate::vcp_modules::group::group_types::GroupConfig {
-            id: group_id.clone(),
-            name: name.clone(),
-            avatar_calculated_color: avatar_calculated_color.clone(),
-            members: members.clone(),
-            mode: row.get("mode"),
-            member_tags: Some(serde_json::Value::Object(member_tags_map)),
-            group_prompt: row.get("group_prompt"),
-            invite_prompt: row.get("invite_prompt"),
-            use_unified_model: row.get::<i32, _>("use_unified_model") != 0,
-            unified_model: row.get("unified_model"),
-            topics: vec![],
-            tag_match_mode: row.get("tag_match_mode"),
-            created_at: row.get("created_at"),
-        };
-
-        // 预热内存缓存，供后续 read_group_config_internal 调用
-        group_state.caches.insert(group_id.clone(), config);
-
         groups_list.push(GroupListItem {
             id: group_id,
             name,
@@ -784,4 +798,32 @@ pub async fn get_assistants_snapshot(
         groups: groups_list,
         unread_counts,
     })
+}
+
+#[cfg(test)]
+mod cache_generation_tests {
+    use super::*;
+
+    #[test]
+    fn sync_invalidation_rejects_a_stale_cache_fill() {
+        let state = AgentConfigState::new();
+        let stale_generation = state.current_cache_generation();
+
+        state.invalidate_cache();
+        state.insert_cache_if_current(
+            "agent-stale".to_string(),
+            create_default_config("agent-stale"),
+            stale_generation,
+        );
+
+        assert!(!state.caches.contains_key("agent-stale"));
+
+        let current_generation = state.current_cache_generation();
+        state.insert_cache_if_current(
+            "agent-current".to_string(),
+            create_default_config("agent-current"),
+            current_generation,
+        );
+        assert!(state.caches.contains_key("agent-current"));
+    }
 }

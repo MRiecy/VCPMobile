@@ -36,6 +36,7 @@ impl DiffHandler {
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<String>>>,
         logger: &Arc<Mutex<SyncLogger>>,
         task_tracker: &Arc<SyncTaskTracker>,
+        attempt_id: u64,
     ) -> Result<(), String> {
         if let Some(items) = payload["data"].as_array() {
             let items_clone: Vec<serde_json::Value> = items.clone();
@@ -100,9 +101,9 @@ impl DiffHandler {
 
                 if current_pending == 0 {
                     if current_phase == 1 {
-                        let _ = tx_internal.send(SyncCommand::StartTopicMetadata);
+                        let _ = tx_internal.send(SyncCommand::StartTopicMetadata { attempt_id });
                     } else if current_phase == 2 {
-                        let _ = tx_internal.send(SyncCommand::StartTopicValidation);
+                        let _ = tx_internal.send(SyncCommand::StartTopicValidation { attempt_id });
                     }
                 } else {
                     let tx_internal_wd = tx_internal.clone();
@@ -110,6 +111,7 @@ impl DiffHandler {
                     let manifest_phase_wd = manifest_phase.clone();
                     let pending_wd = pending_tasks.clone();
                     let handle_clone_wd = app_handle.clone();
+                    let attempt_id_wd = attempt_id;
 
                     task_tracker.spawn(async move {
                         let mut last_pending = pending_wd.load(Ordering::SeqCst);
@@ -143,9 +145,13 @@ impl DiffHandler {
                                     &format!("[TIMEOUT WARNING] 检测到同步流程异常停滞超过 60 秒 (Phase {})。看门狗机制介入强制过渡以恢复正常通信流水线。部分未决 Topic 状态将推迟到下次同步时补齐。", current_phase_wd)
                                 );
                                 if current_phase_wd == 1 {
-                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata);
+                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata {
+                                        attempt_id: attempt_id_wd,
+                                    });
                                 } else if current_phase_wd == 2 {
-                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicValidation);
+                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicValidation {
+                                        attempt_id: attempt_id_wd,
+                                    });
                                 }
                                 break;
                             } else if stuck_count >= 1 {
@@ -222,6 +228,7 @@ impl DiffHandler {
                 let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
                 let data_type_inner = data_type.clone();
+                let attempt_id_inner = attempt_id;
 
                 task_tracker
                     .spawn(async move {
@@ -260,9 +267,14 @@ impl DiffHandler {
                             {
                                 let phase = manifest_phase_in.load(Ordering::SeqCst);
                                 if phase == 1 {
-                                    let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata);
+                                    let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata {
+                                        attempt_id: attempt_id_inner,
+                                    });
                                 } else if phase == 2 {
-                                    let _ = tx_internal_in.send(SyncCommand::StartTopicValidation);
+                                    let _ =
+                                        tx_internal_in.send(SyncCommand::StartTopicValidation {
+                                            attempt_id: attempt_id_inner,
+                                        });
                                 }
                             }
                         }
@@ -281,6 +293,7 @@ impl DiffHandler {
                 let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
                 let http_url = base_url.to_string();
+                let attempt_id_inner = attempt_id;
 
                 task_tracker.spawn(async move {
                     let db = h_in.state::<DbState>();
@@ -374,9 +387,13 @@ impl DiffHandler {
                     {
                         let phase = manifest_phase_in.load(Ordering::SeqCst);
                         if phase == 1 {
-                            let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata);
+                            let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata {
+                                attempt_id: attempt_id_inner,
+                            });
                         } else if phase == 2 {
-                            let _ = tx_internal_in.send(SyncCommand::StartTopicValidation);
+                            let _ = tx_internal_in.send(SyncCommand::StartTopicValidation {
+                                attempt_id: attempt_id_inner,
+                            });
                         }
                     }
                 }).await;
@@ -395,6 +412,7 @@ impl DiffHandler {
                 let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
                 let data_type_base = data_type.clone();
+                let attempt_id_inner = attempt_id;
 
                 task_tracker.spawn(async move {
                     futures_util::stream::iter(other_items)
@@ -413,6 +431,7 @@ impl DiffHandler {
                             let manifest_received_task = manifest_received_in.clone();
                             let manifest_expected_task = manifest_expected_in.clone();
                             let manifest_phase_task = manifest_phase_in.clone();
+                            let attempt_id_task = attempt_id_inner;
 
                             async move {
                                 let mut should_decrement = true;
@@ -531,10 +550,14 @@ impl DiffHandler {
                                         let phase = manifest_phase_task.load(Ordering::SeqCst);
                                         if phase == 1 {
                                             let _ = tx_internal_task
-                                                .send(SyncCommand::StartTopicMetadata);
+                                                .send(SyncCommand::StartTopicMetadata {
+                                                    attempt_id: attempt_id_task,
+                                                });
                                         } else if phase == 2 {
                                             let _ = tx_internal_task
-                                                .send(SyncCommand::StartTopicValidation);
+                                                .send(SyncCommand::StartTopicValidation {
+                                                    attempt_id: attempt_id_task,
+                                                });
                                         }
                                     }
                                 }

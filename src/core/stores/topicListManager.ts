@@ -32,6 +32,15 @@ export const useTopicStore = defineStore("topic", () => {
   const loading = ref(false);
   const searchTerm = ref("");
   const currentAgentId = ref<string | null>(null);
+  const currentOwnerType = ref<string | null>(null);
+  let loadGeneration = 0;
+  let activeLoadKey: string | null = null;
+  let activeLoadPromise: Promise<void> | null = null;
+
+  const ownerKey = (ownerId: string, ownerType: string) =>
+    `${ownerType}:${ownerId}`;
+  const isCurrentOwner = (ownerId: string, ownerType: string) =>
+    currentAgentId.value === ownerId && currentOwnerType.value === ownerType;
 
   // --- 事件监听 (Event Listeners) ---
   // 注意：topic-index-updated 事件当前在 Rust 侧未被 emit，已移除死代码
@@ -41,8 +50,13 @@ export const useTopicStore = defineStore("topic", () => {
    * 同步完成后调用，确保下次切到任意 Agent/Group 时重新加载最新话题
    */
   const invalidateAllTopicCaches = () => {
+    // 使所有在途 Channel 失去提交资格；它们可以自然结束，但不能再污染新列表。
+    loadGeneration += 1;
+    activeLoadKey = null;
+    activeLoadPromise = null;
+    loading.value = false;
     topics.value = [];
-    // currentAgentId 保持不动，这样当前选中的话题列表会在 watch 中重新加载
+    // 当前 owner 身份保留，由调用方显式 reload，避免依赖不会再次触发的 selection watch。
     console.log("[TopicStore] All topic caches invalidated");
   };
 
@@ -83,23 +97,31 @@ export const useTopicStore = defineStore("topic", () => {
    * @param ownerId Agent ID or Group ID
    * @param ownerType "agent" or "group"
    */
-  const loadTopicList = async (ownerId: string, owner_type: string) => {
-    if (!ownerId) return;
+  const loadTopicList = (ownerId: string, owner_type: string): Promise<void> => {
+    if (!ownerId) return Promise.resolve();
 
+    const key = ownerKey(ownerId, owner_type);
+    if (activeLoadKey === key && activeLoadPromise) {
+      return activeLoadPromise;
+    }
+
+    const generation = ++loadGeneration;
     currentAgentId.value = ownerId;
+    currentOwnerType.value = owner_type;
     console.log(`[TopicStore] Loading topics for ${owner_type}: ${ownerId}`);
     loading.value = true;
+    topics.value = [];
 
-    try {
+    const requestTopics = new Map<string, Topic>();
+    let request!: Promise<void>;
+    request = (async () => {
+      try {
       // 1. 创建 Channel 用于接收流式数据
       const channel = new Channel<Topic[]>();
-      
-      // 每次开始加载前，清空当前列表（或根据业务决定是否保留）
-      topics.value = [];
 
       channel.onmessage = (chunk) => {
-        // 竞态检查：如果请求返回时，当前选中的 Agent 已经改变，则丢弃该结果
-        if (currentAgentId.value !== ownerId) return;
+        // owner + generation 双重校验覆盖同 owner 重入和 A -> B -> A。
+        if (generation !== loadGeneration || !isCurrentOwner(ownerId, owner_type)) return;
 
         const mappedChunk = chunk.map((t) => ({
           ...t,
@@ -110,10 +132,10 @@ export const useTopicStore = defineStore("topic", () => {
           msgCount: (t as any).msgCount || 0,
         }));
 
-        // 增量推入
-        topics.value.push(...mappedChunk);
-        // 强制触发虚拟列表重绘 (因为是 push，Vue 数组变动本身能响应，但为了保险对齐方案 A)
-        topics.value = [...topics.value];
+        for (const topic of mappedChunk) {
+          requestTopics.set(topic.id, topic);
+        }
+        topics.value = [...requestTopics.values()];
       };
 
       // 调用 Rust 命令开始流式获取
@@ -126,11 +148,24 @@ export const useTopicStore = defineStore("topic", () => {
       console.log(
         `[TopicStore] Topic list streaming completed for ${ownerId}`,
       );
-    } catch (e) {
-      console.error("[TopicStore] Failed to load topics:", e);
-    } finally {
-      loading.value = false;
-    }
+      } catch (e) {
+        if (generation === loadGeneration) {
+          console.error("[TopicStore] Failed to load topics:", e);
+        }
+      } finally {
+        if (generation === loadGeneration) {
+          loading.value = false;
+        }
+        if (activeLoadPromise === request) {
+          activeLoadKey = null;
+          activeLoadPromise = null;
+        }
+      }
+    })();
+
+    activeLoadKey = key;
+    activeLoadPromise = request;
+    return request;
   };
 
   /**
@@ -162,9 +197,12 @@ export const useTopicStore = defineStore("topic", () => {
         locked: true,
       };
 
-      topics.value.unshift(topicWithState);
-      // 强制触发虚拟列表重绘
-      topics.value = [...topics.value];
+      if (isCurrentOwner(ownerId, ownerType)) {
+        topics.value = [
+          topicWithState,
+          ...topics.value.filter((topic) => topic.id !== topicWithState.id),
+        ];
+      }
       notificationStore.addNotification({
         type: "success",
         title: "话题创建成功",
@@ -201,7 +239,9 @@ export const useTopicStore = defineStore("topic", () => {
       // 注意：确保 Rust 端已实现 delete_topic 命令
       await invoke("delete_topic", { ownerId, ownerType, topicId });
 
-      topics.value = topics.value.filter((t) => t.id !== topicId);
+      if (isCurrentOwner(ownerId, ownerType)) {
+        topics.value = topics.value.filter((t) => t.id !== topicId);
+      }
 
       notificationStore.addNotification({
         type: "success",
@@ -211,7 +251,11 @@ export const useTopicStore = defineStore("topic", () => {
       });
 
       // 如果删除的是当前选中的话题，自动载入最新的一个
-      if (sessionStore.currentTopicId === topicId) {
+      if (
+        sessionStore.currentSelectedItem?.id === ownerId &&
+        sessionStore.currentSelectedItem?.type === ownerType &&
+        sessionStore.currentTopicId === topicId
+      ) {
         const nextTopic = topics.value[0];
         if (nextTopic) {
           await sessionStore.selectTopicById(ownerId, nextTopic.id);
@@ -247,6 +291,7 @@ export const useTopicStore = defineStore("topic", () => {
         title: newTitle,
       });
 
+      if (!isCurrentOwner(ownerId, ownerType)) return;
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
         topics.value[index] = { ...topics.value[index], name: newTitle };
@@ -268,6 +313,7 @@ export const useTopicStore = defineStore("topic", () => {
     topicId: string,
   ) => {
     try {
+      if (!isCurrentOwner(ownerId, ownerType)) return;
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index === -1) return;
 
@@ -283,7 +329,13 @@ export const useTopicStore = defineStore("topic", () => {
         topicId,
         locked: targetLockState,
       });
-      topics.value[index] = { ...topics.value[index], locked: targetLockState };
+      if (!isCurrentOwner(ownerId, ownerType)) return;
+      const currentIndex = topics.value.findIndex((t) => t.id === topicId);
+      if (currentIndex === -1) return;
+      topics.value[currentIndex] = {
+        ...topics.value[currentIndex],
+        locked: targetLockState,
+      };
       // 强制触发虚拟列表重绘
       topics.value = [...topics.value];
     } catch (e) {
@@ -308,6 +360,7 @@ export const useTopicStore = defineStore("topic", () => {
       // 调用 Rust 命令更新状态
       await invoke("set_topic_unread", { ownerId, ownerType, topicId, unread });
 
+      if (!isCurrentOwner(ownerId, ownerType)) return;
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
         topics.value[index] = { ...topics.value[index], unread: unread };

@@ -1,6 +1,7 @@
 import { onMounted, onUnmounted, type Ref } from "vue";
 import { openUrl as openExternal } from "@tauri-apps/plugin-opener";
 import { useChatHistoryStore } from "../stores/chatHistoryStore";
+import { openRenderedImageViewer } from "./useRenderedImageViewer";
 
 export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
   const historyStore = useChatHistoryStore();
@@ -85,19 +86,12 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
         const alt = target.getAttribute("alt") || "";
         const title = target.getAttribute("title") || "";
 
-        // 动态引入查看器 Composable，消灭潜在的 Vue 组件循环引用
-        import("./useRenderedImageViewer")
-          .then(({ openRenderedImageViewer }) => {
-            openRenderedImageViewer({
-              src,
-              alt,
-              title,
-              sourceLabel: "聊天图片",
-            });
-          })
-          .catch((err) => {
-            console.error("[useMessageEvents] Failed to open RenderedImageViewer:", err);
-          });
+        openRenderedImageViewer({
+          src,
+          alt,
+          title,
+          sourceLabel: "聊天图片",
+        });
         return;
       }
     }

@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { useChatHistoryStore } from "@/core/stores/chatHistoryStore";
+import {
+  MAX_HISTORY_MESSAGES,
+  useChatHistoryStore,
+} from "@/core/stores/chatHistoryStore";
 import { useChatSessionStore } from "@/core/stores/chatSessionStore";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
 import { useSettingsStore } from "@/core/stores/settings";
 import { useAssistantStore } from "@/core/stores/assistant";
+import { useAttachmentStore } from "@/core/stores/attachmentStore";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 
 function deferred<T>() {
@@ -140,6 +144,80 @@ describe("chat conversation concurrency guards", () => {
       payload: { agentId: "agent-a", topicId: "topic-a" },
     });
     expect(history.currentChatHistory).toEqual([]);
+  });
+
+  it("loads older history with a stable keyset cursor and bounded window", async () => {
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const recent = Array.from({ length: MAX_HISTORY_MESSAGES }, (_, index) => ({
+      ...message(`message-${String(index).padStart(4, "0")}`, "topic-a"),
+      timestamp: index + 100,
+    }));
+    let page = 0;
+    mockInvoke("load_chat_history", () => {
+      page += 1;
+      return page === 1
+        ? recent
+        : [{ ...message("message-older", "topic-a"), timestamp: 1 }];
+    });
+
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
+    await history.loadMoreHistory();
+
+    const historyCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "load_chat_history",
+    );
+    expect(historyCalls[1]?.[1]).toMatchObject({
+      beforeTimestamp: 100,
+      beforeMessageId: "message-0000",
+      offset: null,
+    });
+    expect(history.currentChatHistory).toHaveLength(MAX_HISTORY_MESSAGES);
+    expect(history.currentChatHistory[0]?.id).toBe("message-older");
+    expect(history.currentChatHistory.some(item => item.id === "message-0499")).toBe(false);
+    expect(history.hasEvictedNewer).toBe(true);
+
+    mockInvoke("load_chat_history", () => recent.slice(-15));
+    await history.returnToLatest();
+
+    const latestCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "load_chat_history",
+    );
+    const latestCall = latestCalls[latestCalls.length - 1]?.[1];
+    expect(latestCall).toMatchObject({
+      beforeTimestamp: null,
+      beforeMessageId: null,
+      offset: 0,
+    });
+    expect(history.hasEvictedNewer).toBe(false);
+    expect(
+      history.currentChatHistory[history.currentChatHistory.length - 1]?.id,
+    ).toBe("message-0499");
+  });
+
+  it("does not clear or send attachments that are still loading", async () => {
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const attachments = useAttachmentStore();
+    mockInvoke("load_chat_history", () => []);
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
+    attachments.stagedAttachments.push({
+      id: "attachment-loading",
+      name: "large.pdf",
+      type: "application/pdf",
+      size: 10,
+      src: "file:///large.pdf",
+      status: "loading",
+    } as any);
+
+    await history.sendMessage("send with attachment");
+
+    expect(attachments.stagedAttachments).toHaveLength(1);
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "append_single_message"),
+    ).toBe(false);
   });
 
   it("does not persist a frontend skeleton for a thinking event", async () => {

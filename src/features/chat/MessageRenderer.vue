@@ -30,7 +30,7 @@ function setMermaidCache(key: string, value: string) {
   mermaidCache.set(key, value);
 }
 
-const renderingMermaids = new Set<string>();
+const renderingMermaids = new Map<string, Promise<string>>();
 let mermaidInitialized = false;
 
 // UI Components
@@ -524,10 +524,8 @@ const renderHeavyContent = async () => {
         if (wrapper && wrapper.querySelector('svg')) continue; // already rendered & enhanced
         if (placeholder.querySelector('svg')) continue; // already rendered
         
-        // Use innerHTML as stable cache key
-        const codeKey = placeholder.innerHTML;
-        // Skip if already being rendered by a concurrent call
-        if (renderingMermaids.has(codeKey)) continue;
+        const sourceCode = placeholder.dataset.mermaidSource || placeholder.textContent || '';
+        const codeKey = sourceCode;
         // Skip if Vue has replaced this element out of the DOM
         if (!messageContentRef.value.contains(placeholder)) continue;
         
@@ -541,25 +539,29 @@ const renderHeavyContent = async () => {
           continue;
         }
         
-        renderingMermaids.add(codeKey);
+        placeholder.dataset.mermaidSource = sourceCode;
         try {
-          const sourceCode = placeholder.textContent || '';
-          placeholder.dataset.mermaidSource = sourceCode; // 保存原始源码
-          
+          let renderPromise = renderingMermaids.get(codeKey);
+          if (!renderPromise) {
+            const renderId = `vcp-mermaid-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            renderPromise = mermaid.render(renderId, sourceCode).then(result => result.svg);
+            renderingMermaids.set(codeKey, renderPromise);
+            const release = () => {
+              if (renderingMermaids.get(codeKey) === renderPromise) renderingMermaids.delete(codeKey);
+            };
+            void renderPromise.then(release, release);
+          }
+          const renderedSvg = await renderPromise;
+          setMermaidCache(codeKey, renderedSvg);
+          if (!messageContentRef.value.contains(placeholder)) continue;
+          placeholder.innerHTML = renderedSvg;
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
-          await mermaid.run({ nodes: [placeholder] });
-          
-          const renderedSvg = placeholder.innerHTML;
-          setMermaidCache(codeKey, renderedSvg); // 缓存纯 SVG
-          
           enhanceMermaid(placeholder, sourceCode);
         } catch (e: any) {
           const errorMsg = e?.str || e?.message || String(e);
           console.error('[MessageRenderer] Mermaid render failed:', errorMsg, e);
           placeholder.innerHTML = `<div class="text-red-500 text-[10px] p-4 rounded-xl border border-red-500/10 bg-red-500/5">图表渲染失败: ${escapeHtml(errorMsg)}</div>`;
-        } finally {
-          renderingMermaids.delete(codeKey);
         }
       }
     } catch (e) {

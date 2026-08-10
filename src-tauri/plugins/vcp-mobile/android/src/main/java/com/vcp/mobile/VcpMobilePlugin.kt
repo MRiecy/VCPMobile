@@ -108,6 +108,76 @@ internal class PluginExecutorDomains(
     }
 }
 
+object ScreenKeepOnArbiter {
+    private val stateLock = Any()
+    private var activityRef: java.lang.ref.WeakReference<Activity>? = null
+    private var manualRequested = false
+    private var guardianRequested = false
+    private var appInForeground = true
+
+    @JvmStatic
+    fun setManualRequested(activity: Activity, requested: Boolean) {
+        synchronized(stateLock) {
+            activityRef = java.lang.ref.WeakReference(activity)
+            manualRequested = requested
+        }
+        apply(activity)
+    }
+
+    fun setGuardianRequested(activity: Activity, requested: Boolean) {
+        synchronized(stateLock) {
+            activityRef = java.lang.ref.WeakReference(activity)
+            guardianRequested = requested
+        }
+        apply(activity)
+    }
+
+    fun setAppInForeground(activity: Activity, foreground: Boolean) {
+        synchronized(stateLock) {
+            activityRef = java.lang.ref.WeakReference(activity)
+            appInForeground = foreground
+        }
+        apply(activity)
+    }
+
+    fun detach(activity: Activity) {
+        val ownsActivity = synchronized(stateLock) {
+            if (activityRef?.get() !== activity) {
+                false
+            } else {
+                activityRef?.clear()
+                activityRef = null
+                manualRequested = false
+                appInForeground = false
+                true
+            }
+        }
+        if (ownsActivity) {
+            activity.runOnUiThread {
+                activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+
+    private fun apply(activity: Activity) {
+        activity.runOnUiThread {
+            val shouldKeepScreenOn = synchronized(stateLock) {
+                if (activityRef?.get() !== activity) {
+                    null
+                } else {
+                    appInForeground && (manualRequested || guardianRequested)
+                }
+            } ?: return@runOnUiThread
+
+            if (shouldKeepScreenOn) {
+                activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            } else {
+                activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+        }
+    }
+}
+
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
@@ -145,24 +215,12 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(a: Activity) {
             if (a === activity) {
-                isAppInForeground = true
-
-                if (com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
-                    activity.runOnUiThread {
-                        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    }
-                }
+                ScreenKeepOnArbiter.setAppInForeground(activity, true)
             }
         }
         override fun onActivityPaused(a: Activity) {
             if (a === activity) {
-                isAppInForeground = false
-
-                if (com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
-                    activity.runOnUiThread {
-                        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    }
-                }
+                ScreenKeepOnArbiter.setAppInForeground(activity, false)
             }
         }
         override fun onActivityCreated(a: Activity, savedInstanceState: android.os.Bundle?) {}
@@ -183,7 +241,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     val pluginActivity: Activity get() = activity
     var webViewRef: WebView? = null
-    private var isAppInForeground = true
     private var pendingNotificationData: JSObject? = null
 
     private fun handleNotificationIntent(intent: Intent) {
@@ -241,24 +298,38 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // SSE Proxy Service Lifecycle
     // ==================================================================
     private fun startHelperServiceInternal() {
-        try {
-            val intent = Intent(activity, com.vcp.mobile.service.SseProxyService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                activity.startForegroundService(intent)
+        val intent = Intent(activity, com.vcp.mobile.service.SseProxyService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            activity.startForegroundService(intent)
+        } else {
+            activity.startService(intent)
+        }
+        Log.i(TAG, "SseProxyService start initiated on demand.")
+    }
+
+    private fun applyGuardianScreenState(required: Boolean) {
+        ScreenKeepOnArbiter.setGuardianRequested(activity, required)
+    }
+
+    private fun resolveWhenGuardianReady(invoke: Invoke, generation: Long) {
+        com.vcp.mobile.service.ForegroundGuardian.awaitServiceReadiness(
+            activity,
+            generation,
+        ) { ready, message ->
+            if (ready) {
+                invoke.resolve()
             } else {
-                activity.startService(intent)
+                invoke.reject(message ?: "Foreground service failed to become ready")
             }
-            Log.i(TAG, "SseProxyService start initiated.")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start SseProxyService: ", e)
         }
     }
 
     init {
         instanceRef = java.lang.ref.WeakReference(this)
         activity.application.registerActivityLifecycleCallbacks(activityLifecycleCallbacks)
+        ScreenKeepOnArbiter.setAppInForeground(activity, true)
+        com.vcp.mobile.service.ForegroundGuardian.setScreenStateListener(::applyGuardianScreenState)
         startOomScoreGuard()
-        startHelperServiceInternal()
     }
 
 
@@ -719,13 +790,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     @Command
     fun setKeepScreenOn(invoke: Invoke) {
-        activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        ScreenKeepOnArbiter.setManualRequested(activity, true)
         invoke.resolve()
     }
 
     @Command
     fun clearKeepScreenOn(invoke: Invoke) {
-        activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        ScreenKeepOnArbiter.setManualRequested(activity, false)
         invoke.resolve()
     }
 
@@ -936,13 +1007,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun acquireForeground(invoke: Invoke) {
         try {
             val args = invoke.parseArgs(AcquireForegroundArgs::class.java)
-            com.vcp.mobile.service.ForegroundGuardian.acquire(activity, args.tag, args.priority, args.label, args.screenKeepOn)
-            if (args.screenKeepOn) {
-                activity.runOnUiThread {
-                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
-            }
-            invoke.resolve()
+            val generation = com.vcp.mobile.service.ForegroundGuardian.acquire(
+                activity, args.tag, args.priority, args.label, args.screenKeepOn,
+            )
+            resolveWhenGuardianReady(invoke, generation)
         } catch (e: Exception) {
             Log.e(TAG, "acquireForeground failed", e)
             invoke.reject(e.message ?: "Unknown error")
@@ -954,11 +1022,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         try {
             val args = invoke.parseArgs(ReleaseForegroundArgs::class.java)
             com.vcp.mobile.service.ForegroundGuardian.release(activity, args.tag)
-            if (!com.vcp.mobile.service.ForegroundGuardian.isScreenKeepOnRequired) {
-                activity.runOnUiThread {
-                    activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
-            }
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "releaseForeground failed", e)
@@ -978,11 +1041,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     if (!isKeepalive) {
                         com.vcp.mobile.service.ForegroundGuardian.release(activity, "distributed")
                     } else {
-                        com.vcp.mobile.service.ForegroundGuardian.acquire(
+                        val generation = com.vcp.mobile.service.ForegroundGuardian.acquire(
                             activity, "distributed", 
                             com.vcp.mobile.service.ForegroundGuardian.PRIORITY_DISTRIBUTED, 
                             "distributed"
                         )
+                        resolveWhenGuardianReady(invoke, generation)
+                        return
                     }
                 } else {
                     // 老版 Rust 停止信号：释放所有流式相关的默认锁
@@ -994,24 +1059,18 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 return
             }
 
-            if (args.agentName.contains("[数据同步]")) {
+            val generation = if (args.agentName.contains("[数据同步]")) {
                 com.vcp.mobile.service.ForegroundGuardian.acquire(
                     activity, "sync", 
                     com.vcp.mobile.service.ForegroundGuardian.PRIORITY_SYNC, 
                     args.agentName, true
                 )
-                activity.runOnUiThread {
-                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
             } else if (args.agentName.contains("[预渲染重建]")) {
                 com.vcp.mobile.service.ForegroundGuardian.acquire(
                     activity, "prerender", 
                     com.vcp.mobile.service.ForegroundGuardian.PRIORITY_PRERENDER, 
                     args.agentName, true
                 )
-                activity.runOnUiThread {
-                    activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                }
             } else {
                 com.vcp.mobile.service.ForegroundGuardian.acquire(
                     activity, "stream:${args.agentName}", 
@@ -1020,7 +1079,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 )
             }
 
-            invoke.resolve()
+            resolveWhenGuardianReady(invoke, generation)
         } catch (e: Exception) {
             Log.e(TAG, "startStreamingService failed", e)
             invoke.reject(e.message ?: "Unknown error")
@@ -1030,10 +1089,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun stopStreamingService(invoke: Invoke) {
         try {
-            com.vcp.mobile.service.ForegroundGuardian.releaseAllLocks()
-            activity.runOnUiThread {
-                activity.window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            }
+            com.vcp.mobile.service.ForegroundGuardian.releaseAll(activity)
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "stopStreamingService failed", e)
@@ -1044,12 +1100,12 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun acquireWakeLock(invoke: Invoke) {
         try {
-            com.vcp.mobile.service.ForegroundGuardian.acquire(
+            val generation = com.vcp.mobile.service.ForegroundGuardian.acquire(
                 activity, "manual_keepalive", 
                 com.vcp.mobile.service.ForegroundGuardian.PRIORITY_DISTRIBUTED, 
                 "[后台保活]"
             )
-            invoke.resolve()
+            resolveWhenGuardianReady(invoke, generation)
         } catch (e: Exception) {
             Log.e(TAG, "acquireWakeLock failed", e)
             invoke.reject(e.message ?: "Unknown error")
@@ -1171,6 +1227,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             (pendingTask as? PendingInvokeTask)?.rejectBeforeStart("plugin was destroyed")
         }
         activity.application.unregisterActivityLifecycleCallbacks(activityLifecycleCallbacks)
+        com.vcp.mobile.service.ForegroundGuardian.setScreenStateListener(null)
+        ScreenKeepOnArbiter.detach(activity)
+        keyboardInsetsManager.detach()
         webViewRef = null
         lifecycleBridge.detach()
         try {

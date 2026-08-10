@@ -7,6 +7,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import app.tauri.plugin.JSObject
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 应用生命周期桥接器
@@ -18,6 +19,8 @@ class LifecycleBridge : DefaultLifecycleObserver {
 
     private var activityRef: WeakReference<Activity>? = null
     private var pluginRef: WeakReference<VcpMobilePlugin>? = null
+    private val transitionEpoch = AtomicLong(0)
+    private var lastForegroundState: Boolean? = null
 
     fun attach(activity: Activity, plugin: VcpMobilePlugin) {
         activityRef = WeakReference(activity)
@@ -43,6 +46,7 @@ class LifecycleBridge : DefaultLifecycleObserver {
         }
         activityRef = null
         pluginRef = null
+        lastForegroundState = null
     }
 
     override fun onDestroy(owner: LifecycleOwner) {
@@ -51,15 +55,15 @@ class LifecycleBridge : DefaultLifecycleObserver {
     }
 
     override fun onResume(owner: LifecycleOwner) {
-        emit(mapOf("state" to "resume"))
+        emitTransition("resume", true)
     }
 
     override fun onPause(owner: LifecycleOwner) {
-        emit(mapOf("state" to "pause"))
+        emitTransition("pause", false)
     }
 
     override fun onStop(owner: LifecycleOwner) {
-        emit(mapOf("state" to "stop"))
+        emitTransition("stop", false)
     }
 
     fun onConfigurationChanged(newConfig: Configuration) {
@@ -73,6 +77,12 @@ class LifecycleBridge : DefaultLifecycleObserver {
 
     fun onLowMemory() {
         emit(mapOf("state" to "low-memory"))
+    }
+
+    private fun emitTransition(state: String, foreground: Boolean) {
+        if (lastForegroundState == foreground) return
+        lastForegroundState = foreground
+        emit(mapOf("state" to state, "epoch" to transitionEpoch.incrementAndGet()))
     }
 
     private fun emit(detail: Map<String, Any?>) {
@@ -93,4 +103,3 @@ class LifecycleBridge : DefaultLifecycleObserver {
         }
     }
 }
-

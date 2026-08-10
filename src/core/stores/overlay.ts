@@ -94,15 +94,20 @@ export const useOverlayStore = defineStore('overlay', () => {
     const modalId = 'Page:syncSession';
     pageStack.value.push({ type: 'syncSession', id: undefined, modalId });
     registerModal(modalId, () => {
-      syncStore.close();
+      // connecting / connected 期间由 sync store 持有不可卸载权；
+      // registerModal 是同步回调，因此必须直接返回 canDismiss 门禁结果。
+      if (!syncStore.canDismiss) return false;
+      void syncStore.close();
       popPageInternal();
+      return true;
     });
   };
 
-  const closeSyncSession = () => {
+  const closeSyncSession = async () => {
     if (!isSyncSessionOpen.value) return;
     const syncStore = useSyncSessionStore();
-    syncStore.close();
+    if (!syncStore.canDismiss) return;
+    await syncStore.close();
     const top = pageStack.value[pageStack.value.length - 1];
     if (top?.type === 'syncSession') {
       unregisterModal(top.modalId);

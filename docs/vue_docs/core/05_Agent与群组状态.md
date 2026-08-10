@@ -2,8 +2,8 @@
 id: VUE-CORE-005
 title: Agent与群组状态
 description: VCP Mobile 前端 Agent/群组 列表管理、配置缓存与话题联动的状态设计
-version: 1.0.3
-date: 2026-06-05
+version: 1.1.3
+date: 2026-08-11
 ---
 
 # 05. Agent与群组状态
@@ -422,7 +422,7 @@ channel.onmessage = (chunk) => {
 await invoke("get_topics_streamed", { ownerId, ownerType: owner_type, onChunk: channel });
 ```
 
-Rust 后端通过 Tauri `Channel` 分批次推送话题块，前端每收到一批即增量追加到 `topics.value`。`currentAgentId` 用于**竞态防护**：若用户在加载过程中切换了侧边栏选中项，旧请求的返回数据会被丢弃。
+Rust 后端通过 Tauri `Channel` 分批次推送话题块。每次加载拥有不可变 `ownerKey = ownerType:ownerId` 与递增 `loadGeneration`，chunk 先按 ID 合并到本请求的 Map，只有 owner 与 generation 同时匹配才替换 `topics.value`。这同时覆盖不同 owner、同 owner 重入以及 A→B→A 的迟到回调。
 
 ### 4.2 与 Agent 的从属关系
 
@@ -433,7 +433,9 @@ Rust 后端通过 Tauri `Channel` 分批次推送话题块，前端每收到一�
 | 切换 Agent/Group | `chatSessionStore.selectItem()` → 触发外部 watcher | `topicStore.loadTopicList(ownerId, ownerType)` |
 | 创建话题 | 话题列表 UI | `topicStore.createTopic(ownerId, ownerType, name)`，本地 `unshift` 乐观更新 |
 | 删除话题 | 话题列表 UI | `topicStore.deleteTopic(...)`，若删除的是当前话题则自动切换至下一个 |
-| 同步完成后 | 外部生命周期 | `topicStore.invalidateAllTopicCaches()` → `topics.value = []` |
+| 同步完成后 | `useDataReload.performFullReload()` | 先 `invalidateAllTopicCaches()` 使在途 Channel 失效，再显式按当前复合 owner 重新 `loadTopicList`；不依赖 selection watcher 再次触发 |
+
+`TopicList.vue` 监听 `[currentSelectedItem.id, currentSelectedItem.type]`，而不是只监听 ID 或从列表反推类型；即使 Agent 与 Group 的 ID 文本相同，owner type 变化也会启动新 generation。相同 owner 的并发调用则复用同一个 `activeLoadPromise`，避免重复 Channel。
 
 **删除话题的级联处理**：
 
@@ -750,7 +752,7 @@ watch(agentConfig, () => {
 | Blob URL | — | 通过 `URL.createObjectURL(blob)` 创建的内存级对象 URL，用于展示头像 | `avatar.ts` |
 | Dominant Color | 主色调 | 从头像中提取的代表性颜色，用于 UI 边框与 Glassmorphism 背景 | `avatar.ts`, `VcpAvatar.vue` |
 | Channel | Tauri Channel | Tauri v2 的流式通信机制，Rust 可多次 `send()`，前端通过 `onmessage` 接收 | `topicListManager.ts` |
-| 竞态防护 | Race Condition Guard | 通过 `currentAgentId` 比对，丢弃非当前选中项的异步返回数据 | `topicListManager.ts` |
+| 竞态防护 | Race Condition Guard | 通过 `ownerType:ownerId + loadGeneration + activeLoadPromise` 约束异步 Channel 的提交资格 | `topicListManager.ts` |
 | 乐观更新 | Optimistic Update | UI 先变更本地状态，再异步同步到后端，提升交互响应感 | `topicListManager.ts` |
 | 原始快照 | Original Snapshot | 配置加载后深克隆一份 JSON 快照，用于后续变更检测 | `AgentSettingsView.vue` |
 | SortableJS | — | 第三方拖拽排序库，用于 Agent/Group 侧边栏的手动排序 | `AgentList.vue` |
@@ -764,4 +766,4 @@ watch(agentConfig, () => {
 | 流式加载 | Streaming Load | 通过 Channel 分块接收话题数据，前端渐进式渲染 | `topicListManager.ts` |
 
 ---
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-08-11 | VCP Mobile v1.1.3*

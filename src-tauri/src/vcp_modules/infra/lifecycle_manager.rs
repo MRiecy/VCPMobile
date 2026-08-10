@@ -13,8 +13,10 @@ use crate::vcp_modules::sync_service::init_sync_service;
 use crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal;
 
 // Re-export submodules to preserve public API compatibility
+#[allow(unused_imports)]
 pub use crate::vcp_modules::infra::lifecycle_controller::{
-    is_app_in_foreground, set_app_foreground_state, set_app_foreground_state_internal,
+    is_app_in_foreground, reserve_lifecycle_transition, set_app_foreground_state,
+    set_app_foreground_state_for_epoch, set_app_foreground_state_internal,
 };
 pub use crate::vcp_modules::infra::lifecycle_reconciler::{
     reconcile_distributed_node, reconcile_local_server,

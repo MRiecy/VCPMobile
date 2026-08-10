@@ -1008,7 +1008,6 @@ html.dark .vcp-fullscreen-tool-panel.is-tool-result .vcp-fullscreen-header {
   font-size: 0.88em !important;
   line-height: 1.5;
   box-sizing: border-box;
-  backdrop-filter: blur(6px);
 }
 
 .vcp-tool-call-summary-header {
@@ -1176,6 +1175,5 @@ html:not(.dark) .vcp-tool-call-summary-chip.status-unknown {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 
 

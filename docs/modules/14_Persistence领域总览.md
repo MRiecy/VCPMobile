@@ -1,7 +1,7 @@
 ---
 id: MOD-PERSISTENCE-014
 version: "1.1.3"
-date: 2026-08-10
+date: 2026-08-11
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
 related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs, message_service.rs]
@@ -233,6 +233,8 @@ CREATE TABLE render_cache (
     topic_id TEXT NOT NULL,
     msg_id TEXT NOT NULL,
     render_content BLOB,            -- zstd 压缩的 JSON AST
+    content_hash TEXT NOT NULL,      -- 编译时对应的消息正文指纹
+    renderer_schema_version INTEGER NOT NULL,
     updated_at BIGINT NOT NULL,
     PRIMARY KEY (topic_id, msg_id),
     FOREIGN KEY (topic_id, msg_id) REFERENCES messages(topic_id, msg_id) ON DELETE CASCADE
@@ -242,6 +244,8 @@ CREATE TABLE render_cache (
 | 字段 | 说明 |
 |------|------|
 | `render_content` | `MessageRenderCompiler::serialize` 生成的 zstd 压缩 JSON，存储 `Vec<ContentBlock>` |
+| `content_hash` | 与 `messages.content_hash` 相等时缓存才可命中；正文变化会自动失效 |
+| `renderer_schema_version` | 渲染器协议版本；版本不匹配时按 cache miss 重编译 |
 | `ON DELETE CASCADE` | 消息被删除时，渲染缓存自动级联删除，无需应用层处理 |
 
 ### 2.8 新增表：`active_generations`（v1.1.3）
@@ -369,17 +373,17 @@ Worker 的核心设计是**将短时间窗口内的多个独立写入请求合�
     初始化 total_msg_count = 该任务包含的消息数
     初始化 flush_tx_opt = None
     │
-    └─→ 循环尝试拉取更多任务（最多 50ms 超时）
+    └─→ 循环尝试拉取更多任务（最多 10ms 超时）
         ├─→ 收到 Flush → 记录 sender，中断拉取
-        ├─→ 收到普通任务 → 加入批次（限制：总任务数 < 200，总消息数 < 5000）
+        ├─→ 收到普通任务 → 加入批次（限制：总任务数 < 32，总消息数 < 500）
         └─→ 超时或通道空 → 中断拉取
 ```
 
 | 限制项 | 阈值 | 设计理由 |
 |--------|------|---------|
-| 最大任务数 | 200 | 防止单个事务过大导致内存膨胀和 checkpoint 延迟 |
-| 最大消息数 | 5000 | 消息任务通常体积最大，单独限制以保护资源 |
-| 合并窗口 | 50 ms | 在吞吐与延迟之间取平衡点；高并发时窗口内自然填满 |
+| 最大任务数 | 32 | 缩短同步事务占锁时间，给聊天终态写入留出调度窗口 |
+| 最大消息数 | 500 | 限制消息解析结果与 SQL 参数的单事务峰值 |
+| 合并窗口 | 10 ms | 保留批量吞吐，同时降低交互写等待 |
 
 **事务执行**（L120–L216）：
 - 在 `spawn_blocking` 闭包内：`rusqlite::Connection::open(&db_path)` 打开独立连接。
@@ -396,11 +400,11 @@ Worker 的核心设计是**将短时间窗口内的多个独立写入请求合�
 `Flush` 是写入队列中唯一的**控制信号**而非数据负载，用于解决同步 pipeline 中的**时序确定性**问题。
 
 ```rust
-pub async fn flush(&self) {
+pub async fn flush(&self) -> Result<(), String> {
     let (tx, rx) = oneshot::channel();
     if let Err(e) = self.sender.send(DbWriteTask::Flush { tx }).await { ... }
-    let _ = rx.await;
-    println!("[DbWriteQueue] Flush completed");
+    rx.await.map_err(...)??;
+    Ok(())
 }
 ```
 
@@ -408,10 +412,10 @@ pub async fn flush(&self) {
 
 | 场景 | 行为 |
 |------|------|
-| **首任务即 Flush** | 事务队列为空，无需等待任何数据写入，直接 `tx.send(())` 确认（L86） |
-| **合并中收到 Flush** | 终止当前批次收集，将 Flush 的 oneshot sender 暂存到 `flush_tx_opt`；待当前事务提交后，再发送确认（L231） |
+| **首任务即 Flush** | 事务队列为空，返回此前尚未结算的 batch 错误；无错误时返回 `Ok(())` |
+| **合并中收到 Flush** | 终止当前批次收集；事务提交后返回本批与此前积累错误的汇总 Result |
 
-**设计意图**：同步服务在批量发送 TopicMessages 后调用 `flush().await`，可确保**此前所有已提交的任务已落盘**，然后再向前端发送同步完成事件或进行下一步操作。如果没有 Flush，由于批量合并的 50ms 窗口，最后几条消息可能仍在队列中等待，导致前端收到"同步完成"但数据库尚未写入的竞态条件。
+**设计意图**：同步服务在批量发送 TopicMessages 后调用 `flush().await?`，不仅确认此前任务已处理，还把后台事务失败显式传回阶段状态机。任一 flush/finalizer 失败都会阻止 `PHASE_COMPLETED`，避免 UI 显示完成但数据库缺项。
 
 ### 3.5 Turbo rusqlite 模式
 
@@ -512,28 +516,22 @@ fn rusqlite_upsert_agent(
 - AgentTopic：写入 `owner_type = 'agent'`，保留 `locked` 和 `unread` 字段。
 - GroupTopic：写入 `owner_type = 'group'`，`locked` 固定为 1，`unread` 固定为 0（群组话题无未读概念）。
 
-### 3.8 错误处理与统计
+### 3.8 错误传播与统计
 
-DbWriteQueue Worker 对错误采取**记录但不中断**的策略：
+DbWriteQueue Worker 可以继续消费后续批次，但任何批次失败都会进入 `pending_errors`，并由下一次 `flush()` 汇总返回；继续运行不等于把失败当作成功：
 
 ```rust
 match result {
     Ok(Ok(_)) => success_count += 1,
-    Ok(Err(e)) => {
-        error_count += 1;
-        println!("[DbWriteQueue] rusqlite execution error: {}", e);
-    }
-    Err(e) => {
-        error_count += 1;
-        println!("[DbWriteQueue] spawn_blocking error: {}", e);
-    }
+    Ok(Err(e)) => pending_errors.push(e.to_string()),
+    Err(e) => pending_errors.push(e.to_string()),
 }
 ```
 
 | 错误类型 | 原因 | 处理策略 |
 |---------|------|---------|
-| rusqlite 执行错误 | SQL 语法错误、约束冲突、磁盘满 | 打印日志，跳过当前批次，Worker 继续处理下一批 |
-| spawn_blocking 错误 | 线程池 panic、OS 级资源耗尽 | 打印日志，Worker 继续 |
+| rusqlite 执行错误 | SQL 语法错误、约束冲突、磁盘满 | 事务回滚、记录错误；下一次 Flush 返回 `Err`，同步阶段不得完成 |
+| spawn_blocking 错误 | 线程池 panic、OS 级资源耗尽 | 记录 JoinError；下一次 Flush 返回 `Err` |
 
 **统计输出**：Worker 停止时（通道关闭或应用退出）输出总成功数和错误数（L235–L238），便于诊断同步数据丢失问题。
 
@@ -640,21 +638,20 @@ v0.9.14 对消息加载流程进行了重大重构，引入**懒渲染缓存策�
 ├─→ 查询 LEFT JOIN render_cache
 │
 ├─→ render_content 命中 ?
-│   ├─Yes─→ parse_render_bytes(rb) → blocks
+│   ├─Yes 且 hash/schema 匹配─→ deserialize_render_async(rb) → blocks
 │   │        跳过编译，直接返回
 │   │
 │   └─No──→ ContentCompressor::decompress(content)
-│            MessageRenderCompiler::compile(decompressed)
+│            有界 spawn_blocking 编译/序列化
 │            serde_json::to_value(&compiled) → blocks
 │            │
-│            └─→ tokio::spawn(async { 异步写回 render_cache })
-│                 （非阻塞，使用 sqlx UPSERT）
+│            └─→ 异步 CAS 写回 render_cache
+│                 （仅正文 content_hash 仍等于编译起点时提交）
 ```
 
-- **命中即走**：`render_cache` 存在时直接反序列化 `blocks`，零编译开销。
-- **未命中编译**：解压 `content` 后实时调用 `MessageRenderCompiler::compile`，生成 AST。
-- **异步回写**：通过 `tokio::spawn` 将编译结果异步写入 `render_cache`，不阻塞消息加载流。这是关键设计：若同步写回，高并发加载时会显著增加延迟。
-- **幂等安全**：回写使用 `ON CONFLICT DO UPDATE`，即使并发回写同一消息也安全。
+- **受控命中**：只有正文 hash 和渲染 schema 同时匹配才反序列化；损坏缓存按 miss 处理，不返回空白正文。
+- **有界编译**：解析、序列化、反序列化共用 1–4 permit 的 `spawn_blocking` 门禁，不占用 Tokio IO worker。
+- **CAS 回写**：慢编译只能在消息仍保持起始 hash 时写回，不能覆盖更新后的正文缓存。
 
 ### 4.3b re_render_message 命令
 
@@ -695,46 +692,42 @@ pub async fn re_render_message(
 | 附件处理 | 逐条 DELETE + INSERT | Chunked Delete + Chunked Insert |
 | 事务来源 | 调用方提供（可跨多个操作共享） | Worker 内部新建（每批次独立） |
 
-### 4.4 通用三段流水线基础设施
+### 4.4 预渲染重建三段流水线
 
-`message_repository.rs` 为全量维护任务设计了一套**可复用的三段流水线**：Reader → Processor → Writer。
+`message_repository.rs` 的预渲染重建采用 Reader → Processor → Writer 三段流水线。旧的内容压缩维护任务已移除，因此这里不是任意 SQL 的通用 writer。
 
 ```rust
 // Stage 1: Reader
-async fn stream_all_message_contents(
+async fn stream_cached_message_contents(
     pool: &sqlx::SqlitePool,
-    tx: mpsc::Sender<(String, String, Vec<u8>)>,
+    tx: mpsc::Sender<(String, String, String, String)>,
 ) -> Result<(), String>;
 
 // Stage 3: Writer
-fn run_batch_update_writer(
+fn run_render_cache_update_writer(
     db_path: &Path,
-    rx: mpsc::Receiver<Vec<(String, String, Vec<u8>)>>,
-    update_sql: &str,
+    rx: mpsc::Receiver<Vec<(String, String, String, Vec<u8>)>>,
     progress_event: &str,
     app_handle: AppHandle,
     total: usize,
 ) -> JoinHandle<Result<(), String>>;
 ```
 
-**Reader（`stream_all_message_contents`）**（L86–L120）：
+**Reader（`stream_cached_message_contents`）**：
 - 按 `rowid` 正序分页读取，每页 `FETCH_SIZE = 500`。
-- 不解压内容，直接传递 `(topic_id, msg_id, content_bytes)` 元组。
+- 读取明文 `content` 与当时的 `content_hash`，传递 `(topic_id, msg_id, content, source_hash)`。
 - 当发送端关闭（`tx.send` 失败）时优雅退出，不报错。
 - 使用 `rowid` 而非 `OFFSET` 分页，避免大数据量下的偏移性能衰减。
 
-**Writer（`run_batch_update_writer`）**（L123–L174）：
+**Writer（`run_render_cache_update_writer`）**：
 - 在 `spawn_blocking` 中运行，使用 rusqlite 直连。
-- 每收到一个 batch 开启一个事务，批量执行 `update_sql`。
-- 支持两种 SQL 参数模式：
-  - `render_cache` 模式：4 参数 `(topic_id, msg_id, bytes, now)`。
-  - `content` 模式：3 参数 `(bytes, topic_id, msg_id)`。
-- 通过字符串包含检测 `update_sql.contains("render_cache")` 自动适配参数顺序（L149）。
+- 每收到一个 batch 开启一个事务，逐项调用 `update_render_cache_if_current`。
+- 写入携带 Reader 捕获的 `source_hash`；仅当 messages 当前 hash 仍相等且未删除时更新缓存。
 - 进度发射：每 32ms 或处理完成时，通过 `app_handle.emit` 向前端推送 `RebuildProgress`。
 - 32ms 间隔对应约 30 FPS，确保进度条视觉流畅且不频繁触发 IPC。
 
-**Processor（任务特定）**：
-- 由 `rebuild_all_pre_renders` 和 `compress_all_contents` 各自定义，通常为多个 `spawn_blocking` 并行 Worker。
+**Processor**：
+- 由 `rebuild_all_pre_renders` 创建多个 `spawn_blocking` 并行 Worker。
 - 并发度：`std::thread::available_parallelism().clamp(2, 12)`，根据设备核心数自适应，最低 2 线程保证基础并行，最高 12 线程防止线程爆炸。
 
 ### 4.5 全量预渲染重建
@@ -750,9 +743,8 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 
 ```text
 Stage 1: Reader (tokio::spawn 异步)
-    └─→ stream_all_message_contents
-        └─→ 分页读取 messages.content (zstd 压缩二进制)
-        └─→ ContentCompressor::decompress 解压为明文
+    └─→ stream_cached_message_contents
+        └─→ 按 rowid 分页读取已有 render_cache 的 messages.content + content_hash
         └─→ mpsc::send 到 Compiler Stage
 
 Stage 2: Parallel Compiler Workers (spawn_blocking × N)
@@ -763,11 +755,13 @@ Stage 2: Parallel Compiler Workers (spawn_blocking × N)
     └─→ 通道关闭时发送残余 batch
 
 Stage 3: Writer (spawn_blocking)
-    └─→ run_batch_update_writer
+    └─→ run_render_cache_update_writer
         └─→ 每 batch 一个 rusqlite 事务
-        └─→ INSERT INTO render_cache ... ON CONFLICT DO UPDATE
+        └─→ 仅当 messages.content_hash == source_hash 且未删除时 UPDATE
         └─→ 发射事件 "render_rebuild_progress"
 ```
+
+Reader 将读取时的 `content_hash` 随编译结果传到 Writer。Writer 通过 `update_render_cache_if_current` 做 hash-CAS；若正文在编译期间被编辑或删除，该旧结果更新 0 行，不能覆盖新缓存。普通懒渲染与全量重建因此遵守同一缓存提交条件。
 
 **优雅停机机制**：
 - Reader 完成后 `drop(tx_compiler)`，Compiler Workers 的 `blocking_recv()` 收到 `None` 后发送残余 batch 并退出。
@@ -859,6 +853,8 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 
 在这个时序中，`flush()` 是同步 pipeline 与 persistence/ 之间的**契约点**：没有 flush 的确认，sync service 不会宣告同步完成。
 
+Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出前都会调用 `invalidate_sync_entity_caches()`。配置缓存带 generation 与短提交锁：异步 read/write/create 在数据库工作前捕获代次，只有代次未变化才允许填充；同步失效在同一短锁内 clear 并推进 generation，旧快照最多造成一次 cache miss，不会在 clear 后复活。
+
 ---
 
 ## 6. 术语速查表
@@ -871,7 +867,7 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 | **DbWriteTask** | 写入任务枚举，涵盖 Agent/Group/Avatar/Topic/Messages/Flush | `db_write_queue.rs` L14 |
 | **Flush** | 穿透式屏障信号，确保此前所有写入已落盘 | `db_write_queue.rs` L49 |
 | **Turbo rusqlite 模式** | 绕过 sqlx，直接用 rusqlite 执行同步批量事务 | `db_write_queue.rs` L78 |
-| **批量事务合并** | 将 50ms 窗口内的多个任务合并为单个 SQLite 事务 | `db_write_queue.rs` L99 |
+| **批量事务合并** | 将 10ms 窗口内最多 32 个任务/500 条消息合并为 SQLite 事务 | `db_write_queue.rs` |
 | **Chunked Insert** | 受 SQLite 参数上限约束的分块批量插入 | `db_write_queue.rs` L445 |
 | **哈希冒泡** | 自底向上重新计算并更新 content_hash / config_hash | `db_write_queue.rs` L637 |
 | **Merkle Root** | 对有序哈希列表计算出的聚合根哈希 | `sync_types.rs` |
@@ -888,14 +884,14 @@ Sync Pipeline (sync_service.rs / sync_executor.rs)
 
 ---
 
-*最后更新：2026-07-04 | VCP Mobile v1.1.3*
+*最后更新：2026-08-11 | VCP Mobile v1.1.3*
 
 > **关键设计决策备忘**
 >
 > 1. **双通道数据库访问**：查询走 sqlx 异步连接池，写入走 DbWriteQueue + rusqlite 同步直连。两者共享同一物理数据库文件，通过 WAL 模式协调并发。
-> 2. **批量事务合并**：DbWriteQueue Worker 以 50ms 窗口 + 200 任务/5000 消息上限将离散写入合并为大事务，将 SQLite 的 fsync 次数从 O(N) 降至 O(1)。
+> 2. **批量事务合并**：DbWriteQueue Worker 以 10ms 窗口 + 32 任务/500 消息上限合并事务，在吞吐与交互写延迟之间取平衡。
 > 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时使全量重建可独立进行而不影响消息正文。
 > 4. **zstd 压缩全链路**：messages.content 和 render_cache.render_content 均以 zstd level=3 压缩存储，纯文本压缩比通常 3–10 倍。
 > 5. **哈希冒泡分层去重**：事务提交后先批量校验 Owner 存在性，再执行 Topic → Owner 的两层冒泡，避免对幽灵数据做无意义计算。
 > 6. **懒渲染缓存闭环**：加载时 render_cache 命中即走；未命中实时编译并异步回写，确保首次访问后的后续加载均为 O(1) 反序列化。
-> 6. **渐进式 Schema 迁移**：通过检测 `pragma_table_info` 和 `ALTER TABLE ... ADD COLUMN` 的幂等执行，实现无版本号数据库升级。
+> 7. **渐进式 Schema 迁移**：通过检测 `pragma_table_info` 和 `ALTER TABLE ... ADD COLUMN` 的幂等执行，实现无版本号数据库升级。

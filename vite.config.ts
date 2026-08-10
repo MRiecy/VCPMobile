@@ -96,10 +96,38 @@ export default defineConfig(async () => ({
   },
 
   build: {
+    // Mermaid 的冷门图表包按需加载，原始体积偏大但不进入首屏；其余常驻依赖显式拆包，
+    // 让主应用 chunk 保持在默认 500KB 门槛以内。
+    chunkSizeWarningLimit: 700,
     rollupOptions: {
       input: {
         main: "index.html",
         floating: "floating.html",
+      },
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (
+            id.includes("/vue/") ||
+            id.includes("/@vue/") ||
+            id.includes("/pinia/") ||
+            id.includes("/pinia-plugin-persistedstate/") ||
+            id.includes("/vue-router/")
+          ) {
+            return "vue-vendor";
+          }
+          if (
+            id.includes("/marked/") ||
+            id.includes("/morphdom/") ||
+            id.includes("/dompurify/")
+          ) {
+            return "render-vendor";
+          }
+          if (id.includes("/@tauri-apps/")) {
+            return "tauri-vendor";
+          }
+          return undefined;
+        },
       },
     },
   },

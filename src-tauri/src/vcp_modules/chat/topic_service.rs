@@ -205,16 +205,25 @@ pub async fn create_topic(
 pub async fn delete_topic(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,
+    active_requests: State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+
+    let active_ids: Vec<String> =
+        sqlx::query_scalar("SELECT msg_id FROM active_generations WHERE topic_id = ?")
+            .bind(&topic_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
 
     sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ?")
         .bind(now)
         .bind(&topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -222,16 +231,32 @@ pub async fn delete_topic(
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
         .bind(now)
         .bind(&topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 级联清除活跃生成注册表，杜绝已删除消息复活
     sqlx::query("DELETE FROM active_generations WHERE topic_id = ?")
         .bind(&topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    if owner_type == "agent" {
+        HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await?;
+    } else if owner_type == "group" {
+        HashAggregator::bubble_group_hash(&mut tx, &owner_id).await?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+
+    for msg_id in active_ids {
+        if let Err(error) = active_requests.cancel(&msg_id) {
+            log::warn!(
+                "Failed to cancel generation from deleted topic {}: {}",
+                msg_id,
+                error
+            );
+        }
+    }
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
@@ -239,14 +264,6 @@ pub async fn delete_topic(
             id: topic_id.clone(),
         });
     }
-
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-    if owner_type == "agent" {
-        let _ = HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await;
-    } else if owner_type == "group" {
-        let _ = HashAggregator::bubble_group_hash(&mut tx, &owner_id).await;
-    }
-    let _ = tx.commit().await;
 
     Ok(())
 }
@@ -573,7 +590,7 @@ pub async fn regenerate_topic_response(
     let timestamp: i64 = row.get("timestamp");
 
     // 3. 截断该消息之后的所有历史
-    crate::vcp_modules::message_service::truncate_history_after_timestamp(
+    let cancelled_ids = crate::vcp_modules::message_service::truncate_history_after_timestamp(
         app_handle.clone(),
         &db_state.pool,
         &owner_id,
@@ -582,6 +599,15 @@ pub async fn regenerate_topic_response(
         timestamp,
     )
     .await?;
+    for msg_id in cancelled_ids {
+        if let Err(error) = active_requests.cancel(&msg_id) {
+            log::warn!(
+                "Failed to cancel regenerated generation {}: {}",
+                msg_id,
+                error
+            );
+        }
+    }
 
     // 4. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
     let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {

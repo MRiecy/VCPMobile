@@ -3,7 +3,7 @@ id: PLUGIN-GUARDIAN-011
 title: ForegroundGuardian 前台守护者
 description: 进程级单例，统一管理 WakeLock + WifiLock + 前台服务的引用计数与优先级调度。v1.1.2 新增，v1.1.3 新增超时自动释放。
 version: 1.1.3
-date: 2026-07-04
+date: 2026-08-11
 related_files:
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/service/ForegroundGuardian.kt
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/service/StreamKeepaliveService.kt
@@ -159,9 +159,7 @@ fun releaseAllLocks() {
 }
 ```
 
-`releaseAllLocks()` 被以下路径调用：
-- `StreamKeepaliveService.onDestroy()`：前台服务被系统杀死或 `stopFgs()` 触发的自杀，作为兜底清扫防止锁泄漏。
-- `VcpMobilePlugin.stopStreamingService()` 空参数分支：前端发出"全部停止"信号时。
+`releaseAllLocks()` 只用于显式全局清理。`StreamKeepaliveService.onDestroy()` **不得**无条件调用它：Service 的旧 generation 可能在新消费者已经接管后才销毁。当前实现把 generation 放进 Intent，Service ready/start-failed/destroy 都回报该 generation；Guardian 只有在它仍是当前 owner 时才提交清理或恢复。
 
 ### 4.5 超时自动释放（v1.1.3 新增）
 
@@ -272,25 +270,27 @@ wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 
 ```kotlin
 // 启动
-private fun startFgs(context: Context) {
+private fun startFgs(context: Context, generation: Long) {
     val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java)
+        .putExtra(StreamKeepaliveService.EXTRA_GENERATION, generation)
     context.applicationContext.startForegroundService(intent)  // API 26+
 }
 
 // 更新（复用启动路径触发 onStartCommand）
-private fun updateFgs(context: Context) {
+private fun updateFgs(context: Context, generation: Long) {
     val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java)
+        .putExtra(StreamKeepaliveService.EXTRA_GENERATION, generation)
     context.applicationContext.startForegroundService(intent)  // 轻量刷新通知
 }
 
 // 停止
-private fun stopFgs(context: Context) {
+private fun stopFgs(context: Context, expectedGeneration: Long) {
     val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java)
     context.applicationContext.stopService(intent)
 }
 ```
 
-> **设计意图**：`updateFgs()` 复用 `startForegroundService()` 而非直接操作 `NotificationManager`。这利用了 Android 的机制：对已在运行的前台服务再次调用 `startForegroundService()` 会触发 `onStartCommand()`，Service 在其中通过 `ForegroundGuardian.getNotificationLabel()` 获取最新文案并更新通知——一条路径同时覆盖启动和更新。
+> **设计意图**：`updateFgs()` 复用 `startForegroundService()`，但每次操作都携带 generation。Rust/Kotlin command 只有等到 `onServiceReady(generation)` 才 resolve；若 `startForeground()` 抛错，Guardian 回滚该次 consumer 与 `desiredGeneration`。失败 Service 后续 `onDestroy` 使用独立 recovery generation 重启仍有效的旧消费者，不能误清新 owner。
 
 ### 6.2 StreamKeepaliveService 的角色转变
 
@@ -302,7 +302,7 @@ private fun stopFgs(context: Context) {
 | WifiLock 管理 | ✅ 自己管理 | ❌ 委托 ForegroundGuardian |
 | 通知构建 | ✅ 根据 Agent 名 | ✅ 根据 ForegroundGuardian.getNotificationLabel() |
 | startForeground() | ✅ | ✅（仅此一项保留） |
-| onDestroy 锁清扫 | ❌ 无 | ✅ 调用 ForegroundGuardian.releaseAllLocks() |
+| onDestroy 所有权回报 | ❌ 无 | ✅ `onServiceDestroyed(context, generation)`，只允许当前 generation 清理/恢复 |
 
 ---
 
@@ -313,12 +313,13 @@ val isScreenKeepOnRequired: Boolean
     get() = consumers.values.any { it.screenKeepOn }
 ```
 
-`VcpMobilePlugin` 的 Activity 生命周期回调中，每次 `onResume` / `onPause` 均查询此属性：
+`VcpMobilePlugin.ScreenKeepOnArbiter` 是 `FLAG_KEEP_SCREEN_ON` 的唯一写入者。它分别记录 Raw-JNI 手动 owner 与 Guardian owner，并按以下公式提交：
 
-- `onResume` + `isScreenKeepOnRequired == true` → JNI 添加 `FLAG_KEEP_SCREEN_ON`
-- `onPause` 或 `isScreenKeepOnRequired` 变为 `false` → JNI 清除 `FLAG_KEEP_SCREEN_ON`
+```text
+effective = appInForeground && (manualRequested || guardianRequested)
+```
 
-这替代了旧版 `isScreenKeepOnActive` 布尔开关，使屏幕常亮与具体业务（同步/预渲染）精确绑定，而非笼统的"流式进行中"。
+因此任一 owner 的 release 都不能清除另一 owner 仍持有的常亮需求；`onPause` 清 flag 但保留需求，`onResume` 再按 OR 结果恢复。Guardian 通过 screen-state listener 更新 arbiter，Rust `screen.rs` 不再直接 add/clear Window flag。
 
 ---
 
@@ -438,18 +439,14 @@ fun startStreamingService(invoke: Invoke) {
             com.vcp.mobile.service.ForegroundGuardian.PRIORITY_SYNC,
             args.agentName, true
         )
-        activity.runOnUiThread {
-            activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+        // screenKeepOn=true 会经 Guardian listener 交给 ScreenKeepOnArbiter
     } else if (args.agentName.contains("[预渲染重建]")) {
         com.vcp.mobile.service.ForegroundGuardian.acquire(
             activity, "prerender",
             com.vcp.mobile.service.ForegroundGuardian.PRIORITY_PRERENDER,
             args.agentName, true
         )
-        activity.runOnUiThread {
-            activity.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+        // 与 Raw-JNI manual owner 按 OR 语义合并，不直接写 Window flag
     } else {
         com.vcp.mobile.service.ForegroundGuardian.acquire(
             activity, "stream:${args.agentName}",
@@ -491,7 +488,7 @@ ForegroundGuardian.release(context, "manual_keepalive")
 
 1. **`@Synchronized` 是必需的**：`acquire()` 和 `release()` 必须互斥执行。若不加同步，两个线程可能同时读到 `consumers.isEmpty() == true`，双双调用 `acquireLocks()` 导致重复获取锁（虽然 `isHeld` 检查能防住二次物理获取，但语义上不正确）。
 
-2. **`releaseAllLocks()` 不能省略 `consumers.clear()`**：若不清空注册表而只释放物理锁，后续 `acquire()` 将看到 `consumers.isNotEmpty()` 从而跳过 `acquireLocks()`，导致传入的消费者永远拿不到物理锁。
+2. **Service 回调必须校验 generation**：旧 Service 的 ready/failure/onDestroy 都可能迟到；不得据此清空新 consumer。显式 `releaseAllLocks()` 才能清空全表，普通 Service 销毁走 `onServiceDestroyed(generation)`。
 
 3. **物理锁置 null 是防御性编程**：`releaseLocks()` 在 `release()` 后立即 `wakeLock = null`。如果 Kotlin 的 `PowerManager.WakeLock` 被 GC 回收时未 release，可能导致系统 `PowerManagerService` 中残留引用。置 null 配合 `isHeld` 检查形成双保险。
 
@@ -519,4 +516,4 @@ ForegroundGuardian.release(context, "manual_keepalive")
 
 ---
 
-*最后更新：2026-07-04 | VCP Mobile v1.1.3*
+*最后更新：2026-08-11 | VCP Mobile v1.1.3*

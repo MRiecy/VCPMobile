@@ -2,7 +2,35 @@
 use tauri::{AppHandle, Manager, Runtime};
 
 #[cfg(target_os = "android")]
-const FLAG_KEEP_SCREEN_ON: i32 = 0x00000080;
+fn set_manual_screen_owner<R: Runtime>(app: &AppHandle<R>, requested: bool) -> Result<(), String> {
+    use jni::objects::JValue;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
+    window
+        .as_ref()
+        .with_webview(move |webview| {
+            webview.jni_handle().exec(move |env, activity, _webview| {
+                if let Err(error) = env.call_static_method(
+                    "com/vcp/mobile/ScreenKeepOnArbiter",
+                    "setManualRequested",
+                    "(Landroid/app/Activity;Z)V",
+                    &[
+                        JValue::Object(activity),
+                        JValue::Bool(if requested { 1 } else { 0 }),
+                    ],
+                ) {
+                    log::error!(
+                        "[VcpMobilePlugin] ScreenKeepOnArbiter.setManualRequested failed: {:?}",
+                        error
+                    );
+                }
+            });
+        })
+        .map_err(|error| format!("with_webview failed: {:?}", error))?;
+    Ok(())
+}
 
 /// Set screen to keep awake during sync / streaming.
 #[tauri::command]
@@ -10,40 +38,7 @@ const FLAG_KEEP_SCREEN_ON: i32 = 0x00000080;
 pub fn set_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        use jni::objects::JValue;
-
-        let window = app
-            .get_webview_window("main")
-            .ok_or("main window not found")?;
-        window
-            .as_ref()
-            .with_webview(|webview| {
-                webview.jni_handle().exec(move |env, activity, _webview| {
-                    let Ok(window) =
-                        env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])
-                    else {
-                        log::error!("[VcpMobilePlugin] getWindow failed");
-                        return;
-                    };
-                    let Ok(window_obj) = window.l() else {
-                        log::error!("[VcpMobilePlugin] getWindow returned non-object");
-                        return;
-                    };
-                    if window_obj.is_null() {
-                        log::error!("[VcpMobilePlugin] getWindow returned null");
-                        return;
-                    }
-                    if let Err(e) = env.call_method(
-                        window_obj,
-                        "addFlags",
-                        "(I)V",
-                        &[JValue::Int(FLAG_KEEP_SCREEN_ON)],
-                    ) {
-                        log::error!("[VcpMobilePlugin] addFlags failed: {:?}", e);
-                    }
-                });
-            })
-            .map_err(|e| format!("with_webview failed: {:?}", e))?;
+        set_manual_screen_owner(&app, true)?;
     }
 
     Ok(())
@@ -55,40 +50,7 @@ pub fn set_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 pub fn clear_keep_screen_on<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
-        use jni::objects::JValue;
-
-        let window = app
-            .get_webview_window("main")
-            .ok_or("main window not found")?;
-        window
-            .as_ref()
-            .with_webview(|webview| {
-                webview.jni_handle().exec(move |env, activity, _webview| {
-                    let Ok(window) =
-                        env.call_method(activity, "getWindow", "()Landroid/view/Window;", &[])
-                    else {
-                        log::error!("[VcpMobilePlugin] getWindow failed");
-                        return;
-                    };
-                    let Ok(window_obj) = window.l() else {
-                        log::error!("[VcpMobilePlugin] getWindow returned non-object");
-                        return;
-                    };
-                    if window_obj.is_null() {
-                        log::error!("[VcpMobilePlugin] getWindow returned null");
-                        return;
-                    }
-                    if let Err(e) = env.call_method(
-                        window_obj,
-                        "clearFlags",
-                        "(I)V",
-                        &[JValue::Int(FLAG_KEEP_SCREEN_ON)],
-                    ) {
-                        log::error!("[VcpMobilePlugin] clearFlags failed: {:?}", e);
-                    }
-                });
-            })
-            .map_err(|e| format!("with_webview failed: {:?}", e))?;
+        set_manual_screen_owner(&app, false)?;
     }
 
     Ok(())

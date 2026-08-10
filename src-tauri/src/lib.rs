@@ -1,6 +1,8 @@
 mod distributed;
 mod vcp_modules;
 
+const DISTRIBUTED_NETWORK_EVENT: &str = "vcp-mobile://vcp-network-status-changed";
+
 use tauri::{Listener, Manager};
 use tauri_plugin_log::{Target, TargetKind};
 use vcp_modules::agent_chat_application_service::{
@@ -161,7 +163,7 @@ pub fn run() {
 
             // 3. 监听安卓原生网络状态变更，实现分布式连接的自主重连
             let handle_net = app.handle().clone();
-            app.listen_any("vcp-network-status-changed", move |event| {
+            app.listen_any(DISTRIBUTED_NETWORK_EVENT, move |event| {
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
                     if payload.get("connected").and_then(|v| v.as_bool()).unwrap_or(false) {
                         let h = handle_net.clone();
@@ -188,13 +190,15 @@ pub fn run() {
                             let handle = handle_lifecycle.clone();
                             if state == "pause" || state == "stop" {
                                 log::info!("[Lifecycle] App entered background (state={})", state);
+                                let epoch = vcp_modules::lifecycle_manager::reserve_lifecycle_transition();
                                 tauri::async_runtime::spawn(async move {
-                                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, false).await;
+                                    vcp_modules::lifecycle_manager::set_app_foreground_state_for_epoch(handle, false, epoch).await;
                                 });
                             } else if state == "resume" {
                                 log::info!("[Lifecycle] App entered foreground (state={})", state);
+                                let epoch = vcp_modules::lifecycle_manager::reserve_lifecycle_transition();
                                 tauri::async_runtime::spawn(async move {
-                                    vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, true).await;
+                                    vcp_modules::lifecycle_manager::set_app_foreground_state_for_epoch(handle, true, epoch).await;
                                 });
                             }
                         }
@@ -372,11 +376,31 @@ pub fn run() {
                 focused
             );
             let handle = _app_handle.clone();
+            let epoch = vcp_modules::lifecycle_manager::reserve_lifecycle_transition();
             tauri::async_runtime::spawn(async move {
-                vcp_modules::lifecycle_manager::set_app_foreground_state_internal(handle, focused)
-                    .await;
+                vcp_modules::lifecycle_manager::set_app_foreground_state_for_epoch(
+                    handle, focused, epoch,
+                )
+                .await;
             });
         }
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::DISTRIBUTED_NETWORK_EVENT;
+
+    #[test]
+    fn distributed_network_listener_matches_android_plugin_namespace() {
+        let kotlin_plugin = include_str!(
+            "../plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt"
+        );
+        assert!(kotlin_plugin.contains("trigger(\"vcp-network-status-changed\""));
+        assert_eq!(
+            DISTRIBUTED_NETWORK_EVENT,
+            "vcp-mobile://vcp-network-status-changed"
+        );
+    }
 }

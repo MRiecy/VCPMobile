@@ -95,11 +95,11 @@ const handleClose = async () => {
       onlyConfirm: true
     });
     store.markReloaded();
-    overlayStore.closeSyncSession();
+    await overlayStore.closeSyncSession();
     await performFullReload();
     return;
   }
-  overlayStore.closeSyncSession();
+  await overlayStore.closeSyncSession();
 };
 
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';

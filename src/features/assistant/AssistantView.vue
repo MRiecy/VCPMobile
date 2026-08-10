@@ -161,7 +161,7 @@ onMounted(() => {
     <TransitionGroup
       name="toast"
       tag="div"
-      class="absolute top-12 left-0 right-0 flex flex-col items-center gap-1 pointer-events-none z-50"
+      class="absolute top-12 left-0 right-0 flex flex-col items-center gap-1 pointer-events-none z-toast"
     >
       <div
         v-for="toast in floatingStore.toasts"

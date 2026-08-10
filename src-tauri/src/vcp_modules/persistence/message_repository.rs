@@ -7,6 +7,106 @@ use sqlx::Row;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
+pub const RENDERER_SCHEMA_VERSION: i64 = 1;
+
+fn render_work_semaphore() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| {
+            let permits = std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(2)
+                .clamp(1, 4);
+            std::sync::Arc::new(tokio::sync::Semaphore::new(permits))
+        })
+        .clone()
+}
+
+async fn run_render_work<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let permit = render_work_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|_| "render worker pool closed".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|error| format!("render worker failed: {}", error))?
+}
+
+pub async fn compile_render_async(content: String) -> Result<Vec<ContentBlock>, String> {
+    run_render_work(move || Ok(MessageRenderCompiler::compile(&content))).await
+}
+
+pub async fn compile_and_serialize_render_async(
+    content: String,
+) -> Result<(Vec<ContentBlock>, Vec<u8>), String> {
+    run_render_work(move || {
+        let blocks = MessageRenderCompiler::compile(&content);
+        let bytes = MessageRenderCompiler::serialize(&blocks)?;
+        Ok((blocks, bytes))
+    })
+    .await
+}
+
+pub async fn serialize_render_async(blocks: Vec<ContentBlock>) -> Result<Vec<u8>, String> {
+    run_render_work(move || MessageRenderCompiler::serialize(&blocks)).await
+}
+
+pub async fn deserialize_render_async(bytes: Vec<u8>) -> Result<Vec<ContentBlock>, String> {
+    run_render_work(move || MessageRenderCompiler::deserialize(&bytes)).await
+}
+
+/// Writes a render result only while the source message still has the hash that was compiled.
+/// This prevents a slow cache miss/re-render from overwriting a newer edit.
+pub async fn write_render_cache_cas(
+    pool: &sqlx::SqlitePool,
+    topic_id: &str,
+    msg_id: &str,
+    observed_content_hash: &str,
+    render_content: &[u8],
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp_millis();
+    let result = sqlx::query(
+        "INSERT INTO render_cache (
+            topic_id, msg_id, render_content, content_hash, renderer_schema_version, updated_at
+         ) SELECT ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+            SELECT 1 FROM messages
+            WHERE topic_id = ? AND msg_id = ? AND content_hash = ? AND deleted_at IS NULL
+         )
+         ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+            render_content = excluded.render_content,
+            content_hash = excluded.content_hash,
+            renderer_schema_version = excluded.renderer_schema_version,
+            updated_at = excluded.updated_at
+         WHERE EXISTS (
+            SELECT 1 FROM messages
+            WHERE topic_id = excluded.topic_id AND msg_id = excluded.msg_id
+              AND content_hash = excluded.content_hash AND deleted_at IS NULL
+         )",
+    )
+    .bind(topic_id)
+    .bind(msg_id)
+    .bind(render_content)
+    .bind(observed_content_hash)
+    .bind(RENDERER_SCHEMA_VERSION)
+    .bind(now)
+    .bind(topic_id)
+    .bind(msg_id)
+    .bind(observed_content_hash)
+    .execute(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub struct MessageRenderCompiler;
 
 impl MessageRenderCompiler {
@@ -59,9 +159,7 @@ pub async fn process_message_content(
     content: String,
 ) -> Result<Vec<ContentBlock>, String> {
     // 1. 全量预解析 (调用统一的渲染编译器)
-    let blocks = MessageRenderCompiler::compile(&content);
-
-    Ok(blocks)
+    compile_render_async(content).await
 }
 
 #[derive(Clone, Serialize)]
@@ -75,6 +173,9 @@ pub struct RebuildProgress {
 // 通用三段流水线基础设施（Reader → Processor → Writer）
 // =================================================================
 
+type CachedMessageSource = (String, String, String, String);
+type RenderCacheWrite = (String, String, String, Vec<u8>);
+
 fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
     conn.execute("PRAGMA journal_mode = WAL", []).ok();
@@ -86,14 +187,14 @@ fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Conn
 /// 分页流式读取已有渲染缓存的消息的 (topic_id, msg_id, content)，content 为明文字符串
 async fn stream_cached_message_contents(
     pool: &sqlx::SqlitePool,
-    tx: mpsc::Sender<(String, String, String)>,
+    tx: mpsc::Sender<CachedMessageSource>,
 ) -> Result<(), String> {
     let mut last_rowid = 0i64;
     const FETCH_SIZE: i64 = 500;
 
     loop {
         let rows = sqlx::query(
-            "SELECT m.rowid, m.topic_id, m.msg_id, m.content \
+            "SELECT m.rowid, m.topic_id, m.msg_id, m.content, m.content_hash \
              FROM messages m \
              INNER JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id \
              WHERE m.rowid > ? \
@@ -114,7 +215,12 @@ async fn stream_cached_message_contents(
                     let topic_id: String = row.get("topic_id");
                     let msg_id: String = row.get("msg_id");
                     let content: String = row.get("content");
-                    if tx.send((topic_id, msg_id, content)).await.is_err() {
+                    let content_hash: String = row.get("content_hash");
+                    if tx
+                        .send((topic_id, msg_id, content, content_hash))
+                        .await
+                        .is_err()
+                    {
                         return Ok(());
                     }
                 }
@@ -125,16 +231,45 @@ async fn stream_cached_message_contents(
     Ok(())
 }
 
-/// 通用批量 UPDATE Writer，带进度发射
-fn run_batch_update_writer(
+fn update_render_cache_if_current(
+    conn: &rusqlite::Connection,
+    topic_id: &str,
+    msg_id: &str,
+    content_hash: &str,
+    bytes: &[u8],
+    now: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE render_cache SET
+            render_content = ?1,
+            content_hash = ?2,
+            renderer_schema_version = ?3,
+            updated_at = ?4
+         WHERE topic_id = ?5 AND msg_id = ?6
+           AND EXISTS (
+             SELECT 1 FROM messages
+             WHERE topic_id = ?5 AND msg_id = ?6
+               AND content_hash = ?2 AND deleted_at IS NULL
+           )",
+        rusqlite::params![
+            bytes,
+            content_hash,
+            RENDERER_SCHEMA_VERSION,
+            now,
+            topic_id,
+            msg_id,
+        ],
+    )
+}
+
+/// 渲染缓存批量 CAS Writer，带进度发射。
+fn run_render_cache_update_writer(
     db_path: &std::path::Path,
-    mut rx: mpsc::Receiver<Vec<(String, String, Vec<u8>)>>,
-    update_sql: &str,
+    mut rx: mpsc::Receiver<Vec<RenderCacheWrite>>,
     progress_event: &str,
     app_handle: AppHandle,
     total: usize,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
-    let update_sql = update_sql.to_string();
     let progress_event = progress_event.to_string();
     let db_path = db_path.to_path_buf();
 
@@ -147,18 +282,17 @@ fn run_batch_update_writer(
         while let Some(batch) = rx.blocking_recv() {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             {
-                let mut stmt = tx.prepare_cached(&update_sql).map_err(|e| e.to_string())?;
                 let now = chrono::Utc::now().timestamp_millis();
-                for (topic_id, msg_id, bytes) in batch {
-                    // 适配 render_cache 的 4 参数 SQL (topic_id, msg_id, bytes, now)
-                    // 或 content_compress 的 3 参数 SQL (bytes, topic_id, msg_id)
-                    if update_sql.contains("render_cache") {
-                        stmt.execute(rusqlite::params![topic_id, msg_id, bytes, now])
-                            .map_err(|e| e.to_string())?;
-                    } else {
-                        stmt.execute(rusqlite::params![bytes, topic_id, msg_id])
-                            .map_err(|e| e.to_string())?;
-                    }
+                for (topic_id, msg_id, content_hash, bytes) in batch {
+                    update_render_cache_if_current(
+                        &tx,
+                        &topic_id,
+                        &msg_id,
+                        &content_hash,
+                        &bytes,
+                        now,
+                    )
+                    .map_err(|e| e.to_string())?;
                     processed += 1;
                 }
             }
@@ -177,6 +311,57 @@ fn run_batch_update_writer(
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod rebuild_cache_tests {
+    use super::update_render_cache_if_current;
+
+    #[test]
+    fn rebuild_writer_never_overwrites_cache_for_a_newer_message_hash() {
+        let conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                deleted_at INTEGER,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             CREATE TABLE render_cache (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                render_content BLOB NOT NULL,
+                content_hash TEXT NOT NULL,
+                renderer_schema_version INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             INSERT INTO messages VALUES ('topic', 'message', 'new-hash', NULL);
+             INSERT INTO render_cache VALUES ('topic', 'message', x'09', 'new-hash', 1, 2);",
+        )
+        .expect("create cache fixture");
+
+        let stale =
+            update_render_cache_if_current(&conn, "topic", "message", "old-hash", &[1, 2, 3], 3)
+                .expect("stale CAS update");
+        assert_eq!(stale, 0);
+
+        let (bytes, hash): (Vec<u8>, String) = conn
+            .query_row(
+                "SELECT render_content, content_hash FROM render_cache",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read cache after stale update");
+        assert_eq!(bytes, vec![9]);
+        assert_eq!(hash, "new-hash");
+
+        let current =
+            update_render_cache_if_current(&conn, "topic", "message", "new-hash", &[4, 5, 6], 4)
+                .expect("current CAS update");
+        assert_eq!(current, 1);
+    }
 }
 
 // =================================================================
@@ -204,16 +389,14 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         "[预渲染重建] VCP Mobile",
     );
 
-    let (tx_compiler, rx_compiler) = mpsc::channel::<(String, String, String)>(1000);
-    let (tx_writer, rx_writer) = mpsc::channel::<Vec<(String, String, Vec<u8>)>>(100);
+    let (tx_compiler, rx_compiler) = mpsc::channel::<CachedMessageSource>(1000);
+    let (tx_writer, rx_writer) = mpsc::channel::<Vec<RenderCacheWrite>>(100);
     let total_count = total as usize;
 
     // --- Stage 3: Writer ---
-    let writer_handle = run_batch_update_writer(
+    let writer_handle = run_render_cache_update_writer(
         &db_path,
         rx_writer,
-        "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES (?, ?, ?, ?) \
-         ON CONFLICT(topic_id, msg_id) DO UPDATE SET render_content = excluded.render_content, updated_at = excluded.updated_at",
         "render_rebuild_progress",
         app_handle.clone(),
         total_count,
@@ -241,10 +424,10 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                 };
 
                 match item {
-                    Some((topic_id, msg_id, content)) => {
+                    Some((topic_id, msg_id, content, content_hash)) => {
                         let blocks = MessageRenderCompiler::compile(&content);
                         if let Ok(bytes) = MessageRenderCompiler::serialize(&blocks) {
-                            batch.push((topic_id, msg_id, bytes));
+                            batch.push((topic_id, msg_id, content_hash, bytes));
                         }
 
                         if batch.len() >= 50
@@ -269,14 +452,18 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 
     // --- Stage 1: Reader ---
     let reader_handle = tokio::spawn(async move {
-        let (tx_inner, mut rx_inner) = mpsc::channel::<(String, String, String)>(1000);
+        let (tx_inner, mut rx_inner) = mpsc::channel::<CachedMessageSource>(1000);
 
         let stream_handle = tokio::spawn(async move {
             let _ = stream_cached_message_contents(&pool, tx_inner).await;
         });
 
-        while let Some((topic_id, msg_id, content)) = rx_inner.recv().await {
-            if tx_compiler.send((topic_id, msg_id, content)).await.is_err() {
+        while let Some((topic_id, msg_id, content, content_hash)) = rx_inner.recv().await {
+            if tx_compiler
+                .send((topic_id, msg_id, content, content_hash))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -376,15 +563,20 @@ impl MessageRepository {
 
         // 2.1 插入或更新渲染缓存 (独立表)
         sqlx::query(
-            "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at)
-             VALUES (?, ?, ?, ?)
+            "INSERT INTO render_cache (
+                topic_id, msg_id, render_content, content_hash, renderer_schema_version, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                 render_content = excluded.render_content,
+                content_hash = excluded.content_hash,
+                renderer_schema_version = excluded.renderer_schema_version,
                 updated_at = excluded.updated_at",
         )
         .bind(topic_id)
         .bind(&message.id)
         .bind(render_content)
+        .bind(&content_hash)
+        .bind(RENDERER_SCHEMA_VERSION)
         .bind(message.timestamp as i64)
         .execute(&mut **tx)
         .await

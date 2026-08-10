@@ -47,8 +47,27 @@ pub enum DbWriteTask {
         skip_bubble: bool,
     },
     Flush {
-        tx: oneshot::Sender<()>,
+        tx: oneshot::Sender<Result<(), String>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DbWriteQueue;
+
+    #[test]
+    fn flush_error_summary_is_reported_once() {
+        let mut errors = vec![
+            "batch one failed".to_string(),
+            "batch two failed".to_string(),
+        ];
+        let first = DbWriteQueue::take_pending_errors(&mut errors)
+            .expect_err("flush must surface all prior batch failures");
+        assert!(first.contains("batch one failed"));
+        assert!(first.contains("batch two failed"));
+        assert!(errors.is_empty());
+        assert!(DbWriteQueue::take_pending_errors(&mut errors).is_ok());
+    }
 }
 
 pub struct DbWriteQueue {
@@ -82,11 +101,12 @@ impl DbWriteQueue {
 
             let mut success_count = 0u32;
             let mut error_count = 0u32;
+            let mut pending_errors: Vec<String> = Vec::new();
 
             while let Some(first_task) = rx.recv().await {
                 // 如果第一个任务就是 Flush，直接确认
                 if let DbWriteTask::Flush { tx } = first_task {
-                    let _ = tx.send(());
+                    let _ = tx.send(Self::take_pending_errors(&mut pending_errors));
                     continue;
                 }
 
@@ -97,11 +117,11 @@ impl DbWriteQueue {
                     total_msg_count += messages.len() as u32;
                 }
 
-                let mut flush_tx_opt: Option<oneshot::Sender<()>> = None;
+                let mut flush_tx_opt: Option<oneshot::Sender<Result<(), String>>> = None;
 
-                while tasks_in_this_tx.len() < 200 && total_msg_count < 5000 {
+                while tasks_in_this_tx.len() < 32 && total_msg_count < 500 {
                     let next_res =
-                        tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+                        tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await;
 
                     match next_res {
                         Ok(Some(DbWriteTask::Flush { tx })) => {
@@ -129,7 +149,9 @@ impl DbWriteQueue {
                         // 极致性能调优 (仅在初始化连接时执行一次)
                         conn.pragma_update(None, "journal_mode", "WAL")?;
                         conn.pragma_update(None, "synchronous", "NORMAL")?;
-                        conn.busy_timeout(std::time::Duration::from_millis(30000))?;
+                        // SQLite 内建 busy handler 做有界退避；2 秒后把错误交给 flush，
+                        // 不再用 30 秒长事务阻塞正常聊天写入。
+                        conn.busy_timeout(std::time::Duration::from_millis(2000))?;
                         *guard = Some(conn);
                     }
                     let conn = guard.as_mut().unwrap();
@@ -228,15 +250,17 @@ impl DbWriteQueue {
                     Ok(Err(e)) => {
                         error_count += 1;
                         log::error!("[DbWriteQueue] rusqlite execution error: {}", e);
+                        pending_errors.push(format!("rusqlite execution error: {e}"));
                     }
                     Err(e) => {
                         error_count += 1;
                         log::error!("[DbWriteQueue] spawn_blocking error: {}", e);
+                        pending_errors.push(format!("write worker join error: {e}"));
                     }
                 }
 
                 if let Some(tx) = flush_tx_opt {
-                    let _ = tx.send(());
+                    let _ = tx.send(Self::take_pending_errors(&mut pending_errors));
                 }
             }
 
@@ -259,20 +283,31 @@ impl DbWriteQueue {
         self.logger = Some(logger);
     }
 
-    pub async fn submit(&self, task: DbWriteTask) {
-        if let Err(e) = self.sender.send(task).await {
-            log::error!("[DbWriteQueue] Submit error: {}", e);
-        }
+    pub async fn submit(&self, task: DbWriteTask) -> Result<(), String> {
+        self.sender
+            .send(task)
+            .await
+            .map_err(|e| format!("DbWriteQueue submit failed: {e}"))
     }
 
-    pub async fn flush(&self) {
+    pub async fn flush(&self) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        if let Err(e) = self.sender.send(DbWriteTask::Flush { tx }).await {
-            log::error!("[DbWriteQueue] Flush submit error: {}", e);
-            return;
-        }
-        let _ = rx.await;
+        self.sender
+            .send(DbWriteTask::Flush { tx })
+            .await
+            .map_err(|e| format!("DbWriteQueue flush submit failed: {e}"))?;
+        rx.await
+            .map_err(|e| format!("DbWriteQueue flush acknowledgement failed: {e}"))??;
         log::debug!("[DbWriteQueue] Flush completed");
+        Ok(())
+    }
+
+    fn take_pending_errors(errors: &mut Vec<String>) -> Result<(), String> {
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(std::mem::take(errors).join(" | "))
+        }
     }
 
     // --- rusqlite 事务级方法 ---
@@ -516,6 +551,22 @@ impl DbWriteQueue {
             stmt_msgs.execute(&*refs_msgs)?;
 
             // 2. 批量插入 render_cache 表
+            // 先失效本批全部旧缓存；预渲染关闭或编译失败时不能继续沿用旧内容。
+            let cache_placeholders = vec!["?"; chunk_indices.len()].join(", ");
+            let delete_cache_sql = format!(
+                "DELETE FROM render_cache WHERE topic_id = ? AND msg_id IN ({})",
+                cache_placeholders
+            );
+            let mut delete_cache = tx.prepare_cached(&delete_cache_sql)?;
+            let mut delete_params: Vec<String> = Vec::with_capacity(chunk_indices.len() + 1);
+            delete_params.push(topic_id.to_string());
+            delete_params.extend(chunk_indices.iter().map(|(_, msg)| msg.id.clone()));
+            let delete_refs: Vec<&dyn rusqlite::ToSql> = delete_params
+                .iter()
+                .map(|value| value as &dyn rusqlite::ToSql)
+                .collect();
+            delete_cache.execute(&*delete_refs)?;
+
             // 过滤出有实际预渲染内容的消息（当预渲染关闭时，所有 render_bytes 均为空）
             let render_chunk: Vec<_> = chunk_indices
                 .iter()
@@ -525,19 +576,24 @@ impl DbWriteQueue {
 
             if !render_chunk.is_empty() {
                 let mut sql_render = String::from(
-                    "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES ",
+                    "INSERT INTO render_cache (
+                        topic_id, msg_id, render_content, content_hash,
+                        renderer_schema_version, updated_at
+                     ) VALUES ",
                 );
 
                 for i in 0..render_chunk.len() {
                     if i > 0 {
                         sql_render.push_str(", ");
                     }
-                    sql_render.push_str("(?, ?, ?, ?)");
+                    sql_render.push_str("(?, ?, ?, ?, ?, ?)");
                 }
 
                 sql_render.push_str(
                     " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
                         render_content = excluded.render_content,
+                        content_hash = excluded.content_hash,
+                        renderer_schema_version = excluded.renderer_schema_version,
                         updated_at = excluded.updated_at",
                 );
 
@@ -548,6 +604,10 @@ impl DbWriteQueue {
                     params_render.push(Box::new(topic_id.to_string()));
                     params_render.push(Box::new(msg.id.clone()));
                     params_render.push(Box::new(render_bytes[idx].clone()));
+                    params_render.push(Box::new(content_hashes[idx].clone()));
+                    params_render.push(Box::new(
+                        crate::vcp_modules::message_repository::RENDERER_SCHEMA_VERSION,
+                    ));
                     params_render.push(Box::new(now));
                 }
 

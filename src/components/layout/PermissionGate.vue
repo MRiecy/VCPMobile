@@ -459,7 +459,7 @@ onUnmounted(() => {
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >
                 <span>激活并进入应用</span>
-                <div class="i-heroicons-rocket text-lg"></div>
+                <div class="i-heroicons-rocket-launch text-lg"></div>
               </button>
               <button v-else class="w-full py-4 bg-red-100 text-red-400 text-[15px] font-bold rounded-2xl cursor-not-allowed flex items-center justify-center gap-2" disabled>
                 <span>存储空间不足，已阻断进入</span>

@@ -174,16 +174,29 @@ async fn process_topic_messages<R: Runtime>(
 
         // 4. 提交落盘
         let t_submit_start = std::time::Instant::now();
-        write_queue
-            .submit(DbWriteTask::TopicMessages {
-                topic_id: topic_id.to_string(),
-                messages: parsed_messages_back,
-                contents,
-                render_bytes: render_bytes_list,
-                content_hashes,
-                skip_bubble: true,
-            })
-            .await;
+        // 限制单个事务的消息规模；队列仍会合并相邻小任务，但总量上限为 500。
+        const WRITE_CHUNK_MESSAGES: usize = 250;
+        let mut messages = parsed_messages_back.into_iter();
+        let mut contents = contents.into_iter();
+        let mut render_bytes = render_bytes_list.into_iter();
+        let mut hashes = content_hashes.into_iter();
+        loop {
+            let message_chunk: Vec<_> = messages.by_ref().take(WRITE_CHUNK_MESSAGES).collect();
+            if message_chunk.is_empty() {
+                break;
+            }
+            let chunk_len = message_chunk.len();
+            write_queue
+                .submit(DbWriteTask::TopicMessages {
+                    topic_id: topic_id.to_string(),
+                    messages: message_chunk,
+                    contents: contents.by_ref().take(chunk_len).collect(),
+                    render_bytes: render_bytes.by_ref().take(chunk_len).collect(),
+                    content_hashes: hashes.by_ref().take(chunk_len).collect(),
+                    skip_bubble: true,
+                })
+                .await?;
+        }
         t_submit = t_submit_start.elapsed();
     }
 
@@ -241,7 +254,7 @@ impl PullExecutor {
                 id: agent_id.to_string(),
                 dto,
             })
-            .await;
+            .await?;
 
         Ok(())
     }
@@ -276,7 +289,7 @@ impl PullExecutor {
                 id: group_id.to_string(),
                 dto,
             })
-            .await;
+            .await?;
 
         Ok(())
     }
@@ -328,7 +341,7 @@ impl PullExecutor {
                                 id: id.to_string(),
                                 dto,
                             })
-                            .await;
+                            .await?;
                     }
                 }
                 "group" => {
@@ -338,7 +351,7 @@ impl PullExecutor {
                                 id: id.to_string(),
                                 dto,
                             })
-                            .await;
+                            .await?;
                     }
                 }
                 "agent_topic" => {
@@ -370,7 +383,7 @@ impl PullExecutor {
                 .submit(DbWriteTask::AgentTopicBatch {
                     topics: agent_topics,
                 })
-                .await;
+                .await?;
         }
         if !group_topics.is_empty() {
             log::debug!(
@@ -381,7 +394,7 @@ impl PullExecutor {
                 .submit(DbWriteTask::GroupTopicBatch {
                     topics: group_topics,
                 })
-                .await;
+                .await?;
         }
 
         crate::vcp_modules::sync::sync_service::emit_sync_log(
@@ -430,7 +443,7 @@ impl PullExecutor {
                                     owner_id: owner_id.to_string(),
                                     bytes: bytes.to_vec(),
                                 })
-                                .await;
+                                .await?;
                             if retries > 0 {
                                 log::info!(
                                     "[PullExecutor] Avatar {} {} succeeded after {} retries",
@@ -506,7 +519,7 @@ impl PullExecutor {
                 topic_id: topic_id.to_string(),
                 dto,
             })
-            .await;
+            .await?;
 
         Ok(())
     }
@@ -546,7 +559,7 @@ impl PullExecutor {
                 topic_id: topic_id.to_string(),
                 dto,
             })
-            .await;
+            .await?;
 
         Ok(())
     }

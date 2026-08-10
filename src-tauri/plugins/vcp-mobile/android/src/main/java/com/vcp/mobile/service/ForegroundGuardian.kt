@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 前台守护者 (ForegroundGuardian)
@@ -35,11 +36,27 @@ object ForegroundGuardian {
     // 超时自动释放任务调度器
     private val handler = Handler(Looper.getMainLooper())
     private val timeoutRunnables = ConcurrentHashMap<String, Runnable>()
+    private val generationCounter = AtomicLong(0)
+    private val pendingAcquires = ConcurrentHashMap<Long, PendingAcquire>()
+    private val pendingGenerations = ConcurrentHashMap.newKeySet<Long>()
+    private val restartAfterDestroy = ConcurrentHashMap<Long, Long>()
+    private val readinessWaiters = ConcurrentHashMap<Long, (Boolean, String?) -> Unit>()
+    private val readinessOutcomes = ConcurrentHashMap<Long, Pair<Boolean, String?>>()
+    private val readinessTimeouts = ConcurrentHashMap<Long, Runnable>()
+    @Volatile private var desiredGeneration = 0L
+    @Volatile private var expectedStopGeneration = 0L
+    @Volatile private var screenStateListener: ((Boolean) -> Unit)? = null
 
     data class ConsumerEntry(
         val priority: Int,
         val displayLabel: String,
-        val screenKeepOn: Boolean
+        val screenKeepOn: Boolean,
+        val generation: Long,
+    )
+
+    private data class PendingAcquire(
+        val previousEntry: ConsumerEntry?,
+        val previousDesiredGeneration: Long,
     )
 
     /**
@@ -65,7 +82,7 @@ object ForegroundGuardian {
      * 申请持有前台锁（幂等）
      */
     @Synchronized
-    fun acquire(context: Context, tag: String, priority: Int, label: String, screenKeepOn: Boolean = false, timeoutMs: Long = -1) {
+    fun acquire(context: Context, tag: String, priority: Int, label: String, screenKeepOn: Boolean = false, timeoutMs: Long = -1): Long {
         Log.i(TAG, "acquire: tag=$tag, priority=$priority, label=$label, screenKeepOn=$screenKeepOn, timeoutMs=$timeoutMs")
         
         // 1. 取消该 tag 已有的超时任务
@@ -74,18 +91,30 @@ object ForegroundGuardian {
         }
 
         val wasEmpty = consumers.isEmpty()
+        val previous = consumers[tag]
+        val pendingAcquire = PendingAcquire(previous, desiredGeneration)
+        val generation = generationCounter.incrementAndGet()
+        desiredGeneration = generation
+        pendingGenerations.add(generation)
+        pendingAcquires[generation] = pendingAcquire
         
         // 更新/插入消费者
-        consumers[tag] = ConsumerEntry(priority, label, screenKeepOn)
+        consumers[tag] = ConsumerEntry(priority, label, screenKeepOn, generation)
 
-        if (wasEmpty) {
-            // 首次消费者进入：物理获取系统双锁，并拉起前台服务
-            acquireLocks(context)
-            startFgs(context)
-        } else {
-            // 已有消费者在运行：仅触发 Service 更新通知文案与屏幕状态
-            updateFgs(context)
+        try {
+            if (wasEmpty) {
+                // 首次消费者进入：物理获取系统双锁，并拉起前台服务
+                acquireLocks(context)
+                startFgs(context, generation)
+            } else {
+                // 已有消费者在运行：仅触发 Service 更新通知文案与屏幕状态
+                updateFgs(context, generation)
+            }
+        } catch (error: Exception) {
+            rollbackAcquire(context, tag, generation, pendingAcquire, false)
+            throw error
         }
+        notifyScreenState()
 
         // 2. 调度超时自动释放任务
         val actualTimeout = if (timeoutMs >= 0) {
@@ -104,12 +133,13 @@ object ForegroundGuardian {
         if (actualTimeout > 0) {
             val runnable = Runnable {
                 Log.w(TAG, "Timeout reached for tag: $tag. Force releasing to prevent lock leak.")
-                release(context, tag)
+                releaseIfCurrent(context, tag, generation)
             }
             timeoutRunnables[tag] = runnable
             handler.postDelayed(runnable, actualTimeout)
             Log.d(TAG, "Scheduled timeout for tag: $tag in $actualTimeout ms")
         }
+        return generation
     }
 
     /**
@@ -129,7 +159,16 @@ object ForegroundGuardian {
             return
         }
 
-        consumers.remove(tag)
+        val removedEntry = consumers.remove(tag) ?: return
+        if (pendingGenerations.remove(removedEntry.generation)) {
+            pendingAcquires.remove(removedEntry.generation)
+            completeReadiness(
+                removedEntry.generation,
+                false,
+                "Foreground lease released before service readiness",
+            )
+        }
+        notifyScreenState()
 
         if (consumers.isEmpty()) {
             // 最后一个消费者退出：物理释放系统双锁，并停用前台服务
@@ -137,8 +176,23 @@ object ForegroundGuardian {
             stopFgs(context)
         } else {
             // 仍有消费者在运行：更新通知文案与屏幕状态
-            updateFgs(context)
+            try {
+                updateFgs(context, generationCounter.incrementAndGet())
+            } catch (error: Exception) {
+                Log.e(TAG, "Failed to refresh foreground service after release", error)
+                releaseAll(context)
+                throw error
+            }
         }
+    }
+
+    @Synchronized
+    private fun releaseIfCurrent(context: Context, tag: String, generation: Long) {
+        if (consumers[tag]?.generation != generation) {
+            Log.d(TAG, "Ignoring stale timeout for tag=$tag generation=$generation")
+            return
+        }
+        release(context, tag)
     }
 
     /**
@@ -152,8 +206,170 @@ object ForegroundGuardian {
             handler.removeCallbacks(runnable)
         }
         timeoutRunnables.clear()
+        for (runnable in readinessTimeouts.values) handler.removeCallbacks(runnable)
+        readinessTimeouts.clear()
+        val pendingWaiters = readinessWaiters.values.toList()
+        readinessWaiters.clear()
+        readinessOutcomes.clear()
+        pendingAcquires.clear()
+        pendingGenerations.clear()
+        restartAfterDestroy.clear()
         consumers.clear()
+        desiredGeneration = 0L
+        expectedStopGeneration = 0L
         releaseLocks()
+        notifyScreenState()
+        for (waiter in pendingWaiters) {
+            handler.post { waiter(false, "Foreground Guardian released before readiness") }
+        }
+    }
+
+    @Synchronized
+    fun releaseAll(context: Context) {
+        releaseAllLocks()
+        stopFgs(context)
+    }
+
+    @Synchronized
+    fun setScreenStateListener(listener: ((Boolean) -> Unit)?) {
+        screenStateListener = listener
+        notifyScreenState()
+    }
+
+    @Synchronized
+    fun onServiceReady(generation: Long) {
+        pendingGenerations.remove(generation)
+        pendingAcquires.remove(generation)
+        restartAfterDestroy.entries
+            .filter { it.value <= generation }
+            .forEach { restartAfterDestroy.remove(it.key, it.value) }
+        completeReadiness(generation, true, null)
+        if (generation < desiredGeneration) {
+            Log.d(TAG, "Ignoring stale service ready generation=$generation desired=$desiredGeneration")
+            return
+        }
+        Log.i(TAG, "Foreground service ready generation=$generation")
+    }
+
+    @Synchronized
+    fun onServiceStartFailed(context: Context, generation: Long, message: String) {
+        pendingGenerations.remove(generation)
+        val pendingAcquire = pendingAcquires.remove(generation)
+        Log.e(TAG, "Foreground service failed generation=$generation: $message")
+        if (pendingAcquire != null) {
+            consumers.entries.firstOrNull { it.value.generation == generation }?.let { entry ->
+                rollbackAcquire(context, entry.key, generation, pendingAcquire, true)
+            }
+        }
+        completeReadiness(generation, false, message)
+    }
+
+    @Synchronized
+    fun awaitServiceReadiness(
+        context: Context,
+        generation: Long,
+        callback: (Boolean, String?) -> Unit,
+    ) {
+        val outcome = readinessOutcomes.remove(generation)
+        if (outcome != null) {
+            handler.post { callback(outcome.first, outcome.second) }
+            return
+        }
+        readinessWaiters[generation] = callback
+        val timeout = Runnable {
+            onServiceStartFailed(context, generation, "Foreground service readiness timed out")
+        }
+        readinessTimeouts[generation] = timeout
+        handler.postDelayed(timeout, 5_000L)
+    }
+
+    @Synchronized
+    fun onServiceDestroyed(context: Context, generation: Long) {
+        if (generation <= 0L) {
+            Log.w(TAG, "Ignoring service destroy without a generation; readiness timeout owns rollback")
+            return
+        }
+        val recoveryGeneration = restartAfterDestroy.remove(generation)
+        if (recoveryGeneration != null) {
+            if (expectedStopGeneration == generation) expectedStopGeneration = 0L
+            if (consumers.isNotEmpty() && desiredGeneration == recoveryGeneration) {
+                Log.i(
+                    TAG,
+                    "Restarting foreground service after failed generation=$generation as generation=$recoveryGeneration",
+                )
+                try {
+                    startFgs(context, recoveryGeneration)
+                } catch (error: Exception) {
+                    Log.e(TAG, "Foreground service recovery start failed", error)
+                    releaseAllLocks()
+                }
+            } else if (consumers.isEmpty() && desiredGeneration == recoveryGeneration) {
+                desiredGeneration = 0L
+            }
+            return
+        }
+        if (generation == expectedStopGeneration) {
+            expectedStopGeneration = 0L
+            if (consumers.isEmpty()) desiredGeneration = 0L
+            return
+        }
+        if (generation < desiredGeneration) {
+            Log.d(TAG, "Ignoring stale service destroy generation=$generation desired=$desiredGeneration")
+            return
+        }
+        if (consumers.isNotEmpty()) {
+            Log.e(TAG, "Foreground service destroyed unexpectedly at generation=$generation")
+            releaseAllLocks()
+        }
+    }
+
+    private fun notifyScreenState() {
+        screenStateListener?.invoke(isScreenKeepOnRequired)
+    }
+
+    private fun completeReadiness(generation: Long, success: Boolean, message: String?) {
+        readinessTimeouts.remove(generation)?.let(handler::removeCallbacks)
+        val waiter = readinessWaiters.remove(generation)
+        if (waiter != null) {
+            handler.post { waiter(success, message) }
+        } else {
+            readinessOutcomes[generation] = Pair(success, message)
+            handler.postDelayed({ readinessOutcomes.remove(generation) }, 10_000L)
+        }
+    }
+
+    private fun rollbackAcquire(
+        context: Context,
+        tag: String,
+        generation: Long,
+        pendingAcquire: PendingAcquire,
+        failedServiceWillStop: Boolean,
+    ) {
+        if (consumers[tag]?.generation != generation) return
+        val isDesiredFailure = desiredGeneration == generation
+        pendingGenerations.remove(generation)
+        pendingAcquires.remove(generation)
+        if (pendingAcquire.previousEntry == null) {
+            consumers.remove(tag)
+        } else {
+            consumers[tag] = pendingAcquire.previousEntry
+        }
+        timeoutRunnables.remove(tag)?.let(handler::removeCallbacks)
+        if (isDesiredFailure) {
+            desiredGeneration = pendingAcquire.previousDesiredGeneration
+        }
+        if (consumers.isEmpty()) {
+            releaseLocks()
+            if (failedServiceWillStop && isDesiredFailure) {
+                stopFgs(context, generation)
+            }
+        } else if (failedServiceWillStop && isDesiredFailure) {
+            val recoveryGeneration = generationCounter.incrementAndGet()
+            desiredGeneration = recoveryGeneration
+            restartAfterDestroy[generation] = recoveryGeneration
+            stopFgs(context, generation)
+        }
+        notifyScreenState()
     }
 
     /**
@@ -216,37 +432,35 @@ object ForegroundGuardian {
         wifiLock = null
     }
 
-    private fun startFgs(context: Context) {
+    private fun startFgs(context: Context, generation: Long) {
         Log.i(TAG, "startFgs: Starting StreamKeepaliveService...")
-        val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.applicationContext.startForegroundService(intent)
-            } else {
-                context.applicationContext.startService(intent)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "startFgs failed: ", e)
+        val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java).apply {
+            putExtra(StreamKeepaliveService.EXTRA_GENERATION, generation)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.applicationContext.startForegroundService(intent)
+        } else {
+            context.applicationContext.startService(intent)
         }
     }
 
-    private fun updateFgs(context: Context) {
+    private fun updateFgs(context: Context, generation: Long) {
         Log.d(TAG, "updateFgs: Updating StreamKeepaliveService notification...")
-        val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java)
+        desiredGeneration = generation
+        val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java).apply {
+            putExtra(StreamKeepaliveService.EXTRA_GENERATION, generation)
+        }
         // 重复调用 startForegroundService 会触发 onStartCommand，轻量更新通知文案
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.applicationContext.startForegroundService(intent)
-            } else {
-                context.applicationContext.startService(intent)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "updateFgs failed: ", e)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.applicationContext.startForegroundService(intent)
+        } else {
+            context.applicationContext.startService(intent)
         }
     }
 
-    private fun stopFgs(context: Context) {
+    private fun stopFgs(context: Context, expectedGeneration: Long = desiredGeneration) {
         Log.i(TAG, "stopFgs: Stopping StreamKeepaliveService...")
+        expectedStopGeneration = expectedGeneration
         val intent = Intent(context.applicationContext, StreamKeepaliveService::class.java)
         try {
             context.applicationContext.stopService(intent)

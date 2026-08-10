@@ -1,15 +1,127 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
-use crate::vcp_modules::message_repository::MessageRenderCompiler;
-use crate::vcp_modules::message_repository::MessageRepository;
+use crate::vcp_modules::message_repository::{
+    compile_and_serialize_render_async, deserialize_render_async, serialize_render_async,
+    write_render_cache_cas, MessageRepository, RENDERER_SCHEMA_VERSION,
+};
 use crate::vcp_modules::settings_manager;
 use crate::vcp_modules::sync_hash::HashAggregator;
+use futures_util::StreamExt;
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::path::Path;
+use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
+
+const MAX_ATTACHMENT_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+
+fn attachment_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+async fn download_attachment(
+    base_url: &str,
+    sync_token: &str,
+    expected_hash: &str,
+    expected_size: u64,
+    destination: &Path,
+) -> Result<(), String> {
+    if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("attachment hash must be 64 hexadecimal characters".to_string());
+    }
+    let mut url = reqwest::Url::parse(&format!(
+        "{}/api/mobile-sync/download-attachment",
+        base_url.trim_end_matches('/')
+    ))
+    .map_err(|error| format!("invalid sync URL: {}", error))?;
+    url.query_pairs_mut().append_pair("hash", expected_hash);
+
+    let response = attachment_http_client()?
+        .get(url)
+        .header("x-sync-token", sync_token)
+        .header("Authorization", format!("Bearer {}", sync_token))
+        .send()
+        .await
+        .map_err(|error| format!("attachment download failed: {}", error))?
+        .error_for_status()
+        .map_err(|error| format!("attachment server rejected download: {}", error))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ATTACHMENT_DOWNLOAD_BYTES)
+    {
+        return Err("attachment exceeds 50 MiB download limit".to_string());
+    }
+
+    let temp_path = destination.with_file_name(format!(
+        ".{}.{}.part",
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("attachment"),
+        uuid::Uuid::new_v4()
+    ));
+    let result = async {
+        let mut file = fs::File::create(&temp_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut stream = response.bytes_stream();
+        let mut total = 0u64;
+        let mut hasher = Sha256::new();
+        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(15), stream.next())
+            .await
+            .map_err(|_| "attachment download stalled".to_string())?
+        {
+            let chunk = chunk.map_err(|error| error.to_string())?;
+            total = total
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| "attachment size overflow".to_string())?;
+            if total > MAX_ATTACHMENT_DOWNLOAD_BYTES {
+                return Err("attachment exceeds 50 MiB download limit".to_string());
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        if expected_size > 0 && total != expected_size {
+            return Err(format!(
+                "attachment size mismatch: expected {}, received {}",
+                expected_size, total
+            ));
+        }
+        let actual_hash = format!("{:x}", hasher.finalize());
+        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+            return Err("attachment SHA-256 mismatch".to_string());
+        }
+        file.flush().await.map_err(|error| error.to_string())?;
+        file.sync_all().await.map_err(|error| error.to_string())?;
+        drop(file);
+        fs::rename(&temp_path, destination)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path).await;
+    }
+    result
+}
 
 // =================================================================
 // vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
@@ -39,7 +151,7 @@ pub async fn load_multi_topic_messages(
 
     let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let query_str = format!(
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.topic_id, m.content_hash
+        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.topic_id, m.content_hash
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          WHERE m.topic_id IN ({}) AND m.deleted_at IS NULL
@@ -58,11 +170,15 @@ pub async fn load_multi_topic_messages(
         let role: String = row.get("role");
         let topic_id: String = row.get("topic_id");
         let timestamp: i64 = row.get("timestamp");
-        let render_content: Option<Vec<u8>> = row.get("render_content");
-        let blocks = parse_render_bytes(render_content);
-
         let content: String = row.get("content");
         let content_hash_raw: String = row.get("content_hash");
+        let blocks = decode_valid_render_cache(
+            row.get("render_content"),
+            row.get("cache_content_hash"),
+            row.get("renderer_schema_version"),
+            &content_hash_raw,
+        )
+        .await;
         let content_hash = if content_hash_raw.is_empty() {
             None
         } else {
@@ -160,40 +276,82 @@ pub async fn load_multi_topic_messages(
 #[allow(clippy::too_many_arguments)]
 pub async fn load_chat_history_internal(
     _app_handle: &AppHandle,
-    _owner_id: &str,
-    _owner_type: &str,
+    owner_id: &str,
+    owner_type: &str,
     topic_id: &str,
     limit: Option<usize>,
     offset: Option<usize>,
+    before_timestamp: Option<i64>,
+    before_message_id: Option<&str>,
     include_content: bool,
     include_extracted_text: bool,
 ) -> Result<Vec<ChatMessage>, String> {
     let db_state = _app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
 
-    let offset = offset.unwrap_or(0);
+    let owner_matches: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM topics
+            WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL
+         )",
+    )
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if owner_matches == 0 {
+        return Err("topic does not belong to the selected owner".to_string());
+    }
 
-    let query_str = if limit.is_some() {
-        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
+    let offset = offset.unwrap_or(0);
+    if before_timestamp.is_some() != before_message_id.is_some() {
+        return Err("history cursor requires both beforeTimestamp and beforeMessageId".to_string());
+    }
+    if offset > 0 && before_timestamp.is_none() {
+        return Err(
+            "offset history pagination is no longer supported; use a keyset cursor".to_string(),
+        );
+    }
+
+    let query_str = if limit.is_some() && before_timestamp.is_some() {
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
+         FROM messages m
+         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON m.agent_id = a.agent_id
+         WHERE m.topic_id = ? AND m.deleted_at IS NULL
+           AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))
+         ORDER BY m.timestamp DESC, m.msg_id DESC
+         LIMIT ?"
+    } else if limit.is_some() {
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          LEFT JOIN agents a ON m.agent_id = a.agent_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
-         ORDER BY m.timestamp DESC, m.rowid DESC 
-         LIMIT ? OFFSET ?"
+         ORDER BY m.timestamp DESC, m.msg_id DESC
+         LIMIT ?"
     } else {
-        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, m.content_hash 
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
          FROM messages m
          LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
          LEFT JOIN agents a ON m.agent_id = a.agent_id
          WHERE m.topic_id = ? AND m.deleted_at IS NULL 
-         ORDER BY m.timestamp DESC, m.rowid DESC"
+         ORDER BY m.timestamp DESC, m.msg_id DESC"
     };
 
     let mut q = sqlx::query(query_str).bind(topic_id);
     if let Some(l) = limit {
-        q = q.bind(l as i64);
-        q = q.bind(offset as i64);
+        if let (Some(before_ts), Some(before_id)) = (before_timestamp, before_message_id) {
+            q = q
+                .bind(before_ts)
+                .bind(before_ts)
+                .bind(before_id)
+                .bind(l as i64);
+        } else {
+            q = q.bind(l as i64);
+        }
     }
     let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
 
@@ -328,48 +486,42 @@ pub async fn load_chat_history_internal(
         let name: Option<String> = row.get("name");
 
         let content: String = row.get("content");
-        let render_content: Option<Vec<u8>> = row.get("render_content");
+        let content_hash_raw: String = row.get("content_hash");
+        let cached_blocks = decode_valid_render_cache(
+            row.get("render_content"),
+            row.get("cache_content_hash"),
+            row.get("renderer_schema_version"),
+            &content_hash_raw,
+        )
+        .await;
 
-        // 懒渲染策略：render_cache 命中则直接用，未命中则实时编译
-        let (blocks, content) = if let Some(ref rb) = render_content {
-            let blocks = parse_render_bytes(Some(rb.clone()));
+        // 缓存只有在 source hash、renderer schema 和压缩载荷均有效时才命中。
+        let (blocks, content) = if let Some(blocks) = cached_blocks {
             let content = if include_content {
                 content
             } else {
                 String::new()
             };
-            (blocks, content)
+            (Some(blocks), content)
         } else {
             // 未命中：直接用明文 content → 编译 blocks → 异步回写 cache
             let decompressed = content.clone();
             if decompressed.is_empty() {
                 (None, String::new())
             } else {
-                let compiled = MessageRenderCompiler::compile(&decompressed);
+                let (compiled, serialized) =
+                    compile_and_serialize_render_async(decompressed.clone()).await?;
                 let blocks_json = serde_json::to_value(&compiled).ok();
 
-                // 异步回写 render_cache (使用 tokio::spawn，不阻塞消息加载流)
-                if let Ok(serialized) = MessageRenderCompiler::serialize(&compiled) {
-                    let pool_c = pool.clone();
-                    let tid = topic_id.to_string();
-                    let mid = msg_id.clone();
-                    tokio::spawn(async move {
-                        let now = chrono::Utc::now().timestamp_millis();
-                        let _ = sqlx::query(
-                            "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) \
-                             VALUES (?, ?, ?, ?) \
-                             ON CONFLICT(topic_id, msg_id) DO UPDATE SET \
-                             render_content = excluded.render_content, \
-                             updated_at = excluded.updated_at"
-                        )
-                        .bind(&tid)
-                        .bind(&mid)
-                        .bind(&serialized)
-                        .bind(now)
-                        .execute(&pool_c)
-                        .await;
-                    });
-                }
+                let pool_c = pool.clone();
+                let tid = topic_id.to_string();
+                let mid = msg_id.clone();
+                let observed_hash = content_hash_raw.clone();
+                tokio::spawn(async move {
+                    let _ =
+                        write_render_cache_cas(&pool_c, &tid, &mid, &observed_hash, &serialized)
+                            .await;
+                });
 
                 let content = if include_content {
                     decompressed
@@ -380,7 +532,6 @@ pub async fn load_chat_history_internal(
             }
         };
 
-        let content_hash_raw: String = row.get("content_hash");
         let content_hash = if content_hash_raw.is_empty() {
             None
         } else {
@@ -610,29 +761,21 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
         let local_path_str = local_path.to_string_lossy().into_owned();
 
         if !local_path.exists() {
-            // 尝试下载
             let settings = settings_manager::read_settings(app.clone(), app.state()).await?;
-            if !settings.sync_http_url.is_empty() {
-                let client = reqwest::Client::new();
-                let url = format!(
-                    "{}/api/mobile-sync/download-attachment?hash={}",
-                    settings.sync_http_url, hash
-                );
-                match client
-                    .get(&url)
-                    .header("x-sync-token", &settings.sync_token)
-                    .header("Authorization", format!("Bearer {}", settings.sync_token))
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(bytes) = resp.bytes().await {
-                            let _ = fs::write(&local_path, bytes).await;
-                        }
-                    }
-                    _ => {} // 下载失败则跳过，UI 会显示裂图
-                }
+            if settings.sync_http_url.is_empty() {
+                return Err(format!(
+                    "attachment {} is missing locally and sync is disabled",
+                    hash
+                ));
             }
+            download_attachment(
+                &settings.sync_http_url,
+                &settings.sync_token,
+                &hash,
+                att.size,
+                &local_path,
+            )
+            .await?;
         }
 
         // 核心对齐：
@@ -642,6 +785,7 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
             att.src = format!("file://{}", local_path_str);
         }
         att.internal_path = local_path_str;
+        att.status = Some("done".to_string());
     }
     Ok(())
 }
@@ -674,7 +818,7 @@ pub async fn begin_stream_message(
     }
 
     let now = crate::vcp_modules::infra::utils::now_millis();
-    let render_bytes = MessageRenderCompiler::serialize(&MessageRenderCompiler::compile(""))?;
+    let (_, render_bytes) = compile_and_serialize_render_async(String::new()).await?;
     let content_hash = HashAggregator::compute_message_fingerprint("", &[]);
     let is_group = owner_type == "group";
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
@@ -700,11 +844,15 @@ pub async fn begin_stream_message(
     .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO render_cache (
+            topic_id, msg_id, render_content, content_hash, renderer_schema_version, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(topic_id)
     .bind(message_id)
     .bind(render_bytes)
+    .bind(&content_hash)
+    .bind(RENDERER_SCHEMA_VERSION)
     .bind(now)
     .execute(&mut *tx)
     .await
@@ -756,12 +904,15 @@ pub async fn append_single_message<R: tauri::Runtime>(
 ) -> Result<Vec<ContentBlock>, String> {
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
-    let blocks: Vec<ContentBlock> = if let Some(blocks_val) = &message.blocks {
-        serde_json::from_value(blocks_val.clone()).map_err(|e| e.to_string())?
-    } else {
-        MessageRenderCompiler::compile(&message.content)
-    };
-    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    let (blocks, render_bytes): (Vec<ContentBlock>, Vec<u8>) =
+        if let Some(blocks_val) = &message.blocks {
+            let blocks: Vec<ContentBlock> =
+                serde_json::from_value(blocks_val.clone()).map_err(|e| e.to_string())?;
+            let render_bytes = serialize_render_async(blocks.clone()).await?;
+            (blocks, render_bytes)
+        } else {
+            compile_and_serialize_render_async(message.content.clone()).await?
+        };
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, false).await?;
@@ -819,35 +970,30 @@ pub async fn re_render_message(
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
 
-    let row = sqlx::query("SELECT content FROM messages WHERE msg_id = ? AND topic_id = ?")
-        .bind(&message_id)
-        .bind(&topic_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let row = sqlx::query(
+        "SELECT content, content_hash FROM messages \
+         WHERE msg_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&message_id)
+    .bind(&topic_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     match row {
         Some(r) => {
             let decompressed: String = r.get("content");
 
-            let compiled = MessageRenderCompiler::compile(&decompressed);
-            let serialized = MessageRenderCompiler::serialize(&compiled)?;
-
-            let now = chrono::Utc::now().timestamp_millis();
-            sqlx::query(
-                "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) \
-                 VALUES (?, ?, ?, ?) \
-                 ON CONFLICT(topic_id, msg_id) DO UPDATE SET \
-                 render_content = excluded.render_content, \
-                 updated_at = excluded.updated_at",
-            )
-            .bind(&topic_id)
-            .bind(&message_id)
-            .bind(&serialized)
-            .bind(now)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+            let observed_hash: String = r.get("content_hash");
+            let (compiled, serialized) = compile_and_serialize_render_async(decompressed).await?;
+            if !write_render_cache_cas(pool, &topic_id, &message_id, &observed_hash, &serialized)
+                .await?
+            {
+                return Err(format!(
+                    "Message {} changed while re-rendering; stale cache discarded",
+                    message_id
+                ));
+            }
 
             serde_json::to_value(&compiled).map_err(|e| e.to_string())
         }
@@ -870,12 +1016,15 @@ pub async fn patch_single_message<R: tauri::Runtime>(
     ensure_attachments_locally(&app_handle, &mut message).await?;
 
     // 优先使用传入的 blocks，如果缺失则实时编译
-    let blocks: Vec<ContentBlock> = if let Some(blocks_val) = &message.blocks {
-        serde_json::from_value(blocks_val.clone()).map_err(|e| e.to_string())?
-    } else {
-        MessageRenderCompiler::compile(&message.content)
-    };
-    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    let (blocks, render_bytes): (Vec<ContentBlock>, Vec<u8>) =
+        if let Some(blocks_val) = &message.blocks {
+            let blocks: Vec<ContentBlock> =
+                serde_json::from_value(blocks_val.clone()).map_err(|e| e.to_string())?;
+            let render_bytes = serialize_render_async(blocks.clone()).await?;
+            (blocks, render_bytes)
+        } else {
+            compile_and_serialize_render_async(message.content.clone()).await?
+        };
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
@@ -990,8 +1139,19 @@ pub async fn truncate_history_after_timestamp(
     _owner_type: &str,
     topic_id: &str,
     timestamp: i64,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+
+    let active_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT ag.msg_id FROM active_generations ag \
+         JOIN messages m ON m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
+         WHERE ag.topic_id = ? AND m.timestamp > ?",
+    )
+    .bind(topic_id)
+    .bind(timestamp)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     // 物理强清除 render_cache，消灭幽灵缓存
     sqlx::query("DELETE FROM render_cache WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
@@ -1003,6 +1163,17 @@ pub async fn truncate_history_after_timestamp(
     // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
     sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
         .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "DELETE FROM active_generations WHERE topic_id = ? AND msg_id IN (\
+         SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)",
+    )
+    .bind(topic_id)
+    .bind(topic_id)
+    .bind(timestamp)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let now = chrono::Utc::now().timestamp_millis();
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ?")
@@ -1028,20 +1199,22 @@ pub async fn truncate_history_after_timestamp(
         .await
         .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(active_ids)
 }
 
-/// Helper: Deserializes render_content bytes (JSON + zstd) into JSON blocks for frontend
-fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Value> {
-    render_content.and_then(|bytes| {
-        crate::vcp_modules::message_repository::MessageRenderCompiler::deserialize(&bytes)
-            .ok()
-            .and_then(
-                |blocks: Vec<crate::vcp_modules::content_parser::ContentBlock>| {
-                    serde_json::to_value(blocks).ok()
-                },
-            )
-    })
+async fn decode_valid_render_cache(
+    render_content: Option<Vec<u8>>,
+    cache_content_hash: Option<String>,
+    renderer_schema_version: Option<i64>,
+    message_content_hash: &str,
+) -> Option<serde_json::Value> {
+    if cache_content_hash.as_deref() != Some(message_content_hash)
+        || renderer_schema_version != Some(RENDERER_SCHEMA_VERSION)
+    {
+        return None;
+    }
+    let blocks = deserialize_render_async(render_content?).await.ok()?;
+    serde_json::to_value(blocks).ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1100,8 +1273,8 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
             "topicId": topic_id,
         }))
     };
-    let end_blocks = if owner_id.is_empty() || topic_id.is_empty() {
-        None
+    let (end_blocks, end_timestamp) = if owner_id.is_empty() || topic_id.is_empty() {
+        (None, final_ts)
     } else {
         match commit_stream_message(
             pool,
@@ -1117,7 +1290,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         )
         .await
         {
-            Ok(blocks) => Some(blocks),
+            Ok((blocks, start_timestamp)) => (Some(blocks), start_timestamp),
             Err(error) => {
                 if let Some(chan) = &stream_channel {
                     let _ = chan.send(crate::vcp_modules::vcp_client::StreamEvent::error(
@@ -1137,7 +1310,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
             context,
             Some(terminal_reason),
             end_blocks,
-            Some(final_ts),
+            Some(end_timestamp),
         ));
     }
 
@@ -1154,27 +1327,44 @@ async fn commit_stream_message(
     final_content: &str,
     final_ts: u64,
     finish_reason: &str,
-    agent_id: Option<&str>,
-    agent_name: Option<&str>,
-) -> Result<Vec<ContentBlock>, String> {
-    let blocks = MessageRenderCompiler::compile(final_content);
-    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    _agent_id: Option<&str>,
+    _agent_name: Option<&str>,
+) -> Result<(Vec<ContentBlock>, u64), String> {
+    let (blocks, render_bytes) =
+        compile_and_serialize_render_async(final_content.to_string()).await?;
     let content_hash = HashAggregator::compute_message_fingerprint(final_content, &[]);
     let is_group = owner_type == "group";
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
+    let start_timestamp: i64 = sqlx::query_scalar(
+        "SELECT m.timestamp FROM messages m \
+         JOIN active_generations ag ON ag.msg_id = m.msg_id AND ag.topic_id = m.topic_id \
+         WHERE m.topic_id = ? AND m.msg_id = ? AND m.finish_reason IS NULL \
+           AND m.deleted_at IS NULL AND ag.owner_id = ? AND ag.owner_type = ?",
+    )
+    .bind(topic_id)
+    .bind(message_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| {
+        format!(
+            "Generation {} is not pending for {} {} topic {}",
+            message_id, owner_type, owner_id, topic_id
+        )
+    })?;
+
     let updated = sqlx::query(
-        "UPDATE messages SET role = 'assistant', name = ?, agent_id = ?, content = ?, \
-         timestamp = ?, is_group_message = ?, group_id = ?, finish_reason = ?, \
+        "UPDATE messages SET role = 'assistant', content = ?, \
+         is_group_message = ?, group_id = ?, finish_reason = ?, \
          content_hash = ?, updated_at = ? \
          WHERE topic_id = ? AND msg_id = ? AND finish_reason IS NULL AND deleted_at IS NULL \
          AND EXISTS(SELECT 1 FROM active_generations \
                     WHERE msg_id = ? AND topic_id = ? AND owner_id = ? AND owner_type = ?)",
     )
-    .bind(agent_name)
-    .bind(agent_id)
     .bind(final_content)
-    .bind(final_ts as i64)
     .bind(is_group)
     .bind(if is_group { Some(owner_id) } else { None })
     .bind(finish_reason)
@@ -1197,10 +1387,13 @@ async fn commit_stream_message(
     }
 
     let cache_updated = sqlx::query(
-        "UPDATE render_cache SET render_content = ?, updated_at = ? \
+        "UPDATE render_cache SET render_content = ?, content_hash = ?, \
+         renderer_schema_version = ?, updated_at = ? \
          WHERE topic_id = ? AND msg_id = ?",
     )
     .bind(render_bytes)
+    .bind(&content_hash)
+    .bind(RENDERER_SCHEMA_VERSION)
     .bind(final_ts as i64)
     .bind(topic_id)
     .bind(message_id)
@@ -1254,7 +1447,7 @@ async fn commit_stream_message(
         .map_err(|e| e.to_string())?;
     HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(blocks)
+    Ok((blocks, start_timestamp as u64))
 }
 
 #[tauri::command]
@@ -1346,7 +1539,14 @@ mod stream_lifecycle_tests {
         .await
         .is_err());
 
-        commit_stream_message(
+        let skeleton: (i64, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT timestamp, name, agent_id FROM messages WHERE msg_id = 'message-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("skeleton identity");
+
+        let (_, terminal_timestamp) = commit_stream_message(
             &pool,
             "agent-1",
             "agent",
@@ -1360,15 +1560,20 @@ mod stream_lifecycle_tests {
         )
         .await
         .expect("finalize generation");
+        assert_eq!(terminal_timestamp, skeleton.0 as u64);
 
-        let row: (String, Option<String>) = sqlx::query_as(
-            "SELECT content, finish_reason FROM messages WHERE msg_id = 'message-1'",
+        let row: (String, Option<String>, i64, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT content, finish_reason, timestamp, name, agent_id \
+             FROM messages WHERE msg_id = 'message-1'",
         )
         .fetch_one(&pool)
         .await
         .expect("terminal message");
         assert_eq!(row.0, "terminal body");
         assert_eq!(row.1.as_deref(), Some("completed"));
+        assert_eq!(row.2, skeleton.0);
+        assert_eq!(row.3, skeleton.1);
+        assert_eq!(row.4, skeleton.2);
         let active: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'message-1'",
         )
@@ -1439,5 +1644,174 @@ mod stream_lifecycle_tests {
         .await
         .expect("active count");
         assert_eq!(active, 1);
+    }
+
+    #[tokio::test]
+    async fn tombstoned_generation_rejects_late_finalization() {
+        let pool = test_pool().await;
+        begin_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-deleted",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .expect("begin generation");
+
+        delete_messages(&pool, "topic-1", vec!["message-deleted".to_string()])
+            .await
+            .expect("delete generation");
+        assert!(commit_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-deleted",
+            "late terminal body",
+            999,
+            "completed",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .is_err());
+
+        let deleted_at: Option<i64> =
+            sqlx::query_scalar("SELECT deleted_at FROM messages WHERE msg_id = 'message-deleted'")
+                .fetch_one(&pool)
+                .await
+                .expect("deleted message");
+        assert!(deleted_at.is_some());
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'message-deleted'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("active count");
+        assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn render_cache_rejects_stale_hash_and_invalid_identity() {
+        let pool = test_pool().await;
+        begin_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-cache",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .expect("begin generation");
+        let old_hash: String =
+            sqlx::query_scalar("SELECT content_hash FROM messages WHERE msg_id = 'message-cache'")
+                .fetch_one(&pool)
+                .await
+                .expect("old hash");
+        let old_bytes: Vec<u8> = sqlx::query_scalar(
+            "SELECT render_content FROM render_cache WHERE msg_id = 'message-cache'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("old cache");
+
+        sqlx::query(
+            "UPDATE messages SET content = 'new', content_hash = 'new-hash' \
+             WHERE msg_id = 'message-cache'",
+        )
+        .execute(&pool)
+        .await
+        .expect("concurrent edit");
+        let (_, stale_bytes) = compile_and_serialize_render_async("stale".to_string())
+            .await
+            .expect("compile stale");
+        assert!(!write_render_cache_cas(
+            &pool,
+            "topic-1",
+            "message-cache",
+            &old_hash,
+            &stale_bytes,
+        )
+        .await
+        .expect("cache CAS"));
+        let after_bytes: Vec<u8> = sqlx::query_scalar(
+            "SELECT render_content FROM render_cache WHERE msg_id = 'message-cache'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("cache after CAS");
+        assert_eq!(after_bytes, old_bytes);
+
+        assert!(decode_valid_render_cache(
+            Some(old_bytes.clone()),
+            Some(old_hash.clone()),
+            Some(RENDERER_SCHEMA_VERSION),
+            &old_hash,
+        )
+        .await
+        .is_some());
+        assert!(decode_valid_render_cache(
+            Some(old_bytes.clone()),
+            Some(old_hash.clone()),
+            Some(RENDERER_SCHEMA_VERSION + 1),
+            &old_hash,
+        )
+        .await
+        .is_none());
+        assert!(decode_valid_render_cache(
+            Some(vec![1, 2, 3]),
+            Some(old_hash.clone()),
+            Some(RENDERER_SCHEMA_VERSION),
+            &old_hash,
+        )
+        .await
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn attachment_download_never_publishes_unverified_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0u8; 2048];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .await
+                .expect("write response");
+        });
+        let directory = tempfile::tempdir().expect("temporary attachment dir");
+        let destination = directory.path().join("attachment.bin");
+
+        let result = download_attachment(
+            &format!("http://{}", address),
+            "token",
+            &"0".repeat(64),
+            5,
+            &destination,
+        )
+        .await;
+        server.await.expect("test server");
+
+        assert!(result.is_err());
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(directory.path())
+                .expect("read temporary dir")
+                .count(),
+            0
+        );
     }
 }

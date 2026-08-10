@@ -28,9 +28,22 @@ const selectTopic = async (
   itemId: string,
   topicId: string,
   topicName: string,
+  ownerType: string,
+  expectedEpoch: number,
+  allowUnselectedOwner: boolean,
 ) => {
   if (router.currentRoute.value.path !== "/chat") {
     await router.push("/chat");
+  }
+
+  const currentOwner = sessionStore.currentSelectedItem;
+  if (
+    sessionStore.sessionEpoch !== expectedEpoch ||
+    (currentOwner
+      ? currentOwner.id !== itemId || currentOwner.type !== ownerType
+      : !allowUnselectedOwner)
+  ) {
+    return;
   }
 
   // 使用统一的 sessionStore 选择话题，历史加载由 ChatView 的 watcher 响应
@@ -52,7 +65,10 @@ const handleCreateTopic = async () => {
     sessionStore.currentSelectedItem,
   );
 
-  if (!currentItemId.value) {
+  const owner = sessionStore.currentSelectedItem;
+  const allowUnselectedOwner = !owner;
+  const ownerId = owner?.id || currentItemId.value;
+  if (!ownerId) {
     notificationStore.addNotification({
       type: 'warning',
       message: '请先选择一个助手或群组',
@@ -62,6 +78,10 @@ const handleCreateTopic = async () => {
   }
 
   isCreating.value = true;
+  const ownerType = owner?.type || (
+    assistantStore.agents.some((a) => a.id === ownerId) ? "agent" : "group"
+  );
+  const selectionEpoch = sessionStore.sessionEpoch;
 
   const newTopicName = `新话题 ${new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -70,17 +90,27 @@ const handleCreateTopic = async () => {
   })}`;
 
   try {
-    const ownerType = assistantStore.agents.some((a) => a.id === currentItemId.value)
-      ? "agent"
-      : "group";
-
     const newTopic = await topicStore.createTopic(
-      currentItemId.value,
+      ownerId,
       ownerType,
       newTopicName,
     );
-    if (newTopic?.id) {
-      await selectTopic(currentItemId.value, newTopic.id, newTopic.name);
+    if (
+      newTopic?.id &&
+      sessionStore.sessionEpoch === selectionEpoch &&
+      (sessionStore.currentSelectedItem
+        ? sessionStore.currentSelectedItem.id === ownerId &&
+          sessionStore.currentSelectedItem.type === ownerType
+        : allowUnselectedOwner)
+    ) {
+      await selectTopic(
+        ownerId,
+        newTopic.id,
+        newTopic.name,
+        ownerType,
+        selectionEpoch,
+        allowUnselectedOwner,
+      );
     }
   } catch (error) {
     console.error("[TopicCreator] create-topic failed", error);

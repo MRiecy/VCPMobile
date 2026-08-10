@@ -24,6 +24,37 @@ use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
 
+#[cfg(target_os = "android")]
+const HELPER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "android")]
+const HELPER_IO_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[cfg(target_os = "android")]
+fn helper_frame_codec() -> LengthDelimitedCodec {
+    LengthDelimitedCodec::builder()
+        .max_frame_length(10 * 1024 * 1024)
+        .new_codec()
+}
+
+#[cfg(target_os = "android")]
+async fn connect_helper_port(port: u16) -> Result<tokio::net::TcpStream, String> {
+    connect_helper_port_with_timeout(port, HELPER_CONNECT_TIMEOUT).await
+}
+
+#[cfg(target_os = "android")]
+async fn connect_helper_port_with_timeout(
+    port: u16,
+    timeout: Duration,
+) -> Result<tokio::net::TcpStream, String> {
+    tokio::time::timeout(
+        timeout,
+        tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)),
+    )
+    .await
+    .map_err(|_| format!("Helper connect timed out on port {}", port))?
+    .map_err(|e| format!("Helper connect failed on port {}: {}", port, e))
+}
+
 /// =================================================================
 /// vcp_modules/vcp_client.rs - 统一的 VCP 请求处理模块 (Rust 重写版)
 /// =================================================================
@@ -125,7 +156,7 @@ impl Default for ActiveRequests {
 }
 
 impl ActiveRequests {
-    fn cancel(&self, message_id: &str) -> Result<bool, String> {
+    pub(crate) fn cancel(&self, message_id: &str) -> Result<bool, String> {
         let Some(entry) = self.0.get(message_id) else {
             return Ok(false);
         };
@@ -678,9 +709,7 @@ async fn connect_to_helper<R: Runtime>(
     if port_file.exists() {
         if let Ok(content) = std::fs::read_to_string(&port_file) {
             if let Ok(port) = content.trim().parse::<u16>() {
-                if let Ok(stream) =
-                    tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await
-                {
+                if let Ok(stream) = connect_helper_port(port).await {
                     log::info!(
                         "[VCPClient] Connected to existing sse helper socket on 127.0.0.1:{}",
                         port
@@ -701,8 +730,12 @@ async fn connect_to_helper<R: Runtime>(
     let mut last_err = String::new();
     let max_attempts = 60;
     let delay = Duration::from_millis(50);
+    let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(3);
 
     for attempt in 1..=max_attempts {
+        if tokio::time::Instant::now() >= ready_deadline {
+            break;
+        }
         if !port_file.exists() {
             tokio::time::sleep(delay).await;
             continue;
@@ -733,7 +766,7 @@ async fn connect_to_helper<R: Runtime>(
         };
 
         // 尝试连接
-        match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+        match connect_helper_port_with_timeout(port, Duration::from_millis(100)).await {
             Ok(stream) => {
                 log::info!(
                     "[VCPClient] Connected to sse helper socket on 127.0.0.1:{} after {} attempts",
@@ -780,47 +813,100 @@ async fn send_command_to_stream(
     let cmd_str = cmd.to_string();
     let cmd_bytes = cmd_str.as_bytes();
     let len = cmd_bytes.len() as u32;
-    stream
-        .write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| format!("Write command length error: {}", e))?;
-    stream
-        .write_all(cmd_bytes)
-        .await
-        .map_err(|e| format!("Write command error: {}", e))?;
-    stream
-        .flush()
-        .await
-        .map_err(|e| format!("Flush command error: {}", e))?;
+    tokio::time::timeout(HELPER_IO_TIMEOUT, async {
+        stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| format!("Write command length error: {}", e))?;
+        stream
+            .write_all(cmd_bytes)
+            .await
+            .map_err(|e| format!("Write command error: {}", e))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("Flush command error: {}", e))?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| "Helper command write timed out".to_string())??;
     Ok(stream)
 }
 
 #[cfg(target_os = "android")]
-async fn send_stop_to_helper<R: Runtime>(app: &AppHandle<R>, msg_id: &str) -> Result<(), String> {
+async fn query_helper_generation<R: Runtime>(
+    app: &AppHandle<R>,
+    msg_id: &str,
+) -> Result<u64, String> {
     let port = get_helper_port(app)?;
-    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+    let stream = connect_helper_port(port).await?;
+    let stream = send_command_to_stream(stream, "query", msg_id, None).await?;
+    let mut reader = FramedRead::new(stream, helper_frame_codec());
+    let frame = tokio::time::timeout(HELPER_IO_TIMEOUT, reader.next())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| "Helper generation query timed out".to_string())?
+        .ok_or_else(|| "Helper generation query ended at EOF".to_string())?
+        .map_err(|e| format!("Helper generation query frame error: {}", e))?;
+    let response = serde_json::from_slice::<Value>(&frame)
+        .map_err(|e| format!("Invalid helper generation response: {}", e))?;
+    if response.get("requestId").and_then(Value::as_str) != Some(msg_id) {
+        return Err("Helper generation response identity mismatch".to_string());
+    }
+    response
+        .get("generation")
+        .and_then(Value::as_u64)
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| "Helper session has no active generation".to_string())
+}
 
-    let cmd = json!({
-        "action": "stop",
-        "requestId": msg_id
-    });
+#[cfg(target_os = "android")]
+async fn send_stop_to_helper<R: Runtime>(
+    app: &AppHandle<R>,
+    msg_id: &str,
+    expected_generation: Option<u64>,
+) -> Result<(), String> {
+    let expected_generation = match expected_generation.filter(|generation| *generation > 0) {
+        Some(generation) => generation,
+        None => query_helper_generation(app, msg_id).await?,
+    };
+    let port = get_helper_port(app)?;
+    let stream = connect_helper_port(port).await?;
+    let stream = send_command_to_stream(
+        stream,
+        "stop",
+        msg_id,
+        Some(json!({ "generation": expected_generation })),
+    )
+    .await?;
+    let mut reader = FramedRead::new(stream, helper_frame_codec());
+    let frame = tokio::time::timeout(HELPER_IO_TIMEOUT, reader.next())
+        .await
+        .map_err(|_| "Helper stop ACK timed out".to_string())?
+        .ok_or_else(|| "Helper stop ACK ended at EOF".to_string())?
+        .map_err(|e| format!("Helper stop ACK frame error: {}", e))?;
+    let ack = serde_json::from_slice::<Value>(&frame)
+        .map_err(|e| format!("Invalid helper stop ACK: {}", e))?;
+    validate_helper_stop_ack(&ack, msg_id, expected_generation)
+}
 
-    use tokio::io::AsyncWriteExt;
-    let cmd_str = cmd.to_string();
-    let cmd_bytes = cmd_str.as_bytes();
-    let len = cmd_bytes.len() as u32;
-    stream
-        .write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    stream
-        .write_all(cmd_bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    stream.flush().await.map_err(|e| e.to_string())?;
-    Ok(())
+#[cfg(any(target_os = "android", test))]
+fn validate_helper_stop_ack(
+    ack: &Value,
+    msg_id: &str,
+    expected_generation: u64,
+) -> Result<(), String> {
+    if ack.get("action").and_then(Value::as_str) == Some("stop_ack")
+        && ack.get("requestId").and_then(Value::as_str) == Some(msg_id)
+        && ack.get("generation").and_then(Value::as_u64) == Some(expected_generation)
+        && ack.get("stopped").and_then(Value::as_bool) == Some(true)
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Helper stop ACK rejected: expected requestId={} generation={}, got {}",
+        msg_id, expected_generation, ack
+    ))
 }
 
 /// 3. 抽离自适应降帧流式请求循环
@@ -852,6 +938,8 @@ async fn handle_streaming_request<R: Runtime>(
     let mut last_finish_reason: Option<String> = None;
     #[allow(unused_mut)]
     let mut last_received_index: Option<i64> = last_event_index;
+    #[cfg(target_os = "android")]
+    let mut helper_generation: Option<u64> = None;
     let mut aurora_buffer = AuroraBuffer::new();
     let mut pending_aurora_chunk = String::new();
     let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
@@ -1020,7 +1108,7 @@ async fn handle_streaming_request<R: Runtime>(
 
                     match connect_to_helper(_app, "start", &message_id_inner, Some(params)).await {
                         Ok(stream) => {
-                            tcp_reader = Some(FramedRead::new(stream, LengthDelimitedCodec::new()));
+                            tcp_reader = Some(FramedRead::new(stream, helper_frame_codec()));
                             state = State::Streaming;
                         }
                         Err(e) => {
@@ -1086,7 +1174,8 @@ async fn handle_streaming_request<R: Runtime>(
                         _ = &mut abort_rx => {
                             #[cfg(target_os = "android")]
                             {
-                                let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                                send_stop_to_helper(_app, &message_id_inner, helper_generation)
+                                    .await?;
                             }
                             return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                         }
@@ -1109,7 +1198,7 @@ async fn handle_streaming_request<R: Runtime>(
                     match connect_to_helper(_app, "resume", &message_id_inner, Some(params)).await {
                         Ok(stream) => {
                             log::info!("[VCPClient] Successfully reconnected to sse helper socket");
-                            tcp_reader = Some(FramedRead::new(stream, LengthDelimitedCodec::new()));
+                            tcp_reader = Some(FramedRead::new(stream, helper_frame_codec()));
                             retry_count = 0;
                             backoff = Duration::from_millis(500);
                             state = State::Streaming;
@@ -1136,7 +1225,8 @@ async fn handle_streaming_request<R: Runtime>(
                             tokio::select! {
                                 _ = &mut abort_rx => {
                                     log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
-                                    let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                                    send_stop_to_helper(_app, &message_id_inner, helper_generation)
+                                        .await?;
                                     flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                                     aurora_buffer.finalize();
                                     send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()), Some("请求已中止".to_string()));
@@ -1146,6 +1236,18 @@ async fn handle_streaming_request<R: Runtime>(
                                     match next_line {
                                         Some(Ok(line)) => {
                                             if let Ok(event) = serde_json::from_slice::<Value>(&line) {
+                                                if let Some(generation) = event.get("generation").and_then(Value::as_u64) {
+                                                    if let Some(current) = helper_generation {
+                                                        if current != generation {
+                                                            return Err(format!(
+                                                                "Helper generation changed during stream: expected {}, got {}",
+                                                                current, generation
+                                                            ));
+                                                        }
+                                                    } else {
+                                                        helper_generation = Some(generation);
+                                                    }
+                                                }
                                                 let event_type = event["eventType"].as_str().unwrap_or("");
                                                 let event_data = event["eventData"].as_str().unwrap_or("");
 
@@ -1191,7 +1293,18 @@ async fn handle_streaming_request<R: Runtime>(
                                                         context_inner.clone(),
                                                         err_msg.clone(),
                                                     ));
-                                                    let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                                                    if let Err(stop_error) = send_stop_to_helper(
+                                                        _app,
+                                                        &message_id_inner,
+                                                        helper_generation,
+                                                    )
+                                                    .await
+                                                    {
+                                                        log::warn!(
+                                                            "[VCPClient] Best-effort helper stop after proxy error failed: {}",
+                                                            stop_error
+                                                        );
+                                                    }
                                                     return Err(err_msg);
                                                 }
                                             }
@@ -1298,7 +1411,7 @@ async fn handle_streaming_request<R: Runtime>(
                     );
                     #[cfg(target_os = "android")]
                     {
-                        let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                        send_stop_to_helper(_app, &message_id_inner, helper_generation).await?;
                     }
                     return Ok((
                         json!({
@@ -1355,7 +1468,7 @@ async fn handle_streaming_request<R: Runtime>(
                         log::warn!("[VCPClient] Aborted during retry backoff sleep");
                         #[cfg(target_os = "android")]
                         {
-                            let _ = send_stop_to_helper(_app, &message_id_inner).await;
+                            send_stop_to_helper(_app, &message_id_inner, helper_generation).await?;
                         }
                         return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                     }
@@ -1642,6 +1755,8 @@ pub struct ActiveGeneration {
     pub owner_id: String,
     pub owner_type: String,
     pub created_at: i64,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
 }
 
 #[tauri::command]
@@ -1651,7 +1766,12 @@ pub async fn get_active_generations(
 ) -> Result<Vec<ActiveGeneration>, String> {
     let db = app.state::<DbState>();
     let rows = sqlx::query(
-        "SELECT msg_id, topic_id, owner_id, owner_type, created_at FROM active_generations ORDER BY created_at ASC"
+        "SELECT ag.msg_id, ag.topic_id, ag.owner_id, ag.owner_type, ag.created_at, \
+                m.agent_id, COALESCE(m.name, a.name) AS agent_name \
+         FROM active_generations ag \
+         LEFT JOIN messages m ON m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
+         LEFT JOIN agents a ON a.agent_id = m.agent_id \
+         ORDER BY ag.created_at ASC",
     )
     .fetch_all(&db.pool)
     .await
@@ -1671,6 +1791,8 @@ pub async fn get_active_generations(
             owner_id: row.get("owner_id"),
             owner_type: row.get("owner_type"),
             created_at: row.get("created_at"),
+            agent_id: row.get("agent_id"),
+            agent_name: row.get("agent_name"),
         });
     }
     Ok(list)
@@ -1910,36 +2032,22 @@ pub async fn recover_active_generation<R: Runtime>(
         let query_res = async {
             let port = get_helper_port(&app)?;
             log::info!("[VCPClient] Helper port discovered: {}", port);
-            let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-                .await
-                .map_err(|e| format!("TCP connection failed: {}", e))?;
+            let stream = connect_helper_port(port).await?;
 
-            let cmd = json!({
-                "action": "query",
-                "requestId": msg_id
-            });
-
-            use tokio::io::AsyncWriteExt;
-            let cmd_str = cmd.to_string();
-            let cmd_bytes = cmd_str.as_bytes();
-            let len = cmd_bytes.len() as u32;
-            stream
-                .write_all(&len.to_be_bytes())
-                .await
-                .map_err(|e| e.to_string())?;
-            stream
-                .write_all(cmd_bytes)
-                .await
-                .map_err(|e| e.to_string())?;
-            stream.flush().await.map_err(|e| e.to_string())?;
+            let stream = send_command_to_stream(stream, "query", &msg_id, None).await?;
 
             log::info!("[VCPClient] Query command sent, waiting for response frame...");
-            let mut reader = FramedRead::new(stream, LengthDelimitedCodec::new());
-            if let Some(Ok(line)) = reader.next().await {
-                let resp = serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())?;
-                return Ok::<Value, String>(resp);
+            let mut reader = FramedRead::new(stream, helper_frame_codec());
+            let line = tokio::time::timeout(HELPER_IO_TIMEOUT, reader.next())
+                .await
+                .map_err(|_| "Helper query response timed out".to_string())?
+                .ok_or_else(|| "No query response received (EOF)".to_string())?
+                .map_err(|e| format!("Helper query frame error: {}", e))?;
+            let resp = serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())?;
+            if resp.get("requestId").and_then(Value::as_str) != Some(msg_id.as_str()) {
+                return Err("Helper query response identity mismatch".to_string());
             }
-            Err("No query response received (EOF)".to_string())
+            Ok::<Value, String>(resp)
         }
         .await;
 
@@ -1957,6 +2065,12 @@ pub async fn recover_active_generation<R: Runtime>(
                 );
 
                 if status == "completed" {
+                    let helper_generation = resp["generation"]
+                        .as_u64()
+                        .filter(|generation| *generation > 0)
+                        .ok_or_else(|| {
+                            "Completed helper session is missing generation".to_string()
+                        })?;
                     log::info!("[VCPClient] Session completed in helper memory. Finalizing message in SQLite database.");
                     crate::vcp_modules::chat::message_service::finalize_stream_message(
                         app.clone(),
@@ -1974,7 +2088,14 @@ pub async fn recover_active_generation<R: Runtime>(
                     .await?;
 
                     log::info!("[VCPClient] Finalization complete. Sending stop command to helper to release memory.");
-                    let _ = send_stop_to_helper(&app, &msg_id).await;
+                    if let Err(stop_error) =
+                        send_stop_to_helper(&app, &msg_id, Some(helper_generation)).await
+                    {
+                        log::warn!(
+                            "[VCPClient] Best-effort helper cleanup after durable finalization failed: {}",
+                            stop_error
+                        );
+                    }
 
                     return Ok(json!({
                         "status": "completed",
@@ -2185,5 +2306,32 @@ mod active_request_tests {
                 .attempt_id,
             new_attempt_id
         );
+    }
+
+    #[test]
+    fn helper_stop_ack_requires_stopped_and_exact_generation() {
+        let valid = json!({
+            "action": "stop_ack",
+            "requestId": "message-3",
+            "generation": 17,
+            "stopped": true,
+        });
+        assert!(validate_helper_stop_ack(&valid, "message-3", 17).is_ok());
+
+        let stale_generation = json!({
+            "action": "stop_ack",
+            "requestId": "message-3",
+            "generation": 16,
+            "stopped": true,
+        });
+        assert!(validate_helper_stop_ack(&stale_generation, "message-3", 17).is_err());
+
+        let not_stopped = json!({
+            "action": "stop_ack",
+            "requestId": "message-3",
+            "generation": 17,
+            "stopped": false,
+        });
+        assert!(validate_helper_stop_ack(&not_stopped, "message-3", 17).is_err());
     }
 }

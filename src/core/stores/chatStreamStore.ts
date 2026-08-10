@@ -44,11 +44,38 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
   }
 
+  const MAX_PENDING_TAIL_MUTATIONS = 512;
+
   function mergeTailFrame(
     existing: TailFrame | null,
     incoming: TailFrame,
+    latestSnapshot?: any[],
+    forceSnapshot = false,
   ): TailFrame {
     const incomingMutations = incoming.mutations || [];
+    const snapshotFrame = (): TailFrame => ({
+      ...incoming,
+      reset: true,
+      snapshot: latestSnapshot
+        ? [...latestSnapshot]
+        : incoming.snapshot
+          ? [...incoming.snapshot]
+          : undefined,
+      mutations: [],
+    });
+
+    // 后台 WebView 的 rAF 可能长期停摆。此时只保留最新完整 AST 基线，
+    // 不累计期间的每一条 diff；回到前台后单帧重建即可追上当前状态。
+    if (forceSnapshot) {
+      return snapshotFrame();
+    }
+
+    // 一个尚未刷入 DOM 的 reset 后续再收到增量时，直接把基线推进到最新完整节点。
+    // 这样合并结果始终自洽，不需要保存 reset 之后的全部中间 diff。
+    if (existing?.reset) {
+      return snapshotFrame();
+    }
+
     if (!existing || incoming.reset || incoming.epoch !== existing.epoch) {
       return {
         ...incoming,
@@ -57,14 +84,19 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       };
     }
 
+    const mutations = [
+      ...(existing.reset ? [] : existing.mutations || []),
+      ...incomingMutations,
+    ];
+    if (mutations.length > MAX_PENDING_TAIL_MUTATIONS) {
+      return snapshotFrame();
+    }
+
     return {
       ...incoming,
       reset: existing.reset || incoming.reset,
       snapshot: incoming.snapshot || existing.snapshot,
-      mutations: [
-        ...(existing.reset ? [] : existing.mutations || []),
-        ...incomingMutations,
-      ],
+      mutations,
     };
   }
 
@@ -296,6 +328,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
     // 同时从全局池中移除 (延迟移除，确保 finalizeStream 能拿到对象)
     const cleanupTimer = setTimeout(() => {
+      cleanupTimers.delete(cleanupTimer);
       if (!activeStreamingIds.value.has(messageId)) {
         activeStreamMessages.delete(messageId);
         clearRAFUpdate(messageId, false); // 漏洞 2 修复：延迟清理时，强制安全注销 rAF 帧，杜绝句柄泄露
@@ -316,6 +349,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
 
     const cleanupTimer = setTimeout(() => {
+      cleanupTimers.delete(cleanupTimer);
       if (!isMessageActive(messageId)) {
         activeStreamMessages.delete(messageId);
         clearRAFUpdate(messageId, false);
@@ -450,7 +484,16 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           streamDebugLog(
             `[chatStreamStore] Received tailFrame seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`,
           );
-          update.tailFrame = mergeTailFrame(update.tailFrame, aurora.tailFrame);
+          const latestSnapshot =
+            aurora.tailFrame.snapshot ||
+            aurora.tailSnapshot ||
+            aurora.tailBlock?.nodes;
+          update.tailFrame = mergeTailFrame(
+            update.tailFrame,
+            aurora.tailFrame,
+            latestSnapshot,
+            typeof document !== "undefined" && document.hidden,
+          );
           if (aurora.tailFrame.snapshot) {
             update.tailSnapshot = aurora.tailFrame.snapshot as any[];
           }
@@ -650,7 +693,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       // 2. UI 预处理：在内存中将消息标记为 reconnecting，让用户在界面上看到“重连中”
       for (const gen of activeGens) {
-        const { msgId, topicId, ownerId, ownerType } = gen;
+        const { msgId, topicId, ownerId, ownerType, agentId, agentName } = gen;
 
         let msg = activeStreamMessages.get(msgId);
         if (!msg) {
@@ -666,17 +709,17 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             msg = reactive<ChatMessage>({
               id: msgId,
               role: "assistant",
-              name: undefined,
+              name: agentName,
               content: "",
               timestamp: gen.createdAt || Date.now(),
               isThinking: false,
               isReconnecting: true,
-              agentId: ownerType === "agent" ? ownerId : undefined,
+              agentId: agentId || (ownerType === "agent" ? ownerId : undefined),
               groupId: ownerType === "group" ? ownerId : undefined,
               isGroupMessage: ownerType === "group",
               shell: computeShell({
                 role: "assistant",
-                agentId: ownerType === "agent" ? ownerId : undefined,
+                agentId: agentId || (ownerType === "agent" ? ownerId : undefined),
               }),
             });
 

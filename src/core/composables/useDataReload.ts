@@ -27,7 +27,15 @@ export function useDataReload() {
     // 3. 清理话题列表缓存
     topicStore.invalidateAllTopicCaches();
 
-    // 4. 如果当前在某个话题中，重新加载消息以获取最新 AST
+    // 4. 当前 owner 的列表必须显式重载；selection watch 的依赖没有变化，不会自行触发。
+    if (sessionStore.currentSelectedItem) {
+      await topicStore.loadTopicList(
+        sessionStore.currentSelectedItem.id,
+        sessionStore.currentSelectedItem.type,
+      );
+    }
+
+    // 5. 如果当前在某个话题中，重新加载消息以获取最新 AST
     if (sessionStore.currentTopicId && sessionStore.currentSelectedItem) {
       await chatHistoryStore.loadHistoryPaginated(
         sessionStore.currentSelectedItem.id,

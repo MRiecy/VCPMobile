@@ -30,11 +30,14 @@ class StreamKeepaliveService : Service() {
     companion object {
         const val CHANNEL_ID = "vcp_stream_keepalive"
         const val NOTIFICATION_ID = 0x53545201 // "STR" + 01
+        const val EXTRA_GENERATION = "vcp_guardian_generation"
         private const val TAG = "VcpMobileService"
 
         @Volatile
         var isServiceRunning = false
     }
+
+    private var latestGeneration = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -43,6 +46,13 @@ class StreamKeepaliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val generation = intent?.getLongExtra(EXTRA_GENERATION, 0L) ?: 0L
+        if (generation <= 0L) {
+            Log.e(TAG, "Missing ForegroundGuardian generation; refusing stale start")
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
+        latestGeneration = generation
         val label = ForegroundGuardian.getNotificationLabel()
         val notification = buildNotification(label)
 
@@ -57,8 +67,11 @@ class StreamKeepaliveService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            ForegroundGuardian.onServiceReady(generation)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to startForeground", e)
+            ForegroundGuardian.onServiceStartFailed(applicationContext, generation, e.message ?: e.javaClass.simpleName)
+            stopSelfResult(startId)
         }
 
         return START_NOT_STICKY
@@ -72,8 +85,7 @@ class StreamKeepaliveService : Service() {
             stopForeground(true)
         }
         
-        // 关键安全闭环：前台服务销毁（包括被系统/用户强杀）时，强行释放全部进程级物理锁，防止电量泄露
-        ForegroundGuardian.releaseAllLocks()
+        ForegroundGuardian.onServiceDestroyed(applicationContext, latestGeneration)
 
         isServiceRunning = false
         super.onDestroy()

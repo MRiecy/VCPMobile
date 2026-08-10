@@ -4,6 +4,16 @@ use tauri::{AppHandle, Manager, Runtime};
 #[allow(unused_imports)]
 use crate::VcpMobileState;
 
+fn stream_guardian_tag(agent_name: &str) -> String {
+    if agent_name.contains("[数据同步]") {
+        "sync".to_string()
+    } else if agent_name.contains("[预渲染重建]") {
+        "prerender".to_string()
+    } else {
+        format!("stream:{}", agent_name)
+    }
+}
+
 /// 申请持有进程级前台锁 (语义化接口)
 pub fn acquire_foreground_inner<R: Runtime>(
     _app: &AppHandle<R>,
@@ -61,7 +71,7 @@ pub fn start_stream_service_inner<R: Runtime>(
     app: &AppHandle<R>,
     agent_name: &str,
 ) -> Result<(), String> {
-    let tag = format!("stream:{}", agent_name);
+    let tag = stream_guardian_tag(agent_name);
     let priority = if agent_name.contains("[数据同步]") {
         40
     } else if agent_name.contains("[预渲染重建]") {
@@ -78,8 +88,20 @@ pub fn stop_stream_service_inner<R: Runtime>(
     app: &AppHandle<R>,
     agent_name: &str,
 ) -> Result<(), String> {
-    let tag = format!("stream:{}", agent_name);
+    let tag = stream_guardian_tag(agent_name);
     release_foreground_inner(app, &tag)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_guardian_tag;
+
+    #[test]
+    fn stream_domains_use_their_explicit_guardian_tags() {
+        assert_eq!(stream_guardian_tag("[数据同步] 增量"), "sync");
+        assert_eq!(stream_guardian_tag("[预渲染重建] Aurora"), "prerender");
+        assert_eq!(stream_guardian_tag("Nova"), "stream:Nova");
+    }
 }
 
 /// 设置分布式保活模式 (兼容老版本接口)

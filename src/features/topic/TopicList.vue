@@ -4,7 +4,6 @@ import { useRouter } from "vue-router";
 import { useVirtualList } from "@vueuse/core";
 import { useTopicStore, type Topic } from "../../core/stores/topicListManager";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
-import { useAssistantStore } from "../../core/stores/assistant";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -16,7 +15,6 @@ const emit = defineEmits<{
 
 const topicListStore = useTopicStore();
 const sessionStore = useChatSessionStore();
-const assistantStore = useAssistantStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
@@ -63,9 +61,11 @@ const showTopicContextMenu = (topicId: string) => {
     topicListStore.currentAgentId ||
     sessionStore.currentSelectedItem?.id ||
     "default_agent";
-  const ownerType = assistantStore.agents.some((a) => a.id === itemId)
-    ? "agent"
-    : "group";
+  const ownerType = topic.ownerType === "agent" || topic.ownerType === "group"
+    ? topic.ownerType
+    : sessionStore.currentSelectedItem?.type === "group"
+      ? "group"
+      : "agent";
 
   const menuItems: any[] = [
     {
@@ -167,13 +167,13 @@ const showTopicContextMenu = (topicId: string) => {
 
 // 兜底同步：当聊天上下文的选中项变化时，自动重新加载对应 Agent/Group 的话题列表
 watch(
-  () => sessionStore.currentSelectedItem?.id,
-  (newId) => {
-    if (newId) {
-      const ownerType = assistantStore.agents.some((a) => a.id === newId)
-        ? "agent"
-        : "group";
-      topicListStore.loadTopicList(newId, ownerType);
+  () => [
+    sessionStore.currentSelectedItem?.id,
+    sessionStore.currentSelectedItem?.type,
+  ] as const,
+  ([ownerId, ownerType]) => {
+    if (ownerId && (ownerType === "agent" || ownerType === "group")) {
+      topicListStore.loadTopicList(ownerId, ownerType);
     }
   },
   { immediate: true },

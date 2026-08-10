@@ -7,9 +7,23 @@ export function useAppLifecycle() {
   const lifecycleStore = useAppLifecycleStore();
   const streamStore = useChatStreamStore();
   let unlisten: UnlistenFn | null = null;
+  let foregroundRecoveryPromise: Promise<void> | null = null;
 
   // 检测是否是划词助手窗口
   const isAssistant = typeof window !== 'undefined' && window.location.search.includes("mode=floating");
+
+  const scheduleForegroundRecovery = (source: string) => {
+    if (foregroundRecoveryPromise) return foregroundRecoveryPromise;
+    console.log(`[useAppLifecycle] ${source}. Triggering stream recovery.`);
+    foregroundRecoveryPromise = streamStore.checkAndRecoverInterruptedStreams()
+      .catch(err => {
+        console.error(`[useAppLifecycle] Failed to recover streams (${source}):`, err);
+      })
+      .finally(() => {
+        foregroundRecoveryPromise = null;
+      });
+    return foregroundRecoveryPromise;
+  };
 
   // 监听后台状态，控制全局动画挂起，替代 App.vue 中的 watch
   watch(() => lifecycleStore.isBackground, (newVal) => {
@@ -32,14 +46,14 @@ export function useAppLifecycle() {
       const isHidden = document.hidden;
       lifecycleStore.isBackground = isHidden;
       console.log(`[useAppLifecycle] Visibility changed: hidden=${isHidden}`);
+      if (!isHidden) {
+        void scheduleForegroundRecovery("Document visible");
+      }
     }
   };
 
   const handleOnline = () => {
-    console.log("[useAppLifecycle] Device online. Triggering stream recovery.");
-    streamStore.checkAndRecoverInterruptedStreams().catch(err => {
-      console.error("[useAppLifecycle] Failed to recover streams on network restored:", err);
-    });
+    void scheduleForegroundRecovery("Device online");
   };
 
   onMounted(async () => {
@@ -57,9 +71,7 @@ export function useAppLifecycle() {
           lifecycleStore.isBackground = true;
         } else if (state === 'resume') {
           lifecycleStore.isBackground = false;
-          streamStore.checkAndRecoverInterruptedStreams().catch(err => {
-            console.error("[useAppLifecycle] Failed to recover streams on resume:", err);
-          });
+          void scheduleForegroundRecovery("Native resume");
         }
       });
     } catch (err) {

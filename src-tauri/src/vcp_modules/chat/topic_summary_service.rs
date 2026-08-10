@@ -40,6 +40,8 @@ pub async fn summarize_topic(
         &topic_id,
         Some(4),
         None,
+        None,
+        None,
         true,
         false, // include_extracted_text: 总结话题不需要大体积的提取文本内容
     )

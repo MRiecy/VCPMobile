@@ -1,9 +1,15 @@
 use crate::vcp_modules::db_manager::DbState;
 use sha2::{Digest, Sha256};
-use std::fs;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{Duration, Instant};
+
+const MAX_UPLOAD_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_HEADER_BYTES: usize = 16 * 1024;
+const ENDPOINT_ACCEPT_LIFETIME: Duration = Duration::from_secs(30);
+const CONNECTION_LIFETIME: Duration = Duration::from_secs(10 * 60);
+const IO_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(serde::Deserialize)]
 pub struct UploadMetadata {
@@ -31,11 +37,22 @@ pub async fn prepare_vcp_upload<R: Runtime>(
     db_state: State<'_, DbState>,
     metadata: UploadMetadata,
 ) -> Result<UploadEndpoint, String> {
+    validate_upload_metadata(&metadata)?;
+
+    let mut temp_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?;
+    temp_dir.push("uploads");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
     // 1. 监听本地随机端口
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| e.to_string())?;
-    let port = listener.local_addr().unwrap().port();
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let token = uuid::Uuid::new_v4().to_string();
 
     let url = format!("http://127.0.0.1:{}", port);
@@ -43,129 +60,24 @@ pub async fn prepare_vcp_upload<R: Runtime>(
     let pool = db_state.pool.clone();
 
     tauri::async_runtime::spawn(async move {
-        let mut upload_finished = false;
-        let timeout = std::time::Duration::from_secs(20);
-        let start_time = std::time::Instant::now();
-
-        let mut temp_dir = app_handle.path().app_cache_dir().unwrap();
-        temp_dir.push("uploads");
-        if !temp_dir.exists() {
-            let _ = fs::create_dir_all(&temp_dir);
-        }
-
-        while !upload_finished && start_time.elapsed() < timeout {
+        let accept_deadline = Instant::now() + ENDPOINT_ACCEPT_LIFETIME;
+        while Instant::now() < accept_deadline {
+            let remaining = accept_deadline.saturating_duration_since(Instant::now());
             let accept_res =
-                tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept())
+                tokio::time::timeout(remaining.min(Duration::from_millis(500)), listener.accept())
                     .await;
 
-            let (mut socket, _addr) = match accept_res {
+            let (socket, _addr) = match accept_res {
                 Ok(Ok(conn)) => conn,
                 _ => continue,
             };
 
-            let mut buffer = [0u8; 65536];
-            let mut body_started = false;
-            let mut header_data = Vec::with_capacity(4096);
-
-            let session_id = uuid::Uuid::new_v4().to_string();
-            let temp_file_path = temp_dir.join(format!("{}.tmp", session_id));
-
-            let mut bytes_count = 0u64;
-            let mut hasher = Sha256::new();
-            let mut is_options = false;
-            let mut file: Option<tokio::fs::File> = None;
-
-            loop {
-                let n = match socket.read(&mut buffer).await {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-
-                let data = if !body_started {
-                    header_data.extend_from_slice(&buffer[..n]);
-                    if let Some(pos) = header_data.windows(4).position(|w| w == b"\r\n\r\n") {
-                        body_started = true;
-                        let header_str = String::from_utf8_lossy(&header_data[..pos]);
-
-                        if header_str.starts_with("OPTIONS") {
-                            is_options = true;
-                            let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n";
-                            socket.write_all(resp.as_bytes()).await.ok();
-                            break;
-                        }
-
-                        file = tokio::fs::File::create(&temp_file_path).await.ok();
-
-                        let header_len_in_current_buffer = if header_data.len() > n {
-                            let consumed_before = header_data.len() - n;
-                            (pos + 4).saturating_sub(consumed_before)
-                        } else {
-                            0
-                        };
-
-                        if header_len_in_current_buffer < n {
-                            &buffer[header_len_in_current_buffer..n]
-                        } else {
-                            &[]
-                        }
-                    } else {
-                        &[]
-                    }
-                } else {
-                    &buffer[..n]
-                };
-
-                if !data.is_empty() && !is_options {
-                    if let Some(ref mut f) = file {
-                        let _ = f.write_all(data).await;
-                    }
-                    hasher.update(data);
-                    bytes_count += data.len() as u64;
-
-                    if bytes_count >= metadata.size {
-                        break;
-                    }
-                }
-            }
-
-            if let Some(mut f) = file.take() {
-                let _ = f.flush().await;
-                drop(f);
-            }
-
-            if !is_options && bytes_count > 0 {
-                if bytes_count < metadata.size {
-                    let _ = fs::remove_file(&temp_file_path);
-                    let response =
-                        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nIncomplete Data";
-                    let _ = socket.write_all(response.as_bytes()).await;
-                } else {
-                    let hash = hex::encode(hasher.finalize());
-                    let final_data_res = finalize_high_speed_upload(
-                        &app_handle,
-                        &pool,
-                        &temp_file_path,
-                        &metadata,
-                        hash,
-                        bytes_count,
-                    )
-                    .await;
-
-                    let (status, body) = match final_data_res {
-                        Ok(data) => (200, serde_json::to_vec(&data).unwrap_or_default()),
-                        Err(e) => (500, e.into_bytes()),
-                    };
-
-                    let response = format!(
-                        "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        status, body.len()
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
-                    let _ = socket.write_all(&body).await;
-
-                    upload_finished = true;
-                }
+            match handle_upload_connection(socket, &app_handle, &pool, &temp_dir, &metadata, &token)
+                .await
+            {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => log::warn!("[HighSpeedUpload] connection failed: {error}"),
             }
         }
     });
@@ -174,6 +86,319 @@ pub async fn prepare_vcp_upload<R: Runtime>(
         url,
         token: token_clone,
     })
+}
+
+#[derive(Debug)]
+struct ProtocolError {
+    status: &'static str,
+    message: String,
+}
+
+impl ProtocolError {
+    fn new(status: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum UploadRequestKind {
+    Preflight,
+    Upload,
+}
+
+fn validate_upload_metadata(metadata: &UploadMetadata) -> Result<(), String> {
+    if metadata.size == 0 || metadata.size > MAX_UPLOAD_BYTES {
+        return Err(format!(
+            "附件大小必须在 1 字节到 {} MB 之间",
+            MAX_UPLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    if metadata.name.trim().is_empty() || metadata.name.len() > 512 {
+        return Err("附件名称为空或过长".to_string());
+    }
+    if metadata.mime.len() > 255 {
+        return Err("附件 MIME 类型过长".to_string());
+    }
+    Ok(())
+}
+
+fn parse_upload_request_head(
+    head: &[u8],
+    expected_token: &str,
+    expected_size: u64,
+) -> Result<UploadRequestKind, ProtocolError> {
+    let text = std::str::from_utf8(head)
+        .map_err(|_| ProtocolError::new("400 Bad Request", "请求头不是有效 UTF-8"))?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| ProtocolError::new("400 Bad Request", "缺少请求行"))?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default();
+    let path = request_parts.next().unwrap_or_default();
+    let version = request_parts.next().unwrap_or_default();
+    if request_parts.next().is_some()
+        || path != "/"
+        || !(version == "HTTP/1.1" || version == "HTTP/1.0")
+    {
+        return Err(ProtocolError::new("400 Bad Request", "无效请求行"));
+    }
+    if method == "OPTIONS" {
+        return Ok(UploadRequestKind::Preflight);
+    }
+    if method != "POST" {
+        return Err(ProtocolError::new(
+            "405 Method Not Allowed",
+            "仅允许 POST 上传",
+        ));
+    }
+
+    let mut supplied_token: Option<&str> = None;
+    let mut content_length: Option<u64> = None;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| ProtocolError::new("400 Bad Request", "请求头格式错误"))?;
+        let value = value.trim();
+        if name.trim().eq_ignore_ascii_case("x-upload-token") {
+            if supplied_token.replace(value).is_some() {
+                return Err(ProtocolError::new("400 Bad Request", "重复上传 token"));
+            }
+        } else if name.trim().eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(ProtocolError::new("400 Bad Request", "重复 Content-Length"));
+            }
+            content_length = Some(
+                value
+                    .parse::<u64>()
+                    .map_err(|_| ProtocolError::new("400 Bad Request", "无效 Content-Length"))?,
+            );
+        }
+    }
+
+    if supplied_token != Some(expected_token) {
+        return Err(ProtocolError::new("401 Unauthorized", "上传 token 无效"));
+    }
+    if content_length != Some(expected_size) {
+        return Err(ProtocolError::new(
+            "413 Payload Too Large",
+            "正文长度与已声明附件大小不一致",
+        ));
+    }
+    Ok(UploadRequestKind::Upload)
+}
+
+async fn write_http_response(
+    socket: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, X-Upload-Token\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = tokio::time::timeout(IO_IDLE_TIMEOUT, socket.write_all(head.as_bytes())).await;
+    if !body.is_empty() {
+        let _ = tokio::time::timeout(IO_IDLE_TIMEOUT, socket.write_all(body)).await;
+    }
+}
+
+async fn read_request_head(socket: &mut TcpStream) -> Result<(Vec<u8>, Vec<u8>), ProtocolError> {
+    let mut header_data = Vec::with_capacity(4096);
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = tokio::time::timeout(IO_IDLE_TIMEOUT, socket.read(&mut buffer))
+            .await
+            .map_err(|_| ProtocolError::new("408 Request Timeout", "读取请求头超时"))?
+            .map_err(|e| ProtocolError::new("400 Bad Request", e.to_string()))?;
+        if n == 0 {
+            return Err(ProtocolError::new("400 Bad Request", "请求头未完成"));
+        }
+        header_data.extend_from_slice(&buffer[..n]);
+        if let Some(pos) = header_data
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+        {
+            if pos + 4 > MAX_HEADER_BYTES {
+                return Err(ProtocolError::new(
+                    "431 Request Header Fields Too Large",
+                    "请求头过大",
+                ));
+            }
+            let body_prefix = header_data.split_off(pos + 4);
+            header_data.truncate(pos);
+            return Ok((header_data, body_prefix));
+        }
+        if header_data.len() > MAX_HEADER_BYTES {
+            return Err(ProtocolError::new(
+                "431 Request Header Fields Too Large",
+                "请求头过大",
+            ));
+        }
+    }
+}
+
+async fn receive_upload_body(
+    socket: &mut TcpStream,
+    temp_path: &std::path::Path,
+    initial_body: &[u8],
+    expected_size: u64,
+) -> Result<(String, u64), ProtocolError> {
+    if initial_body.len() as u64 > expected_size {
+        return Err(ProtocolError::new(
+            "413 Payload Too Large",
+            "正文超过声明大小",
+        ));
+    }
+    let mut file = tokio::fs::File::create(temp_path)
+        .await
+        .map_err(|e| ProtocolError::new("500 Internal Server Error", e.to_string()))?;
+    let mut hasher = Sha256::new();
+    let mut received = 0u64;
+
+    if !initial_body.is_empty() {
+        tokio::time::timeout(IO_IDLE_TIMEOUT, file.write_all(initial_body))
+            .await
+            .map_err(|_| ProtocolError::new("408 Request Timeout", "写入临时文件超时"))?
+            .map_err(|e| ProtocolError::new("500 Internal Server Error", e.to_string()))?;
+        hasher.update(initial_body);
+        received = initial_body.len() as u64;
+    }
+
+    let mut buffer = [0u8; 64 * 1024];
+    while received < expected_size {
+        let remaining = (expected_size - received) as usize;
+        let read_len = remaining.min(buffer.len());
+        let n = tokio::time::timeout(IO_IDLE_TIMEOUT, socket.read(&mut buffer[..read_len]))
+            .await
+            .map_err(|_| ProtocolError::new("408 Request Timeout", "上传读取空闲超时"))?
+            .map_err(|e| ProtocolError::new("400 Bad Request", e.to_string()))?;
+        if n == 0 {
+            return Err(ProtocolError::new("400 Bad Request", "上传正文不完整"));
+        }
+        tokio::time::timeout(IO_IDLE_TIMEOUT, file.write_all(&buffer[..n]))
+            .await
+            .map_err(|_| ProtocolError::new("408 Request Timeout", "写入临时文件超时"))?
+            .map_err(|e| ProtocolError::new("500 Internal Server Error", e.to_string()))?;
+        hasher.update(&buffer[..n]);
+        received += n as u64;
+    }
+    tokio::time::timeout(IO_IDLE_TIMEOUT, file.flush())
+        .await
+        .map_err(|_| ProtocolError::new("408 Request Timeout", "刷新临时文件超时"))?
+        .map_err(|e| ProtocolError::new("500 Internal Server Error", e.to_string()))?;
+
+    Ok((hex::encode(hasher.finalize()), received))
+}
+
+async fn handle_upload_connection<R: Runtime>(
+    mut socket: TcpStream,
+    app_handle: &AppHandle<R>,
+    pool: &sqlx::SqlitePool,
+    temp_dir: &std::path::Path,
+    metadata: &UploadMetadata,
+    expected_token: &str,
+) -> Result<bool, String> {
+    let temp_file_path = temp_dir.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = tokio::time::timeout(CONNECTION_LIFETIME, async {
+        let (head, initial_body) = match read_request_head(&mut socket).await {
+            Ok(value) => value,
+            Err(error) => {
+                write_http_response(
+                    &mut socket,
+                    error.status,
+                    "text/plain; charset=utf-8",
+                    error.message.as_bytes(),
+                )
+                .await;
+                return Ok(false);
+            }
+        };
+
+        match parse_upload_request_head(&head, expected_token, metadata.size) {
+            Ok(UploadRequestKind::Preflight) => {
+                write_http_response(&mut socket, "204 No Content", "text/plain", &[]).await;
+                return Ok(false);
+            }
+            Ok(UploadRequestKind::Upload) => {}
+            Err(error) => {
+                write_http_response(
+                    &mut socket,
+                    error.status,
+                    "text/plain; charset=utf-8",
+                    error.message.as_bytes(),
+                )
+                .await;
+                return Ok(false);
+            }
+        }
+
+        let (hash, bytes_count) =
+            match receive_upload_body(&mut socket, &temp_file_path, &initial_body, metadata.size)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&temp_file_path).await;
+                    write_http_response(
+                        &mut socket,
+                        error.status,
+                        "text/plain; charset=utf-8",
+                        error.message.as_bytes(),
+                    )
+                    .await;
+                    return Ok(false);
+                }
+            };
+
+        match finalize_high_speed_upload(
+            app_handle,
+            pool,
+            &temp_file_path,
+            metadata,
+            hash,
+            bytes_count,
+        )
+        .await
+        {
+            Ok(data) => {
+                let body = serde_json::to_vec(&data).map_err(|e| e.to_string())?;
+                write_http_response(&mut socket, "200 OK", "application/json", &body).await;
+                Ok(true)
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&temp_file_path).await;
+                write_http_response(
+                    &mut socket,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.as_bytes(),
+                )
+                .await;
+                Ok(false)
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&temp_file_path).await;
+            write_http_response(
+                &mut socket,
+                "408 Request Timeout",
+                "text/plain; charset=utf-8",
+                b"upload session timed out",
+            )
+            .await;
+            Ok(false)
+        }
+    }
 }
 
 async fn finalize_high_speed_upload<R: Runtime>(
@@ -195,17 +420,30 @@ async fn finalize_high_speed_upload<R: Runtime>(
     };
 
     let dest = crate::vcp_modules::file_manager::get_attachments_root_dir(app_handle)?;
-    if !dest.exists() {
-        fs::create_dir_all(&dest).ok();
-    }
+    tokio::fs::create_dir_all(&dest)
+        .await
+        .map_err(|e| format!("创建附件目录失败: {e}"))?;
     let dest_path = dest.join(internal_name);
 
     if !dest_path.exists() {
-        crate::vcp_modules::file_manager::safe_rename(temp_path, &dest_path)
-            .map_err(|e| e.to_string())?;
+        let source = temp_path.clone();
+        let destination = dest_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::vcp_modules::file_manager::safe_rename(source, destination)
+        })
+        .await
+        .map_err(|e| format!("附件移动任务失败: {e}"))?
+        .map_err(|e| format!("附件移动失败: {e}"))?;
     } else {
-        let _ = std::fs::remove_file(temp_path);
+        tokio::fs::remove_file(temp_path)
+            .await
+            .map_err(|e| format!("清理重复附件临时文件失败: {e}"))?;
     }
+
+    let internal_path = dest_path
+        .to_str()
+        .ok_or_else(|| "附件目标路径不是有效 UTF-8".to_string())?
+        .to_string();
 
     crate::vcp_modules::file_manager::register_attachment_internal(
         app_handle,
@@ -214,7 +452,68 @@ async fn finalize_high_speed_upload<R: Runtime>(
         metadata.name.clone(),
         metadata.mime.clone(),
         size,
-        dest_path.to_str().unwrap().to_string(),
+        internal_path,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post_head(token: &str, size: u64) -> Vec<u8> {
+        format!(
+            "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Upload-Token: {token}\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn upload_head_requires_matching_token_and_exact_length() {
+        assert!(matches!(
+            parse_upload_request_head(&post_head("secret", 42), "secret", 42),
+            Ok(UploadRequestKind::Upload)
+        ));
+
+        let wrong_token = parse_upload_request_head(&post_head("wrong", 42), "secret", 42)
+            .expect_err("wrong token must be rejected");
+        assert_eq!(wrong_token.status, "401 Unauthorized");
+
+        let wrong_length = parse_upload_request_head(&post_head("secret", 41), "secret", 42)
+            .expect_err("mismatched length must be rejected");
+        assert_eq!(wrong_length.status, "413 Payload Too Large");
+    }
+
+    #[test]
+    fn upload_head_rejects_ambiguous_duplicates_but_allows_preflight() {
+        let duplicate = b"POST / HTTP/1.1\r\nX-Upload-Token: secret\r\nX-Upload-Token: secret\r\nContent-Length: 42";
+        let error = parse_upload_request_head(duplicate, "secret", 42)
+            .expect_err("duplicate security headers must be rejected");
+        assert_eq!(error.status, "400 Bad Request");
+
+        assert!(matches!(
+            parse_upload_request_head(
+                b"OPTIONS / HTTP/1.1\r\nOrigin: asset://localhost",
+                "secret",
+                42
+            ),
+            Ok(UploadRequestKind::Preflight)
+        ));
+    }
+
+    #[test]
+    fn upload_metadata_has_a_hard_size_boundary() {
+        let valid = UploadMetadata {
+            name: "sample.bin".to_string(),
+            mime: "application/octet-stream".to_string(),
+            size: MAX_UPLOAD_BYTES,
+        };
+        assert!(validate_upload_metadata(&valid).is_ok());
+
+        let oversized = UploadMetadata {
+            size: MAX_UPLOAD_BYTES + 1,
+            ..valid
+        };
+        assert!(validate_upload_metadata(&oversized).is_err());
+    }
 }

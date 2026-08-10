@@ -87,10 +87,40 @@ class PluginContractTest {
 
         assertTrue("resume 连接必须按引用同一性解绑", helper.contains("activeConnection !== connection"))
         assertTrue("重复 requestId 必须用 putIfAbsent 拒绝覆盖", helper.contains("activeSessions.putIfAbsent(requestId, session)"))
-        assertTrue("session 删除必须携带实例身份", helper.contains("activeSessions.remove(requestId, session)"))
+        assertTrue(
+            "session 删除必须携带实例身份",
+            helper.contains("activeSessions.remove(requestId, session)") ||
+                helper.contains("activeSessions.remove(session.requestId, session)"),
+        )
         assertTrue("EventSource 安装必须复核 session owner", helper.contains("isServiceRunning && isCurrentSession(session)"))
         assertTrue("失去 owner 的 EventSource 必须立即取消", helper.contains("source.cancel()"))
         assertTrue("旧 raw output 所有权字段不应残留", !helper.contains("activeSocketOutputStream"))
+        assertTrue("helper 不得再用静音音频伪装媒体保活", !helper.contains("MediaPlayer"))
+        assertTrue("stop 必须读取调用方期望代次", helper.contains("request.optLong(\"generation\", -1L)"))
+        assertTrue("stop 必须精确匹配 session 代次", helper.contains("session.generation != expectedGeneration"))
+        assertTrue(
+            "stop ACK 必须同时返回代次与实际停止结果",
+            helper.contains("\"stop_ack\"") &&
+                helper.contains("put(\"generation\"") &&
+                helper.contains("put(\"stopped\", stopped)"),
+        )
+    }
+
+    @Test
+    fun helperIsLazyAndInsetsAreFrameCoalesced() {
+        val kotlinPlugin = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
+        ).readText()
+        val initBody = Regex("init\\s*\\{([\\s\\S]*?)\\n\\s*}").find(kotlinPlugin)?.groupValues?.get(1).orEmpty()
+        val insets = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/KeyboardInsetsManager.kt",
+        ).readText()
+
+        assertTrue("helper 不得在插件 init 时无条件启动", !initBody.contains("startHelperServiceInternal"))
+        assertTrue("Insets 必须按显示帧合并", insets.contains("postOnAnimation(frameCallback)"))
+        assertTrue("Insets manager 必须支持解绑并发送归零态", insets.contains("fun detach()") && insets.contains("InsetSnapshot(0, false"))
     }
 
     @Test
@@ -107,6 +137,28 @@ class PluginContractTest {
         assertTrue("执行队列必须有界", kotlinPlugin.contains("ArrayBlockingQueue"))
         assertTrue("非 Root 设备只探测一次后退出", kotlinPlugin.contains("if (!Shell.getShell().isRoot)"))
         assertTrue("销毁必须立即取消执行域", kotlinPlugin.contains("executorDomains.shutdownNow()"))
+    }
+
+    @Test
+    fun rawJniAndGuardianScreenRequestsShareOrArbitration() {
+        val kotlinPlugin = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
+        ).readText()
+        val rustScreen = File(pluginRoot, "src/screen.rs").readText()
+
+        assertTrue(
+            "屏幕常亮必须由 manual OR Guardian 统一仲裁",
+            kotlinPlugin.contains("manualRequested || guardianRequested"),
+        )
+        assertTrue(
+            "Raw JNI owner 必须进入统一仲裁器",
+            rustScreen.contains("ScreenKeepOnArbiter") && rustScreen.contains("setManualRequested"),
+        )
+        assertTrue(
+            "Rust clear 不得绕过另一 owner 直接清 Window flag",
+            !rustScreen.contains("clearFlags"),
+        )
     }
 
     @Test

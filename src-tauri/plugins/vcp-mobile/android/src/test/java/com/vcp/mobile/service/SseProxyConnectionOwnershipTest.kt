@@ -9,6 +9,8 @@ import org.junit.Test
 import java.io.OutputStream
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class SseProxyConnectionOwnershipTest {
     private class TrackingSocket : Socket() {
@@ -26,6 +28,20 @@ class SseProxyConnectionOwnershipTest {
 
         override fun close() {
             closeCount.incrementAndGet()
+        }
+    }
+
+    private class BlockingOutputStream : OutputStream() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+
+        override fun write(value: Int) {
+            entered.countDown()
+            release.await()
+        }
+
+        override fun close() {
+            release.countDown()
         }
     }
 
@@ -81,5 +97,30 @@ class SseProxyConnectionOwnershipTest {
         assertEquals(1, first.socket.closeCount.get())
         assertEquals(1, second.socket.closeCount.get())
         assertEquals(1, third.socket.closeCount.get())
+    }
+
+    @Test
+    fun slowClientWriterUsesABoundedQueue() {
+        val socket = TrackingSocket()
+        val output = BlockingOutputStream()
+        val connection = ClientConnection(socket, output)
+
+        assertTrue(connection.enqueue("first"))
+        assertTrue(output.entered.await(1, TimeUnit.SECONDS))
+        repeat(128) { assertTrue(connection.enqueue("queued-$it")) }
+        assertFalse(connection.enqueue("overflow"))
+
+        output.release.countDown()
+        connection.close()
+    }
+
+    @Test
+    fun helperMemoryBudgetsAreFiniteAndNested() {
+        assertTrue(SseProxyService.MAX_ACTIVE_SESSIONS in 1..32)
+        assertTrue(SseProxyService.MAX_SESSION_EVENTS > 0)
+        assertTrue(SseProxyService.MAX_SESSION_BUFFER_BYTES > 0)
+        assertTrue(
+            SseProxyService.MAX_GLOBAL_BUFFER_BYTES >= SseProxyService.MAX_SESSION_BUFFER_BYTES,
+        )
     }
 }

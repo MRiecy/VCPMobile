@@ -19,10 +19,24 @@ import androidx.core.view.WindowInsetsCompat
 class KeyboardInsetsManager(private val activity: Activity) {
 
     private var webViewRef: WebView? = null
+    private var rootView: android.view.View? = null
+    private var lastSent: InsetSnapshot? = null
+    private var pending: InsetSnapshot? = null
+    private var frameScheduled = false
+    private val frameCallback = Runnable {
+        frameScheduled = false
+        val snapshot = pending ?: return@Runnable
+        pending = null
+        if (snapshot != lastSent) {
+            lastSent = snapshot
+            emitSnapshot(snapshot)
+        }
+    }
 
     fun attach(webView: WebView) {
         webViewRef = webView
         val rootView = activity.window.decorView.rootView
+        this.rootView = rootView
 
         ViewCompat.setOnApplyWindowInsetsListener(rootView) { _, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -30,19 +44,52 @@ class KeyboardInsetsManager(private val activity: Activity) {
             val isKeyboardVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
             val keyboardHeight = if (isKeyboardVisible) ime.bottom else 0
 
-            Log.d("VCPKeyboard", "Native inset event: height=$keyboardHeight, visible=$isKeyboardVisible, safeArea=${systemBars.bottom}")
-
-            emit(
-                "vcp-keyboard-inset",
-                mapOf(
-                    "height" to keyboardHeight,
-                    "visible" to isKeyboardVisible,
-                    "safeAreaBottom" to systemBars.bottom
-                )
-            )
+            schedule(InsetSnapshot(keyboardHeight, isKeyboardVisible, systemBars.bottom))
 
             insets
         }
+        ViewCompat.requestApplyInsets(rootView)
+    }
+
+    fun detach() {
+        val view = rootView
+        if (view != null) {
+            view.removeCallbacks(frameCallback)
+            ViewCompat.setOnApplyWindowInsetsListener(view, null)
+        }
+        val previous = lastSent
+        if (previous?.visible == true || (previous?.height ?: 0) != 0) {
+            emitSnapshot(InsetSnapshot(0, false, previous?.safeAreaBottom ?: 0))
+        }
+        pending = null
+        frameScheduled = false
+        lastSent = null
+        rootView = null
+        webViewRef = null
+    }
+
+    private fun schedule(snapshot: InsetSnapshot) {
+        if (snapshot == lastSent && !frameScheduled) return
+        pending = snapshot
+        if (!frameScheduled) {
+            frameScheduled = true
+            rootView?.postOnAnimation(frameCallback)
+        }
+    }
+
+    private fun emitSnapshot(snapshot: InsetSnapshot) {
+        Log.d(
+            "VCPKeyboard",
+            "Native inset changed: height=${snapshot.height}, visible=${snapshot.visible}, safeArea=${snapshot.safeAreaBottom}",
+        )
+        emit(
+            "vcp-keyboard-inset",
+            mapOf(
+                "height" to snapshot.height,
+                "visible" to snapshot.visible,
+                "safeAreaBottom" to snapshot.safeAreaBottom,
+            ),
+        )
     }
 
     fun queryCurrentState(): KeyboardState {
@@ -57,10 +104,11 @@ class KeyboardInsetsManager(private val activity: Activity) {
     }
 
     private fun emit(eventName: String, detail: Map<String, Any?>) {
+        val targetWebView = webViewRef ?: return
         val json = serializeValue(detail)
         val script = "window.dispatchEvent(new CustomEvent('$eventName', { detail: $json }))"
         activity.runOnUiThread {
-            webViewRef?.evaluateJavascript(script, null)
+            targetWebView.evaluateJavascript(script, null)
         }
     }
 
@@ -91,4 +139,9 @@ class KeyboardInsetsManager(private val activity: Activity) {
     }
 
     data class KeyboardState(val height: Int, val visible: Boolean)
+    private data class InsetSnapshot(
+        val height: Int,
+        val visible: Boolean,
+        val safeAreaBottom: Int,
+    )
 }
