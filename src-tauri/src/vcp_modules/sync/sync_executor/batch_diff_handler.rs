@@ -1,12 +1,14 @@
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::{BatchPullResult, PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
-use crate::vcp_modules::sync_service::{emit_sync_log, Phase3Tracker, SyncCommand};
+use crate::vcp_modules::sync_service::{
+    emit_sync_log, Phase3Tracker, SyncCommand, SyncTaskTracker,
+};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio::sync::mpsc;
 
 pub struct BatchDiffHandler;
@@ -29,6 +31,8 @@ impl BatchDiffHandler {
             >,
         >,
         prerender_enabled: bool,
+        uploaded_hashes: &Arc<tokio::sync::RwLock<HashSet<String>>>,
+        task_tracker: &Arc<SyncTaskTracker>,
     ) -> Result<(), String> {
         if let Some(results) = payload["results"].as_object() {
             // 分类 topics: push_only, push_pull, pull_only
@@ -75,9 +79,7 @@ impl BatchDiffHandler {
                 let sync_logger_msg = logger.clone();
                 let wq_in = write_queue.clone();
 
-                let sync_state =
-                    app_handle.state::<crate::vcp_modules::sync::sync_service::SyncState>();
-                let uploaded_hashes = sync_state.uploaded_hashes.clone();
+                let uploaded_hashes = uploaded_hashes.clone();
 
                 // 收集所有涉及的 topic ID（去重）
                 let mut all_topic_ids: HashSet<String> = HashSet::new();
@@ -88,79 +90,31 @@ impl BatchDiffHandler {
                     all_topic_ids.insert(tid.clone());
                 }
 
-                tauri::async_runtime::spawn(async move {
-                    // 1. Push 批量（先执行，确保 push_pull 的 topic 推送完再拉取）
-                    if has_push {
-                        match PushExecutor::push_messages_batch(
-                            &h_in,
-                            &c_in,
-                            &b_in,
-                            &token,
-                            &push_topic_ids,
-                            uploaded_hashes.clone(),
-                        )
-                        .await
-                        {
-                            Ok(results) => {
-                                for r in &results {
-                                    if r.success {
-                                        tracker_clone.mark_modified(&r.topic_id).await;
-                                    } else {
-                                        let err = r.error.as_deref().unwrap_or("unknown");
-                                        if let Ok(mut l) = sync_logger_msg.lock() {
-                                            l.log_operation(
-                                                "messages",
-                                                "topic",
-                                                &r.topic_id,
-                                                false,
-                                                Some(err),
-                                            );
-                                        }
-                                        emit_sync_log(
-                                            &h_in,
-                                            "error",
-                                            &format!("Push failed for {}: {}", r.topic_id, err),
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let err_msg = format!("Batch push messages failed: {}", e);
-                                if let Ok(mut l) = sync_logger_msg.lock() {
-                                    l.log(LogLevel::Error, "messages", &err_msg);
-                                }
-                                emit_sync_log(&h_in, "error", &err_msg);
-                            }
-                        }
-                    }
-
-                    // 2. Pull 批量（push 完成后再 pull，确保 push_pull 的 topic 数据已合并）
-                    if has_pull {
-                        match PullExecutor::pull_messages_batch(
-                            &h_in,
-                            &c_in,
-                            &b_in,
-                            &token,
-                            &pull_batch,
-                            &wq_in,
-                            prerender_enabled,
-                        )
-                        .await
-                        {
-                            Ok(results) => {
-                                let result_map: std::collections::HashMap<&str, &BatchPullResult> =
-                                    results.iter().map(|r| (r.topic_id.as_str(), r)).collect();
-                                for (tid, _) in &pull_batch {
-                                    if let Some(r) = result_map.get(tid.as_str()) {
+                task_tracker
+                    .spawn(async move {
+                        // 1. Push 批量（先执行，确保 push_pull 的 topic 推送完再拉取）
+                        if has_push {
+                            match PushExecutor::push_messages_batch(
+                                &h_in,
+                                &c_in,
+                                &b_in,
+                                &token,
+                                &push_topic_ids,
+                                uploaded_hashes.clone(),
+                            )
+                            .await
+                            {
+                                Ok(results) => {
+                                    for r in &results {
                                         if r.success {
-                                            tracker_clone.mark_modified(tid).await;
+                                            tracker_clone.mark_modified(&r.topic_id).await;
                                         } else {
                                             let err = r.error.as_deref().unwrap_or("unknown");
                                             if let Ok(mut l) = sync_logger_msg.lock() {
                                                 l.log_operation(
                                                     "messages",
                                                     "topic",
-                                                    tid,
+                                                    &r.topic_id,
                                                     false,
                                                     Some(err),
                                                 );
@@ -168,45 +122,103 @@ impl BatchDiffHandler {
                                             emit_sync_log(
                                                 &h_in,
                                                 "error",
-                                                &format!("Pull failed for {}: {}", tid, err),
-                                            );
-                                        }
-                                    } else {
-                                        if let Ok(mut l) = sync_logger_msg.lock() {
-                                            l.log_operation(
-                                                "messages",
-                                                "topic",
-                                                tid,
-                                                false,
-                                                Some("not in batch response"),
+                                                &format!("Push failed for {}: {}", r.topic_id, err),
                                             );
                                         }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                let err_msg = format!("Batch pull messages failed: {}", e);
-                                if let Ok(mut l) = sync_logger_msg.lock() {
-                                    l.log(LogLevel::Error, "messages", &err_msg);
+                                Err(e) => {
+                                    let err_msg = format!("Batch push messages failed: {}", e);
+                                    if let Ok(mut l) = sync_logger_msg.lock() {
+                                        l.log(LogLevel::Error, "messages", &err_msg);
+                                    }
+                                    emit_sync_log(&h_in, "error", &err_msg);
                                 }
-                                emit_sync_log(&h_in, "error", &err_msg);
                             }
                         }
-                    }
 
-                    // 3. 所有 topic 标记完成
-                    for tid in &all_topic_ids {
-                        tracker_clone
-                            .mark_completed(tid, &sync_logger_msg, &tx_internal_msg, &h_in, false)
-                            .await;
-                    }
+                        // 2. Pull 批量（push 完成后再 pull，确保 push_pull 的 topic 数据已合并）
+                        if has_pull {
+                            match PullExecutor::pull_messages_batch(
+                                &h_in,
+                                &c_in,
+                                &b_in,
+                                &token,
+                                &pull_batch,
+                                &wq_in,
+                                prerender_enabled,
+                            )
+                            .await
+                            {
+                                Ok(results) => {
+                                    let result_map: std::collections::HashMap<
+                                        &str,
+                                        &BatchPullResult,
+                                    > = results.iter().map(|r| (r.topic_id.as_str(), r)).collect();
+                                    for (tid, _) in &pull_batch {
+                                        if let Some(r) = result_map.get(tid.as_str()) {
+                                            if r.success {
+                                                tracker_clone.mark_modified(tid).await;
+                                            } else {
+                                                let err = r.error.as_deref().unwrap_or("unknown");
+                                                if let Ok(mut l) = sync_logger_msg.lock() {
+                                                    l.log_operation(
+                                                        "messages",
+                                                        "topic",
+                                                        tid,
+                                                        false,
+                                                        Some(err),
+                                                    );
+                                                }
+                                                emit_sync_log(
+                                                    &h_in,
+                                                    "error",
+                                                    &format!("Pull failed for {}: {}", tid, err),
+                                                );
+                                            }
+                                        } else {
+                                            if let Ok(mut l) = sync_logger_msg.lock() {
+                                                l.log_operation(
+                                                    "messages",
+                                                    "topic",
+                                                    tid,
+                                                    false,
+                                                    Some("not in batch response"),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let err_msg = format!("Batch pull messages failed: {}", e);
+                                    if let Ok(mut l) = sync_logger_msg.lock() {
+                                        l.log(LogLevel::Error, "messages", &err_msg);
+                                    }
+                                    emit_sync_log(&h_in, "error", &err_msg);
+                                }
+                            }
+                        }
 
-                    log::info!(
-                        "[SyncService] Phase 3 batch done: push={} pull={}",
-                        push_topic_ids.len(),
-                        pull_batch.len()
-                    );
-                });
+                        // 3. 所有 topic 标记完成
+                        for tid in &all_topic_ids {
+                            tracker_clone
+                                .mark_completed(
+                                    tid,
+                                    &sync_logger_msg,
+                                    &tx_internal_msg,
+                                    &h_in,
+                                    false,
+                                )
+                                .await;
+                        }
+
+                        log::info!(
+                            "[SyncService] Phase 3 batch done: push={} pull={}",
+                            push_topic_ids.len(),
+                            pull_batch.len()
+                        );
+                    })
+                    .await;
             }
 
             // 当前批次处理完毕，发送下一批（如果还有）

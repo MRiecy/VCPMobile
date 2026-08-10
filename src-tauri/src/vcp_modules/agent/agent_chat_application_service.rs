@@ -3,7 +3,8 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{
-    perform_vcp_request, ActiveRequests, StreamEvent, VcpRequestPayload,
+    perform_vcp_request, perform_vcp_request_registered, ActiveRequestLease, ActiveRequests,
+    StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -53,8 +54,7 @@ pub async fn internal_process_agent_chat_message(
     let topic_id = payload.topic_id;
     let user_message = payload.user_message;
 
-    let timestamp = crate::vcp_modules::infra::utils::now_millis();
-    let thinking_id = format!("msg_{}_{}", agent_id, timestamp);
+    let thinking_id = format!("msg_{}", uuid::Uuid::new_v4());
 
     // 1. 读取 Agent 配置
     let agent_config =
@@ -138,15 +138,28 @@ pub async fn internal_process_agent_chat_message(
         context: context.clone(),
     };
 
+    let (_request_lease, abort_rx) =
+        ActiveRequestLease::try_acquire(active_requests.0.clone(), thinking_id.clone())?;
+    message_service::begin_stream_message(
+        &db_state.pool,
+        &agent_id,
+        "agent",
+        &topic_id,
+        &thinking_id,
+        Some(&agent_id),
+        Some(&agent_config.name),
+    )
+    .await?;
+
     // 在发起 VCP 请求前，向前端发射 thinking 事件以初始化气泡
     let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context));
 
     // 8. 发起请求
-    let result = perform_vcp_request(
+    let result = perform_vcp_request_registered(
         &app_handle,
-        active_requests.0.clone(),
         request_payload,
         Some(stream_channel.clone()),
+        abort_rx,
     )
     .await;
 
@@ -188,10 +201,6 @@ pub async fn internal_process_agent_chat_message(
         }
         Err(e) => {
             log::error!("[AgentChatAppService] perform_vcp_request failed: {}", e);
-            let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
-                .bind(&thinking_id)
-                .execute(&db_state.pool)
-                .await;
         }
     }
 
@@ -218,8 +227,7 @@ pub async fn handle_assistant_chat_stream(
     let agent_id = payload.agent_id;
     let temp_messages = payload.temp_messages;
 
-    let timestamp = crate::vcp_modules::infra::utils::now_millis();
-    let thinking_id = format!("msg_{}_{}", agent_id, timestamp);
+    let thinking_id = format!("msg_{}", uuid::Uuid::new_v4());
 
     // 1. 读取 Agent 配置
     let agent_config =

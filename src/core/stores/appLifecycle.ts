@@ -18,6 +18,12 @@ export interface CoreStatus {
   message: string;
 }
 
+interface DatabaseRecoveryNotice {
+  message: string;
+  archivePath: string;
+  recoveredAt: number;
+}
+
 
 
 const CONNECT_TIMEOUT_MS = 15000;
@@ -258,14 +264,35 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const hydrateSystemStatus = async () => {
     try {
       console.log('[Lifecycle] Fetching system status snapshot...');
-      const snapshot = await invoke<{ core: string; log: string; sync: string; distributed: string }>('get_system_snapshot');
+      const snapshot = await invoke<{
+        core: string;
+        message: string;
+        log: string;
+        sync: string;
+        distributed: string;
+        databaseRecovery?: DatabaseRecoveryNotice | null;
+      }>('get_system_snapshot');
       
       // 同步到 Notification Store (唯一真相源)
       notificationStore.updateCoreStatus({
         status: snapshot.core as any,
-        message: snapshot.core === 'ready' ? '核心引擎已就绪' : '核心引擎初始化中...',
+        message: snapshot.message || (snapshot.core === 'ready' ? '核心引擎已就绪' : '核心引擎初始化中...'),
         source: 'Core'
       });
+
+      if (snapshot.databaseRecovery) {
+        notificationStore.addNotification({
+          id: `database_recovery_${snapshot.databaseRecovery.recoveredAt}`,
+          title: '数据库已进入安全恢复模式',
+          message: snapshot.databaseRecovery.message,
+          type: 'warning',
+          duration: 0,
+          rawPayload: {
+            type: 'vcp-database-recovery',
+            archivePath: snapshot.databaseRecovery.archivePath,
+          },
+        });
+      }
 
       notificationStore.updateStatus({
         status: snapshot.log as any,

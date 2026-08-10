@@ -69,7 +69,7 @@ use vcp_modules::topic_service::{
 use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
     get_active_generations, interruptGroupTurn, interruptRequest, recover_active_generation,
-    resume_stream, sendToVCP, test_vcp_connection, ActiveRequests, CancelledGroupTurns,
+    sendToVCP, test_vcp_connection, ActiveRequests, CancelledGroupTurns,
 };
 use vcp_modules::vcp_info_service::{
     clear_vcp_info, get_vcp_info_connection_status, get_vcp_info_metadata_list,
@@ -242,7 +242,6 @@ pub fn run() {
             sendToVCP,
             get_active_generations,
             recover_active_generation,
-            resume_stream,
             get_tarven_rules,
             save_tarven_rule,
             delete_tarven_rule,

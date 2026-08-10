@@ -62,7 +62,51 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Composition
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+
+internal class PluginExecutorDomains(
+    fileThreadCount: Int = 1,
+    rootQueueCapacity: Int = 16,
+    fileQueueCapacity: Int = 64,
+) {
+    private val threadSequence = AtomicInteger(0)
+    private fun threadFactory(prefix: String) = java.util.concurrent.ThreadFactory { runnable ->
+        Thread(runnable, "$prefix-${threadSequence.incrementAndGet()}")
+    }
+
+    val oomScheduler = Executors.newSingleThreadScheduledExecutor(threadFactory("vcp-oom-guard"))
+    val rootExecutor: ExecutorService = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(rootQueueCapacity),
+        threadFactory("vcp-root"),
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+    val fileIoExecutor: ExecutorService = ThreadPoolExecutor(
+        fileThreadCount,
+        fileThreadCount,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(fileQueueCapacity),
+        threadFactory("vcp-file-io"),
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+
+    fun shutdownNow(): List<Runnable> {
+        oomScheduler.shutdownNow()
+        return rootExecutor.shutdownNow() + fileIoExecutor.shutdownNow()
+    }
+}
 
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
@@ -73,6 +117,30 @@ import java.util.concurrent.TimeUnit
     Permission(strings = ["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"], alias = "location")
 ])
 class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
+
+    private class PendingInvokeTask(
+        private val invoke: Invoke,
+        private val operation: String,
+        private val task: () -> Unit,
+    ) : Runnable {
+        private val claimed = AtomicBoolean(false)
+
+        override fun run() {
+            if (!claimed.compareAndSet(false, true)) return
+            try {
+                task()
+            } catch (error: Throwable) {
+                Log.e(TAG, "$operation failed", error)
+                invoke.reject("$operation failed: ${error.message ?: error.javaClass.simpleName}")
+            }
+        }
+
+        fun rejectBeforeStart(reason: String) {
+            if (claimed.compareAndSet(false, true)) {
+                invoke.reject("$operation unavailable: $reason")
+            }
+        }
+    }
 
     private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
         override fun onActivityResumed(a: Activity) {
@@ -158,7 +226,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
     private val sensorStatusManager = SensorStatusManager(activity)
     private val shareIntentHandler = ShareIntentHandler(this)
-    private val fileIoExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val executorDomains = PluginExecutorDomains()
+    private val isDestroying = AtomicBoolean(false)
+    @Volatile private var oomGuardFuture: ScheduledFuture<*>? = null
     private var cameraTempFile: java.io.File? = null
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
     private var lastConnected: Boolean? = null
@@ -327,28 +397,47 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun startOomScoreGuard() {
-        fileIoExecutor.execute {
+        oomGuardFuture = executorDomains.oomScheduler.schedule({
+            if (isDestroying.get()) return@schedule
             try {
-                // 利用 topjohnwu 的 superuser 库检查 root 状态
-                if (Shell.getShell().isRoot) {
-                    val pid = android.os.Process.myPid()
-                    Log.i(TAG, "OomScoreGuard: Root detected. Locking OOM score adj for PID $pid to -900.")
-                    while (true) {
+                if (!Shell.getShell().isRoot) {
+                    Log.i(TAG, "OomScoreGuard disabled: root access is unavailable.")
+                    return@schedule
+                }
+
+                val pid = android.os.Process.myPid()
+                Shell.cmd("echo -900 > /proc/$pid/oom_score_adj").exec()
+                if (!isDestroying.get()) {
+                    oomGuardFuture = executorDomains.oomScheduler.scheduleWithFixedDelay({
+                        if (isDestroying.get()) return@scheduleWithFixedDelay
                         try {
-                            // 强行把 oom_score_adj 改为 -900
                             Shell.cmd("echo -900 > /proc/$pid/oom_score_adj").exec()
                         } catch (e: Exception) {
-                            Log.e(TAG, "OomScoreGuard: Write command failed", e)
+                            Log.e(TAG, "OomScoreGuard refresh failed", e)
                         }
-                        // 每 20 秒循环锁定一次，应对部分定制系统后台回收机制的复原
-                        Thread.sleep(20000)
-                    }
-                } else {
-                    Log.i(TAG, "OomScoreGuard: Non-root device. Skipping OOM score lock.")
+                    }, 20L, 20L, TimeUnit.SECONDS)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "OomScoreGuard error", e)
+                Log.e(TAG, "OomScoreGuard initialization failed", e)
             }
+        }, 0L, TimeUnit.MILLISECONDS)
+    }
+
+    private fun executePluginTask(
+        executor: ExecutorService,
+        invoke: Invoke,
+        operation: String,
+        task: () -> Unit,
+    ) {
+        val pendingTask = PendingInvokeTask(invoke, operation, task)
+        if (isDestroying.get()) {
+            pendingTask.rejectBeforeStart("plugin is shutting down")
+            return
+        }
+        try {
+            executor.execute(pendingTask)
+        } catch (_: RejectedExecutionException) {
+            pendingTask.rejectBeforeStart("executor queue is full or shutting down")
         }
     }
 
@@ -686,7 +775,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun checkRootAccess(invoke: Invoke) {
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.rootExecutor, invoke, "checkRootAccess") {
             try {
                 val isRoot = Shell.getShell().isRoot
                 val result = JSObject()
@@ -780,7 +869,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun runRootCommand(invoke: Invoke) {
         try {
             val args = invoke.parseArgs(RunRootCommandArgs::class.java)
-            fileIoExecutor.execute {
+            executePluginTask(executorDomains.rootExecutor, invoke, "runRootCommand") {
                 try {
                     val output = Shell.cmd(args.command).exec().out
                     val result = JSObject().apply {
@@ -1075,6 +1164,12 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     override fun onDestroy(activity: AppCompatActivity) {
+        isDestroying.set(true)
+        oomGuardFuture?.cancel(true)
+        oomGuardFuture = null
+        executorDomains.shutdownNow().forEach { pendingTask ->
+            (pendingTask as? PendingInvokeTask)?.rejectBeforeStart("plugin was destroyed")
+        }
         activity.application.unregisterActivityLifecycleCallbacks(activityLifecycleCallbacks)
         webViewRef = null
         lifecycleBridge.detach()
@@ -1088,9 +1183,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (_: Exception) {}
         try {
             // Locks are managed by StreamKeepaliveService
-        } catch (_: Exception) {}
-        try {
-            fileIoExecutor.shutdown()
         } catch (_: Exception) {}
         super.onDestroy(activity)
     }
@@ -1198,7 +1290,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         cameraTempFile = null // reset
 
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "processCapturedPhoto") {
             try {
                 val context = activity
                 val originalName = "Camera_${System.currentTimeMillis()}.jpg"
@@ -1295,7 +1387,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "processPickedFile", fileTask@{
             var currentTempFile: java.io.File? = null
             try {
                 val context = activity
@@ -1338,7 +1430,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     if (inputStream == null) {
                         Log.e(TAG, "[onPickFileResult] openInputStream returned null")
                         invoke.reject("Could not open input stream")
-                        return@execute
+                        return@fileTask
                     }
                     java.io.FileOutputStream(tempFile).use { outputStream ->
                         val buffer = ByteArray(65536)
@@ -1522,7 +1614,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 } catch (_: Exception) {}
                 invoke.reject("Handling picked file failed: ${e.message}")
             }
-        }
+        })
     }
 
     private fun generateNativeThumbnail(context: Context, originalFile: java.io.File, hash: String): String? {
@@ -1613,14 +1705,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "processSharedFile", fileTask@{
             var currentTempFile: java.io.File? = null
             try {
                 val context = activity
                 val sourceFile = java.io.File(cachePath)
                 if (!sourceFile.exists()) {
                     invoke.reject("Shared file not found at cache path: $cachePath")
-                    return@execute
+                    return@fileTask
                 }
 
                 val size = sourceFile.length()
@@ -1722,7 +1814,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 } catch (_: Exception) {}
                 invoke.reject("Processing shared file failed: ${e.message}")
             }
-        }
+        })
     }
 
     @Command
@@ -1734,20 +1826,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
         
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "openFile", fileTask@{
             try {
                 val context = activity
 
                 // 💥 安全边界拦截：禁止通过 openFile 访问沙箱外部物理文件
                 if (!isSafeLocalPath(context, path)) {
                     invoke.reject("安全拒绝：禁止打开沙箱外部的敏感文件")
-                    return@execute
+                    return@fileTask
                 }
 
                 val file = java.io.File(path)
                 if (!file.exists()) {
                     invoke.reject("文件不存在: $path")
-                    return@execute
+                    return@fileTask
                 }
 
                 // 1. 自动提取并修正 MIME 类型
@@ -1788,7 +1880,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 Log.e(TAG, "[openFile] Native file viewing failed", e)
                 invoke.reject("打开文件失败: ${e.message}")
             }
-        }
+        })
     }
 
     // ==================================================================
@@ -1822,20 +1914,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "saveImageToGallery", fileTask@{
             try {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                     val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
                     if (!writeGranted) {
                         invoke.reject("保存到相册需要储存空间权限")
-                        return@execute
+                        return@fileTask
                     }
                 }
 
                 val loaded = loadImageBytes(args.sourceUrl)
                 if (!loaded.mimeType.startsWith("image/")) {
                     invoke.reject("当前资源不是图片: ${loaded.mimeType}")
-                    return@execute
+                    return@fileTask
                 }
 
                 val displayName = buildGalleryFileName(args.fileName, args.sourceUrl, loaded.mimeType)
@@ -1851,7 +1943,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 Log.e(TAG, "saveImageToGallery failed", e)
                 invoke.reject("保存图片失败: ${e.message}")
             }
-        }
+        })
     }
 
     @Command
@@ -1868,19 +1960,19 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        fileIoExecutor.execute {
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "saveImageFromPath", fileTask@{
             val file = java.io.File(args.imagePath)
             try {
                 if (!file.exists()) {
                     invoke.reject("本地临时文件不存在")
-                    return@execute
+                    return@fileTask
                 }
 
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                     val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
                     if (!writeGranted) {
                         invoke.reject("保存到相册需要储存空间权限")
-                        return@execute
+                        return@fileTask
                     }
                 }
 
@@ -1891,7 +1983,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 val mimeType = sniffImageMime(bytes, file.name, true)
                 if (!mimeType.startsWith("image/")) {
                     invoke.reject("当前资源不是图片: $mimeType")
-                    return@execute
+                    return@fileTask
                 }
 
                 val displayName = buildGalleryFileName(args.fileName, file.name, mimeType)
@@ -1916,7 +2008,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     Log.e(TAG, "Failed to clean up temporary save image file", ex)
                 }
             }
-        }
+        })
     }
 
     private data class LoadedImage(val bytes: ByteArray, val mimeType: String)
@@ -2447,6 +2539,3 @@ class SendLocalNotificationArgs {
     lateinit var title: String
     lateinit var body: String
 }
-
-
-

@@ -66,21 +66,21 @@ const {
 
 // 监听话题切换与智能体变更，触发历史加载与防御性状态清空
 watch(
-  [() => sessionStore.currentTopicId, () => sessionStore.currentSelectedItem],
-  ([newTopicId, newSelectedItem]) => {
+  () => sessionStore.currentConversationKey,
+  (key) => {
     showScrollToBottom.value = false;
     resetChatScroll();
-    if (newTopicId && newSelectedItem) {
-      console.log(`[ChatView] Topic changed to ${newTopicId}, loading history...`);
-      topicStore.markTopicAsRead(newTopicId);
+    if (key) {
+      console.log(`[ChatView] Topic changed to ${key.topicId}, loading history...`);
+      topicStore.markTopicAsRead(key.topicId);
       historyStore.loadHistoryPaginated(
-        newSelectedItem.id,
-        newSelectedItem.type,
-        newTopicId
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
       );
     } else {
       console.log('[ChatView] Clearing chat history (Selected item or Topic became null).');
-      historyStore.currentChatHistory = [];
+      historyStore.resetHistoryForConversation();
     }
   },
   { immediate: true }

@@ -57,6 +57,9 @@ struct ConnectionSession {
 pub struct DistributedClient {
     /// Current connection status.
     status: Arc<RwLock<DistributedStatus>>,
+    /// Serializes start/stop so a stop request cannot pass a start that has not
+    /// installed its session handle yet.
+    lifecycle: Mutex<()>,
     /// Active session handle — None when disconnected.
     session: Mutex<Option<ConnectionSession>>,
 }
@@ -65,6 +68,7 @@ impl DistributedClient {
     pub fn new() -> Self {
         Self {
             status: Arc::new(RwLock::new(DistributedStatus::default())),
+            lifecycle: Mutex::new(()),
             session: Mutex::new(None),
         }
     }
@@ -81,6 +85,8 @@ impl DistributedClient {
         device_name: String,
         registry: Arc<ToolRegistry>,
     ) -> Result<(), String> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+
         // Prevent duplicate activation using ConnectionState.
         let next_session_id = {
             let mut s = self.status.write().await;
@@ -146,6 +152,18 @@ impl DistributedClient {
         };
         let loop_token = cancel_token.clone();
 
+        // Keep the generation check immediately adjacent to the final commit.
+        // The lifecycle mutex already excludes stop(), while this check also
+        // protects against any future owner-aware transition added here.
+        {
+            let s = self.status.read().await;
+            if s.state != ConnectionState::Connecting || s.session_id != next_session_id {
+                cancel_token.cancel();
+                log::info!("[Distributed] Session owner changed before install, aborting start.");
+                return Ok(());
+            }
+        }
+
         let task_handle = tokio::spawn(Self::connection_loop(app, config, loop_token, ctx));
 
         *self.session.lock().await = Some(ConnectionSession {
@@ -159,6 +177,8 @@ impl DistributedClient {
 
     /// Stop the distributed node.
     pub async fn stop(&self, _app: &AppHandle) {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+
         #[cfg(target_os = "android")]
         if let Err(e) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(_app, false) {
             log::warn!(
@@ -167,17 +187,25 @@ impl DistributedClient {
             );
         }
 
-        {
+        let stop_generation = {
             let mut s = self.status.write().await;
-            if s.state == ConnectionState::Disconnected || s.state == ConnectionState::Disconnecting
-            {
+            let was_running = s.state != ConnectionState::Disconnected || s.connected;
+            s.session_id = s.session_id.wrapping_add(1);
+            let stop_generation = s.session_id;
+
+            if was_running {
+                s.state = ConnectionState::Disconnecting;
+            } else {
                 log::info!(
-                    "[Distributed] Already disconnected or disconnecting, skipping stop request."
+                    "[Distributed] Already disconnected; advancing session generation only."
                 );
-                return;
+                s.state = ConnectionState::Disconnected;
             }
-            s.state = ConnectionState::Disconnecting;
-        }
+            s.connected = false;
+            s.server_id = None;
+            s.client_id = None;
+            stop_generation
+        };
 
         // Take the session out and gracefully shut it down.
         let old_session = { self.session.lock().await.take() };
@@ -189,7 +217,7 @@ impl DistributedClient {
         // Safety net: ensure final Disconnected state if loop didn't clean up properly.
         {
             let mut s = self.status.write().await;
-            if s.state == ConnectionState::Disconnecting {
+            if s.session_id == stop_generation {
                 s.state = ConnectionState::Disconnected;
                 s.connected = false;
                 s.server_id = None;
@@ -508,16 +536,22 @@ impl DistributedClient {
                     client_id
                 );
 
-                // Update status
-                {
+                // Update status only while this session still owns the generation.
+                let accepted = {
                     let mut s = status.write().await;
-                    if s.session_id == session_id {
-                        s.state = ConnectionState::Connected;
-                        s.connected = true;
-                        s.server_id = Some(server_id.clone());
-                        s.client_id = Some(client_id.clone());
-                        s.last_error = None;
-                    }
+                    Self::commit_connection_ack(
+                        &mut s,
+                        session_id,
+                        server_id.clone(),
+                        client_id.clone(),
+                    )
+                };
+                if !accepted {
+                    log::info!(
+                        "[Distributed] Ignoring stale connection ACK for session {}.",
+                        session_id
+                    );
+                    return;
                 }
                 Self::emit_status_with_app(app, status).await;
 
@@ -719,6 +753,24 @@ impl DistributedClient {
     // Helpers
     // ================================================================
 
+    fn commit_connection_ack(
+        status: &mut DistributedStatus,
+        session_id: u64,
+        server_id: String,
+        client_id: String,
+    ) -> bool {
+        if status.session_id != session_id {
+            return false;
+        }
+
+        status.state = ConnectionState::Connected;
+        status.connected = true;
+        status.server_id = Some(server_id);
+        status.client_id = Some(client_id);
+        status.last_error = None;
+        true
+    }
+
     /// Serialize and send a message over WebSocket.
     async fn send_message(ws_tx: &WsSink, msg: &OutgoingMessage) {
         match serde_json::to_string(msg) {
@@ -745,6 +797,49 @@ impl DistributedClient {
 
     async fn emit_status_with_app(app: &AppHandle, status: &Arc<RwLock<DistributedStatus>>) {
         Self::emit_status(app, status).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_mutex_serializes_transitions() {
+        let client = Arc::new(DistributedClient::new());
+        let guard = client.lifecycle.lock().await;
+        let waiter_client = client.clone();
+        let waiter = tokio::spawn(async move {
+            let _guard = waiter_client.lifecycle.lock().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("queued lifecycle transition should resume")
+            .expect("queued lifecycle transition should not panic");
+    }
+
+    #[test]
+    fn advanced_generation_rejects_late_connection_ack() {
+        let mut status = DistributedStatus {
+            state: ConnectionState::Disconnecting,
+            session_id: 2,
+            ..DistributedStatus::default()
+        };
+
+        assert!(!DistributedClient::commit_connection_ack(
+            &mut status,
+            1,
+            "old-server".to_string(),
+            "old-client".to_string(),
+        ));
+        assert_eq!(status.state, ConnectionState::Disconnecting);
+        assert!(!status.connected);
+        assert_eq!(status.session_id, 2);
     }
 }
 

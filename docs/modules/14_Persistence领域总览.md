@@ -1,7 +1,7 @@
 ---
 id: MOD-PERSISTENCE-014
 version: "1.1.3"
-date: 2026-07-04
+date: 2026-08-10
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
 related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs, message_service.rs]
@@ -91,7 +91,18 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 4. **运行版本化迁移**：调用 `run_migrations(&pool).await?`（L85），由 `sqlx::migrate!("./migrations")` 应用 `src-tauri/migrations/` 下的全部 SQL 迁移。
 5. **返回**：`(pool, db_path)`，由调用方（`lib.rs` 生命周期管理器）组装为 `DbState` 并挂载到 App State。
 
-### 2.3 WAL 模式与深度性能调优
+### 2.3 损坏检测与恢复单元
+
+数据库自愈遵循 fail-closed 边界，不能把任意 open/check 错误解释为损坏：
+
+1. 在任何 SQLite open 之前检查文件集合。主 DB 缺失但 `-wal` 或 `-shm` 任一存在时，立即停止初始化并保留现场；不得让 `create_if_missing` 先创建空主库、间接清掉旁车；
+2. `PRAGMA quick_check(1)` 只有返回非 `ok`，或错误码 primary code 为 `SQLITE_CORRUPT(11)` / `SQLITE_NOTADB(26)` 时，才授权恢复；BUSY、LOCKED、IOERR 等全部归类为“暂不可用”，不重建；
+3. 已确认损坏时先关闭连接池，再把主 DB、WAL、SHM 移入同一个唯一恢复目录。普通 rename 失败会反向回滚此前移动，不删除任何旁车；
+4. 归档成功后才创建干净数据库。恢复通知及 archive path 保存在 `LifecycleState.database_recovery`，并通过 `get_system_snapshot` 交给前端持久警告，避免启动早期一次性事件丢失。
+
+这套流程保证常规错误路径不会静默丢弃最近已提交但尚未 checkpoint 的 WAL。三文件 rename 仍不是掉电原子操作；遇到异常断电留下的不完整恢复单元必须人工保全处理，不能自动猜测。
+
+### 2.4 WAL 模式与深度性能调优
 
 连接选项通过链式 `pragma` 调用实现 9 项深度优化（`db_manager.rs:56-65`）：
 
@@ -113,7 +124,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 - 这允许前端在同步大批量写入时，仍然流畅地滚动浏览历史消息。
 - checkpoint 操作（将 WAL 内容刷回主数据库）由 SQLite 自动管理，通常在 WAL 文件达到 1000 页时触发。
 
-### 2.4 连接池容量决策
+### 2.5 连接池容量决策
 
 `max_connections = 5` 并非随意选取，而是基于 SQLite 的并发特性和移动端资源约束的权衡：
 
@@ -124,7 +135,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 | 读并发需求 | 前端同时可能进行：消息列表加载、话题列表加载、附件查询、设置读取，5 个连接足以覆盖 |
 | Tauri IPC 并发 | 前端同时发起的 invoke 调用通常不超过 3–4 个，5 个连接有充足余量 |
 
-### 2.5 Schema 初始化与版本迁移（v1.1.3 重构）
+### 2.6 Schema 初始化与版本迁移（v1.1.3 重构）
 
 v1.1.3 起，数据库 Schema 不再通过 `setup_tables` 函数硬编码创建，而是使用 **`sqlx::migrate!("./migrations")`** 进行版本化迁移管理，配合 `db_manager.rs` 中的 `run_migrations()` 与 `bootstrap_legacy_if_needed()` 实现从 1.1.2 平滑升级。
 
@@ -183,7 +194,7 @@ v1.1.3 起，数据库 Schema 不再通过 `setup_tables` 函数硬编码创建�
   3. 同步重建 `messages_fts` 全文索引（仅对未删除消息）。
   4. 最后执行 `VACUUM` 回收空间，并进入 `DecompressionComplete` 状态等待用户重启。
 
-### 2.6 关键表字段详解
+### 2.7 关键表字段详解
 
 #### messages 表
 
@@ -233,7 +244,7 @@ CREATE TABLE render_cache (
 | `render_content` | `MessageRenderCompiler::serialize` 生成的 zstd 压缩 JSON，存储 `Vec<ContentBlock>` |
 | `ON DELETE CASCADE` | 消息被删除时，渲染缓存自动级联删除，无需应用层处理 |
 
-### 2.7 新增表：`active_generations`（v1.1.3）
+### 2.8 新增表：`active_generations`（v1.1.3）
 
 ```sql
 CREATE TABLE IF NOT EXISTS active_generations (
@@ -256,7 +267,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 - **DELETE**：`message_service::finalize_stream_message` 在流正常结束/中止/错误后执行 `DELETE FROM active_generations WHERE msg_id = ?`（`message_service.rs:1065-1070`）。
 - **清理**：`delete_executor` 在软删除 Agent/Group/Topic 时级联清理相关活跃生成记录；`topic_service` 删除话题时清理。
 
-### 2.8 索引策略
+### 2.9 索引策略
 
 迁移 `0001_create_initial_tables.sql` 创建 9 个索引，覆盖高频查询路径：
 

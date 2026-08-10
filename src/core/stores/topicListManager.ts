@@ -216,7 +216,7 @@ export const useTopicStore = defineStore("topic", () => {
         if (nextTopic) {
           await sessionStore.selectTopicById(ownerId, nextTopic.id);
         } else {
-          sessionStore.currentTopicId = null;
+          sessionStore.setConversation(sessionStore.currentSelectedItem, null);
           // chatHistoryStore 监听 currentTopicId 变化，会自动清空历史
         }
       }

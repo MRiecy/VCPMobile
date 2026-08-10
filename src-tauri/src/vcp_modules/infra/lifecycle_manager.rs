@@ -379,6 +379,9 @@ pub struct SystemSnapshot {
     pub log: String,
     pub sync: String,
     pub distributed: String,
+    #[serde(rename = "databaseRecovery")]
+    pub database_recovery:
+        Option<crate::vcp_modules::infra::lifecycle_state::DatabaseRecoveryNotice>,
 }
 
 #[tauri::command]
@@ -388,6 +391,7 @@ pub async fn get_system_snapshot(
 ) -> Result<SystemSnapshot, String> {
     let core = *state.status.read().await;
     let message = state.status_message.read().await.clone();
+    let database_recovery = state.database_recovery.read().await.clone();
 
     // 获取 VCPLog 状态
     let log = crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal().await;
@@ -418,6 +422,7 @@ pub async fn get_system_snapshot(
         log,
         sync,
         distributed,
+        database_recovery,
     })
 }
 

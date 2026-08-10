@@ -28,11 +28,11 @@ const handleCreateAgent = async () => {
         await assistantStore.fetchAgents();
         if (newAgent?.id) {
           // 选中新创建的 Agent
-          sessionStore.currentSelectedItem = {
+          sessionStore.setConversation({
             id: newAgent.id,
             name: newAgent.name,
             type: 'agent'
-          };
+          }, null);
           // 加载话题列表
           await topicListStore.loadTopicList(newAgent.id, 'agent');
           // 关闭侧边栏
@@ -67,11 +67,11 @@ const handleCreateGroup = async () => {
         await assistantStore.fetchGroups();
         if (newGroup?.id) {
           // 选中新创建 of Group
-          sessionStore.currentSelectedItem = {
+          sessionStore.setConversation({
             id: newGroup.id,
             name: newGroup.name,
             type: 'group'
-          };
+          }, null);
           // 加载话题列表
           await topicListStore.loadTopicList(newGroup.id, 'group');
           // 关闭侧边栏

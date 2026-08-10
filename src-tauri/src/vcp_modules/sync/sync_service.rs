@@ -9,24 +9,124 @@ use crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock, Semaphore};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_util::sync::CancellationToken;
 
 const EXPECTED_PLUGIN_VERSION: &str = "1.0.0";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
+
+#[derive(Clone, Default)]
+pub struct SyncCommandRouter {
+    current: Arc<std::sync::RwLock<Option<RoutedSyncCommand>>>,
+}
+
+impl SyncCommandRouter {
+    pub fn send(&self, command: SyncCommand) -> Result<(), String> {
+        let current = self
+            .current
+            .read()
+            .map_err(|_| "同步命令路由锁已损坏".to_string())?;
+        let Some((_, sender)) = current.as_ref() else {
+            return Err("同步会话未运行".to_string());
+        };
+        sender.send(command).map_err(|e| e.to_string())
+    }
+
+    fn install(&self, session_id: u64, sender: mpsc::UnboundedSender<SyncCommand>) {
+        if let Ok(mut current) = self.current.write() {
+            *current = Some((session_id, sender));
+        }
+    }
+
+    fn clear(&self) {
+        if let Ok(mut current) = self.current.write() {
+            *current = None;
+        }
+    }
+
+    fn clear_if_owner(&self, session_id: u64) {
+        if let Ok(mut current) = self.current.write() {
+            if current.as_ref().map(|(id, _)| *id) == Some(session_id) {
+                *current = None;
+            }
+        }
+    }
+}
 
 pub struct SyncState {
-    pub ws_sender: mpsc::UnboundedSender<SyncCommand>,
+    pub ws_sender: SyncCommandRouter,
     pub connection_status: Arc<RwLock<String>>,
-    pub uploaded_hashes: Arc<RwLock<HashSet<String>>>,
-    pub is_syncing: Arc<std::sync::atomic::AtomicBool>,
     pub current_log_path: Arc<RwLock<Option<String>>>,
     pub current_logger: Arc<std::sync::RwLock<Option<Arc<std::sync::Mutex<SyncLogger>>>>>,
+    lifecycle: AsyncMutex<()>,
+    owner_commit: AsyncMutex<()>,
+    session: AsyncMutex<Option<SyncSessionHandle>>,
+    next_session_id: AtomicU64,
+    current_session_id: AtomicU64,
+}
+
+struct SyncSessionHandle {
+    session_id: u64,
+    cancel_token: CancellationToken,
+    command_tx: mpsc::UnboundedSender<SyncCommand>,
+    join_handle: JoinHandle<()>,
+}
+
+pub(crate) struct SyncTaskTracker {
+    cancel_token: CancellationToken,
+    closed: AtomicBool,
+    tasks: AsyncMutex<JoinSet<()>>,
+}
+
+impl SyncTaskTracker {
+    fn new(cancel_token: CancellationToken) -> Self {
+        Self {
+            cancel_token,
+            closed: AtomicBool::new(false),
+            tasks: AsyncMutex::new(JoinSet::new()),
+        }
+    }
+
+    pub(crate) async fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let cancel_token = self.cancel_token.clone();
+        let mut tasks = self.tasks.lock().await;
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        tasks.spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {}
+                _ = future => {}
+            }
+        });
+    }
+
+    async fn close_and_wait(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let mut tasks = self.tasks.lock().await;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = result {
+                log::warn!("[SyncService] Session child task failed: {}", error);
+            }
+        }
+    }
 }
 
 /// 追踪 Phase 3 中已处理完成的 topic，替代 AtomicU32 避免双重递减下溢
@@ -144,10 +244,17 @@ pub fn parse_sync_data_type(value: &Value) -> Option<SyncDataType> {
 
 async fn publish_sync_status<R: Runtime>(
     app_handle: &AppHandle<R>,
+    session_id: u64,
     status: &Arc<RwLock<String>>,
     next_status: &str,
     message: &str,
 ) {
+    let sync_state = app_handle.state::<SyncState>();
+    let _owner_commit = sync_state.owner_commit.lock().await;
+    if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
+        return;
+    }
+
     {
         let mut guard = status.write().await;
         if guard.as_str() == next_status {
@@ -187,15 +294,54 @@ async fn publish_sync_status<R: Runtime>(
     emit_sync_log(app_handle, level, message);
 }
 
+async fn publish_sync_completed(
+    app_handle: &AppHandle,
+    session_id: u64,
+    status: &Arc<RwLock<String>>,
+) -> bool {
+    let sync_state = app_handle.state::<SyncState>();
+    let _owner_commit = sync_state.owner_commit.lock().await;
+    if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
+        return false;
+    }
+
+    let _ = app_handle.emit(
+        "vcp-sync-completed",
+        json!({
+            "source": "Sync",
+            "agentsChanged": true,
+            "groupsChanged": true,
+            "topicsChanged": true,
+            "messagesChanged": true,
+        }),
+    );
+    *status.write().await = "completed".to_string();
+    let _ = app_handle.emit(
+        "vcp-sync-status",
+        json!({ "status": "completed", "message": "同步完成", "source": "Sync" }),
+    );
+    true
+}
+
 pub fn init_sync_service(_app_handle: AppHandle) -> SyncState {
-    let (tx, _rx) = mpsc::unbounded_channel::<SyncCommand>();
     SyncState {
-        ws_sender: tx,
+        ws_sender: SyncCommandRouter::default(),
         connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
-        uploaded_hashes: Arc::new(RwLock::new(HashSet::new())),
-        is_syncing: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         current_log_path: Arc::new(RwLock::new(None)),
         current_logger: Arc::new(std::sync::RwLock::new(None)),
+        lifecycle: AsyncMutex::new(()),
+        owner_commit: AsyncMutex::new(()),
+        session: AsyncMutex::new(None),
+        next_session_id: AtomicU64::new(0),
+        current_session_id: AtomicU64::new(0),
+    }
+}
+
+async fn cancelled_during(token: &CancellationToken, duration: Duration) -> bool {
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => true,
+        _ = tokio::time::sleep(duration) => false,
     }
 }
 
@@ -337,6 +483,8 @@ async fn diagnose_connection_failure(
 
 async fn run_sync_session(
     app_handle: AppHandle,
+    session_id: u64,
+    cancel_token: CancellationToken,
     tx: mpsc::UnboundedSender<SyncCommand>,
     mut rx: mpsc::UnboundedReceiver<SyncCommand>,
     connection_status: Arc<RwLock<String>>,
@@ -349,6 +497,8 @@ async fn run_sync_session(
     let mut retry_count = 0u32;
     const MAX_RETRIES: u32 = 3;
     let mut retry_delay = Duration::from_millis(500);
+    let task_tracker = Arc::new(SyncTaskTracker::new(cancel_token.clone()));
+    let uploaded_hashes = Arc::new(RwLock::new(HashSet::new()));
 
     let db = app_handle.state::<DbState>();
     let mut write_queue = DbWriteQueue::new(db.pool.clone(), db.path.clone());
@@ -365,6 +515,10 @@ async fn run_sync_session(
     )));
     {
         let sync_state = app_handle.state::<SyncState>();
+        let _owner_commit = sync_state.owner_commit.lock().await;
+        if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
+            return;
+        }
         let log_path = {
             let logger = sync_logger.lock();
             logger.ok().and_then(|l| l.log_path().cloned())
@@ -406,11 +560,7 @@ async fn run_sync_session(
     let sync_logger_task = sync_logger.clone();
 
     loop {
-        if !handle_clone
-            .state::<SyncState>()
-            .is_syncing
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if cancel_token.is_cancelled() {
             break;
         }
         let (ws_url, http_url) = {
@@ -427,6 +577,7 @@ async fn run_sync_session(
                         emit_sync_log(&handle_clone, "error", "同步服务 URL 未配置，请检查设置");
                         publish_sync_status(
                             &handle_clone,
+                            session_id,
                             &connection_status_for_task,
                             "error",
                             "同步服务 URL 未配置",
@@ -447,6 +598,7 @@ async fn run_sync_session(
                             );
                             publish_sync_status(
                                 &handle_clone,
+                                session_id,
                                 &connection_status_for_task,
                                 "error",
                                 "同步服务 URL 格式非法",
@@ -461,6 +613,7 @@ async fn run_sync_session(
                     emit_sync_log(&handle_clone, "error", "无法读取同步配置");
                     publish_sync_status(
                         &handle_clone,
+                        session_id,
                         &connection_status_for_task,
                         "error",
                         "无法读取同步配置",
@@ -473,6 +626,7 @@ async fn run_sync_session(
 
         publish_sync_status(
             &handle_clone,
+            session_id,
             &connection_status_for_task,
             "connecting",
             "同步服务连接中...",
@@ -481,7 +635,13 @@ async fn run_sync_session(
 
         let phase_gate: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
-        match connect_async(&ws_url).await {
+        let connect_result = tokio::select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            result = connect_async(&ws_url) => result,
+        };
+
+        match connect_result {
             Ok((mut ws_stream, _)) => {
                 retry_count = 0;
                 retry_delay = Duration::from_millis(500);
@@ -497,34 +657,40 @@ async fn run_sync_session(
                         .await;
                     emit_sync_log(&handle_clone, "info", "正在验证桌面端插件版本...");
 
-                    let version_result = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
-                        while let Some(res) = ws_stream.next().await {
-                            match res {
-                                Ok(Message::Text(text)) => {
-                                    if let Ok(payload) = serde_json::from_str::<Value>(&text) {
-                                        if payload.get("type").and_then(|v| v.as_str())
-                                            == Some("VERSION_ACK")
-                                        {
-                                            if let Some(v) =
-                                                payload.get("version").and_then(|v| v.as_str())
+                    let version_result = tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            let _ = ws_stream.close(None).await;
+                            break;
+                        }
+                        result = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
+                            while let Some(res) = ws_stream.next().await {
+                                match res {
+                                    Ok(Message::Text(text)) => {
+                                        if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                                            if payload.get("type").and_then(|v| v.as_str())
+                                                == Some("VERSION_ACK")
                                             {
-                                                return Ok(v.to_string());
+                                                if let Some(v) =
+                                                    payload.get("version").and_then(|v| v.as_str())
+                                                {
+                                                    return Ok(v.to_string());
+                                                }
                                             }
                                         }
                                     }
+                                    Ok(Message::Close(close_frame)) => {
+                                        return Err(close_frame);
+                                    }
+                                    Err(_) => {
+                                        return Err(None);
+                                    }
+                                    _ => {}
                                 }
-                                Ok(Message::Close(close_frame)) => {
-                                    return Err(close_frame);
-                                }
-                                Err(_) => {
-                                    return Err(None);
-                                }
-                                _ => {}
                             }
-                        }
-                        Err(None)
-                    })
-                    .await;
+                            Err(None)
+                        }) => result,
+                    };
 
                     match version_result {
                         Ok(Ok(plugin_version)) => {
@@ -537,6 +703,7 @@ async fn run_sync_session(
                             } else {
                                 publish_sync_status(
                                     &handle_clone,
+                                    session_id,
                                     &connection_status_for_task,
                                     "error",
                                     &format!(
@@ -569,6 +736,7 @@ async fn run_sync_session(
                                 emit_sync_log(&handle_clone, "error", "👉 排查建议: 移动端设置的同步令牌与桌面端不匹配。请检查移动端设置中的『同步令牌』是否与电脑端 VCPMobileSync 插件的 config.env 中的 SYNC_TOKEN 完全一致。");
                                 publish_sync_status(
                                     &handle_clone,
+                                    session_id,
                                     &connection_status_for_task,
                                     "error",
                                     "身份认证失败（Token 错误）",
@@ -591,6 +759,7 @@ async fn run_sync_session(
                                 );
                                 publish_sync_status(
                                     &handle_clone,
+                                    session_id,
                                     &connection_status_for_task,
                                     "error",
                                     &err_msg,
@@ -608,6 +777,7 @@ async fn run_sync_session(
                             emit_sync_log(&handle_clone, "error", "👉 排查建议: 请确认桌面端服务正常运行，且同步 Token 与网络无异常。");
                             publish_sync_status(
                                 &handle_clone,
+                                session_id,
                                 &connection_status_for_task,
                                 "error",
                                 "连接被意外关闭",
@@ -624,6 +794,7 @@ async fn run_sync_session(
                             emit_sync_log(&handle_clone, "error", "👉 排查建议: 桌面端服务响应缓慢，或者当前网络异常。请检查局域网连接，或尝试重启电脑端服务。");
                             publish_sync_status(
                                 &handle_clone,
+                                session_id,
                                 &connection_status_for_task,
                                 "error",
                                 "版本验证超时",
@@ -647,6 +818,7 @@ async fn run_sync_session(
                     .await;
                 publish_sync_status(
                     &handle_clone,
+                    session_id,
                     &connection_status_for_task,
                     "open",
                     "同步服务已连接",
@@ -691,7 +863,9 @@ async fn run_sync_session(
                             }
                         }),
                     );
-                    tokio::time::sleep(retry_delay).await;
+                    if cancelled_during(&cancel_token, retry_delay).await {
+                        break;
+                    }
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                     continue;
                 }
@@ -718,7 +892,9 @@ async fn run_sync_session(
                             }
                         }),
                     );
-                    tokio::time::sleep(retry_delay).await;
+                    if cancelled_during(&cancel_token, retry_delay).await {
+                        break;
+                    }
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                     continue;
                 }
@@ -749,6 +925,11 @@ async fn run_sync_session(
 
                 loop {
                     tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            let _ = ws_stream.close(None).await;
+                            break;
+                        }
                         _ = heartbeat_interval.tick() => {
                             if let Err(e) = ws_stream.send(Message::Ping(vec![].into())).await {
                                 log::warn!("[SyncService] Failed to send WebSocket Ping: {}", e);
@@ -895,28 +1076,13 @@ async fn run_sync_session(
                                         (*logger).end_session();
                                     }
 
-                                    // [修复] 移动端主动关闭 WS 前，先通知前端同步已完成
-                                    // （服务器返回的 PHASE_COMPLETED 永远不会被收到，因此不能依赖 WS 响应处理器触发完成）
-                                    let _ = handle_clone.emit(
-                                        "vcp-sync-completed",
-                                        json!({
-                                            "source": "Sync",
-                                            "agentsChanged": true,
-                                            "groupsChanged": true,
-                                            "topicsChanged": true,
-                                            "messagesChanged": true,
-                                        }),
-                                    );
-                                    {
-                                        let mut guard = connection_status_for_task.write().await;
-                                        *guard = "completed".to_string();
-                                    }
-                                    let _ = handle_clone.emit(
-                                        "vcp-sync-status",
-                                        json!({ "status": "completed", "message": "同步完成", "source": "Sync" }),
-                                    );
-
-                                    sync_success = true;
+                                    // 移动端主动关闭 WS 前，先由当前 owner 原子提交完成态。
+                                    sync_success = publish_sync_completed(
+                                        &handle_clone,
+                                        session_id,
+                                        &connection_status_for_task,
+                                    )
+                                    .await;
                                     let _ = ws_stream.send(Message::Text(json!({ "type": "PHASE_COMPLETED" }).to_string().into())).await;
                                     let _ = ws_stream.close(None).await;
                                     break;
@@ -1060,7 +1226,7 @@ async fn run_sync_session(
                                         let id = payload["id"].as_str().unwrap_or_default().to_string();
                                         let owner_type = payload["ownerType"].as_str().unwrap_or("agent").to_string();
                                         let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                        tauri::async_runtime::spawn(async move {
+                                        task_tracker.spawn(async move {
                                             let _permit = sem.acquire().await;
                                             let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await.unwrap_or_default();
                                             match data_type {
@@ -1075,13 +1241,13 @@ async fn run_sync_session(
                                                 },
                                                 _ => {}
                                             }
-                                        });
+                                        }).await;
                                     },
                                     Some("SYNC_DELETE_NOTIFY") => {
                                         use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
                                         let id = payload["id"].as_str().unwrap_or_default().to_string();
                                         let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                        tauri::async_runtime::spawn(async move {
+                                        task_tracker.spawn(async move {
                                             match data_type {
                                                 SyncDataType::Agent => { let _ = DeleteExecutor::soft_delete_agent(&h, &id).await; },
                                                 SyncDataType::Group => { let _ = DeleteExecutor::soft_delete_group(&h, &id).await; },
@@ -1094,7 +1260,7 @@ async fn run_sync_session(
                                                 },
                                                 _ => {}
                                             }
-                                        });
+                                        }).await;
                                     },
                                     Some("SYNC_ERROR") => {
                                         let message = payload["message"].as_str().unwrap_or("Unknown desktop error");
@@ -1102,7 +1268,7 @@ async fn run_sync_session(
                                         let err_msg = format!("Desktop Error ({}): {}", code, message);
                                         log::error!("[SyncService] {}", err_msg);
                                         emit_sync_log(&handle_clone, "error", &err_msg);
-                                        publish_sync_status(&handle_clone, &connection_status_for_task, "error", &err_msg).await;
+                                        publish_sync_status(&handle_clone, session_id, &connection_status_for_task, "error", &err_msg).await;
                                         // 致命错误，建议断开或重试
                                     },
                                     Some("SYNC_DIFF_RESULTS") => {
@@ -1123,6 +1289,7 @@ async fn run_sync_session(
                                             &tx_internal,
                                             &changed_owners,
                                             &sync_logger_task,
+                                            &task_tracker,
                                         ).await {
                                             log::error!("[SyncService] DiffHandler failed: {}", e);
                                         }
@@ -1140,6 +1307,8 @@ async fn run_sync_session(
                                             &wq,
                                             &pending_diff_batches,
                                             settings.sync_prerender_enabled,
+                                            &uploaded_hashes,
+                                            &task_tracker,
                                         ).await {
                                             log::error!("[SyncService] BatchDiffHandler failed: {}", e);
                                         }
@@ -1164,33 +1333,28 @@ async fn run_sync_session(
                                         manifest_phase.store(0, Ordering::SeqCst); // 同步完成，所有看门狗失效
                                         write_queue_task.flush().await;
 
-                                        emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
+                                        if publish_sync_completed(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                        ).await {
+                                            emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
 
-                                        // 发送同步完成提示
-                                        let _ = handle_clone.emit(
-                                            "vcp-system-event",
-                                            json!({
-                                                "type": "vcp-log-message",
-                                                "data": {
-                                                    "id": "vcp_sync_connection_status",
-                                                    "status": "success",
-                                                    "tool_name": "Sync",
-                                                    "content": "同步完成",
-                                                    "source": "Sync"
-                                                }
-                                            }),
-                                        );
-                                        // 发射前端刷新事件
-                                        let _ = handle_clone.emit(
-                                            "vcp-sync-completed",
-                                            json!({
-                                                "source": "Sync",
-                                                "agentsChanged": true,
-                                                "groupsChanged": true,
-                                                "topicsChanged": true,
-                                                "messagesChanged": true,
-                                            }),
-                                        );
+                                            // 发送同步完成提示
+                                            let _ = handle_clone.emit(
+                                                "vcp-system-event",
+                                                json!({
+                                                    "type": "vcp-log-message",
+                                                    "data": {
+                                                        "id": "vcp_sync_connection_status",
+                                                        "status": "success",
+                                                        "tool_name": "Sync",
+                                                        "content": "同步完成",
+                                                        "source": "Sync"
+                                                    }
+                                                }),
+                                            );
+                                        }
                                     },
                                     Some("SYNC_LOG_EVENT") => {
                                         let level = payload["level"].as_str().unwrap_or("info");
@@ -1226,7 +1390,7 @@ async fn run_sync_session(
                                     }
                                     emit_sync_log(&handle_clone, "error", &format!("❌ 同步连接失败 [{}]: {}", error_code, err_msg));
                                     emit_sync_log(&handle_clone, "error", &format!("👉 排查建议: {}", solution));
-                                    publish_sync_status(&handle_clone, &connection_status_for_task, "error", &err_msg).await;
+                                    publish_sync_status(&handle_clone, session_id, &connection_status_for_task, "error", &err_msg).await;
                                     break;
                                 }
                                 _ => {}
@@ -1265,6 +1429,7 @@ async fn run_sync_session(
                         let err_msg = "同步中途异常断开，已达到最大重试次数";
                         publish_sync_status(
                             &handle_clone,
+                            session_id,
                             &connection_status_for_task,
                             "error",
                             err_msg,
@@ -1278,19 +1443,10 @@ async fn run_sync_session(
                         backoff, retry_count, MAX_RETRIES
                     );
                     emit_sync_log(&handle_clone, "warn", &err_msg);
-                    if !handle_clone
-                        .state::<SyncState>()
-                        .is_syncing
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
+                    if cancel_token.is_cancelled() {
                         break;
                     }
-                    tokio::time::sleep(backoff).await;
-                    if !handle_clone
-                        .state::<SyncState>()
-                        .is_syncing
-                        .load(std::sync::atomic::Ordering::SeqCst)
-                    {
+                    if cancelled_during(&cancel_token, backoff).await {
                         break;
                     }
                     continue; // 重新尝试连接
@@ -1324,6 +1480,7 @@ async fn run_sync_session(
 
                     publish_sync_status(
                         &handle_clone,
+                        session_id,
                         &connection_status_for_task,
                         "error",
                         &format!("同步连接失败: {}", diagnosis.error_message),
@@ -1341,19 +1498,10 @@ async fn run_sync_session(
                 emit_sync_log(&handle_clone, "warning", &warn_msg);
 
                 retry_count += 1;
-                if !handle_clone
-                    .state::<SyncState>()
-                    .is_syncing
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if cancel_token.is_cancelled() {
                     break;
                 }
-                tokio::time::sleep(retry_delay).await;
-                if !handle_clone
-                    .state::<SyncState>()
-                    .is_syncing
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if cancelled_during(&cancel_token, retry_delay).await {
                     break;
                 }
                 retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
@@ -1361,18 +1509,26 @@ async fn run_sync_session(
         }
     }
 
-    // 同步会话结束，清空 current_logger
-    {
-        let sync_state = app_handle.state::<SyncState>();
+    // No session is considered stopped until its children can no longer enqueue
+    // writes and the session-local queue has drained everything already accepted.
+    cancel_token.cancel();
+    task_tracker.close_and_wait().await;
+    write_queue.flush().await;
+
+    let sync_state = app_handle.state::<SyncState>();
+    let _owner_commit = sync_state.owner_commit.lock().await;
+    if sync_state.current_session_id.load(Ordering::SeqCst) == session_id {
+        sync_state.ws_sender.clear_if_owner(session_id);
         let mut logger_guard = sync_state.current_logger.write().unwrap();
         *logger_guard = None;
-    }
+        drop(logger_guard);
 
-    #[cfg(target_os = "android")]
-    let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
-        &app_handle,
-        "[数据同步] VCP Mobile",
-    );
+        #[cfg(target_os = "android")]
+        let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
+            &app_handle,
+            "[数据同步] VCP Mobile",
+        );
+    }
 }
 
 /// 每批最多包含的消息数，控制单次 WS payload 大小（约 10000 条消息 ≈ 1.5-2MB JSON）
@@ -1454,16 +1610,54 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
 }
 
 #[tauri::command]
-pub async fn stop_sync(state: State<'_, SyncState>) -> Result<(), String> {
-    state
-        .is_syncing
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+pub async fn stop_sync(
+    #[allow(unused_variables)] handle: AppHandle,
+    state: State<'_, SyncState>,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.lifecycle.lock().await;
+
+    // Invalidate the old owner before signalling it. Every late status/finally
+    // path now observes a different generation and loses commit authority.
+    {
+        let _owner_commit = state.owner_commit.lock().await;
+        let generation = state.next_session_id.fetch_add(1, Ordering::SeqCst) + 1;
+        state.current_session_id.store(generation, Ordering::SeqCst);
+        state.ws_sender.clear();
+    }
+
+    let session = state.session.lock().await.take();
+    let join_result = if let Some(session) = session {
+        cancel_and_join_session(session).await
+    } else {
+        Ok(())
+    };
+
     {
         let mut guard = state.connection_status.write().await;
         *guard = "disconnected".to_string();
     }
-    let _ = state.ws_sender.send(SyncCommand::Cancel);
-    Ok(())
+    {
+        let mut logger_guard = state.current_logger.write().unwrap();
+        *logger_guard = None;
+    }
+
+    #[cfg(target_os = "android")]
+    let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
+        &handle,
+        "[数据同步] VCP Mobile",
+    );
+
+    join_result
+}
+
+async fn cancel_and_join_session(session: SyncSessionHandle) -> Result<(), String> {
+    log::info!("[SyncService] Cancelling session {}", session.session_id);
+    session.cancel_token.cancel();
+    let _ = session.command_tx.send(SyncCommand::Cancel);
+    session
+        .join_handle
+        .await
+        .map_err(|error| format!("同步会话退出失败: {}", error))
 }
 
 #[tauri::command]
@@ -1476,37 +1670,64 @@ pub async fn start_manual_sync(
     handle: AppHandle,
     state: State<'_, SyncState>,
 ) -> Result<(), String> {
-    if state
-        .is_syncing
-        .swap(true, std::sync::atomic::Ordering::SeqCst)
-    {
-        return Err("同步已在进行中".to_string());
+    let _lifecycle_guard = state.lifecycle.lock().await;
+
+    let finished_session = {
+        let mut session = state.session.lock().await;
+        if let Some(active) = session.as_ref() {
+            if !active.join_handle.is_finished() {
+                return Err("同步已在进行中".to_string());
+            }
+        }
+        session.take()
+    };
+    if let Some(finished_session) = finished_session {
+        finished_session
+            .join_handle
+            .await
+            .map_err(|error| format!("上一同步会话退出失败: {}", error))?;
     }
 
     // VCPLog 是全局重要通道，未连接时直接拦截同步，避免进入同步主循环后长时间挂起
     let log_status = get_vcp_log_status_internal().await;
     if log_status != "connected" {
-        state
-            .is_syncing
-            .store(false, std::sync::atomic::Ordering::SeqCst);
         return Err("VCPLog 未连接，请先建立 VCPLog 连接后再进行同步".to_string());
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<SyncCommand>();
+    tx.send(SyncCommand::StartManualSync)
+        .map_err(|e| e.to_string())?;
+    let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst) + 1;
+    let command_tx = tx.clone();
+    {
+        let _owner_commit = state.owner_commit.lock().await;
+        state.current_session_id.store(session_id, Ordering::SeqCst);
+        state.ws_sender.install(session_id, command_tx.clone());
+    }
+    let cancel_token = CancellationToken::new();
 
     let app_handle = handle.clone();
     let connection_status = state.connection_status.clone();
-    let is_syncing = state.is_syncing.clone();
-
-    let tx_cmd = tx.clone();
-    tauri::async_runtime::spawn(async move {
-        run_sync_session(app_handle, tx, rx, connection_status).await;
-        is_syncing.store(false, std::sync::atomic::Ordering::SeqCst);
+    let run_cancel_token = cancel_token.clone();
+    let join_handle = tokio::spawn(async move {
+        run_sync_session(
+            app_handle,
+            session_id,
+            run_cancel_token,
+            tx,
+            rx,
+            connection_status,
+        )
+        .await;
     });
 
-    tx_cmd
-        .send(SyncCommand::StartManualSync)
-        .map_err(|e| e.to_string())
+    *state.session.lock().await = Some(SyncSessionHandle {
+        session_id,
+        cancel_token,
+        command_tx,
+        join_handle,
+    });
+    Ok(())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1621,8 +1842,78 @@ pub async fn clear_old_sync_logs(app: AppHandle, keep_days: u32) -> Result<u32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use tokio_tungstenite::tungstenite::error::Error as WsError;
     use tokio_tungstenite::tungstenite::http::{Response, StatusCode};
+
+    #[tokio::test]
+    async fn session_task_tracker_cancels_and_joins_children() {
+        let cancel_token = CancellationToken::new();
+        let tracker = Arc::new(SyncTaskTracker::new(cancel_token.clone()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let late_side_effect = Arc::new(AtomicBool::new(false));
+        let child_started = started.clone();
+        let child_side_effect = late_side_effect.clone();
+
+        tracker
+            .spawn(async move {
+                child_started.notify_one();
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                child_side_effect.store(true, Ordering::SeqCst);
+            })
+            .await;
+        started.notified().await;
+
+        cancel_token.cancel();
+        tracker.close_and_wait().await;
+
+        assert!(!late_side_effect.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancel_session_waits_for_main_task_exit() {
+        let cancel_token = CancellationToken::new();
+        let task_token = cancel_token.clone();
+        let exited = Arc::new(AtomicBool::new(false));
+        let task_exited = exited.clone();
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let join_handle = tokio::spawn(async move {
+            task_token.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            task_exited.store(true, Ordering::SeqCst);
+        });
+
+        cancel_and_join_session(SyncSessionHandle {
+            session_id: 1,
+            cancel_token,
+            command_tx,
+            join_handle,
+        })
+        .await
+        .expect("session should exit cleanly");
+
+        assert!(exited.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn command_router_tracks_the_current_session_owner() {
+        let router = SyncCommandRouter::default();
+        assert!(router.send(SyncCommand::Cancel).is_err());
+
+        let (first_tx, _first_rx) = mpsc::unbounded_channel();
+        router.install(1, first_tx);
+        let (second_tx, mut second_rx) = mpsc::unbounded_channel();
+        router.install(2, second_tx);
+
+        router.clear_if_owner(1);
+        router
+            .send(SyncCommand::Cancel)
+            .expect("stale cleanup must preserve the current session sender");
+        assert!(matches!(second_rx.try_recv(), Ok(SyncCommand::Cancel)));
+
+        router.clear_if_owner(2);
+        assert!(router.send(SyncCommand::Cancel).is_err());
+    }
 
     #[test]
     fn test_check_loopback_on_mobile() {

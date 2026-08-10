@@ -4,6 +4,7 @@ use crate::vcp_modules::file_manager::get_attachments_root_dir;
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::message_repository::MessageRepository;
 use crate::vcp_modules::settings_manager;
+use crate::vcp_modules::sync_hash::HashAggregator;
 use sqlx::Row;
 use std::path::Path;
 use tauri::ipc::Channel;
@@ -645,11 +646,111 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
     Ok(())
 }
 
-pub async fn append_single_message<R: tauri::Runtime>(
-    app_handle: AppHandle<R>,
+#[allow(clippy::too_many_arguments)]
+pub async fn begin_stream_message(
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
     owner_id: &str,
     owner_type: &str,
+    topic_id: &str,
+    message_id: &str,
+    agent_id: Option<&str>,
+    agent_name: Option<&str>,
+) -> Result<(), String> {
+    let topic_matches: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM topics \
+         WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL)",
+    )
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .fetch_one(db_pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if !topic_matches {
+        return Err(format!(
+            "Topic {} does not belong to {} {}",
+            topic_id, owner_type, owner_id
+        ));
+    }
+
+    let now = crate::vcp_modules::infra::utils::now_millis();
+    let render_bytes = MessageRenderCompiler::serialize(&MessageRenderCompiler::compile(""))?;
+    let content_hash = HashAggregator::compute_message_fingerprint("", &[]);
+    let is_group = owner_type == "group";
+    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "INSERT INTO messages (
+            msg_id, topic_id, role, name, agent_id, content, timestamp,
+            is_group_message, group_id, finish_reason, content_hash, created_at, updated_at
+         ) VALUES (?, ?, 'assistant', ?, ?, '', ?, ?, ?, NULL, ?, ?, ?)",
+    )
+    .bind(message_id)
+    .bind(topic_id)
+    .bind(agent_name)
+    .bind(agent_id)
+    .bind(now)
+    .bind(is_group)
+    .bind(if is_group { Some(owner_id) } else { None })
+    .bind(&content_hash)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "INSERT INTO render_cache (topic_id, msg_id, render_content, updated_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(topic_id)
+    .bind(message_id)
+    .bind(render_bytes)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, '')")
+        .bind(message_id)
+        .bind(topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "INSERT INTO active_generations (msg_id, topic_id, owner_id, owner_type, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(message_id)
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "UPDATE topics SET updated_at = ?, msg_count = (SELECT COUNT(*) FROM messages \
+         WHERE topic_id = ? AND deleted_at IS NULL) WHERE topic_id = ?",
+    )
+    .bind(now)
+    .bind(topic_id)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn append_single_message<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
+    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    _owner_id: &str,
+    _owner_type: &str,
     topic_id: String,
     mut message: ChatMessage,
 ) -> Result<Vec<ContentBlock>, String> {
@@ -664,22 +765,6 @@ pub async fn append_single_message<R: tauri::Runtime>(
 
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, false).await?;
-
-    // 如果是助手消息，且为流式生成初始状态（finish_reason 为空），注册到活跃生成表中
-    if message.role == "assistant" && message.finish_reason.is_none() {
-        sqlx::query(
-            "INSERT OR REPLACE INTO active_generations (msg_id, topic_id, owner_id, owner_type, created_at) \
-             VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind(&message.id)
-        .bind(&topic_id)
-        .bind(owner_id)
-        .bind(owner_type)
-        .bind(message.timestamp as i64)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-    }
 
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
@@ -961,7 +1046,7 @@ fn parse_render_bytes(render_content: Option<Vec<u8>>) -> Option<serde_json::Val
 
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_stream_message<R: tauri::Runtime>(
-    app_handle: AppHandle<R>,
+    _app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     owner_id: &str,
     owner_type: &str, // "agent" | "group"
@@ -1000,101 +1085,176 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         }
     }
 
-    let final_msg = ChatMessage {
-        id: message_id.clone(),
-        role: "assistant".to_string(),
-        name: agent_name,
-        content: final_content,
-        timestamp: final_ts,
-        is_thinking: Some(false),
-        agent_id: final_agent_id,
-        group_id: if is_group {
-            Some(owner_id.to_string())
-        } else {
-            None
-        },
-        topic_id: Some(topic_id.clone()),
-        is_group_message: Some(is_group),
-        finish_reason: finish_reason.clone(),
-        attachments: None,
-        blocks: None,
-        shell: None,
-        content_hash: None,
+    let terminal_reason = finish_reason.unwrap_or_else(|| "completed".to_string());
+    let context = if owner_id.is_empty() || topic_id.is_empty() {
+        None
+    } else if is_group {
+        Some(serde_json::json!({
+            "groupId": owner_id,
+            "topicId": topic_id,
+            "isGroupMessage": true,
+        }))
+    } else {
+        Some(serde_json::json!({
+            "agentId": owner_id,
+            "topicId": topic_id,
+        }))
     };
-
     let end_blocks = if owner_id.is_empty() || topic_id.is_empty() {
         None
-    } else if !is_group {
-        match patch_single_message(
-            app_handle.clone(),
-            pool,
-            owner_id,
-            "agent",
-            topic_id.clone(),
-            final_msg,
-            false,
-        )
-        .await
-        {
-            Ok(blocks) => Some(blocks),
-            Err(e) => {
-                log::error!("[StreamFinalizer] Failed to patch agent message: {}", e);
-                None
-            }
-        }
     } else {
-        match append_single_message(
-            app_handle.clone(),
+        match commit_stream_message(
             pool,
             owner_id,
-            "group",
-            topic_id.clone(),
-            final_msg,
+            owner_type,
+            &topic_id,
+            &message_id,
+            &final_content,
+            final_ts,
+            &terminal_reason,
+            final_agent_id.as_deref(),
+            agent_name.as_deref(),
         )
         .await
         {
             Ok(blocks) => Some(blocks),
-            Err(e) => {
-                log::error!("[StreamFinalizer] Failed to append group message: {}", e);
-                None
+            Err(error) => {
+                if let Some(chan) = &stream_channel {
+                    let _ = chan.send(crate::vcp_modules::vcp_client::StreamEvent::error(
+                        message_id.clone(),
+                        context.clone(),
+                        format!("终态保存失败: {}", error),
+                    ));
+                }
+                return Err(error);
             }
         }
     };
 
-    // ⚡ 注销活跃生成注册表中的记录 (清除断点续传事务日志)
-    if !message_id.is_empty() {
-        let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
-            .bind(&message_id)
-            .execute(pool)
-            .await;
-    }
-
     if let Some(chan) = stream_channel {
-        let context = if owner_id.is_empty() || topic_id.is_empty() {
-            None
-        } else if is_group {
-            Some(serde_json::json!({
-                "groupId": owner_id,
-                "topicId": topic_id,
-                "isGroupMessage": true,
-            }))
-        } else {
-            Some(serde_json::json!({
-                "agentId": owner_id,
-                "topicId": topic_id,
-            }))
-        };
-
         let _ = chan.send(crate::vcp_modules::vcp_client::StreamEvent::end(
             message_id,
             context,
-            Some(finish_reason.unwrap_or_else(|| "completed".to_string())),
+            Some(terminal_reason),
             end_blocks,
             Some(final_ts),
         ));
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_stream_message(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    owner_id: &str,
+    owner_type: &str,
+    topic_id: &str,
+    message_id: &str,
+    final_content: &str,
+    final_ts: u64,
+    finish_reason: &str,
+    agent_id: Option<&str>,
+    agent_name: Option<&str>,
+) -> Result<Vec<ContentBlock>, String> {
+    let blocks = MessageRenderCompiler::compile(final_content);
+    let render_bytes = MessageRenderCompiler::serialize(&blocks)?;
+    let content_hash = HashAggregator::compute_message_fingerprint(final_content, &[]);
+    let is_group = owner_type == "group";
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    let updated = sqlx::query(
+        "UPDATE messages SET role = 'assistant', name = ?, agent_id = ?, content = ?, \
+         timestamp = ?, is_group_message = ?, group_id = ?, finish_reason = ?, \
+         content_hash = ?, updated_at = ? \
+         WHERE topic_id = ? AND msg_id = ? AND finish_reason IS NULL AND deleted_at IS NULL \
+         AND EXISTS(SELECT 1 FROM active_generations \
+                    WHERE msg_id = ? AND topic_id = ? AND owner_id = ? AND owner_type = ?)",
+    )
+    .bind(agent_name)
+    .bind(agent_id)
+    .bind(final_content)
+    .bind(final_ts as i64)
+    .bind(is_group)
+    .bind(if is_group { Some(owner_id) } else { None })
+    .bind(finish_reason)
+    .bind(&content_hash)
+    .bind(final_ts as i64)
+    .bind(topic_id)
+    .bind(message_id)
+    .bind(message_id)
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if updated.rows_affected() != 1 {
+        return Err(format!(
+            "Generation {} is not pending for {} {} topic {}",
+            message_id, owner_type, owner_id, topic_id
+        ));
+    }
+
+    let cache_updated = sqlx::query(
+        "UPDATE render_cache SET render_content = ?, updated_at = ? \
+         WHERE topic_id = ? AND msg_id = ?",
+    )
+    .bind(render_bytes)
+    .bind(final_ts as i64)
+    .bind(topic_id)
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if cache_updated.rows_affected() != 1 {
+        return Err(format!(
+            "Render cache missing for pending generation {}",
+            message_id
+        ));
+    }
+
+    sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
+        .bind(topic_id)
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
+        .bind(message_id)
+        .bind(topic_id)
+        .bind(final_content)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let deleted = sqlx::query(
+        "DELETE FROM active_generations \
+         WHERE msg_id = ? AND topic_id = ? AND owner_id = ? AND owner_type = ?",
+    )
+    .bind(message_id)
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if deleted.rows_affected() != 1 {
+        return Err(format!(
+            "Active generation {} changed during finalization",
+            message_id
+        ));
+    }
+
+    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
+        .bind(final_ts as i64)
+        .bind(topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(blocks)
 }
 
 #[tauri::command]
@@ -1126,4 +1286,158 @@ pub async fn delete_message_attachment(
     crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_lifecycle_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        sqlx::query(
+            "INSERT INTO agents (agent_id, name, model, updated_at) VALUES ('agent-1', 'Agent', 'test', 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("agent fixture");
+        sqlx::query(
+            "INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at) \
+             VALUES ('topic-1', 'agent', 'agent-1', 'Topic', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .expect("topic fixture");
+        pool
+    }
+
+    #[tokio::test]
+    async fn pending_generation_can_only_finalize_once() {
+        let pool = test_pool().await;
+        begin_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-1",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .expect("begin generation");
+
+        assert!(begin_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-1",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .is_err());
+
+        commit_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-1",
+            "terminal body",
+            2,
+            "completed",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .expect("finalize generation");
+
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT content, finish_reason FROM messages WHERE msg_id = 'message-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("terminal message");
+        assert_eq!(row.0, "terminal body");
+        assert_eq!(row.1.as_deref(), Some("completed"));
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'message-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("active count");
+        assert_eq!(active, 0);
+        assert!(commit_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-1",
+            "late body",
+            3,
+            "completed",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn finalization_failure_rolls_back_and_keeps_recovery_record() {
+        let pool = test_pool().await;
+        begin_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-2",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .expect("begin generation");
+        sqlx::query("DELETE FROM render_cache WHERE msg_id = 'message-2'")
+            .execute(&pool)
+            .await
+            .expect("remove cache fixture");
+
+        assert!(commit_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-2",
+            "must roll back",
+            2,
+            "completed",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .is_err());
+
+        let finish_reason: Option<String> =
+            sqlx::query_scalar("SELECT finish_reason FROM messages WHERE msg_id = 'message-2'")
+                .fetch_one(&pool)
+                .await
+                .expect("pending message");
+        assert!(finish_reason.is_none());
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'message-2'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("active count");
+        assert_eq!(active, 1);
+    }
 }

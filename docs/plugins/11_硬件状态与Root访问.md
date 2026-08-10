@@ -2,8 +2,8 @@
 id: PLUGIN-HARDWARE-011
 title: 硬件状态与 Root 访问
 description: 设备硬件状态采集（CPU 热分级、GPU 型号、网络连接）与 Root 权限访问体系的实现细节。v1.0.3 新增
-version: 1.0.3
-date: 2026-06-05
+version: 1.1.3
+date: 2026-08-10
 related_files:
   - src-tauri/plugins/vcp-mobile/src/system.rs
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt
@@ -342,7 +342,15 @@ private fun getLocalIpAddress(): String? {
 
 ### 6.1 概述
 
-Root 访问体系基于 [libsu](https://github.com/topjohnwu/libsu)（`com.topjohnwu.superuser`）库提供三项能力：Root 状态检测、Root 命令执行、Root 管理器应用启动。所有操作在 `fileIoExecutor` 单线程池上执行，避免阻塞主线程。
+Root 访问体系基于 [libsu](https://github.com/topjohnwu/libsu)（`com.topjohnwu.superuser`）库提供三项能力：Root 状态检测、Root 命令执行、Root 管理器应用启动。Root 工作使用独立单线程有界 `rootExecutor`，与文件 I/O 和 OOM guard 隔离。
+
+`PluginExecutorDomains` 只划分三个真实阻塞域，不另造任务系统：
+
+- `oomScheduler`：先执行一次 Root 检测；只有 Root 设备才每 20 秒刷新 `oom_score_adj`，future 可取消；
+- `rootExecutor`：单 worker + 有界队列，串行化 libsu 命令；
+- `fileIoExecutor`：单 worker + 有界队列，保持原文件/缩略图/相册操作的串行语义。
+
+队列拒绝和插件销毁会通过统一 `PendingInvokeTask` reject 尚未开始的 Invoke；`onDestroy` 先 cancel guard，再 `shutdownNow` 三个域。Rust 侧只在 mutex 内 clone `PluginHandle`，随后锁外等待 Kotlin 返回，因此一个慢 Root 命令不会占住全局插件句柄锁。
 
 ### 6.2 check_root_access —— Root 状态检测
 
@@ -369,7 +377,7 @@ pub fn check_root_access<R: Runtime>(app: AppHandle<R>) -> Result<RootAccessStat
 ```kotlin
 @Command
 fun checkRootAccess(invoke: Invoke) {
-    fileIoExecutor.execute {
+    executePluginTask(executorDomains.rootExecutor, invoke, "checkRootAccess") {
         try {
             val isRoot = Shell.getShell().isRoot
             val result = JSObject().apply { put("isRoot", isRoot) }
@@ -414,7 +422,7 @@ pub fn run_root_command<R: Runtime>(
 @Command
 fun runRootCommand(invoke: Invoke) {
     val args = invoke.parseArgs(RunRootCommandArgs::class.java)
-    fileIoExecutor.execute {
+    executePluginTask(executorDomains.rootExecutor, invoke, "runRootCommand") {
         try {
             val output = Shell.cmd(args.command).exec().out
             val result = JSObject().apply {
@@ -434,7 +442,7 @@ fun runRootCommand(invoke: Invoke) {
 ```
 
 - `Shell.cmd(command).exec().out`：通过 libsu 以 Root 身份执行命令，返回标准输出行列表。
-- 在 `fileIoExecutor` 上运行，避免阻塞 UI 线程。
+- 在独立 `rootExecutor` 上串行运行，既不阻塞 UI，也不饿死文件任务。
 - 参数解析失败直接 `invoke.reject()`，不上报执行级错误。
 
 ### 6.4 launch_root_manager —— 启动 Root 管理器应用
@@ -527,14 +535,14 @@ Android 11 (API 30) 引入了包可见性限制，默认情况下应用无法查
     ├── invoke('plugin:vcp-mobile|check_root_access')
     │   → system.rs :: check_root_access(app)
     │   → run_mobile_plugin("checkRootAccess", {})
-    │   → Kotlin: checkRootAccess(invoke) on fileIoExecutor
+    │   → Kotlin: checkRootAccess(invoke) on rootExecutor
     │   → Shell.getShell().isRoot
     │   → JSObject { isRoot: bool }
     │
     ├── invoke('plugin:vcp-mobile|run_root_command', { command: "..." })
     │   → system.rs :: run_root_command(app, command)
     │   → run_mobile_plugin("runRootCommand", { "command": "..." })
-    │   → Kotlin: runRootCommand(invoke) on fileIoExecutor
+    │   → Kotlin: runRootCommand(invoke) on rootExecutor
     │   → Shell.cmd(command).exec().out
     │   → JSObject { success, output }
     │
@@ -560,7 +568,7 @@ Android 11 (API 30) 引入了包可见性限制，默认情况下应用无法查
 3. **NetworkStatus 的带宽值为估计值**：`linkDownstreamBandwidthKbps` / `linkUpstreamBandwidthKbps` 是链路层的**理论估计值**，非实时测速结果。实际速度受信号强度、拥塞程度等因素影响。
 
 4. **Root 命令安全**：
-   - 所有 Root 命令在 `fileIoExecutor` 单线程池上执行，避免并发 Root Shell 冲突。
+   - 所有 Root 命令在独立有界 `rootExecutor` 上串行执行，避免并发 Root Shell 冲突，也不占用文件 I/O worker。
    - `run_root_command` 完全信任前端传入的命令字符串，**不做任何命令校验或沙盒化**。调用方需自行确保命令安全性。
    - 异常时 `success: false` + 异常消息，不会因 Root 命令执行失败导致应用崩溃。
 
@@ -599,4 +607,4 @@ Android 11 (API 30) 引入了包可见性限制，默认情况下应用无法查
 
 ---
 
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-08-10 | VCP Mobile v1.1.3*

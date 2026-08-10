@@ -229,7 +229,7 @@ const handleDelete = async () => {
     try {
       await assistantStore.deleteGroup(props.id);
       if (sessionStore.currentSelectedItem?.id === props.id) {
-        sessionStore.currentSelectedItem = null;
+        sessionStore.clearConversation();
       }
       emit("close");
     } catch (err: any) {

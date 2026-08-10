@@ -9,7 +9,8 @@ use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::vcp_client::{
-    perform_vcp_request, ActiveRequests, CancelledGroupTurns, StreamEvent, VcpRequestPayload,
+    perform_vcp_request_registered, ActiveRequestLease, ActiveRequests, CancelledGroupTurns,
+    StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -156,12 +157,7 @@ pub async fn internal_process_group_chat_message(
 
         let agent_id = speaker.id.clone();
         let agent_name = speaker.name.clone();
-        let message_id = format!(
-            "msg_group_{}_{}_{}",
-            user_message.id,
-            agent_id,
-            crate::vcp_modules::infra::utils::now_millis()
-        );
+        let message_id = format!("msg_group_{}", uuid::Uuid::new_v4());
 
         // 【优化点】：此时已识别出当前轮次的发言者 agent_name，立即提前启动前台服务保活，
         // 从而与接下来耗时的群组上下文组装、SQLite Tavern 级联编织等逻辑并行重叠。
@@ -239,17 +235,30 @@ pub async fn internal_process_group_chat_message(
             context: context.clone(),
         };
 
+        let (_request_lease, abort_rx) =
+            ActiveRequestLease::try_acquire(active_requests_map, message_id.clone())?;
+        message_service::begin_stream_message(
+            &db_pool,
+            &group_id,
+            "group",
+            &topic_id,
+            &message_id,
+            Some(&agent_id),
+            Some(&agent_name),
+        )
+        .await?;
+
         // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
         if let Some(chan) = &stream_channel {
             let _ = chan.send(StreamEvent::thinking(message_id.clone(), context));
         }
 
         // 执行请求 (串行等待)
-        let res_result = perform_vcp_request(
+        let res_result = perform_vcp_request_registered(
             &app_handle,
-            active_requests_map,
             request_payload,
             stream_channel.clone(),
+            abort_rx,
         )
         .await;
 
@@ -316,10 +325,6 @@ pub async fn internal_process_group_chat_message(
                 agent_id,
                 e
             );
-            let _ = sqlx::query("DELETE FROM active_generations WHERE msg_id = ?")
-                .bind(&message_id)
-                .execute(&db_pool)
-                .await;
         }
     }
 

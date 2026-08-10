@@ -10,9 +10,21 @@ pub mod system;
 /// Plugin state shared across commands
 pub struct VcpMobileState<R: Runtime> {
     #[cfg(target_os = "android")]
-    pub plugin_handle: std::sync::Mutex<Option<tauri::plugin::PluginHandle<R>>>,
+    plugin_handle: std::sync::Mutex<Option<tauri::plugin::PluginHandle<R>>>,
     #[cfg(not(target_os = "android"))]
     _marker: std::marker::PhantomData<fn() -> R>,
+}
+
+impl<R: Runtime> VcpMobileState<R> {
+    #[cfg(target_os = "android")]
+    pub fn mobile_plugin_handle(&self) -> Result<tauri::plugin::PluginHandle<R>, String> {
+        self.plugin_handle
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "Plugin handle not initialized".to_string())
+    }
 }
 
 /// Initializes the VCP Mobile plugin.

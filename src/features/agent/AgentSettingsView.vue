@@ -203,7 +203,7 @@ const handleDelete = async () => {
     try {
       await assistantStore.deleteAgent(agentConfig.value.id);
       if (sessionStore.currentSelectedItem?.id === agentConfig.value.id) {
-        sessionStore.currentSelectedItem = null;
+        sessionStore.clearConversation();
       }
       emit("close");
     } catch (err) {

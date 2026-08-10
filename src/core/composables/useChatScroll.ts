@@ -10,7 +10,11 @@ interface UseChatScrollOptions {
   /** 是否正在加载历史 */
   isLoadingHistory: Ref<boolean>;
   /** 加载更多历史的回调 */
-  onLoadMore: () => void;
+  onLoadMore: () => Promise<{
+    addedCount: number;
+    error?: unknown;
+    aborted?: boolean;
+  }>;
 }
 
 type ScrollScene = "initial" | "following" | "free" | "loading-top";
@@ -24,7 +28,13 @@ type ScrollScene = "initial" | "following" | "free" | "loading-top";
  * 改用 scroll 事件精确几何检测 + MutationObserver 双重 RAF 确保布局稳定后操作。
  */
 export function useChatScroll(options: UseChatScrollOptions) {
-  const { messageListRef, messageCount, hasMoreHistory, isLoadingHistory, onLoadMore } = options;
+  const {
+    messageListRef,
+    messageCount,
+    hasMoreHistory,
+    isLoadingHistory,
+    onLoadMore,
+  } = options;
 
   const showScrollToBottom = ref(false);
   const scrollScene = ref<ScrollScene>("initial");
@@ -39,6 +49,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
   let resizeObserver: ResizeObserver | null = null;
   let scrollRafId: number | null = null;
   let loadMoreDebounceId: number | null = null;
+  let loadRequestGeneration = 0;
+  let loadInFlight = false;
 
   const scrollToBottom = (smooth = false) => {
     const list = messageListRef.value;
@@ -69,11 +81,47 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   const restoreScrollByAnchor = () => {
     if (!loadAnchor || !messageListRef.value) return;
-    const el = messageListRef.value.querySelector(`[data-message-id="${loadAnchor.messageId}"]`);
+    const el = messageListRef.value.querySelector(
+      `[data-message-id="${loadAnchor.messageId}"]`,
+    );
     if (el) {
-      messageListRef.value.scrollTop = (el as HTMLElement).offsetTop - loadAnchor.offsetFromTop;
+      messageListRef.value.scrollTop =
+        (el as HTMLElement).offsetTop - loadAnchor.offsetFromTop;
     }
     loadAnchor = null;
+  };
+
+  const requestLoadMore = async () => {
+    if (
+      loadInFlight ||
+      scrollScene.value === "loading-top" ||
+      !hasMoreHistory.value ||
+      isLoadingHistory.value
+    ) {
+      return;
+    }
+
+    loadAnchor = null;
+    prepareLoadAnchor();
+    const hadAnchor = Boolean(loadAnchor);
+    const generation = ++loadRequestGeneration;
+    loadInFlight = true;
+    scrollScene.value = "loading-top";
+    try {
+      await onLoadMore();
+    } finally {
+      await nextTick();
+      if (generation !== loadRequestGeneration) return;
+      if (hadAnchor) {
+        restoreScrollByAnchor();
+        scrollScene.value = "free";
+      } else {
+        loadAnchor = null;
+        scrollToBottom(false);
+        scrollScene.value = "following";
+      }
+      loadInFlight = false;
+    }
   };
 
   // --- 自动加载历史几何判定与防抖 ---
@@ -90,10 +138,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
       hasMoreHistory.value &&
       !isLoadingHistory.value
     ) {
-      console.log(`[useChatScroll] Auto loading more because height (${list.scrollHeight}) <= clientHeight (${list.clientHeight}) + 10`);
-      prepareLoadAnchor();
-      scrollScene.value = "loading-top";
-      onLoadMore();
+      console.log(
+        `[useChatScroll] Auto loading more because height (${list.scrollHeight}) <= clientHeight (${list.clientHeight}) + 10`,
+      );
+      void requestLoadMore();
     }
   };
 
@@ -134,20 +182,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
       return;
     }
 
-    // 场景2：分页加载完成（loading-top → free/following）
-    if (scrollScene.value === "loading-top" && !isLoadingHistory.value) {
-      if (loadAnchor) {
-        restoreScrollByAnchor();
-        scrollScene.value = "free";
-      } else {
-        // 无锚点 = 自动续载，直接置底回到 following
-        scrollToBottom(false);
-        scrollScene.value = "following";
-      }
-      return;
-    }
-
-    // 场景3：跟随模式下的新内容/流式追加
+    // 场景2：跟随模式下的新内容/流式追加
     if (scrollScene.value === "following" && !showScrollToBottom.value) {
       scrollToBottom(false);
       // 随着内容变动，持续评估并推迟可能的自动续载
@@ -155,7 +190,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
       return;
     }
 
-    // 场景4：其他高度变化引起的续载评估
+    // 场景3：其他高度变化引起的续载评估
     triggerAutoLoadMoreWithDebounce();
   };
 
@@ -171,7 +206,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
     resizeObserver = new ResizeObserver(() => {
       // 🌟 流式跟随状态下，或正在加载历史消息时，必须同步处理滚动，以防止 DOM 重排和滚动条设置跨帧引发的上下跳变。
-      if (scrollScene.value === "following" || scrollScene.value === "loading-top") {
+      if (
+        scrollScene.value === "following" ||
+        scrollScene.value === "loading-top"
+      ) {
         if (scrollRafId) {
           cancelAnimationFrame(scrollRafId);
           scrollRafId = null;
@@ -207,7 +245,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
     // 若已偏离，瞬间切入 free 状态，使紧随其后的 ResizeObserver 同步回调直接走 else 节流分支，打断强位置底。
     const list = messageListRef.value;
     if (list) {
-      const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+      const nearBottom =
+        list.scrollHeight - list.scrollTop - list.clientHeight < 150;
       if (!nearBottom && scrollScene.value === "following") {
         scrollScene.value = "free";
         showScrollToBottom.value = true;
@@ -228,7 +267,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
       }
 
       const nearTop = list.scrollTop < 100;
-      const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+      const nearBottom =
+        list.scrollHeight - list.scrollTop - list.clientHeight < 150;
 
       // 更新底部按钮显隐
       showScrollToBottom.value = !nearBottom;
@@ -247,9 +287,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
         hasMoreHistory.value &&
         !isLoadingHistory.value
       ) {
-        prepareLoadAnchor();
-        scrollScene.value = "loading-top";
-        onLoadMore();
+        void requestLoadMore();
       }
     });
   };
@@ -270,14 +308,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
     // 如果已经在最顶部，且用户手指继续向下拉（deltaY > 10px）
     if (list.scrollTop <= 2 && e.touches.length > 0) {
       const deltaY = e.touches[0].pageY - startY;
-      if (
-        deltaY > 10 &&
-        hasMoreHistory.value &&
-        !isLoadingHistory.value
-      ) {
-        prepareLoadAnchor();
-        scrollScene.value = "loading-top";
-        onLoadMore();
+      if (deltaY > 10 && hasMoreHistory.value && !isLoadingHistory.value) {
+        void requestLoadMore();
       }
     }
   };
@@ -289,9 +321,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     // 如果已经在最顶部，且鼠标滚轮继续向上滚（试图拉出顶部）
     if (list.scrollTop <= 2 && e.deltaY < 0) {
       if (hasMoreHistory.value && !isLoadingHistory.value) {
-        prepareLoadAnchor();
-        scrollScene.value = "loading-top";
-        onLoadMore();
+        void requestLoadMore();
       }
     }
   };
@@ -314,18 +344,18 @@ export function useChatScroll(options: UseChatScrollOptions) {
     }
   });
 
-  // --- 监听 isLoadingHistory：兜底恢复（应对 ResizeObserver 未及时触发的情况）---
+  // 首屏完成由 history loading 明确信号驱动；分页完成由 requestLoadMore 的 Promise 驱动。
   watch(isLoadingHistory, async (loading) => {
-    if (loading) return;
-
-    // 首屏加载完成兜底 或 分页加载完成兜底
-    if (scrollScene.value === "initial" || (scrollScene.value === "loading-top" && loadAnchor)) {
-      await nextTick();
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          handleContentChange();
-        });
-      });
+    if (loading || scrollScene.value !== "initial") return;
+    await nextTick();
+    if (scrollScene.value !== "initial") return;
+    if (messageCount.value > 0) {
+      scrollToBottom(false);
+      scrollScene.value = "following";
+      triggerAutoLoadMoreWithDebounce();
+    } else {
+      scrollScene.value = "free";
+      isInitialRendering.value = false;
     }
   });
 
@@ -342,6 +372,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   // --- 兼容旧 API（调用方 ChatView.vue 无需改动）---
   const reset = () => {
+    loadRequestGeneration += 1;
+    loadInFlight = false;
     scrollScene.value = "initial";
     showScrollToBottom.value = false;
     loadAnchor = null;
@@ -350,6 +382,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
     if (scrollRafId) {
       cancelAnimationFrame(scrollRafId);
       scrollRafId = null;
+    }
+    if (scrollThrottleId) {
+      cancelAnimationFrame(scrollThrottleId);
+      scrollThrottleId = null;
     }
     if (loadMoreDebounceId) {
       clearTimeout(loadMoreDebounceId);
@@ -370,6 +406,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
   };
 
   const dispose = () => {
+    loadRequestGeneration += 1;
+    loadInFlight = false;
     stopContentObserver();
     if (scrollThrottleId) {
       cancelAnimationFrame(scrollThrottleId);

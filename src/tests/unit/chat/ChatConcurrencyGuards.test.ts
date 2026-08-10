@@ -1,0 +1,220 @@
+import { beforeEach, describe, expect, it } from "vitest";
+import { createPinia, setActivePinia } from "pinia";
+import { useChatHistoryStore } from "@/core/stores/chatHistoryStore";
+import { useChatSessionStore } from "@/core/stores/chatSessionStore";
+import { useChatStreamStore } from "@/core/stores/chatStreamStore";
+import { useSettingsStore } from "@/core/stores/settings";
+import { useAssistantStore } from "@/core/stores/assistant";
+import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+const message = (id: string, topicId: string) => ({
+  id,
+  role: "user",
+  name: "User",
+  content: id,
+  timestamp: 1,
+  topicId,
+  blocks: [],
+});
+
+describe("chat conversation concurrency guards", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockInvoke("get_active_generations", () => []);
+  });
+
+  it("invalidates an A snapshot even when selection later returns to A", () => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    const firstA = { ...session.currentConversationKey! };
+
+    session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+
+    expect(session.currentConversationKey?.epoch).toBeGreaterThan(firstA.epoch);
+    expect(session.isConversationCurrent(firstA)).toBe(false);
+  });
+
+  it("does not let a slow owner lookup overwrite a newer selection", async () => {
+    const session = useChatSessionStore();
+    const assistant = useAssistantStore();
+    assistant.agents = [
+      { id: "agent-b", name: "B", model: "test" },
+      { id: "agent-c", name: "C", model: "test" },
+    ];
+    const topics = deferred<any[]>();
+    mockInvoke("get_topics", () => topics.promise);
+
+    const selectingB = session.selectItem({ id: "agent-b", name: "B" });
+    session.setConversation({ id: "agent-c", name: "C", type: "agent" }, "topic-c");
+    topics.resolve([{ id: "topic-b" }]);
+    await selectingB;
+
+    expect(session.currentConversationKey).toMatchObject({
+      ownerId: "agent-c",
+      topicId: "topic-c",
+    });
+  });
+
+  it("does not let an old load settle the new conversation latch or messages", async () => {
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const loadA = deferred<any[]>();
+    const loadB = deferred<any[]>();
+    mockInvoke("load_chat_history", (args) =>
+      args?.topicId === "topic-a" ? loadA.promise : loadB.promise,
+    );
+
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    const pendingA = history.loadHistoryPaginated(
+      "agent-a",
+      "agent",
+      "topic-a",
+    );
+    session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
+    const pendingB = history.loadHistoryPaginated(
+      "agent-b",
+      "agent",
+      "topic-b",
+    );
+
+    loadA.resolve([message("message-a", "topic-a")]);
+    await pendingA;
+    expect(history.isLoadingHistory).toBe(true);
+    expect(history.currentChatHistory).toEqual([]);
+
+    loadB.resolve([message("message-b", "topic-b")]);
+    await pendingB;
+    expect(history.isLoadingHistory).toBe(false);
+    expect(history.currentChatHistory.map((item) => item.id)).toEqual([
+      "message-b",
+    ]);
+    expect(history.loadedConversationKey?.topicId).toBe("topic-b");
+  });
+
+  it("keeps a send bound to its entry conversation across an await", async () => {
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const settings = useSettingsStore();
+    settings.settings = {
+      userName: "User",
+      vcpServerUrl: "https://example.invalid",
+      vcpApiKey: "key",
+    } as any;
+    mockInvoke("load_chat_history", () => []);
+
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
+
+    const append = deferred<any[]>();
+    mockInvoke("append_single_message", () => append.promise);
+    const pendingSend = history.sendMessage("hello");
+
+    session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
+    history.resetHistoryForConversation();
+    append.resolve([]);
+    await pendingSend;
+
+    const appendCall = invokeMock.mock.calls.find(
+      ([command]) => command === "append_single_message",
+    );
+    expect(appendCall?.[1]).toMatchObject({
+      ownerId: "agent-a",
+      ownerType: "agent",
+      topicId: "topic-a",
+    });
+    const generationCall = invokeMock.mock.calls.find(
+      ([command]) => command === "handle_agent_chat_message",
+    );
+    expect(generationCall?.[1]).toMatchObject({
+      payload: { agentId: "agent-a", topicId: "topic-a" },
+    });
+    expect(history.currentChatHistory).toEqual([]);
+  });
+
+  it("does not persist a frontend skeleton for a thinking event", async () => {
+    const stream = useChatStreamStore();
+    await stream.processStreamEvent({
+      type: "thinking",
+      messageId: "assistant-1",
+      context: { topicId: "topic-a", agentId: "agent-a" },
+    });
+
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "append_single_message",
+      ),
+    ).toBe(false);
+  });
+
+  it("stops the original message even when the visible conversation changes", async () => {
+    const session = useChatSessionStore();
+    const stream = useChatStreamStore();
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    await stream.processStreamEvent({
+      type: "thinking",
+      messageId: "assistant-a",
+      context: { topicId: "topic-a", agentId: "agent-a" },
+    });
+
+    const interrupt = deferred<unknown>();
+    mockInvoke("interruptRequest", () => interrupt.promise);
+    const stoppingA = stream.stopMessage("assistant-a");
+
+    session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
+    await stream.processStreamEvent({
+      type: "thinking",
+      messageId: "assistant-b",
+      context: { topicId: "topic-b", agentId: "agent-b" },
+    });
+    interrupt.resolve(undefined);
+    await stoppingA;
+
+    expect(stream.isMessageActive("assistant-a")).toBe(false);
+    expect(stream.isMessageActiveInSession("agent-b", "topic-b", "assistant-b")).toBe(true);
+  });
+
+  it("claims a cold recovery once and never starts the removed two-step resume path", async () => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    const recovery = deferred<any>();
+    mockInvoke("get_active_generations", () => [{
+      msgId: "assistant-recovery",
+      topicId: "topic-a",
+      ownerId: "agent-a",
+      ownerType: "agent",
+      createdAt: 1,
+    }]);
+    mockInvoke("recover_active_generation", () => recovery.promise);
+
+    const stream = useChatStreamStore();
+    await stream.checkAndRecoverInterruptedStreams();
+    await stream.checkAndRecoverInterruptedStreams();
+
+    const recoveryCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === "recover_active_generation",
+    );
+    expect(recoveryCalls).toHaveLength(1);
+    expect(recoveryCalls[0]?.[1]).toMatchObject({
+      msgId: "assistant-recovery",
+      isWarm: false,
+    });
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "resume_stream"),
+    ).toBe(false);
+
+    recovery.resolve({ status: "completed", content: "recovered" });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+});

@@ -293,10 +293,7 @@ const handleExitRequest = async () => {
   // 2. 第二级：若当前在 Agent 聊天中（且已就绪），按返回键退回到初始零数据引导欢迎页
   if (lifecycleStore.state === 'READY' && sessionStore.currentSelectedItem !== null) {
     console.log('[ExitRequest] Resetting active session to welcome boot screen.');
-    sessionStore.$patch((state) => {
-      state.currentSelectedItem = null;
-      state.currentTopicId = null;
-    });
+    sessionStore.clearConversation();
     return;
   }
 

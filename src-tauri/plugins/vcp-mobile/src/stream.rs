@@ -15,8 +15,7 @@ pub fn acquire_foreground_inner<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = _app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
                 "acquireForeground",
@@ -43,8 +42,7 @@ pub fn release_foreground_inner<R: Runtime>(_app: &AppHandle<R>, tag: &str) -> R
     #[cfg(target_os = "android")]
     {
         let state = _app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
                 "releaseForeground",
@@ -138,8 +136,7 @@ pub fn start_helper_service<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("startHelperService", serde_json::json!({}))
             .map_err(|e| format!("startHelperService failed: {}", e))?;

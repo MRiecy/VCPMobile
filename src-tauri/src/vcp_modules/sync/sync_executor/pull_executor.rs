@@ -7,6 +7,7 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
 
 #[derive(serde::Deserialize)]
 struct TopicNDJSONFrame {
@@ -599,12 +600,12 @@ impl PullExecutor {
         // ── 并发基础设施 ──
         let sem = Arc::new(Semaphore::new(20));
         let (tx, mut rx) = mpsc::unbounded_channel::<BatchPullResult>();
-        let mut spawn_handles = Vec::new();
+        let mut spawn_handles = JoinSet::new();
         let total = requests.len();
 
         // 启动接收协程：实时消费 channel 输出进度日志
         let app_receiver = app.clone();
-        let receiver_handle = tokio::spawn(async move {
+        let receiver = async move {
             let mut results = Vec::new();
             let mut completed = 0usize;
             while let Some(result) = rx.recv().await {
@@ -634,7 +635,7 @@ impl PullExecutor {
                 results.push(result);
             }
             results
-        });
+        };
 
         // ── NDJSON 解析协程 ──
         use futures_util::StreamExt;
@@ -674,7 +675,7 @@ impl PullExecutor {
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
 
-                let handle = tokio::spawn(async move {
+                spawn_handles.spawn(async move {
                     let start_t = std::time::Instant::now();
                     // 1. 在后台多核并发解码标准 DTO JSON
                     let frame: TopicNDJSONFrame = match serde_json::from_slice(&line) {
@@ -783,7 +784,6 @@ impl PullExecutor {
                         }
                     }
                 });
-                spawn_handles.push(handle);
             }
 
             // 循环结束后，游标指向 buffer 末尾，下一轮 chunk 进来时只需扫描新增部分
@@ -810,7 +810,7 @@ impl PullExecutor {
                             let sem_clone = sem.clone();
                             let wq_clone = write_queue.clone();
                             let tx_clone = tx.clone();
-                            let handle = tokio::spawn(async move {
+                            spawn_handles.spawn(async move {
                                 match sem_clone.acquire_owned().await {
                                     Ok(permit) => {
                                         let _permit = permit;
@@ -863,7 +863,6 @@ impl PullExecutor {
                                     }
                                 }
                             });
-                            spawn_handles.push(handle);
                         } else {
                             let _ = tx.send(BatchPullResult {
                                 topic_id,
@@ -880,8 +879,14 @@ impl PullExecutor {
 
         // ── 等待所有任务完成 ──
         drop(tx); // 关闭 channel，通知 receiver 不再有新消息
-        let _ = futures_util::future::join_all(spawn_handles).await;
-        let results = receiver_handle.await.unwrap_or_default();
+        let wait_for_workers = async move {
+            while let Some(result) = spawn_handles.join_next().await {
+                if let Err(error) = result {
+                    log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
+                }
+            }
+        };
+        let (_, results) = tokio::join!(wait_for_workers, receiver);
 
         let ok_count = results.iter().filter(|r| r.success).count();
         let err_count = results.iter().filter(|r| !r.success).count();

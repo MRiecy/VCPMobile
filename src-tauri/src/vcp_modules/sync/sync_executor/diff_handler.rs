@@ -2,7 +2,7 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_logger::SyncLogger;
-use crate::vcp_modules::sync_service::{emit_sync_log, SyncCommand};
+use crate::vcp_modules::sync_service::{emit_sync_log, SyncCommand, SyncTaskTracker};
 use crate::vcp_modules::sync_types::SyncDataType;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -35,6 +35,7 @@ impl DiffHandler {
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<String>>>,
         logger: &Arc<Mutex<SyncLogger>>,
+        task_tracker: &Arc<SyncTaskTracker>,
     ) -> Result<(), String> {
         if let Some(items) = payload["data"].as_array() {
             let items_clone: Vec<serde_json::Value> = items.clone();
@@ -110,7 +111,7 @@ impl DiffHandler {
                     let pending_wd = pending_tasks.clone();
                     let handle_clone_wd = app_handle.clone();
 
-                    tauri::async_runtime::spawn(async move {
+                    task_tracker.spawn(async move {
                         let mut last_pending = pending_wd.load(Ordering::SeqCst);
                         let mut stuck_count = 0;
                         loop {
@@ -158,7 +159,7 @@ impl DiffHandler {
                                 );
                             }
                         }
-                    });
+                    }).await;
                 }
             }
 
@@ -222,49 +223,51 @@ impl DiffHandler {
                 let manifest_phase_in = manifest_phase.clone();
                 let data_type_inner = data_type.clone();
 
-                tauri::async_runtime::spawn(async move {
-                    let chunk_size = match data_type_inner {
-                        SyncDataType::Agent | SyncDataType::Group => 50,
-                        SyncDataType::Topic => 1000,
-                        _ => 100,
-                    };
-                    for chunk in batch_pull_requests.chunks(chunk_size) {
-                        let sub_batch = chunk.to_vec();
-                        let sub_count = sub_batch.len() as u32;
-                        let _ = PullExecutor::pull_entities_batch(
-                            &h_in, &c_in, &b_in, &token, sub_batch, &wq_in,
-                        )
-                        .await;
-                        pending.fetch_sub(sub_count, Ordering::SeqCst);
-                        let current_pending = pending.load(Ordering::SeqCst);
-                        let total = total_tasks_in.load(Ordering::SeqCst);
-                        let done = total.saturating_sub(current_pending);
-                        let _ = h_in.emit(
-                            "vcp-sync-progress",
-                            json!({
-                                "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 {
-                                    "owner_metadata"
-                                } else {
-                                    "topic_metadata"
-                                },
-                                "total": total,
-                                "completed": done,
-                                "message": format!("Syncing: {}/{}", done, total)
-                            }),
-                        );
-                        if current_pending == 0
-                            && manifest_received_in.load(Ordering::SeqCst)
-                                == manifest_expected_in.load(Ordering::SeqCst)
-                        {
-                            let phase = manifest_phase_in.load(Ordering::SeqCst);
-                            if phase == 1 {
-                                let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata);
-                            } else if phase == 2 {
-                                let _ = tx_internal_in.send(SyncCommand::StartTopicValidation);
+                task_tracker
+                    .spawn(async move {
+                        let chunk_size = match data_type_inner {
+                            SyncDataType::Agent | SyncDataType::Group => 50,
+                            SyncDataType::Topic => 1000,
+                            _ => 100,
+                        };
+                        for chunk in batch_pull_requests.chunks(chunk_size) {
+                            let sub_batch = chunk.to_vec();
+                            let sub_count = sub_batch.len() as u32;
+                            let _ = PullExecutor::pull_entities_batch(
+                                &h_in, &c_in, &b_in, &token, sub_batch, &wq_in,
+                            )
+                            .await;
+                            pending.fetch_sub(sub_count, Ordering::SeqCst);
+                            let current_pending = pending.load(Ordering::SeqCst);
+                            let total = total_tasks_in.load(Ordering::SeqCst);
+                            let done = total.saturating_sub(current_pending);
+                            let _ = h_in.emit(
+                                "vcp-sync-progress",
+                                json!({
+                                    "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 {
+                                        "owner_metadata"
+                                    } else {
+                                        "topic_metadata"
+                                    },
+                                    "total": total,
+                                    "completed": done,
+                                    "message": format!("Syncing: {}/{}", done, total)
+                                }),
+                            );
+                            if current_pending == 0
+                                && manifest_received_in.load(Ordering::SeqCst)
+                                    == manifest_expected_in.load(Ordering::SeqCst)
+                            {
+                                let phase = manifest_phase_in.load(Ordering::SeqCst);
+                                if phase == 1 {
+                                    let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata);
+                                } else if phase == 2 {
+                                    let _ = tx_internal_in.send(SyncCommand::StartTopicValidation);
+                                }
                             }
                         }
-                    }
-                });
+                    })
+                    .await;
             }
 
             if !push_topics_to_fetch.is_empty() {
@@ -279,7 +282,7 @@ impl DiffHandler {
                 let manifest_phase_in = manifest_phase.clone();
                 let http_url = base_url.to_string();
 
-                tauri::async_runtime::spawn(async move {
+                task_tracker.spawn(async move {
                     let db = h_in.state::<DbState>();
                     let mut batch_push_requests = Vec::new();
 
@@ -376,7 +379,7 @@ impl DiffHandler {
                             let _ = tx_internal_in.send(SyncCommand::StartTopicValidation);
                         }
                     }
-                });
+                }).await;
             }
 
             if !other_items.is_empty() {
@@ -393,7 +396,7 @@ impl DiffHandler {
                 let manifest_phase_in = manifest_phase.clone();
                 let data_type_base = data_type.clone();
 
-                tauri::async_runtime::spawn(async move {
+                task_tracker.spawn(async move {
                     futures_util::stream::iter(other_items)
                         .for_each_concurrent(15, |item| {
                             let action = item["action"].as_str().unwrap_or_default().to_string();
@@ -538,7 +541,7 @@ impl DiffHandler {
                             }
                         })
                         .await;
-                });
+                }).await;
             }
         }
         Ok(())

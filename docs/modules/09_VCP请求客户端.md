@@ -1,7 +1,7 @@
 ---
 id: MOD-VCP-CLI-009
 version: "1.1.3"
-date: 2026-07-04
+date: 2026-08-10
 module: vcp_client.rs
 scope: src-tauri/src/vcp_modules/
 related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs, message_service.rs]
@@ -15,7 +15,7 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 `vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（约 2100 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
 
-> **v1.1.3 关键变更**：Android 平台引入本地 SSE 代理助手进程（`StreamKeepaliveService` + SSE Helper），流式请求通过 `LengthDelimitedCodec` 帧协议与助手通信；新增活跃生成注册表联动、`recover_active_generation` / `resume_stream` 断点续传能力。
+> **2026-08-10 生命周期收口**：Android SSE Helper 仍负责缓存与按事件索引续接，但恢复入口已合并为单个 `recover_active_generation`。它从 claim、query/cache、resume 一直持有同一 attempt lease 到 terminal DB commit，不再暴露独立 `resume_stream` Tauri Command。
 
 其核心职责包括：
 - 将前端传入的 `VcpRequestPayload` 转换为标准化 HTTP 请求
@@ -35,10 +35,10 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 | 上下文注入 | 读取 `music_state.json`、`songlist.json`，注入 System Message | `perform_vcp_request:403` |
 | 流式 SSE 解析 | 使用 `LinesCodec` + `tokio::select!` 逐行解析 `data:` 事件 | `perform_vcp_request:536` |
 | Aurora 语义沉淀驱动 | 每收到文本 chunk 追加到 `AuroraBuffer`，触发增量块解析与推测渲染 | `perform_vcp_request:591` |
-| 请求中止 | `ActiveRequests` + `oneshot::Sender` + RAII Guard 三层防护 | `ActiveRequests:106`, `interruptRequest:730` |
+| 请求中止 | `ActiveRequests` + attempt UUID + `oneshot::Sender` + RAII lease | `ActiveRequestEntry`, `ActiveRequestLease`, `interruptRequest` |
 | 连接测试 | 对齐桌面端逻辑的 `/v1/models` 探测与模型计数 | `test_vcp_connection:762` |
 | 活跃生成恢复 | 查询 `active_generations`、本地 `sse_cache` 及助手内存，恢复异常中断的流 | `get_active_generations:1611`, `recover_active_generation:1767` |
-| 流式断点续传 | Android 通过 SSE Helper 代理按事件索引 `startIndex` 续接流 | `resume_stream:2011`, `handle_streaming_request:770` |
+| 流式断点续传 | `recover_active_generation` 在已 claim 的 attempt 内按 `startIndex` 续接 Helper 流 | `resume_claimed_generation`, `handle_streaming_request` |
 | 助手进程通信 | `LengthDelimitedCodec` 帧协议：4 字节大端长度 + JSON payload | `send_command_to_stream:705`, `connect_to_helper:612` |
 
 ### 1.3 调用入口
@@ -121,32 +121,40 @@ pub struct StreamEvent {
 ### 2.3 ActiveRequests
 
 ```rust
-pub struct ActiveRequests(pub Arc<DashMap<String, oneshot::Sender<()>>>);
+pub struct ActiveRequestEntry {
+    attempt_id: Uuid,
+    abort_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+pub struct ActiveRequests(pub Arc<DashMap<String, Arc<ActiveRequestEntry>>>);
 ```
 
 - 键：`message_id`（String）
-- 值：`oneshot::Sender<()>` —— 发送即触发中止
+- 值：带唯一 `attempt_id` 的取消句柄；同一个 message ID 只允许一个 live attempt
 - 使用 `DashMap` 而非 `Mutex<HashMap>`：支持高并发读写，无需锁竞争
 - `Arc` 包装确保跨 `tokio::spawn` 克隆时的共享所有权
 
-### 2.4 ActiveRequestGuard（RAII 防护）
+### 2.4 ActiveRequestLease（RAII 所有权）
 
 ```rust
-pub struct ActiveRequestGuard {
-    requests: Arc<DashMap<String, oneshot::Sender<()>>>,
+pub struct ActiveRequestLease {
+    requests: ActiveRequestMap,
     message_id: String,
+    attempt_id: Uuid,
 }
 
-impl Drop for ActiveRequestGuard {
+impl Drop for ActiveRequestLease {
     fn drop(&mut self) {
-        self.requests.remove(&self.message_id);
+        // 仅当 map 当前仍是本 attempt 时移除
+        remove_if_attempt_matches(self.message_id, self.attempt_id);
     }
 }
 ```
 
-- 在 `perform_vcp_request` 开始时创建，函数返回时自动 `Drop`
-- 确保即使发生 panic，对应 `message_id` 也不会在 `ActiveRequests` 中泄漏
-- 这是防止"中止后重新发送同名消息找不到请求"的关键修复
+- `try_acquire` 使用 DashMap entry API 拒绝重复 live ID，不再覆盖旧 sender；
+- `interruptRequest` 只触发 cancel，不提前删除 entry；真正任务退出后才由 lease 释放；
+- Drop 同时校验 `message_id + attempt_id`，旧任务不能删除后来同 ID 的新 attempt；
+- Agent/Group 请求的 lease 覆盖网络请求和 `finalize_stream_message` 提交窗口。网络结束但 terminal 事务未提交时，该 generation 仍被识别为 live。
 
 ### 2.5 CancelledGroupTurns
 
@@ -193,8 +201,8 @@ pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
            │
            ▼
     ┌──────────────┐
-    │ 4. 注册中止   │ ← oneshot::channel → DashMap.insert
-    │    信号       │   ActiveRequestGuard 创建
+    │ 4. 申领请求   │ ← attempt UUID + oneshot::channel
+    │    Lease      │   DashMap entry 拒绝重复 owner
     └──────┬───────┘
            │
     ┌──────┴───────┐
@@ -277,7 +285,7 @@ let mut lines = FramedRead::new(reader, LinesCodec::new_with_max_length(512 * 10
     └─ Err/None → 错误处理或容错结束
 ```
 
-> **注意**：v1.1.3 代码中**不存在**独立的 SSE 空闲超时（如 25s）分支。长连接由 TCP keepalive（20s）与 Android SSE Helper 的本地代理重连机制共同维护。若连接意外断开，非 Android 桌面调试场景会进入 `Retrying` 状态进行最多 3 次退避重连；Android 生产场景则依赖 Helper 进程的本地缓存与 `resume_stream` 接续。
+> **注意**：代码中不存在独立的 SSE 空闲超时（如 25s）分支。长连接由 TCP keepalive（20s）与 Android SSE Helper 的本地代理重连机制共同维护。若连接意外断开，非 Android 桌面调试场景会进入 `Retrying` 状态进行最多 3 次退避重连；Android 生产场景由 `recover_active_generation` 在其内部执行 Helper 接续。
 
 **Aurora 驱动节流**（v1.1.0 更新）：
 - 每收到非空文本 chunk，追加到 pending_chunk 缓冲区
@@ -338,7 +346,7 @@ vcp_client.rs SSE 循环
 
 | 层级 | 机制 | 作用 |
 |------|------|------|
-| L1 | `interruptRequest` Command | 外部触发：从前端或内部服务调用，通过 `message_id` 查找并发送 `oneshot::Sender` |
+| L1 | `interruptRequest` Command | 外部触发：按 `message_id` 取得当前 attempt，只发送取消信号且保留 map owner 到任务真实退出 |
 | L2 | `tokio::select!` 第一层 | 在 HTTP 请求发送前捕获：未建立连接时直接短路返回 |
 | L3 | `tokio::select!` 第二层（深层轮询） | 在 SSE 读取循环内捕获：即使正在等待下一行数据，也能立即响应中止 |
 
@@ -347,8 +355,9 @@ vcp_client.rs SSE 循环
 - 当前实现将 `abort_rx` 与 `lines.next()` 放入同一 `select!` 分支，确保**即使在 I/O 等待间隙也能捕获信号**
 
 **并发安全**：
-- `ActiveRequestGuard::drop` 确保无论正常返回、错误返回还是 panic，都会清理 DashMap 条目
-- `active_requests_inner.remove()` 在中止路径中被显式调用，与 Guard 形成双重保险
+- `ActiveRequestLease::drop` 只清理 token 匹配的条目；不存在 key-only remove；
+- 重复生成/恢复会得到 `already_running` 或 duplicate rejection，不会替换现有取消句柄；
+- finalizer 成功提交前 lease 不释放，因此恢复扫描不会在网络结束与 DB commit 之间误启动第二个 attempt。
 
 ---
 
@@ -369,7 +378,7 @@ pub async fn sendToVCP<R: Runtime>(
 - `stream_channel` 为 `Channel<StreamEvent>`，支持服务端向前端推送事件流
 - 流式模式下，函数返回后仍会通过 `stream_channel` 持续发送事件，直到 `end` 或 `error`
 - 返回的 `Value` 在流式模式下包含 `{ fullContent, streamingStarted, finishReason }`
-- **v1.1.3 变更**：当 `perform_vcp_request` 返回 `Err` 且为流式模式时，`sendToVCP` 会主动 `DELETE FROM active_generations WHERE msg_id = ?`，防止异常路径下活跃生成注册表泄漏（`vcp_client.rs:191-202`）
+- 面向正式 Agent/Group 对话时，generation 的 pending/terminal 生命周期由 application service 的 `begin_stream_message` / `finalize_stream_message` 管理；`sendToVCP` 本身不再以 key-only 删除恢复记录。
 
 ### 4.2 interruptRequest
 
@@ -545,20 +554,21 @@ Helper 向主进程回传的事件帧：
 
 ### 8.4 活跃生成注册表联动
 
-`vcp_client.rs` 不直接写入 `active_generations` 表（由 `message_service::append_single_message` 在收到 `thinking` 事件后写入），但在异常路径负责清理或恢复：
+`active_generations` 与空 pending 消息由 `message_service::begin_stream_message` 在一个事务内 insert-only 创建；事务提交后才向前端发 `thinking`。普通 `append_single_message` 不再根据 assistant/finish_reason 推断生成状态。
 
 | 场景 | 行为 | 代码位置 |
 |------|------|---------|
-| `sendToVCP` 流式请求返回 `Err` | 删除 `active_generations` 中对应 `msg_id` | `vcp_client.rs:191-199` |
-| `recover_active_generation` | 依次查询 Helper 内存、本地 `sse_cache`、最终标记为 `failed` | `vcp_client.rs:1767-2006` |
-| `resume_stream` | 以 `is_resume=true` 进入 `handle_streaming_request`，从 `last_event_index` 续接 | `vcp_client.rs:2011-2109` |
+| 正常生成 | request lease 一直覆盖到 `finalize_stream_message` 原子提交 | Agent/Group application service |
+| `recover_active_generation` | 先 claim attempt，再依次检查 DB pending、`sse_cache`、Helper，并在同一 lease 内完成续接/终态提交 | `vcp_client.rs` |
+| terminal 已存在 | 返回已有 content/finishReason，迟到恢复不得反向改写 error | `recover_active_generation`, `mark_message_as_error` |
 
 ### 8.5 恢复流程
 
 ```text
 recover_active_generation(msg_id)
     │
-    ├─ 若 msg_id 仍在 ActiveRequests 中 → 返回 { status: "streaming" }
+    ├─ try_acquire attempt 失败 → 返回 { status: "already_running" }
+    ├─ DB 已无 pending active row → 幂等返回 terminal / not_found
     │
     ├─ 清理超过 24h 的本地 sse_cache 文件
     │
@@ -567,10 +577,10 @@ recover_active_generation(msg_id)
     │
     ├─ Android: 通过 TCP 向 Helper 查询会话状态
     │   ├─ completed → finalize → 返回 completed
-    │   ├─ streaming → 返回 streaming + content + lastEventIndex
+    │   ├─ streaming → 同一 command 内 resume_claimed_generation
     │   └─ not_found → 继续下一步
     │
-    └─ 标记消息为 error，删除 active_generations 记录
+    └─ 在 pending 仍存在时原子标记 error；若其他 owner 已提交则幂等 no-op
        └─ 返回 { status: "failed" }
 ```
 

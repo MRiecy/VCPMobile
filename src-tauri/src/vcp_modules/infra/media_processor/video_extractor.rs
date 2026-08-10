@@ -43,10 +43,7 @@ pub fn process_video_for_multimodal<R: Runtime>(
         }
 
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle
-            .as_ref()
-            .ok_or("VCP Mobile Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         #[derive(serde::Deserialize)]
         struct ProcessVideoResult {

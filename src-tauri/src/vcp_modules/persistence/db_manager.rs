@@ -1,5 +1,6 @@
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::fs;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub struct DbState {
@@ -38,6 +39,8 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
     let mut db_path = config_dir.clone();
     db_path.push("vcp_avatar.db");
 
+    validate_sqlite_file_set(&db_path)?;
+
     log::info!("[DBManager] Initializing SQLite at: {:?}", db_path);
 
     // 配置连接选项
@@ -66,18 +69,61 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
 
     let pool = match open_and_check_db(&connect_options, &db_path).await {
         Ok(p) => p,
-        Err(e) => {
+        Err(DbOpenFailure::Unavailable(e)) => {
+            return Err(format!("数据库暂不可用，已保留原文件且不会自动重建: {}", e));
+        }
+        Err(DbOpenFailure::ConfirmedCorruption { reason, pool }) => {
             log::warn!(
-                "[DBManager] Database open/integrity check failed: {}. Attempting self-healing...",
-                e
+                "[DBManager] Confirmed database corruption: {}. Preserving recovery unit...",
+                reason
             );
-            // 自愈处理：归档损坏的数据库并清空 WAL 文件
-            archive_corrupt_db(&db_path);
+
+            if let Some(pool) = pool {
+                pool.close().await;
+            }
+
+            let archive_path = archive_corrupt_db(&db_path).await?;
+            let recovery_message = format!(
+                "检测到数据库损坏，原 DB/WAL/SHM 已完整归档至 {}，正在创建干净数据库",
+                archive_path.display()
+            );
+            log::error!("[DBManager] {}", recovery_message);
+            let recovered_at = chrono::Utc::now().timestamp_millis();
+            let recovery_notice =
+                crate::vcp_modules::infra::lifecycle_state::DatabaseRecoveryNotice {
+                    message: recovery_message.clone(),
+                    archive_path: archive_path.to_string_lossy().into_owned(),
+                    recovered_at,
+                };
+            {
+                let lifecycle = app_handle
+                    .state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>(
+                );
+                *lifecycle.database_recovery.write().await = Some(recovery_notice.clone());
+            }
+            let _ = app_handle.emit(
+                "vcp-system-event",
+                serde_json::json!({
+                    "type": "vcp-database-recovery",
+                    "status": "warning",
+                    "message": recovery_message,
+                    "archivePath": recovery_notice.archive_path,
+                    "recoveredAt": recovered_at,
+                    "source": "Core"
+                }),
+            );
 
             // 重新尝试创建并建立干净连接
-            open_and_check_db(&connect_options, &db_path)
-                .await
-                .map_err(|err| format!("数据库损坏且重建失败: {}", err))?
+            match open_and_check_db(&connect_options, &db_path).await {
+                Ok(pool) => pool,
+                Err(err) => {
+                    return Err(format!(
+                        "数据库已归档至 {}，但干净数据库创建失败: {}",
+                        archive_path.display(),
+                        err.message()
+                    ));
+                }
+            }
         }
     };
 
@@ -148,7 +194,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         // 重新打开正常的 WAL 连接池并接管连接
         let pool = match open_and_check_db(&connect_options, &db_path).await {
             Ok(p) => p,
-            Err(err) => return Err(format!("重建连接池失败: {}", err)),
+            Err(err) => return Err(format!("重建连接池失败: {}", err.message())),
         };
 
         // 整理完成后重置回 Initializing 状态以继续引导
@@ -172,7 +218,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
 async fn open_and_check_db(
     connect_options: &sqlx::sqlite::SqliteConnectOptions,
     db_path: &std::path::Path,
-) -> Result<Pool<Sqlite>, String> {
+) -> Result<Pool<Sqlite>, DbOpenFailure> {
     let mut retry_count = 0;
     let pool = loop {
         match SqlitePoolOptions::new()
@@ -182,12 +228,18 @@ async fn open_and_check_db(
         {
             Ok(p) => break p,
             Err(e) => {
+                if is_confirmed_sqlite_corruption(&e) {
+                    return Err(DbOpenFailure::ConfirmedCorruption {
+                        reason: e.to_string(),
+                        pool: None,
+                    });
+                }
                 retry_count += 1;
                 if retry_count >= 3 {
-                    return Err(format!(
+                    return Err(DbOpenFailure::Unavailable(format!(
                         "数据库连接重试失败 (已重试 {} 次): {}",
                         retry_count, e
-                    ));
+                    )));
                 }
                 log::warn!(
                     "[DBManager] Connection failed: {}. Retrying in {}ms... (Attempt {})",
@@ -200,48 +252,195 @@ async fn open_and_check_db(
         }
     };
 
-    // 如果数据库文件先前已存在，则在冷启动时运行轻量化快速自检
-    if db_path.exists() && !check_integrity(&pool).await {
-        return Err("PRAGMA quick_check(1) failed".to_string());
+    // 冷启动时运行轻量化快速自检；SQL 执行错误与明确损坏必须分流。
+    if db_path.exists() {
+        match check_integrity(&pool).await {
+            Ok(()) => {}
+            Err(IntegrityFailure::Confirmed(reason)) => {
+                return Err(DbOpenFailure::ConfirmedCorruption {
+                    reason,
+                    pool: Some(pool),
+                });
+            }
+            Err(IntegrityFailure::Unavailable(reason)) => {
+                pool.close().await;
+                return Err(DbOpenFailure::Unavailable(reason));
+            }
+        }
     }
 
     Ok(pool)
 }
 
-async fn check_integrity(pool: &Pool<Sqlite>) -> bool {
-    let check: Result<String, sqlx::Error> = sqlx::query_scalar("PRAGMA quick_check(1)")
-        .fetch_one(pool)
-        .await;
-    match check {
-        Ok(result) => result.to_lowercase() == "ok",
-        Err(e) => {
-            log::error!("[DBManager] Integrity quick check failed: {}", e);
-            false
+enum DbOpenFailure {
+    Unavailable(String),
+    ConfirmedCorruption {
+        reason: String,
+        pool: Option<Pool<Sqlite>>,
+    },
+}
+
+impl DbOpenFailure {
+    fn message(&self) -> &str {
+        match self {
+            Self::Unavailable(message) => message,
+            Self::ConfirmedCorruption { reason, .. } => reason,
         }
     }
 }
 
-fn archive_corrupt_db(db_path: &std::path::Path) {
-    let now = chrono::Utc::now().timestamp_millis();
-    let corrupt_path = db_path.with_extension(format!("db.corrupt.{}", now));
-    log::warn!(
-        "[DBManager] Archiving corrupt database from {:?} to {:?}",
-        db_path,
-        corrupt_path
-    );
-    if let Err(e) = fs::rename(db_path, &corrupt_path) {
-        log::error!("[DBManager] Failed to rename corrupt database file: {}", e);
+enum IntegrityFailure {
+    Unavailable(String),
+    Confirmed(String),
+}
+
+async fn check_integrity(pool: &Pool<Sqlite>) -> Result<(), IntegrityFailure> {
+    let check: Result<String, sqlx::Error> = sqlx::query_scalar("PRAGMA quick_check(1)")
+        .fetch_one(pool)
+        .await;
+    match check {
+        Ok(result) if result.trim().eq_ignore_ascii_case("ok") => Ok(()),
+        Ok(result) => Err(IntegrityFailure::Confirmed(format!(
+            "PRAGMA quick_check(1) reported corruption: {}",
+            result
+        ))),
+        Err(e) => {
+            log::error!("[DBManager] Integrity quick check failed: {}", e);
+            if is_confirmed_sqlite_corruption(&e) {
+                Err(IntegrityFailure::Confirmed(e.to_string()))
+            } else {
+                Err(IntegrityFailure::Unavailable(format!(
+                    "PRAGMA quick_check(1) could not run: {}",
+                    e
+                )))
+            }
+        }
+    }
+}
+
+fn is_confirmed_sqlite_corruption(error: &sqlx::Error) -> bool {
+    let Some(database_error) = error.as_database_error() else {
+        return false;
+    };
+    let Some(code) = database_error
+        .code()
+        .and_then(|code| code.parse::<i32>().ok())
+    else {
+        return false;
+    };
+
+    // SQLite extended result codes keep the primary code in the low byte.
+    // SQLITE_CORRUPT=11 and SQLITE_NOTADB=26 are the only open/check errors
+    // that authorize destructive-path recovery. BUSY/LOCKED/IOERR remain
+    // unavailable errors and must never cause a fresh database to be created.
+    is_confirmed_sqlite_corruption_code(code)
+}
+
+fn is_confirmed_sqlite_corruption_code(code: i32) -> bool {
+    matches!(code & 0xff, 11 | 26)
+}
+
+fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = db_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+fn validate_sqlite_file_set(db_path: &Path) -> Result<(), String> {
+    if db_path.exists() {
+        return Ok(());
     }
 
-    // 物理清除关联的 WAL / SHM 临时缓存，防止损坏指针残留
-    let wal_path = db_path.with_extension("db-wal");
-    if wal_path.exists() {
-        let _ = fs::remove_file(&wal_path);
+    let wal_path = sqlite_sidecar_path(db_path, "-wal");
+    let shm_path = sqlite_sidecar_path(db_path, "-shm");
+    if wal_path.exists() || shm_path.exists() {
+        return Err(format!(
+            "数据库主文件缺失，但检测到未合并的 WAL/SHM；为避免覆盖已提交数据，已停止自动建库。请保全并人工恢复: {}, {}, {}",
+            db_path.display(),
+            wal_path.display(),
+            shm_path.display()
+        ));
     }
-    let shm_path = db_path.with_extension("db-shm");
-    if shm_path.exists() {
-        let _ = fs::remove_file(&shm_path);
+
+    Ok(())
+}
+
+async fn archive_corrupt_db(db_path: &Path) -> Result<PathBuf, String> {
+    if !db_path.exists() {
+        return Err(format!(
+            "已确认数据库损坏，但主数据库文件不存在: {}",
+            db_path.display()
+        ));
     }
+
+    let parent = db_path
+        .parent()
+        .ok_or_else(|| format!("数据库路径没有父目录: {}", db_path.display()))?;
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("数据库文件名无效: {}", db_path.display()))?;
+    let archive_path = parent.join(format!(
+        "{}.recovery.{}-{}",
+        file_name,
+        chrono::Utc::now().timestamp_millis(),
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    log::warn!(
+        "[DBManager] Archiving SQLite recovery unit from {:?} to {:?}",
+        db_path,
+        archive_path
+    );
+
+    tokio::fs::create_dir(&archive_path)
+        .await
+        .map_err(|e| format!("创建数据库恢复目录失败: {}", e))?;
+
+    let wal_path = sqlite_sidecar_path(db_path, "-wal");
+    let shm_path = sqlite_sidecar_path(db_path, "-shm");
+    let sources = [db_path.to_path_buf(), wal_path, shm_path];
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    for source in sources.into_iter().filter(|path| path.exists()) {
+        let destination = archive_path.join(
+            source
+                .file_name()
+                .ok_or_else(|| format!("恢复单元文件名无效: {}", source.display()))?,
+        );
+        if let Err(error) = tokio::fs::rename(&source, &destination).await {
+            let mut rollback_errors = Vec::new();
+            for (original, archived) in moved.iter().rev() {
+                if let Err(rollback_error) = tokio::fs::rename(archived, original).await {
+                    rollback_errors.push(format!(
+                        "{} -> {}: {}",
+                        archived.display(),
+                        original.display(),
+                        rollback_error
+                    ));
+                }
+            }
+            let rollback_detail = if rollback_errors.is_empty() {
+                "已回滚此前移动".to_string()
+            } else {
+                format!("回滚失败: {}", rollback_errors.join("; "))
+            };
+            return Err(format!(
+                "归档恢复单元失败 {} -> {}: {}; {}",
+                source.display(),
+                destination.display(),
+                error,
+                rollback_detail
+            ));
+        }
+        moved.push((source, destination));
+    }
+
+    if moved.is_empty() {
+        return Err(format!("数据库恢复单元为空: {}", db_path.display()));
+    }
+
+    Ok(archive_path)
 }
 
 async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), String> {
@@ -739,5 +938,105 @@ mod tests {
         assert_eq!(preprocess_fts_text("AI智能体"), "AI 智 能 体");
         assert_eq!(preprocess_fts_text("Hello World"), "Hello World");
         assert_eq!(preprocess_fts_text(""), "");
+    }
+
+    #[test]
+    fn only_corrupt_and_notadb_codes_authorize_recovery() {
+        assert!(is_confirmed_sqlite_corruption_code(11));
+        assert!(is_confirmed_sqlite_corruption_code(26));
+        assert!(is_confirmed_sqlite_corruption_code(11 | (1 << 8)));
+        assert!(!is_confirmed_sqlite_corruption_code(5)); // SQLITE_BUSY
+        assert!(!is_confirmed_sqlite_corruption_code(6)); // SQLITE_LOCKED
+        assert!(!is_confirmed_sqlite_corruption_code(10)); // SQLITE_IOERR
+    }
+
+    #[tokio::test]
+    async fn archive_preserves_database_wal_and_shm_as_one_unit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("vcp_avatar.db");
+        let wal_path = sqlite_sidecar_path(&db_path, "-wal");
+        let shm_path = sqlite_sidecar_path(&db_path, "-shm");
+
+        tokio::fs::write(&db_path, b"main-db")
+            .await
+            .expect("write database fixture");
+        tokio::fs::write(&wal_path, b"committed-wal")
+            .await
+            .expect("write wal fixture");
+        tokio::fs::write(&shm_path, b"shared-memory")
+            .await
+            .expect("write shm fixture");
+
+        let archive = archive_corrupt_db(&db_path).await.expect("archive unit");
+
+        assert!(!db_path.exists());
+        assert!(!wal_path.exists());
+        assert!(!shm_path.exists());
+        assert_eq!(
+            tokio::fs::read(archive.join("vcp_avatar.db"))
+                .await
+                .expect("read archived database"),
+            b"main-db"
+        );
+        assert_eq!(
+            tokio::fs::read(archive.join("vcp_avatar.db-wal"))
+                .await
+                .expect("read archived wal"),
+            b"committed-wal"
+        );
+        assert_eq!(
+            tokio::fs::read(archive.join("vcp_avatar.db-shm"))
+                .await
+                .expect("read archived shm"),
+            b"shared-memory"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_main_database_never_discards_sidecars() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("vcp_avatar.db");
+        let wal_path = sqlite_sidecar_path(&db_path, "-wal");
+        tokio::fs::write(&wal_path, b"orphaned-committed-wal")
+            .await
+            .expect("write wal fixture");
+
+        let error = archive_corrupt_db(&db_path)
+            .await
+            .expect_err("missing main database must fail closed");
+
+        assert!(error.contains("主数据库文件不存在"));
+        assert_eq!(
+            tokio::fs::read(wal_path).await.expect("wal remains"),
+            b"orphaned-committed-wal"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphaned_sidecars_are_rejected_before_sqlite_can_create_a_new_main_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db_path = temp.path().join("vcp_avatar.db");
+        let wal_path = sqlite_sidecar_path(&db_path, "-wal");
+        let shm_path = sqlite_sidecar_path(&db_path, "-shm");
+        tokio::fs::write(&wal_path, b"committed-wal")
+            .await
+            .expect("write wal fixture");
+        tokio::fs::write(&shm_path, b"shared-memory")
+            .await
+            .expect("write shm fixture");
+
+        let error = validate_sqlite_file_set(&db_path)
+            .expect_err("orphaned sidecars must stop initialization before SQLite open");
+
+        assert!(error.contains("主文件缺失"));
+        assert!(!db_path.exists());
+        assert_eq!(
+            tokio::fs::read(&wal_path).await.expect("wal remains"),
+            b"committed-wal"
+        );
+        assert_eq!(
+            tokio::fs::read(&shm_path).await.expect("shm remains"),
+            b"shared-memory"
+        );
     }
 }

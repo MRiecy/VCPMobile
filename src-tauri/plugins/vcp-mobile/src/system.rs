@@ -21,8 +21,7 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let status = plugin_handle
             .run_mobile_plugin::<PermissionStatus>("checkAllPermissions", serde_json::json!({}))
@@ -52,8 +51,7 @@ pub fn request_android_permission<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -75,8 +73,7 @@ pub fn move_task_to_back<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("moveTaskToBack", serde_json::json!({}))
@@ -101,8 +98,7 @@ pub fn check_notification_listener_permission<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
             .run_mobile_plugin::<ListenerPermissionResponse>(
@@ -126,8 +122,7 @@ pub fn request_notification_listener_permission<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -148,8 +143,7 @@ pub fn request_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<bo
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -176,8 +170,7 @@ pub fn request_power_management_permission<R: Runtime>(app: AppHandle<R>) -> Res
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -204,8 +197,7 @@ pub fn check_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<Stri
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -242,8 +234,7 @@ pub fn get_free_disk_space<R: Runtime>(app: AppHandle<R>) -> Result<DiskSpaceInf
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let info = plugin_handle
             .run_mobile_plugin::<DiskSpaceInfo>("getFreeDiskSpace", serde_json::json!({}))
@@ -281,8 +272,7 @@ pub fn pick_file<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let file_info = plugin_handle
             .run_mobile_plugin::<PickedFileInfo>(
@@ -316,8 +306,7 @@ pub fn get_battery_status<R: Runtime>(app: AppHandle<R>) -> Result<BatteryStatus
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let status = plugin_handle
             .run_mobile_plugin::<BatteryStatus>("getBatteryStatus", serde_json::json!({}))
@@ -351,8 +340,7 @@ pub fn get_network_status<R: Runtime>(app: AppHandle<R>) -> Result<NetworkStatus
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let status = plugin_handle
             .run_mobile_plugin::<NetworkStatus>("getNetworkStatus", serde_json::json!({}))
@@ -377,8 +365,7 @@ pub fn open_file_native<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("openFile", serde_json::json!({ "path": path }))
@@ -409,8 +396,7 @@ pub fn capture_window_snapshot<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         let max_width = max_width.unwrap_or(200).clamp(160, 420);
         let quality = quality.unwrap_or(64).clamp(45, 85);
 
@@ -449,8 +435,7 @@ pub fn save_image_to_gallery<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let result = plugin_handle
             .run_mobile_plugin::<GallerySaveResult>(
@@ -478,8 +463,7 @@ pub fn save_image_from_path<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let result = plugin_handle
             .run_mobile_plugin::<GallerySaveResult>(
@@ -550,8 +534,7 @@ pub fn start_download_notification<R: Runtime>(app: AppHandle<R>) -> Result<(), 
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -576,8 +559,7 @@ pub fn update_download_notification<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -600,8 +582,7 @@ pub fn cancel_download_notification<R: Runtime>(app: AppHandle<R>) -> Result<(),
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -622,8 +603,7 @@ pub fn request_overlay_permission<R: Runtime>(app: AppHandle<R>) -> Result<(), S
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -655,8 +635,7 @@ pub fn register_shared_files<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let mut results = Vec::new();
         for file in files {
@@ -687,8 +666,7 @@ pub fn toggle_floating_ball<R: Runtime>(app: AppHandle<R>, show: bool) -> Result
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         #[derive(Deserialize)]
         struct ToggleResult {
@@ -716,8 +694,7 @@ pub fn start_sensor_collection<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("startSensorCollection", serde_json::json!({}))
@@ -735,8 +712,7 @@ pub fn stop_sensor_collection<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("stopSensorCollection", serde_json::json!({}))
@@ -757,8 +733,7 @@ pub fn get_sensor_data<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let data = plugin_handle
             .run_mobile_plugin::<serde_json::Value>(
@@ -794,8 +769,7 @@ pub fn get_cpu_thermal_status<R: Runtime>(app: AppHandle<R>) -> Result<String, S
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         #[derive(Deserialize)]
         struct ThermalResponse {
@@ -825,8 +799,7 @@ pub fn get_gpu_status<R: Runtime>(app: AppHandle<R>) -> Result<GpuStatus, String
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let status = plugin_handle
             .run_mobile_plugin::<GpuStatus>("getGpuStatus", serde_json::json!({}))
@@ -854,8 +827,7 @@ pub fn check_root_access<R: Runtime>(app: AppHandle<R>) -> Result<RootAccessStat
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let status = plugin_handle
             .run_mobile_plugin::<RootAccessStatus>("checkRootAccess", serde_json::json!({}))
@@ -884,8 +856,7 @@ pub fn run_root_command<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
             .run_mobile_plugin::<RootCommandResult>(
@@ -918,8 +889,7 @@ pub fn write_clipboard_native<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         plugin_handle
             .run_mobile_plugin::<()>("writeClipboard", serde_json::json!({ "content": content }))
             .map_err(|e| format!("JNI writeClipboard failed: {}", e))?;
@@ -936,8 +906,7 @@ pub fn read_clipboard_native<R: Runtime>(app: AppHandle<R>) -> Result<String, St
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         let res = plugin_handle
             .run_mobile_plugin::<ClipboardReadResult>("readClipboard", serde_json::json!({}))
             .map_err(|e| format!("JNI readClipboard failed: {}", e))?;
@@ -958,8 +927,7 @@ pub fn send_notification_native<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
         plugin_handle
             .run_mobile_plugin::<()>(
                 "sendLocalNotification",
@@ -991,8 +959,7 @@ pub fn launch_root_manager<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
             .run_mobile_plugin::<LaunchRootManagerResult>(
@@ -1018,8 +985,7 @@ pub fn acquire_wake_lock<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("acquireWakeLock", serde_json::json!({}))
@@ -1037,8 +1003,7 @@ pub fn release_wake_lock<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("releaseWakeLock", serde_json::json!({}))
@@ -1056,8 +1021,7 @@ pub fn start_network_monitoring<R: Runtime>(app: AppHandle<R>) -> Result<(), Str
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
             .run_mobile_plugin::<serde_json::Value>("startNetworkMonitoring", serde_json::json!({}))
@@ -1077,8 +1041,7 @@ pub fn get_pending_notification<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
-        let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-        let plugin_handle = handle.as_ref().ok_or("Plugin handle not initialized")?;
+        let plugin_handle = state.mobile_plugin_handle()?;
 
         let notification_data = plugin_handle
             .run_mobile_plugin::<serde_json::Value>(

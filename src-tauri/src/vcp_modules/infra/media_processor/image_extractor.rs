@@ -19,10 +19,7 @@ pub fn convert_local_image_for_multimodal<R: Runtime>(
 
         let state = app.state::<VcpMobileState<R>>();
         match (|| -> Result<String, String> {
-            let handle = state.plugin_handle.lock().map_err(|e| e.to_string())?;
-            let plugin_handle = handle
-                .as_ref()
-                .ok_or("VCP Mobile Plugin handle not initialized")?;
+            let plugin_handle = state.mobile_plugin_handle()?;
 
             #[derive(serde::Deserialize)]
             struct ProcessImageResult {
