@@ -45,6 +45,7 @@ import ToolBlock from "./blocks/ToolBlock.vue";
 import ThoughtBlock from "./blocks/ThoughtBlock.vue";
 import HtmlPreviewBlock from "./blocks/HtmlPreviewBlock.vue";
 import ToolSummaryBlock from "./blocks/ToolSummaryBlock.vue";
+import DiaryBlock from "./blocks/DiaryBlock.vue";
 import MermaidFullScreenViewer from "./blocks/MermaidFullScreenViewer.vue";
 
 const props = defineProps<{
@@ -78,7 +79,7 @@ const useAstForCurrentTail = computed(() => {
   // tailBlock 会是一个 plain 类型但 nodes 为空的纯文本块。此时必须走原始 tailContent 路径，
   // 否则 AST 沙箱会因无快照/无指令而留白。判定依据：有 plain tailBlock 却无 nodes。
   const tb = props.message.tailBlock;
-  if (tb && isPlainBlock(tb.type) && (!tb.nodes || tb.nodes.length === 0)) {
+  if (tb && isInlineHtmlBlock(tb.type) && (!tb.nodes || tb.nodes.length === 0)) {
     return false;
   }
   return (
@@ -160,7 +161,7 @@ function isBrkNode(node: any): boolean {
 }
 
 function isBrkBlock(block: ContentBlock): boolean {
-  if (!isPlainBlock(block.type)) return false;
+  if (!isInlineHtmlBlock(block.type)) return false;
   
   if (block.content) {
     const trimmed = block.content.trim().replace(/\s+/g, "");
@@ -260,7 +261,7 @@ const messageBubbles = computed(() => {
 
   if (props.message.blocks && props.message.blocks.length > 0) {
     for (const block of props.message.blocks) {
-      if (!isPlainBlock(block.type) || isUserMsg) {
+      if (!isInlineHtmlBlock(block.type) || isUserMsg) {
         currentBlocks.push(block);
         continue;
       }
@@ -346,10 +347,9 @@ const messageContentRef = ref<HTMLElement | null>(null);
 useMessageEvents(messageContentRef);
 
 // === Block Rendering Helper ===
-function isPlainBlock(type: string): boolean {
+function isInlineHtmlBlock(type: string): boolean {
   return [
     "markdown",
-    "diary",
     "role-divider",
     "button-click",
   ].includes(type);
@@ -378,27 +378,6 @@ function renderBlockHtml(block: ContentBlock): string {
         return `<div class="vcp-markdown-block">${renderMarkdownNodes(block.nodes, props.message.id, block.hash)}</div>`;
       }
       return `<div class="vcp-markdown-block"><p>${escapeHtml(block.content || "")}</p></div>`;
-    
-    case "diary": {
-      const diaryContent = (block.nodes && block.nodes.length > 0)
-        ? renderMarkdownNodes(block.nodes, props.message.id, block.hash)
-        : escapeHtml(block.content || "");
-      return `
-        <div class="vcp-diary-block">
-          <div class="vcp-diary-header">
-            <span class="vcp-diary-title">Maid's Diary</span>
-            ${block.date ? `<span class="vcp-diary-date">${escapeHtml(block.date)}</span>` : ''}
-          </div>
-          ${block.maid ? `
-            <div class="vcp-diary-maid-info">
-              <span class="diary-maid-label">Maid:</span>
-              <span class="vcp-diary-maid-name">${escapeHtml(block.maid)}</span>
-            </div>
-          ` : ''}
-          <div class="vcp-diary-content vcp-markdown-block">${diaryContent}</div>
-        </div>
-      `;
-    }
     
     case "role-divider":
       const role = block.role || "unknown";
@@ -778,7 +757,7 @@ watch(
   () => {
     const newTailBlock = props.message.tailBlock;
     if (useAstForCurrentTail.value) return; // 🆕 启用 AST Diff 且有节点时跳过 Morphdom
-    if (!newTailBlock || !isPlainBlock(newTailBlock.type)) return;
+    if (!newTailBlock || !isInlineHtmlBlock(newTailBlock.type)) return;
     nextTick(() => {
       if (!tailRootRef.value) return;
       const html = renderBlockHtml(newTailBlock);
@@ -976,8 +955,14 @@ onUnmounted(() => {
               <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index)">
                 <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
                 <div v-memo="[getBlockKey(block, index)]">
+                  <DiaryBlock
+                    v-if="block.type === 'diary' || block.type === 'diary-update'"
+                    :block="block"
+                    :message-id="message.id"
+                  />
+
                   <div
-                    v-if="isPlainBlock(block.type)"
+                    v-else-if="isInlineHtmlBlock(block.type)"
                     v-html="renderBlockHtml(block)"
                   />
 
@@ -1020,19 +1005,19 @@ onUnmounted(() => {
 
             <!-- 尾部流式推测渲染（只对最后一个活跃气泡生效，且正在流式、有 tailBlock 时渲染，完美拼合在气泡正文末尾） -->
             <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
-              <div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)">
+              <div v-if="useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)">
                 <div
                   :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
                   class="vcp-markdown-block vcp-ast-sandbox"
                 />
               </div>
               <div
-                v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
+                v-else-if="!useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)"
                 :ref="(el) => { tailRootRef = el as HTMLElement | null }"
                 class="vcp-markdown-block"
               />
             </div>
-            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || !isPlainBlock(message.tailBlock.type))" class="opacity-70 italic animate-pulse">
+            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || !isInlineHtmlBlock(message.tailBlock.type))" class="opacity-70 italic animate-pulse">
               {{ message.tailContent }}
             </div>
           </div>

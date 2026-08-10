@@ -323,7 +323,7 @@ html.dark .vcp-markdown-block code:not(pre code) {
   content: none !important;
 }
 
-/* --- Maid Diary Block --- */
+/* --- DailyNote Blocks --- */
 .vcp-diary-block {
     background: #fdfaf6 !important;
     border: 1px solid #eaddd0;
@@ -362,6 +362,8 @@ html.dark .vcp-markdown-block code:not(pre code) {
     font-weight: bold;
     font-size: 1.1em;
     color: #6d4c41;
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .vcp-diary-date {
@@ -374,6 +376,15 @@ html.dark .vcp-markdown-block code:not(pre code) {
     margin-bottom: 12px;
     font-size: 0.9em;
     color: #8d6e63;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px 5px;
+}
+
+.vcp-diary-agent-label,
+.vcp-diary-folder-label {
+    font-weight: 600;
 }
 
 .vcp-diary-maid-name {
@@ -382,6 +393,153 @@ html.dark .vcp-markdown-block code:not(pre code) {
     background: rgba(161, 136, 127, 0.08);
     padding: 1px 5px;
     border-radius: 4px;
+}
+
+.vcp-diary-meta-separator {
+    opacity: 0.55;
+}
+
+.vcp-diary-folder-name {
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.9em;
+}
+
+.vcp-diary-block.is-valet {
+    background: #f5f8fb !important;
+    border-color: #cfdae5;
+    color: #334a5e !important;
+}
+
+.vcp-diary-block.is-valet .vcp-diary-header {
+    border-bottom-color: #cfdae5;
+}
+
+.vcp-diary-block.is-valet .vcp-diary-title {
+    color: #365d7a;
+}
+
+.vcp-diary-block.is-valet .vcp-diary-date,
+.vcp-diary-block.is-valet .vcp-diary-maid-info,
+.vcp-diary-block.is-valet .vcp-diary-maid-name {
+    color: #58758d;
+}
+
+.vcp-diary-block.is-valet .vcp-diary-maid-name {
+    background: rgba(77, 119, 153, 0.08);
+}
+
+.vcp-diary-update-block {
+    margin: 10px 0 12px;
+    padding: 11px 12px 12px;
+    border: 1px solid #e1d7cd;
+    border-radius: 8px;
+    background: #fdfaf6;
+    color: #5d4037;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    overflow: hidden;
+}
+
+.vcp-diary-update-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding-bottom: 7px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #ded3ca;
+}
+
+.vcp-diary-update-title {
+    flex: 0 0 auto;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.vcp-diary-update-meta {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 2px 5px;
+    color: #8d6e63;
+    font-size: 0.75rem;
+}
+
+.vcp-diary-update-body {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.vcp-diary-update-side {
+    position: relative;
+    min-width: 0;
+    padding: 8px 9px 8px 31px;
+    border-left: 2px solid #b8a69a;
+    background: rgba(93, 64, 55, 0.035);
+}
+
+.vcp-diary-update-after {
+    border-left-color: #4f7898;
+    background: rgba(54, 93, 122, 0.05);
+}
+
+.vcp-diary-update-label {
+    position: absolute;
+    top: 8px;
+    left: 9px;
+    color: #8d6e63;
+    font: 700 0.7rem/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.vcp-diary-update-after .vcp-diary-update-label {
+    color: #365d7a;
+}
+
+.vcp-diary-update-arrow {
+    align-self: center;
+    height: 14px;
+    color: #8d6e63;
+    font-size: 0.85rem;
+    line-height: 14px;
+    opacity: 0.7;
+    transform: rotate(90deg);
+}
+
+.vcp-diary-update-content {
+    min-width: 0;
+    font-size: 0.825rem;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.vcp-diary-update-content > :first-child {
+    margin-top: 0;
+}
+
+.vcp-diary-update-content > :last-child {
+    margin-bottom: 0;
+}
+
+.vcp-diary-update-content em {
+    opacity: 0.65;
+}
+
+.vcp-diary-update-block.is-valet {
+    background: #f5f8fb;
+    border-color: #cfdae5;
+    color: #334a5e;
+}
+
+.vcp-diary-update-block.is-valet .vcp-diary-update-header {
+    border-bottom-color: #cfdae5;
+}
+
+.vcp-diary-update-block.is-valet .vcp-diary-update-meta {
+    color: #58758d;
 }
 
 /* Dark Theme Overrides for Diary */
@@ -403,6 +561,75 @@ html.dark .vcp-diary-title {
 html.dark .vcp-diary-maid-name {
     color: #ffcc80;
     background: rgba(255, 183, 77, 0.1);
+}
+
+html.dark .vcp-diary-block.is-valet {
+    background: #202b36 !important;
+    border-color: #3f566a;
+    color: #d4e0e8 !important;
+}
+
+html.dark .vcp-diary-block.is-valet .vcp-diary-header {
+    border-bottom-color: #3f566a;
+}
+
+html.dark .vcp-diary-block.is-valet .vcp-diary-title,
+html.dark .vcp-diary-block.is-valet .vcp-diary-maid-name {
+    color: #9cc8e8;
+}
+
+html.dark .vcp-diary-block.is-valet .vcp-diary-date,
+html.dark .vcp-diary-block.is-valet .vcp-diary-maid-info {
+    color: #aac0d0;
+}
+
+html.dark .vcp-diary-block.is-valet .vcp-diary-maid-name {
+    background: rgba(120, 177, 216, 0.1);
+}
+
+html.dark .vcp-diary-update-block {
+    background: #2c2a3a;
+    border-color: #4a485f;
+    color: #d8d2c9;
+    box-shadow: 0 2px 7px rgba(0, 0, 0, 0.22);
+}
+
+html.dark .vcp-diary-update-header {
+    border-bottom-color: #4a485f;
+}
+
+html.dark .vcp-diary-update-meta,
+html.dark .vcp-diary-update-label,
+html.dark .vcp-diary-update-arrow {
+    color: #c6ad9e;
+}
+
+html.dark .vcp-diary-update-side {
+    background: rgba(255, 255, 255, 0.025);
+    border-left-color: #75665e;
+}
+
+html.dark .vcp-diary-update-after {
+    background: rgba(120, 177, 216, 0.06);
+    border-left-color: #6b9bbb;
+}
+
+html.dark .vcp-diary-update-after .vcp-diary-update-label {
+    color: #9cc8e8;
+}
+
+html.dark .vcp-diary-update-block.is-valet {
+    background: #202b36;
+    border-color: #3f566a;
+    color: #d4e0e8;
+}
+
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-header {
+    border-bottom-color: #3f566a;
+}
+
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-meta {
+    color: #aac0d0;
 }
 
 /* --- Diary content overrides (placed after .vcp-markdown-block to win cascade) --- */
@@ -949,7 +1176,6 @@ html:not(.dark) .vcp-tool-call-summary-chip.status-unknown {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 
 
 

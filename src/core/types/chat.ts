@@ -50,6 +50,7 @@ export interface ContentBlock {
   | "tool-use"
   | "tool-result"
   | "diary"
+  | "diary-update"
   | "thought"
   | "button-click"
   | "html-preview"
@@ -65,7 +66,14 @@ export interface ContentBlock {
   details?: Array<{ key: string; value: string }>;
   footer?: string;
   maid?: string;
+  valet?: string;
   date?: string;
+  file_name?: string;
+  folder?: string;
+  target?: string;
+  replace?: string;
+  target_nodes?: MarkdownNode[];
+  replace_nodes?: MarkdownNode[];
   theme?: string;
   role?: string;
   is_end?: boolean;
@@ -179,7 +187,7 @@ export interface TopicFingerprint {
  * 与 ContentBlock 类似但精简，用于流式期间的增量渲染
  */
 export interface StreamBlock {
-  type: "markdown" | "thought" | "tool-use" | "tool-result" | "diary" | "html-preview" | "role-divider" | "style" | "button-click";
+  type: "markdown" | "thought" | "tool-use" | "tool-result" | "diary" | "diary-update" | "html-preview" | "role-divider" | "style" | "button-click";
   content?: string;
   nodes?: MarkdownNode[];
   theme?: string;
@@ -189,7 +197,14 @@ export interface StreamBlock {
   details?: Array<{ key: string; value: string }>;
   footer?: string;
   maid?: string;
+  valet?: string;
   date?: string;
+  file_name?: string;
+  folder?: string;
+  target?: string;
+  replace?: string;
+  target_nodes?: MarkdownNode[];
+  replace_nodes?: MarkdownNode[];
   role?: string;
   is_end?: boolean;
   highlighted_content?: string;

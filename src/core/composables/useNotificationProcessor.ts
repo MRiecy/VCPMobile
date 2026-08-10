@@ -1,5 +1,27 @@
 import { VcpNotification, useNotificationStore, VcpStatus } from '../stores/notification';
 
+function parseObjectLike(value: unknown): Record<string, any> | null {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    return value as Record<string, any>;
+  }
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, any>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readFriendlyMessage(value: unknown): string | null {
+  const parsed = parseObjectLike(value);
+  return typeof parsed?.message === 'string' && parsed.message.trim()
+    ? parsed.message
+    : null;
+}
+
 /**
  * 过滤结果接口
  * action: 'show' 展示, 'hide' 拦截 (不推入 notificationStore)
@@ -153,14 +175,17 @@ export function useNotificationProcessor() {
       }
 
       if (vcpData.tool_name && vcpData.status) {
+        const isDailyNote = String(vcpData.tool_name).toLowerCase() === 'dailynote';
         type = vcpData.status === 'error' 
           ? 'error' 
-          : (vcpData.tool_name === 'DailyNote' ? 'success' : 'tool');
+          : (isDailyNote ? 'success' : 'tool');
         
         const statusText = vcpData.status === 'success' ? '执行成功' : vcpData.status === 'error' ? '执行失败' : vcpData.status;
         title = `${vcpData.tool_name} ${statusText}`;
 
-        let rawContent = String(vcpData.content || '');
+        let rawContent = typeof vcpData.content === 'string'
+          ? vcpData.content
+          : (vcpData.content ? JSON.stringify(vcpData.content) : '');
         message = rawContent;
         
         // 智能降维渲染：如果文本内容以 Emoji ✅/❌ 开头，或者是不含有换行与大括号的单行日常提示
@@ -205,14 +230,28 @@ export function useNotificationProcessor() {
           }
 
           if (typeof inner.original_plugin_output !== 'undefined') {
-            if (typeof inner.original_plugin_output === 'object' && inner.original_plugin_output !== null) {
+            const friendlyMessage = readFriendlyMessage(inner.original_plugin_output);
+            if (friendlyMessage) {
+              const statusIcon = vcpData.status === 'success' ? '✅' : '❌';
+              message = isDailyNote ? `${statusIcon} ${friendlyMessage}` : friendlyMessage;
+              isPreformatted = false;
+            } else if (typeof inner.original_plugin_output === 'object' && inner.original_plugin_output !== null) {
               message = JSON.stringify(inner.original_plugin_output, null, 2);
+              isPreformatted = true;
             } else {
               message = String(inner.original_plugin_output);
               isPreformatted = false;
             }
-          } else if (vcpData.tool_name === 'DailyNote' && vcpData.status === 'success') {
-            message = "✅ 日记内容已成功记录到本地知识库。";
+          } else if (isDailyNote) {
+            const statusIcon = vcpData.status === 'success' ? '✅' : '❌';
+            const directMessage = typeof inner.message === 'string' && inner.message.trim()
+              ? inner.message
+              : null;
+            message = directMessage
+              ? `${statusIcon} ${directMessage}`
+              : (vcpData.status === 'success'
+                ? '✅ 日记内容已成功记录到本地知识库。'
+                : '❌ 日记处理失败。');
             isPreformatted = false;
           }
         } catch (e) {
