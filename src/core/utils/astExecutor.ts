@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import morphdom from "morphdom";
 import type { MarkdownNode, InlineNode, AstMutation } from "../types/chat";
+import { filterTrustedRichHtml, filterTrustedRichHtmlUrl } from "./astRenderer";
 
 function isAstDebugEnabled(): boolean {
   return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
@@ -336,12 +337,13 @@ function createDomFromNode(
       // 直接赋给 innerHTML 会导致部分 WebView 解析器因无法定位标签边界而直接丢弃并生成空 DOM。
       // 我们通过外层临时 <div> 进行强行诱导闭合补全，确保浏览器能够正确还原并渲染中间状态节点。
       const temp = document.createElement("div");
-      temp.innerHTML = `<div>${repairHtmlFragment(node.content || "")}</div>`;
+      const guardedContent = filterTrustedRichHtml(node.content || "");
+      temp.innerHTML = `<div>${repairHtmlFragment(guardedContent)}</div>`;
       const parsed = temp.firstElementChild;
       if (parsed) {
         el.innerHTML = parsed.innerHTML;
       } else {
-        el.innerHTML = node.content || "";
+        el.innerHTML = guardedContent;
       }
       break;
     }
@@ -398,7 +400,9 @@ function createInlineDom(
 
     case "link": {
       const a = document.createElement("a");
-      a.href = node.needs_asset_conversion && node.href ? convertFileSrc(node.href) : (node.href || "");
+      const rawHref = node.needs_asset_conversion && node.href ? convertFileSrc(node.href) : (node.href || "");
+      const href = filterTrustedRichHtmlUrl(rawHref, "a", "href");
+      if (href !== null) a.setAttribute("href", href);
       a.title = node.title || "";
       a.target = "_blank";
       a.rel = "noopener noreferrer";
@@ -412,7 +416,9 @@ function createInlineDom(
 
     case "image": {
       const img = document.createElement("img");
-      img.src = node.needs_asset_conversion && node.src ? convertFileSrc(node.src) : (node.src || "");
+      const rawSrc = node.needs_asset_conversion && node.src ? convertFileSrc(node.src) : (node.src || "");
+      const src = filterTrustedRichHtmlUrl(rawSrc, "img", "src");
+      if (src !== null) img.setAttribute("src", src);
       img.alt = node.alt || "";
       img.title = node.title || "";
       img.loading = "lazy";
@@ -454,12 +460,13 @@ function createInlineDom(
       const span = document.createElement("span");
       // 物理防御：使用临时 <div> 强行闭合可能未闭合的 inline 标签，防止 WebView 抛弃节点
       const temp = document.createElement("div");
-      temp.innerHTML = `<div>${repairHtmlFragment(node.content || "")}</div>`;
+      const guardedContent = filterTrustedRichHtml(node.content || "");
+      temp.innerHTML = `<div>${repairHtmlFragment(guardedContent)}</div>`;
       const parsed = temp.firstElementChild;
       if (parsed) {
         span.innerHTML = parsed.innerHTML;
       } else {
-        span.innerHTML = node.content || "";
+        span.innerHTML = guardedContent;
       }
       el = span;
       break;
@@ -751,10 +758,16 @@ function executeMutation(
 
           // 2. 策略 B：图片属性原地更新，不销毁 DOM
           if (nodeType === "image" && oldNode instanceof HTMLImageElement) {
-            oldNode.src =
+            const rawSrc =
               mutation.node.needs_asset_conversion && mutation.node.src
                 ? convertFileSrc(mutation.node.src)
                 : (mutation.node.src || "");
+            const src = filterTrustedRichHtmlUrl(rawSrc, "img", "src");
+            if (src === null) {
+              oldNode.removeAttribute("src");
+            } else {
+              oldNode.setAttribute("src", src);
+            }
             oldNode.alt = mutation.node.alt || "";
             oldNode.title = mutation.node.title || "";
             break;

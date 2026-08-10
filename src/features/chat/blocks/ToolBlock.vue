@@ -5,6 +5,7 @@ import type { ContentBlock } from '../../../core/types/chat';
 import { marked } from 'marked';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
+import { filterTrustedRichHtml } from '../../../core/utils/astRenderer';
 
 const notificationStore = useNotificationStore();
 
@@ -23,7 +24,7 @@ const renderMarkdown = (text: string): string => {
     return parsedMarkdownCache.get(text)!;
   }
   try {
-    const rendered = marked.parse(text) as string;
+    const rendered = filterTrustedRichHtml(marked.parse(text) as string);
     if (parsedMarkdownCache.size >= MAX_MARKDOWN_CACHE_SIZE) {
       const firstKey = parsedMarkdownCache.keys().next().value;
       if (firstKey !== undefined) {
@@ -293,5 +294,4 @@ const isImageValue = (key: string, value: string): boolean => {
     </Transition>
   </Teleport>
 </template>
-
 
