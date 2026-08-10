@@ -32,7 +32,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 文件类型 | 正确示例 | 错误示例 | 说明 |
 |---------|---------|---------|------|
-| `Cargo.toml` | `version = "2.11.1"` | `version = "2"` / `version = "^2.11"` | Rust Cargo 默认即精确匹配，但禁止人为使用语义范围 |
+| `Cargo.toml` | `version = "2.11.5"` + `Cargo.lock` | `version = "2"` / `version = ">=2.11"` | Cargo 默认按 caret 范围解析，实际构建版本由 `Cargo.lock` 冻结；必须绝对精确时使用 `=2.11.5` |
 | `package.json` | `"2.11.2"` | `"^2.11.2"` / `"latest"` / `"*"` | pnpm 会尊重 `package.json` 中的前缀，必须显式去除 |
 | Gradle | `version = "2.11.1"` | — | Kotlin DSL 通常为精确字符串，保持现状 |
 
@@ -44,10 +44,10 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 包名 | 当前锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
 |------|-------------|-------------|-------------|------|
-| `tauri` | `2.11.1` | 跟随官方 Release Note | crates.io | 核心运行时，**必须与 CLI/API 对齐** |
-| `tauri-build` | `2.6.1` | 与 `tauri` 同步检查 | crates.io | Build script 依赖，版本独立于 tauri core |
-| `tauri-utils` | `2.9.1` | 与 `tauri` 同步检查 | crates.io | 工具函数集，版本独立于 tauri core |
-| `tauri-plugin-log` | `2.8.0` | 每季度检查 | crates.io | 日志插件 |
+| `tauri` | `2.11.5` | 跟随官方 Release Note | crates.io | 核心运行时，**必须与 CLI/API 对齐** |
+| `tauri-build` | `2.6.3` | 与 `tauri` 同步检查 | crates.io | Build script 依赖，版本独立于 tauri core |
+| `tauri-utils` | `2.9.3` | 与 `tauri` 同步检查 | crates.io | 工具函数集，版本独立于 tauri core |
+| `tauri-plugin-log` | `2.9.0` | 每季度检查 | crates.io | 日志插件 |
 | `tauri-plugin-opener` | `2.5.4` | 每季度检查 | crates.io | 系统打开器插件 |
 | `serde` | `1` | 仅安全补丁 | crates.io | 序列化基石，极稳定 |
 | `serde_json` | `1` | 仅安全补丁 | crates.io | — |
@@ -64,7 +64,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `zstd` | `0.13` | 每半年检查 | crates.io | 压缩 |
 | `zip` | `2` | 每半年检查 | crates.io | ZIP 处理，注意 feature 裁剪 |
 | `dashmap` | `6` | 每季度检查 | crates.io | 并发 HashMap |
-| `lru` | `0.12` | 每半年检查 | crates.io | LRU 缓存 |
+| `lru` | `0.16.4` | 每半年检查 | crates.io | LRU 缓存；清单安全下限 `0.16.3` |
 | `uuid` | `1` | 仅安全补丁 | crates.io | UUID 生成 |
 | `chrono` | `0.4` | 仅安全补丁 | crates.io | 日期时间 |
 | `base64` | `0.22` | 仅安全补丁 | crates.io | Base64 编解码 |
@@ -83,7 +83,8 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `ego-tree` | `0.6` | 每半年检查 | crates.io | DOM 树操作 |
 | `async-trait` | `0.1` | 仅安全补丁 | crates.io | 异步 trait |
 | `libc` | `0.2` | 仅安全补丁 | crates.io | FFI C 库绑定 |
-| `memmap2` | `0.9` | 仅安全补丁 | crates.io | 内存映射 |
+| `memmap2` | `0.9.11` | 仅安全补丁 | crates.io | 内存映射 |
+| `pdf_oxide` | `0.3.77` | 每季度检查 | crates.io | 不可信 PDF 解析；禁用默认 feature |
 | `postcard` | `1` | 每半年检查 | crates.io | 序列化格式 |
 | `encoding_rs` | `0.8` | 仅安全补丁 | crates.io | 编码转换 |
 | `chardetng` | `0.1` | 每半年检查 | crates.io | 编码检测 |
@@ -95,21 +96,21 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 包名 | 当前锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
 |------|-------------|-------------|-------------|------|
-| `@tauri-apps/api` | `2.11.0` | 与 `tauri` crate 同步 | npm | **必须与 Rust tauri 版本对齐** |
+| `@tauri-apps/api` | `2.11.1` | 与 `tauri` crate 同步 | npm | 根应用与本地插件必须保持一致 |
 | `@tauri-apps/plugin-opener` | `2.5.4` | 与 `tauri-plugin-opener` 同步 | npm | 插件前端绑定 |
-| `vue` | `^3.5.33` | 每月检查 | npm | 核心框架 |
+| `vue` | `^3.5.41` | 每月检查 | npm | 核心框架 |
 | `vue-router` | `^5.0.6` | 每月检查 | npm | 路由 |
 | `pinia` | `^3.0.4` | 每月检查 | npm | 状态管理 |
 | `pinia-plugin-persistedstate` | `^4.7.1` | 每季度检查 | npm | 状态持久化 |
 | `@vueuse/core` | `^14.2.1` | 每月检查 | npm | 组合式工具库 |
-| `vite` | `^6.4.2` | 每月检查 | npm | 构建工具 |
+| `vite` | `^6.4.3` | 每月检查 | npm | 构建工具；6.x 安全补丁线，Vite 8 需独立迁移 |
 | `@vitejs/plugin-vue` | `^5.2.4` | 与 `vite` 同步 | npm | Vue Vite 插件 |
 | `unocss` | `^66.6.8` | 每季度检查 | npm | 原子 CSS |
 | `@unocss/*` | `^66.6.8` | 与 `unocss` 同步 | npm | UnoCSS 生态 |
 | `highlight.js` | `^11.11.1` | 每季度检查 | npm | 语法高亮 |
-| `dompurify` | `^3.4.2` | 每季度检查 | npm | XSS 净化 |
+| `dompurify` | `^3.4.13` | 每季度检查 | npm | XSS 净化 |
 | `katex` | `^0.16.45` | 每半年检查 | npm | LaTeX 渲染 |
-| `mermaid` | `^11.14.0` | 每季度检查 | npm | 图表渲染 |
+| `mermaid` | `^11.16.1` | 每季度检查 | npm | 图表渲染；处理不可信模型内容 |
 | `pdfjs-dist` | `^5.7.284` | 每季度检查 | npm | PDF 渲染 |
 | `mammoth` | `^1.12.0` | 每半年检查 | npm | Word 文档解析 |
 | `lucide-vue-next` | `^0.576.0` | 每月检查 | npm | 图标库 |
@@ -121,11 +122,11 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 包名 | 当前锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
 |------|-------------|-------------|-------------|------|
-| `@tauri-apps/cli` | `2.11.2` | 与 `tauri` crate 同步 | npm | **必须与 Rust tauri 版本对齐** |
+| `@tauri-apps/cli` | `2.11.4` | 与 `tauri` crate 同步 | npm | **必须与 Rust tauri 版本对齐** |
 | `typescript` | `~5.6.3` | 每季度检查 | npm | TS 编译器 |
 | `vue-tsc` | `^2.2.12` | 与 `vue`/`typescript` 同步 | npm | Vue 类型检查 |
-| `eslint` | `^10.2.1` | 每季度检查 | npm | 代码检查 |
-| `@typescript-eslint/*` | `^8.59.1` | 与 `eslint`/`typescript` 同步 | npm | TS ESLint 规则 |
+| `eslint` | `^10.8.1` | 每季度检查 | npm | 代码检查 |
+| `@typescript-eslint/*` | `^8.66.0` | 与 `eslint`/`typescript` 同步 | npm | TS ESLint 规则 |
 | `eslint-plugin-vue` | `^10.9.0` | 与 `eslint`/`vue` 同步 | npm | Vue ESLint 规则 |
 | `prettier` | `^3.8.3` | 每季度检查 | npm | 代码格式化 |
 | `eslint-config-prettier` | `^10.1.8` | 与 `prettier`/`eslint` 同步 | npm | Prettier 兼容配置 |
@@ -300,24 +301,25 @@ pnpm tauri android build --apk --target aarch64
 
 | Rust Crate | 当前版本 | npm 包 | 当前版本 | 对齐规则 |
 |-----------|---------|--------|---------|---------|
-| `tauri` | `2.11.1` | `@tauri-apps/cli` | `2.11.2` | 主.次版本必须一致（`2.11.x`） |
-| `tauri` | `2.11.1` | `@tauri-apps/api` | `2.11.0` | 主.次版本必须一致（`2.11.x`） |
-| `tauri-build` | `2.6.1` | — | — | 独立版本，需与 `tauri` 兼容 |
-| `tauri-utils` | `2.9.1` | — | — | 独立版本，需与 `tauri` 兼容 |
+| `tauri` | `2.11.5` | `@tauri-apps/cli` | `2.11.4` | 主.次版本必须一致（`2.11.x`） |
+| `tauri` | `2.11.5` | `@tauri-apps/api` | `2.11.1` | 主.次版本必须一致（`2.11.x`） |
+| `tauri-build` | `2.6.3` | — | — | 独立版本，需与 `tauri` 兼容 |
+| `tauri-utils` | `2.9.3` | — | — | 独立版本，需与 `tauri` 兼容 |
 
 ### 4.2 Tauri 插件跨层对齐
 
 | Rust 插件 | 当前版本 | npm 插件 | 当前版本 | 对齐规则 |
 |----------|---------|---------|---------|---------|
 | `tauri-plugin-opener` | `2.5.4` | `@tauri-apps/plugin-opener` | `2.5.4` | 版本号应完全一致 |
-| `tauri-plugin-log` | `2.8.0` | — | — | 无前端包，Rust 单独升级 |
+| `tauri-plugin-log` | `2.9.0` | — | — | 无前端包，Rust 单独升级 |
 
 ### 4.3 Rust 工具链与 MSRV
 
 | 项目 | 当前值 | 约束来源 |
 |------|--------|---------|
-| Rust Toolchain | `1.95.0` | 本地开发环境 |
+| Rust Toolchain | `stable`（本次本地验证 `1.97.1`） | CI 与本地开发环境 |
 | Tauri MSRV | 见 `tauri` crate 文档 | `tauri` `Cargo.toml` 中 `rust-version` |
+| 当前依赖图最高 MSRV | `1.88` | `pdf_oxide 0.3.77` / `plist 1.10.0` |
 | Cargo Edition | `2021` | `src-tauri/Cargo.toml` |
 
 > **检查方法**：运行 `rustc --version`，确认不低于 Tauri 官方要求的 MSRV。若 Tauri 升级后提高 MSRV，必须同步更新 CI（`release.yml`、`ci.yml`）中的 Rust 安装步骤。
@@ -332,6 +334,14 @@ pnpm tauri android build --apk --target aarch64
 | `kotlinOptions.jvmTarget` | `1.8` | `app/build.gradle.kts` |
 
 **对齐规则**：`compileSdk == targetSdk`，且 `minSdk` 在 Gradle 与 `tauri.conf.json` 中双写一致。
+
+### 4.5 RustSec 审计基线与例外
+
+2026-08-10 供应链整理后的原始 `cargo audit` 结果为：`1 vulnerability / 21 warnings`。门禁命令统一使用 `pnpm audit:rust`，它只忽略以下已核实例外，任何新增 vulnerability 仍会使命令失败：
+
+- `RUSTSEC-2023-0071` / `rsa 0.9.10`：RustSec 尚无已修版本；该包仅来自 `sqlx-mysql` 的可选依赖。本项目对 `sqlx` 使用 `default-features = false` 且只启用 SQLite，默认与 `aarch64-linux-android` 编译图均不包含 `rsa`。
+
+21 条 warning 包含 19 条 unmaintained、Linux GTK3 链上的 1 条 `glib` unsound，以及 SQLx SQLite 链上的 1 条 yanked `spin`。它们是公开的上游维护债，不得表述为“已清零”；升级 SQLx、启用 MySQL/全数据库 feature 或 RustSec 出现 RSA 修复版本时，必须立即撤销例外并重新评估。
 
 ---
 
@@ -384,7 +394,9 @@ pnpm tauri android build --apk --target aarch64
 当前 AGP：`8.11.0`。
 
 - AGP 与 Gradle Wrapper 版本存在严格对应关系。升级 AGP 时，必须同步更新 `gradle/wrapper/gradle-wrapper.properties`。
-- AGP `8.11.0` 要求 Gradle `8.9+`。
+- AGP `8.11.0` 要求 Gradle `8.13+`；当前 Wrapper `8.14.3` 满足要求。
+
+Robolectric 的 instrumented Android JAR 由测试运行期解析。插件测试已将仓库显式指向 Maven Central 官方端点，避免代理镜像返回截断内容后触发校验失败；不得关闭 SHA 校验绕过下载问题。
 
 ---
 

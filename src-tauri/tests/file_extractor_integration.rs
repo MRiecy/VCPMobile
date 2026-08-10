@@ -72,9 +72,9 @@ fn test_extract_pdf_scanned_fallback_message() {
     let file = write_fixture(pdf_bytes, "pdf");
     let text = try_extract_text(file.path(), "application/pdf").expect("PDF 提取不应返回 None");
 
-    assert!(
-        text.contains("扫描件") || text.contains("图片型 PDF") || !text.trim().is_empty(),
-        "PDF 提取应返回扫描件提示或非空文本，实际: {text:?}"
+    assert_eq!(
+        text, "[此文件可能为扫描件或图片型 PDF，暂不支持文字提取]",
+        "扫描 PDF 应稳定返回回退提示"
     );
 }
 

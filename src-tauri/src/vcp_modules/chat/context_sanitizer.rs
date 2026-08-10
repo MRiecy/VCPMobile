@@ -369,4 +369,16 @@ mod tests {
         let md = html_to_vcp_markdown(html, false);
         assert_eq!(md, "<<<[TOOL_REQUEST]>>>\ncall()");
     }
+
+    #[test]
+    fn test_cache_capacity_evicts_least_recent_item() {
+        let sanitizer = ContextSanitizer::new(1, 60);
+        sanitizer.set_cached("first".to_string(), "one".to_string());
+        assert_eq!(sanitizer.get_cached("first"), Some("one".to_string()));
+
+        sanitizer.set_cached("second".to_string(), "two".to_string());
+
+        assert_eq!(sanitizer.get_cached("first"), None);
+        assert_eq!(sanitizer.get_cached("second"), Some("two".to_string()));
+    }
 }

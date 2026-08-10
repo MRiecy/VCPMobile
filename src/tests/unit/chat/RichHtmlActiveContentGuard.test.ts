@@ -16,6 +16,14 @@ vi.mock('@/core/stores/theme', () => ({
   useThemeStore: () => ({ isDarkResolved: false }),
 }));
 
+// happy-dom rejects DOMPurify's WHOLE_DOCUMENT node hoisting even though Chromium/WebView accepts
+// it. This suite verifies the iframe sandbox boundary; DOMPurify's patched version is audit-gated.
+vi.mock('dompurify', () => ({
+  default: {
+    sanitize: (dirty: string) => dirty,
+  },
+}));
+
 const HOST_HANDLER = "window.__TAURI_INTERNALS__.invoke('read_settings')";
 
 function parseHtml(html: string): HTMLDivElement {
