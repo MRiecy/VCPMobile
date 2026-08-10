@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::content_parser::{
-    BlockType, ToolCallSummaryItem, ToolResultDetail, BUTTON_CLICK, /* extraction helpers */
-    CONTENT_REGEX, DATE_REGEX, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END,
-    GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START, HTML_FENCE_START, KV_REGEX, MAID_REGEX,
-    ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
-    THOUGHT_START, TOOL_END, TOOL_NAME, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
+    extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
+    parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
+    BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END, GENERIC_CODE_FENCE_START,
+    HTML_DOC_END, HTML_DOC_START, HTML_FENCE_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END,
+    STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END, THOUGHT_START, TOOL_RESULT_END,
+    TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -47,10 +48,31 @@ pub enum StreamBlock {
     #[serde(rename = "diary")]
     Diary {
         maid: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        valet: String,
         date: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        file_name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        folder: String,
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
+        hash: String,
+    },
+    #[serde(rename = "diary-update")]
+    DiaryUpdate {
+        maid: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        valet: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        folder: String,
+        target: String,
+        replace: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_nodes: Option<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replace_nodes: Option<Vec<MarkdownNode>>,
         hash: String,
     },
     #[serde(rename = "html-preview")]
@@ -129,16 +151,44 @@ impl StreamBlock {
 
     pub fn diary(
         maid: String,
+        valet: String,
         date: String,
+        file_name: String,
+        folder: String,
         content: String,
         nodes: Option<Vec<MarkdownNode>>,
         hash: String,
     ) -> Self {
         Self::Diary {
             maid,
+            valet,
             date,
+            file_name,
+            folder,
             content,
             nodes,
+            hash,
+        }
+    }
+
+    pub fn diary_update(
+        maid: String,
+        valet: String,
+        folder: String,
+        target: String,
+        replace: String,
+        target_nodes: Option<Vec<MarkdownNode>>,
+        replace_nodes: Option<Vec<MarkdownNode>>,
+        hash: String,
+    ) -> Self {
+        Self::DiaryUpdate {
+            maid,
+            valet,
+            folder,
+            target,
+            replace,
+            target_nodes,
+            replace_nodes,
             hash,
         }
     }
@@ -382,8 +432,12 @@ fn find_end_marker(
         return None;
     }
 
+    if *block_type == BlockType::Tool {
+        return find_tool_request_end(search_area);
+    }
+
     let m = match block_type {
-        BlockType::Tool => TOOL_END.find(search_area),
+        BlockType::Tool => unreachable!(),
         BlockType::Thought => THOUGHT_END.find(search_area),
         BlockType::Think => THINK_END.find(search_area),
         BlockType::ToolResult => TOOL_RESULT_END.find(search_area),
@@ -404,6 +458,59 @@ fn find_end_marker(
 }
 
 /// 从匹配的标记构建 StreamBlock
+fn build_daily_note_stream_block(note: ParsedDailyNote) -> StreamBlock {
+    match note {
+        ParsedDailyNote::Create {
+            maid,
+            valet,
+            date,
+            file_name,
+            folder,
+            content,
+        } => {
+            let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&content);
+            let hash = HashAggregator::compute_content_hash(&format!(
+                "diary:create\u{1f}{maid}\u{1f}{valet}\u{1f}{date}\u{1f}{file_name}\u{1f}{folder}\u{1f}{content}"
+            ));
+            StreamBlock::diary(
+                maid,
+                valet,
+                date,
+                file_name,
+                folder,
+                content,
+                Some(nodes),
+                hash,
+            )
+        }
+        ParsedDailyNote::Update {
+            maid,
+            valet,
+            folder,
+            target,
+            replace,
+        } => {
+            let target_nodes =
+                crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&target);
+            let replace_nodes =
+                crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&replace);
+            let hash = HashAggregator::compute_content_hash(&format!(
+                "diary:update\u{1f}{maid}\u{1f}{valet}\u{1f}{folder}\u{1f}{target}\u{1f}{replace}"
+            ));
+            StreamBlock::diary_update(
+                maid,
+                valet,
+                folder,
+                target,
+                replace,
+                Some(target_nodes),
+                Some(replace_nodes),
+                hash,
+            )
+        }
+    }
+}
+
 fn build_stream_block(
     block_type: &BlockType,
     inner_content: &str,
@@ -415,12 +522,8 @@ fn build_stream_block(
     match block_type {
         BlockType::Tool => {
             let tool_name = extract_tool_name(inner_content);
-            if is_daily_note_create(inner_content) {
-                let (maid, date, content) = extract_diary_details(inner_content);
-                let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&content);
-                let hash =
-                    HashAggregator::compute_content_hash(&format!("{}:{}:{}", maid, date, content));
-                StreamBlock::diary(maid, date, content, Some(nodes), hash)
+            if let Some(note) = parse_daily_note_tool_request(inner_content) {
+                build_daily_note_stream_block(note)
             } else {
                 let hash = HashAggregator::compute_content_hash(&format!(
                     "{}:{}",
@@ -468,11 +571,7 @@ fn build_stream_block(
             StreamBlock::tool_result(tool_name, status, details, footer, hash)
         }
         BlockType::Diary => {
-            let (maid, date, content) = extract_diary_details(inner_content);
-            let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&content);
-            let hash =
-                HashAggregator::compute_content_hash(&format!("{}:{}:{}", maid, date, content));
-            StreamBlock::diary(maid, date, content, Some(nodes), hash)
+            build_daily_note_stream_block(parse_legacy_daily_note(inner_content))
         }
         BlockType::ToolCallSummary => {
             let items = crate::vcp_modules::content_parser::parse_tool_call_summary(inner_content);
@@ -633,52 +732,6 @@ fn extract_inline_buttons(mut blocks: Vec<StreamBlock>) -> Vec<StreamBlock> {
     result
 }
 
-// ── 内容提取辅助函数（与 content_parser.rs 保持一致的逻辑）──
-
-fn extract_tool_name(content: &str) -> String {
-    if let Some(caps) = TOOL_NAME.captures(content) {
-        if let Some(m) = caps.get(1).or_else(|| caps.get(2)) {
-            let mut name = m.as_str().trim().to_string();
-            name = name
-                .replace("「始」", "")
-                .replace("「末」", "")
-                .replace("「始exp」", "")
-                .replace("「末exp」", "");
-            if name.ends_with(',') {
-                name.pop();
-            }
-            return name.trim().to_string();
-        }
-    }
-    "Processing...".to_string()
-}
-
-fn is_daily_note_create(content: &str) -> bool {
-    content.contains("DailyNote") && content.contains("create")
-}
-
-fn extract_diary_details(content: &str) -> (String, String, String) {
-    let maid = MAID_REGEX
-        .captures(content)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
-
-    let date = DATE_REGEX
-        .captures(content)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
-
-    let diary_content = CONTENT_REGEX
-        .captures(content)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_else(|| "[日记内容解析失败]".to_string());
-
-    (maid, date, diary_content)
-}
-
 fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, String) {
     let mut tool_name = "Unknown Tool".to_string();
     let mut status = "Unknown Status".to_string();
@@ -729,6 +782,44 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_request(inner: &str) -> String {
+        format!(
+            "<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>"
+        )
+    }
+
+    fn strip_hash(value: &mut serde_json::Value) {
+        if let serde_json::Value::Object(map) = value {
+            map.remove("hash");
+        }
+    }
+
+    fn assert_full_and_stream_match(raw: &str) {
+        let full_blocks = crate::vcp_modules::content_parser::parse_content(raw);
+        let full = full_blocks
+            .iter()
+            .find(|block| {
+                !matches!(
+                    block,
+                    crate::vcp_modules::content_parser::ContentBlock::Markdown { .. }
+                )
+            })
+            .expect("full parser should produce a semantic block");
+
+        let mut parser = StreamBlockParser::new();
+        let stream_blocks = parser.finalize(raw);
+        let stream = stream_blocks
+            .iter()
+            .find(|block| !matches!(block, StreamBlock::Markdown { .. }))
+            .expect("stream parser should produce a semantic block");
+
+        let mut full_json = serde_json::to_value(full).expect("serialize full block");
+        let mut stream_json = serde_json::to_value(stream).expect("serialize stream block");
+        strip_hash(&mut full_json);
+        strip_hash(&mut stream_json);
+        assert_eq!(full_json, stream_json);
+    }
 
     #[test]
     fn test_code_block_precipitation_failure() {
@@ -798,5 +889,91 @@ mod tests {
         // 应该成功闭合代码块并将其沉淀，且 tail 为空
         assert_eq!(blocks_3.len(), 1);
         assert!(tail_3.is_empty());
+    }
+
+    #[test]
+    fn daily_note_create_only_stabilizes_after_true_end_marker() {
+        let frame_1 = "<<<[TOOL_REQUEST]>>>\ntool_name:「始」DailyNote「末」";
+        let frame_2 = "<<<[TOOL_REQUEST]>>>\n\
+                       tool_name:「始」DailyNote「末」\n\
+                       command:「始」create「末」\n\
+                       Content:{始ESCAPE}before\n\
+                       <<<[END_TOOL_REQUEST]>>>\n\
+                       after";
+        let frame_3 = format!("{frame_2}{{末ESCAPE}}\n<<<[END_TOOL_REQUEST]>>>");
+
+        let mut parser = StreamBlockParser::new();
+        let (blocks_1, tail_1) = parser.process(frame_1);
+        assert!(blocks_1.is_empty());
+        assert!(tail_1.starts_with("<<<[TOOL_REQUEST]>>>"));
+
+        let (blocks_2, tail_2) = parser.process(frame_2);
+        assert!(blocks_2.is_empty());
+        assert!(tail_2.contains("after"));
+
+        let (blocks_3, tail_3) = parser.process(&frame_3);
+        assert!(tail_3.is_empty());
+        assert!(matches!(
+            blocks_3.as_slice(),
+            [StreamBlock::Diary { content, .. }]
+                if content.contains("<<<[END_TOOL_REQUEST]>>>") && content.ends_with("after")
+        ));
+    }
+
+    #[test]
+    fn daily_note_update_escape_does_not_close_early() {
+        let raw = tool_request(
+            "tool_name:{始}DailyNote{末}\n\
+             command:{始}update{末}\n\
+             target:{始ESCAPE}old\n<<<[END_TOOL_REQUEST]>>>\ntext{末ESCAPE}\n\
+             replace:{始}new{末}",
+        );
+        let mut parser = StreamBlockParser::new();
+        let blocks = parser.finalize(&raw);
+        assert!(matches!(
+            blocks.as_slice(),
+            [StreamBlock::DiaryUpdate { target, replace, .. }]
+                if target.contains("<<<[END_TOOL_REQUEST]>>>") && replace == "new"
+        ));
+    }
+
+    #[test]
+    fn full_and_stream_daily_note_wires_match() {
+        let create = tool_request(
+            "tool_name:「始」DailyNote「末」\n\
+             command:「始」create「末」\n\
+             maid:「始」Sakura「末」\n\
+             valet:「始」Sebastian「末」\n\
+             Date:「始」2026-08-10「末」\n\
+             fileName:「始」Log「末」\n\
+             folder:「始」daily「末」\n\
+             Content:「始」**done**「末」\n\
+             Tag:「始」mobile「末」",
+        );
+        let update = tool_request(
+            "tool_name:「始」DailyNote「末」\n\
+             target:「始」old「末」\n\
+             replace:「始」new「末」",
+        );
+        let legacy =
+            "<<<DailyNoteStart>>>\nMaid: Sakura\nDate: 2026-08-10\nContent: legacy\n<<<DailyNoteEnd>>>";
+
+        assert_full_and_stream_match(&create);
+        assert_full_and_stream_match(&update);
+        assert_full_and_stream_match(legacy);
+    }
+
+    #[test]
+    fn finalize_unclosed_daily_note_request_preserves_raw_markdown() {
+        let raw = "<<<[TOOL_REQUEST]>>>\n\
+                   tool_name:「始」DailyNote「末」\n\
+                   command:「始」create「末」\n\
+                   Content:{始ESCAPE}unfinished";
+        let mut parser = StreamBlockParser::new();
+        let blocks = parser.finalize(raw);
+        assert!(matches!(
+            blocks.as_slice(),
+            [StreamBlock::Markdown { content, .. }] if content == raw.trim()
+        ));
     }
 }

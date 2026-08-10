@@ -37,10 +37,32 @@ pub enum ContentBlock {
     #[serde(rename = "diary")]
     Diary {
         maid: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        valet: String,
         date: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        file_name: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        folder: String,
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         nodes: Option<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<u64>,
+    },
+    #[serde(rename = "diary-update")]
+    DiaryUpdate {
+        maid: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        valet: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        folder: String,
+        target: String,
+        replace: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_nodes: Option<Vec<MarkdownNode>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replace_nodes: Option<Vec<MarkdownNode>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
@@ -137,15 +159,42 @@ impl ContentBlock {
 
     pub fn diary(
         maid: String,
+        valet: String,
         date: String,
+        file_name: String,
+        folder: String,
         content: String,
         nodes: Option<Vec<MarkdownNode>>,
     ) -> Self {
         Self::Diary {
             maid,
+            valet,
             date,
+            file_name,
+            folder,
             content,
             nodes,
+            hash: None,
+        }
+    }
+
+    pub fn diary_update(
+        maid: String,
+        valet: String,
+        folder: String,
+        target: String,
+        replace: String,
+        target_nodes: Option<Vec<MarkdownNode>>,
+        replace_nodes: Option<Vec<MarkdownNode>>,
+    ) -> Self {
+        Self::DiaryUpdate {
+            maid,
+            valet,
+            folder,
+            target,
+            replace,
+            target_nodes,
+            replace_nodes,
             hash: None,
         }
     }
@@ -221,6 +270,7 @@ impl ContentBlock {
             ContentBlock::ToolUse { hash, .. } => *hash = Some(h),
             ContentBlock::ToolResult { hash, .. } => *hash = Some(h),
             ContentBlock::Diary { hash, .. } => *hash = Some(h),
+            ContentBlock::DiaryUpdate { hash, .. } => *hash = Some(h),
             ContentBlock::Thought { hash, .. } => *hash = Some(h),
             ContentBlock::ButtonClick { hash, .. } => *hash = Some(h),
             ContentBlock::HtmlPreview { hash, .. } => *hash = Some(h),
@@ -252,12 +302,40 @@ pub(crate) enum BlockType {
     ToolCallSummary,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ParsedDailyNote {
+    Create {
+        maid: String,
+        valet: String,
+        date: String,
+        file_name: String,
+        folder: String,
+        content: String,
+    },
+    Update {
+        maid: String,
+        valet: String,
+        folder: String,
+        target: String,
+        replace: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkedFieldMode {
+    Normal,
+    Escape,
+    Exp,
+}
+
 lazy_static! {
     // 核心修复：为所有 VCP 块的起始标记强制增加行首锚定符 `(?im)^[ \t]*`
     // 这将彻底消除因正文提及 `<<<[TOOL_REQUEST]>>>` 等内联代码而引发的 AST 错误截断
     pub(crate) static ref TOOL_START: Regex = Regex::new(r"(?im)^[ \t]*<<<\[TOOL_REQUEST\]>>>").unwrap();
     pub(crate) static ref TOOL_END: Regex = Regex::new(r"(?im)^[ \t]*<<<\[END_TOOL_REQUEST\]>>>").unwrap();
-    pub(crate) static ref TOOL_NAME: Regex = Regex::new(r"<tool_name>([\s\S]*?)</tool_name>|tool_name:\s*「始(?:exp)?」([^「」]*)「末(?:exp)?」").unwrap();
+    pub(crate) static ref TOOL_NAME_XML: Regex = Regex::new(r"(?is)<tool_name>(.*?)</tool_name>").unwrap();
+    static ref MARKED_FIELD_START: Regex = Regex::new(r"(?i)[「{]始(?:escape|exp)?[」}]").unwrap();
+    static ref MARKED_FIELD_END: Regex = Regex::new(r"(?i)[「{]末(?:escape|exp)?[」}]").unwrap();
 
     pub(crate) static ref THOUGHT_START: Regex = Regex::new(r"(?im)^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
     pub(crate) static ref THOUGHT_END: Regex = Regex::new(r"(?im)^[ \t]*\[--- 元思考链结束 ---\]").unwrap();
@@ -272,10 +350,6 @@ lazy_static! {
     pub(crate) static ref DIARY_END: Regex = Regex::new(r"(?im)^[ \t]*<<<DailyNoteEnd>>>").unwrap();
 
     pub(crate) static ref BUTTON_CLICK: Regex = Regex::new(r"\[\[点击按钮:(.*?)\]\]").unwrap();
-
-    pub(crate) static ref MAID_REGEX: Regex = Regex::new(r"(?:maid|maidName):\s*「始(?:exp)?」([^「」]*)「末(?:exp)?」|Maid:\s*([^\n\r]*)").unwrap();
-    pub(crate) static ref DATE_REGEX: Regex = Regex::new(r"Date:\s*「始(?:exp)?」([^「」]*)「末(?:exp)?」|Date:\s*([^\n\r]*)").unwrap();
-    pub(crate) static ref CONTENT_REGEX: Regex = Regex::new(r"Content:\s*「始(?:exp)?」([\s\S]*?)「末(?:exp)?」|Content:\s*([\s\S]*)").unwrap();
 
     pub(crate) static ref KV_REGEX: Regex = Regex::new(r"^-\s*([^:]+):\s*(.*)").unwrap();
 
@@ -505,9 +579,10 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
 
             let start_marker_text = &remaining[start_idx..end_idx];
             let (end_marker_start, end_marker_end, is_complete) = match block_type {
-                BlockType::Tool => TOOL_END.find(search_area).map_or((None, None, false), |m| {
-                    (Some(m.start()), Some(m.end()), true)
-                }),
+                BlockType::Tool => find_tool_request_end(search_area)
+                    .map_or((None, None, false), |(start, end)| {
+                        (Some(start), Some(end), true)
+                    }),
                 BlockType::Thought => THOUGHT_END
                     .find(search_area)
                     .map_or((None, None, false), |m| {
@@ -584,11 +659,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             let block = match block_type {
                 BlockType::Tool => {
                     let tool_name = extract_tool_name(inner_content);
-                    if is_daily_note_create(inner_content) {
-                        let (maid, date, content) = extract_diary_details(inner_content);
-                        let nodes =
-                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                        ContentBlock::diary(maid, date, content, Some(nodes))
+                    if let Some(note) = parse_daily_note_tool_request(inner_content) {
+                        content_block_from_daily_note(note)
                     } else {
                         ContentBlock::tool_use(tool_name, inner_content.to_string(), is_complete)
                     }
@@ -625,9 +697,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     ContentBlock::tool_result(tool_name, status, details, footer)
                 }
                 BlockType::Diary => {
-                    let (maid, date, content) = extract_diary_details(inner_content);
-                    let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
-                    ContentBlock::diary(maid, date, content, Some(nodes))
+                    content_block_from_daily_note(parse_legacy_daily_note(inner_content))
                 }
                 BlockType::ToolCallSummary => {
                     let items = parse_tool_call_summary(inner_content);
@@ -769,51 +839,273 @@ fn parse_inline_blocks(text: &str) -> Vec<ContentBlock> {
     blocks
 }
 
-fn extract_tool_name(content: &str) -> String {
-    if let Some(caps) = TOOL_NAME.captures(content) {
-        if let Some(m) = caps.get(1).or_else(|| caps.get(2)) {
-            let s = m.as_str().trim();
-            let mut name = if s.contains('「') {
-                s.replace("「始」", "")
-                    .replace("「末」", "")
-                    .replace("「始exp」", "")
-                    .replace("「末exp」", "")
-            } else {
-                s.to_string()
-            };
-            if name.ends_with(',') {
-                name.pop();
-            }
-            return name.trim().to_string();
+fn marked_field_mode(marker: &str) -> MarkedFieldMode {
+    let normalized = marker.to_ascii_lowercase();
+    if normalized.contains("escape") {
+        MarkedFieldMode::Escape
+    } else if normalized.contains("exp") {
+        MarkedFieldMode::Exp
+    } else {
+        MarkedFieldMode::Normal
+    }
+}
+
+fn find_marked_field_end(
+    source: &str,
+    content_start: usize,
+    expected_mode: MarkedFieldMode,
+) -> Option<(usize, usize)> {
+    for end_match in MARKED_FIELD_END.find_iter(&source[content_start..]) {
+        let start = content_start + end_match.start();
+        let end = content_start + end_match.end();
+        if marked_field_mode(&source[start..end]) == expected_mode {
+            return Some((start, end));
         }
     }
-    "Processing...".to_string()
+    None
 }
 
-fn is_daily_note_create(content: &str) -> bool {
-    content.contains("DailyNote") && content.contains("create")
+fn find_label_colon(source: &str, labels: &[&str], from: usize) -> Option<usize> {
+    for (relative_colon, _) in source[from..].match_indices(':') {
+        let colon = from + relative_colon;
+        for label in labels {
+            if colon < label.len() {
+                continue;
+            }
+            let start = colon - label.len();
+            if !source.is_char_boundary(start) {
+                continue;
+            }
+            let candidate = &source[start..colon];
+            let has_left_boundary = source[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
+            if has_left_boundary && candidate.eq_ignore_ascii_case(label) {
+                return Some(colon);
+            }
+        }
+    }
+    None
 }
 
-fn extract_diary_details(content: &str) -> (String, String, String) {
-    let maid = MAID_REGEX
-        .captures(content)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
+pub(crate) fn extract_marked_field(source: &str, labels: &[&str]) -> Option<String> {
+    let mut search_from = 0;
 
-    let date = DATE_REGEX
-        .captures(content)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_default();
+    while let Some(colon) = find_label_colon(source, labels, search_from) {
+        let mut marker_start = colon + 1;
+        while let Some(ch) = source[marker_start..].chars().next() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            marker_start += ch.len_utf8();
+        }
 
-    let diary_content = CONTENT_REGEX
-        .captures(content)
-        .and_then(|c| c.get(1).or_else(|| c.get(2)))
-        .map(|m| m.as_str().trim().to_string())
-        .unwrap_or_else(|| "[日记内容解析失败]".to_string());
+        if let Some(start_match) = MARKED_FIELD_START.find_at(source, marker_start) {
+            if start_match.start() == marker_start {
+                let mode = marked_field_mode(start_match.as_str());
+                let content_start = start_match.end();
+                let content_end = find_marked_field_end(source, content_start, mode)
+                    .map(|(start, _)| start)
+                    .unwrap_or(source.len());
+                return Some(source[content_start..content_end].trim().to_string());
+            }
+        }
 
-    (maid, date, diary_content)
+        search_from = colon + 1;
+    }
+
+    None
+}
+
+/// 在 ToolRequest 正文中寻找真正的外层结束标记。
+/// 标记字段内部出现的 END_TOOL_REQUEST 只是正文，必须跳过对应的字段结束标记后再继续扫描。
+pub(crate) fn find_tool_request_end(source: &str) -> Option<(usize, usize)> {
+    const TOOL_END_MARKER_LEN: usize = "<<<[END_TOOL_REQUEST]>>>".len();
+    let mut cursor = 0;
+
+    loop {
+        let tool_end = TOOL_END.find_at(source, cursor);
+        let field_start = MARKED_FIELD_START.find_at(source, cursor);
+
+        if let Some(start_match) = field_start {
+            if tool_end
+                .as_ref()
+                .is_none_or(|end_match| start_match.start() < end_match.start())
+            {
+                let mode = marked_field_mode(start_match.as_str());
+                let (_, field_end) = find_marked_field_end(source, start_match.end(), mode)?;
+                cursor = field_end;
+                continue;
+            }
+        }
+
+        let end_match = tool_end?;
+        let marker_start = end_match.end().saturating_sub(TOOL_END_MARKER_LEN);
+        let wrapped_before = source[..marker_start].ends_with('`');
+        let wrapped_after = source[end_match.end()..].starts_with('`');
+        if wrapped_before || wrapped_after {
+            cursor = end_match.end();
+            continue;
+        }
+        return Some((end_match.start(), end_match.end()));
+    }
+}
+
+fn extract_tool_name_value(content: &str) -> Option<String> {
+    let mut name = extract_marked_field(content, &["tool_name"]).or_else(|| {
+        TOOL_NAME_XML
+            .captures(content)
+            .and_then(|captures| captures.get(1))
+            .map(|matched| matched.as_str().trim().to_string())
+    })?;
+    if name.ends_with(',') {
+        name.pop();
+    }
+    let name = name.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+pub(crate) fn extract_tool_name(content: &str) -> String {
+    extract_tool_name_value(content).unwrap_or_else(|| "Processing...".to_string())
+}
+
+pub(crate) fn parse_daily_note_tool_request(content: &str) -> Option<ParsedDailyNote> {
+    let tool_name = extract_tool_name_value(content)?;
+    if !tool_name.eq_ignore_ascii_case("DailyNote") {
+        return None;
+    }
+
+    let command = extract_marked_field(content, &["command"])
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let daily_content = extract_marked_field(content, &["Content"]).unwrap_or_default();
+    let target = extract_marked_field(content, &["target"]).unwrap_or_default();
+    let replace = extract_marked_field(content, &["replace"]).unwrap_or_default();
+
+    let is_update = command == "update"
+        || (command.is_empty() && !target.trim().is_empty() && !replace.trim().is_empty());
+    let is_create = !is_update
+        && (command == "create" || (command.is_empty() && !daily_content.trim().is_empty()));
+
+    if !is_update && !is_create {
+        return None;
+    }
+
+    let maid = extract_marked_field(content, &["maid", "maidName"]).unwrap_or_default();
+    let valet = extract_marked_field(content, &["valet", "valetName"]).unwrap_or_default();
+    let folder = extract_marked_field(content, &["folder"]).unwrap_or_default();
+
+    if is_update {
+        return Some(ParsedDailyNote::Update {
+            maid,
+            valet,
+            folder,
+            target,
+            replace,
+        });
+    }
+
+    let date = extract_marked_field(content, &["Date"]).unwrap_or_default();
+    let file_name = extract_marked_field(content, &["fileName"]).unwrap_or_default();
+    let mut rendered_content = if daily_content.trim().is_empty() {
+        "[日记内容解析失败]".to_string()
+    } else {
+        daily_content
+    };
+    if let Some(tag) = extract_marked_field(content, &["Tag"])
+        .filter(|tag| !tag.trim().is_empty())
+    {
+        rendered_content.push_str("\n\nTag:");
+        rendered_content.push_str(&tag);
+    }
+
+    Some(ParsedDailyNote::Create {
+        maid,
+        valet,
+        date,
+        file_name,
+        folder,
+        content: rendered_content,
+    })
+}
+
+fn extract_legacy_line_field(content: &str, label: &str) -> String {
+    content
+        .lines()
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix(label)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .map(|value| value.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_legacy_daily_note(content: &str) -> ParsedDailyNote {
+    let diary_content = content
+        .match_indices("Content:")
+        .find_map(|(start, marker)| {
+            let has_left_boundary = content[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| ch == '\n' || ch == '\r' || ch.is_whitespace());
+            has_left_boundary.then(|| content[start + marker.len()..].trim().to_string())
+        })
+        .unwrap_or_else(|| content.trim().to_string());
+
+    ParsedDailyNote::Create {
+        maid: extract_legacy_line_field(content, "Maid"),
+        valet: String::new(),
+        date: extract_legacy_line_field(content, "Date"),
+        file_name: String::new(),
+        folder: String::new(),
+        content: diary_content,
+    }
+}
+
+fn content_block_from_daily_note(note: ParsedDailyNote) -> ContentBlock {
+    match note {
+        ParsedDailyNote::Create {
+            maid,
+            valet,
+            date,
+            file_name,
+            folder,
+            content,
+        } => {
+            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&content);
+            ContentBlock::diary(
+                maid,
+                valet,
+                date,
+                file_name,
+                folder,
+                content,
+                Some(nodes),
+            )
+        }
+        ParsedDailyNote::Update {
+            maid,
+            valet,
+            folder,
+            target,
+            replace,
+        } => {
+            let target_nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&target);
+            let replace_nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&replace);
+            ContentBlock::diary_update(
+                maid,
+                valet,
+                folder,
+                target,
+                replace,
+                Some(target_nodes),
+                Some(replace_nodes),
+            )
+        }
+    }
 }
 
 fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, String) {
@@ -938,6 +1230,19 @@ pub fn is_html_tag_block(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn tool_request(inner: &str) -> String {
+        format!(
+            "<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>"
+        )
+    }
+
+    fn first_non_markdown(blocks: &[ContentBlock]) -> &ContentBlock {
+        blocks
+            .iter()
+            .find(|block| !matches!(block, ContentBlock::Markdown { .. }))
+            .expect("expected a semantic content block")
+    }
+
     #[test]
     fn test_parse_content_style_blocks() {
         // 1. 正常的独立行 <style> 应该被正确解析为 Style 块
@@ -1006,5 +1311,184 @@ mod tests {
                 blocks[1]
             );
         }
+    }
+
+    #[test]
+    fn parses_full_daily_note_create_with_new_fields_and_tag() {
+        let raw = tool_request(
+            "tool_name:「始」DailyNote「末」\n\
+             command:「始」create「末」\n\
+             maidName:「始」Sakura「末」\n\
+             valetName:「始」Sebastian「末」\n\
+             Date:「始」2026-08-10「末」\n\
+             fileName:「始」Field Log「末」\n\
+             folder:「始」missions/day-1「末」\n\
+             Content:「始」## Done\n\n- item「末」\n\
+             Tag:「始」mobile, sync「末」",
+        );
+
+        let blocks = parse_content(&raw);
+        match first_non_markdown(&blocks) {
+            ContentBlock::Diary {
+                maid,
+                valet,
+                date,
+                file_name,
+                folder,
+                content,
+                nodes,
+                ..
+            } => {
+                assert_eq!(maid, "Sakura");
+                assert_eq!(valet, "Sebastian");
+                assert_eq!(date, "2026-08-10");
+                assert_eq!(file_name, "Field Log");
+                assert_eq!(folder, "missions/day-1");
+                assert_eq!(content, "## Done\n\n- item\n\nTag:mobile, sync");
+                assert!(nodes.as_ref().is_some_and(|nodes| !nodes.is_empty()));
+            }
+            block => panic!("expected diary, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn recognizes_commandless_create_and_update_with_update_precedence() {
+        let create = tool_request(
+            "tool_name:{始}dAiLyNoTe{末}\nContent:{始}commandless create{末}",
+        );
+        assert!(matches!(
+            first_non_markdown(&parse_content(&create)),
+            ContentBlock::Diary { content, .. } if content == "commandless create"
+        ));
+
+        let update = tool_request(
+            "tool_name:「始」DailyNote「末」\n\
+             target:「始」old「末」\n\
+             replace:「始」new「末」\n\
+             Content:「始」must not win「末」",
+        );
+        assert!(matches!(
+            first_non_markdown(&parse_content(&update)),
+            ContentBlock::DiaryUpdate { target, replace, .. }
+                if target == "old" && replace == "new"
+        ));
+    }
+
+    #[test]
+    fn explicit_daily_note_commands_keep_failure_placeholders() {
+        let create = tool_request(
+            "tool_name:「始」DailyNote「末」\ncommand:「始」create「末」",
+        );
+        assert!(matches!(
+            first_non_markdown(&parse_content(&create)),
+            ContentBlock::Diary { content, .. } if content == "[日记内容解析失败]"
+        ));
+
+        let update = tool_request(
+            "tool_name:「始」DailyNote「末」\n\
+             command:「始」update「末」\n\
+             target:「始」old「末」",
+        );
+        assert!(matches!(
+            first_non_markdown(&parse_content(&update)),
+            ContentBlock::DiaryUpdate { target, replace, .. }
+                if target == "old" && replace.is_empty()
+        ));
+    }
+
+    #[test]
+    fn escape_field_can_contain_normal_end_and_fake_tool_end() {
+        let raw = tool_request(
+            "TOOL_NAME:{始}DailyNote{末}\n\
+             COMMAND:{始}create{末}\n\
+             Maid:{始EXP}Sakura{末EXP}\n\
+             Content:{始EsCaPe}first {末}\n\
+             <<<[END_TOOL_REQUEST]>>>\n\
+             still content{末EsCaPe}",
+        );
+
+        match first_non_markdown(&parse_content(&raw)) {
+            ContentBlock::Diary { maid, content, .. } => {
+                assert_eq!(maid, "Sakura");
+                assert!(content.contains("first {末}"));
+                assert!(content.contains("<<<[END_TOOL_REQUEST]>>>"));
+                assert!(content.ends_with("still content"));
+            }
+            block => panic!("expected diary, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_or_non_daily_note_commands_remain_tool_use() {
+        let unknown = tool_request(
+            "tool_name:「始」DailyNote「末」\n\
+             command:「始」delete「末」\n\
+             Content:「始」do not specialize「末」",
+        );
+        assert!(matches!(
+            first_non_markdown(&parse_content(&unknown)),
+            ContentBlock::ToolUse { tool_name, .. } if tool_name == "DailyNote"
+        ));
+
+        let other = tool_request(
+            "tool_name:「始」OtherTool「末」\n\
+             command:「始」create「末」\n\
+             Content:「始」mentions DailyNote create「末」",
+        );
+        assert!(matches!(
+            first_non_markdown(&parse_content(&other)),
+            ContentBlock::ToolUse { tool_name, .. } if tool_name == "OtherTool"
+        ));
+    }
+
+    #[test]
+    fn legacy_daily_note_uses_full_body_when_content_label_is_missing() {
+        let raw = "<<<DailyNoteStart>>>\nMaid: Sakura\nDate: 2026-08-10\nlegacy body\n<<<DailyNoteEnd>>>";
+        match first_non_markdown(&parse_content(raw)) {
+            ContentBlock::Diary {
+                maid,
+                date,
+                content,
+                valet,
+                ..
+            } => {
+                assert_eq!(maid, "Sakura");
+                assert_eq!(date, "2026-08-10");
+                assert!(content.contains("Maid: Sakura"));
+                assert!(content.contains("legacy body"));
+                assert!(valet.is_empty());
+            }
+            block => panic!("expected legacy diary, got {block:?}"),
+        }
+    }
+
+    #[test]
+    fn unclosed_escape_request_does_not_become_diary() {
+        let raw = "<<<[TOOL_REQUEST]>>>\n\
+                   tool_name:「始」DailyNote「末」\n\
+                   command:「始」create「末」\n\
+                   Content:{始ESCAPE}body\n\
+                   <<<[END_TOOL_REQUEST]>>>";
+        let blocks = parse_content(raw);
+        assert!(!blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Diary { .. } | ContentBlock::DiaryUpdate { .. }
+        )));
+    }
+
+    #[test]
+    fn old_diary_cache_deserializes_with_defaulted_new_fields() {
+        let cached = r#"{
+            "type":"diary",
+            "maid":"Sakura",
+            "date":"2026-08-10",
+            "content":"legacy cache"
+        }"#;
+        let block: ContentBlock = serde_json::from_str(cached).expect("old diary cache must load");
+        assert!(matches!(
+            block,
+            ContentBlock::Diary { valet, file_name, folder, .. }
+                if valet.is_empty() && file_name.is_empty() && folder.is_empty()
+        ));
     }
 }
