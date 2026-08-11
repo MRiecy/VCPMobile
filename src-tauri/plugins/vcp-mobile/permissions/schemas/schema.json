@@ -625,18 +625,6 @@
           "markdownDescription": "Denies the request_notification_listener_permission command without any pre-configured scope."
         },
         {
-          "description": "Enables the request_overlay_permission command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-request-overlay-permission",
-          "markdownDescription": "Enables the request_overlay_permission command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the request_overlay_permission command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-request-overlay-permission",
-          "markdownDescription": "Denies the request_overlay_permission command without any pre-configured scope."
-        },
-        {
           "description": "Enables the request_power_management_permission command without any pre-configured scope.",
           "type": "string",
           "const": "allow-request-power-management-permission",
@@ -779,18 +767,6 @@
           "type": "string",
           "const": "deny-stop-streaming-service",
           "markdownDescription": "Denies the stop_streaming_service command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the toggle_floating_ball command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-toggle-floating-ball",
-          "markdownDescription": "Enables the toggle_floating_ball command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the toggle_floating_ball command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-toggle-floating-ball",
-          "markdownDescription": "Denies the toggle_floating_ball command without any pre-configured scope."
         },
         {
           "description": "Enables the update_download_notification command without any pre-configured scope.",

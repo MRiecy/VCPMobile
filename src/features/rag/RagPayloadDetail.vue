@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { marked } from 'marked';
+import { filterTrustedRichHtml } from '../../core/utils/astRenderer';
 
 // Configure marked to support Github Flavored Markdown & breaks
 marked.setOptions({
@@ -28,10 +29,10 @@ const renderedHtml = computed(() => {
   try {
     // 修复 Markdown 引擎将 "[AI]:" 或 "[USER]:" 识别为隐藏链接定义（Link Reference Definition）从而吞字的 Bug
     const safeText = rawText.replace(/^(\s*)\[([^\]]+)\]:/gm, '$1\\[$2\\]:');
-    return marked.parse(safeText) as string;
+    return filterTrustedRichHtml(marked.parse(safeText) as string);
   } catch (e) {
     console.error('[RagPayloadDetail] marked parse failed:', e);
-    return rawText;
+    return filterTrustedRichHtml(rawText);
   }
 });
 </script>

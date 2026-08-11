@@ -474,37 +474,39 @@ async fn bootstrap_legacy_if_needed(
     )
     .fetch_one(pool)
     .await
-    .unwrap_or(false);
+    .map_err(|e| format!("Bootstrap: failed to inspect messages table: {e}"))?;
 
-    let has_sqlx_table: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
-
-    // 不是遗留用户（全新安装），或桥接已完成
-    if !has_messages || has_sqlx_table {
+    // 全新安装由 sqlx migrator 正常建表。已有 tracking 表不代表桥接完整；
+    // 旧版本可能在逐条 seed 中途崩溃，因此仍需在事务内补齐可证明已应用的记录。
+    if !has_messages {
         return Ok(());
     }
 
     log::info!("[DBManager] Legacy 1.1.2 database detected. Bootstrapping migration state...");
 
     // 检测各迁移在历史上是否已执行（通过当前 Schema 状态推断）
-    let columns = sqlx::query("PRAGMA table_info(message_attachments)")
-        .fetch_all(pool)
+    let mut tx = pool
+        .begin()
         .await
-        .unwrap_or_default();
-    let has_deleted_at = columns
-        .iter()
-        .any(|row| row.try_get::<String, _>("name").unwrap_or_default() == "deleted_at");
+        .map_err(|e| format!("Bootstrap: failed to begin transaction: {e}"))?;
+    let columns = sqlx::query("PRAGMA table_info(message_attachments)")
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| format!("Bootstrap: failed to inspect attachment columns: {e}"))?;
+    let mut has_deleted_at = false;
+    for row in columns {
+        let name: String = row
+            .try_get("name")
+            .map_err(|e| format!("Bootstrap: failed to decode attachment column: {e}"))?;
+        has_deleted_at |= name == "deleted_at";
+    }
 
     let has_fts: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts')",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
-    .unwrap_or(false);
+    .map_err(|e| format!("Bootstrap: failed to inspect FTS table: {e}"))?;
 
     // 向 _sqlx_migrations 写入虚拟记录（migrator.run() 会自动建表后再读取）
     // 此处借用 pool 直接执行，因为 _sqlx_migrations 尚不存在，
@@ -523,7 +525,7 @@ async fn bootstrap_legacy_if_needed(
             execution_time BIGINT NOT NULL
         )",
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Bootstrap: failed to create _sqlx_migrations: {}", e))?;
 
@@ -544,7 +546,7 @@ async fn bootstrap_legacy_if_needed(
             .bind(migration.version)
             .bind(migration.description.as_ref())
             .bind(migration.checksum.as_ref())
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| {
                 format!(
@@ -560,6 +562,10 @@ async fn bootstrap_legacy_if_needed(
             );
         }
     }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Bootstrap: failed to commit migration bridge: {e}"))?;
 
     log::info!("[DBManager] Legacy bootstrap complete. Handing over to sqlx migrator.");
     Ok(())
@@ -948,6 +954,60 @@ mod tests {
         assert!(!is_confirmed_sqlite_corruption_code(5)); // SQLITE_BUSY
         assert!(!is_confirmed_sqlite_corruption_code(6)); // SQLITE_LOCKED
         assert!(!is_confirmed_sqlite_corruption_code(10)); // SQLITE_IOERR
+    }
+
+    #[tokio::test]
+    async fn legacy_migration_seed_is_atomic_and_retryable() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::query(
+            "CREATE TABLE messages (msg_id TEXT);
+             CREATE TABLE message_attachments (hash TEXT, deleted_at INTEGER);
+             CREATE TABLE messages_fts (msg_id TEXT);
+             CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+             );
+             CREATE TRIGGER fail_second_seed
+             BEFORE INSERT ON _sqlx_migrations
+             WHEN NEW.version = 2
+             BEGIN SELECT RAISE(ABORT, 'seed failure'); END;",
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy fixture");
+        let migrator = sqlx::migrate!("./migrations");
+
+        let error = bootstrap_legacy_if_needed(&pool, &migrator)
+            .await
+            .expect_err("injected seed failure must abort bridge");
+        assert!(error.contains("seed migration v2"));
+        let partial_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .expect("count partial rows");
+        assert_eq!(partial_count, 0);
+
+        sqlx::query("DROP TRIGGER fail_second_seed")
+            .execute(&pool)
+            .await
+            .expect("remove failure trigger");
+        bootstrap_legacy_if_needed(&pool, &migrator)
+            .await
+            .expect("retry migration bridge");
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("read seeded versions");
+        assert_eq!(versions, vec![1, 2, 3]);
     }
 
     #[tokio::test]

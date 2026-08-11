@@ -66,42 +66,70 @@ impl SyncPipeline {
 
     /// 进入 Phase 2: Topic 元数据补全
     pub async fn on_owner_metadata_done(&self) -> Result<(), String> {
+        self.command_tx
+            .send(PipelineCommand::StartTopicMetadata)
+            .map_err(|_| "sync pipeline command receiver closed".to_string())?;
         {
             let mut state = self.state.write().await;
             *state = PipelinePhase::Phase2TopicMetadata {
                 progress: PhaseProgress::new(),
             };
         }
-        let _ = self.command_tx.send(PipelineCommand::StartTopicMetadata);
         Ok(())
     }
 
     /// 进入 Phase 2.5: Topic 哈希比对
     pub async fn on_topic_metadata_pull_done(&self) -> Result<(), String> {
         // 哈希比对在 Phase2 逻辑内，不改变底层 PipelinePhase 枚举
-        let _ = self.command_tx.send(PipelineCommand::StartTopicValidation);
+        self.command_tx
+            .send(PipelineCommand::StartTopicValidation)
+            .map_err(|_| "sync pipeline command receiver closed".to_string())?;
         Ok(())
     }
 
     /// 进入 Phase 3: 消息同步
     pub async fn on_topic_validation_done(&self) -> Result<(), String> {
+        self.command_tx
+            .send(PipelineCommand::StartMessages)
+            .map_err(|_| "sync pipeline command receiver closed".to_string())?;
         {
             let mut state = self.state.write().await;
             *state = PipelinePhase::Phase3Messages {
                 progress: PhaseProgress::new(),
             };
         }
-        let _ = self.command_tx.send(PipelineCommand::StartMessages);
         Ok(())
     }
 
     /// 同步结束
     pub async fn on_messages_done(&self) -> Result<(), String> {
+        self.command_tx
+            .send(PipelineCommand::Finalize)
+            .map_err(|_| "sync pipeline command receiver closed".to_string())?;
         {
             let mut state = self.state.write().await;
             *state = PipelinePhase::Completed;
         }
-        let _ = self.command_tx.send(PipelineCommand::Finalize);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PipelinePhase, SyncPipeline};
+
+    #[tokio::test]
+    async fn completed_phase_is_not_published_when_finalize_receiver_is_closed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let pipeline = SyncPipeline::new(tx);
+
+        let error = pipeline
+            .on_messages_done()
+            .await
+            .expect_err("closed receiver must fail finalization");
+        assert!(error.contains("receiver closed"));
+        let state = pipeline.get_state();
+        assert!(matches!(&*state.read().await, PipelinePhase::Idle));
     }
 }

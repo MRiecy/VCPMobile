@@ -1762,7 +1762,7 @@ mod tests {
                         ..
                     } = child
                     {
-                        if strong_children.len() > 0 {
+                        if !strong_children.is_empty() {
                             if let InlineNode::Text { value, .. } = &strong_children[0] {
                                 if value.contains("自愈判定阀") {
                                     found = true;

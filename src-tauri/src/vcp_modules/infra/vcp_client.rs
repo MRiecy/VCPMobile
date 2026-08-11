@@ -22,7 +22,7 @@ use url::Url;
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::settings_manager::{create_default_settings, Settings};
+use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
 
 #[cfg(target_os = "android")]
 const HELPER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -358,6 +358,7 @@ fn get_or_calculate_message_hash(content: &Value) -> String {
 
 /// 核心请求实现函数，可供 Tauri Command 或 内部 Rust 模块(如 GroupOrchestrator) 调用
 /// 返回 Result<(全量内容/响应体, 是否被中止), 错误信息>
+#[allow(dead_code)] // DORMANT ASSET: only the unregistered floating-assistant bridge uses this API.
 pub async fn perform_vcp_request<R: Runtime>(
     app: &AppHandle<R>,
     active_requests: ActiveRequestMap,
@@ -1620,23 +1621,8 @@ async fn handle_non_streaming_request(
 }
 
 async fn load_app_settings<R: Runtime>(app: &AppHandle<R>) -> Result<Settings, String> {
-    let db_state = app.state::<DbState>();
-    let pool = &db_state.pool;
-
-    let row = sqlx::query("SELECT value FROM settings WHERE key = 'global'")
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(row) = row {
-        use sqlx::Row;
-        let content: String = row.get("value");
-        let settings = serde_json::from_str::<Settings>(&content)
-            .unwrap_or_else(|_| create_default_settings());
-        Ok(settings)
-    } else {
-        Ok(create_default_settings())
-    }
+    let settings_state = app.state::<SettingsState>();
+    read_settings(app.clone(), settings_state).await
 }
 
 /// 中止请求 Command: interruptRequest

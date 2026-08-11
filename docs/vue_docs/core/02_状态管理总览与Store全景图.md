@@ -568,7 +568,7 @@ overlayStore.openSyncSession()
 
 > 文件位置：`src/core/stores/floatingAssistant.ts`（~352 行）
 
-> **⚠️ SUSPENDED BETA**：浮动助手功能在 v1.1.3 中已暂停使用，`SettingsView.vue` 入口已关闭，但 Store 代码保留。
+> **⛔ DORMANT ASSET**：浮动助手 Store 及其历史依赖源码保留，但路由、production HTML、窗口事件、直接 IPC、原生悬浮命令与 capability 均已注销；本节只记录未来可能复用的历史设计。
 
 `useFloatingAssistantStore` 是 VCP Mobile 浮动助手 **Mini-App 的唯一 Pinia Store**。它为 Android 悬浮 WebView 提供完整的消息管理、WebSocket IPC、剪贴板读取、设置镜像与内置 Toast 系统。
 

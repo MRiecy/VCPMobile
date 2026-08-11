@@ -209,6 +209,7 @@ pub async fn internal_process_agent_chat_message(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // DORMANT ASSET: floating-assistant bridge is retained but not registered.
 pub struct AssistantChatPayload {
     pub agent_id: String,
     pub temp_messages: Vec<crate::vcp_modules::chat::topic_service::TempMessage>,
@@ -217,6 +218,7 @@ pub struct AssistantChatPayload {
 }
 
 #[tauri::command]
+#[allow(dead_code)] // DORMANT ASSET: floating-assistant bridge is retained but not registered.
 pub async fn handle_assistant_chat_stream(
     app_handle: AppHandle,
     agent_state: State<'_, AgentConfigState>,

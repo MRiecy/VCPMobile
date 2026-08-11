@@ -359,7 +359,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     }
                 }
 
-                log::info!("[VCPInfo] Disconnected from {}.", ws_url);
+                log::info!("[VCPInfo] Disconnected from {}.", masked_url);
                 {
                     *CURRENT_INFO_STATUS.write().await = "closed".to_string();
                 }

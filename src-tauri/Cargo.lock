@@ -6629,7 +6629,6 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-opener",
  "tauri-plugin-vcp-mobile",
- "tauri-utils",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",

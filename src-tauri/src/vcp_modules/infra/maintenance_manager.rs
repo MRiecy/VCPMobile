@@ -2,13 +2,108 @@
 // 职责: 聚合所有低频但关键的系统维护任务，对齐前端 MaintenanceSection 领域。
 
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::file_manager::{
-    delete_attachment_physical, get_attachments_root_dir, get_multimodal_cache_dir,
-    get_thumbnails_root_dir,
-};
 use crate::vcp_modules::infra::utils::{is_valid_cas_hash, now_secs, YieldCounter};
 use crate::vcp_modules::settings_manager::{read_settings, update_settings, SettingsState};
+use std::collections::HashSet;
 use tauri::{AppHandle, Manager, State};
+
+struct AttachmentGcSnapshot {
+    live_hashes: HashSet<String>,
+    indexed_attachments: Vec<(String, String)>,
+}
+
+struct AttachmentGcPlan {
+    live_count: usize,
+    orphaned_indexed_count: usize,
+}
+
+/// Load every input used by online attachment diagnostics from one SQLite snapshot.
+/// Callers must not mutate logical tombstones unless this succeeds.
+async fn load_attachment_gc_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+) -> Result<AttachmentGcSnapshot, String> {
+    let live_hashes = sqlx::query_as::<_, (String,)>(
+        "SELECT DISTINCT ma.hash FROM message_attachments ma \
+             INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+             INNER JOIN topics t ON m.topic_id = t.topic_id \
+             LEFT JOIN agents a ON t.owner_id = a.agent_id AND t.owner_type = 'agent' \
+             LEFT JOIN groups g ON t.owner_id = g.group_id AND t.owner_type = 'group' \
+             WHERE m.deleted_at IS NULL \
+               AND ma.deleted_at IS NULL \
+               AND t.deleted_at IS NULL \
+               AND (t.owner_type != 'agent' OR a.deleted_at IS NULL) \
+               AND (t.owner_type != 'group' OR g.deleted_at IS NULL)",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("读取附件 GC 有效引用失败: {error}"))?
+    .into_iter()
+    .map(|(hash,)| hash)
+    .collect();
+
+    let indexed_attachments =
+        sqlx::query_as::<_, (String, String)>("SELECT hash, internal_path FROM attachments")
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| format!("读取附件 GC 索引失败: {error}"))?;
+
+    Ok(AttachmentGcSnapshot {
+        live_hashes,
+        indexed_attachments,
+    })
+}
+
+async fn apply_attachment_gc_index_mutations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    _orphaned_indexed: &[(String, String)],
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE message_attachments \
+         SET display_name = '[附件已删除]', src = NULL, status = 'removed' \
+         WHERE deleted_at IS NOT NULL \
+            OR (topic_id, msg_id) IN (\
+                SELECT topic_id, msg_id FROM messages WHERE deleted_at IS NOT NULL\
+            ) \
+            OR topic_id IN (\
+                SELECT topic_id FROM topics WHERE deleted_at IS NOT NULL \
+                   OR owner_id IN (SELECT agent_id FROM agents WHERE deleted_at IS NOT NULL) AND owner_type = 'agent' \
+                   OR owner_id IN (SELECT group_id FROM groups WHERE deleted_at IS NOT NULL) AND owner_type = 'group' \
+            )",
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("更新附件墓碑失败: {e}"))?;
+
+    // 在线维护只允许逻辑墓碑更新。附件索引与物理文件必须保留，直到后续
+    // owner + quarantine/grace 协议能把新引用与 unlink 线性化。
+    Ok(())
+}
+
+async fn prepare_attachment_gc(pool: &sqlx::SqlitePool) -> Result<AttachmentGcPlan, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| format!("开启附件 GC 快照失败: {error}"))?;
+    let snapshot = load_attachment_gc_snapshot(&mut tx).await?;
+    let orphaned_indexed: Vec<(String, String)> = snapshot
+        .indexed_attachments
+        .into_iter()
+        .filter(|(hash, _)| !snapshot.live_hashes.contains(hash))
+        .collect();
+
+    // Snapshot and logical tombstone updates share one transaction. If another connection
+    // commits after the read snapshot, SQLite rejects the stale read-to-write upgrade.
+    // Physical files and attachment indices are deliberately outside this online action.
+    apply_attachment_gc_index_mutations(&mut tx, &orphaned_indexed).await?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("提交附件 GC 索引事务失败: {error}"))?;
+
+    Ok(AttachmentGcPlan {
+        live_count: snapshot.live_hashes.len(),
+        orphaned_indexed_count: orphaned_indexed.len(),
+    })
+}
 
 /// 辅助函数：异步深度遍历计算目录大小（带协作式 CPU 挂起出让，每 200 个文件出让一次时间片）
 async fn calculate_dir_size(path: &std::path::Path) -> u64 {
@@ -75,207 +170,20 @@ pub async fn clear_webview_cache(app: AppHandle) -> Result<String, String> {
     ))
 }
 
-/// 2. 清理孤儿附件 (Level 2)
-/// 深度扫描并删除未被引用的孤立附件与缩略图。
-/// 第一阶段：基于数据库比对，清除消息已被删除的孤立附件；
-/// 第二阶段：物理磁盘双向校验扫盲，清除在库里完全无登记记录的无主“幽灵文件”及无主缩略图。
+/// 2. 检查孤儿附件 (Level 2)
+/// 在线阶段只统计候选并更新已删除消息的逻辑墓碑，不删除索引或物理文件。
 #[tauri::command]
 pub async fn cleanup_orphaned_attachments(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     db_state: State<'_, DbState>,
 ) -> Result<String, String> {
-    let attachments_dir = get_attachments_root_dir(&app_handle)?;
-
-    // ==========================================
-    // 🌟 第一阶段：基于数据库与消息引用的孤儿清理 🌟
-    // ==========================================
-    let mut deleted_count = 0;
-    let mut freed_size = 0u64;
-
-    // 1.5 将已逻辑删除或所属消息/话题/智能体/群组已删除的 message_attachments 记录清空为无害的墓碑态 (清空敏感正文、src路径等)，但保留主键条目
-    let _ = sqlx::query(
-        "UPDATE message_attachments \
-         SET display_name = '[附件已删除]', src = NULL, status = 'removed' \
-         WHERE deleted_at IS NOT NULL \
-            OR (topic_id, msg_id) IN (\
-                SELECT topic_id, msg_id FROM messages WHERE deleted_at IS NOT NULL\
-            ) \
-            OR topic_id IN (\
-                SELECT topic_id FROM topics WHERE deleted_at IS NOT NULL \
-                   OR owner_id IN (SELECT agent_id FROM agents WHERE deleted_at IS NOT NULL) AND owner_type = 'agent' \
-                   OR owner_id IN (SELECT group_id FROM groups WHERE deleted_at IS NOT NULL) AND owner_type = 'group' \
-            )",
-    )
-    .execute(&db_state.pool)
-    .await;
-
-    // 2. 查 message_attachments 确定哪些 hash 正在被有效消息引用 (防线四：GC 强校验，包含对 Topic/Agent/Group 存活链路的安全判定)
-    let used_hashes: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT DISTINCT ma.hash FROM message_attachments ma \
-             INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
-             INNER JOIN topics t ON m.topic_id = t.topic_id \
-             LEFT JOIN agents a ON t.owner_id = a.agent_id AND t.owner_type = 'agent' \
-             LEFT JOIN groups g ON t.owner_id = g.group_id AND t.owner_type = 'group' \
-             WHERE m.deleted_at IS NULL \
-               AND ma.deleted_at IS NULL \
-               AND t.deleted_at IS NULL \
-               AND (t.owner_type != 'agent' OR a.deleted_at IS NULL) \
-               AND (t.owner_type != 'group' OR g.deleted_at IS NULL)",
-    )
-    .fetch_all(&db_state.pool)
-    .await
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .map(|(h,)| h)
-    .collect();
-
-    // 3. 获取数据库中记录的所有附件哈希与物理路径
-    let all_indexed_hashes: Vec<(String, String)> =
-        sqlx::query_as("SELECT hash, internal_path FROM attachments")
-            .fetch_all(&db_state.pool)
-            .await
-            .unwrap_or_default();
-
-    for (hash, local_path) in all_indexed_hashes {
-        if !used_hashes.contains(&hash) {
-            let path = std::path::Path::new(&local_path);
-            if path.exists() {
-                if let Ok(meta) = tokio::fs::metadata(path).await {
-                    freed_size += meta.len();
-                }
-                let _ = delete_attachment_physical(&app_handle, &hash, &local_path).await;
-
-                deleted_count += 1;
-            }
-
-            // 从数据库中移除
-            let _ = sqlx::query("DELETE FROM attachments WHERE hash = ?")
-                .bind(&hash)
-                .execute(&db_state.pool)
-                .await;
-        }
-    }
-
-    // ==========================================
-    // 🌟 第二阶段：双向磁盘“幽灵文件”扫盲清扫 🌟
-    // ==========================================
-    let mut ghost_deleted_count = 0;
-    let mut ghost_freed_size = 0u64;
-
-    // 1. 获取最新在库的所有有效附件 hash
-    let db_hashes_rows: Vec<(String,)> = sqlx::query_as("SELECT hash FROM attachments")
-        .fetch_all(&db_state.pool)
-        .await
-        .unwrap_or_default();
-    let current_in_db_hashes: std::collections::HashSet<String> =
-        db_hashes_rows.into_iter().map(|(h,)| h).collect();
-
-    // 2. 双向物理校验：清理无主物理附件
-    let mut file_yield = YieldCounter::new(200);
-    if attachments_dir.exists() {
-        if let Ok(mut entries) = tokio::fs::read_dir(&attachments_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                // 协作式 CPU 出让挂起：使用公共 YieldCounter
-                file_yield.tick().await;
-
-                let path = entry.path();
-                if path.is_file() {
-                    let file_name = entry.file_name().to_string_lossy().to_string();
-                    let hash = file_name
-                        .split('.')
-                        .next()
-                        .unwrap_or(&file_name)
-                        .to_string();
-
-                    // 64位十六进制哈希强校验，保障删除安全
-                    if is_valid_cas_hash(&hash) && !current_in_db_hashes.contains(&hash) {
-                        if let Ok(meta) = tokio::fs::metadata(&path).await {
-                            ghost_freed_size += meta.len();
-                        }
-                        if tokio::fs::remove_file(&path).await.is_ok() {
-                            ghost_deleted_count += 1;
-                            log::info!(
-                                "[Maintenance] GC swept ghost attachment file: {}",
-                                file_name
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. 双向物理校验：清理无主物理缩略图
-    let mut thumb_yield = YieldCounter::new(200);
-    if let Ok(thumbnails_dir) = get_thumbnails_root_dir(&app_handle) {
-        if thumbnails_dir.exists() {
-            if let Ok(mut entries) = tokio::fs::read_dir(&thumbnails_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    // 协作式 CPU 出让挂起：使用公共 YieldCounter
-                    thumb_yield.tick().await;
-
-                    let path = entry.path();
-                    if path.is_file() {
-                        let file_name = entry.file_name().to_string_lossy().to_string();
-                        // 提取缩略图对应的哈希值 (hash_thumb.webp)
-                        if file_name.ends_with("_thumb.webp") && file_name.len() == 75 {
-                            let hash = file_name[..64].to_string();
-                            if !current_in_db_hashes.contains(&hash) {
-                                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                    ghost_freed_size += meta.len();
-                                }
-                                if tokio::fs::remove_file(&path).await.is_ok() {
-                                    ghost_deleted_count += 1;
-                                    log::info!(
-                                        "[Maintenance] GC swept ghost thumbnail file: {}",
-                                        file_name
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 4. 双向物理校验：清理无主多模态缓存 (.json 文件)
-    let mut cache_yield = YieldCounter::new(200);
-    if let Ok(cache_dir) = get_multimodal_cache_dir(&app_handle) {
-        if cache_dir.exists() {
-            if let Ok(mut entries) = tokio::fs::read_dir(&cache_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    cache_yield.tick().await;
-                    let path = entry.path();
-                    if path.is_file() {
-                        let file_name = entry.file_name().to_string_lossy().to_string();
-                        if file_name.ends_with(".json") && file_name.len() == 69 {
-                            let hash = file_name[..64].to_string();
-                            if !current_in_db_hashes.contains(&hash) {
-                                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                                    ghost_freed_size += meta.len();
-                                }
-                                if tokio::fs::remove_file(&path).await.is_ok() {
-                                    ghost_deleted_count += 1;
-                                    log::info!(
-                                        "[Maintenance] GC swept ghost multimodal cache file: {}",
-                                        file_name
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let total_deleted = deleted_count + ghost_deleted_count;
-    let total_freed_mb = ((freed_size + ghost_freed_size) as f64) / 1024.0 / 1024.0;
-
+    // A complete snapshot is still required for diagnostics and logical tombstones. Online
+    // physical deletion is intentionally disabled: a reference may be added after any DB
+    // commit, so unlinking without a shared attachment owner can delete newly-live CAS data.
+    let plan = prepare_attachment_gc(&db_state.pool).await?;
     Ok(format!(
-        "清理完成：共删除 {} 个孤立文件 (常规: {} 个，幽灵: {} 个)，释放空间: {:.2} MB",
-        total_deleted, deleted_count, ghost_deleted_count, total_freed_mb
+        "已完成附件引用检查：有效引用 {} 个，孤儿候选 {} 个；在线物理回收已延期，未删除附件索引、主文件、缩略图或多模态缓存",
+        plan.live_count, plan.orphaned_indexed_count
     ))
 }
 
@@ -313,14 +221,17 @@ pub async fn reconstruct_system_cache(
     ))
 }
 
-/// 2.5 精准清理单个孤儿附件 (供前端取消暂存时调用)
-/// 检查特定 hash 是否被引用，若未引用则物理删除以防脏数据
+/// 2.5 检查单个孤儿附件 (供前端取消暂存时调用)
+/// 当前仅确认引用状态；物理回收等待 owner + quarantine/grace 协议。
 #[tauri::command]
 pub async fn cleanup_single_orphaned_attachment(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     db_state: State<'_, DbState>,
     hash: String,
 ) -> Result<String, String> {
+    if !is_valid_cas_hash(&hash) {
+        return Err("附件哈希格式无效".to_string());
+    }
     // 1. 查 message_attachments 确定该 hash 是否被有效历史消息引用
     let is_used: bool = sqlx::query_scalar::<_, i32>(
         "SELECT EXISTS(\
@@ -338,28 +249,7 @@ pub async fn cleanup_single_orphaned_attachment(
         return Ok("附件已被其他消息引用，跳过清理".to_string());
     }
 
-    // 2. 获取记录的物理路径与创建时间
-    let row: Option<(String, i64)> =
-        sqlx::query_as("SELECT internal_path, created_at FROM attachments WHERE hash = ?")
-            .bind(&hash)
-            .fetch_optional(&db_state.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    if let Some((path_str, _)) = row {
-        // 调用统一的物理删除原语，连同缩略图一并抹除
-        let _ = delete_attachment_physical(&app_handle, &hash, &path_str).await;
-
-        // 从数据库中移除
-        let _ = sqlx::query("DELETE FROM attachments WHERE hash = ?")
-            .bind(&hash)
-            .execute(&db_state.pool)
-            .await;
-
-        Ok("成功清理未引用的暂存附件".to_string())
-    } else {
-        Ok("数据库中未找到该附件记录".to_string())
-    }
+    Ok("附件当前未被有效消息引用；在线物理回收已延期，文件与索引保持不变".to_string())
 }
 
 /// 3. 初始化自动维护逻辑 (在 App 启动时调用)
@@ -450,5 +340,255 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         });
         let _ = update_settings(app.clone(), settings_state, updates).await;
         log::info!("[Maintenance] Scheduled maintenance complete.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_attachment_gc_index_mutations, load_attachment_gc_snapshot, prepare_attachment_gc,
+    };
+
+    async fn create_live_set_tables(pool: &sqlx::SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE message_attachments (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                deleted_at INTEGER,
+                display_name TEXT,
+                src TEXT,
+                status TEXT
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create message_attachments");
+        sqlx::query(
+            "CREATE TABLE messages (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                deleted_at INTEGER
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create messages");
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                owner_type TEXT NOT NULL,
+                deleted_at INTEGER
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create topics");
+        sqlx::query("CREATE TABLE agents (agent_id TEXT PRIMARY KEY, deleted_at INTEGER)")
+            .execute(pool)
+            .await
+            .expect("create agents");
+        sqlx::query("CREATE TABLE groups (group_id TEXT PRIMARY KEY, deleted_at INTEGER)")
+            .execute(pool)
+            .await
+            .expect("create groups");
+    }
+
+    #[tokio::test]
+    async fn gc_snapshot_query_failure_yields_no_destructive_plan() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        create_live_set_tables(&pool).await;
+
+        // The first live-reference query is valid, but the attachment index query fails.
+        // The caller receives no partial snapshot and therefore has nothing it may delete.
+        let error = prepare_attachment_gc(&pool)
+            .await
+            .err()
+            .expect("missing attachments table must fail closed");
+        assert!(error.contains("附件 GC 索引"));
+    }
+
+    #[tokio::test]
+    async fn gc_snapshot_keeps_only_fully_live_attachment_hashes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        create_live_set_tables(&pool).await;
+        sqlx::query(
+            "CREATE TABLE attachments (hash TEXT PRIMARY KEY, internal_path TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create attachments");
+        sqlx::query("INSERT INTO agents VALUES ('agent-live', NULL), ('agent-deleted', 7)")
+            .execute(&pool)
+            .await
+            .expect("insert owners");
+        sqlx::query(
+            "INSERT INTO topics VALUES
+                ('topic-live', 'agent-live', 'agent', NULL),
+                ('topic-deleted', 'agent-deleted', 'agent', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert topics");
+        sqlx::query(
+            "INSERT INTO messages VALUES
+                ('topic-live', 'message-live', NULL),
+                ('topic-deleted', 'message-deleted', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert messages");
+        sqlx::query(
+            "INSERT INTO message_attachments (topic_id, msg_id, hash, deleted_at) VALUES
+                ('topic-live', 'message-live', 'live-hash', NULL),
+                ('topic-deleted', 'message-deleted', 'deleted-hash', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert relations");
+        sqlx::query(
+            "INSERT INTO attachments VALUES
+                ('live-hash', '/live'),
+                ('deleted-hash', '/deleted')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert attachment index");
+
+        let mut tx = pool.begin().await.expect("begin snapshot");
+        let snapshot = load_attachment_gc_snapshot(&mut tx)
+            .await
+            .expect("complete live-set snapshot");
+        assert!(snapshot.live_hashes.contains("live-hash"));
+        assert!(!snapshot.live_hashes.contains("deleted-hash"));
+        assert_eq!(snapshot.indexed_attachments.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn online_gc_keeps_orphan_index_and_physical_candidate() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        create_live_set_tables(&pool).await;
+        sqlx::query(
+            "CREATE TABLE attachments (hash TEXT PRIMARY KEY, internal_path TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create attachments");
+        let temp = tempfile::tempdir().expect("physical attachment directory");
+        let candidate = temp.path().join("orphan.bin");
+        std::fs::write(&candidate, b"preserve online").expect("physical candidate");
+        sqlx::query("INSERT INTO attachments VALUES ('orphan-hash', ?)")
+            .bind(candidate.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .expect("insert orphan index");
+
+        let plan = prepare_attachment_gc(&pool).await.expect("online GC plan");
+
+        assert_eq!(plan.orphaned_indexed_count, 1);
+        let index_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE hash = 'orphan-hash'")
+                .fetch_one(&pool)
+                .await
+                .expect("read preserved index");
+        assert_eq!(index_count, 1);
+        assert_eq!(
+            std::fs::read(&candidate).expect("physical candidate remains"),
+            b"preserve online"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_reference_prevents_stale_gc_plan_from_committing() {
+        let temp = tempfile::tempdir().expect("temp database directory");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(temp.path().join("gc.sqlite"))
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_millis(100));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("open WAL test database");
+        create_live_set_tables(&pool).await;
+        sqlx::query(
+            "CREATE TABLE attachments (hash TEXT PRIMARY KEY, internal_path TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create attachments");
+        sqlx::query("INSERT INTO agents VALUES ('agent', NULL)")
+            .execute(&pool)
+            .await
+            .expect("insert owner");
+        sqlx::query("INSERT INTO topics VALUES ('topic', 'agent', 'agent', NULL)")
+            .execute(&pool)
+            .await
+            .expect("insert topic");
+        sqlx::query("INSERT INTO messages VALUES ('topic', 'message', NULL)")
+            .execute(&pool)
+            .await
+            .expect("insert message");
+        sqlx::query("INSERT INTO attachments VALUES ('raced-hash', '/raced')")
+            .execute(&pool)
+            .await
+            .expect("insert attachment index");
+
+        let mut stale_tx = pool.begin().await.expect("begin stale GC snapshot");
+        let snapshot = load_attachment_gc_snapshot(&mut stale_tx)
+            .await
+            .expect("read stale GC snapshot");
+        let orphaned: Vec<_> = snapshot
+            .indexed_attachments
+            .into_iter()
+            .filter(|(hash, _)| !snapshot.live_hashes.contains(hash))
+            .collect();
+        assert_eq!(orphaned.len(), 1);
+
+        // A second WAL connection makes the previously orphaned hash live after the
+        // first connection has established its read snapshot.
+        sqlx::query(
+            "INSERT INTO message_attachments (topic_id, msg_id, hash, deleted_at)
+             VALUES ('topic', 'message', 'raced-hash', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("publish concurrent attachment reference");
+
+        assert!(
+            apply_attachment_gc_index_mutations(&mut stale_tx, &orphaned)
+                .await
+                .is_err(),
+            "SQLite must reject a stale read snapshot upgrading to destructive write"
+        );
+        stale_tx.rollback().await.ok();
+
+        let index_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE hash = 'raced-hash'")
+                .fetch_one(&pool)
+                .await
+                .expect("read attachment index");
+        let reference_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_attachments WHERE hash = 'raced-hash'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read attachment reference");
+        assert_eq!(index_count, 1);
+        assert_eq!(reference_count, 1);
     }
 }

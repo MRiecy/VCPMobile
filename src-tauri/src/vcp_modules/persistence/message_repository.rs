@@ -501,6 +501,37 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 pub struct MessageRepository;
 
 impl MessageRepository {
+    async fn ensure_upsert_target_live(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        topic_id: &str,
+        msg_id: &str,
+    ) -> Result<(), String> {
+        let topic_is_live: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM topics WHERE topic_id = ? AND deleted_at IS NULL)",
+        )
+        .bind(topic_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| error.to_string())?;
+        if !topic_is_live {
+            return Err(format!("topic {topic_id} is deleted or missing"));
+        }
+
+        let deleted_at: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT deleted_at FROM messages WHERE topic_id = ? AND msg_id = ?")
+                .bind(topic_id)
+                .bind(msg_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|error| error.to_string())?;
+        if matches!(deleted_at, Some(Some(_))) {
+            return Err(format!(
+                "message {msg_id} is tombstoned and cannot be restored by upsert"
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn upsert_message(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         message: &ChatMessage,
@@ -508,6 +539,8 @@ impl MessageRepository {
         render_content: &[u8],
         skip_bubble: bool,
     ) -> Result<(), String> {
+        Self::ensure_upsert_target_live(tx, topic_id, &message.id).await?;
+
         // 1. 计算核心内容指纹 (通过 HashAggregator)
         let attachment_hashes: Vec<String> = message
             .attachments
@@ -541,8 +574,8 @@ impl MessageRepository {
                 group_id = excluded.group_id,
                 finish_reason = excluded.finish_reason,
                 content_hash = excluded.content_hash,
-                updated_at = excluded.updated_at,
-                deleted_at = NULL",
+                updated_at = excluded.updated_at
+             WHERE messages.deleted_at IS NULL",
         )
         .bind(&message.id)
         .bind(topic_id)
@@ -696,5 +729,57 @@ impl MessageRepository {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tombstone_tests {
+    use super::MessageRepository;
+
+    async fn test_pool() -> sqlx::SqlitePool {
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database")
+    }
+
+    #[tokio::test]
+    async fn generic_upsert_rejects_deleted_topic_and_message_targets() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "CREATE TABLE topics (topic_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE messages (
+                topic_id TEXT NOT NULL,
+                msg_id TEXT NOT NULL,
+                deleted_at INTEGER,
+                PRIMARY KEY(topic_id, msg_id)
+             );",
+        )
+        .execute(&pool)
+        .await
+        .expect("create tombstone tables");
+        sqlx::query(
+            "INSERT INTO topics VALUES ('live-topic', NULL), ('deleted-topic', 7);
+             INSERT INTO messages VALUES ('live-topic', 'deleted-message', 8);",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert tombstones");
+
+        let mut tx = pool.begin().await.expect("begin transaction");
+        MessageRepository::ensure_upsert_target_live(&mut tx, "live-topic", "new-message")
+            .await
+            .expect("new message in a live topic is allowed");
+        let message_error =
+            MessageRepository::ensure_upsert_target_live(&mut tx, "live-topic", "deleted-message")
+                .await
+                .expect_err("message tombstone is monotonic");
+        assert!(message_error.contains("tombstoned"));
+        let topic_error =
+            MessageRepository::ensure_upsert_target_live(&mut tx, "deleted-topic", "new-message")
+                .await
+                .expect_err("topic tombstone blocks child writes");
+        assert!(topic_error.contains("deleted or missing"));
     }
 }

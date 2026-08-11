@@ -29,7 +29,7 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 2. [应用架构与生命周期](vue_docs/architecture/01_应用架构与生命周期.md)
 3. [状态管理总览](vue_docs/core/02_状态管理总览与Store全景图.md)
 4. [对话引擎总览](vue_docs/features/chat/08_对话引擎总览.md)
-5. [浮动助手系统](vue_docs/features/assistant/24_浮动助手系统.md) -- v1.0.3 新增，v1.1.3 已暂停使用
+5. [浮动助手系统](vue_docs/features/assistant/24_浮动助手系统.md) -- 历史技术资产；当前运行入口、构建产物与权限均已注销
 
 ### Android 原生开发者
 1. [插件总览](plugins/00_总览与导航.md)

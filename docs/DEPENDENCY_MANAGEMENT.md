@@ -7,14 +7,14 @@
 
 ## 1. 版本锁定哲学
 
-### 1.1 为什么使用精确版本
+### 1.1 为什么以锁文件作为构建真相
 
-VCP Mobile 采用**完全精确版本锁定**策略（Exact Version Pinning），禁止在核心依赖中使用 `^`、`~`、`>=` 或 `"latest"`。理由如下：
+VCP Mobile 采用**manifest 表达兼容范围、锁文件冻结实际解析**的策略。Tauri 跨层包与 Gradle 直接依赖使用明确版本；其余 npm/Cargo 依赖可保留受控范围，但 CI/Release 必须分别使用 `pnpm install --frozen-lockfile` 与 Cargo `--locked`。任何场景都禁止 `"latest"`。理由如下：
 
 1. **可复现构建（Reproducible Builds）**：Android 发布包一旦签名即不可篡改。若构建产物因依赖隐式升级而发生行为漂移，将无法追溯。
 2. **Tauri 跨层契约**：Tauri 是一个横跨 Rust crate、npm CLI、npm API 包、Android Gradle 插件、Kotlin 运行时的大型框架。任意一层版本错配都会导致编译失败或运行时 ABI 不兼容。
 3. **移动端特殊性**：Android NDK、Gradle Plugin、compileSdk 之间存在硬编码的兼容性矩阵。非确定性升级极易在真机上触发原生崩溃（native crash）。
-4. **审计与回滚**：精确版本使 `git diff` 即可定位依赖变更，回滚只需一次 `git revert`。
+4. **审计与回滚**：`package.json`/`Cargo.toml` 与两份 lockfile 的 diff 共同定位意图和实际解析，回滚边界明确。
 
 ### 1.2 Tauri 跨层版本契约
 
@@ -24,17 +24,17 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 - `@tauri-apps/cli` (npm devDependency)
 - `@tauri-apps/api` (npm dependency)
 - `tauri-build` (Rust build dependency) — 版本独立，但需兼容
-- `tauri-utils` (Rust utility crate) — 版本独立，但需兼容
+- `tauri-utils` (Rust transitive crate) — 当前不在 manifest 直接声明，但需在 `Cargo.lock` 解析图中检查兼容性
 
-> **铁律**：当 `tauri` crate 从 `2.11.1` 升级到 `2.12.0` 时，`@tauri-apps/cli`、`@tauri-apps/api` 必须在**同一次 commit** 内同步升级。`tauri-build` 和 `tauri-utils` 也需检查兼容性，但它们有自己的独立版本号（如 `tauri-build 2.6.1`、`tauri-utils 2.9.1`），不需要与 `tauri` core 版本号一致。
+> **铁律**：当 `tauri` crate 跨主/次版本升级时，`@tauri-apps/cli`、`@tauri-apps/api` 必须在**同一次 commit** 内同步升级。`tauri-build` 需检查独立兼容版本；`tauri-utils` 等传递依赖以新的 `Cargo.lock` 解析图为准，不得凭文档手工添加不存在的 direct dependency。
 
 ### 1.3 版本号书写规范
 
 | 文件类型 | 正确示例 | 错误示例 | 说明 |
 |---------|---------|---------|------|
-| `Cargo.toml` | `version = "2.11.5"` + `Cargo.lock` | `version = "2"` / `version = ">=2.11"` | Cargo 默认按 caret 范围解析，实际构建版本由 `Cargo.lock` 冻结；必须绝对精确时使用 `=2.11.5` |
-| `package.json` | `"2.11.2"` | `"^2.11.2"` / `"latest"` / `"*"` | pnpm 会尊重 `package.json` 中的前缀，必须显式去除 |
-| Gradle | `version = "2.11.1"` | — | Kotlin DSL 通常为精确字符串，保持现状 |
+| `Cargo.toml` | `tauri = "2.11.5"` + committed `Cargo.lock` | `tauri = "2"` / `">=2.11"` | Cargo manifest 值仍是兼容范围；CI/Release 用 `--locked` 冻结实际解析 |
+| `package.json` | Tauri 包 `"2.11.4"`；普通库可用 `^`/`~` + committed lock | `"latest"` / `"*"` | CI/Release 必须 `pnpm install --frozen-lockfile`，不允许隐式改 lock |
+| Gradle | `implementation("androidx.webkit:webkit:1.14.0")` | 动态版本 `1.+` | 直接依赖用精确字符串，并由 verification metadata 固定制品摘要 |
 
 ---
 
@@ -46,7 +46,6 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 |------|-------------|-------------|-------------|------|
 | `tauri` | `2.11.5` | 跟随官方 Release Note | crates.io | 核心运行时，**必须与 CLI/API 对齐** |
 | `tauri-build` | `2.6.3` | 与 `tauri` 同步检查 | crates.io | Build script 依赖，版本独立于 tauri core |
-| `tauri-utils` | `2.9.3` | 与 `tauri` 同步检查 | crates.io | 工具函数集，版本独立于 tauri core |
 | `tauri-plugin-log` | `2.9.0` | 每季度检查 | crates.io | 日志插件 |
 | `tauri-plugin-opener` | `2.5.4` | 每季度检查 | crates.io | 系统打开器插件 |
 | `serde` | `1` | 仅安全补丁 | crates.io | 序列化基石，极稳定 |
@@ -56,13 +55,12 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `sqlx` | `0.8.6` | 每季度检查 | crates.io | SQLite 异步 ORM |
 | `rusqlite` | `0.32.1` | 每季度检查 | crates.io | 同步 SQLite，启用 `bundled` |
 | `tokio-tungstenite` | `0.26` | 每季度检查 | crates.io | WebSocket 客户端 |
-| `image` | `0.25` | 每季度检查 | crates.io | 图像处理 |
 | `syntect` | `5.3.0` | 每半年检查 | crates.io | 语法高亮，体积敏感 |
 | `pulldown-cmark` | `0.13.3` | 每半年检查 | crates.io | Markdown 解析 |
 | `scraper` | `0.19` | 每半年检查 | crates.io | HTML 解析 |
-| `fancy-regex` | `0.13` | 每半年检查 | crates.io | 正则引擎 |
+| `fancy-regex` | `0.16.2` | 每半年检查 | crates.io | manifest 下限 `0.16`，实际版本由 Cargo.lock 冻结 |
 | `zstd` | `0.13` | 每半年检查 | crates.io | 压缩 |
-| `zip` | `2` | 每半年检查 | crates.io | ZIP 处理，注意 feature 裁剪 |
+| `zip` | `8.6.0` | 每半年检查 | crates.io | ZIP 处理，禁用默认 feature，仅启用 deflate |
 | `dashmap` | `6` | 每季度检查 | crates.io | 并发 HashMap |
 | `lru` | `0.16.4` | 每半年检查 | crates.io | LRU 缓存；清单安全下限 `0.16.3` |
 | `uuid` | `1` | 仅安全补丁 | crates.io | UUID 生成 |
@@ -85,7 +83,6 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `libc` | `0.2` | 仅安全补丁 | crates.io | FFI C 库绑定 |
 | `memmap2` | `0.9.11` | 仅安全补丁 | crates.io | 内存映射 |
 | `pdf_oxide` | `0.3.77` | 每季度检查 | crates.io | 不可信 PDF 解析；禁用默认 feature |
-| `postcard` | `1` | 每半年检查 | crates.io | 序列化格式 |
 | `encoding_rs` | `0.8` | 仅安全补丁 | crates.io | 编码转换 |
 | `chardetng` | `0.1` | 每半年检查 | crates.io | 编码检测 |
 | `jni` | `0.21` | 每季度检查 | crates.io | Android JNI 绑定 |
@@ -107,12 +104,11 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `@vitejs/plugin-vue` | `^5.2.4` | 与 `vite` 同步 | npm | Vue Vite 插件 |
 | `unocss` | `^66.6.8` | 每季度检查 | npm | 原子 CSS |
 | `@unocss/*` | `^66.6.8` | 与 `unocss` 同步 | npm | UnoCSS 生态 |
-| `highlight.js` | `^11.11.1` | 每季度检查 | npm | 语法高亮 |
 | `dompurify` | `^3.4.13` | 每季度检查 | npm | XSS 净化 |
 | `katex` | `^0.16.45` | 每半年检查 | npm | LaTeX 渲染 |
 | `mermaid` | `^11.16.1` | 每季度检查 | npm | 图表渲染；处理不可信模型内容 |
-| `pdfjs-dist` | `^5.7.284` | 每季度检查 | npm | PDF 渲染 |
-| `mammoth` | `^1.12.0` | 每半年检查 | npm | Word 文档解析 |
+| `marked` | `^18.0.4` | 每季度检查 | npm | Markdown 解析 |
+| `morphdom` | `^2.7.8` | 每半年检查 | npm | 增量 DOM 更新 |
 | `lucide-vue-next` | `^0.576.0` | 每月检查 | npm | 图标库 |
 | `sortablejs` | `^1.15.7` | 每半年检查 | npm | 拖拽排序 |
 | `vue-cropper` | `^1.1.4` | 每半年检查 | npm | 图像裁剪 |
@@ -135,7 +131,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `@types/sortablejs` | `^1.15.9` | 与 `sortablejs` 同步 | npm | 类型定义 |
 | `@iconify-json/ph` | `^1.2.2` | 每季度检查 | npm | Iconify 图标数据 |
 
-> **注意**：前端非 Tauri 生态的依赖当前使用 `^` 前缀。鉴于本宪章确立，未来应将核心 runtime 依赖（`vue`、`vite`、`pinia`、`@vueuse/core`）逐步迁移为精确版本。
+> **注意**：前端非 Tauri 生态依赖使用 `^`/`~` 是当前 manifest 策略；可复现性由 committed `pnpm-lock.yaml` 与 frozen install 保证。不要只改前缀而不审查 lockfile 实际解析。
 
 ### 2.3 Android Gradle 层
 
@@ -160,11 +156,11 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 工具 | 当前版本 | 更新频率建议 | 来源 | 备注 |
 |------|---------|-------------|------|------|
-| Node.js | `22.21.1` (LTS) | 每年 major / 每季度 minor | nodejs.org | CI 与本地开发统一 |
-| pnpm | `10.33.0` | 每季度检查 | pnpm.io | 包管理器 |
-| Rust Toolchain | `1.95.0` | 每季度检查 | rustup | MSRV 以 `tauri` crate 要求为准 |
+| Node.js | `22.x` (LTS) | 每年 major / 每季度 minor | nodejs.org | Actions 固定 Node 22 主线 |
+| pnpm | `10.x` | 每季度检查 | pnpm.io | Actions 固定 pnpm 10 主线，解析由 lockfile 冻结 |
+| Rust Toolchain | `stable` | 每季度检查 | rustup | Actions toolchain 本身固定 commit，MSRV 以依赖图为准 |
 | Java (Temurin) | `17` | 每年 LTS | adoptium.net | Android 构建必需 |
-| Gradle (Wrapper) | 与 AGP `8.11.0` 兼容版本 | 跟随 AGP | Gradle 官方 | 由 `gradle/wrapper/gradle-wrapper.properties` 决定 |
+| Gradle (Wrapper) | `8.14.3` | 跟随 AGP | Gradle 官方 | 官方分发 URL + `distributionSha256Sum` |
 
 ---
 
@@ -183,17 +179,16 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 当需要升级 Tauri 核心（如 `2.11.x` → `2.12.x`）：
 
-**步骤 1：同步修改以下 4 个文件**
+**步骤 1：同步修改以下跨层字段，并更新两份 lockfile**
 
 | 文件 | 字段 | 新值 |
 |------|------|------|
 | `src-tauri/Cargo.toml` | `[dependencies] tauri` | 新版本 |
-| `src-tauri/Cargo.toml` | `[build-dependencies] tauri-build` | 与新版本一致 |
-| `src-tauri/Cargo.toml` | `[dependencies] tauri-utils` | 与新版本一致 |
+| `src-tauri/Cargo.toml` | `[build-dependencies] tauri-build` | 官方兼容的独立版本 |
 | `package.json` | `devDependencies["@tauri-apps/cli"]` | 与新版本一致（允许小版本差异，如 `2.11.2`） |
 | `package.json` | `dependencies["@tauri-apps/api"]` | 与新版本一致 |
 
-> `@tauri-apps/cli` 与 `@tauri-apps/api` 的版本通常与 Rust 侧 `tauri` **主版本.次版本**一致，补丁号可能略有差异（如 `2.11.1` vs `2.11.2`），以 npm 最新可用为准。`tauri-build` 和 `tauri-utils` 有独立的版本号，不需要与 `tauri` core 版本号一致，但升级时需检查兼容性。
+> `@tauri-apps/cli` 与 `@tauri-apps/api` 的版本通常与 Rust 侧 `tauri` **主版本.次版本**一致，补丁号可能略有差异，以官方发布与实际 lockfile 为准。`tauri-build` 使用自己的版本线；`tauri-utils` 当前仅作为传递依赖检查。
 
 **步骤 2：执行强制检查**
 
@@ -224,7 +219,7 @@ deps: bump tauri to 2.12.0
 
 - tauri: 2.11.1 -> 2.12.0
 - tauri-build: 2.6.1 -> 检查 crates.io 最新兼容版本
-- tauri-utils: 2.9.1 -> 检查 crates.io 最新兼容版本
+- Cargo.lock: 审查 tauri-utils 等传递依赖的实际解析变化
 - @tauri-apps/cli: 2.11.2 -> 2.12.0
 - @tauri-apps/api: 2.11.0 -> 2.12.0
 ```
@@ -253,7 +248,7 @@ AGP 升级通常伴随 Kotlin、Gradle Wrapper、compileSdk 的联动：
 2. 同步更新：
    - `src-tauri/gen/android/build.gradle.kts` 中的 `com.android.tools.build:gradle`
    - `src-tauri/gen/android/buildSrc/build.gradle.kts` 中的 `com.android.tools.build:gradle`
-   - `gradle/wrapper/gradle-wrapper.properties` 中的 `distributionUrl`
+   - `gradle/wrapper/gradle-wrapper.properties` 中的官方 `distributionUrl` 与官方 `distributionSha256Sum`
 3. 若 AGP 要求更高 `compileSdk`，同步修改：
    - `src-tauri/gen/android/app/build.gradle.kts` 的 `compileSdk`
    - `src-tauri/gen/android/app/build.gradle.kts` 的 `targetSdk`
@@ -272,12 +267,13 @@ AGP 升级通常伴随 Kotlin、Gradle Wrapper、compileSdk 的联动：
 **步骤 4：验证**
 
 ```powershell
-# 清理构建缓存后重新构建
 cd src-tauri/gen/android
-; .\gradlew clean
-; cd ../../..
-pnpm tauri android build --apk --target aarch64
+.\gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest
+cd ../../..
+pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict
 ```
+
+任何 Gradle 直接依赖、插件或 Wrapper 版本变更都必须重新生成并人工审查 `gradle/verification-metadata.xml`；不得用关闭 dependency verification 的方式绕过未知摘要。Tauri 生成树更新后还必须执行 `git diff --exit-code -- src-tauri/gen/android src-tauri/plugins/vcp-mobile/permissions`，确保生成结果已显式提交。
 
 ### 3.5 回滚计划
 
@@ -291,7 +287,7 @@ pnpm tauri android build --apk --target aarch64
    pnpm install
    ```
 3. **验证回滚**：`pnpm check` 通过即为回滚成功。
-4. **问题归档**：在 `plans/04_Logs/` 记录失败原因，标记该版本为黑名单。
+4. **问题归档**：在 tracked issue 或 `docs/` 对应模块记录失败原因与黑名单版本；当前仓库未启用 `plans/`。
 
 ---
 
@@ -304,7 +300,6 @@ pnpm tauri android build --apk --target aarch64
 | `tauri` | `2.11.5` | `@tauri-apps/cli` | `2.11.4` | 主.次版本必须一致（`2.11.x`） |
 | `tauri` | `2.11.5` | `@tauri-apps/api` | `2.11.1` | 主.次版本必须一致（`2.11.x`） |
 | `tauri-build` | `2.6.3` | — | — | 独立版本，需与 `tauri` 兼容 |
-| `tauri-utils` | `2.9.3` | — | — | 独立版本，需与 `tauri` 兼容 |
 
 ### 4.2 Tauri 插件跨层对齐
 
@@ -337,7 +332,7 @@ pnpm tauri android build --apk --target aarch64
 
 ### 4.5 RustSec 审计基线与例外
 
-2026-08-10 供应链整理后的原始 `cargo audit` 结果为：`1 vulnerability / 21 warnings`。门禁命令统一使用 `pnpm audit:rust`，它只忽略以下已核实例外，任何新增 vulnerability 仍会使命令失败：
+2026-08-11 供应链整理后的原始 `cargo audit` 结果为：`1 vulnerability / 21 warnings`。门禁命令统一使用 `pnpm audit:rust`，它只忽略以下已核实例外，任何新增 vulnerability 仍会使命令失败：
 
 - `RUSTSEC-2023-0071` / `rsa 0.9.10`：RustSec 尚无已修版本；该包仅来自 `sqlx-mysql` 的可选依赖。本项目对 `sqlx` 使用 `default-features = false` 且只启用 SQLite，默认与 `aarch64-linux-android` 编译图均不包含 `rsa`。
 
@@ -357,6 +352,8 @@ pnpm tauri android build --apk --target aarch64
 6. **禁止手动修改 `tauri.build.gradle.kts`**。该文件由 Tauri CLI 自动生成，手动修改会在下次生成时被覆盖。
 7. **禁止在 CI 中使用 `pnpm install` 而不加 `--frozen-lockfile`**。`release.yml` 已正确配置，不得移除该标志。
 8. **禁止混合使用 npm/yarn 与 pnpm**。项目唯一包管理器为 pnpm，`package-lock.json` 与 `yarn.lock` 不应存在于仓库中。
+9. **禁止 CI/Release 中使用可移动 Action tag**。所有 `uses:` 必须固定完整 commit SHA，并在升级时记录对应上游版本。
+10. **禁止绕过锁与摘要门禁**。Cargo 使用 `--locked`；Gradle Wrapper 使用官方 URL/SHA，依赖使用 committed `verification-metadata.xml` 的 strict 校验。
 
 ---
 
@@ -396,7 +393,15 @@ pnpm tauri android build --apk --target aarch64
 - AGP 与 Gradle Wrapper 版本存在严格对应关系。升级 AGP 时，必须同步更新 `gradle/wrapper/gradle-wrapper.properties`。
 - AGP `8.11.0` 要求 Gradle `8.13+`；当前 Wrapper `8.14.3` 满足要求。
 
-Robolectric 的 instrumented Android JAR 由测试运行期解析。插件测试已将仓库显式指向 Maven Central 官方端点，避免代理镜像返回截断内容后触发校验失败；不得关闭 SHA 校验绕过下载问题。
+Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保留 Google Maven、Maven Central 与 Root 能力所需的 content-filtered JitPack；所有解析制品由 `gradle/verification-metadata.xml` 固定 SHA-256。不得恢复第三方镜像或关闭摘要校验绕过下载问题。
+
+### 6.5 发布供应链门禁
+
+- `gradle-wrapper.properties` 固定官方 Gradle 8.14.3 分发与官方 SHA-256；wrapper JAR/脚本由该版本官方 Wrapper 任务生成，CI/Release 另行核对官方 wrapper JAR SHA-256。
+- CI 在 `tauri android init --ci` 后检查 Android 生成树与插件权限生成树无漂移，并以 strict 模式运行 Gradle JVM 测试。
+- Release 仅接受同 commit 已成功的 CI，核对 tag/HEAD/event SHA、四处版本源和 Android versionCode。
+- 签名 secrets 只进入恢复、构建与验证步骤；缺任一输入即失败。APK、keystore 与仓库变量 `ANDROID_RELEASE_CERT_SHA256` 必须三方一致。
+- Release 只上传 arm64 签名 APK 与其 `.sha256`；不发布可被主 WebView 独立加载的前端 ZIP。
 
 ---
 
@@ -424,9 +429,9 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。插件测试
 
 **情况 B：次版本 / 主版本升级（需评审）**
 
-1. 在 `plans/04_Logs/` 创建漏洞分析文档，记录 CVE 编号、影响范围、升级方案。
+1. 在 tracked issue 或 `docs/` 对应模块记录 CVE 编号、影响范围与升级方案；当前仓库未启用 `plans/`。
 2. 执行完整更新流程（第 3 节）。
-3. 必须经过 **Magi 三贤者协议**快速评审（见 `AGENTS.md` 第 8.2 节）：
+3. 必须经过 **Magi 三贤者协议**快速评审（见 `CLAUDE.md` 第 9.2 节）：
    - Melchior：确认 Rust 侧 ABI 兼容性。
    - Balthasar：确认 Android 端交互与 UI 无异常。
    - Casper：确认升级成本与发布排期不冲突。
@@ -435,10 +440,10 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。插件测试
 ### 7.3 合并前测试清单（安全更新专用）
 
 - [ ] `pnpm check` 零错误。
-- [ ] `cargo clippy -- -D warnings` 零警告。
+- [ ] `cargo clippy --locked -- -D warnings` 零警告。
 - [ ] `pnpm tauri android dev` 真机/模拟器启动成功。
 - [ ] 核心功能回归：登录/同步/聊天/文件上传/设置。
-- [ ] APK Release 构建成功：`pnpm tauri android build --apk --target aarch64`。
+- [ ] APK Release 构建成功：`pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict`。
 - [ ] APK 安装后无闪退，签名验证通过。
 
 ### 7.4 时间线要求
@@ -463,11 +468,11 @@ npm view @tauri-apps/cli version
 # 查询 pnpm 过时的依赖
 pnpm outdated
 
-# Rust 安全审计
-cargo audit
+# Rust 安全审计（包含已核实的具名例外）
+pnpm audit:rust
 
-# npm 安全审计
-pnpm audit
+# npm 安全审计门禁
+pnpm audit --audit-level=high
 
 # 查看当前 Android NDK 版本
 sdkmanager --list_installed | findstr ndk
@@ -477,12 +482,10 @@ sdkmanager --list_installed | findstr ndk
 
 | 依赖类别 | 涉及文件 |
 |---------|---------|
-| Rust Crates | `src-tauri/Cargo.toml` |
+| Rust Crates | `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` |
 | Rust 插件 | `src-tauri/Cargo.toml` |
-| npm Runtime | `package.json` |
-| npm Dev | `package.json` |
-| npm 插件 | `package.json` |
-| AGP / Kotlin | `src-tauri/gen/android/build.gradle.kts`, `src-tauri/gen/android/buildSrc/build.gradle.kts` |
+| npm Runtime / Dev / 插件 | `package.json`, `pnpm-lock.yaml` |
+| AGP / Kotlin / Gradle 供应链 | `src-tauri/gen/android/build.gradle.kts`, `src-tauri/gen/android/buildSrc/build.gradle.kts`, `src-tauri/gen/android/gradle/wrapper/`, `src-tauri/gen/android/gradle/verification-metadata.xml` |
 | AndroidX | `src-tauri/gen/android/app/build.gradle.kts` |
 | SDK / NDK | `src-tauri/gen/android/app/build.gradle.kts`, `.github/workflows/release.yml` |
 | Tauri 配置 | `src-tauri/tauri.conf.json` |

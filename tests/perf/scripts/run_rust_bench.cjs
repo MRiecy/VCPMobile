@@ -32,7 +32,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const outDir = ensureDir(path.resolve(ROOT, args.outDir || path.join('tests', 'perf', 'reports', timestamp())));
-const cargoArgs = ['bench', '--profile', 'perf'];
+const cargoArgs = ['bench', '--locked', '--profile', 'perf'];
 if (args.noRun) {
   cargoArgs.push('--no-run');
 }

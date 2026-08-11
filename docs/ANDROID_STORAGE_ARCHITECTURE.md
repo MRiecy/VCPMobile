@@ -36,8 +36,8 @@ VCP Mobile 的开发目录严格奉行前后端物理隔离、特征共置（Fea
 | ├── `src-tauri/src/distributed/` | 分布式设备集成层 | 统一管理并注册 14 个 Android 底层物理设备能力（如电池、剪贴板、传感器获取工具）。 |
 | └── `src-tauri/plugins/vcp-mobile/` | 自定义 Android 原生插件 | **项目内唯一自定义插件**（`tauri-plugin-vcp-mobile`），托管 Kotlin 原生代码。实现保活前台服务与 Scoped Storage 穿透。 |
 | **`docs/`** | **高稳定性工程知识规范库** | 沉淀项目核心设计思想，包含 Android 插件管理、Z-Index UI 规范、增量同步体系等。 |
-| **`plans/`** | **AI 协同物理记忆体系** | 专为 AI 代理设计的“物理大脑”。严格划分架构、重构、日志（Magi 会话）、真理固化五大分区。 |
-| **`scripts/`** | **工程保障与自动化脚本** | 包含 WiFi/USB 双调试模式启动器、安全文件 IO 工具、Memory 自动编译脚本。 |
+| **`docs/`** | **工程知识与约束体系** | tracked 的前端、Rust、Sync、Android 插件与测试治理文档；必须与代码和契约测试同步。 |
+| **`tests/`** | **跨层验收脚本** | Android adb smoke、性能采集与发布前外部验收工具。 |
 
 ---
 

@@ -54,6 +54,14 @@ pub async fn get_registered_tools_metadata(
     Ok(state.registry.get_tools_metadata())
 }
 
+/// Expose whether a damaged/missing config was recovered to all-disabled.
+#[tauri::command]
+pub async fn get_distributed_tool_config_status(
+    state: State<'_, DistributedState>,
+) -> Result<tool_registry::ToolConfigStatus, String> {
+    Ok(state.registry.config_status())
+}
+
 /// Update disabled tools list and re-register if connected.
 #[tauri::command]
 pub async fn update_disabled_tools(
@@ -61,14 +69,30 @@ pub async fn update_disabled_tools(
     state: State<'_, DistributedState>,
     disabled_names: Vec<String>,
 ) -> Result<(), String> {
-    let changed = state.registry.update_disabled(disabled_names);
+    let changed = state
+        .registry
+        .persist_and_update_disabled(&app, disabled_names)
+        .await?;
 
     if changed {
-        let _ = state.registry.save_disabled_config(&app);
         let client = state.client.read().await;
         if client.is_connected().await {
             client.re_register_tools().await;
         }
+    }
+    Ok(())
+}
+
+/// Explicit recovery entry: atomically persist and apply an all-disabled policy.
+#[tauri::command]
+pub async fn reset_distributed_tools_disabled(
+    app: tauri::AppHandle,
+    state: State<'_, DistributedState>,
+) -> Result<(), String> {
+    state.registry.reset_all_disabled(&app).await?;
+    let client = state.client.read().await;
+    if client.is_connected().await {
+        client.re_register_tools().await;
     }
     Ok(())
 }

@@ -64,12 +64,3 @@ app.use(router);
 app.directive('intersection-observer', vIntersectionObserver);
 app.directive('longpress', vLongpress);
 app.mount("#app");
-
-
-// 标记前端启动成功（用于 OTA 回滚保护）
-import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-const currentWin = getCurrentWindow();
-if (currentWin.label === 'main') {
-  invoke('confirm_frontend_boot').catch(() => {});
-}

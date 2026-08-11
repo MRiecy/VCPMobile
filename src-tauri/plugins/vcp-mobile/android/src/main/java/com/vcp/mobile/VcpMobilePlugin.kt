@@ -178,6 +178,15 @@ object ScreenKeepOnArbiter {
     }
 }
 
+internal fun pickerUploadStagingStem(stagingTicket: String, hash: String): String =
+    "picked_${stagingTicket}_$hash"
+
+internal fun pickerUploadStagingName(
+    stagingTicket: String,
+    hash: String,
+    fileExtension: String,
+): String = "${pickerUploadStagingStem(stagingTicket, hash)}$fileExtension"
+
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
@@ -282,8 +291,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val gpuStatusManager = GpuStatusManager(activity)
     private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
     private val sensorStatusManager = SensorStatusManager(activity)
-    private val shareIntentHandler = ShareIntentHandler(this)
     private val executorDomains = PluginExecutorDomains()
+    private val shareIntentHandler = ShareIntentHandler(this, executorDomains.fileIoExecutor)
     private val isDestroying = AtomicBoolean(false)
     @Volatile private var oomGuardFuture: ScheduledFuture<*>? = null
     private var cameraTempFile: java.io.File? = null
@@ -371,8 +380,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             false
         }
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName) && !isRestricted
-        val overlayGranted = floatingWindowManager.hasOverlayPermission()
-
         val result = JSObject()
         result.put("notification", notificationGranted)
         result.put("storage", storageGranted)
@@ -380,7 +387,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         result.put("camera", cameraGranted)
         result.put("location", locationGranted)
         result.put("battery", batteryOptimizationIgnored)
-        result.put("overlay", overlayGranted)
         
         invoke.resolve(result)
     }
@@ -763,9 +769,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             false
         }
         val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName) && !isRestricted
-        val overlayGranted = floatingWindowManager.hasOverlayPermission()
-
-        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"overlay":$overlayGranted,"location":$locationGranted}"""
+        val json = """{"notification":$notificationGranted,"storage":$storageGranted,"microphone":$microphoneGranted,"camera":$cameraGranted,"battery":$batteryOptimizationIgnored,"location":$locationGranted}"""
         val script = "window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: $json }))"
         webViewRef?.evaluateJavascript(script, null)
     }
@@ -1448,9 +1452,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         executePluginTask(executorDomains.fileIoExecutor, invoke, "processPickedFile", fileTask@{
             var currentTempFile: java.io.File? = null
+            var currentThumbnailFile: java.io.File? = null
             try {
                 val context = activity
                 val contentResolver = context.contentResolver
+                val stagingTicket = java.util.UUID.randomUUID().toString()
 
                 // 1. 获取文件名和大小
                 var originalName = "unknown"
@@ -1481,7 +1487,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
                 // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
                 val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
-                var tempFile = java.io.File(uploadsDir, "pick_${System.currentTimeMillis()}_temp")
+                var tempFile = java.io.File(uploadsDir, "pick_${stagingTicket}_temp")
                 currentTempFile = tempFile
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
                 
@@ -1546,7 +1552,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     val isAudioOnly = isUnsupportedAudio || isUnsupportedOpus || (ext == "ogg" && sdkInt < 29)
                     val isImageOnly = isUnsupportedHeic || isUnsupportedAvif
                     val outputSuffix = if (isAudioOnly) "m4a" else if (isImageOnly) "jpg" else "mp4"
-                    val transcodedFile = java.io.File(uploadsDir, "transcoded_${System.currentTimeMillis()}.$outputSuffix")
+                    val transcodedFile = java.io.File(uploadsDir, "transcoded_${stagingTicket}.$outputSuffix")
                     currentTempFile = transcodedFile
 
                     val latch = CountDownLatch(1)
@@ -1617,25 +1623,43 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     tempFile = transcodedFile
                 }
 
-                val finalTempFile = java.io.File(uploadsDir, "$hash$fileExtension")
-                
-                if (finalTempFile.exists()) {
-                    tempFile.delete() // 缓存去重，复用已有文件
-                } else {
-                    tempFile.renameTo(finalTempFile)
-                }
+                val stagingStem = pickerUploadStagingStem(stagingTicket, hash)
+                val finalTempFile = java.io.File(
+                    uploadsDir,
+                    pickerUploadStagingName(stagingTicket, hash, fileExtension),
+                )
 
-                val finalSize = if (size > 0) size else finalTempFile.length()
+                if (finalTempFile.exists()) {
+                    throw IllegalStateException("picker upload staging ticket 已存在")
+                }
+                if (!tempFile.renameTo(finalTempFile)) {
+                    try {
+                        tempFile.copyTo(finalTempFile, overwrite = false)
+                    } catch (error: Throwable) {
+                        finalTempFile.delete()
+                        throw error
+                    }
+                    if (!tempFile.delete()) {
+                        finalTempFile.delete()
+                        throw IllegalStateException("无法清理已复制的 picker source staging")
+                    }
+                }
+                currentTempFile = finalTempFile
+                val ownedFinalTempFile = currentTempFile
+
+                val finalSize = if (size > 0) size else ownedFinalTempFile.length()
 
                 // 4. 图片资源触发 Native 硬件加速缩略图硬解
                 var thumbnailPath: String? = null
                 if (mimeType.startsWith("image/")) {
-                    thumbnailPath = generateNativeThumbnail(context, finalTempFile, hash)
+                    thumbnailPath = generateNativeThumbnail(context, ownedFinalTempFile, stagingStem)
+                    currentThumbnailFile = thumbnailPath?.let { java.io.File(it) }
+                    thumbnailPath = currentThumbnailFile?.absolutePath
                 }
 
                 // 5. 组装结果物理路径并回传给 Rust 桥接
                 val resultObject = JSObject()
-                resultObject.put("path", finalTempFile.absolutePath)
+                resultObject.put("path", ownedFinalTempFile.absolutePath)
                 resultObject.put("name", originalName)
                 resultObject.put("mime", mimeType)
                 resultObject.put("size", finalSize)
@@ -1644,11 +1668,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     resultObject.put("thumbnailPath", thumbnailPath)
                 }
 
-                Log.i(TAG, "[onPickFileResult] File copy & process complete: path=${finalTempFile.absolutePath}, hash=$hash")
+                Log.i(TAG, "[onPickFileResult] File copy & process complete: path=${ownedFinalTempFile.absolutePath}, hash=$hash")
                 
                 // 双轨通信：主动推送最终结果给前端，穿透 JNI 断裂层
                 val pickedDetail = JSObject().apply {
-                    put("path", finalTempFile.absolutePath)
+                    put("path", ownedFinalTempFile.absolutePath)
                     put("name", originalName)
                     put("mime", mimeType)
                     put("size", finalSize)
@@ -1666,10 +1690,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
                 
                 invoke.resolve(resultObject)
+                currentTempFile = null
+                currentThumbnailFile = null
             } catch (e: Throwable) {
                 Log.e(TAG, "[onPickFileResult] File pick handling failed", e)
                 try {
                     currentTempFile?.delete()
+                    currentThumbnailFile?.delete()
                 } catch (_: Exception) {}
                 invoke.reject("Handling picked file failed: ${e.message}")
             }
@@ -1736,6 +1763,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return thumbFile.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "Native thumbnail generation failed", e)
+            thumbFile.delete()
             return null
         }
     }
@@ -1752,85 +1780,122 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     // External Share File Processor (no chooser, processes cached file)
     // ==================================================================
+    @Suppress("ASSIGNED_VALUE_IS_NEVER_READ")
     @Command
     fun processSharedFile(invoke: Invoke) {
         val args = invoke.parseArgs(ProcessSharedFileArgs::class.java)
         val cachePath = args.cachePath
         val rawMimeType = args.mimeType
-        val originalName = args.fileName
+        val originalName = sanitizeSharedFileName(args.fileName)
+        val ownerId = args.ownerId
+        val stagingTicket = args.stagingTicket
 
-        if (cachePath.isEmpty()) {
-            invoke.reject("cachePath is empty")
+        if (cachePath.isEmpty() || ownerId.isEmpty() || stagingTicket.isEmpty()) {
+            invoke.reject("分享 staging 参数不完整")
+            return
+        }
+        if (runCatching { java.util.UUID.fromString(ownerId) }.isFailure ||
+            runCatching { java.util.UUID.fromString(stagingTicket) }.isFailure) {
+            invoke.reject("分享 staging owner/ticket 格式非法")
             return
         }
 
         executePluginTask(executorDomains.fileIoExecutor, invoke, "processSharedFile", fileTask@{
             var currentTempFile: java.io.File? = null
+            var currentThumbnailFile: java.io.File? = null
+            var claimedSourceFile: java.io.File? = null
             try {
+                if (!shareIntentHandler.isCurrentOwner(ownerId)) {
+                    invoke.reject("分享 intent 已被更新")
+                    return@fileTask
+                }
                 val context = activity
-                val sourceFile = java.io.File(cachePath)
+                val sharedRoot = java.io.File(context.cacheDir, "shared").apply { mkdirs() }.canonicalFile
+                val sourceFile = java.io.File(cachePath).canonicalFile
+                val expectedName = "shared_${ownerId}_${stagingTicket}_$originalName"
+                if (sourceFile.parentFile != sharedRoot || sourceFile.name != expectedName || !sourceFile.isFile) {
+                    invoke.reject("拒绝处理不属于当前 intent ticket 的分享 staging 文件")
+                    return@fileTask
+                }
+                if (!shareIntentHandler.claimStagedFile(ownerId, sourceFile)) {
+                    invoke.reject("分享 staging ticket 已失效或已消费")
+                    return@fileTask
+                }
+                claimedSourceFile = sourceFile
                 if (!sourceFile.exists()) {
                     invoke.reject("Shared file not found at cache path: $cachePath")
                     return@fileTask
                 }
 
                 val size = sourceFile.length()
+                if (size > 100L * 1024 * 1024) {
+                    invoke.reject("分享文件超过单文件上限 (100MB)")
+                    return@fileTask
+                }
                 var mimeType = rawMimeType
                 if (mimeType.isNullOrBlank()) {
                     val ext = sourceFile.extension.lowercase()
                     mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
                 }
 
-                Log.i(TAG, "[processSharedFile] Processing shared file: $originalName (size=$size, mime=$mimeType)")
+                Log.i(TAG, "[processSharedFile] Processing shared file: size=$size, mime=$mimeType")
 
-                // 发送预准备事件
-                val startDetail = JSObject().apply {
-                    put("name", originalName)
-                    put("size", size)
-                    put("mime", mimeType)
-                }
-                val safeStartDetail = escapeJsonForJsString(startDetail.toString())
-                activity.runOnUiThread {
-                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: JSON.parse(\"$safeStartDetail\") }))", null)
-                }
-
-                // 计算 SHA-256 哈希 (复用现有 pickFile 的流式拷贝+哈希模式)
+                // 直接在受控 staging 文件上流式重算 SHA-256，避免 shared → uploads 双倍占盘。
                 val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
-                val tempFile = java.io.File(uploadsDir, "shared_${System.currentTimeMillis()}_temp")
-                currentTempFile = tempFile
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
 
                 sourceFile.inputStream().use { inputStream ->
-                    java.io.FileOutputStream(tempFile).use { outputStream ->
-                        val buffer = ByteArray(65536)
-                        var bytesRead = inputStream.read(buffer)
-                        while (bytesRead != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            digest.update(buffer, 0, bytesRead)
-                            bytesRead = inputStream.read(buffer)
+                    val buffer = ByteArray(65536)
+                    var bytesRead = inputStream.read(buffer)
+                    while (bytesRead != -1) {
+                        if (!shareIntentHandler.isCurrentOwner(ownerId)) {
+                            throw InterruptedException("分享 intent 已被更新")
                         }
+                        digest.update(buffer, 0, bytesRead)
+                        bytesRead = inputStream.read(buffer)
                     }
                 }
 
                 val hashBytes = digest.digest()
                 val hash = hashBytes.joinToString("") { "%02x".format(it) }
 
-                // 内容寻址哈希重命名去重
+                // uploads 只是交给 Rust ingest 的临时交接区。永久 CAS 去重由 Rust 负责；
+                // owner/ticket 保证同内容的多个分享消费者不会争用同一个临时文件。
                 val fileExtension = java.io.File(originalName).extension.let {
                     if (it.isEmpty()) "" else ".$it"
                 }
-                val finalTempFile = java.io.File(uploadsDir, "$hash$fileExtension")
+                val stagingStem = shareUploadStagingStem(ownerId, stagingTicket, hash)
+                val finalTempFile = java.io.File(
+                    uploadsDir,
+                    shareUploadStagingName(ownerId, stagingTicket, hash, fileExtension),
+                )
 
                 if (finalTempFile.exists()) {
-                    tempFile.delete()
-                } else {
-                    tempFile.renameTo(finalTempFile)
+                    // 目标异常占用时不能删除原始 share staging，也不能把未知旧内容返回给 Rust。
+                    claimedSourceFile = null
+                    throw IllegalStateException("分享 upload staging ticket 已存在")
                 }
+                currentTempFile = finalTempFile
+                if (!sourceFile.renameTo(finalTempFile)) {
+                    if (uploadsDir.usableSpace < size + 64L * 1024 * 1024) {
+                        throw IllegalStateException("uploads staging 可用空间不足")
+                    }
+                    sourceFile.copyTo(finalTempFile, overwrite = false)
+                    if (!sourceFile.delete()) {
+                        throw IllegalStateException("无法清理已复制的分享 source staging")
+                    }
+                }
+                claimedSourceFile = null
 
                 // 缩略图生成（仅图片）
                 var thumbnailPath: String? = null
                 if (mimeType.startsWith("image/")) {
-                    thumbnailPath = generateNativeThumbnail(context, finalTempFile, hash)
+                    thumbnailPath = generateNativeThumbnail(context, finalTempFile, stagingStem)
+                    currentThumbnailFile = thumbnailPath?.let { java.io.File(it) }
+                }
+
+                if (!shareIntentHandler.isCurrentOwner(ownerId)) {
+                    throw InterruptedException("分享 intent 已被更新")
                 }
 
                 // 组装结果
@@ -1844,32 +1909,16 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     resultObject.put("thumbnailPath", thumbnailPath)
                 }
 
-                Log.i(TAG, "[processSharedFile] Complete: path=${finalTempFile.absolutePath}, hash=$hash")
-
-                // 双轨推送
-                val pickedDetail = JSObject().apply {
-                    put("path", finalTempFile.absolutePath)
-                    put("name", originalName)
-                    put("mime", mimeType)
-                    put("size", finalTempFile.length())
-                    put("hash", hash)
-                    if (thumbnailPath != null) {
-                        put("thumbnailPath", thumbnailPath)
-                    } else {
-                        put("thumbnailPath", org.json.JSONObject.NULL)
-                    }
-                }
-                val safePickedDetail = escapeJsonForJsString(pickedDetail.toString())
-                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: JSON.parse(\"$safePickedDetail\") }))"
-                activity.runOnUiThread {
-                    webViewRef?.evaluateJavascript(pickedScript, null)
-                }
-
+                Log.i(TAG, "[processSharedFile] Complete: size=${finalTempFile.length()}, mime=$mimeType")
                 invoke.resolve(resultObject)
+                currentTempFile = null
+                currentThumbnailFile = null
             } catch (e: Throwable) {
                 Log.e(TAG, "[processSharedFile] Failed", e)
                 try {
                     currentTempFile?.delete()
+                    currentThumbnailFile?.delete()
+                    claimedSourceFile?.delete()
                 } catch (_: Exception) {}
                 invoke.reject("Processing shared file failed: ${e.message}")
             }
@@ -2563,6 +2612,8 @@ class ProcessSharedFileArgs {
     lateinit var cachePath: String
     var mimeType: String? = null
     lateinit var fileName: String
+    lateinit var ownerId: String
+    lateinit var stagingTicket: String
 }
 
 @InvokeArg

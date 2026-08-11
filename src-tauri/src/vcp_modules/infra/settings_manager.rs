@@ -3,6 +3,7 @@
 
 use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -90,8 +91,19 @@ pub struct Settings {
 }
 
 pub struct SettingsState {
-    pub cache: Arc<Mutex<Option<Settings>>>,
-    pub lock: Arc<Mutex<()>>,
+    cache: Arc<Mutex<Option<Settings>>>,
+    lock: Arc<Mutex<()>>,
+    recovery_status: Arc<Mutex<SettingsRecoveryStatus>>,
+    runtime_generation: Arc<AtomicU64>,
+    runtime_reconcile_lock: Arc<Mutex<()>>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsRecoveryStatus {
+    pub recovered_corrupt: bool,
+    pub backup_key: Option<String>,
+    pub message: Option<String>,
 }
 
 impl SettingsState {
@@ -99,7 +111,22 @@ impl SettingsState {
         Self {
             cache: Arc::new(Mutex::new(None)),
             lock: Arc::new(Mutex::new(())),
+            recovery_status: Arc::new(Mutex::new(SettingsRecoveryStatus::default())),
+            runtime_generation: Arc::new(AtomicU64::new(0)),
+            runtime_reconcile_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub(crate) async fn lock_runtime_reconcile(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.runtime_reconcile_lock.clone().lock_owned().await
+    }
+
+    fn reserve_runtime_reconcile(&self) -> u64 {
+        self.runtime_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn is_runtime_generation_current(&self, generation: u64) -> bool {
+        self.runtime_generation.load(Ordering::SeqCst) == generation
     }
 }
 
@@ -137,6 +164,14 @@ pub async fn read_settings<R: Runtime>(
     app_handle: AppHandle<R>,
     state: State<'_, SettingsState>,
 ) -> Result<Settings, String> {
+    let _lock = state.lock.lock().await;
+    read_settings_locked(&app_handle, &state).await
+}
+
+async fn read_settings_locked<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    state: &SettingsState,
+) -> Result<Settings, String> {
     if let Some(cached) = &*state.cache.lock().await {
         return Ok(cached.clone());
     }
@@ -152,7 +187,12 @@ pub async fn read_settings<R: Runtime>(
     let settings = if let Some(row) = row_res {
         use sqlx::Row;
         let content: String = row.get("value");
-        serde_json::from_str(&content).unwrap_or_else(|_| create_default_settings())
+        match serde_json::from_str(&content) {
+            Ok(settings) => settings,
+            Err(parse_error) => {
+                recover_corrupt_settings(pool, state, &content, &parse_error.to_string()).await?
+            }
+        }
     } else {
         create_default_settings()
     };
@@ -161,13 +201,69 @@ pub async fn read_settings<R: Runtime>(
     Ok(settings)
 }
 
+async fn recover_corrupt_settings(
+    pool: &sqlx::SqlitePool,
+    state: &SettingsState,
+    original: &str,
+    parse_error: &str,
+) -> Result<Settings, String> {
+    let defaults = create_default_settings();
+    let default_content =
+        serde_json::to_string_pretty(&defaults).map_err(|error| error.to_string())?;
+    let now = crate::vcp_modules::infra::utils::now_millis();
+    let backup_key = format!("global_corrupt_backup_{}_{}", now, uuid::Uuid::new_v4());
+
+    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
+        .bind(&backup_key)
+        .bind(original)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("保存损坏设置原文失败: {error}"))?;
+    sqlx::query("UPDATE settings SET value = ?, updated_at = ? WHERE key = 'global'")
+        .bind(&default_content)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("恢复默认设置失败: {error}"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("提交设置恢复事务失败: {error}"))?;
+
+    *state.recovery_status.lock().await = SettingsRecoveryStatus {
+        recovered_corrupt: true,
+        backup_key: Some(backup_key.clone()),
+        message: Some(format!(
+            "检测到损坏的全局设置，原文已保存为 {backup_key}，并恢复为默认值: {parse_error}"
+        )),
+    };
+    log::error!(
+        "[Settings] Corrupt global settings recovered; original preserved as {}: {}",
+        backup_key,
+        parse_error
+    );
+    Ok(defaults)
+}
+
 #[tauri::command]
+pub async fn get_settings_recovery_status(
+    state: State<'_, SettingsState>,
+) -> Result<SettingsRecoveryStatus, String> {
+    Ok(state.recovery_status.lock().await.clone())
+}
+
+#[tauri::command]
+#[allow(dead_code)] // Dormant compatibility asset; intentionally absent from generate_handler!.
 pub async fn write_settings<R: Runtime>(
     app_handle: AppHandle<R>,
     state: State<'_, SettingsState>,
     settings: Settings,
 ) -> Result<bool, String> {
+    let _runtime_guard = state.lock_runtime_reconcile().await;
     let _lock = state.lock.lock().await;
+    let _ = read_settings_locked(&app_handle, &state).await?;
     internal_write_settings(&app_handle, &state, &settings).await
 }
 
@@ -177,9 +273,10 @@ pub async fn update_settings<R: Runtime>(
     state: State<'_, SettingsState>,
     updates: serde_json::Value,
 ) -> Result<Settings, String> {
+    let _runtime_guard = state.lock_runtime_reconcile().await;
     let _lock = state.lock.lock().await;
 
-    let current = read_settings(app_handle.clone(), state.clone()).await?;
+    let current = read_settings_locked(&app_handle, &state).await?;
     let mut current_val = serde_json::to_value(&current).map_err(|e| e.to_string())?;
 
     if let Some(obj) = updates.as_object() {
@@ -225,7 +322,7 @@ async fn internal_write_settings<R: Runtime>(
     };
 
     // 判断分布式设置是否发生改变
-    let (should_reconcile_dist, force_reconnect_dist) = {
+    let should_reconcile_dist = {
         let old_cache = state.cache.lock().await;
         if let Some(ref old) = *old_cache {
             let enabled_changed = old.distributed_enabled != settings.distributed_enabled;
@@ -233,48 +330,64 @@ async fn internal_write_settings<R: Runtime>(
                 || old.distributed_vcp_key != settings.distributed_vcp_key
                 || old.distributed_device_name != settings.distributed_device_name;
 
-            let should = enabled_changed || (params_changed && settings.distributed_enabled);
-            let force = params_changed && settings.distributed_enabled;
-            (should, force)
+            enabled_changed || (params_changed && settings.distributed_enabled)
         } else {
-            (settings.distributed_enabled, false)
+            settings.distributed_enabled
         }
     };
 
     *state.cache.lock().await = Some(settings.clone());
 
-    // [强耦合联动] 仅当 VCPLog 连接参数实际变化时，才通知 VCP Log 服务更新连接状态
-    if should_reconnect {
-        let h = app_handle.clone();
-        let log_url = settings.vcp_log_url.clone();
-        let log_key = settings.vcp_log_key.clone();
+    // VCPLog/Info 与分布式节点共用一个 generation owner。任务执行时重新读取
+    // 最新 Settings；旧 generation 只能退出，不能在新设置之后提交运行时副作用。
+    if should_reconnect || should_reconcile_dist {
+        let generation = state.reserve_runtime_reconcile();
+        let concrete_app = app_handle.state::<tauri::AppHandle>().inner().clone();
         tauri::async_runtime::spawn(async move {
-            let _ = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
-                h.clone(),
-                log_url.clone(),
-                log_key.clone(),
-            )
-            .await;
-            let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
-                h, log_url, log_key,
-            )
-            .await;
+            reconcile_current_runtime_settings(concrete_app, generation).await;
         });
     }
 
-    // 分布式生命周期自动联动
-    if should_reconcile_dist {
-        let concrete_app = app_handle.state::<tauri::AppHandle>().inner().clone();
-        let enabled = settings.distributed_enabled;
-        crate::vcp_modules::infra::lifecycle_manager::reconcile_distributed_node(
-            &concrete_app,
-            enabled,
-            force_reconnect_dist,
-        )
-        .await;
+    Ok(true)
+}
+
+async fn reconcile_current_runtime_settings(app_handle: AppHandle, generation: u64) {
+    let state = app_handle.state::<SettingsState>();
+    let _runtime_guard = state.lock_runtime_reconcile().await;
+    if !state.is_runtime_generation_current(generation) {
+        log::debug!("[Settings] Skipping stale runtime reconciliation generation={generation}");
+        return;
     }
 
-    Ok(true)
+    let settings = match read_settings(app_handle.clone(), app_handle.state()).await {
+        Ok(settings) => settings,
+        Err(error) => {
+            log::error!("[Settings] Runtime reconciliation could not read settings: {error}");
+            return;
+        }
+    };
+
+    if let Err(error) = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
+        app_handle.clone(),
+        settings.vcp_log_url.clone(),
+        settings.vcp_log_key.clone(),
+    )
+    .await
+    {
+        log::error!("[Settings] VCPLog runtime reconciliation failed: {error}");
+    }
+    if let Err(error) = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
+        app_handle.clone(),
+        settings.vcp_log_url,
+        settings.vcp_log_key,
+    )
+    .await
+    {
+        log::error!("[Settings] VCPInfo runtime reconciliation failed: {error}");
+    }
+
+    crate::vcp_modules::infra::lifecycle_manager::reconcile_distributed_node(&app_handle, true)
+        .await;
 }
 
 #[tauri::command]
@@ -289,4 +402,74 @@ pub async fn set_theme<R: Runtime>(
 
     update_settings(app_handle, state, updates).await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::Row;
+
+    #[tokio::test]
+    async fn newer_runtime_generation_supersedes_waiting_reconciler() {
+        let state = Arc::new(SettingsState::new());
+        let runtime_guard = state.lock_runtime_reconcile().await;
+        let stale_generation = state.reserve_runtime_reconcile();
+        let task_state = state.clone();
+        let stale_task = tokio::spawn(async move {
+            let _guard = task_state.lock_runtime_reconcile().await;
+            task_state.is_runtime_generation_current(stale_generation)
+        });
+
+        let current_generation = state.reserve_runtime_reconcile();
+        drop(runtime_guard);
+
+        assert!(!stale_task.await.expect("stale task joins"));
+        assert!(state.is_runtime_generation_current(current_generation));
+    }
+
+    #[tokio::test]
+    async fn corrupt_settings_are_backed_up_before_defaults_replace_global() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('global', ?, 1)")
+            .bind("{broken-json")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = SettingsState::new();
+        let recovered = recover_corrupt_settings(&pool, &state, "{broken-json", "syntax")
+            .await
+            .unwrap();
+        assert_eq!(recovered.user_name, "用户");
+
+        let rows = sqlx::query("SELECT key, value FROM settings ORDER BY key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| {
+            row.get::<String, _>("key")
+                .starts_with("global_corrupt_backup_")
+                && row.get::<String, _>("value") == "{broken-json"
+        }));
+        let global = rows
+            .iter()
+            .find(|row| row.get::<String, _>("key") == "global")
+            .unwrap();
+        assert!(serde_json::from_str::<Settings>(&global.get::<String, _>("value")).is_ok());
+
+        let status = state.recovery_status.lock().await.clone();
+        assert!(status.recovered_corrupt);
+        assert!(status.backup_key.is_some());
+    }
 }

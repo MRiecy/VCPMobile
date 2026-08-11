@@ -4,11 +4,12 @@
 //! 原测试 `test_extract_sample_files` 使用绝对路径 `g:\VCPMobile\scripts\test`
 //! （该目录不存在 → CI 必跳过）且无任何断言，仅做人工诊断。
 //!
-//! 本集成测试使用从 `scripts/attach-test/` 复制整理来的真实附件样本：
+//! 本集成测试使用仓库内固定的真实附件样本：
 //! - `sample.docx`：蒙特卡罗模拟实验报告
 //! - `sample.xlsx`：蒙特卡洛计算π值表格
 //! - `sample.pdf`：扫描件/图片型 PDF 回退提示
 //! - `sample.pptx`：蒙特卡罗模拟原理与方法演示文稿
+//!
 //! 另覆盖文本文件 BOM/编码解码路径与超大文件 OOM 防护路径。
 
 use std::io::Write;

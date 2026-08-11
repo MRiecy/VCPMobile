@@ -404,20 +404,14 @@ async fn handle_upload_connection<R: Runtime>(
 async fn finalize_high_speed_upload<R: Runtime>(
     app_handle: &AppHandle<R>,
     pool: &sqlx::SqlitePool,
-    temp_path: &std::path::PathBuf,
+    temp_path: &std::path::Path,
     metadata: &UploadMetadata,
     hash: String,
     size: u64,
 ) -> Result<crate::vcp_modules::file_manager::AttachmentData, String> {
-    let ext = std::path::Path::new(&metadata.name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let internal_name = if ext.is_empty() {
-        hash.clone()
-    } else {
-        format!("{}.{}", hash, ext)
-    };
+    let internal_name = crate::vcp_modules::file_manager::safe_storage_extension(&metadata.name)
+        .map(|extension| format!("{}.{}", hash, extension))
+        .unwrap_or_else(|| hash.clone());
 
     let dest = crate::vcp_modules::file_manager::get_attachments_root_dir(app_handle)?;
     tokio::fs::create_dir_all(&dest)
@@ -425,20 +419,7 @@ async fn finalize_high_speed_upload<R: Runtime>(
         .map_err(|e| format!("创建附件目录失败: {e}"))?;
     let dest_path = dest.join(internal_name);
 
-    if !dest_path.exists() {
-        let source = temp_path.clone();
-        let destination = dest_path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::vcp_modules::file_manager::safe_rename(source, destination)
-        })
-        .await
-        .map_err(|e| format!("附件移动任务失败: {e}"))?
-        .map_err(|e| format!("附件移动失败: {e}"))?;
-    } else {
-        tokio::fs::remove_file(temp_path)
-            .await
-            .map_err(|e| format!("清理重复附件临时文件失败: {e}"))?;
-    }
+    install_verified_upload(temp_path, &dest_path, &hash, size).await?;
 
     let internal_path = dest_path
         .to_str()
@@ -457,6 +438,40 @@ async fn finalize_high_speed_upload<R: Runtime>(
     .await
 }
 
+async fn install_verified_upload(
+    temp_path: &std::path::Path,
+    dest_path: &std::path::Path,
+    expected_hash: &str,
+    expected_size: u64,
+) -> Result<(), String> {
+    if !dest_path.exists() {
+        let source = temp_path.to_path_buf();
+        let destination = dest_path.to_path_buf();
+        let move_result = tokio::task::spawn_blocking(move || {
+            crate::vcp_modules::file_manager::safe_rename(source, destination)
+        })
+        .await
+        .map_err(|error| format!("附件移动任务失败: {error}"))?;
+
+        if let Err(error) = move_result {
+            // Windows 等平台的无覆盖 rename 可能输给同哈希并发提交；只接受已完整验证的胜者。
+            if !dest_path.exists() {
+                return Err(format!("附件移动失败: {error}"));
+            }
+        }
+    }
+
+    crate::vcp_modules::file_manager::verify_existing_cas(dest_path, expected_hash, expected_size)
+        .await?;
+
+    if temp_path.exists() {
+        tokio::fs::remove_file(temp_path)
+            .await
+            .map_err(|error| format!("清理已验证的重复附件临时文件失败: {error}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +482,6 @@ mod tests {
         )
         .into_bytes()
     }
-
     #[test]
     fn upload_head_requires_matching_token_and_exact_length() {
         assert!(matches!(
@@ -515,5 +529,51 @@ mod tests {
             ..valid
         };
         assert!(validate_upload_metadata(&oversized).is_err());
+    }
+
+    #[tokio::test]
+    async fn existing_cas_must_be_verified_before_upload_temp_is_discarded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("upload.tmp");
+        let destination = temp.path().join("cas.bin");
+        let expected = b"expected";
+        let hash = crate::vcp_modules::infra::utils::calculate_sha256(expected);
+
+        std::fs::write(&source, expected).expect("source");
+        std::fs::write(&destination, b"corrupt!").expect("corrupt destination");
+        assert!(
+            install_verified_upload(&source, &destination, &hash, expected.len() as u64)
+                .await
+                .is_err()
+        );
+        assert!(
+            source.exists(),
+            "unverified upload temp must remain retryable"
+        );
+
+        std::fs::write(&destination, expected).expect("valid destination");
+        install_verified_upload(&source, &destination, &hash, expected.len() as u64)
+            .await
+            .expect("matching CAS should be reusable");
+        assert!(
+            !source.exists(),
+            "verified duplicate temp should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn newly_installed_upload_is_verified_after_atomic_move() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("upload.tmp");
+        let destination = temp.path().join("cas.bin");
+        let expected = b"new-cas";
+        let hash = crate::vcp_modules::infra::utils::calculate_sha256(expected);
+        std::fs::write(&source, expected).expect("source");
+
+        install_verified_upload(&source, &destination, &hash, expected.len() as u64)
+            .await
+            .expect("new CAS should install");
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(destination).expect("destination"), expected);
     }
 }

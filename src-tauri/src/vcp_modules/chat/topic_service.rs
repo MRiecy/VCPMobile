@@ -173,6 +173,7 @@ pub async fn create_topic(
         owner_type: owner_type.clone(),
     };
 
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query(
         "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, msg_count, locked, unread, unread_count)
          VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0)",
@@ -183,19 +184,12 @@ pub async fn create_topic(
     .bind(&name)
     .bind(now)
     .bind(now)
-    .execute(&db_state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("[CreateTopic] DB initialization failed: {}", e))?;
 
     // 触发聚合哈希冒泡 (初始化 Topic Hash 并更新 Agent/Group 的 ContentHash)
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-    if let Err(e) = HashAggregator::bubble_from_topic(&mut tx, &id).await {
-        log::error!(
-            "[CreateTopic] Failed to bubble hash for topic {}: {}",
-            id,
-            e
-        );
-    }
+    HashAggregator::bubble_from_topic(&mut tx, &id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(topic)
@@ -279,16 +273,16 @@ pub async fn update_topic_title(
 ) -> Result<(), String> {
     let now = crate::vcp_modules::infra::utils::now_millis();
 
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query("UPDATE topics SET title = ?, updated_at = ? WHERE topic_id = ?")
         .bind(&title)
         .bind(now)
         .bind(&topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 1. 触发聚合哈希冒泡 (重算当前 topic 的哈希，并向上累加到 Agent/Group)
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -343,16 +337,16 @@ pub async fn toggle_topic_lock(
 ) -> Result<(), String> {
     let now = crate::vcp_modules::infra::utils::now_millis();
 
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query("UPDATE topics SET locked = ?, updated_at = ? WHERE topic_id = ?")
         .bind(locked)
         .bind(now)
         .bind(&topic_id)
-        .execute(&db_state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
     // 1. 触发聚合哈希冒泡
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -398,6 +392,7 @@ pub async fn set_topic_unread(
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
+#[allow(dead_code)] // DORMANT ASSET: floating-assistant archive DTO is not runtime-exposed.
 pub struct TempMessage {
     pub role: String,
     pub name: Option<String>,
@@ -406,6 +401,7 @@ pub struct TempMessage {
 }
 
 #[tauri::command]
+#[allow(dead_code)] // DORMANT ASSET: floating-assistant archive command is not registered.
 pub async fn archive_assistant_chat(
     app_handle: AppHandle,
     db_state: State<'_, DbState>,

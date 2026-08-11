@@ -3,6 +3,7 @@
 // Mirrors VCPChat/VCPDistributedServer/VCPDistributedServer.js (class DistributedServer)
 // Self-contained — does NOT import anything from vcp_modules/.
 
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,9 +12,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +24,18 @@ use super::types::*;
 
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OUTBOUND_CAPACITY: usize = 64;
+const MAX_INCOMING_MESSAGE_BYTES: usize = 512 * 1024;
+const MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+const MAX_TOOL_REQUEST_ID_BYTES: usize = 128;
+const MAX_TOOL_NAME_BYTES: usize = 128;
+const MAX_IN_FLIGHT_TOOL_REQUESTS: usize = 8;
+const REMEMBERED_TOOL_REQUEST_IDS: usize = 1024;
+
+fn inbound_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_INCOMING_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_INCOMING_MESSAGE_BYTES))
+}
 
 struct OutboundFrame {
     message: WsMessage,
@@ -34,6 +48,7 @@ struct SessionTaskTracker {
     cancel_token: CancellationToken,
     closed: AtomicBool,
     tasks: Mutex<JoinSet<()>>,
+    tool_requests: ToolRequestGate,
 }
 
 impl SessionTaskTracker {
@@ -42,6 +57,7 @@ impl SessionTaskTracker {
             cancel_token,
             closed: AtomicBool::new(false),
             tasks: Mutex::new(JoinSet::new()),
+            tool_requests: ToolRequestGate::new(),
         }
     }
 
@@ -76,6 +92,70 @@ impl SessionTaskTracker {
                 log::warn!("[Distributed] Session child task failed: {}", error);
             }
         }
+    }
+}
+
+struct ToolRequestGateState {
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+struct ToolRequestGate {
+    permits: Arc<Semaphore>,
+    state: Mutex<ToolRequestGateState>,
+}
+
+struct ToolRequestPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl ToolRequestGate {
+    fn new() -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TOOL_REQUESTS)),
+            state: Mutex::new(ToolRequestGateState {
+                seen: HashSet::new(),
+                order: VecDeque::new(),
+            }),
+        }
+    }
+
+    async fn try_claim(
+        &self,
+        request_id: &str,
+        tool_name: &str,
+        tool_args: &Value,
+    ) -> Result<ToolRequestPermit, String> {
+        if request_id.is_empty() || request_id.len() > MAX_TOOL_REQUEST_ID_BYTES {
+            return Err("requestId is empty or exceeds 128 bytes".to_string());
+        }
+        if tool_name.is_empty() || tool_name.len() > MAX_TOOL_NAME_BYTES {
+            return Err("toolName is empty or exceeds 128 bytes".to_string());
+        }
+        let encoded_args = serde_json::to_vec(tool_args)
+            .map_err(|error| format!("toolArgs serialization failed: {}", error))?;
+        if encoded_args.len() > MAX_TOOL_ARGUMENT_BYTES {
+            return Err("toolArgs exceeds 256KB budget".to_string());
+        }
+
+        let mut state = self.state.lock().await;
+        if state.seen.contains(request_id) {
+            return Err("duplicate requestId rejected".to_string());
+        }
+        let permit = self
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "too many in-flight tool requests".to_string())?;
+
+        while state.order.len() >= REMEMBERED_TOOL_REQUEST_IDS {
+            if let Some(expired) = state.order.pop_front() {
+                state.seen.remove(&expired);
+            }
+        }
+        state.seen.insert(request_id.to_string());
+        state.order.push_back(request_id.to_string());
+        Ok(ToolRequestPermit { _permit: permit })
     }
 }
 
@@ -360,7 +440,11 @@ impl DistributedClient {
                 WakeLockLease::acquire(&app, "distributed:connect".to_string()),
                 async {
                     tokio::select! {
-                        result = tokio_tungstenite::connect_async(&connection_url) => Some(result),
+                        result = tokio_tungstenite::connect_async_with_config(
+                            &connection_url,
+                            Some(inbound_websocket_config()),
+                            false,
+                        ) => Some(result),
                         _ = cancel_token.cancelled() => None,
                     }
                 },
@@ -635,6 +719,13 @@ impl DistributedClient {
         child_tracker: &Arc<SessionTaskTracker>,
         session_id: u64,
     ) {
+        if text.len() > MAX_INCOMING_MESSAGE_BYTES {
+            log::warn!(
+                "[Distributed] Incoming message exceeds {} byte budget; ignored.",
+                MAX_INCOMING_MESSAGE_BYTES
+            );
+            return;
+        }
         let envelope: IncomingEnvelope = match serde_json::from_str(text) {
             Ok(e) => e,
             Err(e) => {
@@ -696,6 +787,29 @@ impl DistributedClient {
                 tool_name,
                 tool_args,
             } => {
+                let request_permit = match child_tracker
+                    .tool_requests
+                    .try_claim(&request_id, &tool_name, &tool_args)
+                    .await
+                {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        let response = OutgoingMessage::ToolResult {
+                            request_id: request_id.chars().take(128).collect(),
+                            status: "error".to_string(),
+                            result: None,
+                            error: Some(error),
+                        };
+                        if let Err(send_error) = Self::send_message(ws_tx, &response).await {
+                            log::warn!(
+                                "[Distributed] Failed to reject tool request: {}",
+                                send_error
+                            );
+                        }
+                        return;
+                    }
+                };
+
                 log::info!(
                     "[Distributed] Execute tool request: {} (requestId={})",
                     tool_name,
@@ -711,6 +825,7 @@ impl DistributedClient {
 
                 child_tracker
                     .spawn(async move {
+                        let _request_permit = request_permit;
                         let tag = format!(
                             "distributed:tool:{}:{}",
                             request_id_clone,
@@ -956,6 +1071,40 @@ impl DistributedClient {
     }
 }
 
+#[cfg(target_os = "android")]
+fn acquire_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
+    if let Err(e) = tauri_plugin_vcp_mobile::stream::acquire_foreground_inner(
+        app,
+        tag,
+        10, // priority = PRIORITY_DISTRIBUTED
+        "[分布式连接]",
+        false, // screen_keep_on = false
+    ) {
+        log::warn!(
+            "[Distributed] Failed to acquire native wake lock with tag {}: {}",
+            tag,
+            e
+        );
+    }
+}
+
+#[cfg(target_os = "android")]
+fn release_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
+    if let Err(e) = tauri_plugin_vcp_mobile::stream::release_foreground_inner(app, tag) {
+        log::warn!(
+            "[Distributed] Failed to release native wake lock with tag {}: {}",
+            tag,
+            e
+        );
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn acquire_wake_lock_helper(_app: &tauri::AppHandle, _tag: &str) {}
+
+#[cfg(not(target_os = "android"))]
+fn release_wake_lock_helper(_app: &tauri::AppHandle, _tag: &str) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1069,38 +1218,91 @@ mod tests {
         );
         assert!(ws_rx.try_recv().is_ok());
     }
-}
 
-#[cfg(target_os = "android")]
-fn acquire_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
-    if let Err(e) = tauri_plugin_vcp_mobile::stream::acquire_foreground_inner(
-        app,
-        tag,
-        10, // priority = PRIORITY_DISTRIBUTED
-        "[分布式连接]",
-        false, // screen_keep_on = false
-    ) {
-        log::warn!(
-            "[Distributed] Failed to acquire native wake lock with tag {}: {}",
-            tag,
-            e
+    #[test]
+    fn websocket_protocol_budget_matches_incoming_handler_budget() {
+        let config = inbound_websocket_config();
+
+        assert_eq!(config.max_message_size, Some(MAX_INCOMING_MESSAGE_BYTES));
+        assert_eq!(config.max_frame_size, Some(MAX_INCOMING_MESSAGE_BYTES));
+    }
+
+    #[tokio::test]
+    async fn websocket_protocol_rejects_oversized_message_before_handler() {
+        use tokio_tungstenite::tungstenite::{error::CapacityError, Error, Message};
+        use tokio_tungstenite::{tungstenite::protocol::Role, WebSocketStream};
+
+        let (client_io, server_io) = tokio::io::duplex(MAX_INCOMING_MESSAGE_BYTES * 2);
+        let (mut client, mut server) = tokio::join!(
+            WebSocketStream::from_raw_socket(client_io, Role::Client, None),
+            WebSocketStream::from_raw_socket(
+                server_io,
+                Role::Server,
+                Some(inbound_websocket_config()),
+            ),
         );
+
+        let oversized = Message::Text("x".repeat(MAX_INCOMING_MESSAGE_BYTES + 1).into());
+        let (send_result, receive_result) = tokio::join!(client.send(oversized), server.next());
+
+        assert!(send_result.is_ok());
+        assert!(matches!(
+            receive_result,
+            Some(Err(Error::Capacity(CapacityError::MessageTooLong { .. })))
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_request_gate_rejects_duplicates_oversized_args_and_fanout() {
+        let gate = ToolRequestGate::new();
+        let first = gate
+            .try_claim("request-1", "test_tool", &serde_json::json!({"value": 1}))
+            .await
+            .expect("first request should be accepted");
+        assert!(gate
+            .try_claim("request-1", "test_tool", &serde_json::json!({"value": 2}))
+            .await
+            .is_err());
+
+        let oversized = "x".repeat(MAX_TOOL_ARGUMENT_BYTES + 1);
+        assert!(gate
+            .try_claim(
+                "oversized",
+                "test_tool",
+                &serde_json::json!({"value": oversized})
+            )
+            .await
+            .is_err());
+        assert!(gate
+            .try_claim(
+                "bad-tool-name",
+                &"x".repeat(MAX_TOOL_NAME_BYTES + 1),
+                &serde_json::json!({}),
+            )
+            .await
+            .is_err());
+
+        let mut permits = vec![first];
+        for index in 2..=MAX_IN_FLIGHT_TOOL_REQUESTS {
+            permits.push(
+                gate.try_claim(
+                    &format!("request-{index}"),
+                    "test_tool",
+                    &serde_json::json!({"value": index}),
+                )
+                .await
+                .expect("request within in-flight budget should be accepted"),
+            );
+        }
+        assert!(gate
+            .try_claim("request-overflow", "test_tool", &serde_json::json!({}))
+            .await
+            .is_err());
+
+        drop(permits);
+        assert!(gate
+            .try_claim("request-after-release", "test_tool", &serde_json::json!({}))
+            .await
+            .is_ok());
     }
 }
-
-#[cfg(target_os = "android")]
-fn release_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
-    if let Err(e) = tauri_plugin_vcp_mobile::stream::release_foreground_inner(app, tag) {
-        log::warn!(
-            "[Distributed] Failed to release native wake lock with tag {}: {}",
-            tag,
-            e
-        );
-    }
-}
-
-#[cfg(not(target_os = "android"))]
-fn acquire_wake_lock_helper(_app: &tauri::AppHandle, _tag: &str) {}
-
-#[cfg(not(target_os = "android"))]
-fn release_wake_lock_helper(_app: &tauri::AppHandle, _tag: &str) {}

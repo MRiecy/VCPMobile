@@ -51,6 +51,8 @@ pub struct LifecycleState {
     /// 启动早期的数据库恢复结果。保留到前端读取系统快照，避免一次性事件先于监听器发出。
     pub database_recovery: Arc<RwLock<Option<DatabaseRecoveryNotice>>>,
     /// 划词助手本地服务器句柄：用于根据设置动态启停
+    #[allow(dead_code)]
+    // DORMANT ASSET: no production lifecycle path currently reads this handle.
     pub local_server_handle: Arc<tokio::sync::Mutex<Option<ServerHandle>>>,
     /// 应用前台状态，统一替代原裸静态全局变量
     pub is_foreground: Arc<AtomicBool>,

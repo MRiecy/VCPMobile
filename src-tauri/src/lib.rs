@@ -5,9 +5,7 @@ const DISTRIBUTED_NETWORK_EVENT: &str = "vcp-mobile://vcp-network-status-changed
 
 use tauri::{Listener, Manager};
 use tauri_plugin_log::{Target, TargetKind};
-use vcp_modules::agent_chat_application_service::{
-    handle_agent_chat_message, handle_assistant_chat_stream,
-};
+use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
 use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config,
     save_agent_config, update_agent_config,
@@ -31,10 +29,6 @@ use vcp_modules::emoticon_manager::{
 use vcp_modules::file_manager::{
     check_attachment_support, get_attachment_real_path, open_file, register_local_file, store_file,
 };
-use vcp_modules::frontend_update_manager::{
-    apply_frontend_update, check_for_frontend_update, clear_frontend_updates,
-    confirm_frontend_boot, download_frontend_update, get_active_frontend_version,
-};
 use vcp_modules::group_chat_application_service::handle_group_chat_message;
 use vcp_modules::group_service::{
     create_group, delete_group, get_groups, read_group_config, save_group_config,
@@ -43,8 +37,7 @@ use vcp_modules::group_service::{
 use vcp_modules::high_speed_channel::prepare_vcp_upload;
 use vcp_modules::lifecycle_manager::{
     bootstrap, get_core_status, get_last_error, get_system_snapshot,
-    reconcile_distributed_node_cmd, reconcile_local_server_cmd, restart_or_exit_app,
-    set_app_foreground_state, LifecycleState,
+    reconcile_distributed_node_cmd, restart_or_exit_app, set_app_foreground_state, LifecycleState,
 };
 use vcp_modules::maintenance_manager::{
     cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
@@ -57,16 +50,18 @@ use vcp_modules::model_manager::{
     get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
     start_batch_model_test, stop_all_model_tests, test_model_connectivity, toggle_favorite_model,
 };
-use vcp_modules::settings_manager::{read_settings, set_theme, update_settings, write_settings};
+use vcp_modules::settings_manager::{
+    get_settings_recovery_status, read_settings, set_theme, update_settings,
+};
 
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
     read_sync_log_file, start_manual_sync, stop_sync,
 };
 use vcp_modules::topic_service::{
-    archive_assistant_chat, create_topic, delete_topic, get_topics, get_topics_streamed,
-    get_unread_counts, regenerate_topic_response, set_topic_unread, summarize_topic,
-    toggle_topic_lock, update_topic_title,
+    create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
+    regenerate_topic_response, set_topic_unread, summarize_topic, toggle_topic_lock,
+    update_topic_title,
 };
 use vcp_modules::update_manager::{check_for_update, download_update, install_update};
 use vcp_modules::vcp_client::{
@@ -83,41 +78,7 @@ use vcp_modules::vcp_log_service::{
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut context = tauri::generate_context!();
-
-    // 注入 OtaAssets：优先从文件系统读取前端热更新资源
-    {
-        let identifier = context.config().identifier.clone();
-        #[cfg(target_os = "android")]
-        let active_version_path = format!(
-            "/data/data/{}/files/frontend_updates/active_version",
-            identifier
-        );
-        #[cfg(not(target_os = "android"))]
-        let active_version_path = String::new();
-
-        let update_dir = if cfg!(target_os = "android") {
-            if let Ok(version) = std::fs::read_to_string(&active_version_path) {
-                let v = version.trim();
-                if v.is_empty() {
-                    std::path::PathBuf::new()
-                } else {
-                    std::path::PathBuf::from(format!(
-                        "/data/data/{}/files/frontend_updates/{}",
-                        identifier, v
-                    ))
-                }
-            } else {
-                std::path::PathBuf::new()
-            }
-        } else {
-            std::path::PathBuf::new()
-        };
-
-        let embedded = context.set_assets(Box::new(vcp_modules::ota_assets::EmptyAssets));
-        let ota_assets = vcp_modules::ota_assets::OtaAssets::new(embedded, update_dir);
-        context.set_assets(Box::new(ota_assets));
-    }
+    let context = tauri::generate_context!();
 
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -138,10 +99,11 @@ pub fn run() {
 
             let handle = app.handle().clone();
 
-            // 0. 前端 OTA：APK 升级清理 & 损坏版本回滚 & 安全期冗余垃圾清理
-            vcp_modules::frontend_update_manager::clear_on_apk_upgrade(&handle);
-            vcp_modules::frontend_update_manager::rollback_if_needed(&handle);
-            vcp_modules::frontend_update_manager::safe_cleanup_old_versions(&handle);
+            // 前端始终使用 APK 内嵌资源；旧 OTA 目录的 best-effort 清理不阻塞冷启动。
+            let legacy_cleanup_handle = handle.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                vcp_modules::update_manager::cleanup_legacy_frontend_ota(&legacy_cleanup_handle);
+            });
 
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);
@@ -256,7 +218,6 @@ pub fn run() {
             interruptGroupTurn,
             test_vcp_connection,
             handle_agent_chat_message,
-            handle_assistant_chat_stream,
             load_chat_history,
             load_chat_history_streamed,
             append_single_message,
@@ -288,7 +249,7 @@ pub fn run() {
             batch_get_avatars,
             store_dominant_color,
             read_settings,
-            write_settings,
+            get_settings_recovery_status,
             update_settings,
             handle_group_chat_message,
             create_agent,
@@ -342,23 +303,17 @@ pub fn run() {
             list_sync_log_files,
             read_sync_log_file,
             clear_old_sync_logs,
-            archive_assistant_chat,
-            reconcile_local_server_cmd,
             reconcile_distributed_node_cmd,
             distributed::get_distributed_status,
             distributed::get_registered_tools_metadata,
+            distributed::get_distributed_tool_config_status,
             distributed::update_disabled_tools,
+            distributed::reset_distributed_tools_disabled,
             distributed::execute_distributed_tool,
             distributed::reconnect_distributed_client,
             check_for_update,
             download_update,
             install_update,
-            check_for_frontend_update,
-            download_frontend_update,
-            apply_frontend_update,
-            get_active_frontend_version,
-            clear_frontend_updates,
-            confirm_frontend_boot,
             tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
             restart_or_exit_app,
         ])

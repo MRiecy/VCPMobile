@@ -464,15 +464,12 @@ async fn internal_write_agent_config<R: Runtime>(
         }
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
-
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
     // 只有在明确要求冒泡且话题列表不为空（即话题可能有变动）时才执行
     if !skip_bubble && !new_config.topics.is_empty() {
-        let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-        HashAggregator::bubble_agent_hash(&mut bubble_tx, agent_id).await?;
-        bubble_tx.commit().await.map_err(|e| e.to_string())?;
+        HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
     }
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     state.insert_cache_if_current(agent_id.to_string(), final_config.clone(), cache_generation);
 
@@ -649,12 +646,9 @@ pub async fn create_agent(
         HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
-
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
-    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-    HashAggregator::bubble_agent_hash(&mut bubble_tx, &agent_id).await?;
-    bubble_tx.commit().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_agent_hash(&mut tx, &agent_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     state.insert_cache_if_current(agent_id.clone(), config.clone(), cache_generation);
 

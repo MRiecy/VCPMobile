@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref, watch } from "vue";
+import { onMounted, onUnmounted, computed, ref, watch, type WatchStopHandle } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebviewWindow, WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSidebarSwipe } from "./core/composables/useSidebarSwipe";
 import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
@@ -15,8 +15,8 @@ import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
 import { useAssistantStore } from "./core/stores/assistant";
-import { useSettingsStore } from "./core/stores/settings";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
+import { LatestIntentOwner } from "./core/utils/latestIntentOwner";
 
 // 初始化应用生命周期监听
 useAppLifecycle();
@@ -38,7 +38,6 @@ const handleSafeAreaInset = (e: Event) => {
 };
 
 // Layout Components
-import PermissionGate from "./components/layout/PermissionGate.vue";
 import BootScreen from "./components/layout/BootScreen.vue";
 import AgentSidebar from "./components/layout/AgentSidebar.vue";
 import RightSidebar from "./components/layout/RightSidebar.vue";
@@ -53,9 +52,12 @@ interface SharedFileEntry {
   mimeType: string;
   fileName: string;
   size: number;
+  stagingTicket: string;
 }
 
 interface SharedContentData {
+  intentId: string;
+  operationId: string;
   text: string;
   files: SharedFileEntry[];
 }
@@ -75,7 +77,6 @@ const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
 const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
-const settingsStore = useSettingsStore();
 const { processPayload } = useNotificationProcessor();
 const { initGlobalFixer } = useEmoticonFixer();
 const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
@@ -83,60 +84,103 @@ const router = useRouter();
 
 const { initRootHistory } = useModalHistory();
 
-// [SUSPENDED BETA] isAssistant 用于标识浮动助手窗口模式，当前入口已关闭，保留以支持后续重启
-const isAssistant = ref(false);
-
 // --- Share Intent State ---
-const sharedContent = ref<SharedContentData>({ text: "", files: [] });
+const sharedContent = ref<SharedContentData>({ intentId: "", operationId: "", text: "", files: [] });
 const showShareSelector = ref(false);
 const pendingSharedFiles = ref<PickedFileInfo[]>([]);
+const shareIntentOwner = new LatestIntentOwner();
+let stopShareReadyWatch: WatchStopHandle | null = null;
 
 const handleShareIntent = (e: Event) => {
   processSharedIntent((e as CustomEvent).detail);
 };
 
 const processSharedIntent = async (detail: any) => {
-  console.log("[App] Share intent received:", detail);
-
+  const operationId = shareIntentOwner.begin();
+  const intentId = typeof detail?.intentId === "string" ? detail.intentId : "";
   const text = typeof detail?.text === "string" ? detail.text : "";
-  const files: SharedFileEntry[] = Array.isArray(detail?.files) ? detail.files : [];
+  const files: SharedFileEntry[] = Array.isArray(detail?.files)
+    ? detail.files.filter(
+        (file: any) =>
+          typeof file?.cachePath === "string" &&
+          typeof file?.fileName === "string" &&
+          typeof file?.stagingTicket === "string",
+      )
+    : [];
+  console.log("[App] Share intent received", {
+    intentId,
+    textLength: text.length,
+    fileCount: files.length,
+  });
+  const snapshot: SharedContentData = { intentId, operationId, text, files };
 
-  sharedContent.value = { text, files };
+  stopShareReadyWatch?.();
+  stopShareReadyWatch = null;
+  sharedContent.value = snapshot;
+  pendingSharedFiles.value = [];
+  showShareSelector.value = false;
 
   // Wait for core to be ready, then process files
   if (lifecycleStore.state !== "READY") {
     console.log("[App] Core not ready yet, deferring share intent processing...");
-    const unwatch = watch(
+    stopShareReadyWatch = watch(
       () => lifecycleStore.state,
       async (state) => {
-        if (state === "READY") {
-          unwatch();
-          await prepareShareFiles();
+        if (state === "READY" && shareIntentOwner.isCurrent(operationId)) {
+          stopShareReadyWatch?.();
+          stopShareReadyWatch = null;
+          await prepareShareFiles(snapshot, operationId);
         }
       },
     );
     return;
   }
 
-  await prepareShareFiles();
+  await prepareShareFiles(snapshot, operationId);
 };
 
-const prepareShareFiles = async () => {
-  const files = sharedContent.value.files;
+const prepareShareFiles = async (content: SharedContentData, operationId: string) => {
+  const files = content.files;
   if (files.length > 0) {
     try {
       console.log(`[App] Registering ${files.length} shared file(s)...`);
-      const results = await invoke<PickedFileInfo[]>("plugin:vcp-mobile|register_shared_files", {
+      const stagedResults = await invoke<PickedFileInfo[]>("plugin:vcp-mobile|register_shared_files", {
+        ownerId: content.intentId,
         files: files.map((f) => ({
           cachePath: f.cachePath,
           mimeType: f.mimeType,
           fileName: f.fileName,
+          stagingTicket: f.stagingTicket,
         })),
       });
+      if (!shareIntentOwner.isCurrent(operationId)) return;
+
+      const results: PickedFileInfo[] = [];
+      for (const staged of stagedResults) {
+        if (!shareIntentOwner.isCurrent(operationId)) return;
+        const registered = await invoke<any>("register_local_file", {
+          localPath: staged.path,
+          originalName: staged.name,
+          mimeType: staged.mime || "application/octet-stream",
+          thumbnailPath: staged.thumbnailPath || null,
+          stableId: `share_${operationId}_${results.length}`,
+          expectedHash: staged.hash,
+        });
+        results.push({
+          path: registered.internalPath,
+          name: registered.name,
+          mime: registered.type,
+          size: registered.size,
+          hash: registered.hash,
+          thumbnailPath: registered.thumbnailPath,
+        });
+      }
+      if (!shareIntentOwner.isCurrent(operationId)) return;
       pendingSharedFiles.value = results;
-      console.log("[App] Shared files registered:", results);
-    } catch (err) {
-      console.error("[App] Failed to register shared files:", err);
+      console.log(`[App] Shared files registered: ${results.length}`);
+    } catch {
+      if (!shareIntentOwner.isCurrent(operationId)) return;
+      console.error("[App] Failed to register shared files");
       pendingSharedFiles.value = [];
     }
   } else {
@@ -152,10 +196,13 @@ const prepareShareFiles = async () => {
     }
   }
 
-  showShareSelector.value = true;
+  if (shareIntentOwner.isCurrent(operationId)) {
+    showShareSelector.value = true;
+  }
 };
 
 const handleShareAgentSelected = async (agent: any) => {
+  const operationId = sharedContent.value.operationId;
   showShareSelector.value = false;
 
   try {
@@ -169,8 +216,11 @@ const handleShareAgentSelected = async (agent: any) => {
   }
 
   // Clear share state
-  sharedContent.value = { text: "", files: [] };
-  pendingSharedFiles.value = [];
+  if (shareIntentOwner.isCurrent(operationId)) {
+    shareIntentOwner.clear(operationId);
+    sharedContent.value = { intentId: "", operationId: "", text: "", files: [] };
+    pendingSharedFiles.value = [];
+  }
 };
 
 const handleShareSelectorClose = () => {
@@ -224,15 +274,6 @@ useSidebarSwipe(appRootRef, { type: "global" });
 
 const bootstrapApp = async () => {
   try {
-    if (isAssistant.value) {
-      // 划词助手窗口：采用静默快速启动，跳过权限检查和核心就绪等待（假设主窗口已完成）
-      lifecycleStore.state = "READY";
-      // 仅后台静默同步必要的 UI 资源
-      await themeStore.initTheme();
-      // 异步拉取配置，不阻塞渲染
-      settingsStore.fetchSettings().catch(() => {});
-      return;
-    }
     await lifecycleStore.bootstrap();
   } catch (error) {
     console.error("[App] Bootstrap failed:", error);
@@ -332,59 +373,10 @@ const handleExitRequest = async () => {
   }
 };
 
-
-
-
-// [SUSPENDED BETA] 悬浮球点击打开浮动助手窗口，当前功能已暂停使用，事件监听保留但入口关闭
-const handleFloatingBallClick = async () => {
-  console.log("[App] Floating ball clicked. Resolving assistant window...");
-  try {
-    let win = await WebviewWindow.getByLabel("assistant");
-    if (win) {
-      console.log("[App] Assistant window already exists, showing and focusing...");
-      await win.show();
-      await win.setFocus();
-      return;
-    }
-
-    const newWin = new WebviewWindow("assistant", {
-      url: "/#/assistant",
-      title: "VCP 划词助手",
-      transparent: true,
-      decorations: false,
-      visible: true,
-    });
-
-    newWin.once("tauri://created", () => {
-      console.log("[App] Assistant window created successfully!");
-    });
-
-    newWin.once("tauri://error", (e) => {
-      console.error("[App] Failed to create assistant window:", e);
-    });
-  } catch (err) {
-    console.error("[App] Failed to resolve assistant window:", err);
-  }
-};
-
 onMounted(async () => {
-  // 环境探测：若是原生悬浮窗模式，Tauri API 可能不可用，优先通过 URL 判断
-  isAssistant.value = window.location.search.includes("mode=floating");
-
-  if (!isAssistant.value) {
-    try {
-      const win = getCurrentWebviewWindow();
-      isAssistant.value = win.label === "assistant";
-    } catch (e) {
-      // 忽略非 Tauri 环境下的错误
-    }
-  }
-
   // 1. 同步挂载基础物理按键与系统事件监听 (混合应用黄金铁律：物理拦截最优先挂载，杜绝初始化阻塞失效)
   window.addEventListener("vcp-exit-requested", handleExitRequest);
   window.addEventListener("vcp-hardware-back", handleExitRequest);
-  // [SUSPENDED BETA] 悬浮球点击事件保留，但浮动助手功能当前已暂停使用
-  window.addEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.addEventListener("vcp-share-intent", handleShareIntent);
   window.addEventListener("vcp-notification-click", handleNotificationClick);
   window.addEventListener("vcp-keyboard-inset", handleSafeAreaInset);
@@ -416,23 +408,22 @@ onMounted(async () => {
   });
 
   // 3. 处理冷启动的通知栏点击
-  if (!isAssistant.value) {
-    try {
-      const pending = await invoke<any>("plugin:vcp-mobile|get_pending_notification");
-      if (pending && pending.topicId) {
-        processNotificationClick(pending);
-      }
-    } catch (err) {
-      console.warn("[App] Failed to fetch pending notification click:", err);
+  try {
+    const pending = await invoke<any>("plugin:vcp-mobile|get_pending_notification");
+    if (pending && pending.topicId) {
+      processNotificationClick(pending);
     }
+  } catch (err) {
+    console.warn("[App] Failed to fetch pending notification click:", err);
   }
 });
 
 onUnmounted(() => {
+  stopShareReadyWatch?.();
+  stopShareReadyWatch = null;
   if (unlistenLog) unlistenLog();
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
-  window.removeEventListener("vcp-floating-ball-click", handleFloatingBallClick);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
   window.removeEventListener("vcp-notification-click", handleNotificationClick);
   window.removeEventListener("vcp-keyboard-inset", handleSafeAreaInset);
@@ -442,11 +433,8 @@ onUnmounted(() => {
 
 <template>
   <div ref="appRootRef" class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
-    <!-- 0. 权限门禁 (仅在 PERMISSIONS 状态显示) -->
-    <PermissionGate v-if="lifecycleStore.state === 'PERMISSIONS'" />
-
-    <!-- 0.5. 全局初始化加载层 & 错误看板 -->
-    <BootScreen v-else />
+    <!-- 0. 全局初始化加载层 & 错误看板；系统权限由使用对应功能时按需申请 -->
+    <BootScreen />
 
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">

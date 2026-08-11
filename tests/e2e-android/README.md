@@ -44,6 +44,6 @@ These cannot be reliably automated with plain adb on all devices:
 - OEM auto-start permission
 - OEM battery unrestricted mode
 - recents-task lock
-- some overlay permission variants
+- legacy overlay variants are not granted; the dormant floating-assistant permission is absent from production manifests
 
 Record these as device preconditions for P1/P2 tests.

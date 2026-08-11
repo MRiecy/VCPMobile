@@ -9,6 +9,57 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
+const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_NDJSON_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+const MAX_NDJSON_ENTITIES: usize = 100_000;
+
+struct NdjsonBudget {
+    max_frames: usize,
+    total_bytes: usize,
+    frames: usize,
+    entities: usize,
+}
+
+impl NdjsonBudget {
+    fn new(max_frames: usize) -> Self {
+        Self {
+            max_frames,
+            total_bytes: 0,
+            frames: 0,
+            entities: 0,
+        }
+    }
+
+    fn observe_chunk(&mut self, bytes: usize) -> Result<(), String> {
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| "NDJSON response size overflow".to_string())?;
+        if self.total_bytes > MAX_NDJSON_TOTAL_BYTES {
+            return Err("NDJSON response exceeds 256MB budget".to_string());
+        }
+        Ok(())
+    }
+
+    fn observe_frame(&mut self, line_bytes: usize, entities: usize) -> Result<(), String> {
+        if line_bytes > MAX_NDJSON_LINE_BYTES {
+            return Err("NDJSON frame exceeds 32MB budget".to_string());
+        }
+        self.frames += 1;
+        if self.frames > self.max_frames {
+            return Err("NDJSON response contains more frames than requested topics".to_string());
+        }
+        self.entities = self
+            .entities
+            .checked_add(entities)
+            .ok_or_else(|| "NDJSON entity count overflow".to_string())?;
+        if self.entities > MAX_NDJSON_ENTITIES {
+            return Err("NDJSON response exceeds 100000 message budget".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct TopicNDJSONFrame {
     #[serde(rename = "topicId")]
@@ -655,9 +706,11 @@ impl PullExecutor {
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
+        let mut ndjson_budget = NdjsonBudget::new(requests.len());
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+            ndjson_budget.observe_chunk(chunk.len())?;
 
             // 检测流级错误帧
             if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#)
@@ -675,6 +728,9 @@ impl PullExecutor {
             // 逐行解析 NDJSON（优化为从游标处开始扫描，实现 O(N) 性能）
             while let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
                 let line_end = search_start + pos;
+                if line_end + 1 > MAX_NDJSON_LINE_BYTES {
+                    return Err("NDJSON frame exceeds 32MB budget".to_string());
+                }
                 let line = buffer.drain(..=line_end).collect::<Vec<_>>();
                 search_start = 0; // 成功切分一行后，后续扫描从头开始（因为 buffer 已被 drain）
 
@@ -682,60 +738,52 @@ impl PullExecutor {
                     continue;
                 }
 
-                // ⚡ 异步重构：流主协程不等待解析，立即把 line 抛进后台多核协程
+                let frame: TopicNDJSONFrame = serde_json::from_slice(&line)
+                    .map_err(|e| format!("Malformed NDJSON frame: {}", e))?;
+                ndjson_budget.observe_frame(line.len(), frame.messages.len())?;
+                let topic_id = frame.topic_id;
+                if topic_id.is_empty() {
+                    return Err("NDJSON frame contains empty topicId".to_string());
+                }
+                if let Some(topic_err) = frame.error {
+                    let _ = tx.send(BatchPullResult {
+                        topic_id,
+                        success: false,
+                        parsed_count: 0,
+                        failed_count: 0,
+                        error: Some(format!("Desktop error: {}", topic_err)),
+                    });
+                    continue;
+                }
+                if frame.messages.is_empty() {
+                    let _ = tx.send(BatchPullResult {
+                        topic_id,
+                        success: true,
+                        parsed_count: 0,
+                        failed_count: 0,
+                        error: None,
+                    });
+                    continue;
+                }
+
+                // Permit 在 spawn 前取得，避免大量已生成任务在运行时队列中堆积。
+                while let Some(result) = spawn_handles.try_join_next() {
+                    if let Err(error) = result {
+                        log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
+                    }
+                }
+                let permit = sem
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                 let app_clone = app.clone();
-                let sem_clone = sem.clone();
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
+                let pull_dtos = frame.messages;
 
                 spawn_handles.spawn(async move {
                     let start_t = std::time::Instant::now();
-                    // 1. 在后台多核并发解码标准 DTO JSON
-                    let frame: TopicNDJSONFrame = match serde_json::from_slice(&line) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            let err_msg = format!("[PullExecutor] Malformed NDJSON frame: {}", e);
-                            crate::vcp_modules::sync::sync_service::emit_sync_log(
-                                &app_clone, "error", &err_msg,
-                            );
-                            return;
-                        }
-                    };
-
-                    let topic_id = frame.topic_id;
-                    if topic_id.is_empty() {
-                        crate::vcp_modules::sync::sync_service::emit_sync_log(
-                            &app_clone,
-                            "error",
-                            "[PullExecutor] Batch pull: empty topicId in NDJSON line, skipping",
-                        );
-                        return;
-                    }
-
-                    // 2. 检查单 topic 错误帧
-                    if let Some(topic_err) = frame.error {
-                        let _ = tx_clone.send(BatchPullResult {
-                            topic_id,
-                            success: false,
-                            parsed_count: 0,
-                            failed_count: 0,
-                            error: Some(format!("Desktop error: {}", topic_err)),
-                        });
-                        return;
-                    }
-
-                    let pull_dtos = frame.messages;
-                    if pull_dtos.is_empty() {
-                        let _ = tx_clone.send(BatchPullResult {
-                            topic_id,
-                            success: true,
-                            parsed_count: 0,
-                            failed_count: 0,
-                            error: None,
-                        });
-                        return;
-                    }
-
                     // ⚡ 核心转换：通过 DTO From 实现三层完全隔离，净化核心 ChatMessage
                     let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> = pull_dtos
                         .into_iter()
@@ -743,13 +791,7 @@ impl PullExecutor {
                         .collect();
 
                     let decode_t = start_t.elapsed();
-
-                    // 3. 抢占信号量，控制写入并发度
-                    let sem_start = std::time::Instant::now();
-                    match sem_clone.acquire_owned().await {
-                        Ok(permit) => {
-                            let sem_t = sem_start.elapsed();
-                            let _permit = permit; // 持有 permit 直到任务完成
+                    let _permit = permit;
                             let proc_start = std::time::Instant::now();
                             match process_topic_messages(
                                 &app_clone,
@@ -765,7 +807,7 @@ impl PullExecutor {
                                     let total_t = start_t.elapsed();
                                     log::debug!(
                                         "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} sem_wait={:?} process={:?} | total={:?}",
-                                        topic_id, parsed, decode_t, sem_t, proc_t, total_t
+                                        topic_id, parsed, decode_t, std::time::Duration::ZERO, proc_t, total_t
                                     );
                                     let _ = tx_clone.send(BatchPullResult {
                                         topic_id,
@@ -785,27 +827,23 @@ impl PullExecutor {
                                     });
                                 }
                             }
-                        }
-                        Err(e) => {
-                            let _ = tx_clone.send(BatchPullResult {
-                                topic_id,
-                                success: false,
-                                parsed_count: 0,
-                                failed_count: 0,
-                                error: Some(e.to_string()),
-                            });
-                        }
-                    }
                 });
             }
 
             // 循环结束后，游标指向 buffer 末尾，下一轮 chunk 进来时只需扫描新增部分
+            if buffer.len() > MAX_NDJSON_LINE_BYTES {
+                return Err("NDJSON frame exceeds 32MB budget".to_string());
+            }
             search_start = buffer.len();
         }
 
         // 处理流结束后 buffer 中残留的非换行数据（兜底）
         if !buffer.is_empty() {
+            if buffer.len() > MAX_NDJSON_LINE_BYTES {
+                return Err("NDJSON trailing frame exceeds 32MB budget".to_string());
+            }
             if let Ok(frame) = serde_json::from_slice::<TopicNDJSONFrame>(&buffer) {
+                ndjson_budget.observe_frame(buffer.len(), frame.messages.len())?;
                 let topic_id = frame.topic_id;
                 if !topic_id.is_empty() {
                     if let Some(topic_err) = frame.error {
@@ -819,51 +857,47 @@ impl PullExecutor {
                     } else {
                         let pull_dtos = frame.messages;
                         if !pull_dtos.is_empty() {
+                            while let Some(result) = spawn_handles.try_join_next() {
+                                if let Err(error) = result {
+                                    log::warn!(
+                                        "[PullExecutor] Batch pull worker failed: {}",
+                                        error
+                                    );
+                                }
+                            }
                             let app_clone = app.clone();
-                            let sem_clone = sem.clone();
                             let wq_clone = write_queue.clone();
                             let tx_clone = tx.clone();
+                            let permit = sem
+                                .clone()
+                                .acquire_owned()
+                                .await
+                                .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                             spawn_handles.spawn(async move {
-                                match sem_clone.acquire_owned().await {
-                                    Ok(permit) => {
-                                        let _permit = permit;
-                                        // 转换 DTO 到 ChatMessage 核心实体
-                                        let messages: Vec<
-                                            crate::vcp_modules::chat_manager::ChatMessage,
-                                        > = pull_dtos
-                                            .into_iter()
-                                            .map(
-                                                crate::vcp_modules::chat_manager::ChatMessage::from,
-                                            )
-                                            .collect();
-                                        match process_topic_messages(
-                                            &app_clone,
-                                            &topic_id,
-                                            messages,
-                                            &wq_clone,
-                                            prerender_enabled,
-                                        )
-                                        .await
-                                        {
-                                            Ok((parsed, failed)) => {
-                                                let _ = tx_clone.send(BatchPullResult {
-                                                    topic_id,
-                                                    success: true,
-                                                    parsed_count: parsed,
-                                                    failed_count: failed,
-                                                    error: None,
-                                                });
-                                            }
-                                            Err(e) => {
-                                                let _ = tx_clone.send(BatchPullResult {
-                                                    topic_id,
-                                                    success: false,
-                                                    parsed_count: 0,
-                                                    failed_count: 0,
-                                                    error: Some(e),
-                                                });
-                                            }
-                                        }
+                                let _permit = permit;
+                                // 转换 DTO 到 ChatMessage 核心实体
+                                let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> =
+                                    pull_dtos
+                                        .into_iter()
+                                        .map(crate::vcp_modules::chat_manager::ChatMessage::from)
+                                        .collect();
+                                match process_topic_messages(
+                                    &app_clone,
+                                    &topic_id,
+                                    messages,
+                                    &wq_clone,
+                                    prerender_enabled,
+                                )
+                                .await
+                                {
+                                    Ok((parsed, failed)) => {
+                                        let _ = tx_clone.send(BatchPullResult {
+                                            topic_id,
+                                            success: true,
+                                            parsed_count: parsed,
+                                            failed_count: failed,
+                                            error: None,
+                                        });
                                     }
                                     Err(e) => {
                                         let _ = tx_clone.send(BatchPullResult {
@@ -871,7 +905,7 @@ impl PullExecutor {
                                             success: false,
                                             parsed_count: 0,
                                             failed_count: 0,
-                                            error: Some(e.to_string()),
+                                            error: Some(e),
                                         });
                                     }
                                 }
@@ -886,7 +920,11 @@ impl PullExecutor {
                             });
                         }
                     }
+                } else {
+                    return Err("Trailing NDJSON frame contains empty topicId".to_string());
                 }
+            } else {
+                return Err("Malformed trailing NDJSON frame".to_string());
             }
         }
 
@@ -909,5 +947,31 @@ impl PullExecutor {
         );
         crate::vcp_modules::sync::sync_service::emit_sync_log(app, "info", &msg);
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod ndjson_budget_tests {
+    use super::{NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES};
+
+    #[test]
+    fn rejects_oversized_line_total_and_frame_fanout() {
+        let mut line = NdjsonBudget::new(1);
+        assert!(line.observe_frame(MAX_NDJSON_LINE_BYTES + 1, 0).is_err());
+
+        let mut total = NdjsonBudget::new(1);
+        assert!(total.observe_chunk(MAX_NDJSON_TOTAL_BYTES).is_ok());
+        assert!(total.observe_chunk(1).is_err());
+
+        let mut frames = NdjsonBudget::new(1);
+        assert!(frames.observe_frame(1, 1).is_ok());
+        assert!(frames.observe_frame(1, 1).is_err());
+    }
+
+    #[test]
+    fn rejects_entity_budget_before_unbounded_work_is_spawned() {
+        let mut budget = NdjsonBudget::new(2);
+        assert!(budget.observe_frame(1, 75_000).is_ok());
+        assert!(budget.observe_frame(1, 25_001).is_err());
     }
 }

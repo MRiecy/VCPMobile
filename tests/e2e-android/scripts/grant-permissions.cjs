@@ -52,7 +52,6 @@ if (device.sdk >= 33) {
   grant(pkg, 'android.permission.READ_EXTERNAL_STORAGE');
 }
 
-appops(pkg, 'SYSTEM_ALERT_WINDOW', 'allow');
 runAdb(['shell', 'dumpsys', 'deviceidle', 'whitelist', `+${pkg}`], { allowFailure: true });
 
 console.log('[grant-permissions] best-effort grants finished');

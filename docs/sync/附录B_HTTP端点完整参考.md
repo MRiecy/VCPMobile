@@ -142,7 +142,7 @@ let dto: AgentSyncDTO = res.json().await?;
 **移动端消费流程**
 1. `pull_executor.rs` 建立 HTTP POST 连接后，通过 `res.bytes_stream()` 流式读取 chunk。
 2. 使用缓冲区逐行解析 NDJSON，支持 chunk 边界跨越。
-3. 每解析出一行 topic 数据，通过 `Semaphore(20)` 控制并发，spawn 异步任务调用 `process_topic_messages()`。
+3. 每解析出一行 topic 数据，先从 `NetworkAwareSemaphore(6–12)` 取得 permit，再 spawn 异步任务调用 `process_topic_messages()`。
 4. 单 topic 处理失败不中断流，错误通过 `_error` 字段返回。
 
 **字段规范化**
@@ -334,7 +334,7 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 | 层级 | 并发控制 |
 |------|---------|
 | 移动端总并发 | `NetworkAwareSemaphore`，默认上限 `clamp(cores * 1.5, 6, 12)` |
-| 消息 Pull 并发 | `Semaphore(20)`，限制同时处理的 topic 数 |
+| 消息 Pull 并发 | `NetworkAwareSemaphore(6–12)`，按 CPU 核数限制同时处理的 topic 数 |
 | 附件上传并发 | 硬编码 `MAX_CONCURRENT_UPLOADS = 3` |
 | 实体分块大小 | Agent/Group: 50/批；Topic: 1000/批 |
 | 消息分块大小 | `MAX_MESSAGES_PER_BATCH = 10000`（控制 WS payload，非 HTTP） |

@@ -31,10 +31,30 @@ export interface AppSettings {
   [key: string]: any;
 }
 
+export function diffSettingsPatch(
+  baseline: AppSettings,
+  edited: AppSettings,
+): Partial<AppSettings> {
+  const patch: Partial<AppSettings> = {};
+  for (const key of Object.keys(edited)) {
+    if (JSON.stringify(edited[key]) !== JSON.stringify(baseline[key])) {
+      patch[key] = edited[key];
+    }
+  }
+  return patch;
+}
+
+interface SettingsRecoveryStatus {
+  recoveredCorrupt: boolean;
+  backupKey?: string | null;
+  message?: string | null;
+}
+
 export const useSettingsStore = defineStore("settings", () => {
   const settings = ref<AppSettings | null>(null);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  const recoveryNotified = ref(false);
   const notificationStore = useNotificationStore();
 
   const fetchSettings = async () => {
@@ -43,31 +63,19 @@ export const useSettingsStore = defineStore("settings", () => {
     try {
       const fetchedSettings = await invoke<AppSettings>("read_settings");
       settings.value = fetchedSettings;
+      const recovery = await invoke<SettingsRecoveryStatus>("get_settings_recovery_status");
+      if (recovery.recoveredCorrupt && !recoveryNotified.value) {
+        recoveryNotified.value = true;
+        notificationStore.addNotification({
+          type: "warning",
+          title: "设置已从损坏数据恢复",
+          message: recovery.message || "原始设置已在数据库中备份，当前使用默认设置。",
+          toastOnly: true,
+        });
+      }
     } catch (e: any) {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to fetch settings:", e);
-      throw e;
-    } finally {
-      loading.value = false;
-    }
-  };
-
-  const saveSettings = async (newSettings: AppSettings) => {
-    loading.value = true;
-    error.value = null;
-    try {
-      await invoke("write_settings", { settings: newSettings });
-      settings.value = newSettings;
-
-      notificationStore.addNotification({
-        type: "success",
-        title: "设置更新成功",
-        message: "全局配置已持久化",
-        toastOnly: true,
-      });
-    } catch (e: any) {
-      error.value = e.toString();
-      console.error("[SettingsStore] Failed to save settings:", e);
       throw e;
     } finally {
       loading.value = false;
@@ -101,7 +109,6 @@ export const useSettingsStore = defineStore("settings", () => {
     loading,
     error,
     fetchSettings,
-    saveSettings,
     updateSettings,
   };
 });

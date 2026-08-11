@@ -201,11 +201,11 @@ v1.1.2 引入的认知广播观察面板，让 AI 在 RAG 检索、工具调用�
 
 `WebGLFluidBackground.vue` 提供高性能流体模拟动态背景，仅用于**关于界面（About Section）**的视觉特效。
 
-### 🚀 OTA 热更新
+### 🚀 APK 更新
 
-- APK 本体 OTA 升级 + 前端资源热更新双通道
-- `confirm_frontend_boot` 回滚保护机制：新资源加载失败时自动回退至上一稳定版本
-- `frontend_update_manager` 管理下载、校验、应用全生命周期
+- 通过 GitHub Release 检查并下载 arm64 APK
+- 前端资源随 APK 一同签名发布，运行时只加载 APK 内嵌 assets
+- 安装交给 Android 系统安装器完成包名与发布证书校验
 
 ---
 
@@ -358,8 +358,6 @@ VCPMobile/
 │   ├── sync/                     # 同步协议文档（20 份）
 │   ├── plugins/                  # 原生插件文档（13 份）
 │   └── *.md                      # 顶层规范（架构、UI 层级、依赖管理）
-├── plans/                        # 知识治理体系（5 层目录）
-├── scripts/                      # 开发辅助脚本
 ├── .github/workflows/            # CI/CD（类型检查 + Release APK）
 ├── package.json                  # pnpm 依赖与脚本
 ├── vite.config.ts                # Vite 配置（端口 1420/1421）
@@ -384,7 +382,6 @@ VCPMobile/
 | `docs/ARCHIVED_SYNC_ARCHITECTURE.md` | 增量同步协议历史规范 |
 | `docs/sync/00_总览与导航.md` | 同步 V2 子文档导航 |
 | `docs/UI_LAYER_ARCHITECTURE.md` | 全局 UI 层级与 Z-Index 语义化规范 |
-| `scripts/tauri_android_dev.cjs` | WiFi/USB 双模式真机调试启动器 |
 | `uno.config.ts` | UnoCSS 主题色、快捷类、断点配置 |
 | `vite.config.ts` | Vite 插件链、Tauri 感知开发服务器 |
 
@@ -424,7 +421,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 
 - **路径遍历防护**：`file_manager.rs` 中的 `ensure_safe_path()` 限制所有文件访问在 `app_config_dir` 下
 - **内存限制**：文件上传 ≤ 20 MB，`read_local_file_base64` ≤ 50 MB，防止 OOM
-- **密钥管理**：`build_android_release.ps1` 含本地密钥库密码，已被 `.gitignore` 排除
+- **密钥管理**：Release 签名信息仅通过环境变量或 GitHub Actions secrets 注入，缺少任一签名输入时构建直接失败
 - **数据库**：SQLite 启用 WAL（Write-Ahead Logging）模式，降低并发写入锁竞争
 - **网络**：HTTP 客户端使用 `rustls-tls`，禁用原生 TLS；支持 gzip 压缩
 
@@ -513,10 +510,10 @@ pnpm tauri android dev
 vue-tsc --noEmit
 
 # 6. Static check (Rust)
-cd src-tauri && cargo check
+cd src-tauri; cargo check --locked
 
 # 7. Build Release APK
-pnpm tauri android build --apk --target aarch64
+pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict
 ```
 
 ---
@@ -529,15 +526,14 @@ pnpm tauri android build --apk --target aarch64
 |------|------|------|
 | `pnpm dev` | `vite` | 前端开发服务器（端口 1420）|
 | `pnpm build` | `vue-tsc && vite build` | 前端生产构建 |
-| `pnpm check` | `vue-tsc --noEmit && cd src-tauri && cargo check` | 全量静态检查（前端类型 + Rust 编译）|
-| `pnpm dev:android` | `node scripts/tauri_android_dev.cjs` | WiFi 模式真机调试 |
-| `pnpm dev:usb` | `node scripts/tauri_android_dev.cjs --usb` | USB 模式真机调试（adb reverse）|
-| `pnpm test` | `vitest` | 前端单元/集成测试（交互式）|
+| `pnpm check` | `vue-tsc --noEmit && cd src-tauri && cargo check --locked` | 全量静态检查（前端类型 + Rust 锁定依赖编译）|
+| `pnpm test` | `vitest` | 前端 Vitest（交互式）|
 | `pnpm test:run` | `vitest run` | 前端测试一次性运行 |
+| `pnpm test:integration` | `cargo test --locked --manifest-path src-tauri/Cargo.toml --test file_extractor_integration` | Rust 文件提取集成测试 |
 | `pnpm tauri android dev` | — | Android 开发调试 |
-| `pnpm tauri android build --apk --target aarch64` | — | Release APK 构建 |
+| `pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict` | — | Release APK 构建（需四项签名环境变量）|
 
-项目同时提供了 `scripts/` 目录下的辅助脚本（如 WiFi/USB 双模式调试启动器），适用于内部开发流程。
+当前仓库不提供根 `scripts/` 目录；Android 开发与发布直接使用上表中的 Tauri CLI 命令。
 
 ### 8.2 Rust Release 优化
 
@@ -552,16 +548,13 @@ strip = true
 
 ### 8.3 测试策略
 
-- **前端单元/集成测试**：v1.1.3 引入 Vitest 框架，覆盖组件与工具函数
+- **前端单元/契约测试**：Vitest 覆盖组件、Store 并发、富文本、分享 Intent 与 Release/Android 治理契约
   - `src/tests/unit/chat/...`
   - `src/tests/unit/components/ui/...`
   - `src/tests/unit/components/settings/...`
 - **Android E2E 与性能测试**：`tests/e2e-android/`（adb 环境/权限/冒烟脚本）、`tests/perf/`（APK 体积/启动耗时/Rust bench）
-- **Rust 单元测试**：
-  - `vcp_modules/sync/sync_retry.rs`（5 个测试）
-  - `vcp_modules/chat/context_sanitizer.rs`（3 个测试）
-  - `vcp_modules/sync/sync_logger.rs`
-- **核心模块**（`vcp_client`, `sync_service`, `db_manager` 等）自动化测试仍待补齐。
+- **Rust workspace 测试**：覆盖 Chat/Sync/Distributed/DB/Updater/文件边界及 Android 插件 Rust 侧；数量以 `cargo test --locked --workspace --lib -- --list` 为准。
+- **Rust 集成测试**：`file_extractor_integration` 使用仓库内固定 DOCX/XLSX/PDF/PPTX fixture。
 
 ---
 
@@ -575,17 +568,11 @@ strip = true
 - **Balthasar (直觉与美学)**：审查移动端原生直觉、Glassmorphism 规范、微动画、交互心理学
 - **Casper (务实与交付)**：审查工程复杂度、维护成本、实现周期，拒绝过度设计
 
-### 9.2 plans/ 知识治理
+### 9.2 知识治理
 
-| 目录 | 用途 | 写入时机 |
-|------|------|----------|
-| `01_Architecture/` | 核心架构、工程标准 | 重大架构变更 |
-| `02_Refactoring/` | 重构计划与优化报告 | 重构战役期间 |
-| `03_Features/` | 具体功能实现细节 | 新功能开发 |
-| `04_Logs/` | Bug 解剖、Magi 辩证记录 | 重大节点或调试后 |
-| `05_Sublimations/` | 固化真理、精炼标准 | 确立新架构模式时 |
-
-- 任何对 `plans/` 的修改建议同步更新索引文件
+当前仓库以 tracked `docs/`、代码、测试和本 README 作为工程知识来源，未启用
+`plans/`、`memory:refresh` 或根 `scripts/` 自动编译框架。架构变更应同步更新对应
+文档与契约测试，不能只留下未被版本控制的本地笔记。
 
 ### 9.3 编码规范（精简版）
 

@@ -5,6 +5,40 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 use tauri::{AppHandle, Runtime};
 
+#[cfg(target_os = "android")]
+const TEMP_FILE_MAX_BYTES: usize = 20 * 1024 * 1024;
+#[cfg(target_os = "android")]
+const MAX_SHARED_FILES: usize = 16;
+
+#[cfg(any(target_os = "android", test))]
+fn safe_leaf_name(file_name: &str) -> Result<&str, String> {
+    let path = std::path::Path::new(file_name);
+    if file_name.is_empty()
+        || file_name == "."
+        || file_name == ".."
+        || file_name.contains(['/', '\\'])
+        || file_name.len() > 180
+        || path.is_absolute()
+        || path.components().count() != 1
+        || path.file_name().and_then(|name| name.to_str()) != Some(file_name)
+    {
+        return Err("文件名必须是不含路径分隔符的 basename".to_string());
+    }
+    Ok(file_name)
+}
+
+#[cfg(any(target_os = "android", test))]
+fn canonical_file_in(root: &std::path::Path, path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|error| format!("临时目录规范化失败: {}", error))?;
+    let canonical_path =
+        std::fs::canonicalize(path).map_err(|error| format!("临时文件规范化失败: {}", error))?;
+    Ok(canonical_path.starts_with(canonical_root) && canonical_path.is_file())
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PermissionStatus {
     pub notification: bool,
@@ -12,7 +46,6 @@ pub struct PermissionStatus {
     pub battery: bool,
     pub microphone: bool,
     pub camera: bool,
-    pub overlay: bool,
     pub location: bool,
 }
 
@@ -37,7 +70,6 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
             battery: true,
             microphone: true,
             camera: true,
-            overlay: true,
             location: true,
         })
     }
@@ -491,8 +523,22 @@ pub fn write_temp_file<R: Runtime>(
     #[cfg(target_os = "android")]
     {
         use tauri::Manager;
+        if bytes.len() > TEMP_FILE_MAX_BYTES {
+            return Err("临时文件过大 (Limit: 20MB)".to_string());
+        }
+        let file_name = safe_leaf_name(&file_name)?;
         let cache_dir = app.path().cache_dir().map_err(|e| e.to_string())?;
-        let temp_path = cache_dir.join(&file_name);
+        let temp_dir = cache_dir.join("vcp_bridge_temp");
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos()
+        );
+        let temp_path = temp_dir.join(format!("{}-{}", unique, file_name));
         std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
         Ok(temp_path.to_string_lossy().to_string())
     }
@@ -512,13 +558,17 @@ pub fn delete_temp_file<R: Runtime>(app: AppHandle<R>, file_path: String) -> Res
         use std::path::Path;
         let path = Path::new(&file_path);
 
-        // 安全防护：限制仅允许删除 App 自身的 cache_dir 缓存目录下的文件，防路径遍历越权
         use tauri::Manager;
         let cache_dir = app.path().cache_dir().map_err(|e| e.to_string())?;
-
-        if path.starts_with(&cache_dir) && path.exists() && path.is_file() {
-            std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        let temp_dir = cache_dir.join("vcp_bridge_temp");
+        std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+        if !path.exists() {
+            return Ok(());
         }
+        if !path.is_absolute() || !canonical_file_in(&temp_dir, path)? {
+            return Err("拒绝删除非 bridge staging 文件".to_string());
+        }
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
         Ok(())
     }
     #[cfg(not(target_os = "android"))]
@@ -625,30 +675,66 @@ pub struct SharedFileItem {
     pub cache_path: String,
     pub mime_type: String,
     pub file_name: String,
+    pub staging_ticket: String,
 }
 
 #[tauri::command]
 pub fn register_shared_files<R: Runtime>(
     app: AppHandle<R>,
+    owner_id: String,
     files: Vec<SharedFileItem>,
 ) -> Result<Vec<PickedFileInfo>, String> {
     #[cfg(target_os = "android")]
     {
+        if files.len() > MAX_SHARED_FILES {
+            return Err(format!("单次最多处理 {} 个分享文件", MAX_SHARED_FILES));
+        }
+        if owner_id.is_empty()
+            || owner_id.len() > 64
+            || !owner_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("非法的分享 intent owner".to_string());
+        }
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
 
-        let mut results = Vec::new();
+        let mut results: Vec<PickedFileInfo> = Vec::new();
         for file in files {
-            let file_info = plugin_handle
-                .run_mobile_plugin::<PickedFileInfo>(
-                    "processSharedFile",
-                    serde_json::json!({
-                        "cachePath": file.cache_path,
-                        "mimeType": file.mime_type,
-                        "fileName": file.file_name,
-                    }),
-                )
-                .map_err(|e| format!("run_mobile_plugin processSharedFile failed: {}", e))?;
+            if file.staging_ticket.is_empty()
+                || file.staging_ticket.len() > 64
+                || !file
+                    .staging_ticket
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err("非法的分享 staging ticket".to_string());
+            }
+            let file_info = match plugin_handle.run_mobile_plugin::<PickedFileInfo>(
+                "processSharedFile",
+                serde_json::json!({
+                    "cachePath": file.cache_path,
+                    "mimeType": file.mime_type,
+                    "fileName": file.file_name,
+                    "ownerId": owner_id,
+                    "stagingTicket": file.staging_ticket,
+                }),
+            ) {
+                Ok(info) => info,
+                Err(error) => {
+                    for completed in &results {
+                        let _ = std::fs::remove_file(&completed.path);
+                        if let Some(thumbnail) = &completed.thumbnail_path {
+                            let _ = std::fs::remove_file(thumbnail);
+                        }
+                    }
+                    return Err(format!(
+                        "run_mobile_plugin processSharedFile failed: {}",
+                        error
+                    ));
+                }
+            };
             results.push(file_info);
         }
         Ok(results)
@@ -656,8 +742,48 @@ pub fn register_shared_files<R: Runtime>(
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
+        let _ = owner_id;
         let _ = files;
         Err("该接口仅在 Android 物理端可用".to_string())
+    }
+}
+
+#[cfg(test)]
+mod file_boundary_tests {
+    use super::{canonical_file_in, safe_leaf_name};
+    use std::fs;
+
+    #[test]
+    fn temp_file_name_is_leaf_only() {
+        assert_eq!(safe_leaf_name("preview.png"), Ok("preview.png"));
+        assert!(safe_leaf_name("../preview.png").is_err());
+        assert!(safe_leaf_name("nested/preview.png").is_err());
+        assert!(safe_leaf_name("nested\\preview.png").is_err());
+        assert!(safe_leaf_name("/tmp/preview.png").is_err());
+    }
+
+    #[test]
+    fn temp_delete_gate_uses_canonical_containment() {
+        let temp = std::env::temp_dir().join(format!(
+            "vcp-mobile-file-boundary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let root = temp.join("bridge");
+        let outside = temp.join("outside");
+        fs::create_dir_all(&root).expect("root");
+        fs::create_dir_all(&outside).expect("outside");
+        let inside_file = root.join("inside.bin");
+        let outside_file = outside.join("outside.bin");
+        fs::write(&inside_file, b"inside").expect("inside");
+        fs::write(&outside_file, b"outside").expect("outside file");
+
+        assert_eq!(canonical_file_in(&root, &inside_file), Ok(true));
+        assert_eq!(canonical_file_in(&root, &outside_file), Ok(false));
+        let _ = fs::remove_dir_all(temp);
     }
 }
 

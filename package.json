@@ -8,14 +8,11 @@
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "io:write": "node scripts/nova_utils.cjs write",
-    "io:append": "node scripts/nova_utils.cjs append",
-    "memory:refresh": "node scripts/refresh_manifest.cjs",
-    "check": "vue-tsc --noEmit && cd src-tauri && cargo check",
+    "check": "vue-tsc --noEmit && cd src-tauri && cargo check --locked",
     "test": "vitest",
     "test:run": "vitest run",
     "test:unit": "vitest run src/tests/unit",
-    "test:integration": "vitest run src/tests/integration",
+    "test:integration": "cargo test --locked --manifest-path src-tauri/Cargo.toml --test file_extractor_integration",
     "audit:rust": "cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2023-0071",
     "test:coverage": "vitest run --coverage",
     "e2e:android:env": "node tests/e2e-android/scripts/adb-env.cjs",
@@ -24,9 +21,7 @@
     "perf:apk-size": "node tests/perf/scripts/measure_apk_size.cjs",
     "perf:startup": "node tests/perf/scripts/measure_startup_adb.cjs",
     "perf:collect": "node tests/perf/scripts/collect_android_dumpsys.cjs",
-    "perf:rust-bench": "node tests/perf/scripts/run_rust_bench.cjs",
-    "dev:android": "node scripts/tauri_android_dev.cjs",
-    "dev:usb": "node scripts/tauri_android_dev.cjs --usb"
+    "perf:rust-bench": "node tests/perf/scripts/run_rust_bench.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

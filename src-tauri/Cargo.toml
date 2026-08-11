@@ -62,7 +62,6 @@ tauri-plugin-vcp-mobile = { path = "./plugins/vcp-mobile" }
 base64 = "0.22"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 pdf_oxide = { version = "0.3.77", default-features = false }
-tauri-utils = "2.9.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"
 libc = "0.2"

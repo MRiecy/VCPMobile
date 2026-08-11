@@ -800,34 +800,21 @@ pub async fn begin_stream_message(
     agent_id: Option<&str>,
     agent_name: Option<&str>,
 ) -> Result<(), String> {
-    let topic_matches: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM topics \
-         WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL)",
-    )
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
-    .fetch_one(db_pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    if !topic_matches {
-        return Err(format!(
-            "Topic {} does not belong to {} {}",
-            topic_id, owner_type, owner_id
-        ));
-    }
-
     let now = crate::vcp_modules::infra::utils::now_millis();
     let (_, render_bytes) = compile_and_serialize_render_async(String::new()).await?;
     let content_hash = HashAggregator::compute_message_fingerprint("", &[]);
     let is_group = owner_type == "group";
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
 
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO messages (
             msg_id, topic_id, role, name, agent_id, content, timestamp,
             is_group_message, group_id, finish_reason, content_hash, created_at, updated_at
-         ) VALUES (?, ?, 'assistant', ?, ?, '', ?, ?, ?, NULL, ?, ?, ?)",
+         ) SELECT ?, ?, 'assistant', ?, ?, '', ?, ?, ?, NULL, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM topics
+             WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL
+           )",
     )
     .bind(message_id)
     .bind(topic_id)
@@ -839,9 +826,18 @@ pub async fn begin_stream_message(
     .bind(&content_hash)
     .bind(now)
     .bind(now)
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+    if inserted.rows_affected() != 1 {
+        return Err(format!(
+            "Topic {} does not belong to live {} {}",
+            topic_id, owner_type, owner_id
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO render_cache (
@@ -1462,6 +1458,7 @@ pub async fn delete_message_attachment(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query(
         "UPDATE message_attachments SET deleted_at = ? \
          WHERE topic_id = ? AND msg_id = ? AND hash = ?",
@@ -1470,12 +1467,11 @@ pub async fn delete_message_attachment(
     .bind(&topic_id)
     .bind(&message_id)
     .bind(&hash)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
     // ⚡ 冒泡更新主题内容哈希，使该删除动作能够在局域网同步端识别并广播
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
@@ -1595,6 +1591,42 @@ mod stream_lifecycle_tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn begin_generation_cannot_cross_a_topic_tombstone() {
+        let pool = test_pool().await;
+        sqlx::query("UPDATE topics SET deleted_at = 7 WHERE topic_id = 'topic-1'")
+            .execute(&pool)
+            .await
+            .expect("tombstone topic");
+
+        let error = begin_stream_message(
+            &pool,
+            "agent-1",
+            "agent",
+            "topic-1",
+            "message-after-delete",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .expect_err("atomic skeleton insert must observe the tombstone");
+        assert!(error.contains("live agent"));
+        let message_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE msg_id = 'message-after-delete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("message count");
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'message-after-delete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("active count");
+        assert_eq!(message_count, 0);
+        assert_eq!(active_count, 0);
     }
 
     #[tokio::test]

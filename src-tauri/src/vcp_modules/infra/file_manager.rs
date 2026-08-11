@@ -2,8 +2,108 @@ use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::sync::{Arc, OnceLock};
+use tokio::io::AsyncReadExt;
 
 use tauri::{AppHandle, Emitter, Manager, State};
+
+const STORE_FILE_IPC_MAX_BYTES: usize = 2 * 1024 * 1024;
+const STAGED_FILE_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+fn store_file_semaphore() -> Arc<tokio::sync::Semaphore> {
+    static SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SEMAPHORE
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+}
+
+pub(crate) fn safe_storage_extension(original_name: &str) -> Option<&str> {
+    let extension = std::path::Path::new(original_name)
+        .extension()
+        .and_then(|extension| extension.to_str())?;
+    if extension.is_empty()
+        || extension.len() > 16
+        || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        None
+    } else {
+        Some(extension)
+    }
+}
+
+fn canonical_file_within_root(
+    root: &std::path::Path,
+    file: &std::path::Path,
+    label: &str,
+) -> Result<std::path::PathBuf, String> {
+    let canonical_root = std::fs::canonicalize(root)
+        .map_err(|error| format!("{} staging 根目录不可用: {}", label, error))?;
+    let canonical_file = std::fs::canonicalize(file)
+        .map_err(|error| format!("{} staging 文件不可用: {}", label, error))?;
+    if !canonical_file.starts_with(&canonical_root) || !canonical_file.is_file() {
+        return Err(format!("非法的 {} staging 文件路径", label));
+    }
+    Ok(canonical_file)
+}
+
+fn verify_expected_hash(expected_hash: Option<&str>, actual_hash: &str) -> Result<(), String> {
+    if let Some(expected_hash) = expected_hash {
+        if expected_hash != actual_hash {
+            return Err("Native staging hash 与 Rust 重算结果不一致".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn verify_small_existing_cas(
+    path: &std::path::Path,
+    expected_hash: &str,
+    expected_size: u64,
+) -> Result<(), String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("CAS 文件元数据读取失败: {}", error))?;
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Err("已存在的 CAS 文件大小不匹配，拒绝复用".to_string());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("CAS 文件校验读取失败: {}", error))?;
+    let actual_hash = crate::vcp_modules::infra::utils::calculate_sha256(&bytes);
+    if actual_hash != expected_hash {
+        return Err("已存在的 CAS 文件内容哈希不匹配，拒绝复用".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) async fn verify_existing_cas(
+    path: &std::path::Path,
+    expected_hash: &str,
+    expected_size: u64,
+) -> Result<(), String> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| format!("CAS 文件元数据读取失败: {}", error))?;
+    if !metadata.is_file() || metadata.len() != expected_size {
+        return Err("已存在的 CAS 文件大小不匹配，拒绝复用".to_string());
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("CAS 文件校验打开失败: {}", error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("CAS 文件校验读取失败: {}", error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if hex::encode(hasher.finalize()) != expected_hash {
+        return Err("已存在的 CAS 文件内容哈希不匹配，拒绝复用".to_string());
+    }
+    Ok(())
+}
 
 /// =================================================================
 /// vcp_modules/file_manager.rs - 附件物理存储与分片上传管理
@@ -61,8 +161,19 @@ pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
     let to = to.as_ref();
 
     if std::fs::rename(from, to).is_err() {
-        // 如果是跨物理分区移动，执行物理复制 + 物理删除源文件以兜底
-        std::fs::copy(from, to)?;
+        // 跨分区时先复制到目标目录的唯一临时文件，再原子提交，禁止正式路径出现半文件。
+        let parent = to.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "附件目标缺少父目录")
+        })?;
+        let temporary = parent.join(format!(".ingest-{}.tmp", uuid::Uuid::new_v4()));
+        if let Err(error) = std::fs::copy(from, &temporary) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::rename(&temporary, to) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
         let _ = std::fs::remove_file(from);
     }
     Ok(())
@@ -275,18 +386,14 @@ pub fn resolve_attachment_path(
     hash: &str,
     original_name: &str,
 ) -> Option<String> {
+    if !crate::vcp_modules::infra::utils::is_valid_cas_hash(hash) {
+        return None;
+    }
     let attachments_dir = get_attachments_root_dir(app_handle).ok()?;
 
-    let ext = std::path::Path::new(original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-
-    let internal_file_name = if ext.is_empty() {
-        hash.to_string()
-    } else {
-        format!("{}.{}", hash, ext)
-    };
+    let internal_file_name = safe_storage_extension(original_name)
+        .map(|extension| format!("{}.{}", hash, extension))
+        .unwrap_or_else(|| hash.to_string());
 
     let full_path = attachments_dir.join(internal_file_name);
     if full_path.exists() {
@@ -334,9 +441,14 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     // 2. 提取文本内容 (如果适用，使用 spawn_blocking 隔离 CPU 密集型操作以防阻塞 Tokio 异步线程)
     let path_c = internal_file_path.clone();
     let mime_c = mime_type.clone();
-    let extracted_text = tokio::task::spawn_blocking(move || try_extract_text(&path_c, &mime_c))
-        .await
-        .map_err(|e| format!("Text extraction panicked: {}", e))?;
+    let extracted_text =
+        match tokio::task::spawn_blocking(move || try_extract_text(&path_c, &mime_c)).await {
+            Ok(text) => text,
+            Err(error) => {
+                log::warn!("附件已注册，但文本提取任务异常: {}", error);
+                None
+            }
+        };
 
     // 3. 生成缩略图 (如果适用，spawn_blocking 隔离 CPU 密集型操作)
     let thumbnail_path = if mime_type.starts_with("image/") {
@@ -348,7 +460,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     // 核心安全优化：在后端即时且闭环地将耗时提取出的重资产数据持久化写入数据库
     // 杜绝大文本数据在前端 WebView 绕一圈所导致的数据丢失或内存积压泄漏！
     if extracted_text.is_some() || thumbnail_path.is_some() {
-        sqlx::query(
+        if let Err(error) = sqlx::query(
             "UPDATE attachments 
              SET extracted_text = ?, thumbnail_path = ?, updated_at = ? 
              WHERE hash = ?",
@@ -359,18 +471,17 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         .bind(&hash)
         .execute(pool)
         .await
-        .ok();
+        {
+            log::warn!(
+                "附件主记录已提交，但派生文本/缩略图元数据更新失败: {}",
+                error
+            );
+        }
     }
 
-    let ext = std::path::Path::new(&original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let internal_file_name = if ext.is_empty() {
-        hash.clone()
-    } else {
-        format!("{}.{}", hash, ext)
-    };
+    let internal_file_name = safe_storage_extension(&original_name)
+        .map(|extension| format!("{}.{}", hash, extension))
+        .unwrap_or_else(|| hash.clone());
 
     Ok(AttachmentData {
         id: format!("attachment_{}", hash),
@@ -392,7 +503,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
 /// Android 端不走此函数：Android 通过原生插件 `pick_file` 在 Native 层完成文件拷贝与
 /// 哈希计算后，直接调用 `register_local_file` 进行零拷贝注册。
 ///
-/// 后端兜底硬上限 100MB，防止前端异常或 IPC 绕过导致 OOM。
+/// IPC 仅承载小文件；更大文件必须走现有高速流式通道。
 #[tauri::command]
 pub async fn store_file(
     app_handle: AppHandle,
@@ -401,38 +512,52 @@ pub async fn store_file(
     file_bytes: Vec<u8>,
     mime_type: String,
 ) -> Result<AttachmentData, String> {
-    // 0. 冗余兜底：前端已将 >2MB 文件分流至高速链路，此检查在正常情况下几乎不会触发。
-    //    保留作为深层防御，防止未来前端逻辑变更、异常调用或 IPC 绕过导致 OOM。
-    if file_bytes.len() > 100 * 1024 * 1024 {
-        return Err("文件过大，请使用高速链路上传 (Limit: 100MB)".to_string());
+    if file_bytes.len() > STORE_FILE_IPC_MAX_BYTES {
+        return Err("文件过大，请使用高速链路上传 (Limit: 2MB)".to_string());
     }
-
-    // 1. 计算 SHA256 哈希值
-    let hash = crate::vcp_modules::infra::utils::calculate_sha256(&file_bytes);
-
-    let file_extension = std::path::Path::new(&original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let internal_file_name = if file_extension.is_empty() {
-        hash.clone()
-    } else {
-        format!("{}.{}", hash, file_extension)
-    };
 
     let attachments_dir = get_attachments_root_dir(&app_handle)?;
+    tokio::fs::create_dir_all(&attachments_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    if !attachments_dir.exists() {
-        fs::create_dir_all(&attachments_dir).map_err(|e| e.to_string())?;
-    }
-
-    let internal_file_path = attachments_dir.join(&internal_file_name);
-    let internal_path_str = internal_file_path.to_str().unwrap().to_string();
-
-    // 2. 写入物理文件 (如果哈希不存在)
-    if !internal_file_path.exists() {
-        fs::write(&internal_file_path, &file_bytes).map_err(|e| e.to_string())?;
-    }
+    let _permit = store_file_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|_| "文件存储执行器已关闭".to_string())?;
+    let size = file_bytes.len() as u64;
+    let extension = safe_storage_extension(&original_name).map(str::to_owned);
+    let (hash, internal_file_path) = tokio::task::spawn_blocking(move || {
+        let hash = crate::vcp_modules::infra::utils::calculate_sha256(&file_bytes);
+        let internal_file_name = extension
+            .map(|extension| format!("{}.{}", hash, extension))
+            .unwrap_or_else(|| hash.clone());
+        let internal_file_path = attachments_dir.join(internal_file_name);
+        if internal_file_path.exists() {
+            verify_small_existing_cas(&internal_file_path, &hash, file_bytes.len() as u64)?;
+        } else {
+            let temporary_path =
+                attachments_dir.join(format!(".ingest-{}-{}.tmp", hash, uuid::Uuid::new_v4()));
+            if let Err(error) = fs::write(&temporary_path, &file_bytes) {
+                let _ = fs::remove_file(&temporary_path);
+                return Err(error.to_string());
+            }
+            if let Err(error) = fs::rename(&temporary_path, &internal_file_path) {
+                let _ = fs::remove_file(&temporary_path);
+                if !internal_file_path.exists() {
+                    return Err(error.to_string());
+                }
+                verify_small_existing_cas(&internal_file_path, &hash, file_bytes.len() as u64)?;
+            }
+        }
+        Ok::<_, String>((hash, internal_file_path))
+    })
+    .await
+    .map_err(|error| format!("文件存储任务异常: {}", error))??;
+    let internal_path_str = internal_file_path
+        .to_str()
+        .ok_or("无效的附件路径字符")?
+        .to_string();
 
     // 3. 注册并返回元数据
     let refined_mime = get_refined_mime_type(&internal_file_path, &original_name, &mime_type);
@@ -442,7 +567,7 @@ pub async fn store_file(
         hash,
         original_name,
         refined_mime,
-        file_bytes.len() as u64,
+        size,
         internal_path_str,
     )
     .await
@@ -471,15 +596,39 @@ pub async fn register_local_file(
     stable_id: Option<String>,
     expected_hash: Option<String>,
 ) -> Result<AttachmentData, String> {
-    use tokio::io::AsyncReadExt;
-
-    let source_path = std::path::PathBuf::from(&local_path);
-    if !source_path.exists() {
-        return Err(format!("本地源文件不存在: {}", local_path));
+    let uploads_root = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("uploads");
+    tokio::fs::create_dir_all(&uploads_root)
+        .await
+        .map_err(|e| format!("无法创建上传 staging 目录: {}", e))?;
+    let source_path =
+        canonical_file_within_root(&uploads_root, std::path::Path::new(&local_path), "附件")?;
+    let canonical_uploads_root = std::fs::canonicalize(&uploads_root)
+        .map_err(|e| format!("上传 staging 根目录规范化失败: {}", e))?;
+    if source_path.parent() != Some(canonical_uploads_root.as_path()) {
+        return Err("附件必须是 uploads staging 根目录的直接文件".to_string());
     }
 
-    // 1. 安全性检查，防止路径遍历攻击
-    ensure_safe_path(&app_handle, &source_path)?;
+    let staged_thumbnail = match thumbnail_path.as_deref() {
+        Some(path) => {
+            let thumbnail_root = uploads_root.join("thumbnails");
+            tokio::fs::create_dir_all(&thumbnail_root)
+                .await
+                .map_err(|e| format!("无法创建缩略图 staging 目录: {}", e))?;
+            let staged =
+                canonical_file_within_root(&thumbnail_root, std::path::Path::new(path), "缩略图")?;
+            let canonical_thumbnail_root = std::fs::canonicalize(&thumbnail_root)
+                .map_err(|e| format!("缩略图 staging 根目录规范化失败: {}", e))?;
+            if staged.parent() != Some(canonical_thumbnail_root.as_path()) {
+                return Err("缩略图必须是专用 staging 根目录的直接文件".to_string());
+            }
+            Some(staged)
+        }
+        None => None,
+    };
 
     // 1.5 强力防线：对外部注入的哈希指纹进行 Content-Addressable 强格式校验，阻断路径穿越与沙盒逃逸
     if let Some(ref eh) = expected_hash {
@@ -493,72 +642,57 @@ pub async fn register_local_file(
         .await
         .map_err(|e| format!("无法读取源文件元数据: {}", e))?;
     let size = meta.len();
+    if size > STAGED_FILE_MAX_BYTES {
+        return Err("staging 文件过大 (Limit: 512MB)".to_string());
+    }
 
-    // 3. 流式异步读取并计算 SHA-256 (若传入 expected_hash 则直接使用，免除二次哈希)
-    let hash = match expected_hash {
-        Some(h) => {
-            log::info!(
-                "[FileManager] Reusing expected hash from native side: {}",
-                h
-            );
-            h
+    // 3. Native 端给出的 hash 仅作一致性提示；特权边界始终流式重算。
+    let mut file = tokio::fs::File::open(&source_path)
+        .await
+        .map_err(|e| format!("无法打开源文件: {}", e))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut hashed_bytes = 0u64;
+    let mut last_emit_time = std::time::Instant::now();
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| format!("读取源文件失败: {}", e))?;
+        if n == 0 {
+            break;
         }
-        None => {
-            let mut file = tokio::fs::File::open(&source_path)
-                .await
-                .map_err(|e| format!("无法打开源文件: {}", e))?;
-
-            let mut hasher = Sha256::new();
-            let mut buffer = [0u8; 65536]; // 64KB 缓冲
-            let mut hashed_bytes = 0u64;
-            let mut last_emit_time = std::time::Instant::now();
-            loop {
-                let n = file
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|e| format!("读取源文件失败: {}", e))?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..n]);
-                hashed_bytes += n as u64;
-
-                if let Some(ref sid) = stable_id {
-                    let now = std::time::Instant::now();
-                    if now.duration_since(last_emit_time).as_millis() > 200 {
-                        last_emit_time = now;
-                        let pct = if size > 0 {
-                            (hashed_bytes as f64 / size as f64 * 100.0) as u32
-                        } else {
-                            0
-                        };
-                        let scaled_pct = 50 + (pct * 40 / 100); // 50% 到 90%
-                        app_handle
-                            .emit(
-                                "vcp-file-register-progress",
-                                serde_json::json!({
-                                    "progress": scaled_pct,
-                                    "stableId": sid,
-                                }),
-                            )
-                            .ok();
-                    }
-                }
+        hasher.update(&buffer[..n]);
+        hashed_bytes += n as u64;
+        if let Some(ref sid) = stable_id {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_emit_time).as_millis() > 200 {
+                last_emit_time = now;
+                let pct = if size > 0 {
+                    (hashed_bytes as f64 / size as f64 * 100.0) as u32
+                } else {
+                    0
+                };
+                let scaled_pct = 50 + (pct * 40 / 100);
+                app_handle
+                    .emit(
+                        "vcp-file-register-progress",
+                        serde_json::json!({
+                            "progress": scaled_pct,
+                            "stableId": sid,
+                        }),
+                    )
+                    .ok();
             }
-            hex::encode(hasher.finalize())
         }
-    };
+    }
+    let hash = hex::encode(hasher.finalize());
+    verify_expected_hash(expected_hash.as_deref(), &hash)?;
 
     // 4. 计算目标路径
-    let file_extension = std::path::Path::new(&original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let internal_file_name = if file_extension.is_empty() {
-        hash.clone()
-    } else {
-        format!("{}.{}", hash, file_extension)
-    };
+    let internal_file_name = safe_storage_extension(&original_name)
+        .map(|extension| format!("{}.{}", hash, extension))
+        .unwrap_or_else(|| hash.clone());
 
     let attachments_dir = get_attachments_root_dir(&app_handle)?;
     if !attachments_dir.exists() {
@@ -570,11 +704,15 @@ pub async fn register_local_file(
     let dest_path = attachments_dir.join(&internal_file_name);
     let dest_path_str = dest_path.to_str().ok_or("无效的目标路径字符")?.to_string();
 
-    // 如果目标文件已存在（内容寻址去重去冗余），则直接删除源临时文件
-    if dest_path.exists() {
-        let _ = tokio::fs::remove_file(&source_path).await;
+    enum Placement {
+        Existing,
+        Renamed,
+        Copied,
+    }
+    let placement = if dest_path.exists() {
+        verify_existing_cas(&dest_path, &hash, size).await?;
         log::info!(
-            "[FileManager] Duplicated local file found. Removed source path: {}",
+            "[FileManager] Duplicated local file found for staging path: {}",
             local_path
         );
         if let Some(ref sid) = stable_id {
@@ -588,6 +726,7 @@ pub async fn register_local_file(
                 )
                 .ok();
         }
+        Placement::Existing
     } else {
         // 先尝试 rename 极速移动，失败时 fallback 复制 + 删除
         if let Some(ref sid) = stable_id {
@@ -601,12 +740,27 @@ pub async fn register_local_file(
                 )
                 .ok();
         }
-        if tokio::fs::rename(&source_path, &dest_path).await.is_err() {
-            tokio::fs::copy(&source_path, &dest_path)
-                .await
-                .map_err(|e| format!("复制文件到正式目录失败: {}", e))?;
-            let _ = tokio::fs::remove_file(&source_path).await;
-        }
+        let placement = if tokio::fs::rename(&source_path, &dest_path).await.is_ok() {
+            Placement::Renamed
+        } else {
+            let temporary_path =
+                attachments_dir.join(format!(".ingest-{}-{}.tmp", hash, uuid::Uuid::new_v4()));
+            if let Err(error) = tokio::fs::copy(&source_path, &temporary_path).await {
+                let _ = tokio::fs::remove_file(&temporary_path).await;
+                return Err(format!("复制文件到正式目录失败: {}", error));
+            }
+            match tokio::fs::rename(&temporary_path, &dest_path).await {
+                Ok(()) => Placement::Copied,
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&temporary_path).await;
+                    if !dest_path.exists() {
+                        return Err(format!("提交文件到正式目录失败: {}", error));
+                    }
+                    verify_existing_cas(&dest_path, &hash, size).await?;
+                    Placement::Existing
+                }
+            }
+        };
         if let Some(ref sid) = stable_id {
             app_handle
                 .emit(
@@ -618,14 +772,15 @@ pub async fn register_local_file(
                 )
                 .ok();
         }
-    }
+        placement
+    };
 
     // 5. 修正 MIME 类型
     let initial_mime = mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
     let refined_mime = get_refined_mime_type(&dest_path, &original_name, &initial_mime);
 
     // 6. 调用统一的附件注册逻辑
-    let mut attachment_data = register_attachment_internal(
+    let registration = register_attachment_internal(
         &app_handle,
         &db_state.pool,
         hash.clone(),
@@ -634,14 +789,32 @@ pub async fn register_local_file(
         size,
         dest_path_str,
     )
-    .await?;
+    .await;
+    let mut attachment_data = match registration {
+        Ok(data) => data,
+        Err(error) => {
+            match placement {
+                Placement::Renamed => {
+                    log::warn!("附件数据库注册失败；完整 CAS 文件保留，等待重试或维护 GC");
+                }
+                // 完整 CAS 文件允许由维护 GC 清理；这里不删除，避免与同哈希并发注册竞争。
+                Placement::Copied => {}
+                Placement::Existing => {}
+            }
+            return Err(error);
+        }
+    };
+    if matches!(placement, Placement::Existing | Placement::Copied) {
+        if let Err(error) = tokio::fs::remove_file(&source_path).await {
+            log::warn!("附件已注册，但清理 staging 文件失败: {}", error);
+        }
+    }
 
     // 7. 处理前端传入的已有缩略图 (如 Kotlin 侧硬件加速生成的缩略图)
     let mut final_thumbnail_path = attachment_data.thumbnail_path.clone();
 
-    if let Some(ref tp) = thumbnail_path {
-        let source_thumb = std::path::PathBuf::from(tp);
-        if source_thumb.exists() {
+    if let Some(source_thumb) = staged_thumbnail {
+        let thumbnail_result: Result<String, String> = async {
             let thumbs_dir = get_thumbnails_root_dir(&app_handle)?;
             if !thumbs_dir.exists() {
                 tokio::fs::create_dir_all(&thumbs_dir)
@@ -649,17 +822,24 @@ pub async fn register_local_file(
                     .map_err(|e| e.to_string())?;
             }
             let dest_thumb_path = thumbs_dir.join(format!("{}_thumb.webp", hash));
-            let dest_thumb_path_str = dest_thumb_path.to_str().unwrap().to_string();
+            let dest_thumb_path_str = dest_thumb_path
+                .to_str()
+                .ok_or("无效的缩略图目标路径字符")?
+                .to_string();
 
-            if dest_thumb_path.exists()
-                || (tokio::fs::rename(&source_thumb, &dest_thumb_path)
-                    .await
-                    .is_err()
-                    && tokio::fs::copy(&source_thumb, &dest_thumb_path)
-                        .await
-                        .is_ok())
-            {
-                let _ = tokio::fs::remove_file(&source_thumb).await;
+            if !dest_thumb_path.exists() {
+                let temporary_path =
+                    thumbs_dir.join(format!(".thumb-{}-{}.tmp", hash, uuid::Uuid::new_v4()));
+                if let Err(error) = tokio::fs::copy(&source_thumb, &temporary_path).await {
+                    let _ = tokio::fs::remove_file(&temporary_path).await;
+                    return Err(format!("复制缩略图到正式目录失败: {}", error));
+                }
+                if let Err(error) = tokio::fs::rename(&temporary_path, &dest_thumb_path).await {
+                    let _ = tokio::fs::remove_file(&temporary_path).await;
+                    if !dest_thumb_path.exists() {
+                        return Err(format!("提交缩略图到正式目录失败: {}", error));
+                    }
+                }
             }
 
             // 更新 SQLite 中的 thumbnail_path，使其指向正式保存的缩略图
@@ -669,9 +849,22 @@ pub async fn register_local_file(
                 .bind(&hash)
                 .execute(&db_state.pool)
                 .await
-                .ok();
+                .map_err(|error| format!("更新附件缩略图元数据失败: {}", error))?;
+            if let Err(error) = tokio::fs::remove_file(&source_thumb).await {
+                log::warn!("附件缩略图已注册，但清理 staging 文件失败: {}", error);
+            }
+            Ok(dest_thumb_path_str)
+        }
+        .await;
 
-            final_thumbnail_path = Some(dest_thumb_path_str);
+        match thumbnail_result {
+            Ok(path) => final_thumbnail_path = Some(path),
+            Err(error) => {
+                log::warn!(
+                    "主附件已提交；外部派生缩略图处理失败，保留主附件成功结果: {}",
+                    error
+                );
+            }
         }
     }
 
@@ -683,28 +876,27 @@ pub async fn register_local_file(
 #[tauri::command]
 pub async fn get_attachment_real_path(
     app_handle: AppHandle,
+    db_state: State<'_, DbState>,
     hash: String,
-    original_name: String,
+    _original_name: String,
 ) -> Result<String, String> {
-    let attachments_dir = get_attachments_root_dir(&app_handle)?;
-
-    let file_extension = std::path::Path::new(&original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-
-    let internal_file_name = if file_extension.is_empty() {
-        hash
-    } else {
-        format!("{}.{}", hash, file_extension)
-    };
-
-    let full_path = attachments_dir.join(internal_file_name);
-    if full_path.exists() {
-        Ok(full_path.to_string_lossy().to_string())
-    } else {
-        Err("本地附件库中未找到该文件".to_string())
+    if !crate::vcp_modules::infra::utils::is_valid_cas_hash(&hash) {
+        return Err("非法的 Content-Addressable Storage (CAS) 哈希指纹格式".to_string());
     }
+    let internal_path: Option<String> =
+        sqlx::query_scalar("SELECT internal_path FROM attachments WHERE hash = ? LIMIT 1")
+            .bind(&hash)
+            .fetch_optional(&db_state.pool)
+            .await
+            .map_err(|e| format!("读取附件元数据失败: {}", e))?;
+    let internal_path = internal_path.ok_or("本地附件库中未找到该文件")?;
+    let clean_path = internal_path
+        .strip_prefix("file://")
+        .unwrap_or(&internal_path);
+    let attachments_dir = get_attachments_root_dir(&app_handle)?;
+    let canonical_path =
+        canonical_file_within_root(&attachments_dir, std::path::Path::new(clean_path), "附件库")?;
+    Ok(canonical_path.to_string_lossy().to_string())
 }
 
 /// 唤起系统默认应用打开文件或 URL
@@ -938,36 +1130,94 @@ pub async fn ensure_extracted_text(
     }
 }
 
-/// 强力物理删除指定的附件文件及其可能关联的原生硬解缩略图
+// Online attachment GC is disabled. Keep this hardened sink dormant until a
+// future owner + quarantine/grace workflow can safely reuse it.
+#[allow(dead_code)]
+fn invalid_delete_target(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
+}
+
+#[allow(dead_code)]
+fn validated_direct_file(
+    root: &std::path::Path,
+    candidate: &std::path::Path,
+    expected_name: &std::ffi::OsStr,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let metadata = match std::fs::symlink_metadata(candidate) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(invalid_delete_target("拒绝删除非普通附件文件"));
+    }
+
+    let canonical_root = std::fs::canonicalize(root)?;
+    let canonical_candidate = std::fs::canonicalize(candidate)?;
+    if canonical_candidate.parent() != Some(canonical_root.as_path())
+        || canonical_candidate.file_name() != Some(expected_name)
+    {
+        return Err(invalid_delete_target("附件删除目标越出固定存储目录"));
+    }
+    Ok(Some(canonical_candidate))
+}
+
+#[allow(dead_code)]
+fn validated_attachment_file(
+    attachments_root: &std::path::Path,
+    hash: &str,
+    internal_path: &std::path::Path,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    if !crate::vcp_modules::infra::utils::is_valid_cas_hash(hash) {
+        return Err(invalid_delete_target("附件哈希格式无效"));
+    }
+    let file_name = internal_path
+        .file_name()
+        .ok_or_else(|| invalid_delete_target("附件删除目标缺少文件名"))?;
+    let stem = internal_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| invalid_delete_target("附件删除目标文件名无效"))?;
+    if stem != hash {
+        return Err(invalid_delete_target("附件删除目标与内容哈希不匹配"));
+    }
+    validated_direct_file(attachments_root, internal_path, file_name)
+}
+
+/// 强力物理删除指定的附件文件及其可能关联的原生硬解缩略图。
+/// 当前在线维护不会调用此 sink；边界仍在这里收紧，防止未来复用越界删除。
+#[allow(dead_code)]
 pub async fn delete_attachment_physical<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     hash: &str,
     internal_path: &str,
 ) -> std::io::Result<()> {
     let path = std::path::Path::new(internal_path);
-    if path.exists() {
-        tokio::fs::remove_file(path).await?;
-    }
+    let attachments_root = get_attachments_root_dir(app_handle).map_err(invalid_delete_target)?;
+    let attachment_path = validated_attachment_file(&attachments_root, hash, path)?;
 
     // 统一处理缩略图定位与删除
-    let thumb_path = match get_thumbnails_root_dir(app_handle) {
-        Ok(p) => p.join(format!("{}_thumb.webp", hash)),
-        Err(_) => path
-            .parent()
-            .unwrap_or(path)
-            .join("thumbnails")
-            .join(format!("{}_thumb.webp", hash)),
-    };
-    if thumb_path.exists() {
-        let _ = tokio::fs::remove_file(thumb_path).await;
-    }
+    let thumbnails_root = get_thumbnails_root_dir(app_handle).map_err(invalid_delete_target)?;
+    let thumb_name = format!("{}_thumb.webp", hash);
+    let thumb_path = thumbnails_root.join(&thumb_name);
+    let thumbnail_path = validated_direct_file(
+        &thumbnails_root,
+        &thumb_path,
+        std::ffi::OsStr::new(&thumb_name),
+    )?;
 
     // 统一处理多模态持久化缓存删除
-    if let Ok(cache_dir) = get_multimodal_cache_dir(app_handle) {
-        let cache_path = cache_dir.join(format!("{}.json", hash));
-        if cache_path.exists() {
-            let _ = tokio::fs::remove_file(cache_path).await;
-        }
+    let cache_root = get_multimodal_cache_dir(app_handle).map_err(invalid_delete_target)?;
+    let cache_name = format!("{}.json", hash);
+    let cache_path = cache_root.join(&cache_name);
+    let multimodal_path =
+        validated_direct_file(&cache_root, &cache_path, std::ffi::OsStr::new(&cache_name))?;
+
+    for validated in [attachment_path, thumbnail_path, multimodal_path]
+        .into_iter()
+        .flatten()
+    {
+        tokio::fs::remove_file(validated).await?;
     }
     Ok(())
 }
@@ -988,5 +1238,133 @@ pub fn check_attachment_support(original_name: String) -> Result<bool, String> {
             "系统不支持 .{} 格式附件。\n大媒体（图片/视频/音频）支持直读多模态；文档（pdf/docx/xlsx/pptx）及常见代码和文本支持内容提取注入上下文。",
             ext
         ))
+    }
+}
+
+#[cfg(test)]
+mod security_boundary_tests {
+    use super::{
+        canonical_file_within_root, safe_storage_extension, validated_attachment_file,
+        validated_direct_file, verify_existing_cas, verify_expected_hash,
+        verify_small_existing_cas,
+    };
+    use std::fs;
+
+    #[test]
+    fn storage_extension_keeps_common_suffixes_but_drops_path_payloads() {
+        assert_eq!(safe_storage_extension("报告.PDF"), Some("PDF"));
+        assert_eq!(safe_storage_extension("archive.tar.gz"), Some("gz"));
+        assert_eq!(safe_storage_extension("payload.a/b"), None);
+        assert_eq!(safe_storage_extension("payload.../../secret"), None);
+        assert_eq!(safe_storage_extension("payload.very_long_extension"), None);
+    }
+
+    #[test]
+    fn canonical_staging_gate_rejects_parent_and_symlink_escape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("uploads");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).expect("root");
+        fs::create_dir_all(&outside).expect("outside");
+        let staged = root.join("ok.bin");
+        let escaped = outside.join("secret.bin");
+        fs::write(&staged, b"ok").expect("staged");
+        fs::write(&escaped, b"secret").expect("escaped");
+
+        assert!(canonical_file_within_root(&root, &staged, "test").is_ok());
+        assert!(
+            canonical_file_within_root(&root, &root.join("../outside/secret.bin"), "test").is_err()
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&escaped, root.join("link.bin")).expect("symlink");
+            assert!(canonical_file_within_root(&root, &root.join("link.bin"), "test").is_err());
+        }
+    }
+
+    #[test]
+    fn native_hash_is_only_a_hint_and_must_match_rust_recomputation() {
+        let actual = "a".repeat(64);
+        let forged = "b".repeat(64);
+        assert!(verify_expected_hash(Some(&actual), &actual).is_ok());
+        assert!(verify_expected_hash(Some(&forged), &actual).is_err());
+        assert!(verify_expected_hash(None, &actual).is_ok());
+    }
+
+    #[test]
+    fn attachment_delete_target_requires_hash_named_direct_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("attachments");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).expect("attachment root");
+        fs::create_dir_all(&outside).expect("outside root");
+        let hash = "a".repeat(64);
+        let valid = root.join(format!("{hash}.pdf"));
+        let wrong_name = root.join(format!("{}.pdf", "b".repeat(64)));
+        let escaped = outside.join(format!("{hash}.pdf"));
+        fs::write(&valid, b"valid").expect("valid target");
+        fs::write(&wrong_name, b"wrong").expect("wrong target");
+        fs::write(&escaped, b"outside").expect("outside target");
+
+        assert_eq!(
+            validated_attachment_file(&root, &hash, &valid)
+                .expect("valid target")
+                .expect("present target"),
+            fs::canonicalize(&valid).expect("canonical valid target")
+        );
+        assert!(validated_attachment_file(&root, "not-a-hash", &valid).is_err());
+        assert!(validated_attachment_file(&root, &hash, &wrong_name).is_err());
+        assert!(validated_attachment_file(&root, &hash, &escaped).is_err());
+        assert!(escaped.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachment_delete_target_rejects_symlink_and_derived_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("attachments");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).expect("attachment root");
+        fs::create_dir_all(&outside).expect("outside root");
+        let hash = "c".repeat(64);
+        let outside_file = outside.join(format!("{hash}.bin"));
+        let link = root.join(format!("{hash}.bin"));
+        fs::write(&outside_file, b"outside").expect("outside target");
+        symlink(&outside_file, &link).expect("attachment symlink");
+
+        assert!(validated_attachment_file(&root, &hash, &link).is_err());
+        assert!(validated_direct_file(
+            &root,
+            &outside_file,
+            outside_file.file_name().expect("outside filename")
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(&outside_file).expect("outside preserved"),
+            b"outside"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_cas_file_must_match_size_and_hash_before_reuse() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("cas.bin");
+        let bytes = b"complete";
+        let hash = crate::vcp_modules::infra::utils::calculate_sha256(bytes);
+        fs::write(&path, bytes).expect("complete cas");
+
+        assert!(verify_small_existing_cas(&path, &hash, bytes.len() as u64).is_ok());
+        assert!(verify_existing_cas(&path, &hash, bytes.len() as u64)
+            .await
+            .is_ok());
+
+        fs::write(&path, b"corrupt!").expect("corrupt cas");
+        assert!(verify_small_existing_cas(&path, &hash, bytes.len() as u64).is_err());
+        assert!(verify_existing_cas(&path, &hash, bytes.len() as u64)
+            .await
+            .is_err());
     }
 }

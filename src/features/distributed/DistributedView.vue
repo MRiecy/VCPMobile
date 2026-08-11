@@ -67,6 +67,12 @@ interface PlaceholderItem {
 // Reactively populated via get_registered_tools_metadata
 const pluginsList = ref<PluginItem[]>([]);
 const placeholdersList = ref<PlaceholderItem[]>([]);
+const toolConfigRecoveryNotified = ref(false);
+
+interface ToolConfigStatus {
+  state: "uninitialized" | "ready" | "recovered_disabled" | "persistence_error";
+  message?: string | null;
+}
 
 
 
@@ -153,7 +159,14 @@ const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
     const { invoke } = await import("@tauri-apps/api/core");
     await invoke("update_disabled_tools", { disabledNames: currentDisabled });
   } catch (e) {
+    plugin.enabled = !targetState;
     console.error("[DistributedView] Failed to sync disabled tools to backend:", e);
+    notificationStore.addNotification({
+      type: "error",
+      title: "工具配置未保存",
+      message: String(e),
+      toastOnly: true,
+    });
   }
   
   await loadPluginsMetadata();
@@ -164,6 +177,20 @@ const loadPluginsMetadata = async () => {
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const rawTools = await invoke<any[]>("get_registered_tools_metadata");
+    const configStatus = await invoke<ToolConfigStatus>("get_distributed_tool_config_status");
+
+    if (
+      !toolConfigRecoveryNotified.value
+      && (configStatus.state === "recovered_disabled" || configStatus.state === "persistence_error")
+    ) {
+      toolConfigRecoveryNotified.value = true;
+      notificationStore.addNotification({
+        type: "warning",
+        title: "分布式工具已安全关闭",
+        message: configStatus.message || "工具配置不可用，已恢复为全部禁用。可在此页重新启用需要的能力。",
+        toastOnly: true,
+      });
+    }
 
 
     

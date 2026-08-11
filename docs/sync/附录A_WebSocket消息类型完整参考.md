@@ -18,8 +18,8 @@ last_updated: 2026-05-13
 | 1 | `VERSION_CHECK` | M→D | WS 连接建立后，移动端主动发送版本校验请求，作为同步会话第一条业务消息 | `mobileVersion: string`（移动端应用版本号） | `run_sync_session` 中直接构造 JSON 并通过 `ws_stream.send` 发送；发送后启动 `VERSION_CHECK_TIMEOUT` 定时器 | `index.js` 中 switch-case 匹配 `"VERSION_CHECK"`，读取 `plugin-manifest.json` 的 `version` 字段构造 `VERSION_ACK` 返回 | `sync_service.rs:318-325`, `index.js` |
 | 2 | `VERSION_ACK` | D→M | 桌面端收到 `VERSION_CHECK` 后立即回复，携带自身插件版本 | `version: string`（桌面端插件版本号） | `run_sync_session` 中接收并校验版本字符串精确匹配；不匹配则断开连接并提示用户更新插件 | `index.js` 中读取 `plugin-manifest.json` 的 `version` 字段返回 | `sync_service.rs:328-382`, `index.js` |
 | 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
-| 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送，通知桌面端阶段结束；Finalize 阶段也使用此消息 | `phase: string`（可选，Finalize 阶段可省略） | `SyncCommand::Finalize` 或阶段自然结束时触发发送；发送后可能立即关闭 WS | `index.js` 中记录日志，返回 `PHASE_ACK` | `sync_service.rs`, `index.js` |
-| 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | `phase: string` | 移动端仅接收并输出日志，无显式状态机处理；作为冗余确认防止消息丢失 | `index.js` 中统一返回确认帧，结构为 `{ type: "PHASE_ACK", phase }` | `sync_service.rs`, `index.js` |
+| 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
+| 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
 | 6 | `SYNC_LOG_EVENT` | D→M | 桌面端主动上报日志事件，通过 WS 广播给所有已连接客户端；用于前端 Mini Log Terminal 实时展示 | `level: string`（`info`/`success`/`warning`/`error`），`message: string`，`phase: string`（可选） | 通过 `emit_sync_log` 函数转发到前端 `vcp-log` 事件；`level` 映射到 UI 颜色 | 桌面端内部 `SyncLogger` 触发 WS 广播，三个输出通道（控制台、文件、WS）同时写入 | `sync_service.rs`, `core/logger.js` |
 | 7 | `DESKTOP_PHASE_START` | D→M | 桌面端报告自身阶段开始，与移动端的 `PHASE_START` 对应 | `phase: string` | 日志输出格式：`[Desktop] Phase X started`；前端以灰色前缀展示 | 桌面端 `logger.startPhase` 方法触发 WS 广播 | `sync_service.rs`, `core/logger.js` |
 | 8 | `DESKTOP_PHASE_PROGRESS` | D→M | 桌面端报告阶段进度，每处理 100 条记录自动触发 | `phase: string`，`processed: number`，`success: number`，`errors: number` | 日志输出：`[Desktop] Phase X in progress (OK:N ERR:M)` | 桌面端 `logOperation` 中 `processed % 100 === 0` 时自动触发 | `sync_service.rs`, `core/logger.js` |
@@ -72,6 +72,9 @@ last_updated: 2026-05-13
 | `mobileVersion` | `string` | `VERSION_CHECK` | 是 | — | 移动端应用版本号，编译期通过 `env!("CARGO_PKG_VERSION")` 嵌入 |
 | `version` | `string` | `VERSION_ACK` | 是 | — | 桌面端插件版本号，运行时读取 `plugin-manifest.json` 的 `version` 字段 |
 | `phase` | `string` | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 是 | — | 阶段名称，取值：`owner_metadata`、`topic_metadata`、`messages` |
+| `sessionId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 移动端同步会话 owner generation；桌面端必须原样回显 |
+| `attemptId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 当前会话内的 reconnect attempt；桌面端必须原样回显 |
+| `nonce` | `string` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 每次 Finalize 新生成的 UUID v4；用于拒绝过期和重放 ACK |
 | `data` | `EntityState[]` | `SYNC_MANIFEST` | 是 | `[]` | 实体状态向量数组，每个元素为一条实体的指纹与元数据 |
 | `dataType` | `string` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 实体类型枚举值：`agent`、`group`、`avatar`、`topic`；序列化为小写 |
 | `phase` (number) | `number` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 阶段编号：`1`=Owner Metadata, `2`=Topic Metadata；用于桌面端日志分类 |
@@ -138,9 +141,9 @@ last_updated: 2026-05-13
 | 消息类型 | 移动端发送时机 | 桌面端处理函数 | 桌面端响应 | 所属协议阶段 | 关键常量/阈值 |
 |---------|-------------|-------------|-----------|------------|-------------|
 | `VERSION_CHECK` | WS 连接建立后 0ms | `index.js` switch-case | `VERSION_ACK` | 握手 | `VERSION_CHECK_TIMEOUT = 5s` |
-| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "0.9.13"` |
+| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "1.1.0"`；旧 1.0.0 拒绝、不降级 |
 | `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | 看门狗检查周期 `10s × 6 = 60s` |
-| `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重，每阶段仅发送一次 |
+| `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
 | `SYNC_MANIFEST` | Phase 1（3条：agent/group/avatar）Phase 2（1条：topic） | `handleSyncManifest` | `SYNC_DIFF_RESULTS` | Phase 1/2 | Agent/Group 批量 chunk=50；Topic chunk=1000 |
 | `SYNC_DIFF_RESULTS` | —（接收） | `run_sync_session` 差异任务派发 | 无 | Phase 1/2 | `pending_tasks` + `total_tasks` 原子计数 |
 | `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2.5 开始时 | `handleSyncTopicHashBatchV2` | `SYNC_TOPIC_HASH_RESULTS` | Phase 2.5 | 无显式批次限制 |
@@ -178,9 +181,9 @@ last_updated: 2026-05-13
 | 19 | 桌面端 | `SYNC_DIFF_RESULTS_BATCH` | 第 1 批差异结果 |
 | 20 | 移动端 | `SYNC_MESSAGE_DIFF_BATCH` (batch N, 如有) | 后续批次 |
 | 21 | 桌面端 | `SYNC_DIFF_RESULTS_BATCH` | 后续批次结果 |
-| 22 | 移动端 | `PHASE_COMPLETED` (messages) | Phase 3 结束 |
-| 23 | 移动端 | `PHASE_COMPLETED` (final) | Finalize 结束 |
-| 24 | 移动端 | WS Close | 移动端主动断开 |
+| 22 | 移动端 | `PHASE_COMPLETED` (messages, `sessionId/attemptId/nonce`) | Finalize 本地提交后启动最终 ACK 等待 |
+| 23 | 桌面端 | `PHASE_ACK` (exact echo) | 原样回显 `phase/sessionId/attemptId/nonce` |
+| 24 | 移动端 | WS Close | 精确 ACK 消费且最终 drain 成功后主动断开 |
 
 ---
 
@@ -220,7 +223,7 @@ last_updated: 2026-05-13
 | `StartTopicMetadata` | `PHASE_START` (topic_metadata), `SYNC_MANIFEST` (topic) | Phase 1 完成且 `changed_owners` 非空 | 桌面端 |
 | `StartTopicValidation` | `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2 完成 | 桌面端 |
 | `StartMessages` | `PHASE_START` (messages), `SYNC_MESSAGE_DIFF_BATCH` | Phase 2.5 完成且 `changedTopics` 非空 | 桌面端 |
-| `Finalize` | `PHASE_COMPLETED` (messages, final) | Phase 3 所有 Topic 完成 | 桌面端 |
+| `Finalize` | `PHASE_COMPLETED` (messages + 四元身份) | Phase 3 所有 Topic 完成 | 桌面端 |
 | `NotifyLocalChange` | `SYNC_ENTITY_UPDATE` | 本地实体变更监听器触发 | 桌面端 |
 | `NotifyDelete` | `SYNC_DELETE_NOTIFY`, `SYNC_ENTITY_DELETE` | 本地软删除执行后 | 桌面端 |
 
@@ -236,11 +239,11 @@ last_updated: 2026-05-13
 | `SYNC_TOPIC_HASH_BATCH_V2` | `handleSyncTopicHashBatchV2(payload)` | `sync/diff.js` | `SYNC_TOPIC_HASH_RESULTS` |
 | `SYNC_MESSAGE_DIFF_BATCH` | `handleSyncMessageDiffBatch(payload)` | `sync/diff.js` | `SYNC_DIFF_RESULTS_BATCH` |
 | `PHASE_START` | 记录日志，返回 `PHASE_ACK` | `index.js` | `PHASE_ACK` |
-| `PHASE_COMPLETED` | 记录日志，返回 `PHASE_ACK` | `index.js` | `PHASE_ACK` |
+| `PHASE_COMPLETED` | 记录日志；最终帧原样回显四元身份 | `index.js` | `PHASE_ACK` |
 | `SYNC_ENTITY_UPDATE` | `upsertEntityIndex(...)` | `index.js` | `SYNC_ACK` |
 | `SYNC_DELETE_NOTIFY` | `deleteEntity` / `deleteMessage` | `index.js` | `SYNC_ACK` |
 | `VERSION_ACK` | —（移动端发送，桌面端不接收） | — | — |
-| `PHASE_ACK` | —（桌面端发送，移动端不接收） | — | — |
+| `PHASE_ACK` | —（桌面端发送） | 普通阶段仅记录；最终阶段精确匹配 pending key | — |
 | `SYNC_LOG_EVENT` | —（桌面端发送，移动端不接收） | — | — |
 | `SYNC_ERROR` | —（桌面端发送，移动端不接收） | — | — |
 | `SYNC_ACK` | —（桌面端发送，移动端不接收） | — | — |
@@ -293,12 +296,12 @@ last_updated: 2026-05-13
 
 | 现象 / 问题 | 检查消息类型 | 排查方向 | 关键代码位置 |
 |------------|------------|---------|------------|
-| 同步卡住，进度条不动 | `PHASE_START` / `PHASE_COMPLETED` | 检查 `phase_gate` 是否重复发送同一阶段；确认 `SYNC_DIFF_RESULTS` 是否遗漏 | `sync_service.rs` phase_gate 逻辑 |
+| 同步卡住，进度条不动 | `PHASE_START` / `PHASE_COMPLETED` / `PHASE_ACK` | 检查 `phase_gate`、差异任务错误；Finalize 时确认 peer 原样回显 `sessionId/attemptId/phase/nonce` | `sync_service.rs` phase_gate / final ACK 逻辑 |
 | Phase 3 执行但无消息传输 | `SYNC_TOPIC_HASH_BATCH_V2` → `SYNC_TOPIC_HASH_RESULTS` | 检查 `changedTopics` 是否为空数组（所有 Topic 双哈希一致，正确跳过 Phase 3） | `sync/diff.js` `handleSyncTopicHashBatchV2` |
 | 消息重复同步 | `SYNC_DIFF_RESULTS_BATCH` | 检查 `Phase3Tracker` HashSet 去重是否失效；检查 `toPull` 列表是否包含已存在消息 | `sync_service.rs` `Phase3Tracker` |
 | 实体变更未实时同步 | `SYNC_ENTITY_UPDATE` | 检查前端是否调用 `notifyEntityUpdate`；检查桌面端 `upsertEntityIndex` 是否成功 | `index.js` `upsertEntityIndex` |
 | 删除后另一端仍有数据 | `SYNC_DELETE_NOTIFY` / `SYNC_ENTITY_DELETE` | 检查 `deletedAt` 是否正确设置；检查桌面端 `deleteEntity` 是否执行物理删除 | `sync_service.rs` `DeleteExecutor` |
-| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对移动端 `env!("CARGO_PKG_VERSION")` 与桌面端 `plugin-manifest.json` 的 `version` 字段 | `sync_service.rs` 版本校验逻辑 |
+| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对桌面端 `plugin-manifest.json.version` 是否精确等于 `EXPECTED_PLUGIN_VERSION` 1.1.0；1.0.0 不兼容 | `sync_service.rs` 版本校验逻辑 |
 | WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查看门狗超时（60s 无 Phase 进展）；检查网络稳定性 | `sync_service.rs` 看门狗逻辑 |
 | Phase 2 数据传输量过大 | `SYNC_MANIFEST` (topic, phase=2) | 检查 `targetedOwners` 是否正确填充；确认 `changed_owners` 是否包含未变更 Owner | `manifest_builder.rs` `build_targeted_topic_manifest` |
 | 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_BATCH` | 检查是否已启用 Fast Path（话题级哈希匹配直接跳过）；检查分片策略 | `sync/diff.js` `handleSyncMessageDiffBatch` |

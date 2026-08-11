@@ -9,9 +9,6 @@ export function useAppLifecycle() {
   let unlisten: UnlistenFn | null = null;
   let foregroundRecoveryPromise: Promise<void> | null = null;
 
-  // 检测是否是划词助手窗口
-  const isAssistant = typeof window !== 'undefined' && window.location.search.includes("mode=floating");
-
   const scheduleForegroundRecovery = (source: string) => {
     if (foregroundRecoveryPromise) return foregroundRecoveryPromise;
     console.log(`[useAppLifecycle] ${source}. Triggering stream recovery.`);
@@ -27,8 +24,6 @@ export function useAppLifecycle() {
 
   // 监听后台状态，控制全局动画挂起，替代 App.vue 中的 watch
   watch(() => lifecycleStore.isBackground, (newVal) => {
-    if (isAssistant) return;
-
     if (newVal) {
       document.documentElement.classList.add("vcp-paused-animations");
       console.log("[useAppLifecycle] App moved to background, pausing animations.");

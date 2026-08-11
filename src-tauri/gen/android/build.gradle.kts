@@ -8,9 +8,6 @@ buildscript {
                 includeGroupByRegex("com\\.github\\..*")
             }
         }
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/central") }
-        maven { url = uri("https://maven.aliyun.com/repository/public") }
     }
     dependencies {
         classpath("com.android.tools.build:gradle:8.11.0")
@@ -28,13 +25,9 @@ allprojects {
                 includeGroupByRegex("com\\.github\\..*")
             }
         }
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/central") }
-        maven { url = uri("https://maven.aliyun.com/repository/public") }
     }
 }
 
 tasks.register("clean").configure {
     delete("build")
 }
-

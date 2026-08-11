@@ -65,6 +65,4 @@ pub use infra::vcp_info_service;
 pub use infra::vcp_log_service;
 
 // --- Updater 领域 ---
-pub use updater::frontend_update_manager;
-pub use updater::ota_assets;
 pub use updater::update_manager;

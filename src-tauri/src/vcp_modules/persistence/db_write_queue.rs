@@ -52,8 +52,13 @@ pub enum DbWriteTask {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Existing test module intentionally sits beside the task enum.
 mod tests {
     use super::DbWriteQueue;
+    use crate::vcp_modules::chat_manager::ChatMessage;
+    use crate::vcp_modules::sync_dto::{
+        AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
+    };
 
     #[test]
     fn flush_error_summary_is_reported_once() {
@@ -67,6 +72,211 @@ mod tests {
         assert!(first.contains("batch two failed"));
         assert!(errors.is_empty());
         assert!(DbWriteQueue::take_pending_errors(&mut errors).is_ok());
+    }
+
+    #[test]
+    fn sync_entity_upserts_never_rewrite_tombstones_or_children() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY, name TEXT, system_prompt TEXT, model TEXT,
+                temperature REAL, context_token_limit INTEGER, max_output_tokens INTEGER,
+                stream_output INTEGER, config_hash TEXT, content_hash TEXT,
+                updated_at INTEGER, deleted_at INTEGER
+             );
+             CREATE TABLE groups (
+                group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, group_prompt TEXT,
+                invite_prompt TEXT, use_unified_model INTEGER, unified_model TEXT,
+                tag_match_mode TEXT, created_at INTEGER, config_hash TEXT,
+                content_hash TEXT, updated_at INTEGER, deleted_at INTEGER
+             );
+             CREATE TABLE group_members (
+                group_id TEXT, agent_id TEXT, member_tag TEXT, sort_order INTEGER,
+                updated_at INTEGER
+             );
+             CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, title TEXT, owner_id TEXT, owner_type TEXT,
+                created_at INTEGER, locked INTEGER, unread INTEGER, updated_at INTEGER,
+                deleted_at INTEGER
+             );
+             INSERT INTO agents VALUES
+                ('agent-live', 'live', '', '', 0, 0, 0, 0, '', '', 1, NULL),
+                ('agent-deleted', 'deleted', '', '', 0, 0, 0, 0, '', '', 1, 9);
+             INSERT INTO groups VALUES
+                ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, 9);
+             INSERT INTO group_members VALUES ('group-deleted', 'old-member', NULL, 0, 1);
+             INSERT INTO topics VALUES
+                ('topic-deleted', 'deleted-topic', 'agent-live', 'agent', 1, 1, 0, 1, 9);",
+        )
+        .expect("create tombstone fixture");
+
+        let tx = conn.transaction().expect("begin transaction");
+        DbWriteQueue::rusqlite_upsert_agent(
+            &tx,
+            "agent-deleted",
+            &AgentSyncDTO {
+                name: "stale-agent".into(),
+                system_prompt: "stale".into(),
+                model: "stale".into(),
+                temperature: 1.0,
+                context_token_limit: 1,
+                max_output_tokens: 1,
+                stream_output: true,
+            },
+        )
+        .expect("guarded agent upsert");
+        DbWriteQueue::rusqlite_upsert_group(
+            &tx,
+            "group-deleted",
+            &GroupSyncDTO {
+                name: "stale-group".into(),
+                members: vec!["new-member".into()],
+                mode: "round".into(),
+                member_tags: None,
+                group_prompt: None,
+                invite_prompt: None,
+                use_unified_model: false,
+                unified_model: None,
+                tag_match_mode: None,
+                created_at: 2,
+            },
+        )
+        .expect("guarded group upsert");
+        DbWriteQueue::rusqlite_upsert_agent_topic(
+            &tx,
+            "topic-deleted",
+            &AgentTopicSyncDTO {
+                id: "topic-deleted".into(),
+                name: "stale-topic".into(),
+                created_at: 2,
+                locked: false,
+                unread: true,
+                owner_id: "agent-live".into(),
+            },
+        )
+        .expect("guarded topic upsert");
+        DbWriteQueue::rusqlite_upsert_group_topic(
+            &tx,
+            "topic-under-deleted-owner",
+            &GroupTopicSyncDTO {
+                id: "topic-under-deleted-owner".into(),
+                name: "stale-child".into(),
+                created_at: 2,
+                owner_id: "group-deleted".into(),
+            },
+        )
+        .expect("guarded child topic upsert");
+
+        assert_eq!(
+            tx.query_row(
+                "SELECT name FROM agents WHERE agent_id = 'agent-deleted'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read agent"),
+            "deleted"
+        );
+        assert_eq!(
+            tx.query_row(
+                "SELECT name FROM groups WHERE group_id = 'group-deleted'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read group"),
+            "deleted-group"
+        );
+        assert_eq!(
+            tx.query_row(
+                "SELECT agent_id FROM group_members WHERE group_id = 'group-deleted'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read member"),
+            "old-member"
+        );
+        assert_eq!(
+            tx.query_row(
+                "SELECT title FROM topics WHERE topic_id = 'topic-deleted'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read topic"),
+            "deleted-topic"
+        );
+        let child_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM topics WHERE topic_id = 'topic-under-deleted-owner'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count child topics");
+        assert_eq!(child_count, 0);
+    }
+
+    #[test]
+    fn sync_message_batch_does_not_repopulate_tombstoned_side_tables() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(
+            "CREATE TABLE topics (topic_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE messages (
+                topic_id TEXT, msg_id TEXT, content TEXT, deleted_at INTEGER,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             CREATE TABLE render_cache (
+                topic_id TEXT, msg_id TEXT, render_content BLOB,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             CREATE TABLE messages_fts (msg_id TEXT, topic_id TEXT, content TEXT);
+             CREATE TABLE message_attachments (topic_id TEXT, msg_id TEXT, hash TEXT);
+             INSERT INTO topics VALUES ('topic', NULL);
+             INSERT INTO messages VALUES ('topic', 'message', '[deleted]', 9);
+             INSERT INTO render_cache VALUES ('topic', 'message', x'09');
+             INSERT INTO messages_fts VALUES ('message', 'topic', 'deleted-index');
+             INSERT INTO message_attachments VALUES ('topic', 'message', 'deleted-hash');",
+        )
+        .expect("create message tombstone fixture");
+
+        let tx = conn.transaction().expect("begin transaction");
+        let stale = ChatMessage {
+            id: "message".into(),
+            role: "assistant".into(),
+            content: "stale remote body".into(),
+            timestamp: 10,
+            ..Default::default()
+        };
+        DbWriteQueue::rusqlite_upsert_messages_batch(
+            &tx,
+            "topic",
+            vec![stale],
+            vec!["stale remote body".into()],
+            vec![vec![1, 2, 3]],
+            vec!["stale-hash".into()],
+        )
+        .expect("guarded message batch");
+
+        let (content, deleted_at): (String, Option<i64>) = tx
+            .query_row(
+                "SELECT content, deleted_at FROM messages WHERE topic_id = 'topic' AND msg_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read tombstoned message");
+        assert_eq!(content, "[deleted]");
+        assert_eq!(deleted_at, Some(9));
+        let render: Vec<u8> = tx
+            .query_row("SELECT render_content FROM render_cache", [], |row| {
+                row.get(0)
+            })
+            .expect("read render cache");
+        assert_eq!(render, vec![9]);
+        let fts: String = tx
+            .query_row("SELECT content FROM messages_fts", [], |row| row.get(0))
+            .expect("read fts");
+        assert_eq!(fts, "deleted-index");
+        let relation: String = tx
+            .query_row("SELECT hash FROM message_attachments", [], |row| row.get(0))
+            .expect("read relation");
+        assert_eq!(relation, "deleted-hash");
     }
 }
 
@@ -335,7 +545,8 @@ impl DbWriteQueue {
                 max_output_tokens = excluded.max_output_tokens, 
                 stream_output = excluded.stream_output, 
                 config_hash = excluded.config_hash,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at
+             WHERE agents.deleted_at IS NULL",
             rusqlite::params![
                 id,
                 &dto.name,
@@ -361,7 +572,7 @@ impl DbWriteQueue {
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_group_config_hash(dto);
 
-        tx.execute(
+        let changed = tx.execute(
             "INSERT INTO groups (
                 group_id, name, mode,
                 group_prompt, invite_prompt, use_unified_model, unified_model,
@@ -377,7 +588,8 @@ impl DbWriteQueue {
                 tag_match_mode = excluded.tag_match_mode,
                 created_at = excluded.created_at,
                 config_hash = excluded.config_hash,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at
+             WHERE groups.deleted_at IS NULL",
             rusqlite::params![
                 id,
                 &dto.name,
@@ -392,6 +604,12 @@ impl DbWriteQueue {
                 now
             ],
         )?;
+
+        // A local tombstone is monotonic. A stale remote snapshot must not rewrite
+        // members after the group upsert itself was rejected by the conflict guard.
+        if changed == 0 {
+            return Ok(());
+        }
 
         tx.execute("DELETE FROM group_members WHERE group_id = ?", [id])?;
 
@@ -424,7 +642,8 @@ impl DbWriteQueue {
             "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at) 
              VALUES (?, ?, ?, 'image/png', ?, ?, ?) 
              ON CONFLICT(owner_type, owner_id) DO UPDATE SET 
-             avatar_hash=excluded.avatar_hash, image_data=excluded.image_data, dominant_color=excluded.dominant_color, updated_at=excluded.updated_at",
+             avatar_hash=excluded.avatar_hash, image_data=excluded.image_data, dominant_color=excluded.dominant_color, updated_at=excluded.updated_at
+             WHERE avatars.deleted_at IS NULL",
             rusqlite::params![owner_type, owner_id, &hash, bytes, &dominant_color, now]
         )?;
 
@@ -440,14 +659,16 @@ impl DbWriteQueue {
 
         tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
-            VALUES (?, ?, ?, 'agent', ?, ?, ?, ?)
+            SELECT ?, ?, ?, 'agent', ?, ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)
             ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at",
+            title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at
+            WHERE topics.deleted_at IS NULL",
             rusqlite::params![
                 topic_id, &dto.name, &dto.owner_id, dto.created_at,
                 if dto.locked { 1 } else { 0 },
                 if dto.unread { 1 } else { 0 },
-                now
+                now, &dto.owner_id
             ]
         )?;
 
@@ -463,10 +684,12 @@ impl DbWriteQueue {
 
         tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
-            VALUES (?, ?, ?, 'group', ?, 1, 0, ?)
+            SELECT ?, ?, ?, 'group', ?, 1, 0, ?
+            WHERE EXISTS (SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)
             ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title, updated_at=excluded.updated_at",
-            rusqlite::params![topic_id, &dto.name, &dto.owner_id, dto.created_at, now]
+            title=excluded.title, updated_at=excluded.updated_at
+            WHERE topics.deleted_at IS NULL",
+            rusqlite::params![topic_id, &dto.name, &dto.owner_id, dto.created_at, now, &dto.owner_id]
         )?;
 
         Ok(())
@@ -482,6 +705,71 @@ impl DbWriteQueue {
     ) -> rusqlite::Result<()> {
         if messages.is_empty() {
             return Ok(());
+        }
+
+        let topic_is_live: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM topics WHERE topic_id = ? AND deleted_at IS NULL)",
+            [topic_id],
+            |row| row.get(0),
+        )?;
+        if !topic_is_live {
+            return Ok(());
+        }
+
+        // Pull batches do not carry a causally newer restore marker. Filter local
+        // tombstones once up front so no message, FTS, render, or attachment side table
+        // can be repopulated by a stale remote snapshot.
+        let mut tombstoned_ids: HashSet<String> = HashSet::new();
+        for chunk in messages.chunks(998) {
+            let placeholders = vec!["?"; chunk.len()].join(", ");
+            let sql = format!(
+                "SELECT msg_id FROM messages WHERE topic_id = ? AND deleted_at IS NOT NULL AND msg_id IN ({})",
+                placeholders
+            );
+            let mut params = Vec::with_capacity(chunk.len() + 1);
+            params.push(topic_id.to_string());
+            params.extend(chunk.iter().map(|message| message.id.clone()));
+            let mut statement = tx.prepare_cached(&sql)?;
+            let rows = statement.query_map(rusqlite::params_from_iter(params), |row| row.get(0))?;
+            for row in rows {
+                tombstoned_ids.insert(row?);
+            }
+        }
+        if !tombstoned_ids.is_empty() {
+            let kept_indices: Vec<usize> = messages
+                .iter()
+                .enumerate()
+                .filter_map(|(index, message)| {
+                    (!tombstoned_ids.contains(&message.id)).then_some(index)
+                })
+                .collect();
+            if kept_indices.is_empty() {
+                return Ok(());
+            }
+            let filtered_messages = kept_indices
+                .iter()
+                .map(|index| messages[*index].clone())
+                .collect();
+            let filtered_contents = kept_indices
+                .iter()
+                .map(|index| contents[*index].clone())
+                .collect();
+            let filtered_render_bytes = kept_indices
+                .iter()
+                .map(|index| render_bytes[*index].clone())
+                .collect();
+            let filtered_content_hashes = kept_indices
+                .iter()
+                .map(|index| content_hashes[*index].clone())
+                .collect();
+            return Self::rusqlite_upsert_messages_batch(
+                tx,
+                topic_id,
+                filtered_messages,
+                filtered_contents,
+                filtered_render_bytes,
+                filtered_content_hashes,
+            );
         }
 
         let now = chrono::Utc::now().timestamp_millis();
@@ -523,8 +811,8 @@ impl DbWriteQueue {
                     group_id = excluded.group_id,
                     finish_reason = excluded.finish_reason,
                     content_hash = excluded.content_hash,
-                    updated_at = excluded.updated_at,
-                    deleted_at = NULL",
+                    updated_at = excluded.updated_at
+                 WHERE messages.deleted_at IS NULL",
             );
 
             let mut stmt_msgs = tx.prepare_cached(&sql_msgs)?;

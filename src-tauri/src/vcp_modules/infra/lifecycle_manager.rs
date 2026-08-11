@@ -118,14 +118,6 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         }
     };
 
-    // 3.5 根据设置决定是否启动划词助手本地服务器 (Beta) - 暂时停用该功能
-    {
-        log::info!(
-            "[Lifecycle] enableAssistant=false (temporarily disabled), reconciling local server..."
-        );
-        reconcile_local_server(&handle, &lifecycle, false).await;
-    }
-
     // 3.6 根据设置决定是否启动分布式节点 (自动重连)
     {
         let enable_dist = settings.distributed_enabled;
@@ -133,7 +125,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             "[Lifecycle] distributedEnabled={}, reconciling distributed node...",
             enable_dist
         );
-        reconcile_distributed_node(&handle, enable_dist, false).await;
+        let settings_state = handle.state::<SettingsState>();
+        let _runtime_guard = settings_state.lock_runtime_reconcile().await;
+        reconcile_distributed_node(&handle, false).await;
     }
 
     // 初始化同步服务
@@ -143,8 +137,6 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     // 4. 服务级后台初始化 (P2 - 非阻塞)
     {
         let h = handle.clone();
-        let s_url = settings.vcp_log_url.clone();
-        let s_key = settings.vcp_log_key.clone();
 
         tokio::spawn(async move {
             let emoticon_state = h.state::<EmoticonManagerState>();
@@ -162,18 +154,27 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                 Err(e) => info!("[Lifecycle] Emoticon auto-refresh skipped: {}", e),
             }
 
-            // 自动连接 VCP Log
-            if !s_url.is_empty() && !s_key.is_empty() {
-                info!("[Lifecycle] Auto-connecting VCP Log...");
-                let _ =
-                    init_vcp_log_connection_internal(h.clone(), s_url.clone(), s_key.clone()).await;
-                info!("[Lifecycle] Auto-connecting VCP Info...");
-                let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection(
-                    h.clone(),
-                    s_url,
-                    s_key,
-                )
-                .await;
+            // 自动连接 VCP Log。执行前在 Settings runtime owner 下重读，避免启动
+            // 后台任务用旧快照覆盖用户刚保存的新连接参数。
+            let settings_state = h.state::<SettingsState>();
+            let _runtime_guard = settings_state.lock_runtime_reconcile().await;
+            if let Ok(latest) = read_settings(h.clone(), h.state()).await {
+                if !latest.vcp_log_url.is_empty() && !latest.vcp_log_key.is_empty() {
+                    info!("[Lifecycle] Auto-connecting VCP Log...");
+                    let _ = init_vcp_log_connection_internal(
+                        h.clone(),
+                        latest.vcp_log_url.clone(),
+                        latest.vcp_log_key.clone(),
+                    )
+                    .await;
+                    info!("[Lifecycle] Auto-connecting VCP Info...");
+                    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection(
+                        h.clone(),
+                        latest.vcp_log_url,
+                        latest.vcp_log_key,
+                    )
+                    .await;
+                }
             }
         });
     }
@@ -279,98 +280,6 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         }
     });
 
-    // 6. 后台静默检查前端热更新（完全非阻塞）
-    {
-        let h = handle.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-
-            let db_state = h.state::<DbState>();
-            let pool = &db_state.pool;
-
-            let mut skip_check = false;
-            {
-                use sqlx::Row;
-                if let Ok(Some(row)) = sqlx::query(
-                    "SELECT value FROM settings WHERE key = 'frontend_update_last_check'",
-                )
-                .fetch_optional(pool)
-                .await
-                {
-                    let last_check_str: String = row.get("value");
-                    if let Ok(last_check) = last_check_str.parse::<i64>() {
-                        let now = crate::vcp_modules::infra::utils::now_millis();
-                        // 24h = 86_400_000 ms
-                        if now - last_check < 86_400_000 {
-                            log::info!("[FrontendUpdate] Last check ran at {} (less than 24h ago). Skipping startup check.", last_check);
-                            skip_check = true;
-                        }
-                    }
-                }
-            }
-
-            if !skip_check {
-                info!("[FrontendUpdate] Starting background check...");
-                match crate::vcp_modules::frontend_update_manager::check_for_frontend_update(
-                    h.clone(),
-                )
-                .await
-                {
-                    Ok(info) => {
-                        // 更新最后检查时间戳
-                        let now = crate::vcp_modules::infra::utils::now_millis();
-                        let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('frontend_update_last_check', ?, ?)")
-                            .bind(now.to_string())
-                            .bind(now)
-                            .execute(pool)
-                            .await;
-
-                        if info.has_update {
-                            if let Some(url) = info.download_url {
-                                info!(
-                                    "[FrontendUpdate] New version available: {}, downloading...",
-                                    info.remote_version
-                                );
-                                match crate::vcp_modules::frontend_update_manager::download_frontend_update_inner(
-                                    &h,
-                                    &url,
-                                    None,
-                                )
-                                .await
-                                {
-                                    Ok(zip_path) => {
-                                        if let Err(e) = crate::vcp_modules::frontend_update_manager::apply_frontend_update(
-                                            h.clone(),
-                                            zip_path,
-                                            info.remote_version.clone(),
-                                        )
-                                        .await
-                                        {
-                                            log::error!("[FrontendUpdate] Apply failed: {}", e);
-                                        } else {
-                                            info!(
-                                                "[FrontendUpdate] Version {} downloaded and applied. Will take effect on next cold start.",
-                                                info.remote_version
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("[FrontendUpdate] Download failed: {}", e);
-                                    }
-                                }
-                            }
-                        } else {
-                            info!("[FrontendUpdate] No frontend update available.");
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("[FrontendUpdate] Check failed: {}", e);
-                    }
-                }
-            }
-        });
-    }
-
     Ok(())
 }
 
@@ -430,6 +339,7 @@ pub async fn get_system_snapshot(
 
 /// 前端保存设置后调用，即时生效启用/停用划词助手本地服务器 - 暂时停用该功能
 #[tauri::command]
+#[allow(dead_code)] // DORMANT ASSET: implementation is retained but absent from generate_handler!.
 pub async fn reconcile_local_server_cmd(
     app_handle: AppHandle,
     state: State<'_, LifecycleState>,
@@ -446,16 +356,16 @@ pub async fn reconcile_local_server_cmd(
 
 #[tauri::command]
 pub async fn reconcile_distributed_node_cmd(app_handle: AppHandle) -> Result<bool, String> {
-    // 读取全局 settings，对齐当前状态
     let settings_state = app_handle.state::<SettingsState>();
-    let settings = read_settings(app_handle.clone(), settings_state)
+    let _runtime_guard = settings_state.lock_runtime_reconcile().await;
+    let settings = read_settings(app_handle.clone(), app_handle.state())
         .await
         .map_err(|e| e.to_string())?;
     log::info!(
         "[Lifecycle] reconcile_distributed_node_cmd called: enable={}",
         settings.distributed_enabled
     );
-    reconcile_distributed_node(&app_handle, settings.distributed_enabled, true).await;
+    reconcile_distributed_node(&app_handle, true).await;
     Ok(settings.distributed_enabled)
 }
 

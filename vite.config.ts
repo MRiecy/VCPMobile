@@ -102,7 +102,6 @@ export default defineConfig(async () => ({
     rollupOptions: {
       input: {
         main: "index.html",
-        floating: "floating.html",
       },
       output: {
         manualChunks(id) {

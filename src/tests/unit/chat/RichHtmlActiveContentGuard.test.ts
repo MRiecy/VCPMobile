@@ -3,6 +3,15 @@ import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import ToolBlock from '@/features/chat/blocks/ToolBlock.vue';
 import HtmlPreviewBlock from '@/features/chat/blocks/HtmlPreviewBlock.vue';
+import AssistantMessageCard from '@/features/assistant/AssistantMessageCard.vue';
+import RagPayloadDetail from '@/features/rag/RagPayloadDetail.vue';
+import { router } from '@/core/router';
+import appSource from '@/App.vue?raw';
+import appLifecycleSource from '@/core/composables/useAppLifecycle.ts?raw';
+import viteConfigSource from '../../../../vite.config.ts?raw';
+import defaultCapability from '../../../../src-tauri/capabilities/default.json';
+import tauriLibSource from '../../../../src-tauri/src/lib.rs?raw';
+import lifecycleManagerSource from '../../../../src-tauri/src/vcp_modules/infra/lifecycle_manager.rs?raw';
 import {
   clearHtmlCache,
   filterTrustedRichHtml,
@@ -186,6 +195,48 @@ describe('trusted-circle rich HTML active-content guard', () => {
     expect(rendered.querySelector('[onerror]')).toBeNull();
     expect(rendered.querySelector('script')).toBeNull();
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('applies the same rich-HTML guard to dormant assistant cards and reachable RAG details', () => {
+    const richPayload = `## Rich payload
+
+<custom-panel id="local-panel" onclick="this.classList.toggle('active')">
+  <img src="x" onerror="${HOST_HANDLER}">
+  <script>${HOST_HANDLER}</script>
+</custom-panel>`;
+    const assistant = mount(AssistantMessageCard, {
+      props: {
+        message: {
+          id: 'dormant-assistant-message',
+          role: 'assistant',
+          content: richPayload,
+          timestamp: 0,
+        },
+      },
+    });
+    const rag = mount(RagPayloadDetail, {
+      props: { text: richPayload },
+    });
+
+    for (const host of [assistant.element, rag.element]) {
+      expect(host.querySelector('h2')?.textContent).toBe('Rich payload');
+      expect(host.querySelector('#local-panel')?.getAttribute('onclick'))
+        .toBe("this.classList.toggle('active')");
+      expectHostCapabilityBlocked(host);
+    }
+  });
+
+  it('keeps the dormant assistant source out of runtime and production build entry points', () => {
+    expect(router.getRoutes().some((route) => route.path === '/assistant')).toBe(false);
+    expect(router.getRoutes().some((route) => route.name === 'assistant')).toBe(false);
+    expect(appSource).not.toContain('vcp-floating-ball-click');
+    expect(appSource).not.toContain('new WebviewWindow');
+    expect(appSource).not.toContain('mode=floating');
+    expect(appLifecycleSource).not.toContain('mode=floating');
+    expect(viteConfigSource).not.toMatch(/floating\s*:\s*["']floating\.html["']/);
+    expect(defaultCapability.windows).not.toContain('assistant');
+    expect(tauriLibSource).not.toContain('reconcile_local_server_cmd');
+    expect(lifecycleManagerSource).not.toContain('reconcile_local_server(&handle');
   });
 
   it('keeps unrestricted scripts inside the existing sandboxed HTML Preview', async () => {

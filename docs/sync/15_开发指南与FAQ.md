@@ -290,7 +290,7 @@ pub async fn on_attachment_phase_ready(&self) -> Result<(), String> {
 +-----------------------------------+
     |
     ├─ 否 → 检查 VCPDistributedServer 是否运行
-    |       检查 plugin-manifest.json 版本是否为 0.9.13
+    |       检查 plugin-manifest.json 版本是否为 1.1.0
     |       检查 5975 端口是否被占用
     |
     └─ 是 → 继续
@@ -370,6 +370,8 @@ VCP Mobile 采用**严格版本匹配**策略，不支持向前/向后兼容的�
 - 版本一致：继续同步流程。
 - 版本不一致：移动端断开 WS，状态置为 `error`，提示用户更新插件。
 - 超时未收到 `VERSION_ACK`（5秒）：视为桌面端插件过旧，同样断开。
+- 当前唯一接受的插件协议版本为 1.1.0。1.0.0 及更旧版本拒绝，不降级为 phase-only 最终 ACK。
+- 1.1.0 peer 必须对最终 `PHASE_COMPLETED` 原样回显 `phase`、`sessionId`、`attemptId`、`nonce`；缺失、错配或重放的 `PHASE_ACK` 均不会进入完成态。
 
 ### 5.2 字段增减的平滑升级
 
@@ -398,7 +400,7 @@ pub new_field: Option<String>,
 
 ### 5.3 版本升级 checklist
 
-当需要发布新版本（如 `0.9.13 → 0.9.14`）时，必须同步修改：
+当需要发布新协议版本（如 `1.1.0 → 1.2.0`）时，必须同步修改：
 
 | 位置 | 当前值 | 修改后 | 说明 |
 |------|--------|--------|------|
@@ -406,6 +408,8 @@ pub new_field: Option<String>,
 | `plugin-manifest.json` | `version` | 新版本号 | 桌面端实际版本 |
 | `package.json` | `version` | 新版本号 | 移动端应用版本 |
 | `Cargo.toml` | `version` | 新版本号 | Rust 编译版本 |
+
+若版本升级改动最终 ACK 字段，还必须同步修改 VCPChat `index.js` 的原样回显逻辑，并保留负向测试（缺字段、过期 session/attempt、错 nonce、重放）。
 
 ---
 
@@ -492,7 +496,7 @@ VCP Mobile 采用「先写消息、后补附件」的懒加载策略：
 
 1. 运行 `pnpm check`（`vue-tsc --noEmit && cargo check`）。
 2. 若修改了 DTO 或 Hash 计算，执行双端全量同步测试，验证相同配置的哈希值是否一致。
-3. 若修改了 `plans/` 目录，执行 `pnpm memory:refresh`。
+3. 同步更新受影响的 tracked `docs/` 与契约测试；当前仓库未启用 `plans/`/`memory:refresh` 框架。
 4. 若涉及超过 500 行的文件重构，先执行 `git add . && git commit -m "save"`。
 
 ### Q12: 桌面端 `sync_state.db` 可以删除吗？

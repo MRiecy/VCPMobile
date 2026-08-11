@@ -1,5 +1,6 @@
 import java.io.File
 import java.util.Properties
+import org.gradle.api.GradleException
  
 plugins {
     id("com.android.application")
@@ -30,6 +31,16 @@ val hasReleaseSigning = resolvedReleaseKeystoreFile?.exists() == true
     && !releaseKeyAlias.isNullOrBlank()
     && !releaseKeystorePassword.isNullOrBlank()
     && !releaseKeyPassword.isNullOrBlank()
+
+val trustedLanMode = (
+    providers.gradleProperty("vcp.trustedLanMode").orNull
+        ?: System.getenv("VCP_TRUSTED_LAN_MODE")
+        ?: "disabled"
+).trim().lowercase()
+if (trustedLanMode !in setOf("enabled", "disabled")) {
+    throw GradleException("VCP trusted LAN mode must be exactly 'enabled' or 'disabled'")
+}
+val releaseTrustedLanCleartext = trustedLanMode == "enabled"
  
 android {
     compileSdk = 36
@@ -71,11 +82,10 @@ android {
             }
         }
         getByName("release") {
-            signingConfig = if (hasReleaseSigning) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
             }
+            manifestPlaceholders["usesCleartextTraffic"] = releaseTrustedLanCleartext.toString()
             isMinifyEnabled = false
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
@@ -93,6 +103,21 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+        }
+    }
+}
+
+// Debug builds remain frictionless. Any task that actually produces/tests a release variant
+// must receive the four explicit signing inputs; an unsigned or debug-signed release is invalid.
+tasks.configureEach {
+    if (name.contains("release", ignoreCase = true)) {
+        doFirst {
+            if (!hasReleaseSigning) {
+                throw GradleException(
+                    "Release signing is incomplete. Set ANDROID_KEYSTORE_PATH, " +
+                        "ANDROID_KEY_ALIAS, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_PASSWORD."
+                )
+            }
         }
     }
 }

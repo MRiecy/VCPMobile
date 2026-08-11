@@ -138,21 +138,19 @@ impl DiffHandler {
                             }
 
                             if stuck_count >= 6 {
-                                log::error!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Forcing transition...", current_phase_wd);
+                                log::error!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Failing current attempt.", current_phase_wd);
                                 emit_sync_log(
                                     &handle_clone_wd,
                                     "error",
-                                    &format!("[TIMEOUT WARNING] 检测到同步流程异常停滞超过 60 秒 (Phase {})。看门狗机制介入强制过渡以恢复正常通信流水线。部分未决 Topic 状态将推迟到下次同步时补齐。", current_phase_wd)
+                                    &format!("同步流程停滞超过 60 秒 (Phase {})；当前 attempt 已失败，不会把未完成数据报告为成功。", current_phase_wd)
                                 );
-                                if current_phase_wd == 1 {
-                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicMetadata {
-                                        attempt_id: attempt_id_wd,
-                                    });
-                                } else if current_phase_wd == 2 {
-                                    let _ = tx_internal_wd.send(SyncCommand::StartTopicValidation {
-                                        attempt_id: attempt_id_wd,
-                                    });
-                                }
+                                let _ = tx_internal_wd.send(SyncCommand::FailAttempt {
+                                    attempt_id: attempt_id_wd,
+                                    message: format!(
+                                        "Sync phase {} timed out with {} unfinished operations",
+                                        current_phase_wd, current_pending
+                                    ),
+                                });
                                 break;
                             } else if stuck_count >= 1 {
                                 emit_sync_log(
@@ -240,10 +238,17 @@ impl DiffHandler {
                         for chunk in batch_pull_requests.chunks(chunk_size) {
                             let sub_batch = chunk.to_vec();
                             let sub_count = sub_batch.len() as u32;
-                            let _ = PullExecutor::pull_entities_batch(
+                            if let Err(error) = PullExecutor::pull_entities_batch(
                                 &h_in, &c_in, &b_in, &token, sub_batch, &wq_in,
                             )
-                            .await;
+                            .await
+                            {
+                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                    attempt_id: attempt_id_inner,
+                                    message: format!("Batch pull failed: {error}"),
+                                });
+                                return;
+                            }
                             pending.fetch_sub(sub_count, Ordering::SeqCst);
                             let current_pending = pending.load(Ordering::SeqCst);
                             let total = total_tasks_in.load(Ordering::SeqCst);
@@ -332,11 +337,19 @@ impl DiffHandler {
                             }
                             Ok(None) => {
                                 log::warn!("[SyncDebug] Topic NOT FOUND in database: {}", id);
-                                pending.fetch_sub(1, Ordering::SeqCst);
+                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                    attempt_id: attempt_id_inner,
+                                    message: format!("Topic selected for push is missing: {id}"),
+                                });
+                                return;
                             }
                             Err(e) => {
                                 log::error!("[SyncDebug] SQL ERROR fetching topic {}: {}", id, e);
-                                pending.fetch_sub(1, Ordering::SeqCst);
+                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                    attempt_id: attempt_id_inner,
+                                    message: format!("Failed to load topic {id} for push: {e}"),
+                                });
+                                return;
                             }
                         }
                     }
@@ -364,7 +377,12 @@ impl DiffHandler {
                                 "[SyncDebug] Successfully pushed metadata batch to desktop"
                             ),
                             Err(e) => {
-                                log::error!("[SyncDebug] FAILED to push metadata batch: {}", e)
+                                log::error!("[SyncDebug] FAILED to push metadata batch: {}", e);
+                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                    attempt_id: attempt_id_inner,
+                                    message: format!("Batch topic push failed: {e}"),
+                                });
+                                return;
                             }
                         }
 
@@ -434,98 +452,121 @@ impl DiffHandler {
                             let attempt_id_task = attempt_id_inner;
 
                             async move {
-                                let mut should_decrement = true;
-                                if action == "PULL" {
-                                    if data_type_task == SyncDataType::Avatar {
-                                        let parts: Vec<&str> = id.split(':').collect();
-                                        if parts.len() == 2 {
-                                            let _ = PullExecutor::pull_avatar(
-                                                &h_task,
-                                                &c_task,
-                                                &b_task,
-                                                &token_task,
-                                                parts[0],
-                                                parts[1],
+                                let operation_result: Result<(), String> = if action == "PULL" {
+                                    match &data_type_task {
+                                        SyncDataType::Avatar => {
+                                            let parts: Vec<&str> = id.split(':').collect();
+                                            if parts.len() != 2 {
+                                                Err(format!("invalid avatar id: {id}"))
+                                            } else {
+                                                PullExecutor::pull_avatar(
+                                                    &h_task,
+                                                    &c_task,
+                                                    &b_task,
+                                                    &token_task,
+                                                    parts[0],
+                                                    parts[1],
+                                                    &wq_task,
+                                                )
+                                                .await
+                                            }
+                                        }
+                                        SyncDataType::Agent => {
+                                            PullExecutor::pull_agent(
+                                                &h_task, &c_task, &b_task, &token_task, &id,
                                                 &wq_task,
                                             )
-                                            .await;
-                                        }
-                                    } else if data_type_task == SyncDataType::Agent {
-                                        let _ = PullExecutor::pull_agent(
-                                            &h_task, &c_task, &b_task, &token_task, &id, &wq_task,
-                                        )
-                                        .await;
-                                    } else if data_type_task == SyncDataType::Group {
-                                        let _ = PullExecutor::pull_group(
-                                            &h_task, &c_task, &b_task, &token_task, &id, &wq_task,
-                                        )
-                                        .await;
-                                    } else {
-                                        should_decrement = false;
-                                    }
-                                } else if action == "PUSH" {
-                                    if data_type_task == SyncDataType::Agent {
-                                        let _ = PushExecutor::push_agent(
-                                            &h_task, &c_task, &b_task, &token_task, &id,
-                                        )
-                                        .await;
-                                    } else if data_type_task == SyncDataType::Group {
-                                        let _ = PushExecutor::push_group(
-                                            &h_task, &c_task, &b_task, &token_task, &id,
-                                        )
-                                        .await;
-                                    } else if data_type_task == SyncDataType::Avatar {
-                                        let parts: Vec<&str> = id.split(':').collect();
-                                        if parts.len() == 2 {
-                                            let _ = PushExecutor::push_avatar(
-                                                &h_task, &c_task, &b_task, &token_task, parts[0],
-                                                parts[1],
-                                            )
-                                            .await;
-                                        }
-                                    } else {
-                                        should_decrement = false;
-                                    }
-                                } else if action == "DELETE" || action == "PUSH_DELETE" {
-                                    use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                    match data_type_task {
-                                        SyncDataType::Agent => {
-                                            let _ =
-                                                DeleteExecutor::soft_delete_agent(&h_task, &id)
-                                                    .await;
+                                            .await
                                         }
                                         SyncDataType::Group => {
-                                            let _ =
-                                                DeleteExecutor::soft_delete_group(&h_task, &id)
-                                                    .await;
+                                            PullExecutor::pull_group(
+                                                &h_task, &c_task, &b_task, &token_task, &id,
+                                                &wq_task,
+                                            )
+                                            .await
+                                        }
+                                        _ => Err(format!(
+                                            "unsupported PULL data type: {:?}",
+                                            data_type_task
+                                        )),
+                                    }
+                                } else if action == "PUSH" {
+                                    match &data_type_task {
+                                        SyncDataType::Agent => {
+                                            PushExecutor::push_agent(
+                                                &h_task, &c_task, &b_task, &token_task, &id,
+                                            )
+                                            .await
+                                        }
+                                        SyncDataType::Group => {
+                                            PushExecutor::push_group(
+                                                &h_task, &c_task, &b_task, &token_task, &id,
+                                            )
+                                            .await
                                         }
                                         SyncDataType::Avatar => {
                                             let parts: Vec<&str> = id.split(':').collect();
-                                            if parts.len() == 2 {
-                                                let _ = DeleteExecutor::soft_delete_avatar(
+                                            if parts.len() != 2 {
+                                                Err(format!("invalid avatar id: {id}"))
+                                            } else {
+                                                PushExecutor::push_avatar(
+                                                    &h_task,
+                                                    &c_task,
+                                                    &b_task,
+                                                    &token_task,
+                                                    parts[0],
+                                                    parts[1],
+                                                )
+                                                .await
+                                            }
+                                        }
+                                        _ => Err(format!(
+                                            "unsupported PUSH data type: {:?}",
+                                            data_type_task
+                                        )),
+                                    }
+                                } else if action == "DELETE" || action == "PUSH_DELETE" {
+                                    use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+                                    let delete_result = match &data_type_task {
+                                        SyncDataType::Agent => {
+                                            DeleteExecutor::soft_delete_agent(&h_task, &id).await
+                                        }
+                                        SyncDataType::Group => {
+                                            DeleteExecutor::soft_delete_group(&h_task, &id).await
+                                        }
+                                        SyncDataType::Avatar => {
+                                            let parts: Vec<&str> = id.split(':').collect();
+                                            if parts.len() != 2 {
+                                                Err(format!("invalid avatar id: {id}"))
+                                            } else {
+                                                DeleteExecutor::soft_delete_avatar(
                                                     &h_task, parts[0], parts[1],
                                                 )
-                                                .await;
+                                                .await
                                             }
                                         }
                                         SyncDataType::Topic => {
-                                            let _ =
-                                                DeleteExecutor::soft_delete_topic(&h_task, &id)
-                                                    .await;
+                                            DeleteExecutor::soft_delete_topic(&h_task, &id).await
                                         }
-                                        _ => {}
-                                    }
-                                    if action == "PUSH_DELETE" {
-                                        let _ = tx_internal_task.send(SyncCommand::NotifyDelete {
-                                            data_type: data_type_task,
+                                        _ => Err(format!(
+                                            "unsupported DELETE data type: {:?}",
+                                            data_type_task
+                                        )),
+                                    };
+                                    if delete_result.is_ok() && action == "PUSH_DELETE" {
+                                        tx_internal_task.send(SyncCommand::NotifyDelete {
+                                            data_type: data_type_task.clone(),
                                             id: id.clone(),
-                                        });
+                                        }).map_err(|error| error.to_string())
+                                    } else {
+                                        delete_result
                                     }
                                 } else {
-                                    should_decrement = false;
-                                }
+                                    Err(format!("unsupported sync action: {action}"))
+                                };
 
-                                if should_decrement {
+                                match operation_result {
+                                    Ok(()) => {
                                     pending_task.fetch_sub(1, Ordering::SeqCst);
                                     let current_pending = pending_task.load(Ordering::SeqCst);
                                     let total = total_tasks_task.load(Ordering::SeqCst);
@@ -559,6 +600,15 @@ impl DiffHandler {
                                                     attempt_id: attempt_id_task,
                                                 });
                                         }
+                                    }
+                                    }
+                                    Err(error) => {
+                                        let _ = tx_internal_task.send(SyncCommand::FailAttempt {
+                                            attempt_id: attempt_id_task,
+                                            message: format!(
+                                                "Sync {action} failed for {id}: {error}"
+                                            ),
+                                        });
                                     }
                                 }
                             }

@@ -1,3 +1,5 @@
+#![allow(dead_code)] // DORMANT ASSET: compiled for preservation, with every runtime entry removed.
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},

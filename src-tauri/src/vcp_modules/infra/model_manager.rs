@@ -4,11 +4,12 @@ use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, Runtime, State};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use url::Url;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -25,7 +26,19 @@ pub struct ModelInfo {
 pub struct ModelManagerState {
     pub cached_models: Arc<RwLock<Vec<ModelInfo>>>,
     pub http_client: Client,
-    pub active_batch_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
+    active_batch_task: Arc<Mutex<Option<OwnedBatchTask>>>,
+    batch_lifecycle: Mutex<()>,
+    refresh_lifecycle: Mutex<()>,
+    next_batch_owner: AtomicU64,
+}
+
+struct OwnedBatchTask {
+    owner_id: u64,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+fn is_current_batch_owner(active_owner: Option<u64>, owner_id: u64) -> bool {
+    active_owner == Some(owner_id)
 }
 
 impl ModelManagerState {
@@ -39,7 +52,10 @@ impl ModelManagerState {
         Self {
             cached_models: Arc::new(RwLock::new(Vec::new())),
             http_client,
-            active_batch_task: Arc::new(RwLock::new(None)),
+            active_batch_task: Arc::new(Mutex::new(None)),
+            batch_lifecycle: Mutex::new(()),
+            refresh_lifecycle: Mutex::new(()),
+            next_batch_owner: AtomicU64::new(0),
         }
     }
 }
@@ -83,6 +99,7 @@ pub async fn refresh_models<R: Runtime>(
     state: State<'_, ModelManagerState>,
     settings_state: State<'_, SettingsState>,
 ) -> Result<Vec<ModelInfo>, String> {
+    let _refresh_guard = state.refresh_lifecycle.lock().await;
     let settings = read_settings(app.clone(), settings_state).await?;
     let vcp_url = settings.vcp_server_url;
     let vcp_api_key = settings.vcp_api_key;
@@ -380,6 +397,11 @@ pub async fn start_batch_model_test<R: Runtime>(
     model_ids: Vec<String>,
     progress_channel: Channel<ModelTestProgress>,
 ) -> Result<(), String> {
+    if model_ids.len() > 200 {
+        return Err("单次最多测试 200 个模型".to_string());
+    }
+    let _lifecycle_guard = state.batch_lifecycle.lock().await;
+
     // 1. 在主线程同步读取一次设置，规避生命周期逃逸问题，同时实现零冗余开销
     let settings = read_settings(app, settings_state).await?;
     let vcp_url = settings.vcp_server_url;
@@ -394,18 +416,29 @@ pub async fn start_batch_model_test<R: Runtime>(
 
     // 2. 物理级硬性中止上一次的批量测试任务，从源头防止网络泄漏
     {
-        let mut active_task = state.active_batch_task.write().await;
-        if let Some(handle) = active_task.take() {
+        let mut active_task = state.active_batch_task.lock().await;
+        if let Some(task) = active_task.take() {
             log::info!("[ModelManager] Aborting previous active batch model test task...");
-            handle.abort();
+            task.handle.abort();
+            drop(active_task);
+            if let Err(error) = task.handle.await {
+                if !error.is_cancelled() {
+                    log::warn!("[ModelManager] Previous batch task join failed: {}", error);
+                }
+            }
         }
     }
 
     let http_client = state.http_client.clone();
     let active_batch_task = state.active_batch_task.clone();
+    let owner_id = state.next_batch_owner.fetch_add(1, Ordering::SeqCst) + 1;
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
 
     // 3. 启动全新的后台异步任务管理队列（将所有拥有权 String 和 bool 安全 move 进闭包，生命周期自动延长为 'static）
     let handle = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
         log::info!(
             "[ModelManager] Starting new batch model test for {} models...",
             model_ids.len()
@@ -469,33 +502,46 @@ pub async fn start_batch_model_test<R: Runtime>(
             let _ = join_all(futures).await;
         }
 
-        // 4. 队列测试全部结束，发送 completed 终结标识，并清理句柄
-        let _ = progress_channel.send(ModelTestProgress {
-            model_id: "".to_string(),
-            status: "completed".to_string(),
-            latency: None,
-            error: None,
-        });
-
-        let mut active_task = active_batch_task.write().await;
-        *active_task = None;
-        log::info!("[ModelManager] Batch model test completed successfully.");
+        // 4. 只有仍持有 owner 的任务可以发送 completed 并清理自己的句柄。
+        let mut active_task = active_batch_task.lock().await;
+        let active_owner = active_task.as_ref().map(|task| task.owner_id);
+        if is_current_batch_owner(active_owner, owner_id) {
+            let _ = progress_channel.send(ModelTestProgress {
+                model_id: "".to_string(),
+                status: "completed".to_string(),
+                latency: None,
+                error: None,
+            });
+            active_task.take();
+            log::info!(
+                "[ModelManager] Batch model test owner {} completed successfully.",
+                owner_id
+            );
+        }
     });
 
     // 保存当前任务句柄以支持随时 Abort
-    *state.active_batch_task.write().await = Some(handle);
+    *state.active_batch_task.lock().await = Some(OwnedBatchTask { owner_id, handle });
+    let _ = start_tx.send(());
 
     Ok(())
 }
 
 #[tauri::command]
 pub async fn stop_all_model_tests(state: State<'_, ModelManagerState>) -> Result<(), String> {
-    let mut active_task = state.active_batch_task.write().await;
-    if let Some(handle) = active_task.take() {
+    let _lifecycle_guard = state.batch_lifecycle.lock().await;
+    let mut active_task = state.active_batch_task.lock().await;
+    if let Some(task) = active_task.take() {
         log::info!(
             "[ModelManager] Stop command received. Aborting backend model test task physically."
         );
-        handle.abort(); // 物理终止 Tokio 任务，自动断开所有未完成的网络套接字
+        task.handle.abort();
+        drop(active_task);
+        if let Err(error) = task.handle.await {
+            if !error.is_cancelled() {
+                return Err(format!("等待模型测试任务停止失败: {}", error));
+            }
+        }
     }
     Ok(())
 }
@@ -503,4 +549,16 @@ pub async fn stop_all_model_tests(state: State<'_, ModelManagerState>) -> Result
 // 初始化加载
 pub async fn init_model_manager<R: Runtime>(_app: &AppHandle<R>, _state: &ModelManagerState) {
     // 数据库架构下无需在启动时将全量收藏与使用数据加载至内存
+}
+
+#[cfg(test)]
+mod task_owner_tests {
+    use super::is_current_batch_owner;
+
+    #[test]
+    fn old_batch_finalizer_cannot_clear_new_owner() {
+        assert!(is_current_batch_owner(Some(2), 2));
+        assert!(!is_current_batch_owner(Some(2), 1));
+        assert!(!is_current_batch_owner(None, 1));
+    }
 }

@@ -264,7 +264,6 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
     }
 
     const settings = await resolveSettings();
-    console.log("[FloatingAssistantStore] sendMessage settings:", settings);
 
     if (!settings) {
       addToast("error", "配置未就绪", "请稍后重试，助手配置加载中...");

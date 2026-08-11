@@ -421,12 +421,9 @@ pub async fn create_group(
         HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
-
     // 触发聚合哈希冒泡
-    let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-    HashAggregator::bubble_group_hash(&mut bubble_tx, &group_id).await?;
-    bubble_tx.commit().await.map_err(|e| e.to_string())?;
+    HashAggregator::bubble_group_hash(&mut tx, &group_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     state.insert_cache_if_current(group_id, config.clone(), cache_generation);
     Ok(config)
@@ -574,14 +571,11 @@ async fn internal_write_group_config<R: Runtime>(
         }
     }
 
-    tx.commit().await.map_err(|e| e.to_string())?;
-
     // 触发聚合哈希冒泡
     if !skip_bubble && !config.topics.is_empty() {
-        let mut bubble_tx = pool.begin().await.map_err(|e| e.to_string())?;
-        HashAggregator::bubble_group_hash(&mut bubble_tx, group_id).await?;
-        bubble_tx.commit().await.map_err(|e| e.to_string())?;
+        HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
     }
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 

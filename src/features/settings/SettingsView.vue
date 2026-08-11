@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed, defineAsyncComponent } from "vue";
 import { useModalHistory } from "../../core/composables/useModalHistory";
-import { useSettingsStore, type AppSettings } from "../../core/stores/settings";
+import {
+  diffSettingsPatch,
+  useSettingsStore,
+  type AppSettings,
+} from "../../core/stores/settings";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
 // 原子组件与高频子页面：静态 import，无需等待
@@ -61,6 +65,9 @@ const settings = ref<AppSettings>({
   enableAssistant: false,
   assistantAgentId: "",
 });
+const settingsBaseline = ref<AppSettings | null>(null);
+const cloneSettings = (value: AppSettings): AppSettings =>
+  JSON.parse(JSON.stringify(value)) as AppSettings;
 
 const loading = ref(true);
 const showSummaryModelSelector = ref(false);
@@ -92,7 +99,7 @@ const closeSettings = () => {
 
 const goBack = async () => {
   try {
-    await settingsStore.saveSettings(settings.value);
+    await saveSettings();
   } catch (e) {
     console.error("Failed to save settings:", e);
   }
@@ -103,7 +110,9 @@ const loadSettings = async () => {
   try {
     await settingsStore.fetchSettings();
     if (settingsStore.settings) {
-      settings.value = JSON.parse(JSON.stringify(settingsStore.settings));
+      const loaded = cloneSettings(settingsStore.settings);
+      settings.value = loaded;
+      settingsBaseline.value = cloneSettings(loaded);
     }
   } catch (e) {
     console.error("[SettingsView] Failed to load settings:", e);
@@ -114,7 +123,16 @@ const loadSettings = async () => {
 
 const saveSettings = async () => {
   try {
-    await settingsStore.saveSettings(settings.value);
+    const baseline = settingsBaseline.value;
+    if (!baseline) return;
+    const patch = diffSettingsPatch(baseline, settings.value);
+    if (Object.keys(patch).length === 0) return;
+    await settingsStore.updateSettings(patch);
+    if (settingsStore.settings) {
+      const persisted = cloneSettings(settingsStore.settings);
+      settings.value = persisted;
+      settingsBaseline.value = cloneSettings(persisted);
+    }
     console.log("Settings saved!");
   } catch (e) {
     console.error("Failed to save settings:", e);

@@ -25,9 +25,7 @@ commands.allow = [
     "update_download_notification",
     "cancel_download_notification",
     "get_pending_notification",
-    "request_overlay_permission",
     "register_shared_files",
-    "toggle_floating_ball",
     "start_sensor_collection",
     "stop_sensor_collection",
     "get_sensor_data",
@@ -46,4 +44,3 @@ commands.allow = [
     "acquire_foreground",
     "release_foreground",
 ]
-

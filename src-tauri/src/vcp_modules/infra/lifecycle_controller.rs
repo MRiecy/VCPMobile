@@ -250,7 +250,8 @@ pub async fn set_app_foreground_state_for_epoch(app: AppHandle, is_foreground: b
         let was_dist_disconnected = state.linger.is_dist_disconnected.load(Ordering::SeqCst);
 
         let settings_state = app.state::<SettingsState>();
-        if let Ok(settings) = read_settings(app.clone(), settings_state).await {
+        let _runtime_guard = settings_state.lock_runtime_reconcile().await;
+        if let Ok(settings) = read_settings(app.clone(), app.state()).await {
             if !is_transition_epoch_current(epoch) {
                 log::debug!(
                     "[Lifecycle] Foreground transition epoch={} superseded while reading settings",
@@ -285,7 +286,7 @@ pub async fn set_app_foreground_state_for_epoch(app: AppHandle, is_foreground: b
                     "[Lifecycle] App returned to foreground. Reconnecting distributed client."
                 );
                 crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node(
-                    &app, true, false,
+                    &app, false,
                 )
                 .await;
                 if !is_transition_epoch_current(epoch) {

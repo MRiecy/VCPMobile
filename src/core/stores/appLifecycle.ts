@@ -11,7 +11,7 @@ import { useTopicStore } from './topicListManager';
 import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
 import { useAvatarStore } from './avatar';
 
-export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
+export type AppState = 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
 
 export interface CoreStatus {
   status: 'initializing' | 'ready' | 'error' | 'none';
@@ -51,8 +51,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
   const statusText = computed(() => {
     switch (state.value) {
-      case 'PERMISSIONS':
-        return '正在检查系统权限...';
       case 'BOOTING':
         return '正在初始化界面资源...';
       case 'CONNECTING':
@@ -325,18 +323,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         isBootstrapping.value = true;
         errorMsg.value = null;
         hasBootstrapped.value = false;
-
-        const pStatus = await invoke<{ notification: boolean; storage: boolean; battery: boolean }>('plugin:vcp-mobile|check_all_permissions');
-        const listenerRes = await invoke<{ enabled: boolean }>('plugin:vcp-mobile|check_notification_listener_permission');
-        if (!pStatus.notification || !pStatus.storage || !pStatus.battery || !listenerRes.enabled) {
-          console.log('[Lifecycle] Missing permissions, waiting for user action');
-          // 仅在确认缺失权限时才将状态设为 PERMISSIONS，避免权限完整时引导页一闪而过
-          setState('PERMISSIONS', '权限缺失，展示引导界面');
-          // 清除 Promise，以便下次点击“进入应用”时能重新触发
-          bootstrapPromise = null;
-          isBootstrapping.value = false;
-          return;
-        }
 
         setState('BOOTING', '开始前端主线程启动编排');
         

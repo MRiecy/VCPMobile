@@ -36,7 +36,7 @@ export function useUpdateDownloader() {
       // 2. 优化：立即弹出起步 Toast，给用户明确反馈，防止物理链路延迟造成“无反应”错觉
       notificationStore.addNotification({
         title: '发起更新下载',
-        message: '已发起后台下载，进度将在系统通知栏显示...',
+        message: '已发起后台下载；允许通知后，进度也会显示在系统通知栏。',
         type: 'info',
         duration: 3500,
         toastOnly: true,
@@ -44,6 +44,11 @@ export function useUpdateDownloader() {
 
       // 3. 在 Android 上拉起系统通知栏的 Ongoing 进度通知
       if (isAndroid) {
+        // Android 13+ 的通知权限只在用户真正开始 OTA 下载时申请。
+        // 拒绝通知不阻断下载，应用内进度与系统安装器仍可正常工作。
+        await invoke('plugin:vcp-mobile|request_android_permission', { pType: 'notification' }).catch((e) => {
+          console.warn('[UpdateDownloader] notification permission unavailable:', e);
+        });
         await invoke('plugin:vcp-mobile|start_download_notification').catch((e) => {
           console.error('[UpdateDownloader] start_download_notification failed:', e);
         });

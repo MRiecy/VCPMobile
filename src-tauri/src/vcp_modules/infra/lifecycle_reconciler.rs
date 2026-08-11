@@ -4,6 +4,7 @@ use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use tauri::{AppHandle, Manager};
 
 /// 根据设置决定启动或停止划词助手本地服务器
+#[allow(dead_code)] // DORMANT ASSET: retained for a possible future assistant redesign.
 pub async fn reconcile_local_server(
     app_handle: &AppHandle,
     lifecycle: &LifecycleState,
@@ -30,11 +31,7 @@ pub async fn reconcile_local_server(
 }
 
 /// 根据设置决定启动或停止分布式节点连接
-pub async fn reconcile_distributed_node(
-    app_handle: &AppHandle,
-    distributed_enabled: bool,
-    force_reconnect: bool,
-) {
+pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect: bool) {
     let distributed_state = match app_handle.try_state::<crate::distributed::DistributedState>() {
         Some(s) => s,
         None => {
@@ -59,6 +56,7 @@ pub async fn reconcile_distributed_node(
 
     let ws_url = settings.distributed_ws_url.clone();
     let vcp_key = settings.distributed_vcp_key.clone();
+    let distributed_enabled = settings.distributed_enabled;
     let device_name = if settings.distributed_device_name.is_empty() {
         "VCPMobile".to_string()
     } else {
@@ -81,7 +79,16 @@ pub async fn reconcile_distributed_node(
             log::info!(
                 "[Lifecycle] distributedEnabled=true, starting distributed node connection..."
             );
-            distributed_state.registry.load_disabled_config(app_handle);
+            let config_status = distributed_state
+                .registry
+                .load_disabled_config(app_handle)
+                .await;
+            if config_status.state != crate::distributed::tool_registry::ToolConfigState::Ready {
+                log::warn!(
+                    "[Lifecycle] Distributed tools started fail-closed after config recovery: {:?}",
+                    config_status
+                );
+            }
             if let Err(e) = client
                 .start(
                     app_handle.clone(),
