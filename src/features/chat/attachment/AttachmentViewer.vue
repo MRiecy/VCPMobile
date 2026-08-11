@@ -5,15 +5,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { X, ExternalLink, Download } from "lucide-vue-next";
 import { saveImageToGallery } from "tauri-plugin-vcp-mobile";
 import { useNotificationStore } from "../../../core/stores/notification";
-
-interface Attachment {
-  type: string;
-  src: string;
-  name: string;
-  size: number;
-  extractedText?: string;
-  internalPath?: string;
-}
+import type { Attachment } from "../../../core/types/chat";
 
 const props = defineProps<{
   file: Attachment | null;
@@ -25,6 +17,11 @@ const emit = defineEmits(["close", "open-external"]);
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = 'AttachmentViewer';
 const notificationStore = useNotificationStore();
+const hasLocalCapability = computed(() =>
+  !!props.file &&
+  props.file.status !== "desktop_only" &&
+  !!(props.file.internalPath || props.file.src)
+);
 
 const previewText = ref("");
 const isTextTruncated = ref(false);
@@ -67,6 +64,10 @@ const isText = computed(() => {
 
 watch(() => props.isOpen, async (newVal) => {
   if (newVal) {
+    if (!hasLocalCapability.value) {
+      close();
+      return;
+    }
     registerModal(modalId, close);
     previewText.value = "";
     isTextTruncated.value = false;
@@ -129,15 +130,16 @@ watch(() => props.isOpen, async (newVal) => {
 });
 
 const renderSrc = computed(() => {
-  if (!props.file?.src) return "";
+  if (!hasLocalCapability.value || !props.file) return "";
+  const source = props.file.internalPath || props.file.src;
   if (
-    props.file.src.startsWith("http") ||
-    props.file.src.startsWith("data:") ||
-    props.file.src.startsWith("blob:")
+    source.startsWith("http") ||
+    source.startsWith("data:") ||
+    source.startsWith("blob:")
   )
-    return props.file.src;
+    return source;
   try {
-    return convertFileSrc(props.file.src.replace("file://", "").replace("file://", ""));
+    return convertFileSrc(source.replace("file://", ""));
   } catch (e) {
     return "";
   }
@@ -148,7 +150,7 @@ const close = () => emit("close");
 const isSaving = ref(false);
 
 const saveToAlbum = async () => {
-  if (!props.file || isSaving.value) return;
+  if (!props.file || !hasLocalCapability.value || isSaving.value) return;
   isSaving.value = true;
   try {
     const sourceUrl = props.file.internalPath || props.file.src;
@@ -198,7 +200,7 @@ const saveToAlbum = async () => {
         </div>
         <div class="flex items-center gap-1">
           <button
-            v-if="isImage"
+            v-if="isImage && hasLocalCapability"
             @click="saveToAlbum"
             :disabled="isSaving"
             class="p-2 -mr-1 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5 disabled:opacity-40"
@@ -207,6 +209,7 @@ const saveToAlbum = async () => {
             <Download :size="20" />
           </button>
           <button
+            v-if="hasLocalCapability"
             @click="$emit('open-external', file?.internalPath || file?.src)"
             class="p-2 -mr-1 rounded-full text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors active:bg-black/5 dark:active:bg-white/5"
           >

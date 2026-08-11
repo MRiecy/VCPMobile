@@ -78,11 +78,10 @@ jobs:
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           CARGO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)
-          ANDROID_VERSION=$(sed -n 's/^tauri\.android\.versionName=//p' src-tauri/gen/android/app/tauri.properties)
 
-          for source_version in "$PACKAGE_VERSION" "$TAURI_VERSION" "$CARGO_VERSION" "$ANDROID_VERSION"; do
+          for source_version in "$PACKAGE_VERSION" "$TAURI_VERSION" "$CARGO_VERSION"; do
             if [[ -z "$source_version" || "$source_version" != "$VERSION" ]]; then
-              echo "Version mismatch for tag $TAG_NAME: package=$PACKAGE_VERSION tauri=$TAURI_VERSION cargo=$CARGO_VERSION android=$ANDROID_VERSION" >&2
+              echo "Version mismatch for tag $TAG_NAME: package=$PACKAGE_VERSION tauri=$TAURI_VERSION cargo=$CARGO_VERSION" >&2
               exit 1
             fi
           done
@@ -97,7 +96,7 @@ jobs:
             echo "Android versionCode is outside the valid positive 32-bit range: $EXPECTED_VERSION_CODE" >&2
             exit 1
           fi
-          ANDROID_VERSION_CODE=$(sed -n 's/^tauri\.android\.versionCode=//p' src-tauri/gen/android/app/tauri.properties)
+          ANDROID_VERSION_CODE=$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")
           if [[ "$ANDROID_VERSION_CODE" != "$EXPECTED_VERSION_CODE" ]]; then
             echo "Android versionCode mismatch: expected=$EXPECTED_VERSION_CODE actual=$ANDROID_VERSION_CODE" >&2
             exit 1

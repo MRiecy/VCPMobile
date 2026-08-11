@@ -22,7 +22,7 @@
 
 **VCP Mobile**（代号：Project Avatar）是 VCPChat 的移动端版本，基于 **Tauri v2 + Vue 3 + Rust**，目标平台 Android（`aarch64-linux-android`，minSdk 26）。架构上为 Rust 核心层、Tauri IPC 层、Vue 3 渲染层三层隔离。
 
-- 版本：`1.1.3`
+- 版本：`1.1.4`
 - 包名：`com.vcp.avatar`
 
 ---
@@ -515,4 +515,4 @@ pnpm tauri android build --apk --target aarch64 -- --dependency-verification str
 
 ---
 
-*最后更新：2026-08-11 | VCP Mobile v1.1.3。若项目结构发生重大变化，请同步更新本文件。*
+*最后更新：2026-08-11 | VCP Mobile v1.1.4。若项目结构发生重大变化，请同步更新本文件。*

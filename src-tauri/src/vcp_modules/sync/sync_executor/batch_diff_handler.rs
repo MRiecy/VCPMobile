@@ -4,8 +4,11 @@ use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
 use crate::vcp_modules::sync_service::{
     emit_sync_log, Phase3Tracker, SyncCommand, SyncTaskTracker,
 };
-use serde_json::{json, Value};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::AppHandle;
@@ -13,11 +16,227 @@ use tokio::sync::mpsc;
 
 pub struct BatchDiffHandler;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phase3ProtocolError {
+    pub code: String,
+    pub message: String,
+    pub failed_topic_ids: Vec<String>,
+}
+
+impl Phase3ProtocolError {
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            failed_topic_ids: Vec::new(),
+        }
+    }
+
+    fn for_topic(code: impl Into<String>, message: impl Into<String>, topic_id: &str) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            failed_topic_ids: vec![topic_id.to_string()],
+        }
+    }
+}
+
+impl fmt::Display for Phase3ProtocolError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Phase3ProtocolError {}
+
+struct UniqueResults(Map<String, Value>);
+
+impl<'de> Deserialize<'de> for UniqueResults {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct UniqueResultsVisitor;
+
+        impl<'de> Visitor<'de> for UniqueResultsVisitor {
+            type Value = UniqueResults;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an object with unique topic ids")
+            }
+
+            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut results = Map::new();
+                while let Some((topic_id, value)) = access.next_entry::<String, Value>()? {
+                    if results.insert(topic_id.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!(
+                            "duplicate Phase 3 topic id {topic_id}"
+                        )));
+                    }
+                }
+                Ok(UniqueResults(results))
+            }
+        }
+
+        deserializer.deserialize_map(UniqueResultsVisitor)
+    }
+}
+
+#[derive(Deserialize)]
+struct Phase3BatchWire {
+    #[serde(rename = "type")]
+    message_type: String,
+    results: UniqueResults,
+}
+
+pub fn parse_phase3_batch_frame(text: &str) -> Result<Value, Phase3ProtocolError> {
+    let wire: Phase3BatchWire = serde_json::from_str(text).map_err(|error| {
+        Phase3ProtocolError::new(
+            "PHASE3_FRAME_INVALID",
+            format!("Invalid Phase 3 batch frame: {error}"),
+        )
+    })?;
+    if wire.message_type != "SYNC_DIFF_RESULTS_BATCH" {
+        return Err(Phase3ProtocolError::new(
+            "PHASE3_FRAME_INVALID",
+            "Phase 3 batch frame has an unexpected type",
+        ));
+    }
+    Ok(json!({
+        "type": wire.message_type,
+        "results": wire.results.0,
+    }))
+}
+
 #[derive(Debug)]
 struct TopicBatchOutcome {
     topic_id: String,
     success: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TopicDecision {
+    to_pull: Vec<String>,
+    to_push: bool,
+}
+
+fn parse_topic_decision(
+    topic_id: &str,
+    value: &Value,
+) -> Result<TopicDecision, Phase3ProtocolError> {
+    let object = value.as_object().ok_or_else(|| {
+        Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_INVALID",
+            format!("Phase 3 decision for {topic_id} must be an object"),
+            topic_id,
+        )
+    })?;
+    let ok = object.get("ok").and_then(Value::as_bool).ok_or_else(|| {
+        Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_INVALID",
+            format!("Phase 3 decision for {topic_id} requires boolean ok"),
+            topic_id,
+        )
+    })?;
+    if !ok {
+        if object.contains_key("toPull") || object.contains_key("toPush") {
+            return Err(Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 rejection for {topic_id} must not contain toPull/toPush"),
+                topic_id,
+            ));
+        }
+        let error = object
+            .get("error")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                Phase3ProtocolError::for_topic(
+                    "PHASE3_DECISION_INVALID",
+                    format!("Phase 3 rejection for {topic_id} requires error object"),
+                    topic_id,
+                )
+            })?;
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Phase3ProtocolError::for_topic(
+                    "PHASE3_DECISION_INVALID",
+                    format!("Phase 3 rejection for {topic_id} requires error.code"),
+                    topic_id,
+                )
+            })?;
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Phase3ProtocolError::for_topic(
+                    "PHASE3_DECISION_INVALID",
+                    format!("Phase 3 rejection for {topic_id} requires error.message"),
+                    topic_id,
+                )
+            })?;
+        return Err(Phase3ProtocolError::for_topic(
+            code,
+            format!("Phase 3 decision rejected {topic_id}: {message}"),
+            topic_id,
+        ));
+    }
+
+    if object.contains_key("error") {
+        return Err(Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_INVALID",
+            format!("Successful Phase 3 decision for {topic_id} must not contain error"),
+            topic_id,
+        ));
+    }
+
+    let to_pull_values = object
+        .get("toPull")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 decision for {topic_id} requires string[] toPull"),
+                topic_id,
+            )
+        })?;
+    let mut seen = HashSet::new();
+    let mut to_pull = Vec::with_capacity(to_pull_values.len());
+    for value in to_pull_values {
+        let message_id = value.as_str().filter(|id| !id.is_empty()).ok_or_else(|| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 toPull for {topic_id} contains a non-string or empty id"),
+                topic_id,
+            )
+        })?;
+        if !seen.insert(message_id) {
+            return Err(Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 toPull for {topic_id} contains duplicate id {message_id}"),
+                topic_id,
+            ));
+        }
+        to_pull.push(message_id.to_string());
+    }
+    let to_push = object
+        .get("toPush")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 decision for {topic_id} requires boolean toPush"),
+                topic_id,
+            )
+        })?;
+    Ok(TopicDecision { to_pull, to_push })
 }
 
 fn validate_topic_batch_outcomes(
@@ -33,10 +252,24 @@ fn validate_topic_batch_outcomes(
             operation, topics, error
         )
     })?;
-    let outcomes_by_topic: HashMap<String, TopicBatchOutcome> = outcomes
-        .into_iter()
-        .map(|outcome| (outcome.topic_id.clone(), outcome))
-        .collect();
+    let expected_set = expected.iter().cloned().collect::<HashSet<_>>();
+    let mut outcomes_by_topic = HashMap::new();
+    for outcome in outcomes {
+        if !expected_set.contains(&outcome.topic_id) {
+            return Err(format!(
+                "Phase 3 {operation} response contains unexpected topic {}",
+                outcome.topic_id
+            ));
+        }
+        if outcomes_by_topic
+            .insert(outcome.topic_id.clone(), outcome)
+            .is_some()
+        {
+            return Err(format!(
+                "Phase 3 {operation} response contains duplicate topic"
+            ));
+        }
+    }
 
     let mut successful = Vec::new();
     let mut failed = Vec::new();
@@ -69,15 +302,19 @@ fn fail_phase3_attempt(
     logger: &Arc<Mutex<SyncLogger>>,
     tx_internal: &mpsc::UnboundedSender<SyncCommand>,
     attempt_id: u64,
+    code: &str,
+    failed_topic_ids: Vec<String>,
     message: String,
 ) {
     if let Ok(mut logger) = logger.lock() {
         logger.log(LogLevel::Error, "messages", &message);
     }
     emit_sync_log(app_handle, "error", &message);
-    let _ = tx_internal.send(SyncCommand::FailAttempt {
+    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
         attempt_id,
+        code: code.to_string(),
         message,
+        failed_topic_ids,
     });
 }
 
@@ -122,13 +359,25 @@ impl BatchDiffHandler {
         task_tracker: &Arc<SyncTaskTracker>,
         expected_batch_topics: &Arc<tokio::sync::Mutex<HashSet<String>>>,
         attempt_id: u64,
-    ) -> Result<(), String> {
-        let results = payload["results"]
-            .as_object()
-            .ok_or_else(|| "Phase 3 response is missing results".to_string())?;
+    ) -> Result<(), Phase3ProtocolError> {
+        let results = payload["results"].as_object().ok_or_else(|| {
+            Phase3ProtocolError::new(
+                "PHASE3_FRAME_INVALID",
+                "Phase 3 response is missing results",
+            )
+        })?;
         {
             let expected = expected_batch_topics.lock().await;
-            validate_phase3_result_topics(&expected, results)?;
+            validate_phase3_result_topics(&expected, results).map_err(|message| {
+                let mut failed_topic_ids = expected.iter().cloned().collect::<Vec<_>>();
+                failed_topic_ids.sort();
+                failed_topic_ids.truncate(8);
+                Phase3ProtocolError {
+                    code: "PHASE3_TOPIC_MISMATCH".to_string(),
+                    message,
+                    failed_topic_ids,
+                }
+            })?;
         }
 
         {
@@ -137,15 +386,13 @@ impl BatchDiffHandler {
             let mut pull_batch: Vec<(String, Vec<String>)> = Vec::new();
 
             for (topic_id, result) in results {
-                let to_pull_ids: Vec<String> = result["toPull"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let to_push = result["toPush"].as_bool().unwrap_or(false);
+                let decision = parse_topic_decision(topic_id, result)?;
+                let to_pull_ids = decision.to_pull;
+                let to_push = decision.to_push;
+
+                // Phase 2.5 已判定该 topic 聚合哈希有变化；即使消息 diff 是合法
+                // no-op，也必须进入 finalizer 的 hash-repair 集。
+                tracker.mark_modified(topic_id).await;
 
                 if !to_push && to_pull_ids.is_empty() {
                     // 无需操作，直接标记完成
@@ -217,11 +464,16 @@ impl BatchDiffHandler {
                             ) {
                                 Ok(successful) => successful,
                                 Err(message) => {
+                                    for topic_id in &push_topic_ids {
+                                        tracker_clone.mark_failed(topic_id).await;
+                                    }
                                     fail_phase3_attempt(
                                         &h_in,
                                         &sync_logger_msg,
                                         &tx_internal_msg,
                                         attempt_id,
+                                        "PHASE3_PUSH_FAILED",
+                                        push_topic_ids.clone(),
                                         message,
                                     );
                                     return;
@@ -249,6 +501,11 @@ impl BatchDiffHandler {
                             )
                             .await
                             .map(|results| {
+                                let warning_count = results
+                                    .iter()
+                                    .map(|result| result.legacy_attachment_warnings)
+                                    .sum();
+                                tracker_clone.add_legacy_attachment_warnings(warning_count);
                                 results
                                     .into_iter()
                                     .map(|result: BatchPullResult| TopicBatchOutcome {
@@ -265,11 +522,16 @@ impl BatchDiffHandler {
                             ) {
                                 Ok(successful) => successful,
                                 Err(message) => {
+                                    for topic_id in &pull_topic_ids {
+                                        tracker_clone.mark_failed(topic_id).await;
+                                    }
                                     fail_phase3_attempt(
                                         &h_in,
                                         &sync_logger_msg,
                                         &tx_internal_msg,
                                         attempt_id,
+                                        "PHASE3_PULL_FAILED",
+                                        pull_topic_ids.clone(),
                                         message,
                                     );
                                     return;
@@ -337,8 +599,8 @@ mod tests {
     fn phase3_results_must_cover_the_exact_requested_topic_set() {
         let expected = HashSet::from(["topic-a".to_string(), "topic-b".to_string()]);
         let complete = serde_json::json!({
-            "topic-a": { "toPush": false, "toPull": [] },
-            "topic-b": { "toPush": false, "toPull": [] }
+            "topic-a": { "ok": true, "toPush": false, "toPull": [] },
+            "topic-b": { "ok": true, "toPush": false, "toPull": [] }
         });
         assert!(validate_phase3_result_topics(
             &expected,
@@ -347,7 +609,7 @@ mod tests {
         .is_ok());
 
         let incomplete = serde_json::json!({
-            "topic-a": { "toPush": false, "toPull": [] }
+            "topic-a": { "ok": true, "toPush": false, "toPull": [] }
         });
         let error = validate_phase3_result_topics(
             &expected,
@@ -355,6 +617,56 @@ mod tests {
         )
         .expect_err("missing topic must fail phase 3");
         assert!(error.contains("topic-b"));
+    }
+
+    #[test]
+    fn phase3_decision_is_a_strict_discriminated_union() {
+        assert_eq!(
+            parse_topic_decision(
+                "topic-a",
+                &json!({ "ok": true, "toPull": ["message-a"], "toPush": false })
+            )
+            .expect("valid decision"),
+            TopicDecision {
+                to_pull: vec!["message-a".to_string()],
+                to_push: false,
+            }
+        );
+
+        for invalid in [
+            json!({ "toPull": [], "toPush": false }),
+            json!({ "ok": true, "toPull": "message-a", "toPush": false }),
+            json!({ "ok": true, "toPull": [], "toPush": "false" }),
+            json!({ "ok": true, "toPull": ["message-a", "message-a"], "toPush": false }),
+            json!({ "ok": true, "toPull": [], "toPush": false, "error": { "code": "X", "message": "bad" } }),
+            json!({ "ok": false, "error": { "code": "DESKTOP_DB", "message": "failed" } }),
+            json!({ "ok": false, "toPull": [], "toPush": false, "error": { "code": "DESKTOP_DB", "message": "failed" } }),
+        ] {
+            assert!(parse_topic_decision("topic-a", &invalid).is_err());
+        }
+
+        let rejection = parse_topic_decision(
+            "topic-a",
+            &json!({ "ok": false, "error": { "code": "DESKTOP_DB", "message": "failed" } }),
+        )
+        .expect_err("desktop rejection must terminate phase 3");
+        assert_eq!(rejection.code, "DESKTOP_DB");
+        assert_eq!(rejection.failed_topic_ids, vec!["topic-a"]);
+    }
+
+    #[test]
+    fn raw_phase3_parser_rejects_duplicate_topic_keys() {
+        let duplicate = r#"{
+            "type":"SYNC_DIFF_RESULTS_BATCH",
+            "results":{
+                "topic-a":{"ok":true,"toPull":[],"toPush":false},
+                "topic-a":{"ok":true,"toPull":[],"toPush":false}
+            }
+        }"#;
+        let error = parse_phase3_batch_frame(duplicate)
+            .expect_err("duplicate raw JSON topic keys must not be overwritten");
+        assert_eq!(error.code, "PHASE3_FRAME_INVALID");
+        assert!(error.message.contains("duplicate Phase 3 topic id topic-a"));
     }
 
     #[test]
@@ -391,6 +703,41 @@ mod tests {
 
         assert!(error.contains("topic-b"));
         assert!(error.contains("missing from batch response"));
+    }
+
+    #[test]
+    fn duplicate_or_unexpected_batch_outcomes_are_rejected() {
+        let expected = vec!["topic-a".to_string()];
+        let duplicate = validate_topic_batch_outcomes(
+            "push",
+            &expected,
+            Ok(vec![
+                TopicBatchOutcome {
+                    topic_id: "topic-a".to_string(),
+                    success: true,
+                    error: None,
+                },
+                TopicBatchOutcome {
+                    topic_id: "topic-a".to_string(),
+                    success: true,
+                    error: None,
+                },
+            ]),
+        )
+        .expect_err("duplicate response topic must fail");
+        assert!(duplicate.contains("duplicate topic"));
+
+        let unexpected = validate_topic_batch_outcomes(
+            "push",
+            &expected,
+            Ok(vec![TopicBatchOutcome {
+                topic_id: "topic-b".to_string(),
+                success: true,
+                error: None,
+            }]),
+        )
+        .expect_err("unexpected response topic must fail");
+        assert!(unexpected.contains("unexpected topic topic-b"));
     }
 
     #[test]

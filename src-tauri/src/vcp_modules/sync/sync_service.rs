@@ -23,6 +23,7 @@ use tokio_tungstenite::{
 use tokio_util::sync::CancellationToken;
 
 const EXPECTED_PLUGIN_VERSION: &str = "1.1.0";
+const WIRE_PROTOCOL_VERSION: &str = "1.1";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const PHASE3_WATCHDOG_TICK: Duration = Duration::from_secs(10);
@@ -30,6 +31,39 @@ const PHASE3_WATCHDOG_STUCK_TICKS: u32 = 6;
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
 type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[derive(Debug, PartialEq, Eq)]
+struct VersionAck {
+    plugin_version: String,
+    protocol_version: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum VersionHandshakeError {
+    Protocol(String),
+    Closed { code: Option<u16>, reason: String },
+    Transport(String),
+}
+
+fn parse_version_ack(payload: &Value) -> Result<VersionAck, String> {
+    if payload.get("type").and_then(Value::as_str) != Some("VERSION_ACK") {
+        return Err("expected VERSION_ACK".to_string());
+    }
+    let plugin_version = payload
+        .get("pluginVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "VERSION_ACK.pluginVersion must be a non-empty string".to_string())?;
+    let protocol_version = payload
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "VERSION_ACK.protocolVersion must be a non-empty string".to_string())?;
+    Ok(VersionAck {
+        plugin_version: plugin_version.to_string(),
+        protocol_version: protocol_version.to_string(),
+    })
+}
 
 async fn send_ws_with_deadline(
     ws_stream: &mut SyncWebSocket,
@@ -257,9 +291,12 @@ impl SyncTaskTracker {
 
 /// 追踪 Phase 3 中已处理完成的 topic，替代 AtomicU32 避免双重递减下溢
 pub struct Phase3Tracker {
+    pub session_id: u64,
     pub attempt_id: u64,
     pub completed: tokio::sync::Mutex<HashSet<String>>,
     pub modified: tokio::sync::Mutex<HashSet<String>>,
+    pub failed: tokio::sync::Mutex<HashSet<String>>,
+    pub legacy_attachment_warnings: std::sync::atomic::AtomicUsize,
     pub total: std::sync::atomic::AtomicUsize,
 }
 
@@ -268,6 +305,30 @@ impl Phase3Tracker {
     pub async fn mark_modified(&self, topic_id: &str) {
         let mut modified = self.modified.lock().await;
         modified.insert(topic_id.to_string());
+    }
+
+    pub async fn mark_failed(&self, topic_id: &str) {
+        self.failed.lock().await.insert(topic_id.to_string());
+    }
+
+    pub fn add_legacy_attachment_warnings(&self, count: usize) {
+        self.legacy_attachment_warnings
+            .fetch_add(count, Ordering::SeqCst);
+    }
+
+    async fn completion_summary(&self) -> SyncCompletionSummary {
+        let successful_topics = self.completed.lock().await.len();
+        let failed = self.failed.lock().await;
+        let mut failed_topic_ids = failed.iter().cloned().collect::<Vec<_>>();
+        failed_topic_ids.sort();
+        failed_topic_ids.truncate(8);
+        SyncCompletionSummary {
+            successful_topics,
+            total_topics: self.total.load(Ordering::SeqCst),
+            failed_topics: failed.len(),
+            legacy_attachment_warnings: self.legacy_attachment_warnings.load(Ordering::SeqCst),
+            failed_topic_ids,
+        }
     }
 
     /// 标记某个 topic 已完成。如果是首次标记，返回 true；否则返回 false。
@@ -296,10 +357,15 @@ impl Phase3Tracker {
             let _ = app_handle.emit(
                 "vcp-sync-progress",
                 json!({
+                    "sessionId": self.session_id,
                     "phase": "messages",
                     "total": total,
                     "completed": done,
-                    "message": format!("Syncing Messages: {}/{}", done, total)
+                    "message": format!("Syncing Messages: {}/{}", done, total),
+                    "successfulTopics": done,
+                    "totalTopics": total,
+                    "failedTopics": self.failed.lock().await.len(),
+                    "legacyAttachmentWarnings": self.legacy_attachment_warnings.load(Ordering::SeqCst)
                 }),
             );
 
@@ -379,11 +445,36 @@ pub enum SyncCommand {
         attempt_id: u64,
         message: String,
     },
+    FailAttemptDetailed {
+        attempt_id: u64,
+        code: String,
+        message: String,
+        failed_topic_ids: Vec<String>,
+    },
     Cancel,
 }
 
 pub fn parse_sync_data_type(value: &Value) -> Option<SyncDataType> {
     serde_json::from_value::<SyncDataType>(value.clone()).ok()
+}
+
+fn parse_unique_nonempty_strings(value: &Value, field: &str) -> Result<Vec<String>, String> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{field} must be an array"))?;
+    let mut seen = HashSet::new();
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        let item = value
+            .as_str()
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| format!("{field} must contain only non-empty strings"))?;
+        if !seen.insert(item) {
+            return Err(format!("{field} contains duplicate value {item}"));
+        }
+        result.push(item.to_string());
+    }
+    Ok(result)
 }
 
 async fn publish_sync_status<R: Runtime>(
@@ -392,6 +483,38 @@ async fn publish_sync_status<R: Runtime>(
     status: &Arc<RwLock<String>>,
     next_status: &str,
     message: &str,
+) {
+    let error =
+        (next_status == "error").then(|| ("SYNC_ATTEMPT_FAILED", message, Vec::<String>::new()));
+    publish_sync_status_inner(app_handle, session_id, status, next_status, message, error).await;
+}
+
+async fn publish_sync_error<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    session_id: u64,
+    status: &Arc<RwLock<String>>,
+    code: &str,
+    message: &str,
+    failed_topic_ids: Vec<String>,
+) {
+    publish_sync_status_inner(
+        app_handle,
+        session_id,
+        status,
+        "error",
+        message,
+        Some((code, message, failed_topic_ids)),
+    )
+    .await;
+}
+
+async fn publish_sync_status_inner<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    session_id: u64,
+    status: &Arc<RwLock<String>>,
+    next_status: &str,
+    message: &str,
+    error: Option<(&str, &str, Vec<String>)>,
 ) {
     let sync_state = app_handle.state::<SyncState>();
     let _owner_commit = sync_state.owner_commit.lock().await;
@@ -404,7 +527,27 @@ async fn publish_sync_status<R: Runtime>(
         if guard.as_str() == next_status {
             return;
         }
+        if matches!(
+            guard.as_str(),
+            "error" | "completed" | "completed_with_warnings"
+        ) {
+            return;
+        }
         *guard = next_status.to_string();
+    }
+
+    let mut payload = json!({
+        "status": next_status,
+        "message": message,
+        "source": "Sync",
+        "sessionId": session_id,
+    });
+    if let Some((code, original_message, failed_topic_ids)) = error {
+        payload["error"] = json!({
+            "code": code,
+            "message": original_message,
+            "failedTopicIds": failed_topic_ids,
+        });
     }
 
     // 统一使用 vcp-system-event 发射，type 为明确的 vcp-sync-status
@@ -414,19 +557,14 @@ async fn publish_sync_status<R: Runtime>(
             "type": "vcp-sync-status",
             "status": next_status,
             "message": message,
-            "source": "Sync"
+            "source": "Sync",
+            "sessionId": session_id,
+            "error": payload.get("error").cloned().unwrap_or(Value::Null),
         }),
     );
 
     // 直接发射前端 syncSession 监听的 vcp-sync-status
-    let _ = app_handle.emit(
-        "vcp-sync-status",
-        json!({
-            "status": next_status,
-            "message": message,
-            "source": "Sync"
-        }),
-    );
+    let _ = app_handle.emit("vcp-sync-status", payload);
 
     // 同步发射到 Mini Log Terminal
     let level = match next_status {
@@ -442,6 +580,7 @@ async fn publish_sync_completed(
     app_handle: &AppHandle,
     session_id: u64,
     status: &Arc<RwLock<String>>,
+    summary: SyncCompletionSummary,
 ) -> bool {
     let sync_state = app_handle.state::<SyncState>();
     let _owner_commit = sync_state.owner_commit.lock().await;
@@ -449,22 +588,59 @@ async fn publish_sync_completed(
         return false;
     }
 
+    {
+        let mut guard = status.write().await;
+        if matches!(
+            guard.as_str(),
+            "error" | "completed" | "completed_with_warnings"
+        ) {
+            return false;
+        }
+        *guard = if summary.legacy_attachment_warnings > 0 {
+            "completed_with_warnings".to_string()
+        } else {
+            "completed".to_string()
+        };
+    }
+
+    let terminal_status = if summary.legacy_attachment_warnings > 0 {
+        "completed_with_warnings"
+    } else {
+        "completed"
+    };
     let _ = app_handle.emit(
         "vcp-sync-completed",
         json!({
             "source": "Sync",
+            "sessionId": session_id,
+            "status": terminal_status,
+            "summary": summary,
             "agentsChanged": true,
             "groupsChanged": true,
             "topicsChanged": true,
             "messagesChanged": true,
         }),
     );
-    *status.write().await = "completed".to_string();
     let _ = app_handle.emit(
         "vcp-sync-status",
-        json!({ "status": "completed", "message": "同步完成", "source": "Sync" }),
+        json!({
+            "status": terminal_status,
+            "message": if terminal_status == "completed" { "同步完成" } else { "同步完成，但存在旧附件警告" },
+            "source": "Sync",
+            "sessionId": session_id,
+        }),
     );
     true
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncCompletionSummary {
+    successful_topics: usize,
+    total_topics: usize,
+    failed_topics: usize,
+    legacy_attachment_warnings: usize,
+    failed_topic_ids: Vec<String>,
 }
 
 pub fn init_sync_service(_app_handle: AppHandle) -> SyncState {
@@ -778,7 +954,8 @@ async fn run_sync_session(
                 {
                     let version_req = json!({
                         "type": "VERSION_CHECK",
-                        "mobileVersion": env!("CARGO_PKG_VERSION")
+                        "mobileVersion": env!("CARGO_PKG_VERSION"),
+                        "protocolVersion": WIRE_PROTOCOL_VERSION,
                     });
                     if let Err(error) = send_ws_with_deadline(
                         &mut ws_stream,
@@ -809,38 +986,52 @@ async fn run_sync_session(
                             while let Some(res) = ws_stream.next().await {
                                 match res {
                                     Ok(Message::Text(text)) => {
-                                        if let Ok(payload) = serde_json::from_str::<Value>(&text) {
-                                            if payload.get("type").and_then(|v| v.as_str())
-                                                == Some("VERSION_ACK")
-                                            {
-                                                if let Some(v) =
-                                                    payload.get("version").and_then(|v| v.as_str())
-                                                {
-                                                    return Ok(v.to_string());
-                                                }
-                                            }
-                                        }
+                                        let payload = serde_json::from_str::<Value>(&text)
+                                            .map_err(|error| VersionHandshakeError::Protocol(
+                                                format!("Malformed VERSION_ACK JSON: {error}")
+                                            ))?;
+                                        return parse_version_ack(&payload)
+                                            .map_err(VersionHandshakeError::Protocol);
                                     }
                                     Ok(Message::Close(close_frame)) => {
-                                        return Err(close_frame);
+                                        return Err(match close_frame {
+                                            Some(frame) => VersionHandshakeError::Closed {
+                                                code: Some(frame.code.into()),
+                                                reason: frame.reason.to_string(),
+                                            },
+                                            None => VersionHandshakeError::Closed {
+                                                code: None,
+                                                reason: String::new(),
+                                            },
+                                        });
                                     }
-                                    Err(_) => {
-                                        return Err(None);
+                                    Err(error) => {
+                                        return Err(VersionHandshakeError::Transport(
+                                            error.to_string(),
+                                        ));
                                     }
                                     _ => {}
                                 }
                             }
-                            Err(None)
+                            Err(VersionHandshakeError::Closed {
+                                code: None,
+                                reason: String::new(),
+                            })
                         }) => result,
                     };
 
                     match version_result {
-                        Ok(Ok(plugin_version)) => {
-                            if plugin_version == EXPECTED_PLUGIN_VERSION {
+                        Ok(Ok(version_ack)) => {
+                            if version_ack.plugin_version == EXPECTED_PLUGIN_VERSION
+                                && version_ack.protocol_version == WIRE_PROTOCOL_VERSION
+                            {
                                 emit_sync_log(
                                     &handle_clone,
                                     "success",
-                                    &format!("桌面端插件版本 v{} 验证通过", plugin_version),
+                                    &format!(
+                                        "桌面端插件 v{} / 同步协议 {} 验证通过",
+                                        version_ack.plugin_version, version_ack.protocol_version
+                                    ),
                                 );
                             } else {
                                 publish_sync_status(
@@ -849,8 +1040,11 @@ async fn run_sync_session(
                                     &connection_status_for_task,
                                     "error",
                                     &format!(
-                                        "桌面端插件版本 v{} 与期望版本 v{} 不兼容",
-                                        plugin_version, EXPECTED_PLUGIN_VERSION
+                                        "桌面端插件 v{} / 协议 {} 与期望 v{} / 协议 {} 不兼容",
+                                        version_ack.plugin_version,
+                                        version_ack.protocol_version,
+                                        EXPECTED_PLUGIN_VERSION,
+                                        WIRE_PROTOCOL_VERSION,
                                     ),
                                 )
                                 .await;
@@ -858,36 +1052,60 @@ async fn run_sync_session(
                                     &handle_clone,
                                     "error",
                                     &format!(
-                                        "❌ 插件版本不匹配: 桌面端版本 v{}，期望版本 v{}",
-                                        plugin_version, EXPECTED_PLUGIN_VERSION
+                                        "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，期望 v{} / 协议 {}",
+                                        version_ack.plugin_version,
+                                        version_ack.protocol_version,
+                                        EXPECTED_PLUGIN_VERSION,
+                                        WIRE_PROTOCOL_VERSION,
                                     ),
                                 );
                                 emit_sync_log(&handle_clone, "error", "👉 排查建议: 请前往 https://github.com/MRiecy/VCPMobile/releases 下载最新同步插件");
                                 break;
                             }
                         }
-                        Ok(Err(Some(frame))) => {
-                            let code: u16 = frame.code.into();
-                            let reason = &frame.reason;
-                            if code == 4001 {
+                        Ok(Err(VersionHandshakeError::Protocol(message))) => {
+                            emit_sync_log(
+                                &handle_clone,
+                                "error",
+                                &format!("❌ 同步连接失败 [VERSION_ACK_INVALID]: {message}"),
+                            );
+                            publish_sync_error(
+                                &handle_clone,
+                                session_id,
+                                &connection_status_for_task,
+                                "VERSION_ACK_INVALID",
+                                &message,
+                                Vec::new(),
+                            )
+                            .await;
+                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                            break;
+                        }
+                        Ok(Err(VersionHandshakeError::Closed { code, reason })) => {
+                            if code == Some(4001) {
                                 emit_sync_log(
                                     &handle_clone,
                                     "error",
                                     "❌ 同步连接失败 [TOKEN_MISMATCH]: 身份认证失败（Token 错误）",
                                 );
                                 emit_sync_log(&handle_clone, "error", "👉 排查建议: 移动端设置的同步令牌与桌面端不匹配。请检查移动端设置中的『同步令牌』是否与电脑端 VCPMobileSync 插件的 config.env 中的 SYNC_TOKEN 完全一致。");
-                                publish_sync_status(
+                                publish_sync_error(
                                     &handle_clone,
                                     session_id,
                                     &connection_status_for_task,
-                                    "error",
+                                    "TOKEN_MISMATCH",
                                     "身份认证失败（Token 错误）",
+                                    Vec::new(),
                                 )
                                 .await;
                             } else {
                                 let err_msg = format!(
                                     "连接被服务器关闭 (code: {}, reason: {})",
-                                    code, reason
+                                    code.map_or_else(
+                                        || "none".to_string(),
+                                        |value| value.to_string()
+                                    ),
+                                    reason
                                 );
                                 emit_sync_log(
                                     &handle_clone,
@@ -899,30 +1117,32 @@ async fn run_sync_session(
                                     "error",
                                     "👉 排查建议: 请检查桌面端控制台日志以获取详细关闭原因。",
                                 );
-                                publish_sync_status(
+                                publish_sync_error(
                                     &handle_clone,
                                     session_id,
                                     &connection_status_for_task,
-                                    "error",
+                                    "WS_CLOSED",
                                     &err_msg,
+                                    Vec::new(),
                                 )
                                 .await;
                             }
                             break;
                         }
-                        Ok(Err(None)) => {
+                        Ok(Err(VersionHandshakeError::Transport(message))) => {
                             emit_sync_log(
                                 &handle_clone,
                                 "error",
-                                "❌ 同步连接失败 [CONNECTION_CLOSED]: 连接在版本验证前被意外关闭",
+                                &format!("❌ 同步连接失败 [WS_RECEIVE_FAILED]: {message}"),
                             );
                             emit_sync_log(&handle_clone, "error", "👉 排查建议: 请确认桌面端服务正常运行，且同步 Token 与网络无异常。");
-                            publish_sync_status(
+                            publish_sync_error(
                                 &handle_clone,
                                 session_id,
                                 &connection_status_for_task,
-                                "error",
-                                "连接被意外关闭",
+                                "WS_RECEIVE_FAILED",
+                                &message,
+                                Vec::new(),
                             )
                             .await;
                             break;
@@ -934,12 +1154,13 @@ async fn run_sync_session(
                                 "❌ 同步连接失败 [VERSION_CHECK_TIMEOUT]: 版本验证超时",
                             );
                             emit_sync_log(&handle_clone, "error", "👉 排查建议: 桌面端服务响应缓慢，或者当前网络异常。请检查局域网连接，或尝试重启电脑端服务。");
-                            publish_sync_status(
+                            publish_sync_error(
                                 &handle_clone,
                                 session_id,
                                 &connection_status_for_task,
-                                "error",
+                                "VERSION_CHECK_TIMEOUT",
                                 "版本验证超时",
+                                Vec::new(),
                             )
                             .await;
                             break;
@@ -1069,9 +1290,12 @@ async fn run_sync_session(
                 let pending_tasks_task = Arc::new(AtomicU32::new(0));
                 let total_tasks_task = Arc::new(AtomicU32::new(0));
                 let pending_msg_topics_task = Arc::new(Phase3Tracker {
+                    session_id,
                     attempt_id,
                     completed: tokio::sync::Mutex::new(HashSet::new()),
                     modified: tokio::sync::Mutex::new(HashSet::new()),
+                    failed: tokio::sync::Mutex::new(HashSet::new()),
+                    legacy_attachment_warnings: std::sync::atomic::AtomicUsize::new(0),
                     total: std::sync::atomic::AtomicUsize::new(0),
                 });
                 let expected_phase3_batch =
@@ -1262,6 +1486,13 @@ async fn run_sync_session(
                                                     let mut modified = pending_msg_topics_task.modified.lock().await;
                                                     modified.clear();
                                                 }
+                                                {
+                                                    let mut failed = pending_msg_topics_task.failed.lock().await;
+                                                    failed.clear();
+                                                }
+                                                pending_msg_topics_task
+                                                    .legacy_attachment_warnings
+                                                    .store(0, Ordering::SeqCst);
 
                                                 // 清空可能残留的旧批次，防止断线重连后发送过时数据
                                                 {
@@ -1641,6 +1872,26 @@ async fn run_sync_session(
                                     let _ = close_ws_with_deadline(&mut ws_stream).await;
                                     break;
                                 },
+                                SyncCommand::FailAttemptDetailed {
+                                    attempt_id: command_attempt,
+                                    code,
+                                    message,
+                                    failed_topic_ids,
+                                } => {
+                                    if command_attempt != attempt_id { continue; }
+                                    fatal_error = true;
+                                    emit_sync_log(&handle_clone, "error", &message);
+                                    publish_sync_error(
+                                        &handle_clone,
+                                        session_id,
+                                        &connection_status_for_task,
+                                        &code,
+                                        &message,
+                                        failed_topic_ids,
+                                    ).await;
+                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                    break;
+                                },
                             }
                         },
                         res = ws_stream.next() => {
@@ -1648,8 +1899,54 @@ async fn run_sync_session(
                                 Some(Ok(msg)) => {
                                     match msg {
                                         Message::Text(text) => {
-                                let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-                                if payload.is_null() { continue; }
+                                let payload: Value = match serde_json::from_str::<Value>(&text) {
+                                    Ok(payload) if payload.is_object() => payload,
+                                    Ok(_) => {
+                                        let message = "Sync protocol frame must be a JSON object";
+                                        fatal_error = true;
+                                        publish_sync_status(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                            "error",
+                                            message,
+                                        ).await;
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        let message = format!("Malformed sync protocol frame: {error}");
+                                        fatal_error = true;
+                                        publish_sync_status(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                            "error",
+                                            &message,
+                                        ).await;
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
+                                    }
+                                };
+                                if payload
+                                    .get("type")
+                                    .and_then(Value::as_str)
+                                    .filter(|value| !value.is_empty())
+                                    .is_none()
+                                {
+                                    let message = "Sync protocol frame requires a non-empty string type";
+                                    fatal_error = true;
+                                    publish_sync_error(
+                                        &handle_clone,
+                                        session_id,
+                                        &connection_status_for_task,
+                                        "PROTOCOL_FRAME_INVALID",
+                                        message,
+                                        Vec::new(),
+                                    ).await;
+                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                    break;
+                                }
 
                                 let h = handle_clone.clone();
                                 let c = http_client.clone();
@@ -1727,16 +2024,59 @@ async fn run_sync_session(
                                         }).await;
                                     },
                                     Some("SYNC_ERROR") => {
-                                        let message = payload["message"].as_str().unwrap_or("Unknown desktop error");
-                                        let code = payload["code"].as_u64().unwrap_or(500);
-                                        let err_msg = format!("Desktop Error ({}): {}", code, message);
+                                        let Some(message) = payload.get("message").and_then(Value::as_str).filter(|value| !value.is_empty()) else {
+                                            fatal_error = true;
+                                            publish_sync_error(
+                                                &handle_clone,
+                                                session_id,
+                                                &connection_status_for_task,
+                                                "PROTOCOL_FRAME_INVALID",
+                                                "SYNC_ERROR.message must be a non-empty string",
+                                                Vec::new(),
+                                            ).await;
+                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                            break;
+                                        };
+                                        let code = match payload.get("code") {
+                                            Some(Value::String(code)) if !code.is_empty() => code.clone(),
+                                            Some(Value::Number(code)) if code.is_u64() => code.to_string(),
+                                            _ => {
+                                                fatal_error = true;
+                                                publish_sync_error(
+                                                    &handle_clone,
+                                                    session_id,
+                                                    &connection_status_for_task,
+                                                    "PROTOCOL_FRAME_INVALID",
+                                                    "SYNC_ERROR.code must be a non-empty string or unsigned integer",
+                                                    Vec::new(),
+                                                ).await;
+                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                break;
+                                            }
+                                        };
+                                        let err_msg = format!("Desktop Error ({code}): {message}");
                                         log::error!("[SyncService] {}", err_msg);
                                         emit_sync_log(&handle_clone, "error", &err_msg);
-                                        publish_sync_status(&handle_clone, session_id, &connection_status_for_task, "error", &err_msg).await;
-                                        // 致命错误，建议断开或重试
+                                        publish_sync_error(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                            &code,
+                                            &err_msg,
+                                            Vec::new(),
+                                        ).await;
+                                        fatal_error = true;
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
                                     },
                                     Some("SYNC_DIFF_RESULTS") => {
-                                        let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
+                                        let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else {
+                                            let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                                attempt_id,
+                                                message: "SYNC_DIFF_RESULTS.dataType is missing or invalid".to_string(),
+                                            });
+                                            continue;
+                                        };
                                         if let Err(e) = crate::vcp_modules::sync_executor::diff_handler::DiffHandler::handle_diff(
                                             &h,
                                             &payload,
@@ -1754,6 +2094,7 @@ async fn run_sync_session(
                                             &changed_owners,
                                             &sync_logger_task,
                                             &task_tracker,
+                                            session_id,
                                             attempt_id,
                                         ).await {
                                             log::error!("[SyncService] DiffHandler failed: {}", e);
@@ -1764,6 +2105,23 @@ async fn run_sync_session(
                                         }
                                     },
                                     Some("SYNC_DIFF_RESULTS_BATCH") => {
+                                        let payload = match crate::vcp_modules::sync_executor::batch_diff_handler::parse_phase3_batch_frame(&text) {
+                                            Ok(payload) => payload,
+                                            Err(error) => {
+                                                fatal_error = true;
+                                                emit_sync_log(&handle_clone, "error", &error.message);
+                                                publish_sync_error(
+                                                    &handle_clone,
+                                                    session_id,
+                                                    &connection_status_for_task,
+                                                    &error.code,
+                                                    &error.message,
+                                                    error.failed_topic_ids,
+                                                ).await;
+                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                break;
+                                            }
+                                        };
                                         if let Err(e) = crate::vcp_modules::sync_executor::batch_diff_handler::BatchDiffHandler::handle_diff_batch(
                                             &h,
                                             &payload,
@@ -1786,14 +2144,15 @@ async fn run_sync_session(
                                             emit_sync_log(
                                                 &handle_clone,
                                                 "error",
-                                                &format!("Phase 3 failed: {}", e),
+                                                &e.message,
                                             );
-                                            publish_sync_status(
+                                            publish_sync_error(
                                                 &handle_clone,
                                                 session_id,
                                                 &connection_status_for_task,
-                                                "error",
-                                                &format!("Phase 3 failed: {}", e),
+                                                &e.code,
+                                                &e.message,
+                                                e.failed_topic_ids,
                                             ).await;
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
@@ -1801,14 +2160,24 @@ async fn run_sync_session(
                                     },
                                     Some("SYNC_TOPIC_HASH_RESULTS") => {
                                         manifest_phase.store(3, Ordering::SeqCst); // 进入 Phase 2.5+，旧 Phase 2 看门狗失效
-                                        if let Some(changed) = payload["changedTopics"].as_array() {
-                                            let changed_ids: Vec<String> = changed.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-                                            log::info!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_ids.len());
-                                            {
-                                                let mut guard = changed_topics.lock().await;
-                                                *guard = changed_ids;
+                                        match parse_unique_nonempty_strings(
+                                            &payload["changedTopics"],
+                                            "SYNC_TOPIC_HASH_RESULTS.changedTopics",
+                                        ) {
+                                            Ok(changed_ids) => {
+                                                log::info!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_ids.len());
+                                                {
+                                                    let mut guard = changed_topics.lock().await;
+                                                    *guard = changed_ids;
+                                                }
+                                                let _ = tx_internal.send(SyncCommand::StartMessages { attempt_id });
                                             }
-                                            let _ = tx_internal.send(SyncCommand::StartMessages { attempt_id });
+                                            Err(message) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                                    attempt_id,
+                                                    message,
+                                                });
+                                            }
                                         }
                                     },
                                     Some("PHASE_MANIFESTS") => {
@@ -1840,6 +2209,7 @@ async fn run_sync_session(
                                             &handle_clone,
                                             session_id,
                                             &connection_status_for_task,
+                                            pending_msg_topics_task.completion_summary().await,
                                         ).await;
                                         if sync_success {
                                             if let Ok(mut logger) = sync_logger_task.lock() {
@@ -2194,7 +2564,7 @@ pub async fn get_sync_status(state: State<'_, SyncState>) -> Result<String, Stri
 pub async fn start_manual_sync(
     handle: AppHandle,
     state: State<'_, SyncState>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let _lifecycle_guard = state.lifecycle.lock().await;
 
     let finished_session = {
@@ -2228,6 +2598,7 @@ pub async fn start_manual_sync(
         let _owner_commit = state.owner_commit.lock().await;
         state.current_session_id.store(session_id, Ordering::SeqCst);
         state.ws_sender.install(session_id, command_tx.clone());
+        *state.connection_status.write().await = "disconnected".to_string();
     }
     let cancel_token = CancellationToken::new();
 
@@ -2252,7 +2623,7 @@ pub async fn start_manual_sync(
         command_tx,
         join_handle,
     });
-    Ok(())
+    Ok(session_id)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2376,6 +2747,44 @@ mod tests {
         assert_eq!(
             protocol_send_failure_message("owner metadata manifest", "socket closed"),
             "Failed to send owner metadata manifest: socket closed"
+        );
+    }
+
+    #[test]
+    fn protocol_1_1_version_ack_is_strict_and_uses_public_field_names() {
+        let ack = parse_version_ack(&json!({
+            "type": "VERSION_ACK",
+            "pluginVersion": "1.1.0",
+            "protocolVersion": "1.1",
+        }))
+        .expect("strict 1.1 acknowledgement");
+        assert_eq!(ack.plugin_version, "1.1.0");
+        assert_eq!(ack.protocol_version, "1.1");
+
+        assert!(parse_version_ack(&json!({
+            "type": "VERSION_ACK",
+            "version": "1.1.0",
+        }))
+        .is_err());
+        assert!(parse_version_ack(&json!({
+            "type": "VERSION_ACK",
+            "pluginVersion": "1.1.0",
+            "protocolVersion": 1.1,
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn changed_topic_list_rejects_wrong_types_empty_ids_and_duplicates() {
+        assert_eq!(
+            parse_unique_nonempty_strings(&json!(["topic-a", "topic-b"]), "changedTopics")
+                .expect("valid topic list"),
+            vec!["topic-a".to_string(), "topic-b".to_string()]
+        );
+        assert!(parse_unique_nonempty_strings(&json!("topic-a"), "changedTopics").is_err());
+        assert!(parse_unique_nonempty_strings(&json!([""]), "changedTopics").is_err());
+        assert!(
+            parse_unique_nonempty_strings(&json!(["topic-a", "topic-a"]), "changedTopics").is_err()
         );
     }
 

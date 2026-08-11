@@ -4,7 +4,7 @@
   <p><em>From Desktop Client to Cyber-Physical Avatar.</em></p>
 
   <p>
-    <img src="https://img.shields.io/badge/version-1.1.3-blue" alt="version">
+    <img src="https://img.shields.io/badge/version-1.1.4-blue" alt="version">
     <img src="https://img.shields.io/badge/platform-Android-green?logo=android" alt="platform">
     <img src="https://img.shields.io/badge/framework-Tauri%202.11.2%20%7C%20Vue%203.5.33-26A17B?logo=tauri" alt="framework">
     <img src="https://img.shields.io/badge/backend-Rust%20%7C%20Tokio-000000?logo=rust" alt="backend">
@@ -474,7 +474,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 
 ### 7.1 用户安装（普通用户）
 
-1. 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 下载最新 `VCPMobile_v1.1.3_arm64-v8a.apk`
+1. 前往 [Releases](https://github.com/MRiecy/VCPMobile/releases) 下载最新 `VCPMobile_v1.1.4_arm64-v8a.apk`
 2. 安装到 Android 设备（minSdk 26，推荐 Android 10+）
 3. 启动应用，完成权限引导（通知、存储、电池优化白名单）
 4. 配置 VCP 服务器地址与 API Key

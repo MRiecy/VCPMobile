@@ -4,6 +4,8 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
@@ -12,6 +14,8 @@ use tokio::task::JoinSet;
 const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_NDJSON_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_NDJSON_ENTITIES: usize = 100_000;
+const MAX_WARNING_SAMPLES: usize = 8;
+const NDJSON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct NdjsonBudget {
     max_frames: usize,
@@ -60,13 +64,235 @@ impl NdjsonBudget {
     }
 }
 
-#[derive(serde::Deserialize)]
 struct TopicNDJSONFrame {
-    #[serde(rename = "topicId")]
     topic_id: String,
     messages: Vec<crate::vcp_modules::sync_dto::MessagePullSyncDTO>,
-    #[serde(rename = "_error")]
     error: Option<String>,
+    legacy_attachment_warnings: usize,
+    warning_samples: Vec<String>,
+}
+
+#[derive(Default)]
+struct BoundedWarnings {
+    count: usize,
+    samples: Vec<String>,
+}
+
+impl BoundedWarnings {
+    fn push(&mut self, message: String) {
+        self.count += 1;
+        if self.samples.len() < MAX_WARNING_SAMPLES {
+            self.samples.push(message);
+        }
+    }
+}
+
+enum HashField {
+    Missing,
+    Valid(String),
+    Invalid,
+}
+
+fn read_hash_field(object: &serde_json::Map<String, Value>, key: &str) -> HashField {
+    match object.get(key) {
+        None | Some(Value::Null) => HashField::Missing,
+        Some(Value::String(hash)) => {
+            let normalized = hash.to_ascii_lowercase();
+            if crate::vcp_modules::infra::utils::is_valid_cas_hash(&normalized) {
+                HashField::Valid(normalized)
+            } else {
+                HashField::Invalid
+            }
+        }
+        Some(_) => HashField::Invalid,
+    }
+}
+
+fn normalize_timestamp(value: Option<&Value>, message_id: &str) -> Result<u64, String> {
+    let timestamp = match value {
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+            format!("Message {message_id} timestamp must be a non-negative integer")
+        }),
+        Some(Value::String(timestamp)) => timestamp.parse::<u64>().map_err(|_| {
+            format!("Message {message_id} timestamp string must be a non-negative integer")
+        }),
+        _ => Err(format!(
+            "Message {message_id} timestamp must be a non-negative integer or integer string"
+        )),
+    }?;
+    if timestamp > i64::MAX as u64 {
+        return Err(format!(
+            "Message {message_id} timestamp exceeds the SQLite integer range"
+        ));
+    }
+    Ok(timestamp)
+}
+
+fn canonicalize_attachment(
+    value: Value,
+    message_id: &str,
+    attachment_index: usize,
+    warnings: &mut BoundedWarnings,
+) -> Result<Option<Value>, String> {
+    let mut object = value.as_object().cloned().ok_or_else(|| {
+        format!("Message {message_id} attachment {attachment_index} must be an object")
+    })?;
+
+    let nested = match object.get("_fileManagerData") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(nested)) => Some(nested.clone()),
+        Some(_) => {
+            warnings.push(format!(
+                "message={message_id} attachment={attachment_index}: invalid _fileManagerData"
+            ));
+            return Ok(None);
+        }
+    };
+    let top_hash = read_hash_field(&object, "hash");
+    let nested_hash = nested
+        .as_ref()
+        .map(|nested| read_hash_field(nested, "hash"))
+        .unwrap_or(HashField::Missing);
+
+    let normalized_hash = match (top_hash, nested_hash) {
+        (HashField::Invalid, _) | (_, HashField::Invalid) => None,
+        (HashField::Valid(top), HashField::Valid(nested)) if top == nested => Some(top),
+        (HashField::Valid(_), HashField::Valid(_)) => None,
+        (HashField::Valid(hash), HashField::Missing)
+        | (HashField::Missing, HashField::Valid(hash)) => Some(hash),
+        (HashField::Missing, HashField::Missing) => None,
+    };
+    let Some(hash) = normalized_hash else {
+        warnings.push(format!(
+            "message={message_id} attachment={attachment_index}: missing, invalid, or conflicting SHA-256"
+        ));
+        return Ok(None);
+    };
+
+    if let Some(nested) = nested {
+        for (nested_key, public_key) in [
+            ("extractedText", "extractedText"),
+            ("imageFrames", "imageFrames"),
+            ("createdAt", "createdAt"),
+        ] {
+            if !object.contains_key(public_key) {
+                if let Some(value) = nested.get(nested_key) {
+                    object.insert(public_key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+
+    object.insert("hash".to_string(), Value::String(hash));
+    object.remove("_fileManagerData");
+    object.remove("src");
+    object.remove("resolvedSrc");
+    object.remove("internalPath");
+    object.remove("thumbnailPath");
+    object.remove("path");
+    object.remove("filePath");
+    object.remove("status");
+    Ok(Some(Value::Object(object)))
+}
+
+fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "NDJSON frame must be an object".to_string())?;
+    let topic_id = object
+        .get("topicId")
+        .and_then(Value::as_str)
+        .filter(|topic_id| !topic_id.is_empty())
+        .ok_or_else(|| "NDJSON frame contains missing or empty topicId".to_string())?
+        .to_string();
+    let error = match object.get("_error") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(error)) if !error.is_empty() => Some(error.clone()),
+        Some(_) => {
+            return Err(format!(
+                "NDJSON error frame for {topic_id} has invalid _error"
+            ))
+        }
+    };
+    if error.is_some() {
+        return Ok(TopicNDJSONFrame {
+            topic_id,
+            messages: Vec::new(),
+            error,
+            legacy_attachment_warnings: 0,
+            warning_samples: Vec::new(),
+        });
+    }
+
+    let raw_messages = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("NDJSON frame for {topic_id} requires messages array"))?;
+    let mut warnings = BoundedWarnings::default();
+    let mut seen_message_ids = HashSet::new();
+    let mut messages = Vec::with_capacity(raw_messages.len());
+    for raw_message in raw_messages {
+        let mut message = raw_message
+            .as_object()
+            .cloned()
+            .ok_or_else(|| format!("Topic {topic_id} contains a non-object message"))?;
+        let message_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("Topic {topic_id} contains a message with missing or empty id"))?
+            .to_string();
+        if !seen_message_ids.insert(message_id.clone()) {
+            return Err(format!(
+                "Topic {topic_id} contains duplicate message {message_id}"
+            ));
+        }
+        message
+            .get("role")
+            .and_then(Value::as_str)
+            .filter(|role| !role.is_empty())
+            .ok_or_else(|| format!("Message {message_id} has missing or empty role"))?;
+        let timestamp = normalize_timestamp(message.get("timestamp"), &message_id)?;
+        message.insert("timestamp".to_string(), Value::from(timestamp));
+        message.remove("contentHash");
+        message.remove("content_hash");
+
+        match message.remove("attachments") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(attachments)) => {
+                let mut canonical = Vec::with_capacity(attachments.len());
+                for (index, attachment) in attachments.into_iter().enumerate() {
+                    if let Some(attachment) =
+                        canonicalize_attachment(attachment, &message_id, index, &mut warnings)?
+                    {
+                        canonical.push(attachment);
+                    }
+                }
+                if !canonical.is_empty() {
+                    message.insert("attachments".to_string(), Value::Array(canonical));
+                }
+            }
+            Some(_) => {
+                return Err(format!(
+                    "Message {message_id} attachments must be an array or null"
+                ));
+            }
+        }
+
+        let dto = serde_json::from_value(Value::Object(message))
+            .map_err(|error| format!("Message {message_id} violates protocol 1.1: {error}"))?;
+        messages.push(dto);
+    }
+
+    Ok(TopicNDJSONFrame {
+        topic_id,
+        messages,
+        error: None,
+        legacy_attachment_warnings: warnings.count,
+        warning_samples: warnings.samples,
+    })
 }
 
 /// 共享消息处理管线：附件路径批量查询 → 填充 → 预渲染并文本压缩(通过Rayon并行化) → 写入队列
@@ -86,13 +312,13 @@ async fn process_topic_messages<R: Runtime>(
 
     // 1. 批量收集所有附件 hash，一次性查询本地路径（替代 N+1 查询）
     let t_att_start = std::time::Instant::now();
-    let mut all_hashes = Vec::new();
+    let mut all_hashes = HashSet::new();
     for msg in &parsed_messages {
         if let Some(ref atts) = msg.attachments {
             for att in atts {
                 if let Some(ref hash) = att.hash {
                     if !hash.is_empty() {
-                        all_hashes.push(hash.to_string());
+                        all_hashes.insert(hash.to_string());
                     }
                 }
             }
@@ -101,26 +327,38 @@ async fn process_topic_messages<R: Runtime>(
 
     let mut path_map = std::collections::HashMap::new();
     if !all_hashes.is_empty() {
-        let placeholders = all_hashes
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!(
-            "SELECT hash, internal_path FROM attachments WHERE hash IN ({})",
-            placeholders
-        );
-        let mut q = sqlx::query(&query);
-        for h in &all_hashes {
-            q = q.bind(h);
-        }
-        if let Ok(rows) = q.fetch_all(&db.pool).await {
+        let all_hashes = all_hashes.into_iter().collect::<Vec<_>>();
+        for hash_chunk in all_hashes.chunks(500) {
+            let placeholders = hash_chunk
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query = format!(
+                "SELECT hash, internal_path FROM attachments WHERE hash IN ({})",
+                placeholders
+            );
+            let mut query = sqlx::query(&query);
+            for hash in hash_chunk {
+                query = query.bind(hash);
+            }
+            let rows = query.fetch_all(&db.pool).await.map_err(|error| {
+                format!("Failed to resolve local attachment CAS paths: {error}")
+            })?;
             for row in rows {
-                if let (Ok(hash), Ok(path)) = (
-                    row.try_get::<String, _>("hash"),
-                    row.try_get::<String, _>("internal_path"),
-                ) {
-                    path_map.insert(hash, path);
+                let hash = row
+                    .try_get::<String, _>("hash")
+                    .map_err(|error| format!("Failed to decode attachment hash: {error}"))?;
+                let path = row
+                    .try_get::<String, _>("internal_path")
+                    .map_err(|error| format!("Failed to decode attachment path: {error}"))?;
+                let clean_path = path.trim_start_matches("file://");
+                if !clean_path.is_empty()
+                    && tokio::fs::metadata(clean_path)
+                        .await
+                        .is_ok_and(|metadata| metadata.is_file())
+                {
+                    path_map.insert(hash, clean_path.to_string());
                 }
             }
         }
@@ -136,15 +374,14 @@ async fn process_topic_messages<R: Runtime>(
                         if let Some(path) = path_map.get(hash) {
                             att.internal_path = path.clone();
                             att.src = format!("file://{}", path);
+                            att.status = Some("ready".to_string());
                         } else {
-                            let default_path = format!("file://attachments/{}", hash);
-                            att.internal_path =
-                                default_path.trim_start_matches("file://").to_string();
-                            att.src = default_path;
+                            att.internal_path.clear();
+                            att.src.clear();
+                            att.status = Some("desktop_only".to_string());
                         }
                     }
                 }
-                att.status = Some("ready".to_string());
             }
         }
     }
@@ -177,14 +414,12 @@ async fn process_topic_messages<R: Runtime>(
                         })
                         .unwrap_or_default();
 
-                    // ⚡ 优化：如果桌面端下发了 content_hash，则直接秒级复用，免去重算开销
-                    let content_hash = match msg.content_hash {
-                        Some(ref h) if !h.is_empty() => h.clone(),
-                        _ => HashAggregator::compute_message_fingerprint(
-                            &msg.content,
-                            &attachment_hashes,
-                        ),
-                    };
+                    // contentHash 只依据最终规范化消息计算，禁止复用桌面端在内部字段
+                    // 尚未剥离时生成的旧指纹。
+                    let content_hash = HashAggregator::compute_message_fingerprint(
+                        &msg.content,
+                        &attachment_hashes,
+                    );
 
                     // B. 预渲染（按开关控制）
                     let content = &msg.content;
@@ -269,6 +504,7 @@ pub struct BatchPullResult {
     pub success: bool,
     pub parsed_count: usize,
     pub failed_count: usize,
+    pub legacy_attachment_warnings: usize,
     pub error: Option<String>,
 }
 
@@ -353,6 +589,24 @@ impl PullExecutor {
         requests: Vec<serde_json::Value>,
         write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
+        let mut expected = HashSet::new();
+        for request in &requests {
+            let id = request
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Entity pull request requires a non-empty id".to_string())?;
+            let entity_type = request
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|value| matches!(*value, "agent" | "group" | "agent_topic" | "group_topic"))
+                .ok_or_else(|| format!("Entity pull request {id} has an invalid type"))?;
+            if !expected.insert((id.to_string(), entity_type.to_string())) {
+                return Err(format!(
+                    "Entity pull request contains duplicate {entity_type}/{id}"
+                ));
+            }
+        }
         let url = format!("{}/api/mobile-sync/download-entities", http_url);
         let res = client
             .post(&url)
@@ -367,7 +621,12 @@ impl PullExecutor {
             return Err(format!("Pull entities batch failed: {}", res.status()));
         }
 
-        let results: Vec<serde_json::Value> = res.json().await.map_err(|e| e.to_string())?;
+        let bytes = res.bytes().await.map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_NDJSON_TOTAL_BYTES {
+            return Err("Entity pull response exceeds 256 MiB budget".to_string());
+        }
+        let results: Vec<serde_json::Value> =
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         log::info!(
             "[PullExecutor] Received {} entities from server",
             results.len()
@@ -375,54 +634,95 @@ impl PullExecutor {
 
         let mut agent_topics = Vec::new();
         let mut group_topics = Vec::new();
+        let mut seen = HashSet::new();
 
         for item in results {
-            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Entity pull result requires a non-empty id".to_string())?;
             let r#type = item
                 .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let data = item.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("Entity pull result {id} requires type"))?;
+            let key = (id.to_string(), r#type.to_string());
+            if !expected.contains(&key) {
+                return Err(format!(
+                    "Entity pull returned unexpected result {type_name}/{id}",
+                    type_name = r#type
+                ));
+            }
+            if !seen.insert(key) {
+                return Err(format!(
+                    "Entity pull returned duplicate result {type_name}/{id}",
+                    type_name = r#type
+                ));
+            }
+            if item.get("success").and_then(Value::as_bool) != Some(true) {
+                let error = item
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error");
+                return Err(format!(
+                    "Entity pull {type_name}/{id} failed: {error}",
+                    type_name = r#type
+                ));
+            }
+            let data = item.get("data").cloned().ok_or_else(|| {
+                format!(
+                    "Entity pull result {type_name}/{id} requires data",
+                    type_name = r#type
+                )
+            })?;
 
             match r#type {
                 "agent" => {
-                    if let Ok(dto) = serde_json::from_value::<AgentSyncDTO>(data) {
-                        write_queue
-                            .submit(DbWriteTask::Agent {
-                                id: id.to_string(),
-                                dto,
-                            })
-                            .await?;
-                    }
+                    let dto = serde_json::from_value::<AgentSyncDTO>(data)
+                        .map_err(|error| format!("Invalid agent {id}: {error}"))?;
+                    write_queue
+                        .submit(DbWriteTask::Agent {
+                            id: id.to_string(),
+                            dto,
+                        })
+                        .await?;
                 }
                 "group" => {
-                    if let Ok(dto) = serde_json::from_value::<GroupSyncDTO>(data) {
-                        write_queue
-                            .submit(DbWriteTask::Group {
-                                id: id.to_string(),
-                                dto,
-                            })
-                            .await?;
-                    }
+                    let dto = serde_json::from_value::<GroupSyncDTO>(data)
+                        .map_err(|error| format!("Invalid group {id}: {error}"))?;
+                    write_queue
+                        .submit(DbWriteTask::Group {
+                            id: id.to_string(),
+                            dto,
+                        })
+                        .await?;
                 }
                 "agent_topic" => {
                     if id == "default" {
                         continue;
                     }
-                    if let Ok(dto) = serde_json::from_value::<AgentTopicSyncDTO>(data) {
-                        agent_topics.push((id.to_string(), dto));
-                    }
+                    let dto = serde_json::from_value::<AgentTopicSyncDTO>(data)
+                        .map_err(|error| format!("Invalid agent topic {id}: {error}"))?;
+                    agent_topics.push((id.to_string(), dto));
                 }
                 "group_topic" => {
                     if id == "default" {
                         continue;
                     }
-                    if let Ok(dto) = serde_json::from_value::<GroupTopicSyncDTO>(data) {
-                        group_topics.push((id.to_string(), dto));
-                    }
+                    let dto = serde_json::from_value::<GroupTopicSyncDTO>(data)
+                        .map_err(|error| format!("Invalid group topic {id}: {error}"))?;
+                    group_topics.push((id.to_string(), dto));
                 }
-                _ => {}
+                _ => return Err(format!("Entity pull returned unsupported type {}", r#type)),
             }
+        }
+
+        if seen != expected {
+            let mut missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
+            missing.sort();
+            return Err(format!(
+                "Entity pull response is missing results {missing:?}"
+            ));
         }
 
         if !agent_topics.is_empty() {
@@ -618,10 +918,10 @@ impl PullExecutor {
     /// 流式批量 Pull — 一次 HTTP 请求拉取多个 topic 的消息
     ///
     /// 桌面端以 NDJSON 逐 topic 分帧返回，手机端逐行消费，
-    /// 不等待整个响应结束。单 topic 失败不中断流。
+    /// 不等待整个响应结束。任何 topic 失败都会通过结果传播并终止当前 attempt。
     ///
     /// **并发控制**: Semaphore(20) + tokio spawn 并行处理 topic 消息，
-    /// mpsc channel 实时推送进度日志。NDJSON 解析与并发处理完全分离。
+    /// 有界 mpsc channel 实时推送进度日志并施加背压。NDJSON 解析与并发处理完全分离。
     ///
     /// 返回每个 topic 的处理结果。
     pub async fn pull_messages_batch<R: Runtime>(
@@ -636,6 +936,16 @@ impl PullExecutor {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
+        let expected_topics: HashSet<String> = requests
+            .iter()
+            .map(|(topic_id, _)| topic_id.clone())
+            .collect();
+        if expected_topics.len() != requests.len()
+            || expected_topics.iter().any(|topic_id| topic_id.is_empty())
+        {
+            return Err("Pull request contains empty or duplicate topicId".to_string());
+        }
+        let mut seen_topics = HashSet::new();
 
         let url = format!("{}/api/mobile-sync/download-messages-stream", http_url);
         let req_body: Vec<serde_json::Value> = requests
@@ -663,7 +973,7 @@ impl PullExecutor {
 
         // ── 并发基础设施 ──
         let sem = Arc::new(Semaphore::new(20));
-        let (tx, mut rx) = mpsc::unbounded_channel::<BatchPullResult>();
+        let (tx, mut rx) = mpsc::channel::<BatchPullResult>(64);
         let mut spawn_handles = JoinSet::new();
         let total = requests.len();
 
@@ -700,6 +1010,7 @@ impl PullExecutor {
             }
             results
         };
+        let receiver_handle = tokio::spawn(receiver);
 
         // ── NDJSON 解析协程 ──
         use futures_util::StreamExt;
@@ -708,7 +1019,13 @@ impl PullExecutor {
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
         let mut ndjson_budget = NdjsonBudget::new(requests.len());
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            let next_chunk = tokio::time::timeout(NDJSON_IDLE_TIMEOUT, stream.next())
+                .await
+                .map_err(|_| "NDJSON stream idle timeout after 30 seconds".to_string())?;
+            let Some(chunk_result) = next_chunk else {
+                break;
+            };
             let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
             ndjson_budget.observe_chunk(chunk.len())?;
 
@@ -738,31 +1055,46 @@ impl PullExecutor {
                     continue;
                 }
 
-                let frame: TopicNDJSONFrame = serde_json::from_slice(&line)
-                    .map_err(|e| format!("Malformed NDJSON frame: {}", e))?;
+                let frame = parse_topic_ndjson_frame(&line)?;
                 ndjson_budget.observe_frame(line.len(), frame.messages.len())?;
                 let topic_id = frame.topic_id;
-                if topic_id.is_empty() {
-                    return Err("NDJSON frame contains empty topicId".to_string());
+                if !expected_topics.contains(&topic_id) {
+                    return Err(format!("NDJSON returned unexpected topicId {topic_id}"));
+                }
+                if !seen_topics.insert(topic_id.clone()) {
+                    return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
+                }
+                for warning in &frame.warning_samples {
+                    crate::vcp_modules::sync::sync_service::emit_sync_log(
+                        app,
+                        "warning",
+                        &format!("旧附件已省略: {warning}"),
+                    );
                 }
                 if let Some(topic_err) = frame.error {
-                    let _ = tx.send(BatchPullResult {
+                    tx.send(BatchPullResult {
                         topic_id,
                         success: false,
                         parsed_count: 0,
                         failed_count: 0,
+                        legacy_attachment_warnings: frame.legacy_attachment_warnings,
                         error: Some(format!("Desktop error: {}", topic_err)),
-                    });
+                    })
+                    .await
+                    .map_err(|_| "Pull result receiver closed".to_string())?;
                     continue;
                 }
                 if frame.messages.is_empty() {
-                    let _ = tx.send(BatchPullResult {
+                    tx.send(BatchPullResult {
                         topic_id,
                         success: true,
                         parsed_count: 0,
                         failed_count: 0,
+                        legacy_attachment_warnings: frame.legacy_attachment_warnings,
                         error: None,
-                    });
+                    })
+                    .await
+                    .map_err(|_| "Pull result receiver closed".to_string())?;
                     continue;
                 }
 
@@ -781,6 +1113,7 @@ impl PullExecutor {
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
                 let pull_dtos = frame.messages;
+                let legacy_attachment_warnings = frame.legacy_attachment_warnings;
 
                 spawn_handles.spawn(async move {
                     let start_t = std::time::Instant::now();
@@ -814,8 +1147,9 @@ impl PullExecutor {
                                         success: true,
                                         parsed_count: parsed,
                                         failed_count: failed,
+                                        legacy_attachment_warnings,
                                         error: None,
-                                    });
+                                    }).await;
                                 }
                                 Err(e) => {
                                     let _ = tx_clone.send(BatchPullResult {
@@ -823,8 +1157,9 @@ impl PullExecutor {
                                         success: false,
                                         parsed_count: 0,
                                         failed_count: 0,
+                                        legacy_attachment_warnings,
                                         error: Some(e),
-                                    });
+                                    }).await;
                                 }
                             }
                 });
@@ -842,90 +1177,114 @@ impl PullExecutor {
             if buffer.len() > MAX_NDJSON_LINE_BYTES {
                 return Err("NDJSON trailing frame exceeds 32MB budget".to_string());
             }
-            if let Ok(frame) = serde_json::from_slice::<TopicNDJSONFrame>(&buffer) {
-                ndjson_budget.observe_frame(buffer.len(), frame.messages.len())?;
-                let topic_id = frame.topic_id;
-                if !topic_id.is_empty() {
-                    if let Some(topic_err) = frame.error {
-                        let _ = tx.send(BatchPullResult {
-                            topic_id,
-                            success: false,
-                            parsed_count: 0,
-                            failed_count: 0,
-                            error: Some(format!("Desktop error: {}", topic_err)),
-                        });
-                    } else {
-                        let pull_dtos = frame.messages;
-                        if !pull_dtos.is_empty() {
-                            while let Some(result) = spawn_handles.try_join_next() {
-                                if let Err(error) = result {
-                                    log::warn!(
-                                        "[PullExecutor] Batch pull worker failed: {}",
-                                        error
-                                    );
-                                }
-                            }
-                            let app_clone = app.clone();
-                            let wq_clone = write_queue.clone();
-                            let tx_clone = tx.clone();
-                            let permit = sem
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
-                            spawn_handles.spawn(async move {
-                                let _permit = permit;
-                                // 转换 DTO 到 ChatMessage 核心实体
-                                let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> =
-                                    pull_dtos
-                                        .into_iter()
-                                        .map(crate::vcp_modules::chat_manager::ChatMessage::from)
-                                        .collect();
-                                match process_topic_messages(
-                                    &app_clone,
-                                    &topic_id,
-                                    messages,
-                                    &wq_clone,
-                                    prerender_enabled,
-                                )
-                                .await
-                                {
-                                    Ok((parsed, failed)) => {
-                                        let _ = tx_clone.send(BatchPullResult {
-                                            topic_id,
-                                            success: true,
-                                            parsed_count: parsed,
-                                            failed_count: failed,
-                                            error: None,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        let _ = tx_clone.send(BatchPullResult {
-                                            topic_id,
-                                            success: false,
-                                            parsed_count: 0,
-                                            failed_count: 0,
-                                            error: Some(e),
-                                        });
-                                    }
-                                }
-                            });
-                        } else {
-                            let _ = tx.send(BatchPullResult {
-                                topic_id,
-                                success: true,
-                                parsed_count: 0,
-                                failed_count: 0,
-                                error: None,
-                            });
+            let frame = parse_topic_ndjson_frame(&buffer)?;
+            ndjson_budget.observe_frame(buffer.len(), frame.messages.len())?;
+            let topic_id = frame.topic_id;
+            if !expected_topics.contains(&topic_id) {
+                return Err(format!("NDJSON returned unexpected topicId {topic_id}"));
+            }
+            if !seen_topics.insert(topic_id.clone()) {
+                return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
+            }
+            for warning in &frame.warning_samples {
+                crate::vcp_modules::sync::sync_service::emit_sync_log(
+                    app,
+                    "warning",
+                    &format!("旧附件已省略: {warning}"),
+                );
+            }
+            if let Some(topic_err) = frame.error {
+                tx.send(BatchPullResult {
+                    topic_id,
+                    success: false,
+                    parsed_count: 0,
+                    failed_count: 0,
+                    legacy_attachment_warnings: frame.legacy_attachment_warnings,
+                    error: Some(format!("Desktop error: {}", topic_err)),
+                })
+                .await
+                .map_err(|_| "Pull result receiver closed".to_string())?;
+            } else {
+                let pull_dtos = frame.messages;
+                let legacy_attachment_warnings = frame.legacy_attachment_warnings;
+                if !pull_dtos.is_empty() {
+                    while let Some(result) = spawn_handles.try_join_next() {
+                        if let Err(error) = result {
+                            log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
                         }
                     }
+                    let app_clone = app.clone();
+                    let wq_clone = write_queue.clone();
+                    let tx_clone = tx.clone();
+                    let permit = sem
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
+                    spawn_handles.spawn(async move {
+                        let _permit = permit;
+                        let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> =
+                            pull_dtos
+                                .into_iter()
+                                .map(crate::vcp_modules::chat_manager::ChatMessage::from)
+                                .collect();
+                        match process_topic_messages(
+                            &app_clone,
+                            &topic_id,
+                            messages,
+                            &wq_clone,
+                            prerender_enabled,
+                        )
+                        .await
+                        {
+                            Ok((parsed, failed)) => {
+                                let _ = tx_clone
+                                    .send(BatchPullResult {
+                                        topic_id,
+                                        success: true,
+                                        parsed_count: parsed,
+                                        failed_count: failed,
+                                        legacy_attachment_warnings,
+                                        error: None,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = tx_clone
+                                    .send(BatchPullResult {
+                                        topic_id,
+                                        success: false,
+                                        parsed_count: 0,
+                                        failed_count: 0,
+                                        legacy_attachment_warnings,
+                                        error: Some(e),
+                                    })
+                                    .await;
+                            }
+                        }
+                    });
                 } else {
-                    return Err("Trailing NDJSON frame contains empty topicId".to_string());
+                    tx.send(BatchPullResult {
+                        topic_id,
+                        success: true,
+                        parsed_count: 0,
+                        failed_count: 0,
+                        legacy_attachment_warnings,
+                        error: None,
+                    })
+                    .await
+                    .map_err(|_| "Pull result receiver closed".to_string())?;
                 }
-            } else {
-                return Err("Malformed trailing NDJSON frame".to_string());
             }
+        }
+
+        if seen_topics != expected_topics {
+            let mut missing = expected_topics
+                .difference(&seen_topics)
+                .cloned()
+                .collect::<Vec<_>>();
+            missing.sort();
+            return Err(format!("NDJSON response is missing topics {missing:?}"));
         }
 
         // ── 等待所有任务完成 ──
@@ -937,7 +1296,10 @@ impl PullExecutor {
                 }
             }
         };
-        let (_, results) = tokio::join!(wait_for_workers, receiver);
+        wait_for_workers.await;
+        let results = receiver_handle
+            .await
+            .map_err(|error| format!("Pull result receiver failed: {error}"))?;
 
         let ok_count = results.iter().filter(|r| r.success).count();
         let err_count = results.iter().filter(|r| !r.success).count();
@@ -952,7 +1314,10 @@ impl PullExecutor {
 
 #[cfg(test)]
 mod ndjson_budget_tests {
-    use super::{NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES};
+    use super::{
+        parse_topic_ndjson_frame, NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES,
+    };
+    use serde_json::json;
 
     #[test]
     fn rejects_oversized_line_total_and_frame_fanout() {
@@ -973,5 +1338,62 @@ mod ndjson_budget_tests {
         let mut budget = NdjsonBudget::new(2);
         assert!(budget.observe_frame(1, 75_000).is_ok());
         assert!(budget.observe_frame(1, 25_001).is_err());
+    }
+
+    #[test]
+    fn inbound_cleaner_preserves_messages_and_omits_only_bad_legacy_attachments() {
+        let hash_a = "A".repeat(64);
+        let hash_b = "b".repeat(64);
+        let frame = json!({
+            "topicId": "topic-unicode",
+            "messages": [{
+                "id": "message-1",
+                "role": "user",
+                "content": "你好 <section data-raw=\"yes\">raw html</section>",
+                "timestamp": "123",
+                "contentHash": "must-not-be-trusted",
+                "attachments": [
+                    { "type": "text/plain", "name": "flat.txt", "size": 1, "hash": hash_a },
+                    { "type": "text/plain", "name": "nested.txt", "size": 2,
+                      "_fileManagerData": { "hash": hash_b, "extractedText": "trusted text" },
+                      "src": "desktop-only-path" },
+                    { "type": "text/plain", "name": "null.txt", "size": 3, "hash": null },
+                    { "type": "text/plain", "name": "missing.txt", "size": 4 },
+                    { "type": "text/plain", "name": "conflict.txt", "size": 5,
+                      "hash": "c".repeat(64), "_fileManagerData": { "hash": "d".repeat(64) } }
+                ]
+            }]
+        });
+
+        let parsed = parse_topic_ndjson_frame(frame.to_string().as_bytes())
+            .expect("legacy frame should be narrowly cleaned");
+        assert_eq!(parsed.topic_id, "topic-unicode");
+        assert_eq!(parsed.legacy_attachment_warnings, 3);
+        assert_eq!(parsed.warning_samples.len(), 3);
+        let message = &parsed.messages[0];
+        assert_eq!(message.timestamp, 123);
+        assert!(message.content.contains("你好"));
+        assert!(message.content_hash.is_none());
+        let attachments = message.attachments.as_ref().expect("valid attachments");
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].hash, "a".repeat(64));
+        assert_eq!(attachments[1].hash, "b".repeat(64));
+        assert_eq!(
+            attachments[1].extracted_text.as_deref(),
+            Some("trusted text")
+        );
+    }
+
+    #[test]
+    fn inbound_cleaner_fails_closed_on_message_contract_errors() {
+        for frame in [
+            json!({ "topicId": "topic", "messages": [{ "id": "", "role": "user", "timestamp": 1 }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "", "timestamp": 1 }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": -1 }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": u64::MAX.to_string() }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "attachments": {} }] }),
+        ] {
+            assert!(parse_topic_ndjson_frame(frame.to_string().as_bytes()).is_err());
+        }
     }
 }

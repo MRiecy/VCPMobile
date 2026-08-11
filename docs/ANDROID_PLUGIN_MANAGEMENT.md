@@ -1,7 +1,7 @@
 # Android 插件管理体系规范
 
 > **文档编号**: ARCH-ANDROID-001  
-> **版本**: 1.1.3
+> **版本**: 1.1.4
 > **日期**: 2026-07-04
 > **附录新增**: 2026-05-19 | 附录 A（插件生态速查）+ 附录 B（权限实战手册）  
 > **状态**: 已迁移至 `tauri-plugin-vcp-mobile`  
@@ -757,4 +757,4 @@ window.addEventListener('vcp-permission-change', (e: CustomEvent) => {
 
 ---
 
-*最后更新：2026-07-04 | VCP Mobile v1.1.3*
+*最后更新：2026-08-11 | VCP Mobile v1.1.4*

@@ -7,23 +7,7 @@ import AttachmentRenderer from './AttachmentRenderer.vue';
 import { useChatHistoryStore } from "../../../core/stores/chatHistoryStore";
 import { useOverlayStore } from "../../../core/stores/overlay";
 import { useNotificationStore } from "../../../core/stores/notification";
-
-interface Attachment {
-  type: string;
-  src: string;
-  resolvedSrc?: string;
-  name: string;
-  size: number;
-  hash?: string;
-  extractedText?: string;
-  thumbnailPath?: string;
-  id?: string;
-  progress?: number;
-  status?: string;
-  internalPath?: string;
-  imageFrames?: string[];
-  createdAt?: number;
-}
+import type { Attachment } from "../../../core/types/chat";
 
 const props = defineProps<{
   attachments: Attachment[];
@@ -66,6 +50,7 @@ const isPreviewableText = (att: Attachment): boolean => {
 };
 
 const openViewer = (att: Attachment) => {
+  if (att.status === "desktop_only") return;
   const ext = att.name.split(".").pop()?.toLowerCase() || "";
   const isImage = IMAGE_WHITELIST.includes(ext) || (att.type || "").startsWith("image/");
   const isText = isPreviewableText(att);
@@ -80,6 +65,7 @@ const openViewer = (att: Attachment) => {
 };
 
 const openExternal = async (path: string) => {
+  if (!path) return;
   try {
     await invoke("open_file", { path });
   } catch (e) {
@@ -89,7 +75,13 @@ const openExternal = async (path: string) => {
 
 const removeAttachment = async (index: number) => {
   const att = props.attachments[index];
-  if (!att || !att.hash || !props.messageId || !props.topicId) return;
+  if (
+    !att ||
+    att.status === "desktop_only" ||
+    !att.hash ||
+    !props.messageId ||
+    !props.topicId
+  ) return;
 
   const confirmed = await overlayStore.showConfirm({
     title: "移除附件",
@@ -120,13 +112,26 @@ const removeAttachment = async (index: number) => {
       v-for="(att, index) in (attachments || []).filter(Boolean)"
       :key="att?.hash || index"
       class="attachment-item relative group"
-      @click="att && openViewer(att)"
     >
+      <div
+        v-if="att.status === 'desktop_only'"
+        class="min-w-48 max-w-full border-l-2 border-gray-400/60 bg-black/5 dark:bg-white/5 px-3 py-2"
+        aria-disabled="true"
+      >
+        <div class="truncate text-xs font-medium text-gray-700 dark:text-gray-300">
+          {{ att.name }}
+        </div>
+        <div class="mt-0.5 text-[10px] font-mono text-gray-500">
+          桌面专用附件 · 未同步文件内容
+        </div>
+      </div>
       <AttachmentRenderer
+        v-else
         :file="att"
         :index="index"
         :show-remove="!!props.messageId"
         @remove="removeAttachment"
+        @click="openViewer(att)"
       />
     </div>
 

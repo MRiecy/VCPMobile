@@ -142,14 +142,40 @@ pub fn assemble_history_for_vcp(
 
         if let Some(attachments) = &msg.attachments {
             for att in attachments {
+                let is_desktop_only = att.status.as_deref() == Some("desktop_only");
+                let local_path = if !att.internal_path.is_empty() {
+                    att.internal_path.clone()
+                } else {
+                    att.src.trim_start_matches("file://").to_string()
+                };
+                let is_local_ready = matches!(att.status.as_deref(), Some("ready" | "done"))
+                    && !local_path.is_empty();
+
                 // 1. 处理提取的文本内容 (文档类)
                 if let Some(text) = &att.extracted_text {
                     if !text.is_empty() {
+                        if is_desktop_only {
+                            combined_text.push_str(&format!(
+                                "\n\n[桌面附件文本: {}]\n{}\n[/桌面附件文本结束: {}]",
+                                att.name, text, att.name
+                            ));
+                        } else {
+                            combined_text.push_str(&format!(
+                                "\n\n[附加文件: {}] (文件名: {})\n{}\n[/附加文件结束: {}]",
+                                local_path, att.name, text, att.name
+                            ));
+                        }
+                    }
+                }
+
+                if is_desktop_only {
+                    if att.extracted_text.as_deref().unwrap_or_default().is_empty() {
                         combined_text.push_str(&format!(
-                            "\n\n[附加文件: {}] (文件名: {})\n{}\n[/附加文件结束: {}]",
-                            att.internal_path, att.name, text, att.name
+                            "\n\n[桌面专用附件: {}，内容未同步至移动端]",
+                            att.name
                         ));
                     }
+                    continue;
                 }
 
                 // 2. 处理多模态文件 (图片/音频/视频)
@@ -158,34 +184,29 @@ pub fn assemble_history_for_vcp(
                 let is_audio = mime.starts_with("audio/");
                 let is_video = mime.starts_with("video/");
 
-                if is_image || is_audio || is_video {
-                    let path = if !att.internal_path.is_empty() {
-                        att.internal_path.clone()
-                    } else {
-                        att.src.clone()
-                    };
-
+                if (is_image || is_audio || is_video) && is_local_ready {
                     if is_image {
-                        combined_text
-                            .push_str(&format!("\n\n[附加图片: {}] (文件名: {})", path, att.name));
+                        combined_text.push_str(&format!(
+                            "\n\n[附加图片: {}] (文件名: {})",
+                            local_path, att.name
+                        ));
                     } else {
-                        combined_text
-                            .push_str(&format!("\n\n[附加文件: {}] (文件名: {})", path, att.name));
+                        combined_text.push_str(&format!(
+                            "\n\n[附加文件: {}] (文件名: {})",
+                            local_path, att.name
+                        ));
                     }
 
                     content_parts.push(json!({
                         "type": "local_file",
-                        "path": path,
+                        "path": local_path,
                         "mime": mime
                     }));
-                } else if att.extracted_text.is_none() {
-                    let path = if !att.internal_path.is_empty() {
-                        att.internal_path.clone()
-                    } else {
-                        att.src.clone()
-                    };
-                    combined_text
-                        .push_str(&format!("\n\n[附加文件: {}] (文件名: {})", path, att.name));
+                } else if att.extracted_text.is_none() && is_local_ready {
+                    combined_text.push_str(&format!(
+                        "\n\n[附加文件: {}] (文件名: {})",
+                        local_path, att.name
+                    ));
                 }
             }
         }
@@ -256,4 +277,65 @@ pub fn assemble_history_for_vcp(
     }
 
     result
+}
+
+#[cfg(test)]
+mod desktop_only_tests {
+    use super::assemble_history_for_vcp;
+    use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
+
+    fn message_with_attachment(attachment: Attachment) -> ChatMessage {
+        ChatMessage {
+            id: "message".into(),
+            role: "user".into(),
+            content: "hello".into(),
+            timestamp: 1,
+            attachments: Some(vec![attachment]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn desktop_only_attachment_keeps_text_without_creating_local_file() {
+        let message = message_with_attachment(Attachment {
+            r#type: "image/png".into(),
+            name: "desktop.png".into(),
+            hash: Some("a".repeat(64)),
+            status: Some("desktop_only".into()),
+            extracted_text: Some("可信提取文本".into()),
+            ..Default::default()
+        });
+
+        let assembled = assemble_history_for_vcp(&[message], false, false);
+        let serialized = serde_json::to_string(&assembled).expect("serialize context");
+        assert!(serialized.contains("桌面附件文本"));
+        assert!(serialized.contains("可信提取文本"));
+        assert!(!serialized.contains("local_file"));
+        assert!(!serialized.contains("file://"));
+    }
+
+    #[test]
+    fn ready_media_requires_a_non_empty_local_path() {
+        let empty = message_with_attachment(Attachment {
+            r#type: "image/png".into(),
+            name: "missing.png".into(),
+            status: Some("ready".into()),
+            ..Default::default()
+        });
+        let ready = message_with_attachment(Attachment {
+            r#type: "image/png".into(),
+            name: "ready.png".into(),
+            status: Some("ready".into()),
+            internal_path: "/cas/ready.png".into(),
+            ..Default::default()
+        });
+
+        let empty_json = serde_json::to_string(&assemble_history_for_vcp(&[empty], false, false))
+            .expect("serialize empty context");
+        let ready_json = serde_json::to_string(&assemble_history_for_vcp(&[ready], false, false))
+            .expect("serialize ready context");
+        assert!(!empty_json.contains("local_file"));
+        assert!(ready_json.contains("local_file"));
+        assert!(ready_json.contains("/cas/ready.png"));
+    }
 }

@@ -25,6 +25,7 @@ export function useAttachmentPreview() {
    */
   const canPreview = computed(() => {
     return (attachment: Attachment): boolean => {
+      if (attachment.status === 'desktop_only') return false;
       const type = getAttachmentType(attachment);
       // Images, videos, and text files can always be previewed
       if ([AttachmentType.IMAGE, AttachmentType.VIDEO, AttachmentType.TEXT].includes(type)) {

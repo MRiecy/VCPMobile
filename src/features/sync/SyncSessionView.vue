@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from 'vue';
-import { X, Copy, Play } from 'lucide-vue-next';
+import { X, Copy, Play, RotateCcw } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
 import { useSyncSessionStore } from '../../core/stores/syncSession';
@@ -53,6 +53,7 @@ const statusLabel = computed(() => {
     case 'connecting': return '连接中';
     case 'connected': return '同步中';
     case 'completed': return '已完成';
+    case 'completed_with_warnings': return '有警告';
     case 'error': return '失败';
     default: return '等待';
   }
@@ -63,6 +64,7 @@ const statusDotClass = computed(() => {
     case 'connecting': return 'bg-yellow-400 animate-pulse';
     case 'connected': return 'bg-blue-400 animate-pulse';
     case 'completed': return 'bg-green-400';
+    case 'completed_with_warnings': return 'bg-yellow-400';
     case 'error': return 'bg-red-400';
     default: return 'bg-gray-400';
   }
@@ -72,11 +74,12 @@ const progressBarClass = computed(() => {
   switch (store.status) {
     case 'error': return 'bg-red-500';
     case 'completed': return 'bg-green-500';
+    case 'completed_with_warnings': return 'bg-yellow-500';
     default: return 'bg-blue-500';
   }
 });
 
-const isSyncing = computed(() => store.status === 'connected');
+const isSyncing = computed(() => store.status === 'connecting' || store.status === 'connected');
 
 const logColor = (level: string) => {
   switch (level) {
@@ -264,6 +267,48 @@ const handlePrerenderToggle = async (val: boolean) => {
                   {{ store.progressData.completed }}/{{ store.progressData.total }}
                 </span>
               </div>
+
+              <div
+                v-if="store.status === 'completed' || store.status === 'completed_with_warnings' || store.status === 'error'"
+                class="grid grid-cols-4 mt-3 border-y border-white/8 py-2 font-mono text-center"
+              >
+                <div>
+                  <div class="text-[9px] text-white/30">成功</div>
+                  <div class="text-xs text-green-400">{{ store.summary.successfulTopics }}</div>
+                </div>
+                <div>
+                  <div class="text-[9px] text-white/30">总数</div>
+                  <div class="text-xs text-white/70">{{ store.summary.totalTopics }}</div>
+                </div>
+                <div>
+                  <div class="text-[9px] text-white/30">失败</div>
+                  <div class="text-xs" :class="store.summary.failedTopics > 0 ? 'text-red-400' : 'text-white/50'">
+                    {{ store.summary.failedTopics }}
+                  </div>
+                </div>
+                <div>
+                  <div class="text-[9px] text-white/30">旧附件</div>
+                  <div class="text-xs" :class="store.summary.legacyAttachmentWarnings > 0 ? 'text-yellow-400' : 'text-white/50'">
+                    {{ store.summary.legacyAttachmentWarnings }}
+                  </div>
+                </div>
+              </div>
+
+              <div
+                v-if="store.terminalError"
+                class="mt-3 border-l-2 border-red-500 bg-red-500/6 px-3 py-2 text-left"
+              >
+                <div class="font-mono text-[10px] text-red-400">{{ store.terminalError.code }}</div>
+                <div class="mt-1 text-[11px] leading-relaxed text-white/70 break-words">
+                  {{ store.terminalError.message }}
+                </div>
+                <div
+                  v-if="store.terminalError.failedTopicIds.length > 0"
+                  class="mt-1 font-mono text-[9px] text-white/35 break-all"
+                >
+                  topic: {{ store.terminalError.failedTopicIds.join(', ') }}
+                </div>
+              </div>
             </div>
 
             <!-- 日志终端 -->
@@ -300,13 +345,28 @@ const handlePrerenderToggle = async (val: boolean) => {
           <span v-else-if="store.status === 'connecting'">正在建立神经同步通道...</span>
           <span v-else-if="store.status === 'connected'">同步进行中</span>
           <span v-else-if="store.status === 'completed'">同步已完成</span>
+          <span v-else-if="store.status === 'completed_with_warnings'">同步完成，存在旧附件警告</span>
           <span v-else-if="store.status === 'error'">同步失败，请检查配置</span>
         </div>
-        <button v-if="store.logs.length > 0 && store.activeTab === 'live'" @click="store.copyLogs()"
-          class="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-white/50 hover:text-white hover:bg-white/10 transition-colors">
-          <Copy :size="12" />
-          复制日志
-        </button>
+        <div v-if="store.activeTab === 'live'" class="flex items-center gap-2">
+          <button
+            v-if="store.status === 'error' || store.status === 'completed_with_warnings'"
+            :disabled="store.retryInFlight"
+            @click="store.retrySync()"
+            class="flex items-center gap-1 border-l-2 border-blue-400 px-2 py-1 text-[10px] text-blue-300 disabled:opacity-30"
+          >
+            <RotateCcw :size="12" :class="{ 'animate-spin': store.retryInFlight }" />
+            重新同步
+          </button>
+          <button
+            v-if="store.logs.length > 0"
+            @click="store.copyDiagnostics()"
+            class="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-white/50 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <Copy :size="12" />
+            复制诊断
+          </button>
+        </div>
       </div>
 
       <!-- 全局遮罩层（连接成功后激活，阻止误触） -->

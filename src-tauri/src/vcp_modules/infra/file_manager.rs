@@ -408,6 +408,54 @@ pub fn resolve_attachment_path(
 /// 2. 无 BOM 时使用 chardetng 统计检测（Firefox 同款）
 use super::file_extractor::try_extract_text;
 
+async fn commit_registered_attachment(
+    pool: &sqlx::SqlitePool,
+    hash: &str,
+    mime_type: &str,
+    size: u64,
+    internal_path: &str,
+    now: i64,
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(hash) DO UPDATE SET
+            mime_type = excluded.mime_type,
+            size = excluded.size,
+            internal_path = excluded.internal_path,
+            updated_at = excluded.updated_at",
+    )
+    .bind(hash)
+    .bind(mime_type)
+    .bind(size as i64)
+    .bind(internal_path)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "UPDATE message_attachments
+         SET status = 'ready', src = ?
+         WHERE hash = ? AND deleted_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM messages m
+             WHERE m.topic_id = message_attachments.topic_id
+               AND m.msg_id = message_attachments.msg_id
+               AND m.deleted_at IS NULL
+           )",
+    )
+    .bind(format!("file://{internal_path}"))
+    .bind(hash)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
 /// 将文件元数据注册到数据库并触发后处理 (缩略图、文本提取)
 pub async fn register_attachment_internal<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
@@ -420,21 +468,8 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
 ) -> Result<AttachmentData, String> {
     let now = crate::vcp_modules::infra::utils::now_secs() as u64;
 
-    // 1. 更新数据库 (attachments)
-    sqlx::query(
-        "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(hash) DO UPDATE SET internal_path = excluded.internal_path",
-    )
-    .bind(&hash)
-    .bind(&mime_type)
-    .bind(size as i64)
-    .bind(&internal_path)
-    .bind(now as i64)
-    .bind(now as i64)
-    .execute(pool)
-    .await
-    .map_err(|e| e.to_string())?;
+    // 1. 原子更新 CAS 索引，并把仍然存活的 desktop_only 关系提升为 ready。
+    commit_registered_attachment(pool, &hash, &mime_type, size, &internal_path, now as i64).await?;
 
     let internal_file_path = std::path::PathBuf::from(&internal_path);
 
@@ -1244,9 +1279,9 @@ pub fn check_attachment_support(original_name: String) -> Result<bool, String> {
 #[cfg(test)]
 mod security_boundary_tests {
     use super::{
-        canonical_file_within_root, safe_storage_extension, validated_attachment_file,
-        validated_direct_file, verify_existing_cas, verify_expected_hash,
-        verify_small_existing_cas,
+        canonical_file_within_root, commit_registered_attachment, safe_storage_extension,
+        validated_attachment_file, validated_direct_file, verify_existing_cas,
+        verify_expected_hash, verify_small_existing_cas,
     };
     use std::fs;
 
@@ -1366,5 +1401,60 @@ mod security_boundary_tests {
         assert!(verify_existing_cas(&path, &hash, bytes.len() as u64)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn registering_cas_promotes_only_live_desktop_only_relations() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        sqlx::query(
+            "CREATE TABLE attachments (
+                hash TEXT PRIMARY KEY, mime_type TEXT, size INTEGER, internal_path TEXT,
+                created_at INTEGER, updated_at INTEGER
+             );
+             CREATE TABLE messages (
+                topic_id TEXT, msg_id TEXT, deleted_at INTEGER,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             CREATE TABLE message_attachments (
+                topic_id TEXT, msg_id TEXT, hash TEXT, status TEXT, src TEXT, deleted_at INTEGER
+             );
+             INSERT INTO messages VALUES
+                ('topic', 'live', NULL),
+                ('topic', 'deleted-message', 9),
+                ('topic', 'tombstoned-relation', NULL);
+             INSERT INTO message_attachments VALUES
+                ('topic', 'live', 'hash', 'desktop_only', NULL, NULL),
+                ('topic', 'deleted-message', 'hash', 'desktop_only', NULL, NULL),
+                ('topic', 'tombstoned-relation', 'hash', 'removed', NULL, 9);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create fixture");
+
+        commit_registered_attachment(&pool, "hash", "text/plain", 4, "/cas/hash", 10)
+            .await
+            .expect("register attachment");
+
+        let relations: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT msg_id, status, src FROM message_attachments ORDER BY msg_id")
+                .fetch_all(&pool)
+                .await
+                .expect("read relations");
+        assert_eq!(
+            relations,
+            vec![
+                ("deleted-message".into(), "desktop_only".into(), None),
+                (
+                    "live".into(),
+                    "ready".into(),
+                    Some("file:///cas/hash".into())
+                ),
+                ("tombstoned-relation".into(), "removed".into(), None),
+            ]
+        );
     }
 }

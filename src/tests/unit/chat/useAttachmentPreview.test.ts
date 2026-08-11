@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { createPinia } from 'pinia';
+import { mount } from '@vue/test-utils';
 import { useAttachmentPreview } from '@/features/chat/attachment/composables/useAttachmentPreview';
+import AttachmentPreview from '@/features/chat/attachment/AttachmentPreview.vue';
 import { AttachmentType } from '@/features/chat/attachment/types/AttachmentType';
 import type { Attachment } from '@/core/types/chat';
 
@@ -23,6 +26,12 @@ describe('useAttachmentPreview', () => {
     expect(preview.canPreview.value(attachment({ type: 'application/pdf', name: 'a.pdf' }))).toBe(false);
     expect(preview.canPreview.value(attachment({ type: 'application/pdf', name: 'a.pdf', extractedText: 'text' }))).toBe(true);
     expect(preview.canPreview.value(attachment({ type: 'application/octet-stream', name: 'a.rs', extractedText: 'fn main() {}' }))).toBe(true);
+    expect(preview.canPreview.value(attachment({
+      type: 'image/png',
+      name: 'desktop.png',
+      status: 'desktop_only',
+      src: '',
+    }))).toBe(false);
   });
 
   it('formats file size and extracts extension', () => {
@@ -59,5 +68,38 @@ describe('useAttachmentPreview', () => {
     expect(stats.canPreview).toBe(3);
     expect(stats.hasText).toBe(2);
     expect(stats.hasThumbnails).toBe(1);
+  });
+
+  it('renders desktop-only attachments as a disabled placeholder', () => {
+    const wrapper = mount(AttachmentPreview, {
+      props: {
+        attachments: [
+          attachment({
+            type: 'image/png',
+            name: 'desktop.png',
+            hash: 'a'.repeat(64),
+            status: 'desktop_only',
+            src: '',
+            internalPath: '',
+          }),
+        ],
+        messageId: 'message-a',
+        topicId: 'topic-a',
+      },
+      global: {
+        plugins: [createPinia()],
+        stubs: {
+          Teleport: true,
+          AttachmentViewer: true,
+          AttachmentRenderer: true,
+        },
+      },
+    });
+
+    expect(wrapper.text()).toContain('桌面专用附件');
+    expect(wrapper.find('[aria-disabled="true"]').exists()).toBe(true);
+    expect(wrapper.findComponent({ name: 'AttachmentRenderer' }).exists()).toBe(
+      false,
+    );
   });
 });

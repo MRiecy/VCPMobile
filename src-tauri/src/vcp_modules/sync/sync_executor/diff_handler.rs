@@ -36,9 +36,63 @@ impl DiffHandler {
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<String>>>,
         logger: &Arc<Mutex<SyncLogger>>,
         task_tracker: &Arc<SyncTaskTracker>,
+        session_id: u64,
         attempt_id: u64,
     ) -> Result<(), String> {
-        if let Some(items) = payload["data"].as_array() {
+        let items = payload
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "SYNC_DIFF_RESULTS.data must be an array".to_string())?;
+        let mut seen_ids = HashSet::new();
+        for item in items {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "SYNC_DIFF_RESULTS item requires a non-empty id".to_string())?;
+            if !seen_ids.insert(id) {
+                return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
+            }
+            let action = item
+                .get("action")
+                .and_then(Value::as_str)
+                .filter(|action| {
+                    matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP")
+                })
+                .ok_or_else(|| format!("SYNC_DIFF_RESULTS item {id} has an invalid action"))?;
+            if item.get("mismatchedContent").is_some()
+                && item
+                    .get("mismatchedContent")
+                    .and_then(Value::as_bool)
+                    .is_none()
+            {
+                return Err(format!(
+                    "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
+                ));
+            }
+            if data_type == SyncDataType::Topic && matches!(action, "PULL" | "PUSH") {
+                let _owner_type = item
+                    .get("ownerType")
+                    .and_then(Value::as_str)
+                    .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
+                    .ok_or_else(|| {
+                        format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
+                    })?;
+                if action == "PUSH"
+                    && item
+                        .get("ownerId")
+                        .and_then(Value::as_str)
+                        .filter(|owner_id| !owner_id.is_empty())
+                        .is_none()
+                {
+                    return Err(format!(
+                        "SYNC_DIFF_RESULTS topic {id} push requires ownerId"
+                    ));
+                }
+            }
+        }
+
+        {
             let items_clone: Vec<serde_json::Value> = items.clone();
 
             // 统计有效操作数（排除 SKIP）
@@ -238,14 +292,26 @@ impl DiffHandler {
                         for chunk in batch_pull_requests.chunks(chunk_size) {
                             let sub_batch = chunk.to_vec();
                             let sub_count = sub_batch.len() as u32;
+                            let failed_topic_ids = if data_type_inner == SyncDataType::Topic {
+                                sub_batch
+                                    .iter()
+                                    .filter_map(|item| item.get("id").and_then(Value::as_str))
+                                    .map(str::to_string)
+                                    .take(8)
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
                             if let Err(error) = PullExecutor::pull_entities_batch(
                                 &h_in, &c_in, &b_in, &token, sub_batch, &wq_in,
                             )
                             .await
                             {
-                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
                                     attempt_id: attempt_id_inner,
+                                    code: "ENTITY_PULL_FAILED".to_string(),
                                     message: format!("Batch pull failed: {error}"),
+                                    failed_topic_ids,
                                 });
                                 return;
                             }
@@ -256,6 +322,7 @@ impl DiffHandler {
                             let _ = h_in.emit(
                                 "vcp-sync-progress",
                                 json!({
+                                    "sessionId": session_id,
                                     "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 {
                                         "owner_metadata"
                                     } else {
@@ -337,17 +404,21 @@ impl DiffHandler {
                             }
                             Ok(None) => {
                                 log::warn!("[SyncDebug] Topic NOT FOUND in database: {}", id);
-                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
                                     attempt_id: attempt_id_inner,
+                                    code: "TOPIC_PUSH_SOURCE_MISSING".to_string(),
                                     message: format!("Topic selected for push is missing: {id}"),
+                                    failed_topic_ids: vec![id],
                                 });
                                 return;
                             }
                             Err(e) => {
                                 log::error!("[SyncDebug] SQL ERROR fetching topic {}: {}", id, e);
-                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
                                     attempt_id: attempt_id_inner,
+                                    code: "TOPIC_PUSH_DB_FAILED".to_string(),
                                     message: format!("Failed to load topic {id} for push: {e}"),
+                                    failed_topic_ids: vec![id],
                                 });
                                 return;
                             }
@@ -363,6 +434,12 @@ impl DiffHandler {
                     for chunk in batch_push_requests.chunks(1000) {
                         let sub_batch = chunk.to_vec();
                         let sub_count = sub_batch.len() as u32;
+                        let failed_topic_ids = sub_batch
+                            .iter()
+                            .filter_map(|item| item.get("id").and_then(Value::as_str))
+                            .map(str::to_string)
+                            .take(8)
+                            .collect::<Vec<_>>();
                         log::debug!(
                             "[SyncDebug] Sending batch of {} topics to desktop",
                             sub_count
@@ -378,9 +455,11 @@ impl DiffHandler {
                             ),
                             Err(e) => {
                                 log::error!("[SyncDebug] FAILED to push metadata batch: {}", e);
-                                let _ = tx_internal_in.send(SyncCommand::FailAttempt {
+                                let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
                                     attempt_id: attempt_id_inner,
+                                    code: "TOPIC_PUSH_FAILED".to_string(),
                                     message: format!("Batch topic push failed: {e}"),
+                                    failed_topic_ids,
                                 });
                                 return;
                             }
@@ -393,7 +472,7 @@ impl DiffHandler {
                         let done = total.saturating_sub(current_pending);
                         let _ = h_in.emit(
                             "vcp-sync-progress",
-                            json!({ "phase": "topic_metadata", "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }),
+                            json!({ "sessionId": session_id, "phase": "topic_metadata", "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }),
                         );
                     }
 
@@ -574,6 +653,7 @@ impl DiffHandler {
                                     let _ = h_task.emit(
                                         "vcp-sync-progress",
                                         json!({
+                                            "sessionId": session_id,
                                             "phase": if manifest_phase_task.load(Ordering::SeqCst) == 1 {
                                                 "owner_metadata"
                                             } else {
@@ -603,11 +683,18 @@ impl DiffHandler {
                                     }
                                     }
                                     Err(error) => {
-                                        let _ = tx_internal_task.send(SyncCommand::FailAttempt {
+                                        let failed_topic_ids = if data_type_task == SyncDataType::Topic {
+                                            vec![id.clone()]
+                                        } else {
+                                            Vec::new()
+                                        };
+                                        let _ = tx_internal_task.send(SyncCommand::FailAttemptDetailed {
                                             attempt_id: attempt_id_task,
+                                            code: "ENTITY_OPERATION_FAILED".to_string(),
                                             message: format!(
                                                 "Sync {action} failed for {id}: {error}"
                                             ),
+                                            failed_topic_ids,
                                         });
                                     }
                                 }

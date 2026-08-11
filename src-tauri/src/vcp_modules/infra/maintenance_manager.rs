@@ -474,6 +474,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_only_relation_remains_live_without_a_physical_path() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        create_live_set_tables(&pool).await;
+        sqlx::query(
+            "CREATE TABLE attachments (hash TEXT PRIMARY KEY, internal_path TEXT NOT NULL);
+             INSERT INTO agents VALUES ('agent', NULL);
+             INSERT INTO topics VALUES ('topic', 'agent', 'agent', NULL);
+             INSERT INTO messages VALUES ('topic', 'message', NULL);
+             INSERT INTO attachments VALUES ('desktop-hash', '');
+             INSERT INTO message_attachments
+                (topic_id, msg_id, hash, deleted_at, display_name, src, status)
+             VALUES
+                ('topic', 'message', 'desktop-hash', NULL, 'desktop.pdf', NULL, 'desktop_only');",
+        )
+        .execute(&pool)
+        .await
+        .expect("create desktop-only fixture");
+
+        let plan = prepare_attachment_gc(&pool)
+            .await
+            .expect("desktop-only attachment is a logical live reference");
+        assert_eq!(plan.live_count, 1);
+        assert_eq!(plan.orphaned_indexed_count, 0);
+        let relation: (String, Option<String>) = sqlx::query_as(
+            "SELECT status, src FROM message_attachments WHERE hash = 'desktop-hash'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read preserved relation");
+        assert_eq!(relation, ("desktop_only".into(), None));
+    }
+
+    #[tokio::test]
     async fn online_gc_keeps_orphan_index_and_physical_candidate() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

@@ -206,7 +206,7 @@ pub async fn load_multi_topic_messages(
         result.entry(topic_id).or_default().push(message);
     }
 
-    // 批量加载附件 — 收集所有 (topic_id, msg_id)，一次 JOIN 查询
+    // 批量加载附件。每条记录占两个 bind 参数，分块避免触发 SQLite 参数上限。
     let mut all_msg_refs: Vec<(String, String)> = Vec::new();
     for (tid, msgs) in result.iter() {
         for m in msgs {
@@ -215,24 +215,28 @@ pub async fn load_multi_topic_messages(
     }
 
     if !all_msg_refs.is_empty() {
-        let mut att_placeholders = Vec::new();
-        att_placeholders.extend(std::iter::repeat_n("(?, ?)", all_msg_refs.len()));
-        let att_query = format!(
-            "SELECT a.hash, a.mime_type, a.size, a.internal_path, NULL as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
-                    ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
-             FROM message_attachments ma
-             JOIN attachments a ON ma.hash = a.hash
-             WHERE (ma.topic_id, ma.msg_id) IN ({}) AND ma.deleted_at IS NULL
-             ORDER BY ma.topic_id, ma.msg_id, ma.attachment_order ASC",
-            att_placeholders.join(",")
-        );
-        let mut q = sqlx::query(&att_query);
-        for (tid, mid) in &all_msg_refs {
-            q = q.bind(tid).bind(mid);
-        }
-        if let Ok(att_rows) = q.fetch_all(pool).await {
-            let mut att_map: std::collections::HashMap<(String, String), Vec<Attachment>> =
-                std::collections::HashMap::new();
+        let mut att_map: std::collections::HashMap<(String, String), Vec<Attachment>> =
+            std::collections::HashMap::new();
+        for refs_chunk in all_msg_refs.chunks(400) {
+            let att_placeholders =
+                std::iter::repeat_n("(?, ?)", refs_chunk.len()).collect::<Vec<_>>();
+            let att_query = format!(
+                "SELECT a.hash, a.mime_type, a.size, a.internal_path, NULL as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
+                        ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
+                 FROM message_attachments ma
+                 JOIN attachments a ON ma.hash = a.hash
+                 WHERE (ma.topic_id, ma.msg_id) IN ({}) AND ma.deleted_at IS NULL
+                 ORDER BY ma.topic_id, ma.msg_id, ma.attachment_order ASC",
+                att_placeholders.join(",")
+            );
+            let mut query = sqlx::query(&att_query);
+            for (topic_id, message_id) in refs_chunk {
+                query = query.bind(topic_id).bind(message_id);
+            }
+            let att_rows = query
+                .fetch_all(pool)
+                .await
+                .map_err(|error| format!("Batch attachment query failed: {error}"))?;
             for ar in att_rows {
                 let tid: String = ar.get("topic_id");
                 let mid: String = ar.get("msg_id");
@@ -259,12 +263,12 @@ pub async fn load_multi_topic_messages(
                     created_at: Some(created_at_i64 as u64),
                 });
             }
-            // 回填附件到消息
-            for (tid, msgs) in result.iter_mut() {
-                for msg in msgs.iter_mut() {
-                    if let Some(atts) = att_map.remove(&(tid.clone(), msg.id.clone())) {
-                        msg.attachments = Some(atts);
-                    }
+        }
+        // 回填附件到消息
+        for (tid, msgs) in result.iter_mut() {
+            for msg in msgs.iter_mut() {
+                if let Some(atts) = att_map.remove(&(tid.clone(), msg.id.clone())) {
+                    msg.attachments = Some(atts);
                 }
             }
         }
@@ -740,6 +744,13 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
     }
 
     for att in attachments {
+        // 协议 1.1 的 desktop_only 是明确的能力边界：保留关系与可用文本，
+        // 但编辑/重放历史消息不得隐式触发桌面二进制下载。
+        if att.status.as_deref() == Some("desktop_only") {
+            att.src.clear();
+            att.internal_path.clear();
+            continue;
+        }
         let hash = match &att.hash {
             Some(h) => h.clone(),
             None => continue,

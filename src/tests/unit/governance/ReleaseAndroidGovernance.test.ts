@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import ciWorkflow from '../../../../.github/workflows/ci.yml?raw';
 import releaseWorkflow from '../../../../.github/workflows/release.yml?raw';
 import packageManifest from '../../../../package.json?raw';
+import tauriConfig from '../../../../src-tauri/tauri.conf.json?raw';
 import rootReadme from '../../../../README.md?raw';
 import dependencyGuide from '../../../../docs/DEPENDENCY_MANAGEMENT.md?raw';
 import claudeGuide from '../../../../CLAUDE.md?raw';
@@ -51,12 +52,21 @@ describe('release and Android governance contracts', () => {
     expect(releaseWorkflow).toContain('conclusion == "success"');
     expect(releaseWorkflow).toContain("require('./package.json').version");
     expect(releaseWorkflow).toContain("require('./src-tauri/tauri.conf.json').version");
-    expect(releaseWorkflow).toContain('tauri\\.android\\.versionCode');
+    expect(releaseWorkflow).toContain('bundle.android.versionCode');
+    expect(releaseWorkflow).not.toContain(
+      "sed -n 's/^tauri\\.android\\.versionCode=//p' src-tauri/gen/android/app/tauri.properties",
+    );
     expect(releaseWorkflow).toContain('ANDROID_RELEASE_CERT_SHA256');
     expect(releaseWorkflow).toContain('APK, keystore, and pinned release certificate identities do not match');
     expect(releaseWorkflow).toContain('sha256sum "$target_apk"');
     expect(releaseWorkflow).toContain('*.sha256');
     expect(releaseWorkflow).toContain('git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock');
+
+    const packageJson = JSON.parse(packageManifest);
+    const tauriJson = JSON.parse(tauriConfig);
+    expect(packageJson.version).toBe('1.1.4');
+    expect(tauriJson.version).toBe('1.1.4');
+    expect(tauriJson.bundle.android.versionCode).toBe(1001004);
 
     expect(releaseWorkflow).toContain('APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK")');
     expect(releaseWorkflow).not.toMatch(/unzip -Z1[^\n]*\|[^\n]*grep -q/);

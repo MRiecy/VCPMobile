@@ -691,7 +691,10 @@ impl MessageRepository {
                  ON CONFLICT(hash) DO UPDATE SET
                     mime_type = excluded.mime_type,
                     size = excluded.size,
-                    internal_path = excluded.internal_path,
+                    internal_path = CASE
+                        WHEN excluded.internal_path <> '' THEN excluded.internal_path
+                        ELSE attachments.internal_path
+                    END,
                     extracted_text = COALESCE(attachments.extracted_text, excluded.extracted_text),
                     image_frames = COALESCE(attachments.image_frames, excluded.image_frames),
                     thumbnail_path = COALESCE(attachments.thumbnail_path, excluded.thumbnail_path),

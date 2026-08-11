@@ -5,25 +5,64 @@ use crate::vcp_modules::sync_dto::{
     AgentMessageSyncDTO, AgentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO, UserMessageSyncDTO,
 };
 use sqlx::Row;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
-async fn query_avatar_color(pool: &sqlx::SqlitePool, agent_id: &str) -> Option<String> {
+const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SYNC_BODY_BYTES: usize = 256 * 1024 * 1024;
+const MESSAGE_REQUEST_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SYNC_TOPICS: usize = 10_000;
+const MAX_SYNC_MESSAGES: usize = 100_000;
+const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
+
+fn canonical_sha256(value: &str) -> Option<String> {
+    let normalized = value.to_ascii_lowercase();
+    crate::vcp_modules::infra::utils::is_valid_cas_hash(&normalized).then_some(normalized)
+}
+
+async fn parse_success_response(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("{operation} response read failed: {error}"))?;
+    if bytes.len() > MAX_CONTROL_RESPONSE_BYTES {
+        return Err(format!("{operation} response exceeds 1 MiB"));
+    }
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&bytes);
+        return Err(format!("{operation} failed: HTTP {status} body={body}"));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{operation} returned invalid JSON: {error}"))?;
+    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(format!("{operation} returned success=false: {value}"));
+    }
+    Ok(value)
+}
+
+async fn query_avatar_color(
+    pool: &sqlx::SqlitePool,
+    agent_id: &str,
+) -> Result<Option<String>, String> {
     if agent_id.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    sqlx::query_scalar::<sqlx::Sqlite, Option<String>>(
+    let color = sqlx::query_scalar::<sqlx::Sqlite, Option<String>>(
         "SELECT dominant_color FROM avatars WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL",
     )
     .bind(agent_id)
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
-    .flatten()
+    .map_err(|error| format!("Avatar color query failed for {agent_id}: {error}"))?
+    .flatten();
+    Ok(color)
 }
 
 /// 批量 Push 单 topic 处理结果
@@ -31,6 +70,150 @@ pub struct PushBatchResult {
     pub topic_id: String,
     pub success: bool,
     pub error: Option<String>,
+}
+
+struct MessagePushFrame {
+    outcome: PushBatchResult,
+    needed_attachment_hashes: Vec<String>,
+}
+
+async fn send_message_chunk(
+    client: &reqwest::Client,
+    http_url: &str,
+    sync_token: &str,
+    body: String,
+    expected_topic_ids: &[String],
+) -> Result<Vec<MessagePushFrame>, String> {
+    let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
+    let response = client
+        .post(&url)
+        .header("x-sync-token", sync_token)
+        .header("Authorization", format!("Bearer {}", sync_token))
+        .header("Content-Type", "application/x-ndjson")
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| format!("Batch push request failed: {error}"))?;
+    let status = response.status();
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("Batch push response read failed: {error}"))?;
+    if bytes.len() > MAX_NDJSON_LINE_BYTES {
+        return Err("Batch push response exceeds 32 MiB".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!(
+            "Batch push messages failed: HTTP {status} body={}",
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+
+    let response_text = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("Batch push response is not UTF-8: {error}"))?;
+    let expected = expected_topic_ids.iter().cloned().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut frames = Vec::with_capacity(expected.len());
+    for raw_line in response_text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.len() > MAX_NDJSON_LINE_BYTES {
+            return Err("Batch push response contains a line over 32 MiB".to_string());
+        }
+        let data: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("Batch push response contains malformed NDJSON: {error}"))?;
+        let topic_id = data
+            .get("topicId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "Batch push response requires a non-empty topicId".to_string())?;
+        if !expected.contains(topic_id) {
+            return Err(format!(
+                "Batch push response contains unexpected topic {topic_id}"
+            ));
+        }
+        if !seen.insert(topic_id.to_string()) {
+            return Err(format!(
+                "Batch push response contains duplicate topic {topic_id}"
+            ));
+        }
+        let success = data
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| format!("Batch push result for {topic_id} requires boolean success"))?;
+        let error = data
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|message| !message.is_empty())
+            .map(str::to_string);
+        if !success && error.is_none() {
+            return Err(format!(
+                "Failed batch push result for {topic_id} requires an error message"
+            ));
+        }
+
+        let mut needed_attachment_hashes = Vec::new();
+        if let Some(value) = data.get("neededAttachmentHashes") {
+            let values = value
+                .as_array()
+                .ok_or_else(|| format!("neededAttachmentHashes for {topic_id} must be an array"))?;
+            let mut unique_hashes = HashSet::new();
+            for value in values {
+                let raw_hash = value.as_str().ok_or_else(|| {
+                    format!("neededAttachmentHashes for {topic_id} must contain strings")
+                })?;
+                let hash = canonical_sha256(raw_hash).ok_or_else(|| {
+                    format!("neededAttachmentHashes for {topic_id} contains an invalid hash")
+                })?;
+                if !unique_hashes.insert(hash.clone()) {
+                    return Err(format!(
+                        "neededAttachmentHashes for {topic_id} contains duplicate hash {hash}"
+                    ));
+                }
+                needed_attachment_hashes.push(hash);
+            }
+        }
+        if !success && !needed_attachment_hashes.is_empty() {
+            return Err(format!(
+                "Failed batch push result for {topic_id} must not request attachments"
+            ));
+        }
+        frames.push(MessagePushFrame {
+            outcome: PushBatchResult {
+                topic_id: topic_id.to_string(),
+                success,
+                error,
+            },
+            needed_attachment_hashes,
+        });
+    }
+
+    if seen != expected {
+        let mut missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
+        missing.sort();
+        return Err(format!("Batch push response is missing topics {missing:?}"));
+    }
+    Ok(frames)
+}
+
+fn record_message_frames(
+    frames: Vec<MessagePushFrame>,
+    results: &mut Vec<PushBatchResult>,
+    attachment_topics: &mut HashMap<String, HashSet<String>>,
+) {
+    for frame in frames {
+        if frame.outcome.success {
+            for hash in frame.needed_attachment_hashes {
+                attachment_topics
+                    .entry(hash)
+                    .or_default()
+                    .insert(frame.outcome.topic_id.clone());
+            }
+        }
+        results.push(frame.outcome);
+    }
 }
 
 pub struct PushExecutor;
@@ -50,14 +233,19 @@ impl PushExecutor {
         let idempotency_key = generate_idempotency_key("push", "agent", agent_id);
         let url = format!("{}/api/mobile-sync/upload-entity", http_url);
 
-        let _ = client
+        let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
             .header("x-idempotency-key", idempotency_key)
             .json(&serde_json::json!({ "id": agent_id, "type": "agent", "data": dto }))
             .send()
-            .await;
+            .await
+            .map_err(|error| format!("Push agent {agent_id} request failed: {error}"))?;
+        let body = parse_success_response(response, "Push agent").await?;
+        if body.get("id").and_then(serde_json::Value::as_str) != Some(agent_id) {
+            return Err(format!("Push agent response id mismatch for {agent_id}"));
+        }
 
         Ok(())
     }
@@ -77,14 +265,19 @@ impl PushExecutor {
         let idempotency_key = generate_idempotency_key("push", "group", group_id);
         let url = format!("{}/api/mobile-sync/upload-entity", http_url);
 
-        let _ = client
+        let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
             .header("x-idempotency-key", idempotency_key)
             .json(&serde_json::json!({ "id": group_id, "type": "group", "data": dto }))
             .send()
-            .await;
+            .await
+            .map_err(|error| format!("Push group {group_id} request failed: {error}"))?;
+        let body = parse_success_response(response, "Push group").await?;
+        if body.get("id").and_then(serde_json::Value::as_str) != Some(group_id) {
+            return Err(format!("Push group response id mismatch for {group_id}"));
+        }
 
         Ok(())
     }
@@ -101,22 +294,71 @@ impl PushExecutor {
             return Ok(());
         }
 
+        let mut expected_ids = HashSet::new();
+        for item in &items {
+            let id = item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Batch push entity item requires a non-empty id".to_string())?;
+            if !expected_ids.insert(id.to_string()) {
+                return Err(format!(
+                    "Batch push entity request contains duplicate id {id}"
+                ));
+            }
+        }
+        let request_body = serde_json::json!({ "items": items });
+        let request_size = serde_json::to_vec(&request_body)
+            .map_err(|error| format!("Batch push entity serialization failed: {error}"))?
+            .len();
+        if request_size > 10 * 1024 * 1024 {
+            return Err("Batch push entity request exceeds 10 MiB".to_string());
+        }
+
         let url = format!("{}/api/mobile-sync/upload-entities-batch", http_url);
         let response = client
             .post(&url)
             .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
-            .json(&serde_json::json!({ "items": items }))
+            .json(&request_body)
             .send()
             .await
             .map_err(|e| format!("Batch push request failed: {}", e))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
+        let response_body = parse_success_response(response, "Batch push entities").await?;
+        let results = response_body
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "Batch push entities response is missing results".to_string())?;
+        let mut seen_ids = HashSet::new();
+        for result in results {
+            let id = result
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "Batch push entity result requires a non-empty id".to_string())?;
+            if !expected_ids.contains(id) {
+                return Err(format!("Batch push entities returned unexpected id {id}"));
+            }
+            if !seen_ids.insert(id.to_string()) {
+                return Err(format!("Batch push entities returned duplicate id {id}"));
+            }
+            if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+                let error = result
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown error");
+                return Err(format!("Batch push entity {id} failed: {error}"));
+            }
+        }
+        if seen_ids != expected_ids {
+            let mut missing = expected_ids
+                .difference(&seen_ids)
+                .cloned()
+                .collect::<Vec<_>>();
+            missing.sort();
             return Err(format!(
-                "Batch push entities failed: HTTP {} body={}",
-                status, err_body
+                "Batch push entities missing results for {missing:?}"
             ));
         }
 
@@ -142,22 +384,30 @@ impl PushExecutor {
         .await
         .map_err(|e| e.to_string())?;
 
-        if let Some(r) = row {
-            let image_data: Vec<u8> = r.get("image_data");
-            let mime_type: String = r.get("mime_type");
+        let r = row.ok_or_else(|| {
+            format!("Avatar {owner_type}/{owner_id} is missing from the local database")
+        })?;
+        let image_data: Vec<u8> = r.get("image_data");
+        let mime_type: String = r.get("mime_type");
 
-            let url = format!(
-                "{}/api/mobile-sync/upload-avatar?id={}&type={}",
-                http_url, owner_id, owner_type
-            );
-            let _ = client
-                .post(&url)
-                .header("x-sync-token", sync_token)
-                .header("Authorization", format!("Bearer {}", sync_token))
-                .header("Content-Type", mime_type)
-                .body(image_data)
-                .send()
-                .await;
+        let url = format!(
+            "{}/api/mobile-sync/upload-avatar?id={}&type={}",
+            http_url, owner_id, owner_type
+        );
+        let response = client
+            .post(&url)
+            .header("x-sync-token", sync_token)
+            .header("Authorization", format!("Bearer {}", sync_token))
+            .header("Content-Type", mime_type)
+            .body(image_data)
+            .send()
+            .await
+            .map_err(|error| format!("Push avatar {owner_type}/{owner_id} failed: {error}"))?;
+        let body = parse_success_response(response, "Push avatar").await?;
+        if body.get("id").and_then(serde_json::Value::as_str) != Some(owner_id) {
+            return Err(format!(
+                "Push avatar response id mismatch for {owner_type}/{owner_id}"
+            ));
         }
 
         Ok(())
@@ -180,153 +430,171 @@ impl PushExecutor {
         if topic_ids.is_empty() {
             return Ok(Vec::new());
         }
-
-        let db = app.state::<DbState>();
-
-        // 1. 批量查询 topic 的 owner 信息
-        let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        let topic_query = format!(
-            "SELECT topic_id, owner_id, owner_type FROM topics WHERE topic_id IN ({})",
-            placeholders
-        );
-        let mut q = sqlx::query(&topic_query);
-        for id in topic_ids {
-            q = q.bind(id);
-        }
-        let topic_rows = q.fetch_all(&db.pool).await.map_err(|e| e.to_string())?;
-
-        let mut owner_map: std::collections::HashMap<String, (String, String)> =
-            std::collections::HashMap::new();
-        for row in &topic_rows {
-            let tid: String = row.get("topic_id");
-            let oid: String = row.get("owner_id");
-            let otype: String = row.get("owner_type");
-            owner_map.insert(tid, (oid, otype));
-        }
-
-        // 2. 批量加载所有 topic 的消息（一次 SQL）
-        let messages_by_topic =
-            crate::vcp_modules::message_service::load_multi_topic_messages(&db.pool, topic_ids)
-                .await?;
-
-        // 3. 构建批量上传请求 (全流式 NDJSON)
-        let mut ndjson_body = String::new();
-        for tid in topic_ids {
-            let history = messages_by_topic.get(tid).cloned().unwrap_or_default();
-            if let Some((_owner_id, owner_type)) = owner_map.get(tid) {
-                let dto_messages = build_message_dtos(app, &history, owner_type).await;
-                let line = serde_json::json!({
-                    "topicId": tid,
-                    "messages": dto_messages,
-                });
-                ndjson_body.push_str(&line.to_string());
-                ndjson_body.push('\n');
-            }
-        }
-
-        let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
-        let response = client
-            .post(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .header("Content-Type", "application/x-ndjson")
-            .body(ndjson_body) // reqwest 接受 String 作为 Body
-            .send()
-            .await
-            .map_err(|e| format!("Batch push request failed: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
+        if topic_ids.len() > MAX_SYNC_TOPICS {
             return Err(format!(
-                "Batch push messages failed: HTTP {} body={}",
-                status, err_body
+                "Message push contains {} topics, limit is {}",
+                topic_ids.len(),
+                MAX_SYNC_TOPICS
             ));
         }
+        let requested_topics = topic_ids.iter().cloned().collect::<HashSet<_>>();
+        if requested_topics.len() != topic_ids.len()
+            || requested_topics.iter().any(|topic_id| topic_id.is_empty())
+        {
+            return Err("Message push topic ids must be unique and non-empty".to_string());
+        }
 
-        // 4. 解析 NDJSON 响应
-        let body = response.text().await.map_err(|e| e.to_string())?;
+        let db = app.state::<DbState>();
         let mut results = Vec::new();
-        let mut all_needed_hashes: Vec<String> = Vec::new();
+        let mut attachment_topics: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut total_request_bytes = 0usize;
+        let mut total_messages = 0usize;
+        let mut request_body = String::new();
+        let mut request_topics = Vec::new();
 
-        for line in body.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        // Query and serialize in bounded topic groups so neither SQLite bind variables nor the
+        // HTTP client need to buffer the entire sync set at once.
+        for topic_chunk in topic_ids.chunks(200) {
+            let placeholders = topic_chunk
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let topic_query = format!(
+                "SELECT topic_id, owner_id, owner_type FROM topics WHERE topic_id IN ({})",
+                placeholders
+            );
+            let mut query = sqlx::query(&topic_query);
+            for topic_id in topic_chunk {
+                query = query.bind(topic_id);
             }
-
-            let data: serde_json::Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!(
-                        "[PushExecutor] Batch push: NDJSON parse error on line: {:.100}... ({})",
-                        line,
-                        e
-                    );
-                    continue;
-                }
-            };
-            let tid = data["topicId"].as_str().unwrap_or("").to_string();
-            if tid.is_empty() {
-                log::error!(
-                    "[PushExecutor] Batch push: NDJSON line missing topicId: {:.100}...",
-                    line
+            let topic_rows = query
+                .fetch_all(&db.pool)
+                .await
+                .map_err(|error| format!("Message push topic query failed: {error}"))?;
+            let mut owner_map = HashMap::new();
+            for row in topic_rows {
+                owner_map.insert(
+                    row.get::<String, _>("topic_id"),
+                    (
+                        row.get::<String, _>("owner_id"),
+                        row.get::<String, _>("owner_type"),
+                    ),
                 );
-                continue;
+            }
+            for topic_id in topic_chunk {
+                if !owner_map.contains_key(topic_id) {
+                    return Err(format!("Message push topic {topic_id} is missing locally"));
+                }
             }
 
-            let success = data["success"].as_bool().unwrap_or(false);
-            let error = data["error"].as_str().map(|s| s.to_string());
+            let messages_by_topic = crate::vcp_modules::message_service::load_multi_topic_messages(
+                &db.pool,
+                topic_chunk,
+            )
+            .await?;
+            for topic_id in topic_chunk {
+                let history = messages_by_topic.get(topic_id).cloned().unwrap_or_default();
+                total_messages = total_messages
+                    .checked_add(history.len())
+                    .ok_or_else(|| "Message push count overflow".to_string())?;
+                if total_messages > MAX_SYNC_MESSAGES {
+                    return Err(format!(
+                        "Message push contains more than {MAX_SYNC_MESSAGES} messages"
+                    ));
+                }
+                let owner_type = &owner_map
+                    .get(topic_id)
+                    .ok_or_else(|| format!("Message push topic {topic_id} has no owner"))?
+                    .1;
+                let dto_messages = build_message_dtos(app, &history, owner_type).await?;
+                let mut line = serde_json::to_string(&serde_json::json!({
+                    "topicId": topic_id,
+                    "messages": dto_messages,
+                }))
+                .map_err(|error| format!("Message push serialization failed: {error}"))?;
+                line.push('\n');
+                if line.len() > MAX_NDJSON_LINE_BYTES {
+                    return Err(format!(
+                        "Message push topic {topic_id} exceeds the 32 MiB line limit"
+                    ));
+                }
+                total_request_bytes = total_request_bytes
+                    .checked_add(line.len())
+                    .ok_or_else(|| "Message push byte count overflow".to_string())?;
+                if total_request_bytes > MAX_SYNC_BODY_BYTES {
+                    return Err("Message push exceeds the 256 MiB total limit".to_string());
+                }
 
-            if success {
-                // 收集此 topic 需要的附件 hash
-                if let Some(needed) = data["neededAttachmentHashes"].as_array() {
-                    for h in needed {
-                        if let Some(hash) = h.as_str() {
-                            all_needed_hashes.push(hash.to_string());
-                        }
+                if !request_body.is_empty()
+                    && request_body.len() + line.len() > MESSAGE_REQUEST_CHUNK_BYTES
+                {
+                    let frames = send_message_chunk(
+                        client,
+                        http_url,
+                        sync_token,
+                        std::mem::take(&mut request_body),
+                        &request_topics,
+                    )
+                    .await?;
+                    record_message_frames(frames, &mut results, &mut attachment_topics);
+                    request_topics.clear();
+                }
+                request_body.push_str(&line);
+                request_topics.push(topic_id.clone());
+            }
+        }
+
+        if !request_body.is_empty() {
+            let frames =
+                send_message_chunk(client, http_url, sync_token, request_body, &request_topics)
+                    .await?;
+            record_message_frames(frames, &mut results, &mut attachment_topics);
+        }
+
+        let hashes_to_upload = {
+            let tracker = uploaded_hashes.read().await;
+            attachment_topics
+                .keys()
+                .filter(|hash| !tracker.contains(*hash))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut attachment_failures = HashMap::new();
+        const MAX_CONCURRENT_UPLOADS: usize = 3;
+        for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
+            let futures = chunk
+                .iter()
+                .map(|hash| upload_attachment(app, client, http_url, sync_token, hash));
+            for (hash, result) in chunk
+                .iter()
+                .zip(futures_util::future::join_all(futures).await)
+            {
+                match result {
+                    Ok(()) => {
+                        uploaded_hashes.write().await.insert(hash.clone());
+                    }
+                    Err(error) => {
+                        attachment_failures.insert(hash.clone(), error);
                     }
                 }
             }
-
-            results.push(PushBatchResult {
-                topic_id: tid,
-                success,
-                error,
-            });
         }
 
-        // 5. 去重后上传附件（复用现有 3 并发上传逻辑）
-        if !all_needed_hashes.is_empty() {
-            use std::collections::HashSet;
-            let unique_hashes: Vec<String> = {
-                let mut seen = HashSet::new();
-                all_needed_hashes
-                    .into_iter()
-                    .filter(|h| seen.insert(h.clone()))
-                    .collect()
-            };
-
-            // 筛选出尚未上传的 hash
-            let hashes_to_upload: Vec<String> = {
-                let tracker_guard = uploaded_hashes.read().await;
-                unique_hashes
-                    .into_iter()
-                    .filter(|h| !tracker_guard.contains(h))
-                    .collect()
-            };
-
-            const MAX_CONCURRENT_UPLOADS: usize = 3;
-            for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
-                let futures: Vec<_> = chunk
-                    .iter()
-                    .map(|hash| upload_attachment(app, client, http_url, sync_token, hash))
-                    .collect();
-                let upload_results = futures_util::future::join_all(futures).await;
-                let mut tracker_guard = uploaded_hashes.write().await;
-                for (hash, result) in chunk.iter().zip(upload_results) {
-                    if result.is_ok() {
-                        tracker_guard.insert(hash.clone());
+        if !attachment_failures.is_empty() {
+            let mut result_indexes = HashMap::new();
+            for (index, result) in results.iter().enumerate() {
+                result_indexes.insert(result.topic_id.clone(), index);
+            }
+            for (hash, error) in attachment_failures {
+                if let Some(topics) = attachment_topics.get(&hash) {
+                    for topic_id in topics {
+                        if let Some(index) = result_indexes.get(topic_id).copied() {
+                            results[index].success = false;
+                            results[index].error = Some(format!(
+                                "Attachment {hash} required by topic {topic_id} failed: {error}"
+                            ));
+                        }
                     }
                 }
             }
@@ -357,36 +625,52 @@ async fn build_message_dtos<R: Runtime>(
     app: &AppHandle<R>,
     history: &[crate::vcp_modules::chat_manager::ChatMessage],
     owner_type: &str,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, String> {
     let db = app.state::<DbState>();
     let mut results = Vec::new();
 
     for msg in history {
+        if msg.id.is_empty() || msg.role.is_empty() {
+            return Err("Outbound messages require non-empty id and role".to_string());
+        }
+        if msg.timestamp > i64::MAX as u64 {
+            return Err(format!(
+                "Outbound message {} timestamp exceeds the supported range",
+                msg.id
+            ));
+        }
         let msg_value = if msg.role == "user" {
-            let dto = UserMessageSyncDTO::from(msg);
-            serde_json::to_value(dto).ok()
+            let mut dto = UserMessageSyncDTO::from(msg);
+            if let Some(attachments) = dto.attachments.as_mut() {
+                for attachment in attachments {
+                    attachment.hash = canonical_sha256(&attachment.hash).ok_or_else(|| {
+                        format!(
+                            "Outbound message {} attachment {} has no valid SHA-256 hash",
+                            msg.id, attachment.name
+                        )
+                    })?;
+                }
+            }
+            serde_json::to_value(dto).map_err(|error| error.to_string())?
         } else if owner_type == "group" {
             let avatar_color =
                 query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default())
-                    .await
-                    .unwrap_or("#6B7280".to_string());
+                    .await?
+                    .unwrap_or_else(|| "#6B7280".to_string());
             let dto = GroupMessageSyncDTO::from_message(msg, avatar_color);
-            serde_json::to_value(dto).ok()
+            serde_json::to_value(dto).map_err(|error| error.to_string())?
         } else {
             let avatar_color =
                 query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default())
-                    .await
-                    .unwrap_or("#6B7280".to_string());
+                    .await?
+                    .unwrap_or_else(|| "#6B7280".to_string());
             let dto = AgentMessageSyncDTO::from_message(msg, avatar_color);
-            serde_json::to_value(dto).ok()
+            serde_json::to_value(dto).map_err(|error| error.to_string())?
         };
-
-        if let Some(v) = msg_value {
-            results.push(v);
-        }
+        results.push(msg_value);
     }
 
-    results
+    Ok(results)
 }
 
 async fn upload_attachment<R: Runtime>(
@@ -396,55 +680,120 @@ async fn upload_attachment<R: Runtime>(
     sync_token: &str,
     hash: &str,
 ) -> Result<(), String> {
+    let hash = canonical_sha256(hash)
+        .ok_or_else(|| "Attachment upload requires a valid SHA-256 hash".to_string())?;
     let db = app.state::<DbState>();
 
     let row = sqlx::query("SELECT mime_type, internal_path FROM attachments WHERE hash = ?")
-        .bind(hash)
+        .bind(&hash)
         .fetch_optional(&db.pool)
         .await
         .map_err(|e| e.to_string())?;
 
-    if let Some(att_row) = row {
-        let mime_type: String = att_row.get("mime_type");
-        let internal_path: String = att_row.get("internal_path");
-
-        let name_row =
-            sqlx::query("SELECT display_name FROM message_attachments WHERE hash = ? LIMIT 1")
-                .bind(hash)
-                .fetch_optional(&db.pool)
-                .await
-                .unwrap_or(None);
-        let display_name = name_row
-            .map(|r| r.get::<String, _>("display_name"))
-            .unwrap_or_else(|| "unnamed".to_string());
-
-        let file_path = internal_path.trim_start_matches("file://");
-        let file_data = tokio::fs::read(file_path)
-            .await
-            .map_err(|e| format!("读取附件失败: {}", e))?;
-
-        let url = format!(
-            "{}/api/mobile-sync/upload-attachment?hash={}&type={}&name={}",
-            http_url,
-            hash,
-            urlencoding::encode(&mime_type),
-            urlencoding::encode(&display_name)
-        );
-
-        let response = client
-            .post(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .header("Content-Type", "application/octet-stream")
-            .body(file_data)
-            .send()
-            .await
-            .map_err(|e| format!("上传附件失败: {}", e))?;
-
-        if response.status().is_success() {
-            log::debug!("[PushExecutor] Attachment uploaded: {}", hash);
-        }
+    let att_row =
+        row.ok_or_else(|| format!("Attachment {hash} is missing from the local index"))?;
+    let mime_type: String = att_row.get("mime_type");
+    let internal_path: String = att_row.get("internal_path");
+    if internal_path.trim().is_empty() {
+        return Err(format!("Attachment {hash} has no local file path"));
     }
 
+    let name_row = sqlx::query("SELECT display_name FROM message_attachments WHERE hash = ? AND deleted_at IS NULL LIMIT 1")
+        .bind(&hash)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|error| format!("Attachment {hash} display name query failed: {error}"))?;
+    let display_name = name_row
+        .map(|row| row.get::<String, _>("display_name"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unnamed".to_string());
+
+    let file_path = internal_path.trim_start_matches("file://");
+    let file_data = tokio::fs::read(file_path)
+        .await
+        .map_err(|error| format!("Attachment {hash} read failed: {error}"))?;
+    let actual_hash = crate::vcp_modules::infra::utils::calculate_sha256(&file_data);
+    if actual_hash != hash {
+        return Err(format!(
+            "Attachment {hash} content hash mismatch (actual {actual_hash})"
+        ));
+    }
+
+    let url = format!(
+        "{}/api/mobile-sync/upload-attachment?hash={}&type={}&name={}",
+        http_url,
+        hash,
+        urlencoding::encode(&mime_type),
+        urlencoding::encode(&display_name)
+    );
+
+    let response = client
+        .post(&url)
+        .header("x-sync-token", sync_token)
+        .header("Authorization", format!("Bearer {}", sync_token))
+        .header("Content-Type", "application/octet-stream")
+        .body(file_data)
+        .send()
+        .await
+        .map_err(|error| format!("Attachment {hash} upload failed: {error}"))?;
+    let body = parse_success_response(response, "Attachment upload").await?;
+    let response_hash = body
+        .get("hash")
+        .and_then(serde_json::Value::as_str)
+        .and_then(canonical_sha256)
+        .ok_or_else(|| "Attachment upload response requires a valid hash".to_string())?;
+    if response_hash != hash {
+        return Err(format!(
+            "Attachment upload response hash mismatch: expected {hash}, got {response_hash}"
+        ));
+    }
+
+    log::debug!("[PushExecutor] Attachment uploaded: {}", hash);
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_hash_is_lowercase_and_rejects_non_sha256_values() {
+        assert_eq!(canonical_sha256(&"A".repeat(64)), Some("a".repeat(64)));
+        assert_eq!(canonical_sha256(""), None);
+        assert_eq!(canonical_sha256(&"g".repeat(64)), None);
+        assert_eq!(canonical_sha256(&"a".repeat(63)), None);
+    }
+
+    #[test]
+    fn attachment_dependencies_are_recorded_per_successful_topic() {
+        let hash = "a".repeat(64);
+        let frames = vec![
+            MessagePushFrame {
+                outcome: PushBatchResult {
+                    topic_id: "topic-a".to_string(),
+                    success: true,
+                    error: None,
+                },
+                needed_attachment_hashes: vec![hash.clone()],
+            },
+            MessagePushFrame {
+                outcome: PushBatchResult {
+                    topic_id: "topic-b".to_string(),
+                    success: false,
+                    error: Some("rejected".to_string()),
+                },
+                needed_attachment_hashes: Vec::new(),
+            },
+        ];
+        let mut results = Vec::new();
+        let mut dependencies = HashMap::new();
+        record_message_frames(frames, &mut results, &mut dependencies);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            dependencies.get(&hash),
+            Some(&HashSet::from(["topic-a".to_string()]))
+        );
+    }
 }
