@@ -393,7 +393,8 @@ Mobile                              Desktop
   │                                   │
   │  <──────────────────────────────  │
   │  SYNC_DIFF_RESULTS_BATCH          │
-  │  { T1: { toPull: ["M1"],         │
+  │  { T1: { ok: true,               │
+  │          toPull: ["M1"],         │
   │          toPush: false } }        │
   │                                   │
   │  ┌─ 执行 Pull ─────────────────┐  │
@@ -417,12 +418,10 @@ Mobile                              Desktop
   │  │ WHERE hash IN (H_att)        │  │
   │  │ → 无记录                      │  │
   │  │                              │  │
-  │  │ 填充占位符:                   │  │
-  │  │ internalPath = "attachments/ │  │
-  │  │               H_att"         │  │
-  │  │ src = "file://attachments/   │  │
-  │  │        H_att"                │  │
-  │  │ status = "ready" // 乐观标记 │  │
+  │  │ 保留附件元数据关系:         │  │
+  │  │ internalPath = ""            │  │
+  │  │ src = ""                     │  │
+  │  │ status = "desktop_only"      │  │
   │  └─────────────────────────────┘  │
   │                                   │
   │  INSERT messages (M1)             │
@@ -435,19 +434,16 @@ Mobile                              Desktop
 
 ### Diff 结果
 
-| Topic | toPull | toPush | 理由 |
-|-------|--------|--------|------|
-| T1 | [M1] | false | 移动端缺少 M1 |
+| Topic | ok | toPull | toPush | 理由 |
+|-------|----|--------|--------|------|
+| T1 | true | [M1] | false | 移动端缺少 M1 |
 
 ### 最终状态
 
 - 移动端 `messages` 表写入 M1，内容与桌面端一致
-- 附件 `att.jpg` **尚未下载**，`attachments` 表无 `H_att` 记录
-- 消息附件路径为占位符 `file://attachments/H_att`，前端显示加载占位图
-- 用户点击附件或后续独立附件同步任务触发时，才执行实际下载：
-  ```
-  GET /api/mobile-sync/download-attachment?hash=H_att
-  ```
+- 附件 `att.jpg` **尚未下载**，但 `attachments` 与 `message_attachments` 保留 `H_att` 元数据/消息关系
+- 关系状态为 `desktop_only`，`src` 与 `internal_path` 均为空；前端显示不可点击的“桌面专用附件”占位
+- 同步不从桌面端下载附件二进制。Mobile 日后注册同 hash 真实文件时，仅将仍 live 的关系原子提升为 `ready`
 - Topic Hash 经冒泡后双端一致
 
 ### 涉及代码文件

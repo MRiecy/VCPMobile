@@ -1,9 +1,7 @@
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::{BatchPullResult, PullExecutor, PushExecutor};
-use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
-use crate::vcp_modules::sync_service::{
-    emit_sync_log, Phase3Tracker, SyncCommand, SyncTaskTracker,
-};
+use crate::vcp_modules::sync_logger::SyncLogger;
+use crate::vcp_modules::sync_service::{Phase3Tracker, SyncCommand};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
@@ -297,27 +295,6 @@ fn validate_topic_batch_outcomes(
     }
 }
 
-fn fail_phase3_attempt(
-    app_handle: &AppHandle,
-    logger: &Arc<Mutex<SyncLogger>>,
-    tx_internal: &mpsc::UnboundedSender<SyncCommand>,
-    attempt_id: u64,
-    code: &str,
-    failed_topic_ids: Vec<String>,
-    message: String,
-) {
-    if let Ok(mut logger) = logger.lock() {
-        logger.log(LogLevel::Error, "messages", &message);
-    }
-    emit_sync_log(app_handle, "error", &message);
-    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-        attempt_id,
-        code: code.to_string(),
-        message,
-        failed_topic_ids,
-    });
-}
-
 fn validate_phase3_result_topics(
     expected: &HashSet<String>,
     results: &serde_json::Map<String, Value>,
@@ -356,7 +333,6 @@ impl BatchDiffHandler {
         >,
         prerender_enabled: bool,
         uploaded_hashes: &Arc<tokio::sync::RwLock<HashSet<String>>>,
-        task_tracker: &Arc<SyncTaskTracker>,
         expected_batch_topics: &Arc<tokio::sync::Mutex<HashSet<String>>>,
         attempt_id: u64,
     ) -> Result<(), Phase3ProtocolError> {
@@ -414,17 +390,6 @@ impl BatchDiffHandler {
             let has_pull = !pull_batch.is_empty();
 
             if has_push || has_pull {
-                let h_in = app_handle.clone();
-                let c_in = http_client.clone();
-                let b_in = base_url.to_string();
-                let token = token.to_string();
-                let tracker_clone = tracker.clone();
-                let tx_internal_msg = tx_internal.clone();
-                let sync_logger_msg = logger.clone();
-                let wq_in = write_queue.clone();
-
-                let uploaded_hashes = uploaded_hashes.clone();
-
                 // 收集所有涉及的 topic ID（去重）
                 let mut all_topic_ids: HashSet<String> = HashSet::new();
                 for tid in &push_topic_ids {
@@ -434,134 +399,113 @@ impl BatchDiffHandler {
                     all_topic_ids.insert(tid.clone());
                 }
 
-                task_tracker
-                    .spawn(async move {
-                        // 1. Push 批量（先执行，确保 push_pull 的 topic 推送完再拉取）
-                        if has_push {
-                            let push_result = PushExecutor::push_messages_batch(
-                                &h_in,
-                                &c_in,
-                                &b_in,
-                                &token,
-                                &push_topic_ids,
-                                uploaded_hashes.clone(),
-                            )
-                            .await
-                            .map(|results| {
-                                results
-                                    .into_iter()
-                                    .map(|result| TopicBatchOutcome {
-                                        topic_id: result.topic_id,
-                                        success: result.success,
-                                        error: result.error,
-                                    })
-                                    .collect()
-                            });
-                            let successful_pushes = match validate_topic_batch_outcomes(
-                                "push",
-                                &push_topic_ids,
-                                push_result,
-                            ) {
-                                Ok(successful) => successful,
-                                Err(message) => {
-                                    for topic_id in &push_topic_ids {
-                                        tracker_clone.mark_failed(topic_id).await;
-                                    }
-                                    fail_phase3_attempt(
-                                        &h_in,
-                                        &sync_logger_msg,
-                                        &tx_internal_msg,
-                                        attempt_id,
-                                        "PHASE3_PUSH_FAILED",
-                                        push_topic_ids.clone(),
-                                        message,
-                                    );
-                                    return;
-                                }
-                            };
-                            for topic_id in successful_pushes {
-                                tracker_clone.mark_modified(&topic_id).await;
+                // At most one Phase 3 HTTP batch may be in flight. The WebSocket owner awaits
+                // this work before requesting the next diff batch, so final ACK cannot overtake
+                // DB/HTTP failures and multiple 256 MiB responses cannot stack in memory.
+                if has_push {
+                    let push_result = PushExecutor::push_messages_batch(
+                        app_handle,
+                        http_client,
+                        base_url,
+                        token,
+                        &push_topic_ids,
+                        uploaded_hashes.clone(),
+                    )
+                    .await
+                    .map(|results| {
+                        results
+                            .into_iter()
+                            .map(|result| TopicBatchOutcome {
+                                topic_id: result.topic_id,
+                                success: result.success,
+                                error: result.error,
+                            })
+                            .collect()
+                    });
+                    match validate_topic_batch_outcomes("push", &push_topic_ids, push_result) {
+                        Ok(successful) => {
+                            for topic_id in successful {
+                                tracker.mark_modified(&topic_id).await;
                             }
                         }
-
-                        // 2. Pull 批量（push 完成后再 pull，确保 push_pull 的 topic 数据已合并）
-                        if has_pull {
-                            let pull_topic_ids: Vec<String> = pull_batch
-                                .iter()
-                                .map(|(topic_id, _)| topic_id.clone())
-                                .collect();
-                            let pull_result = PullExecutor::pull_messages_batch(
-                                &h_in,
-                                &c_in,
-                                &b_in,
-                                &token,
-                                &pull_batch,
-                                &wq_in,
-                                prerender_enabled,
-                            )
-                            .await
-                            .map(|results| {
-                                let warning_count = results
-                                    .iter()
-                                    .map(|result| result.legacy_attachment_warnings)
-                                    .sum();
-                                tracker_clone.add_legacy_attachment_warnings(warning_count);
-                                results
-                                    .into_iter()
-                                    .map(|result: BatchPullResult| TopicBatchOutcome {
-                                        topic_id: result.topic_id,
-                                        success: result.success,
-                                        error: result.error,
-                                    })
-                                    .collect()
+                        Err(message) => {
+                            for topic_id in &push_topic_ids {
+                                tracker.mark_failed(topic_id).await;
+                            }
+                            let mut failed_topic_ids = push_topic_ids.clone();
+                            failed_topic_ids.sort();
+                            failed_topic_ids.truncate(8);
+                            return Err(Phase3ProtocolError {
+                                code: "PHASE3_PUSH_FAILED".to_string(),
+                                message,
+                                failed_topic_ids,
                             });
-                            let successful_pulls = match validate_topic_batch_outcomes(
-                                "pull",
-                                &pull_topic_ids,
-                                pull_result,
-                            ) {
-                                Ok(successful) => successful,
-                                Err(message) => {
-                                    for topic_id in &pull_topic_ids {
-                                        tracker_clone.mark_failed(topic_id).await;
-                                    }
-                                    fail_phase3_attempt(
-                                        &h_in,
-                                        &sync_logger_msg,
-                                        &tx_internal_msg,
-                                        attempt_id,
-                                        "PHASE3_PULL_FAILED",
-                                        pull_topic_ids.clone(),
-                                        message,
-                                    );
-                                    return;
-                                }
-                            };
-                            for topic_id in successful_pulls {
-                                tracker_clone.mark_modified(&topic_id).await;
+                        }
+                    }
+                }
+
+                if has_pull {
+                    let pull_topic_ids = pull_batch
+                        .iter()
+                        .map(|(topic_id, _)| topic_id.clone())
+                        .collect::<Vec<_>>();
+                    let pull_result = PullExecutor::pull_messages_batch(
+                        app_handle,
+                        http_client,
+                        base_url,
+                        token,
+                        &pull_batch,
+                        write_queue,
+                        prerender_enabled,
+                    )
+                    .await
+                    .map(|results| {
+                        let warning_count = results
+                            .iter()
+                            .map(|result| result.legacy_attachment_warnings)
+                            .sum();
+                        tracker.add_legacy_attachment_warnings(warning_count);
+                        results
+                            .into_iter()
+                            .map(|result: BatchPullResult| TopicBatchOutcome {
+                                topic_id: result.topic_id,
+                                success: result.success,
+                                error: result.error,
+                            })
+                            .collect()
+                    });
+                    match validate_topic_batch_outcomes("pull", &pull_topic_ids, pull_result) {
+                        Ok(successful) => {
+                            for topic_id in successful {
+                                tracker.mark_modified(&topic_id).await;
                             }
                         }
-
-                        // 3. 所有 topic 标记完成
-                        for tid in &all_topic_ids {
-                            tracker_clone
-                                .mark_completed(
-                                    tid,
-                                    &sync_logger_msg,
-                                    &tx_internal_msg,
-                                    &h_in,
-                                    false,
-                                )
-                                .await;
+                        Err(message) => {
+                            for topic_id in &pull_topic_ids {
+                                tracker.mark_failed(topic_id).await;
+                            }
+                            let mut failed_topic_ids = pull_topic_ids;
+                            failed_topic_ids.sort();
+                            failed_topic_ids.truncate(8);
+                            return Err(Phase3ProtocolError {
+                                code: "PHASE3_PULL_FAILED".to_string(),
+                                message,
+                                failed_topic_ids,
+                            });
                         }
+                    }
+                }
 
-                        log::info!(
-                            "[SyncService] Phase 3 batch done: push={} pull={}",
-                            push_topic_ids.len(),
-                            pull_batch.len()
-                        );
-                    })
-                    .await;
+                for topic_id in &all_topic_ids {
+                    tracker
+                        .mark_completed(topic_id, logger, tx_internal, app_handle, false)
+                        .await;
+                }
+                log::info!(
+                    "[SyncService] Phase 3 batch done: push={} pull={}",
+                    push_topic_ids.len(),
+                    pull_batch.len()
+                );
             }
 
             // 当前批次处理完毕，发送下一批（如果还有）

@@ -17,6 +17,34 @@ use tokio::sync::mpsc;
 
 pub struct DiffHandler;
 
+fn consume_manifest_response_type(
+    payload: &Value,
+    data_type: &SyncDataType,
+    current_phase: u8,
+    expected_manifest_types: &Mutex<HashSet<String>>,
+) -> Result<bool, String> {
+    let msg_phase = payload
+        .get("phase")
+        .and_then(Value::as_u64)
+        .and_then(|phase| u8::try_from(phase).ok())
+        .ok_or_else(|| "SYNC_DIFF_RESULTS.phase must be an integer".to_string())?;
+    if msg_phase != current_phase {
+        return Err(format!(
+            "SYNC_DIFF_RESULTS phase mismatch: expected {current_phase}, got {msg_phase}"
+        ));
+    }
+    let data_type_name = data_type.to_string();
+    let mut remaining = expected_manifest_types
+        .lock()
+        .map_err(|_| "Expected manifest type set is poisoned".to_string())?;
+    if !remaining.remove(&data_type_name) {
+        return Err(format!(
+            "SYNC_DIFF_RESULTS contains duplicate or unexpected dataType {data_type_name} for phase {current_phase}"
+        ));
+    }
+    Ok(remaining.is_empty())
+}
+
 impl DiffHandler {
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_diff(
@@ -31,6 +59,7 @@ impl DiffHandler {
         total_tasks: &Arc<AtomicU32>,
         manifest_responses_received: &Arc<AtomicU32>,
         expected_manifest_count: &Arc<AtomicU32>,
+        expected_manifest_types: &Arc<Mutex<HashSet<String>>>,
         manifest_phase: &Arc<AtomicU8>,
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<String>>>,
@@ -92,6 +121,14 @@ impl DiffHandler {
             }
         }
 
+        let current_phase = manifest_phase.load(Ordering::SeqCst);
+        let all_manifest_types_received = consume_manifest_response_type(
+            payload,
+            &data_type,
+            current_phase,
+            expected_manifest_types,
+        )?;
+
         {
             let items_clone: Vec<serde_json::Value> = items.clone();
 
@@ -141,10 +178,13 @@ impl DiffHandler {
 
             let received = manifest_responses_received.fetch_add(1, Ordering::SeqCst) + 1;
             let expected = expected_manifest_count.load(Ordering::SeqCst);
-            let current_phase = manifest_phase.load(Ordering::SeqCst);
-            let msg_phase = payload["phase"].as_u64().unwrap_or(0) as u8;
+            if received > expected {
+                return Err(format!(
+                    "SYNC_DIFF_RESULTS response count exceeds phase {current_phase} expectation"
+                ));
+            }
 
-            if received == expected && (msg_phase == current_phase || msg_phase == 0) {
+            if all_manifest_types_received && received == expected {
                 let current_pending = pending_tasks.load(Ordering::SeqCst);
                 log::info!(
                     "[SyncService] All manifests received for Phase {}: dataType={}, pending={}",
@@ -705,5 +745,51 @@ impl DiffHandler {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_manifest_response_type;
+    use crate::vcp_modules::sync_types::SyncDataType;
+    use serde_json::json;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    #[test]
+    fn manifest_responses_consume_exact_type_once_for_the_current_phase() {
+        let expected = Mutex::new(HashSet::from(["agent".to_string(), "group".to_string()]));
+        assert!(!consume_manifest_response_type(
+            &json!({"phase": 1}),
+            &SyncDataType::Agent,
+            1,
+            &expected,
+        )
+        .expect("first expected type"));
+        assert!(consume_manifest_response_type(
+            &json!({"phase": 1}),
+            &SyncDataType::Agent,
+            1,
+            &expected,
+        )
+        .is_err());
+        assert!(
+            consume_manifest_response_type(&json!({}), &SyncDataType::Group, 1, &expected,)
+                .is_err()
+        );
+        assert!(consume_manifest_response_type(
+            &json!({"phase": 2}),
+            &SyncDataType::Group,
+            1,
+            &expected,
+        )
+        .is_err());
+        assert!(consume_manifest_response_type(
+            &json!({"phase": 1}),
+            &SyncDataType::Group,
+            1,
+            &expected,
+        )
+        .expect("last expected type"));
     }
 }

@@ -28,6 +28,8 @@ struct FinalizationStats {
     affected_groups: usize,
 }
 
+const SQLITE_BIND_CHUNK: usize = 400;
+
 async fn finalize_modified_topics(
     pool: &sqlx::SqlitePool,
     modified_topics: &HashSet<String>,
@@ -36,71 +38,103 @@ async fn finalize_modified_topics(
         .begin()
         .await
         .map_err(|error| format!("开启同步收尾事务失败: {error}"))?;
-    let placeholders = modified_topics
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
-    let query_sql = format!(
-        "SELECT topic_id, owner_id, owner_type, title, created_at, locked, unread
-         FROM topics WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
-    );
-    let mut query = sqlx::query(&query_sql);
-    for topic_id in modified_topics {
-        query = query.bind(topic_id);
-    }
-    let rows = query
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| format!("读取同步收尾话题元数据失败: {error}"))?;
-
     let mut meta_map = std::collections::HashMap::new();
-    for row in rows {
-        let topic_id: String = row
-            .try_get("topic_id")
-            .map_err(|error| format!("解码同步收尾 topic_id 失败: {error}"))?;
-        meta_map.insert(
-            topic_id,
-            TopicBubbleMeta {
-                owner_id: row
-                    .try_get("owner_id")
-                    .map_err(|error| format!("解码同步收尾 owner_id 失败: {error}"))?,
-                owner_type: row
-                    .try_get("owner_type")
-                    .map_err(|error| format!("解码同步收尾 owner_type 失败: {error}"))?,
-                title: row
-                    .try_get("title")
-                    .map_err(|error| format!("解码同步收尾 title 失败: {error}"))?,
-                created_at: row
-                    .try_get("created_at")
-                    .map_err(|error| format!("解码同步收尾 created_at 失败: {error}"))?,
-                locked: row
-                    .try_get::<i64, _>("locked")
-                    .map_err(|error| format!("解码同步收尾 locked 失败: {error}"))?
-                    != 0,
-                unread: row
-                    .try_get::<i64, _>("unread")
-                    .map_err(|error| format!("解码同步收尾 unread 失败: {error}"))?
-                    != 0,
-            },
+    let topic_ids = modified_topics.iter().collect::<Vec<_>>();
+    for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+        let placeholders = topic_chunk
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let query_sql = format!(
+            "SELECT topic_id, owner_id, owner_type, title, created_at, locked, unread
+             FROM topics WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
         );
+        let mut query = sqlx::query(&query_sql);
+        for topic_id in topic_chunk {
+            query = query.bind(*topic_id);
+        }
+        let rows = query
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| format!("读取同步收尾话题元数据失败: {error}"))?;
+        for row in rows {
+            let topic_id: String = row
+                .try_get("topic_id")
+                .map_err(|error| format!("解码同步收尾 topic_id 失败: {error}"))?;
+            if meta_map
+                .insert(
+                    topic_id.clone(),
+                    TopicBubbleMeta {
+                        owner_id: row
+                            .try_get("owner_id")
+                            .map_err(|error| format!("解码同步收尾 owner_id 失败: {error}"))?,
+                        owner_type: row
+                            .try_get("owner_type")
+                            .map_err(|error| format!("解码同步收尾 owner_type 失败: {error}"))?,
+                        title: row
+                            .try_get("title")
+                            .map_err(|error| format!("解码同步收尾 title 失败: {error}"))?,
+                        created_at: row
+                            .try_get("created_at")
+                            .map_err(|error| format!("解码同步收尾 created_at 失败: {error}"))?,
+                        locked: row
+                            .try_get::<i64, _>("locked")
+                            .map_err(|error| format!("解码同步收尾 locked 失败: {error}"))?
+                            != 0,
+                        unread: row
+                            .try_get::<i64, _>("unread")
+                            .map_err(|error| format!("解码同步收尾 unread 失败: {error}"))?
+                            != 0,
+                    },
+                )
+                .is_some()
+            {
+                return Err(format!("同步收尾话题元数据重复: {topic_id}"));
+            }
+        }
     }
 
-    let update_sql = format!(
-        "UPDATE topics SET
-            msg_count = (SELECT COUNT(*) FROM messages
-                         WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL),
-            updated_at = ?
-         WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
-    );
-    let mut update = sqlx::query(&update_sql).bind(chrono::Utc::now().timestamp_millis());
-    for topic_id in modified_topics {
-        update = update.bind(topic_id);
+    let actual_topics = meta_map.keys().cloned().collect::<HashSet<_>>();
+    if actual_topics != *modified_topics {
+        let mut missing = modified_topics
+            .difference(&actual_topics)
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort();
+        return Err(format!("同步收尾缺少 live 话题元数据: {missing:?}"));
     }
-    update
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("更新同步收尾消息计数失败: {error}"))?;
+
+    let updated_at = chrono::Utc::now().timestamp_millis();
+    for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+        let placeholders = topic_chunk
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let update_sql = format!(
+            "UPDATE topics SET
+                msg_count = (SELECT COUNT(*) FROM messages
+                             WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL),
+                updated_at = ?
+             WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
+        );
+        let mut update = sqlx::query(&update_sql).bind(updated_at);
+        for topic_id in topic_chunk {
+            update = update.bind(*topic_id);
+        }
+        let result = update
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("更新同步收尾消息计数失败: {error}"))?;
+        if result.rows_affected() != topic_chunk.len() as u64 {
+            return Err(format!(
+                "同步收尾消息计数仅更新 {}/{} 个话题",
+                result.rows_affected(),
+                topic_chunk.len()
+            ));
+        }
+    }
 
     let mut affected_agents = HashSet::new();
     let mut affected_groups = HashSet::new();
@@ -294,5 +328,47 @@ mod tests {
             .await
             .expect_err("malformed metadata query must fail closed");
         assert!(error.contains("话题元数据"));
+    }
+
+    #[tokio::test]
+    async fn missing_or_tombstoned_repair_topic_fails_before_updates() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, title TEXT,
+                created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
+                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE messages (
+                topic_id TEXT, msg_id TEXT, timestamp INTEGER,
+                content_hash TEXT, deleted_at INTEGER
+             );
+             INSERT INTO topics VALUES
+                ('live', 'agent', 'agent', 'Live', 1, 1, 0, 7, 1, '', '', NULL),
+                ('deleted', 'agent', 'agent', 'Deleted', 1, 1, 0, 9, 1, '', '', 8);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create finalizer fixture");
+
+        for missing in ["missing", "deleted"] {
+            let error = finalize_modified_topics(
+                &pool,
+                &HashSet::from(["live".to_string(), missing.to_string()]),
+            )
+            .await
+            .expect_err("repair set must have exact live metadata coverage");
+            assert!(error.contains(missing));
+            let msg_count: i64 =
+                sqlx::query_scalar("SELECT msg_count FROM topics WHERE topic_id = 'live'")
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read unchanged topic");
+            assert_eq!(msg_count, 7);
+        }
     }
 }

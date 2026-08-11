@@ -352,13 +352,11 @@ impl HashInitializer {
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         for row in rows {
             let agent_id: String = row.get("agent_id");
-            if let Err(e) = Self::ensure_agent_hashes(&mut tx, &agent_id).await {
-                log::error!(
-                    "[HashInitializer] Failed to ensure hash for Agent {}: {}",
-                    agent_id,
-                    e
-                );
-            }
+            Self::ensure_agent_hashes(&mut tx, &agent_id)
+                .await
+                .map_err(|error| {
+                    format!("Failed to initialize hash for Agent {agent_id}: {error}")
+                })?;
         }
         tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -381,13 +379,11 @@ impl HashInitializer {
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         for row in rows {
             let group_id: String = row.get("group_id");
-            if let Err(e) = Self::ensure_group_hashes(&mut tx, &group_id).await {
-                log::error!(
-                    "[HashInitializer] Failed to ensure hash for Group {}: {}",
-                    group_id,
-                    e
-                );
-            }
+            Self::ensure_group_hashes(&mut tx, &group_id)
+                .await
+                .map_err(|error| {
+                    format!("Failed to initialize hash for Group {group_id}: {error}")
+                })?;
         }
         tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -473,7 +469,7 @@ impl HashInitializer {
         .map_err(|e| e.to_string())?;
 
         let members = Self::load_group_members(tx, group_id).await?;
-        let member_tags = Self::load_member_tags(tx, group_id).await;
+        let member_tags = Self::load_member_tags(tx, group_id).await?;
 
         Ok(GroupSyncDTO {
             name: row.get("name"),
@@ -507,14 +503,14 @@ impl HashInitializer {
     async fn load_member_tags(
         tx: &mut Transaction<'_, Sqlite>,
         group_id: &str,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, String> {
         let rows = sqlx::query(
             "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? AND member_tag IS NOT NULL",
         )
         .bind(group_id)
         .fetch_all(&mut **tx)
         .await
-        .unwrap_or_default();
+        .map_err(|error| error.to_string())?;
 
         let mut tags = serde_json::Map::new();
         for row in rows {
@@ -523,7 +519,7 @@ impl HashInitializer {
             tags.insert(agent_id, serde_json::Value::String(tag));
         }
 
-        serde_json::Value::Object(tags)
+        Ok(serde_json::Value::Object(tags))
     }
 }
 
@@ -610,5 +606,51 @@ mod tests {
             HashAggregator::compute_group_topic_metadata_hash(&group_topic),
             HashAggregator::compute_group_topic_metadata_hash(&same_metadata_other_owner)
         );
+    }
+
+    #[tokio::test]
+    async fn hash_initializer_rolls_back_and_surfaces_row_errors() {
+        let agent_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open agent database");
+        sqlx::query(
+            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, config_hash TEXT);
+             INSERT INTO agents VALUES ('broken-agent', 'PENDING');",
+        )
+        .execute(&agent_pool)
+        .await
+        .expect("create broken agent fixture");
+        let agent_error = HashInitializer::ensure_all_agent_hashes(&agent_pool)
+            .await
+            .expect_err("per-agent query errors must abort initialization");
+        assert!(agent_error.contains("broken-agent"));
+
+        let group_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open group database");
+        sqlx::query(
+            "CREATE TABLE groups (
+                group_id TEXT PRIMARY KEY, config_hash TEXT, name TEXT, mode TEXT,
+                group_prompt TEXT, invite_prompt TEXT, use_unified_model INTEGER,
+                unified_model TEXT, tag_match_mode TEXT, created_at INTEGER
+             );
+             CREATE TABLE group_members (
+                group_id TEXT, agent_id TEXT, sort_order INTEGER
+             );
+             INSERT INTO groups VALUES
+                ('broken-group', 'PENDING', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, 1);
+             INSERT INTO group_members VALUES ('broken-group', 'agent', 0);",
+        )
+        .execute(&group_pool)
+        .await
+        .expect("create broken group fixture");
+        let group_error = HashInitializer::ensure_all_group_hashes(&group_pool)
+            .await
+            .expect_err("member-tag query errors must abort initialization");
+        assert!(group_error.contains("broken-group"));
     }
 }

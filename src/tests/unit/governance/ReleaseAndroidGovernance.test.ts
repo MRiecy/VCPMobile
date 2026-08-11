@@ -98,7 +98,15 @@ describe('release and Android governance contracts', () => {
     );
     expect(ciWorkflow).toContain('sha256sum --check --strict');
     expect(ciWorkflow).toContain('--dependency-verification strict');
-    expect(releaseWorkflow).toContain('--dependency-verification strict');
+    expect(releaseWorkflow).toContain(
+      'test -s src-tauri/gen/android/gradle/verification-metadata.xml',
+    );
+    expect(releaseWorkflow).toContain(
+      'pnpm tauri android build --apk --target aarch64',
+    );
+    expect(releaseWorkflow).not.toContain(
+      'tauri android build --apk --target aarch64 -- --dependency-verification',
+    );
   });
 
   it('rejects incomplete release signing and makes trusted LAN cleartext explicit', () => {

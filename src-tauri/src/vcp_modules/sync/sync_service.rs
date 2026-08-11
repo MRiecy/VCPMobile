@@ -29,6 +29,7 @@ const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const PHASE3_WATCHDOG_TICK: Duration = Duration::from_secs(10);
 const PHASE3_WATCHDOG_STUCK_TICKS: u32 = 6;
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+const ENTITY_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
 type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -524,16 +525,24 @@ async fn publish_sync_status_inner<R: Runtime>(
 
     {
         let mut guard = status.write().await;
-        if guard.as_str() == next_status {
+        let detailed_error_enrichment = guard.as_str() == "error"
+            && next_status == "error"
+            && error
+                .as_ref()
+                .is_some_and(|(code, _, _)| *code != "SYNC_ATTEMPT_FAILED");
+        if guard.as_str() == next_status && !detailed_error_enrichment {
             return;
         }
         if matches!(
             guard.as_str(),
             "error" | "completed" | "completed_with_warnings"
-        ) {
+        ) && !detailed_error_enrichment
+        {
             return;
         }
-        *guard = next_status.to_string();
+        if !detailed_error_enrichment {
+            *guard = next_status.to_string();
+        }
     }
 
     let mut payload = json!({
@@ -813,7 +822,26 @@ async fn run_sync_session(
     let tx_internal = tx.clone();
     let connection_status_for_task = connection_status.clone();
 
-    let http_client = reqwest::Client::new();
+    let http_client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let message = format!("Failed to initialize sync HTTP client: {error}");
+            publish_sync_error(
+                &app_handle,
+                session_id,
+                &connection_status,
+                "HTTP_CLIENT_INIT_FAILED",
+                &message,
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
+    };
     let mut retry_count = 0u32;
     const MAX_RETRIES: u32 = 3;
     let mut retry_delay = Duration::from_millis(500);
@@ -947,9 +975,6 @@ async fn run_sync_session(
 
         match connect_result {
             Ok((mut ws_stream, _)) => {
-                retry_count = 0;
-                retry_delay = Duration::from_millis(500);
-
                 // ── 版本验证握手 ──
                 {
                     let version_req = json!({
@@ -1240,11 +1265,17 @@ async fn run_sync_session(
                             }
                         }),
                     );
-                    if cancelled_during(&cancel_token, retry_delay).await {
-                        break;
-                    }
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-                    continue;
+                    publish_sync_error(
+                        &handle_clone,
+                        session_id,
+                        &connection_status_for_task,
+                        "AGENT_HASH_INIT_DB_FAILED",
+                        &format!("Failed to initialize agent hashes: {e}"),
+                        Vec::new(),
+                    )
+                    .await;
+                    let _ = close_ws_with_deadline(&mut ws_stream).await;
+                    break 'session;
                 }
                 if let Err(e) = HashInitializer::ensure_all_group_hashes(&db.pool).await {
                     if let Ok(mut logger) = sync_logger_task.lock() {
@@ -1269,11 +1300,17 @@ async fn run_sync_session(
                             }
                         }),
                     );
-                    if cancelled_during(&cancel_token, retry_delay).await {
-                        break;
-                    }
-                    retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-                    continue;
+                    publish_sync_error(
+                        &handle_clone,
+                        session_id,
+                        &connection_status_for_task,
+                        "GROUP_HASH_INIT_DB_FAILED",
+                        &format!("Failed to initialize group hashes: {e}"),
+                        Vec::new(),
+                    )
+                    .await;
+                    let _ = close_ws_with_deadline(&mut ws_stream).await;
+                    break 'session;
                 }
 
                 // Every reconnect gets a fresh owner set. Cancelling and joining this tracker
@@ -1320,6 +1357,7 @@ async fn run_sync_session(
                 // 用于跟踪 manifest diff 结果是否全部收到，防止 total_ops=0 时 Phase 1 卡住
                 let expected_manifest_count = Arc::new(AtomicU32::new(0));
                 let manifest_responses_received = Arc::new(AtomicU32::new(0));
+                let expected_manifest_types = Arc::new(Mutex::new(HashSet::<String>::new()));
                 // 1: 基础 Metadata (agent, group, avatar), 2: Topic Metadata
                 let manifest_phase = Arc::new(AtomicU8::new(1));
                 let mut fatal_error = false;
@@ -1349,12 +1387,41 @@ async fn run_sync_session(
                                     };
 
                                     if owners.is_empty() {
+                                        expected_manifest_count.store(0, Ordering::SeqCst);
+                                        manifest_responses_received.store(0, Ordering::SeqCst);
+                                        if let Ok(mut expected) = expected_manifest_types.lock() {
+                                            expected.clear();
+                                        }
                                         let _ = tx_internal.send(SyncCommand::StartTopicValidation { attempt_id });
                                     } else {
-                                        if let Ok(manifest) = Phase1Metadata::build_targeted_topic_manifest(&db.pool, &owners).await {
+                                        match Phase1Metadata::build_targeted_topic_manifest(&db.pool, &owners).await {
+                                            Ok(manifest) => {
+                                            if manifest.data_type != SyncDataType::Topic {
+                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                    attempt_id,
+                                                    code: "TOPIC_MANIFEST_INVALID".to_string(),
+                                                    message: "Targeted topic manifest returned an unexpected data type".to_string(),
+                                                    failed_topic_ids: Vec::new(),
+                                                });
+                                                continue 'attempt;
+                                            }
                                             manifest_phase.store(2, Ordering::SeqCst);
                                             expected_manifest_count.store(1, Ordering::SeqCst);
                                             manifest_responses_received.store(0, Ordering::SeqCst);
+                                            match expected_manifest_types.lock() {
+                                                Ok(mut expected) => {
+                                                    *expected = HashSet::from(["topic".to_string()]);
+                                                }
+                                                Err(_) => {
+                                                    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                        attempt_id,
+                                                        code: "SYNC_STATE_POISONED".to_string(),
+                                                        message: "Expected manifest type state is poisoned".to_string(),
+                                                        failed_topic_ids: Vec::new(),
+                                                    });
+                                                    continue 'attempt;
+                                                }
+                                            }
                                             pending_tasks_task.store(0, Ordering::SeqCst);
                                             total_tasks_task.store(0, Ordering::SeqCst);
 
@@ -1394,8 +1461,15 @@ async fn run_sync_session(
                                                 ).await;
                                                 break 'attempt;
                                             }
-                                        } else {
-                                            let _ = tx_internal.send(SyncCommand::StartTopicValidation { attempt_id });
+                                            }
+                                            Err(error) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                    attempt_id,
+                                                    code: "TOPIC_MANIFEST_DB_FAILED".to_string(),
+                                                    message: format!("Failed to build targeted topic manifest: {error}"),
+                                                    failed_topic_ids: Vec::new(),
+                                                });
+                                            }
                                         }
                                     }
                                 },
@@ -1439,7 +1513,12 @@ async fn run_sync_session(
                                         }
                                         Err(e) => {
                                             log::error!("[SyncService] Failed to get targeted topic hashes: {}", e);
-                                            let _ = tx_internal.send(SyncCommand::StartMessages { attempt_id });
+                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                attempt_id,
+                                                code: "TOPIC_HASH_DB_FAILED".to_string(),
+                                                message: format!("Failed to get targeted topic hashes: {e}"),
+                                                failed_topic_ids: Vec::new(),
+                                            });
                                         }
                                     }
                                 },
@@ -1493,6 +1572,20 @@ async fn run_sync_session(
                                                 pending_msg_topics_task
                                                     .legacy_attachment_warnings
                                                     .store(0, Ordering::SeqCst);
+                                                let _ = handle_clone.emit(
+                                                    "vcp-sync-progress",
+                                                    json!({
+                                                        "sessionId": session_id,
+                                                        "phase": "messages",
+                                                        "total": topic_count,
+                                                        "completed": 0,
+                                                        "message": format!("Syncing Messages: 0/{topic_count}"),
+                                                        "successfulTopics": 0,
+                                                        "totalTopics": topic_count,
+                                                        "failedTopics": 0,
+                                                        "legacyAttachmentWarnings": 0,
+                                                    }),
+                                                );
 
                                                 // 清空可能残留的旧批次，防止断线重连后发送过时数据
                                                 {
@@ -1500,7 +1593,18 @@ async fn run_sync_session(
                                                     pending.clear();
                                                 }
                                                 // 按消息数量分批，每批最多 10000 条消息，避免超大 WS payload
-                                                let batches = build_diff_batches(topic_states);
+                                                let batches = match build_diff_batches(topic_states) {
+                                                    Ok(batches) => batches,
+                                                    Err(error) => {
+                                                        let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                            attempt_id,
+                                                            code: "PHASE3_DIFF_BUDGET_EXCEEDED".to_string(),
+                                                            message: error,
+                                                            failed_topic_ids: changed_ids.iter().take(8).cloned().collect(),
+                                                        });
+                                                        continue 'attempt;
+                                                    }
+                                                };
                                                 let batch_count = batches.len();
                                                 log::info!("[SyncService] Phase3 diff split into {} batches (max {} msgs/batch)", batch_count, MAX_MESSAGES_PER_BATCH);
 
@@ -1813,13 +1917,54 @@ async fn run_sync_session(
                                 SyncCommand::StartManualSync => {
                                     let db = handle_clone.state::<DbState>();
                                     manifest_phase.store(1, Ordering::SeqCst);
-                                    if let Ok(manifests) = Phase1Metadata::build_phase1_manifests(&db.pool).await {
-                                        let count = manifests.len() as u32;
+                                    match Phase1Metadata::build_phase1_manifests(&db.pool).await {
+                                        Ok(manifests) => {
+                                        let manifest_types = manifests
+                                            .iter()
+                                            .map(|manifest| manifest.data_type.to_string())
+                                            .collect::<HashSet<_>>();
+                                        if manifest_types.len() != manifests.len() {
+                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                attempt_id,
+                                                code: "OWNER_MANIFEST_INVALID".to_string(),
+                                                message: "Phase 1 manifests contain duplicate data types".to_string(),
+                                                failed_topic_ids: Vec::new(),
+                                            });
+                                            continue 'attempt;
+                                        }
+                                        let count = match u32::try_from(manifests.len()) {
+                                            Ok(count) => count,
+                                            Err(_) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                    attempt_id,
+                                                    code: "OWNER_MANIFEST_INVALID".to_string(),
+                                                    message: "Phase 1 manifest count exceeds the supported range".to_string(),
+                                                    failed_topic_ids: Vec::new(),
+                                                });
+                                                continue 'attempt;
+                                            }
+                                        };
                                         expected_manifest_count.store(count, Ordering::SeqCst);
                                         manifest_responses_received.store(0, Ordering::SeqCst);
+                                        match expected_manifest_types.lock() {
+                                            Ok(mut expected) => *expected = manifest_types,
+                                            Err(_) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                    attempt_id,
+                                                    code: "SYNC_STATE_POISONED".to_string(),
+                                                    message: "Expected manifest type state is poisoned".to_string(),
+                                                    failed_topic_ids: Vec::new(),
+                                                });
+                                                continue 'attempt;
+                                            }
+                                        }
 
                                         if let Ok(mut logger) = sync_logger_task.lock() {
                                             logger.set_phase_expected("owner_metadata", count);
+                                        }
+                                        if manifests.is_empty() {
+                                            let _ = tx_internal.send(SyncCommand::StartTopicMetadata { attempt_id });
+                                            continue 'attempt;
                                         }
                                         for manifest in manifests {
                                             let msg = json!({
@@ -1840,6 +1985,15 @@ async fn run_sync_session(
                                                 ).await;
                                                 break 'attempt;
                                             }
+                                        }
+                                        }
+                                        Err(error) => {
+                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                attempt_id,
+                                                code: "OWNER_MANIFEST_DB_FAILED".to_string(),
+                                                message: format!("Failed to build Phase 1 manifests: {error}"),
+                                                failed_topic_ids: Vec::new(),
+                                            });
                                         }
                                     }
                                 },
@@ -1966,62 +2120,151 @@ async fn run_sync_session(
 
                                 match payload["type"].as_str() {
                                     Some("SYNC_ENTITY_UPDATE") => {
-                                        let id = payload["id"].as_str().unwrap_or_default().to_string();
-                                        let owner_type = payload["ownerType"].as_str().unwrap_or("agent").to_string();
-                                        let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                        let failure_tx = tx_internal.clone();
-                                        task_tracker.spawn(async move {
-                                            let result: Result<(), String> = async {
-                                                let _permit = sem.acquire().await;
-                                                let settings = crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await?;
-                                                match &data_type {
+                                        let id = match payload.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                                            Some(id) => id.to_string(),
+                                            None => {
+                                                fatal_error = true;
+                                                publish_sync_error(
+                                                    &handle_clone,
+                                                    session_id,
+                                                    &connection_status_for_task,
+                                                    "PROTOCOL_FRAME_INVALID",
+                                                    "SYNC_ENTITY_UPDATE.id must be a non-empty string",
+                                                    Vec::new(),
+                                                ).await;
+                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                break;
+                                            }
+                                        };
+                                        let data_type = match parse_sync_data_type(&payload["dataType"]) {
+                                            Some(data_type @ (SyncDataType::Agent | SyncDataType::Group | SyncDataType::Topic)) => data_type,
+                                            _ => {
+                                                fatal_error = true;
+                                                publish_sync_error(
+                                                    &handle_clone,
+                                                    session_id,
+                                                    &connection_status_for_task,
+                                                    "PROTOCOL_FRAME_INVALID",
+                                                    "SYNC_ENTITY_UPDATE.dataType must be agent, group, or topic",
+                                                    vec![id.clone()],
+                                                ).await;
+                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                break;
+                                            }
+                                        };
+                                        let owner_type = if data_type == SyncDataType::Topic {
+                                            match payload.get("ownerType").and_then(Value::as_str).filter(|owner_type| matches!(*owner_type, "agent" | "group")) {
+                                                Some(owner_type) => owner_type,
+                                                None => {
+                                                    fatal_error = true;
+                                                    publish_sync_error(
+                                                        &handle_clone,
+                                                        session_id,
+                                                        &connection_status_for_task,
+                                                        "PROTOCOL_FRAME_INVALID",
+                                                        "SYNC_ENTITY_UPDATE topic requires ownerType agent or group",
+                                                        vec![id.clone()],
+                                                    ).await;
+                                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            ""
+                                        };
+                                        let result = tokio::time::timeout(ENTITY_OPERATION_TIMEOUT, async {
+                                            let _permit = sem.acquire().await;
+                                            match data_type {
                                                 SyncDataType::Agent => PullExecutor::pull_agent(&h, &c, &base, &settings.sync_token, &id, &wq).await,
                                                 SyncDataType::Group => PullExecutor::pull_group(&h, &c, &base, &settings.sync_token, &id, &wq).await,
-                                                SyncDataType::Topic => {
-                                                    if owner_type == "group" {
-                                                        PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await
-                                                    } else {
-                                                        PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await
-                                                    }
-                                                },
-                                                _ => Err(format!("unsupported entity update type: {data_type:?}")),
-                                                }
-                                            }.await;
-                                            if let Err(error) = result {
-                                                let _ = failure_tx.send(SyncCommand::FailAttempt {
-                                                    attempt_id,
-                                                    message: format!("SYNC_ENTITY_UPDATE failed for {id}: {error}"),
-                                                });
+                                                SyncDataType::Topic if owner_type == "group" => PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await,
+                                                SyncDataType::Topic => PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await,
+                                                other => Err(format!("unsupported entity update type: {other:?}")),
                                             }
-                                        }).await;
+                                        }).await
+                                            .map_err(|_| format!("operation timed out after {} seconds", ENTITY_OPERATION_TIMEOUT.as_secs()))
+                                            .and_then(|result| result);
+                                        if let Err(error) = result {
+                                            fatal_error = true;
+                                            let message = format!("SYNC_ENTITY_UPDATE failed for {id}: {error}");
+                                            publish_sync_error(
+                                                &handle_clone,
+                                                session_id,
+                                                &connection_status_for_task,
+                                                "ENTITY_UPDATE_FAILED",
+                                                &message,
+                                                vec![id],
+                                            ).await;
+                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                            break;
+                                        }
                                     },
                                     Some("SYNC_DELETE_NOTIFY") => {
                                         use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                        let id = payload["id"].as_str().unwrap_or_default().to_string();
-                                        let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else { continue; };
-                                        let failure_tx = tx_internal.clone();
-                                        task_tracker.spawn(async move {
-                                            let result = match &data_type {
+                                        let id = match payload.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+                                            Some(id) => id.to_string(),
+                                            None => {
+                                                fatal_error = true;
+                                                publish_sync_error(
+                                                    &handle_clone,
+                                                    session_id,
+                                                    &connection_status_for_task,
+                                                    "PROTOCOL_FRAME_INVALID",
+                                                    "SYNC_DELETE_NOTIFY.id must be a non-empty string",
+                                                    Vec::new(),
+                                                ).await;
+                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                break;
+                                            }
+                                        };
+                                        let data_type = match parse_sync_data_type(&payload["dataType"]) {
+                                            Some(data_type @ (SyncDataType::Agent | SyncDataType::Group | SyncDataType::Topic | SyncDataType::Avatar)) => data_type,
+                                            _ => {
+                                                fatal_error = true;
+                                                publish_sync_error(
+                                                    &handle_clone,
+                                                    session_id,
+                                                    &connection_status_for_task,
+                                                    "PROTOCOL_FRAME_INVALID",
+                                                    "SYNC_DELETE_NOTIFY.dataType is missing or invalid",
+                                                    vec![id.clone()],
+                                                ).await;
+                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                break;
+                                            }
+                                        };
+                                        let result = tokio::time::timeout(ENTITY_OPERATION_TIMEOUT, async {
+                                            match data_type {
                                                 SyncDataType::Agent => DeleteExecutor::soft_delete_agent(&h, &id).await,
                                                 SyncDataType::Group => DeleteExecutor::soft_delete_group(&h, &id).await,
                                                 SyncDataType::Topic => DeleteExecutor::soft_delete_topic(&h, &id).await,
-                                                SyncDataType::Avatar => {
-                                                    let parts: Vec<&str> = id.split(':').collect();
-                                                    if parts.len() == 2 {
-                                                        DeleteExecutor::soft_delete_avatar(&h, parts[0], parts[1]).await
-                                                    } else {
-                                                        Err(format!("invalid avatar id: {id}"))
+                                                SyncDataType::Avatar => match id.split_once(':') {
+                                                    Some((owner_type, owner_id))
+                                                        if matches!(owner_type, "agent" | "group") && !owner_id.is_empty() =>
+                                                    {
+                                                        DeleteExecutor::soft_delete_avatar(&h, owner_type, owner_id).await
                                                     }
+                                                    _ => Err(format!("invalid avatar id: {id}")),
                                                 },
-                                                _ => Err(format!("unsupported delete notification type: {data_type:?}")),
-                                            };
-                                            if let Err(error) = result {
-                                                let _ = failure_tx.send(SyncCommand::FailAttempt {
-                                                    attempt_id,
-                                                    message: format!("SYNC_DELETE_NOTIFY failed for {id}: {error}"),
-                                                });
+                                                SyncDataType::Message => Err("message delete notifications are unsupported".to_string()),
                                             }
-                                        }).await;
+                                        }).await
+                                            .map_err(|_| format!("operation timed out after {} seconds", ENTITY_OPERATION_TIMEOUT.as_secs()))
+                                            .and_then(|result| result);
+                                        if let Err(error) = result {
+                                            fatal_error = true;
+                                            let message = format!("SYNC_DELETE_NOTIFY failed for {id}: {error}");
+                                            publish_sync_error(
+                                                &handle_clone,
+                                                session_id,
+                                                &connection_status_for_task,
+                                                "ENTITY_DELETE_FAILED",
+                                                &message,
+                                                vec![id],
+                                            ).await;
+                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                            break;
+                                        }
                                     },
                                     Some("SYNC_ERROR") => {
                                         let Some(message) = payload.get("message").and_then(Value::as_str).filter(|value| !value.is_empty()) else {
@@ -2089,6 +2332,7 @@ async fn run_sync_session(
                                             &total_tasks_task,
                                             &manifest_responses_received,
                                             &expected_manifest_count,
+                                            &expected_manifest_types,
                                             &manifest_phase,
                                             &tx_internal,
                                             &changed_owners,
@@ -2135,12 +2379,28 @@ async fn run_sync_session(
                                             &pending_diff_batches,
                                             settings.sync_prerender_enabled,
                                             &uploaded_hashes,
-                                            &task_tracker,
                                             &expected_phase3_batch,
                                             attempt_id,
                                         ).await {
                                             log::error!("[SyncService] BatchDiffHandler failed: {}", e);
                                             fatal_error = true;
+                                            let failure_summary = pending_msg_topics_task
+                                                .completion_summary()
+                                                .await;
+                                            let _ = handle_clone.emit(
+                                                "vcp-sync-progress",
+                                                json!({
+                                                    "sessionId": session_id,
+                                                    "phase": "messages",
+                                                    "total": failure_summary.total_topics,
+                                                    "completed": failure_summary.successful_topics,
+                                                    "message": "Message synchronization failed",
+                                                    "successfulTopics": failure_summary.successful_topics,
+                                                    "totalTopics": failure_summary.total_topics,
+                                                    "failedTopics": failure_summary.failed_topics,
+                                                    "legacyAttachmentWarnings": failure_summary.legacy_attachment_warnings,
+                                                }),
+                                            );
                                             emit_sync_log(
                                                 &handle_clone,
                                                 "error",
@@ -2268,9 +2528,19 @@ async fn run_sync_session(
                                             fatal_error = true;
                                         }
                                     }
-                                    emit_sync_log(&handle_clone, "error", &format!("❌ 同步连接失败 [{}]: {}", error_code, err_msg));
-                                    emit_sync_log(&handle_clone, "error", &format!("👉 排查建议: {}", solution));
-                                    publish_sync_status(&handle_clone, session_id, &connection_status_for_task, "error", &err_msg).await;
+                                    let level = if fatal_error { "error" } else { "warning" };
+                                    emit_sync_log(&handle_clone, level, &format!("同步连接关闭 [{}]: {}", error_code, err_msg));
+                                    emit_sync_log(&handle_clone, level, &format!("排查建议: {}", solution));
+                                    if fatal_error {
+                                        publish_sync_error(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                            &error_code,
+                                            &err_msg,
+                                            Vec::new(),
+                                        ).await;
+                                    }
                                     break;
                                 }
                                 _ => {}
@@ -2306,7 +2576,6 @@ async fn run_sync_session(
                         break;
                     }
                     // 同步未成功完成，但内层循环已跳出（说明中途断网）
-                    retry_count += 1;
                     if retry_count >= MAX_RETRIES {
                         let err_msg = "同步中途异常断开，已达到最大重试次数";
                         publish_sync_status(
@@ -2319,6 +2588,7 @@ async fn run_sync_session(
                         .await;
                         break;
                     }
+                    retry_count += 1;
                     let backoff = retry_delay * 2u32.pow(retry_count - 1);
                     let err_msg = format!(
                         "同步中途异常断开，{:?} 后尝试重新连接... (次数: {}/{})",
@@ -2426,45 +2696,74 @@ async fn run_sync_session(
     }
 }
 
-/// 每批最多包含的消息数，控制单次 WS payload 大小（约 10000 条消息 ≈ 1.5-2MB JSON）
+/// Phase 3 diff 同时受消息数和真实 JSON 字节预算约束。
 const MAX_MESSAGES_PER_BATCH: usize = 10000;
+const MAX_WS_DIFF_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 fn build_diff_batches(
     topic_states: std::collections::HashMap<
         String,
         crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState,
     >,
-) -> std::collections::VecDeque<serde_json::Map<String, serde_json::Value>> {
+) -> Result<std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>, String> {
     let mut batches = std::collections::VecDeque::new();
     let mut current_batch = serde_json::Map::new();
     let mut current_msg_count = 0usize;
+    let envelope_bytes = br#"{"type":"SYNC_MESSAGE_DIFF_BATCH","topics":{}}"#.len();
+    let mut current_bytes = envelope_bytes;
+    let mut topic_states = topic_states.into_iter().collect::<Vec<_>>();
+    topic_states.sort_by(|left, right| left.0.cmp(&right.0));
 
     for (topic_id, state) in topic_states {
         let msg_count = state.messages.len();
-        // 如果当前批次非空且加入此 topic 会超限，先结算当前批次
-        if current_msg_count > 0 && current_msg_count + msg_count > MAX_MESSAGES_PER_BATCH {
-            batches.push_back(current_batch);
-            current_batch = serde_json::Map::new();
-            current_msg_count = 0;
-        }
-
         let mut msg_map = serde_json::Map::new();
-        for (msg_id, hash) in state.messages {
+        let mut messages = state.messages.into_iter().collect::<Vec<_>>();
+        messages.sort_by(|left, right| left.0.cmp(&right.0));
+        for (msg_id, hash) in messages {
             msg_map.insert(msg_id, serde_json::Value::String(hash));
         }
         let topic_obj = serde_json::json!({
             "topicHash": state.topic_hash,
             "messages": msg_map,
         });
+        let mut single_entry = serde_json::Map::new();
+        single_entry.insert(topic_id.clone(), topic_obj.clone());
+        let entry_bytes = serde_json::to_vec(&single_entry)
+            .map_err(|error| format!("Failed to size Phase 3 topic {topic_id}: {error}"))?
+            .len()
+            .saturating_sub(2);
+        if envelope_bytes.saturating_add(entry_bytes) > MAX_WS_DIFF_BATCH_BYTES {
+            return Err(format!(
+                "Phase 3 diff topic {topic_id} exceeds the 8 MiB WebSocket frame limit"
+            ));
+        }
+
+        let separator_bytes = usize::from(!current_batch.is_empty());
+        if !current_batch.is_empty()
+            && (current_msg_count.saturating_add(msg_count) > MAX_MESSAGES_PER_BATCH
+                || current_bytes
+                    .saturating_add(separator_bytes)
+                    .saturating_add(entry_bytes)
+                    > MAX_WS_DIFF_BATCH_BYTES)
+        {
+            batches.push_back(current_batch);
+            current_batch = serde_json::Map::new();
+            current_msg_count = 0;
+            current_bytes = envelope_bytes;
+        }
+
+        current_bytes = current_bytes
+            .saturating_add(usize::from(!current_batch.is_empty()))
+            .saturating_add(entry_bytes);
         current_batch.insert(topic_id, topic_obj);
-        current_msg_count += msg_count;
+        current_msg_count = current_msg_count.saturating_add(msg_count);
     }
 
     if !current_batch.is_empty() {
         batches.push_back(current_batch);
     }
 
-    batches
+    Ok(batches)
 }
 
 pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
@@ -2786,6 +3085,45 @@ mod tests {
         assert!(
             parse_unique_nonempty_strings(&json!(["topic-a", "topic-a"]), "changedTopics").is_err()
         );
+    }
+
+    #[test]
+    fn phase3_diff_batches_enforce_serialized_byte_budget() {
+        use crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState;
+        use std::collections::HashMap;
+
+        let mut states = HashMap::new();
+        for index in 0..3 {
+            states.insert(
+                format!("topic-{index}"),
+                TopicLocalState {
+                    topic_hash: "h".repeat(64),
+                    messages: HashMap::from([(
+                        format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
+                        "m".repeat(64),
+                    )]),
+                },
+            );
+        }
+        let batches = build_diff_batches(states).expect("bounded batches");
+        assert!(batches.len() >= 2);
+        for batch in batches {
+            let bytes = serde_json::to_vec(&json!({
+                "type": "SYNC_MESSAGE_DIFF_BATCH",
+                "topics": batch,
+            }))
+            .expect("serialize batch");
+            assert!(bytes.len() <= MAX_WS_DIFF_BATCH_BYTES);
+        }
+
+        let oversized = HashMap::from([(
+            "topic-oversized".to_string(),
+            TopicLocalState {
+                topic_hash: "h".repeat(64),
+                messages: HashMap::from([("x".repeat(MAX_WS_DIFF_BATCH_BYTES), "m".repeat(64))]),
+            },
+        )]);
+        assert!(build_diff_batches(oversized).is_err());
     }
 
     #[tokio::test]

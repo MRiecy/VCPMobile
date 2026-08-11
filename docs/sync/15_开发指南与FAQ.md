@@ -361,14 +361,14 @@ VCP Mobile 采用**严格版本匹配**策略，不支持向前/向后兼容的�
 
 | 步骤 | 方向 | 消息 | 字段 | 处理位置 |
 |------|------|------|------|---------|
-| 1 | 移动 → 桌面 | `VERSION_CHECK` | `mobileVersion: string` | `sync_service.rs` |
-| 2 | 桌面 → 移动 | `VERSION_ACK` | `version: string` | `index.js` (读取 plugin-manifest.json) |
-| 3 | 移动端校验 | — | 字符串精确匹配 | `sync_service.rs` |
+| 1 | 移动 → 桌面 | `VERSION_CHECK` | `mobileVersion: string`, `protocolVersion: "1.1"` | `sync_service.rs` |
+| 2 | 桌面 → 移动 | `VERSION_ACK` | `pluginVersion: "1.1.0"`, `protocolVersion: "1.1"` | `index.js` |
+| 3 | 移动端校验 | — | 两字段精确匹配 | `sync_service.rs` |
 
 **校验规则**：
 
-- 版本一致：继续同步流程。
-- 版本不一致：移动端断开 WS，状态置为 `error`，提示用户更新插件。
+- 插件与 wire 版本均一致：继续同步流程。
+- 任一字段缺失、错类型或不一致：移动端断开 WS，状态置为 `error`，提示用户成对更新。
 - 超时未收到 `VERSION_ACK`（5秒）：视为桌面端插件过旧，同样断开。
 - 当前唯一接受的插件协议版本为 1.1.0。1.0.0 及更旧版本拒绝，不降级为 phase-only 最终 ACK。
 - 1.1.0 peer 必须对最终 `PHASE_COMPLETED` 原样回显 `phase`、`sessionId`、`attemptId`、`nonce`；缺失、错配或重放的 `PHASE_ACK` 均不会进入完成态。

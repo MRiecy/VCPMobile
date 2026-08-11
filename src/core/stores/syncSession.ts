@@ -45,10 +45,19 @@ const emptySummary = (): SyncSummary => ({
 
 const sanitizeDiagnosticText = (value: string) =>
   value
-    .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\b(?:sync_)?token\s*[:=]\s*\S+/gi, "token=[redacted]")
-    .replace(/[A-Za-z]:\\[^\s]+/g, "[path]")
-    .replace(/\/(?:home|data|storage|sdcard|tmp|var)\/[^\s]+/g, "[path]");
+    .replace(
+      /Bearer\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi,
+      "Bearer [redacted]",
+    )
+    .replace(
+      /(?:sync[_-]?)?token\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "token=[redacted]",
+    )
+    // Diagnostics favor over-redaction: once an absolute path starts, redact the
+    // remainder of that comma/semicolon-delimited fragment, including spaces.
+    .replace(/[A-Za-z]:[\\/][^\r\n,;]*/g, "[path]")
+    .replace(/file:\/\/\/[^\r\n,;]*/gi, "file:///[path]")
+    .replace(/(^|[^/])\/(?!\/)[^\r\n,;]*/g, "$1[path]");
 
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
@@ -245,10 +254,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     activeSessionId.value = null;
     awaitingSessionId = false;
     bufferedSessionEvents = [];
-    pushLog("info", "──────── 新同步尝试 ────────");
     try {
       await invoke("stop_sync");
       if (!isCurrentAttempt(generation, retryAttempt)) return;
+      pushLog("info", "──────── 新同步尝试 ────────");
       status.value = "idle";
       terminalError.value = null;
       summary.value = emptySummary();
@@ -302,7 +311,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         `Failed topics: ${summary.value.failedTopics}`,
         `Legacy attachment warnings: ${summary.value.legacyAttachmentWarnings}`,
         terminalError.value
-          ? `Error: ${terminalError.value.code} ${sanitizeDiagnosticText(terminalError.value.message)}`
+          ? `Error: ${sanitizeDiagnosticText(terminalError.value.code)} ${sanitizeDiagnosticText(terminalError.value.message)}`
           : "Error: none",
         `Failed topic IDs: ${[
           ...new Set([
@@ -311,6 +320,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
           ]),
         ]
           .slice(0, 8)
+          .map(sanitizeDiagnosticText)
           .join(", ") || "none"}`,
       ].join("\n");
       await navigator.clipboard.writeText(diagnostic);
@@ -320,28 +330,76 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     }
   };
 
-  const readSummary = (value: unknown): SyncSummary => {
-    const source =
-      value && typeof value === "object"
-        ? (value as Record<string, unknown>)
-        : {};
+  const readSummary = (value: unknown): SyncSummary | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const source = value as Record<string, unknown>;
     const readCount = (key: string) => {
       const count = source[key];
       return typeof count === "number" && Number.isSafeInteger(count) && count >= 0
         ? count
-        : 0;
+        : null;
     };
-    const failedTopicIds = Array.isArray(source.failedTopicIds)
-      ? source.failedTopicIds
-          .filter((id): id is string => typeof id === "string" && id.length > 0)
-          .slice(0, 8)
-      : [];
+    const successfulTopics = readCount("successfulTopics");
+    const totalTopics = readCount("totalTopics");
+    const failedTopics = readCount("failedTopics");
+    const legacyAttachmentWarnings = readCount("legacyAttachmentWarnings");
+    if (
+      successfulTopics === null ||
+      totalTopics === null ||
+      failedTopics === null ||
+      legacyAttachmentWarnings === null ||
+      !Array.isArray(source.failedTopicIds) ||
+      source.failedTopicIds.some(
+        (id) => typeof id !== "string" || id.length === 0,
+      )
+    ) {
+      return null;
+    }
+    const allFailedTopicIds = source.failedTopicIds as string[];
+    if (
+      new Set(allFailedTopicIds).size !== allFailedTopicIds.length ||
+      allFailedTopicIds.length > failedTopics ||
+      successfulTopics + failedTopics !== totalTopics
+    ) {
+      return null;
+    }
     return {
-      successfulTopics: readCount("successfulTopics"),
-      totalTopics: readCount("totalTopics"),
-      failedTopics: readCount("failedTopics"),
-      legacyAttachmentWarnings: readCount("legacyAttachmentWarnings"),
-      failedTopicIds,
+      successfulTopics,
+      totalTopics,
+      failedTopics,
+      legacyAttachmentWarnings,
+      failedTopicIds: allFailedTopicIds.slice(0, 8),
+    };
+  };
+
+  const readProgressSummary = (
+    payload: Record<string, unknown>,
+  ): Omit<SyncSummary, "failedTopicIds"> | null => {
+    const keys = [
+      "successfulTopics",
+      "totalTopics",
+      "failedTopics",
+      "legacyAttachmentWarnings",
+    ] as const;
+    const counts = keys.map((key) => payload[key]);
+    if (
+      counts.some(
+        (count) =>
+          typeof count !== "number" ||
+          !Number.isSafeInteger(count) ||
+          count < 0,
+      )
+    ) {
+      return null;
+    }
+    const [successfulTopics, totalTopics, failedTopics, legacyAttachmentWarnings] =
+      counts as number[];
+    if (successfulTopics + failedTopics > totalTopics) return null;
+    return {
+      successfulTopics,
+      totalTopics,
+      failedTopics,
+      legacyAttachmentWarnings,
     };
   };
 
@@ -395,6 +453,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
             ? payload.message
             : progressData.value.message,
       };
+      const nextSummary = readProgressSummary(payload);
+      if (nextSummary) {
+        summary.value = { ...summary.value, ...nextSummary };
+      }
       return;
     }
 
@@ -408,11 +470,16 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
           return;
         }
         terminalError.value = readTerminalError(payload);
+        const failedTopics = Math.max(
+          summary.value.failedTopics,
+          terminalError.value.failedTopicIds.length,
+        );
         summary.value = {
           ...summary.value,
-          failedTopics: Math.max(
-            summary.value.failedTopics,
-            terminalError.value.failedTopicIds.length,
+          failedTopics,
+          totalTopics: Math.max(
+            summary.value.totalTopics,
+            summary.value.successfulTopics + failedTopics,
           ),
           failedTopicIds: terminalError.value.failedTopicIds,
         };
@@ -431,19 +498,49 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         nextStatus === "completed" ||
         nextStatus === "completed_with_warnings"
       ) {
-        status.value = nextStatus;
-        canDismiss.value = true;
-        needsReload.value = true;
+        // The completed event carries the mandatory summary and is the only
+        // authoritative success transition. A status-only terminal frame cannot
+        // manufacture success or bypass summary validation.
+        return;
       }
       return;
     }
 
     if (status.value === "error") return;
-    summary.value = readSummary(payload.summary);
-    status.value =
-      payload.status === "completed_with_warnings"
-        ? "completed_with_warnings"
-        : "completed";
+    if (
+      payload.status !== "completed" &&
+      payload.status !== "completed_with_warnings"
+    ) {
+      pushLog("error", "完成事件协议错误: status 非法");
+      setLocalError("INVALID_COMPLETION_EVENT", "同步完成事件缺少合法终态");
+      needsReload.value = false;
+      return;
+    }
+    const completedSummary = readSummary(payload.summary);
+    if (!completedSummary) {
+      pushLog("error", "完成事件协议错误: summary 非法");
+      setLocalError("INVALID_COMPLETION_EVENT", "同步完成事件统计结构非法");
+      needsReload.value = false;
+      return;
+    }
+    if (
+      completedSummary.failedTopics !== 0 ||
+      completedSummary.failedTopicIds.length !== 0 ||
+      (payload.status === "completed" &&
+        completedSummary.legacyAttachmentWarnings !== 0) ||
+      (payload.status === "completed_with_warnings" &&
+        completedSummary.legacyAttachmentWarnings === 0)
+    ) {
+      pushLog("error", "完成事件协议错误: status 与 summary 不一致");
+      setLocalError(
+        "INVALID_COMPLETION_EVENT",
+        "同步完成事件终态与统计不一致",
+      );
+      needsReload.value = false;
+      return;
+    }
+    summary.value = completedSummary;
+    status.value = payload.status;
     canDismiss.value = true;
     needsReload.value = true;
     pushLog(

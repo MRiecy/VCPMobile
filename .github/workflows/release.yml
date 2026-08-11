@@ -180,7 +180,9 @@ jobs:
           VCP_TRUSTED_LAN_MODE: enabled
         run: |
           cargo metadata --locked --manifest-path src-tauri/Cargo.toml --format-version 1 --no-deps >/dev/null
-          pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict
+          # verification-metadata.xml enables Gradle's strict dependency verification by default.
+          test -s src-tauri/gen/android/gradle/verification-metadata.xml
+          pnpm tauri android build --apk --target aarch64
           git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock
 
       - name: Verify APK signature

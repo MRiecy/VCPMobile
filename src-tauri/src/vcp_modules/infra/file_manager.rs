@@ -439,12 +439,28 @@ async fn commit_registered_attachment(
     sqlx::query(
         "UPDATE message_attachments
          SET status = 'ready', src = ?
-         WHERE hash = ? AND deleted_at IS NULL
+         WHERE hash = ? AND status = 'desktop_only' AND deleted_at IS NULL
            AND EXISTS (
              SELECT 1 FROM messages m
              WHERE m.topic_id = message_attachments.topic_id
                AND m.msg_id = message_attachments.msg_id
                AND m.deleted_at IS NULL
+           )
+           AND EXISTS (
+             SELECT 1 FROM topics t
+             WHERE t.topic_id = message_attachments.topic_id
+               AND t.deleted_at IS NULL
+               AND (
+                 (t.owner_type = 'agent' AND EXISTS (
+                   SELECT 1 FROM agents a
+                   WHERE a.agent_id = t.owner_id AND a.deleted_at IS NULL
+                 ))
+                 OR
+                 (t.owner_type = 'group' AND EXISTS (
+                   SELECT 1 FROM groups g
+                   WHERE g.group_id = t.owner_id AND g.deleted_at IS NULL
+                 ))
+               )
            )",
     )
     .bind(format!("file://{internal_path}"))
@@ -1419,17 +1435,31 @@ mod security_boundary_tests {
                 topic_id TEXT, msg_id TEXT, deleted_at INTEGER,
                 PRIMARY KEY(topic_id, msg_id)
              );
+             CREATE TABLE agents (agent_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE groups (group_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, deleted_at INTEGER
+             );
              CREATE TABLE message_attachments (
                 topic_id TEXT, msg_id TEXT, hash TEXT, status TEXT, src TEXT, deleted_at INTEGER
              );
+             INSERT INTO agents VALUES ('agent', NULL), ('deleted-agent', 9);
+             INSERT INTO topics VALUES
+                ('topic', 'agent', 'agent', NULL),
+                ('deleted-topic', 'agent', 'agent', 9),
+                ('deleted-owner-topic', 'deleted-agent', 'agent', NULL);
              INSERT INTO messages VALUES
                 ('topic', 'live', NULL),
                 ('topic', 'deleted-message', 9),
-                ('topic', 'tombstoned-relation', NULL);
+                ('topic', 'tombstoned-relation', NULL),
+                ('deleted-topic', 'deleted-topic-message', NULL),
+                ('deleted-owner-topic', 'deleted-owner-message', NULL);
              INSERT INTO message_attachments VALUES
                 ('topic', 'live', 'hash', 'desktop_only', NULL, NULL),
                 ('topic', 'deleted-message', 'hash', 'desktop_only', NULL, NULL),
-                ('topic', 'tombstoned-relation', 'hash', 'removed', NULL, 9);",
+                ('topic', 'tombstoned-relation', 'hash', 'removed', NULL, 9),
+                ('deleted-topic', 'deleted-topic-message', 'hash', 'desktop_only', NULL, NULL),
+                ('deleted-owner-topic', 'deleted-owner-message', 'hash', 'desktop_only', NULL, NULL);",
         )
         .execute(&pool)
         .await
@@ -1448,6 +1478,8 @@ mod security_boundary_tests {
             relations,
             vec![
                 ("deleted-message".into(), "desktop_only".into(), None),
+                ("deleted-owner-message".into(), "desktop_only".into(), None),
+                ("deleted-topic-message".into(), "desktop_only".into(), None),
                 (
                     "live".into(),
                     "ready".into(),

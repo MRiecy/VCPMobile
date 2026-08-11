@@ -182,7 +182,7 @@ const saveToAlbum = async () => {
 <template>
   <Transition name="viewer-fade">
     <div
-      v-show="isOpen && file"
+      v-show="isOpen && file && hasLocalCapability"
       class="vcp-attachment-viewer fixed inset-0 z-viewer flex flex-col pointer-events-auto"
       @click.self="close"
     >

@@ -254,6 +254,105 @@ describe("sync session ownership", () => {
     expect(store.terminalError?.code).toBe("DESKTOP_DB");
   });
 
+  it.each([
+    {
+      status: "not-completed",
+      summary: {
+        successfulTopics: 1,
+        totalTopics: 1,
+        failedTopics: 0,
+        legacyAttachmentWarnings: 0,
+        failedTopicIds: [],
+      },
+    },
+    {
+      status: "completed",
+      summary: {
+        successfulTopics: 1,
+        totalTopics: "1",
+        failedTopics: 0,
+        legacyAttachmentWarnings: 0,
+        failedTopicIds: [],
+      },
+    },
+  ])("fails closed on a malformed completion event", ({ status, summary }) => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 42;
+
+    emitTauriEvent("vcp-sync-completed", {
+      sessionId: 42,
+      status,
+      summary,
+    });
+
+    expect(store.status).toBe("error");
+    expect(store.needsReload).toBe(false);
+    expect(store.terminalError?.code).toBe("INVALID_COMPLETION_EVENT");
+  });
+
+  it("uses only the validated completed event as the success transition", () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 43;
+
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 43,
+      status: "completed",
+    });
+    expect(store.status).toBe("idle");
+    expect(store.needsReload).toBe(false);
+
+    emitTauriEvent("vcp-sync-completed", {
+      sessionId: 43,
+      status: "completed",
+      summary: {
+        successfulTopics: 2,
+        totalTopics: 2,
+        failedTopics: 0,
+        legacyAttachmentWarnings: 0,
+        failedTopicIds: [],
+      },
+    });
+    expect(store.status).toBe("completed");
+    expect(store.needsReload).toBe(true);
+  });
+
+  it("retains the latest valid topic counts when the attempt ends in error", () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 44;
+
+    emitTauriEvent("vcp-sync-progress", {
+      sessionId: 44,
+      phase: "messages",
+      total: 5,
+      completed: 3,
+      message: "3/5",
+      successfulTopics: 3,
+      totalTopics: 5,
+      failedTopics: 0,
+      legacyAttachmentWarnings: 2,
+    });
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 44,
+      status: "error",
+      error: {
+        code: "PULL_FAILED",
+        message: "failed",
+        failedTopicIds: ["topic-d"],
+      },
+    });
+
+    expect(store.summary).toMatchObject({
+      successfulTopics: 3,
+      totalTopics: 5,
+      failedTopics: 1,
+      legacyAttachmentWarnings: 2,
+      failedTopicIds: ["topic-d"],
+    });
+  });
+
   it("awaits stop before retrying and preserves an attempt separator", async () => {
     let nextSession = 0;
     mockInvoke("start_manual_sync", () => ++nextSession);
@@ -284,6 +383,47 @@ describe("sync session ownership", () => {
     );
   });
 
+  it("inserts the retry separator only after the old session has joined", async () => {
+    let nextSession = 0;
+    const stopping = deferred<void>();
+    mockInvoke("start_manual_sync", () => ++nextSession);
+    const store = useSyncSessionStore();
+    store.open();
+    await store.startSync();
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 1,
+      status: "error",
+      error: { code: "RETRYABLE", message: "retry", failedTopicIds: [] },
+    });
+    mockInvoke("stop_sync", () => stopping.promise);
+
+    const retrying = store.retrySync();
+    await vi.waitFor(() =>
+      expect(
+        invokeMock.mock.calls.some(([command]) => command === "stop_sync"),
+      ).toBe(true),
+    );
+    emitTauriEvent("vcp-log", {
+      category: "sync",
+      level: "warning",
+      message: "旧会话正在退出",
+    });
+    expect(store.logs.some((log) => log.message.includes("新同步尝试"))).toBe(
+      false,
+    );
+
+    stopping.resolve();
+    await retrying;
+    const oldLogIndex = store.logs.findIndex(
+      (log) => log.message === "旧会话正在退出",
+    );
+    const separatorIndex = store.logs.findIndex((log) =>
+      log.message.includes("新同步尝试"),
+    );
+    expect(oldLogIndex).toBeGreaterThanOrEqual(0);
+    expect(separatorIndex).toBeGreaterThan(oldLogIndex);
+  });
+
   it("copies bounded diagnostics without tokens or absolute paths", async () => {
     const store = useSyncSessionStore();
     store.open();
@@ -292,10 +432,16 @@ describe("sync session ownership", () => {
       sessionId: 51,
       status: "error",
       error: {
-        code: "UPLOAD_FAILED",
+        code: "UPLOAD_token=code-secret_/root/code path/error",
         message:
-          "Bearer secret-token token=also-secret C:\\Users\\me\\file.txt /home/me/file.txt",
-        failedTopicIds: ["topic-a"],
+          'Bearer secret-token; Bearer "alpha beta"; token=also-secret; C:\\Users\\me with space\\file.txt; upload failed at /home/me/file.txt; file:///mnt/private/cache.bin',
+        failedTopicIds: [
+          "topic-a_sync_token=id-secret",
+          "/mnt/private folder/topic-b",
+          "/Users/me/topic-c",
+          "ERR(/root/private/file)",
+          "topic-/Users/me/secret",
+        ],
       },
     });
 
@@ -310,7 +456,14 @@ describe("sync session ownership", () => {
     expect(diagnostic).toContain("Session: 51");
     expect(diagnostic).not.toContain("secret-token");
     expect(diagnostic).not.toContain("also-secret");
+    expect(diagnostic).not.toContain("alpha beta");
+    expect(diagnostic).not.toContain("code-secret");
+    expect(diagnostic).not.toContain("id-secret");
     expect(diagnostic).not.toContain("C:\\Users");
     expect(diagnostic).not.toContain("/home/me");
+    expect(diagnostic).not.toContain("/root");
+    expect(diagnostic).not.toContain("/mnt");
+    expect(diagnostic).not.toContain("/Users");
+    expect(diagnostic).not.toContain("private/file");
   });
 });

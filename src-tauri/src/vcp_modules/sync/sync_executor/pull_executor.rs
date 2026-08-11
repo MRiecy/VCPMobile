@@ -4,8 +4,9 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use futures_util::StreamExt;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
@@ -16,6 +17,36 @@ const MAX_NDJSON_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_NDJSON_ENTITIES: usize = 100_000;
 const MAX_WARNING_SAMPLES: usize = 8;
 const NDJSON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PULL_WORKER_BUDGET_UNIT_BYTES: usize = 1024 * 1024;
+const PULL_WORKER_BUDGET_UNITS: usize = MAX_NDJSON_LINE_BYTES / PULL_WORKER_BUDGET_UNIT_BYTES;
+const MAX_DIRECT_ENTITY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ENTITY_BATCH_ITEMS: usize = 10_000;
+const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
+
+async fn read_response_limited(
+    response: reqwest::Response,
+    max_bytes: usize,
+    operation: &str,
+) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(format!("{operation} response exceeds {max_bytes} bytes"));
+    }
+    let status = response.status();
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("{operation} response read failed: {error}"))?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!("{operation} response exceeds {max_bytes} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((status, body))
+}
 
 struct NdjsonBudget {
     max_frames: usize,
@@ -155,12 +186,11 @@ fn canonicalize_attachment(
         .unwrap_or(HashField::Missing);
 
     let normalized_hash = match (top_hash, nested_hash) {
-        (HashField::Invalid, _) | (_, HashField::Invalid) => None,
         (HashField::Valid(top), HashField::Valid(nested)) if top == nested => Some(top),
         (HashField::Valid(_), HashField::Valid(_)) => None,
-        (HashField::Valid(hash), HashField::Missing)
-        | (HashField::Missing, HashField::Valid(hash)) => Some(hash),
-        (HashField::Missing, HashField::Missing) => None,
+        (HashField::Valid(hash), HashField::Missing | HashField::Invalid)
+        | (HashField::Missing | HashField::Invalid, HashField::Valid(hash)) => Some(hash),
+        (HashField::Missing | HashField::Invalid, HashField::Missing | HashField::Invalid) => None,
     };
     let Some(hash) = normalized_hash else {
         warnings.push(format!(
@@ -254,6 +284,27 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
             .and_then(Value::as_str)
             .filter(|role| !role.is_empty())
             .ok_or_else(|| format!("Message {message_id} has missing or empty role"))?;
+        match message.get("topicId") {
+            None | Some(Value::Null) => {}
+            Some(Value::String(message_topic)) if message_topic == &topic_id => {}
+            Some(Value::String(message_topic)) => {
+                return Err(format!(
+                    "Message {message_id} topicId {message_topic} conflicts with frame topic {topic_id}"
+                ));
+            }
+            Some(_) => {
+                return Err(format!("Message {message_id} topicId must be a string"));
+            }
+        }
+        if message.get("status").and_then(Value::as_str) == Some("removed")
+            || message
+                .get("deletedAt")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Err(format!(
+                "Tombstoned message {message_id} must not appear in a live pull frame"
+            ));
+        }
         let timestamp = normalize_timestamp(message.get("timestamp"), &message_id)?;
         message.insert("timestamp".to_string(), Value::from(timestamp));
         message.remove("contentHash");
@@ -293,6 +344,36 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
         legacy_attachment_warnings: warnings.count,
         warning_samples: warnings.samples,
     })
+}
+
+fn validate_requested_message_ids(
+    topic_id: &str,
+    expected: Option<&HashSet<String>>,
+    messages: &[crate::vcp_modules::sync_dto::MessagePullSyncDTO],
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<HashSet<_>>();
+    if actual == *expected {
+        return Ok(());
+    }
+    let mut missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+    let mut unexpected = actual.difference(expected).cloned().collect::<Vec<_>>();
+    missing.sort();
+    unexpected.sort();
+    Err(format!(
+        "NDJSON message set mismatch for {topic_id}: missing={missing:?}, unexpected={unexpected:?}"
+    ))
+}
+
+fn pull_worker_permits(frame_bytes: usize) -> Result<u32, String> {
+    let units = frame_bytes.saturating_add(PULL_WORKER_BUDGET_UNIT_BYTES - 1)
+        / PULL_WORKER_BUDGET_UNIT_BYTES;
+    u32::try_from(units.max(1)).map_err(|_| "Pull worker permit count overflow".to_string())
 }
 
 /// 共享消息处理管线：附件路径批量查询 → 填充 → 预渲染并文本压缩(通过Rayon并行化) → 写入队列
@@ -531,11 +612,16 @@ impl PullExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        if !res.status().is_success() {
-            return Err(format!("Pull agent failed: {}", res.status()));
+        let (status, bytes) =
+            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull agent").await?;
+        if !status.is_success() {
+            return Err(format!(
+                "Pull agent failed: {status} body={}",
+                String::from_utf8_lossy(&bytes)
+            ));
         }
-
-        let dto: AgentSyncDTO = res.json().await.map_err(|e| e.to_string())?;
+        let dto: AgentSyncDTO = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Pull agent returned invalid JSON: {error}"))?;
         write_queue
             .submit(DbWriteTask::Agent {
                 id: agent_id.to_string(),
@@ -566,11 +652,16 @@ impl PullExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        if !res.status().is_success() {
-            return Err(format!("Pull group failed: {}", res.status()));
+        let (status, bytes) =
+            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull group").await?;
+        if !status.is_success() {
+            return Err(format!(
+                "Pull group failed: {status} body={}",
+                String::from_utf8_lossy(&bytes)
+            ));
         }
-
-        let dto: GroupSyncDTO = res.json().await.map_err(|e| e.to_string())?;
+        let dto: GroupSyncDTO = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Pull group returned invalid JSON: {error}"))?;
         write_queue
             .submit(DbWriteTask::Group {
                 id: group_id.to_string(),
@@ -589,6 +680,11 @@ impl PullExecutor {
         requests: Vec<serde_json::Value>,
         write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
+        if requests.len() > MAX_ENTITY_BATCH_ITEMS {
+            return Err(format!(
+                "Entity pull request contains more than {MAX_ENTITY_BATCH_ITEMS} items"
+            ));
+        }
         let mut expected = HashSet::new();
         for request in &requests {
             let id = request
@@ -607,23 +703,29 @@ impl PullExecutor {
                 ));
             }
         }
+        let request_body = serde_json::to_vec(&serde_json::json!({ "requests": requests }))
+            .map_err(|error| format!("Entity pull request serialization failed: {error}"))?;
+        if request_body.len() > MAX_DIRECT_ENTITY_RESPONSE_BYTES {
+            return Err("Entity pull request exceeds 10 MiB".to_string());
+        }
         let url = format!("{}/api/mobile-sync/download-entities", http_url);
         let res = client
             .post(&url)
             .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
-            .json(&serde_json::json!({ "requests": requests }))
+            .header("Content-Type", "application/json")
+            .body(request_body)
             .send()
             .await
             .map_err(|e| e.to_string())?;
 
-        if !res.status().is_success() {
-            return Err(format!("Pull entities batch failed: {}", res.status()));
-        }
-
-        let bytes = res.bytes().await.map_err(|e| e.to_string())?;
-        if bytes.len() > MAX_NDJSON_TOTAL_BYTES {
-            return Err("Entity pull response exceeds 256 MiB budget".to_string());
+        let (status, bytes) =
+            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Entity pull").await?;
+        if !status.is_success() {
+            return Err(format!(
+                "Pull entities batch failed: {status} body={}",
+                String::from_utf8_lossy(&bytes)
+            ));
         }
         let results: Vec<serde_json::Value> =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -783,16 +885,18 @@ impl PullExecutor {
                 .await
             {
                 Ok(res) => {
-                    if !res.status().is_success() {
-                        return Err(format!("Pull avatar failed: {}", res.status()));
+                    let status = res.status();
+                    if !status.is_success() {
+                        return Err(format!("Pull avatar failed: {status}"));
                     }
-                    match res.bytes().await {
-                        Ok(bytes) => {
+                    match read_response_limited(res, MAX_AVATAR_RESPONSE_BYTES, "Pull avatar").await
+                    {
+                        Ok((_, bytes)) => {
                             write_queue
                                 .submit(DbWriteTask::Avatar {
                                     owner_type: owner_type.to_string(),
                                     owner_id: owner_id.to_string(),
-                                    bytes: bytes.to_vec(),
+                                    bytes,
                                 })
                                 .await?;
                             if retries > 0 {
@@ -855,16 +959,17 @@ impl PullExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        if res.status() == reqwest::StatusCode::NOT_FOUND {
-            // Topic not found on desktop, skip silently
-            return Ok(());
+        let (status, bytes) =
+            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull agent topic")
+                .await?;
+        if !status.is_success() {
+            return Err(format!(
+                "Pull agent_topic failed: {status} body={}",
+                String::from_utf8_lossy(&bytes)
+            ));
         }
-
-        if !res.status().is_success() {
-            return Err(format!("Pull agent_topic failed: {}", res.status()));
-        }
-
-        let dto: AgentTopicSyncDTO = res.json().await.map_err(|e| e.to_string())?;
+        let dto: AgentTopicSyncDTO = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Pull agent topic returned invalid JSON: {error}"))?;
         write_queue
             .submit(DbWriteTask::AgentTopic {
                 topic_id: topic_id.to_string(),
@@ -895,16 +1000,17 @@ impl PullExecutor {
             .await
             .map_err(|e| e.to_string())?;
 
-        if res.status() == reqwest::StatusCode::NOT_FOUND {
-            // Topic not found on desktop, skip silently
-            return Ok(());
+        let (status, bytes) =
+            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull group topic")
+                .await?;
+        if !status.is_success() {
+            return Err(format!(
+                "Pull group_topic failed: {status} body={}",
+                String::from_utf8_lossy(&bytes)
+            ));
         }
-
-        if !res.status().is_success() {
-            return Err(format!("Pull group_topic failed: {}", res.status()));
-        }
-
-        let dto: GroupTopicSyncDTO = res.json().await.map_err(|e| e.to_string())?;
+        let dto: GroupTopicSyncDTO = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Pull group topic returned invalid JSON: {error}"))?;
         write_queue
             .submit(DbWriteTask::GroupTopic {
                 topic_id: topic_id.to_string(),
@@ -920,8 +1026,8 @@ impl PullExecutor {
     /// 桌面端以 NDJSON 逐 topic 分帧返回，手机端逐行消费，
     /// 不等待整个响应结束。任何 topic 失败都会通过结果传播并终止当前 attempt。
     ///
-    /// **并发控制**: Semaphore(20) + tokio spawn 并行处理 topic 消息，
-    /// 有界 mpsc channel 实时推送进度日志并施加背压。NDJSON 解析与并发处理完全分离。
+    /// **并发控制**: 按原始 frame 字节加权的 Semaphore + tokio spawn 处理 topic 消息，
+    /// 在途原始帧预算为 32 MiB；有界 mpsc channel 实时推送进度日志并施加背压。
     ///
     /// 返回每个 topic 的处理结果。
     pub async fn pull_messages_batch<R: Runtime>(
@@ -936,15 +1042,25 @@ impl PullExecutor {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        let expected_topics: HashSet<String> = requests
-            .iter()
-            .map(|(topic_id, _)| topic_id.clone())
-            .collect();
-        if expected_topics.len() != requests.len()
-            || expected_topics.iter().any(|topic_id| topic_id.is_empty())
-        {
-            return Err("Pull request contains empty or duplicate topicId".to_string());
+        let mut expected_message_ids = HashMap::new();
+        for (topic_id, message_ids) in requests {
+            if topic_id.is_empty() || expected_message_ids.contains_key(topic_id) {
+                return Err("Pull request contains empty or duplicate topicId".to_string());
+            }
+            let exact_messages = if message_ids.is_empty() {
+                None
+            } else {
+                let ids = message_ids.iter().cloned().collect::<HashSet<_>>();
+                if ids.len() != message_ids.len() || ids.iter().any(|id| id.is_empty()) {
+                    return Err(format!(
+                        "Pull request for {topic_id} contains empty or duplicate message id"
+                    ));
+                }
+                Some(ids)
+            };
+            expected_message_ids.insert(topic_id.clone(), exact_messages);
         }
+        let expected_topics = expected_message_ids.keys().cloned().collect::<HashSet<_>>();
         let mut seen_topics = HashSet::new();
 
         let url = format!("{}/api/mobile-sync/download-messages-stream", http_url);
@@ -964,15 +1080,17 @@ impl PullExecutor {
 
         if !res.status().is_success() {
             let status = res.status();
-            let err_body = res.text().await.unwrap_or_default();
+            let (_, err_body) =
+                read_response_limited(res, MAX_ERROR_RESPONSE_BYTES, "Batch pull error").await?;
             return Err(format!(
                 "Batch pull messages failed: HTTP {} body={}",
-                status, err_body
+                status,
+                String::from_utf8_lossy(&err_body)
             ));
         }
 
         // ── 并发基础设施 ──
-        let sem = Arc::new(Semaphore::new(20));
+        let sem = Arc::new(Semaphore::new(PULL_WORKER_BUDGET_UNITS));
         let (tx, mut rx) = mpsc::channel::<BatchPullResult>(64);
         let mut spawn_handles = JoinSet::new();
         let total = requests.len();
@@ -1013,7 +1131,6 @@ impl PullExecutor {
         let receiver_handle = tokio::spawn(receiver);
 
         // ── NDJSON 解析协程 ──
-        use futures_util::StreamExt;
         let mut stream = res.bytes_stream();
         let mut buffer: Vec<u8> = Vec::new();
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
@@ -1084,6 +1201,11 @@ impl PullExecutor {
                     .map_err(|_| "Pull result receiver closed".to_string())?;
                     continue;
                 }
+                validate_requested_message_ids(
+                    &topic_id,
+                    expected_message_ids.get(&topic_id).and_then(Option::as_ref),
+                    &frame.messages,
+                )?;
                 if frame.messages.is_empty() {
                     tx.send(BatchPullResult {
                         topic_id,
@@ -1106,7 +1228,7 @@ impl PullExecutor {
                 }
                 let permit = sem
                     .clone()
-                    .acquire_owned()
+                    .acquire_many_owned(pull_worker_permits(line.len())?)
                     .await
                     .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                 let app_clone = app.clone();
@@ -1205,6 +1327,11 @@ impl PullExecutor {
                 .await
                 .map_err(|_| "Pull result receiver closed".to_string())?;
             } else {
+                validate_requested_message_ids(
+                    &topic_id,
+                    expected_message_ids.get(&topic_id).and_then(Option::as_ref),
+                    &frame.messages,
+                )?;
                 let pull_dtos = frame.messages;
                 let legacy_attachment_warnings = frame.legacy_attachment_warnings;
                 if !pull_dtos.is_empty() {
@@ -1218,7 +1345,7 @@ impl PullExecutor {
                     let tx_clone = tx.clone();
                     let permit = sem
                         .clone()
-                        .acquire_owned()
+                        .acquire_many_owned(pull_worker_permits(buffer.len())?)
                         .await
                         .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                     spawn_handles.spawn(async move {
@@ -1315,9 +1442,108 @@ impl PullExecutor {
 #[cfg(test)]
 mod ndjson_budget_tests {
     use super::{
-        parse_topic_ndjson_frame, NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES,
+        parse_topic_ndjson_frame, pull_worker_permits, validate_requested_message_ids,
+        NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
     use serde_json::json;
+    use std::collections::HashSet;
+
+    const PROTOCOL_1_1_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_1_golden.json");
+    const PROTOCOL_1_1_GOLDEN_SHA256: &str =
+        "62654d4ecf6fc144c40b4635b5248e851a880ca003229bad37337e693bdb81ae";
+
+    #[test]
+    fn protocol_1_1_golden_bundle_and_canonical_output_are_stable() {
+        assert_eq!(
+            crate::vcp_modules::infra::utils::calculate_sha256(PROTOCOL_1_1_GOLDEN),
+            PROTOCOL_1_1_GOLDEN_SHA256
+        );
+        let bundle: serde_json::Value =
+            serde_json::from_slice(PROTOCOL_1_1_GOLDEN).expect("golden bundle JSON");
+        assert_eq!(bundle["wireProtocol"], "1.1");
+
+        for case in bundle["validFrames"]
+            .as_array()
+            .expect("valid golden frames")
+        {
+            let bytes = serde_json::to_vec(&case["input"]).expect("serialize golden frame");
+            let parsed = parse_topic_ndjson_frame(&bytes).expect("valid golden frame");
+            let expected = &case["expected"];
+            assert_eq!(parsed.topic_id, expected["topicId"]);
+            assert_eq!(parsed.messages.len() as u64, expected["messageCount"]);
+            assert_eq!(
+                parsed.legacy_attachment_warnings as u64,
+                expected["warningCount"]
+            );
+            let hashes = parsed.messages[0]
+                .attachments
+                .as_ref()
+                .expect("canonical attachments")
+                .iter()
+                .map(|attachment| attachment.hash.clone())
+                .collect::<Vec<_>>();
+            let expected_hashes = expected["attachmentHashes"]
+                .as_array()
+                .expect("expected hashes")
+                .iter()
+                .map(|value| value.as_str().expect("hash string").to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(hashes, expected_hashes);
+            assert_eq!(
+                parsed.messages[0].attachments.as_ref().unwrap()[1]
+                    .extracted_text
+                    .as_deref(),
+                expected["nestedExtractedText"].as_str()
+            );
+            assert!(parsed.messages[0].content.contains("你好"));
+            assert!(parsed.messages[0].content.contains("raw html"));
+            assert!(parsed.messages[1].content.is_empty());
+            assert_eq!(
+                serde_json::to_value(&parsed.messages).expect("canonical messages JSON"),
+                expected["canonicalMessages"]
+            );
+            let content_hashes = parsed
+                .messages
+                .iter()
+                .map(|message| {
+                    let hashes = message
+                        .attachments
+                        .as_ref()
+                        .map(|attachments| {
+                            attachments
+                                .iter()
+                                .map(|attachment| attachment.hash.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    crate::vcp_modules::sync_hash::HashAggregator::compute_message_fingerprint(
+                        &message.content,
+                        &hashes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                serde_json::to_value(content_hashes).expect("content hashes JSON"),
+                expected["contentHashes"]
+            );
+        }
+
+        for case in bundle["invalidFrames"]
+            .as_array()
+            .expect("invalid golden frames")
+        {
+            let bytes = serde_json::to_vec(&case["input"]).expect("serialize invalid frame");
+            let error = match parse_topic_ndjson_frame(&bytes) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid golden frame was accepted"),
+            };
+            assert!(error.contains(
+                case["errorContains"]
+                    .as_str()
+                    .expect("expected error fragment")
+            ));
+        }
+    }
 
     #[test]
     fn rejects_oversized_line_total_and_frame_fanout() {
@@ -1381,6 +1607,108 @@ mod ndjson_budget_tests {
         assert_eq!(
             attachments[1].extracted_text.as_deref(),
             Some("trusted text")
+        );
+    }
+
+    #[test]
+    fn inbound_cleaner_uses_the_only_valid_hash_location() {
+        let frame = json!({
+            "topicId": "topic",
+            "messages": [{
+                "id": "message",
+                "role": "user",
+                "content": "",
+                "timestamp": 1,
+                "attachments": [
+                    {
+                        "type": "text/plain", "name": "nested.txt", "size": 1,
+                        "hash": "invalid",
+                        "_fileManagerData": { "hash": "f".repeat(64) }
+                    },
+                    {
+                        "type": "text/plain", "name": "flat.txt", "size": 1,
+                        "hash": "e".repeat(64),
+                        "_fileManagerData": { "hash": null }
+                    }
+                ]
+            }]
+        });
+
+        let parsed = parse_topic_ndjson_frame(frame.to_string().as_bytes())
+            .expect("the sole valid hash must be used");
+        assert_eq!(parsed.legacy_attachment_warnings, 0);
+        let attachments = parsed.messages[0].attachments.as_ref().unwrap();
+        assert_eq!(attachments[0].hash, "f".repeat(64));
+        assert_eq!(attachments[1].hash, "e".repeat(64));
+    }
+
+    #[test]
+    fn requested_message_ids_require_exact_response_coverage() {
+        let messages = vec![
+            crate::vcp_modules::sync_dto::MessagePullSyncDTO {
+                id: "message-a".into(),
+                role: "user".into(),
+                name: None,
+                content: String::new(),
+                timestamp: 1,
+                is_thinking: None,
+                agent_id: None,
+                group_id: None,
+                topic_id: None,
+                is_group_message: None,
+                finish_reason: None,
+                attachments: None,
+                content_hash: None,
+                avatar_color: None,
+            },
+            crate::vcp_modules::sync_dto::MessagePullSyncDTO {
+                id: "message-b".into(),
+                role: "assistant".into(),
+                name: None,
+                content: String::new(),
+                timestamp: 2,
+                is_thinking: None,
+                agent_id: None,
+                group_id: None,
+                topic_id: None,
+                is_group_message: None,
+                finish_reason: None,
+                attachments: None,
+                content_hash: None,
+                avatar_color: None,
+            },
+        ];
+        assert!(validate_requested_message_ids(
+            "topic",
+            Some(&HashSet::from([
+                "message-a".to_string(),
+                "message-b".to_string(),
+            ])),
+            &messages,
+        )
+        .is_ok());
+        for expected in [
+            HashSet::new(),
+            HashSet::from(["message-a".to_string()]),
+            HashSet::from([
+                "message-a".to_string(),
+                "message-b".to_string(),
+                "message-c".to_string(),
+            ]),
+        ] {
+            assert!(validate_requested_message_ids("topic", Some(&expected), &messages).is_err());
+        }
+        assert!(validate_requested_message_ids("topic", None, &messages).is_ok());
+    }
+
+    #[test]
+    fn pull_worker_permits_are_weighted_by_raw_frame_bytes() {
+        assert_eq!(pull_worker_permits(1).unwrap(), 1);
+        assert_eq!(pull_worker_permits(1024 * 1024).unwrap(), 1);
+        assert_eq!(pull_worker_permits(1024 * 1024 + 1).unwrap(), 2);
+        assert_eq!(
+            pull_worker_permits(MAX_NDJSON_LINE_BYTES).unwrap(),
+            PULL_WORKER_BUDGET_UNITS as u32
         );
     }
 

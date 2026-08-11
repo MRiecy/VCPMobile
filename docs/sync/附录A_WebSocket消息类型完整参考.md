@@ -15,8 +15,8 @@ last_updated: 2026-05-13
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 1 | `VERSION_CHECK` | M→D | WS 连接建立后，移动端主动发送版本校验请求，作为同步会话第一条业务消息 | `mobileVersion: string`（移动端应用版本号） | `run_sync_session` 中直接构造 JSON 并通过 `ws_stream.send` 发送；发送后启动 `VERSION_CHECK_TIMEOUT` 定时器 | `index.js` 中 switch-case 匹配 `"VERSION_CHECK"`，读取 `plugin-manifest.json` 的 `version` 字段构造 `VERSION_ACK` 返回 | `sync_service.rs:318-325`, `index.js` |
-| 2 | `VERSION_ACK` | D→M | 桌面端收到 `VERSION_CHECK` 后立即回复，携带自身插件版本 | `version: string`（桌面端插件版本号） | `run_sync_session` 中接收并校验版本字符串精确匹配；不匹配则断开连接并提示用户更新插件 | `index.js` 中读取 `plugin-manifest.json` 的 `version` 字段返回 | `sync_service.rs:328-382`, `index.js` |
+| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion: string`, `protocolVersion: "1.1"` | `run_sync_session` 发送并启动 `VERSION_CHECK_TIMEOUT` | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `index.js` |
+| 2 | `VERSION_ACK` | D→M | 桌面端收到 `VERSION_CHECK` 后立即回复 | `pluginVersion: "1.1.0"`, `protocolVersion: "1.1"` | 两字段精确匹配；缺失、错类型、旧 `version` 字段或不匹配均终止 attempt | 返回插件包版本与固定 wire 版本 | `sync_service.rs`, `index.js` |
 | 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
 | 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
 | 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
@@ -37,7 +37,7 @@ last_updated: 2026-05-13
 | 13 | `SYNC_TOPIC_HASH_BATCH_V2` | M→D | Phase 2.5 发送 Topic 双哈希（Dual-Hash）批量比对请求；仅针对 Phase 1 筛选出的 `changed_owners` 下的话题 | `hashes: Record<topicId, {configHash: string, contentHash: string}>` | `PipelineCommand::StartTopicValidation` 触发；调用 `Phase3Message::get_targeted_topic_hashes` 批量查询 SQLite，组装为 JSON Map | `handleSyncTopicHashBatchV2`（`sync/diff.js`）：逐 Topic 查询 `hash`（对应 `config_hash`）与 `aggregated_hash`（对应 `content_hash`），双字段均一致才判定为未变更 | `sync_service.rs`, `phase3_message.rs`, `sync/diff.js` |
 | 14 | `SYNC_TOPIC_HASH_RESULTS` | D→M | 桌面端完成双哈希比对后返回变更话题列表 | `changedTopics: string[]`（变更话题 ID 数组） | 接收后写入 `changed_topics` 共享状态（`Arc<Mutex<Vec<String>>>`），触发 `SyncCommand::StartMessages` 进入 Phase 3 | `handleSyncTopicHashBatchV2` 返回：遍历比对结果，收集不一致或不存在的话题 ID | `sync_service.rs`, `sync/diff.js` |
 | 15 | `SYNC_MESSAGE_DIFF_BATCH` | M→D | Phase 3 分批发送消息级哈希映射；按 `MAX_MESSAGES_PER_BATCH`（10000 条）拆分为多个批次 | `topics: Record<topicId, {topicHash: string, messages: Record<msgId, hash>}>` | `PipelineCommand::StartMessages` 触发；调用 `Phase3Message::get_topic_message_hashes` 批量查询话题哈希与消息哈希；`build_diff_batches` 按消息数分片 | `handleSyncMessageDiffBatch`（`sync/diff.js`）：Fast Path（话题级哈希直接匹配则跳过）→ Detailed Path（逐消息哈希比对） | `sync_service.rs`, `phase3_message.rs`, `sync/diff.js` |
-| 16 | `SYNC_DIFF_RESULTS_BATCH` | D→M | 桌面端完成消息级差异计算后返回逐 Topic 的 Pull/Push 指令 | `results: Record<topicId, {toPull: string[], toPush: boolean}>` | 解析结果后：先执行 `PushExecutor::push_messages_batch`（推送移动端消息），再执行 `PullExecutor::pull_messages_batch`（拉取桌面端消息）；确保 Push 先于 Pull | `handleSyncMessageDiffBatch` 返回：`toPull` 为桌面端有而移动端缺失的消息 ID 列表；`toPush` 为布尔值表示移动端是否有桌面端缺失的消息 | `sync_service.rs`, `sync/diff.js` |
+| 16 | `SYNC_DIFF_RESULTS_BATCH` | D→M | 桌面端完成消息级差异计算后返回逐 Topic 决策 | `results: Record<topicId, Phase3Decision>`，值为 `{ok:true,toPull,toPush}` 或 `{ok:false,error}` | 严格校验完整性后先 Push 后 Pull；当前批完全收尾前不发送下一批 | 每个请求 Topic 必须精确返回一项，查询失败必须返回 `ok:false` | `sync_service.rs`, `sync/diff.js` |
 
 ---
 
@@ -70,7 +70,8 @@ last_updated: 2026-05-13
 |--------|---------|---------|------|--------|------|
 | `type` | `string` | 所有消息 | 是 | — | 消息类型标识符，区分大小写，必须为首层字段 |
 | `mobileVersion` | `string` | `VERSION_CHECK` | 是 | — | 移动端应用版本号，编译期通过 `env!("CARGO_PKG_VERSION")` 嵌入 |
-| `version` | `string` | `VERSION_ACK` | 是 | — | 桌面端插件版本号，运行时读取 `plugin-manifest.json` 的 `version` 字段 |
+| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 当前必须精确为 `1.1.0` |
+| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前必须精确为 `1.1` |
 | `phase` | `string` | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 是 | — | 阶段名称，取值：`owner_metadata`、`topic_metadata`、`messages` |
 | `sessionId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 移动端同步会话 owner generation；桌面端必须原样回显 |
 | `attemptId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 当前会话内的 reconnect attempt；桌面端必须原样回显 |
@@ -82,9 +83,10 @@ last_updated: 2026-05-13
 | `hashes` | `object` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | Key 为 `topicId`，Value 为 `{configHash: string, contentHash: string}` 对象 |
 | `changedTopics` | `string[]` | `SYNC_TOPIC_HASH_RESULTS` | 是 | `[]` | 双哈希比对后判定为变更的话题 ID 列表；空数组表示所有话题一致，可跳过 Phase 3 |
 | `topics` | `object` | `SYNC_MESSAGE_DIFF_BATCH` | 是 | — | Key 为 `topicId`，Value 含 `topicHash`（话题聚合哈希）与 `messages`（消息哈希映射） |
-| `results` | `object` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | Key 为 `topicId`，Value 为 `{toPull: string[], toPush: boolean}` |
-| `toPull` | `string[]` | `SYNC_DIFF_RESULTS_BATCH` | 是 | `[]` | 需从桌面端拉取的消息 ID 列表；桌面端有而移动端无（或哈希不同）的消息 |
-| `toPush` | `boolean` | `SYNC_DIFF_RESULTS_BATCH` | 是 | `false` | 移动端是否需要向桌面端推送该话题的消息；`true` 表示移动端有桌面端缺失的消息 |
+| `results` | `object` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | Key 为 `topicId`，Value 为严格判别联合；必须精确覆盖当前请求 topic |
+| `ok` | `boolean` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | `true` 使用 `toPull/toPush`；`false` 使用 `error` 并立即终止 attempt |
+| `toPull` / `toPush` | `string[]` / `boolean` | `ok:true` | 是 | — | 成功分支严禁携带 `error` |
+| `error` | `{code:string,message:string}` | `ok:false` | 是 | — | 失败分支严禁携带 `toPull/toPush` |
 | `level` | `string` | `SYNC_LOG_EVENT` | 是 | — | 日志级别：`info`（白色）、`success`（绿色）、`warning`（黄色）、`error`（红色） |
 | `message` | `string` | `SYNC_LOG_EVENT`, `SYNC_ERROR` | 是 | — | 日志文本或错误描述；前端直接展示 |
 | `id` | `string` | `SYNC_ENTITY_UPDATE`, `SYNC_DELETE_NOTIFY`, `SYNC_ACK` | 是 | — | 实体唯一标识符；对 Avatar 类型格式为 `owner_type:owner_id` |
@@ -209,8 +211,8 @@ last_updated: 2026-05-13
 | `SYNC_DIFF_RESULTS` | 1-100 KB | 无硬性限制 | Express JSON 解析 | — |
 | `SYNC_TOPIC_HASH_BATCH_V2` | 10-200 KB | 无硬性限制 | WS 帧大小 | 哈希字符串固定 64 字节，体积与 Topic 数量线性相关 |
 | `SYNC_TOPIC_HASH_RESULTS` | < 10 KB | 无硬性限制 | WS 帧大小 | — |
-| `SYNC_MESSAGE_DIFF_BATCH` | 500 KB - 2 MB | ~2 MB | WS 网关/代理帧大小限制 | 超过 2MB 可能导致部分网关截断；已按 10000 条消息分片 |
-| `SYNC_DIFF_RESULTS_BATCH` | < 500 KB | 无硬性限制 | WS 帧大小 | — |
+| `SYNC_MESSAGE_DIFF_BATCH` | 500 KB - 8 MiB | 8 MiB | 实际 JSON 序列化字节预算 + 10000 条消息上限 | 单 topic 超限直接失败，不发送超大帧 |
+| `SYNC_DIFF_RESULTS_BATCH` | < 500 KB | 与当前请求批次绑定 | 一批在途门禁 | 当前批 HTTP/DB 收尾前不发送下一批 |
 | `SYNC_LOG_EVENT` | < 1 KB | 无硬性限制 | 无 | 高频日志可能占用带宽 |
 
 ---
@@ -242,7 +244,7 @@ last_updated: 2026-05-13
 | `PHASE_COMPLETED` | 记录日志；最终帧原样回显四元身份 | `index.js` | `PHASE_ACK` |
 | `SYNC_ENTITY_UPDATE` | `upsertEntityIndex(...)` | `index.js` | `SYNC_ACK` |
 | `SYNC_DELETE_NOTIFY` | `deleteEntity` / `deleteMessage` | `index.js` | `SYNC_ACK` |
-| `VERSION_ACK` | —（移动端发送，桌面端不接收） | — | — |
+| `VERSION_ACK` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 | `PHASE_ACK` | —（桌面端发送） | 普通阶段仅记录；最终阶段精确匹配 pending key | — |
 | `SYNC_LOG_EVENT` | —（桌面端发送，移动端不接收） | — | — |
 | `SYNC_ERROR` | —（桌面端发送，移动端不接收） | — | — |

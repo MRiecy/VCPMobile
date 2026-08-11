@@ -4,6 +4,7 @@ use crate::vcp_modules::sync_dto::{
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
+use rusqlite::OptionalExtension;
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -94,6 +95,11 @@ mod tests {
                 group_id TEXT, agent_id TEXT, member_tag TEXT, sort_order INTEGER,
                 updated_at INTEGER
              );
+             CREATE TABLE avatars (
+                owner_type TEXT, owner_id TEXT, avatar_hash TEXT, mime_type TEXT,
+                image_data BLOB, dominant_color TEXT, updated_at INTEGER,
+                deleted_at INTEGER, PRIMARY KEY(owner_type, owner_id)
+             );
              CREATE TABLE topics (
                 topic_id TEXT PRIMARY KEY, title TEXT, owner_id TEXT, owner_type TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, updated_at INTEGER,
@@ -105,6 +111,8 @@ mod tests {
              INSERT INTO groups VALUES
                 ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, 9);
              INSERT INTO group_members VALUES ('group-deleted', 'old-member', NULL, 0, 1);
+             INSERT INTO avatars VALUES
+                ('agent', 'agent-deleted', 'old-hash', 'image/png', x'09', NULL, 1, 9);
              INSERT INTO topics VALUES
                 ('topic-deleted', 'deleted-topic', 'agent-live', 'agent', 1, 1, 0, 1, 9);",
         )
@@ -142,6 +150,8 @@ mod tests {
             },
         )
         .expect("guarded group upsert");
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "agent", "agent-deleted", &[1, 2, 3])
+            .expect_err("tombstoned avatar upsert must fail closed");
         DbWriteQueue::rusqlite_upsert_agent_topic(
             &tx,
             "topic-deleted",
@@ -154,7 +164,7 @@ mod tests {
                 owner_id: "agent-live".into(),
             },
         )
-        .expect("guarded topic upsert");
+        .expect_err("tombstoned topic upsert must fail closed");
         DbWriteQueue::rusqlite_upsert_group_topic(
             &tx,
             "topic-under-deleted-owner",
@@ -165,7 +175,7 @@ mod tests {
                 owner_id: "group-deleted".into(),
             },
         )
-        .expect("guarded child topic upsert");
+        .expect_err("topic with deleted owner must fail closed");
 
         assert_eq!(
             tx.query_row(
@@ -193,6 +203,15 @@ mod tests {
             )
             .expect("read member"),
             "old-member"
+        );
+        assert_eq!(
+            tx.query_row(
+                "SELECT image_data FROM avatars WHERE owner_type = 'agent' AND owner_id = 'agent-deleted'",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .expect("read avatar"),
+            vec![9]
         );
         assert_eq!(
             tx.query_row(
@@ -278,6 +297,51 @@ mod tests {
             .expect("read relation");
         assert_eq!(relation, "deleted-hash");
     }
+
+    #[test]
+    fn sync_topic_and_message_writes_require_live_matching_parents() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(
+            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE groups (group_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, title TEXT, owner_id TEXT, owner_type TEXT,
+                created_at INTEGER, locked INTEGER, unread INTEGER, updated_at INTEGER,
+                deleted_at INTEGER
+             );
+             INSERT INTO agents VALUES ('agent-a', NULL), ('agent-b', NULL);
+             INSERT INTO topics VALUES
+                ('topic', 'Topic', 'agent-a', 'agent', 1, 1, 0, 1, NULL);",
+        )
+        .expect("create parent fixture");
+        let tx = conn.transaction().expect("begin transaction");
+
+        let owner_conflict = DbWriteQueue::rusqlite_upsert_agent_topic(
+            &tx,
+            "topic",
+            &AgentTopicSyncDTO {
+                id: "topic".into(),
+                name: "Conflict".into(),
+                created_at: 1,
+                locked: true,
+                unread: false,
+                owner_id: "agent-b".into(),
+            },
+        )
+        .expect_err("live topic owner must be immutable during sync pull");
+        assert!(owner_conflict.to_string().contains("owner conflicts"));
+
+        let missing_parent = DbWriteQueue::rusqlite_upsert_messages_batch(
+            &tx,
+            "missing-topic",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect_err("even an empty message batch requires its live topic");
+        assert!(missing_parent.to_string().contains("parent topic"));
+    }
 }
 
 pub struct DbWriteQueue {
@@ -299,6 +363,13 @@ impl Clone for DbWriteQueue {
 }
 
 impl DbWriteQueue {
+    fn sync_contract_error(message: impl Into<String>) -> rusqlite::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )))
+    }
+
     pub fn new(_pool: sqlx::SqlitePool, db_path: std::path::PathBuf) -> Self {
         let (tx, mut rx) = mpsc::channel(256);
         let db_path_for_worker = db_path.clone();
@@ -638,7 +709,12 @@ impl DbWriteQueue {
         let dominant_color: Option<String> = None;
         let now = chrono::Utc::now().timestamp_millis();
 
-        tx.execute(
+        if owner_id.is_empty() || !matches!(owner_type, "agent" | "group") {
+            return Err(Self::sync_contract_error(
+                "Avatar requires a non-empty owner id and a supported owner type",
+            ));
+        }
+        let changed = tx.execute(
             "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at) 
              VALUES (?, ?, ?, 'image/png', ?, ?, ?) 
              ON CONFLICT(owner_type, owner_id) DO UPDATE SET 
@@ -646,6 +722,12 @@ impl DbWriteQueue {
              WHERE avatars.deleted_at IS NULL",
             rusqlite::params![owner_type, owner_id, &hash, bytes, &dominant_color, now]
         )?;
+
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Avatar {owner_type}/{owner_id} is tombstoned"
+            )));
+        }
 
         Ok(())
     }
@@ -655,9 +737,50 @@ impl DbWriteQueue {
         topic_id: &str,
         dto: &AgentTopicSyncDTO,
     ) -> rusqlite::Result<()> {
+        if topic_id.is_empty() || dto.id != topic_id || dto.owner_id.is_empty() {
+            return Err(Self::sync_contract_error(
+                "Agent topic requires matching non-empty topic and owner ids",
+            ));
+        }
+        let owner_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+            [&dto.owner_id],
+            |row| row.get(0),
+        )?;
+        if !owner_exists {
+            return Err(Self::sync_contract_error(format!(
+                "Agent topic {topic_id} owner {} is missing or deleted",
+                dto.owner_id
+            )));
+        }
+        let existing = tx
+            .query_row(
+                "SELECT owner_id, owner_type, deleted_at FROM topics WHERE topic_id = ?",
+                [topic_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((owner_id, owner_type, deleted_at)) = existing {
+            if deleted_at.is_some() {
+                return Err(Self::sync_contract_error(format!(
+                    "Agent topic {topic_id} is tombstoned"
+                )));
+            }
+            if owner_id != dto.owner_id || owner_type != "agent" {
+                return Err(Self::sync_contract_error(format!(
+                    "Agent topic {topic_id} owner conflicts with the existing live topic"
+                )));
+            }
+        }
         let now = chrono::Utc::now().timestamp_millis();
 
-        tx.execute(
+        let changed = tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
             SELECT ?, ?, ?, 'agent', ?, ?, ?, ?
             WHERE EXISTS (SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)
@@ -671,6 +794,11 @@ impl DbWriteQueue {
                 now, &dto.owner_id
             ]
         )?;
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Agent topic {topic_id} upsert affected {changed} rows"
+            )));
+        }
 
         Ok(())
     }
@@ -680,9 +808,50 @@ impl DbWriteQueue {
         topic_id: &str,
         dto: &GroupTopicSyncDTO,
     ) -> rusqlite::Result<()> {
+        if topic_id.is_empty() || dto.id != topic_id || dto.owner_id.is_empty() {
+            return Err(Self::sync_contract_error(
+                "Group topic requires matching non-empty topic and owner ids",
+            ));
+        }
+        let owner_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+            [&dto.owner_id],
+            |row| row.get(0),
+        )?;
+        if !owner_exists {
+            return Err(Self::sync_contract_error(format!(
+                "Group topic {topic_id} owner {} is missing or deleted",
+                dto.owner_id
+            )));
+        }
+        let existing = tx
+            .query_row(
+                "SELECT owner_id, owner_type, deleted_at FROM topics WHERE topic_id = ?",
+                [topic_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((owner_id, owner_type, deleted_at)) = existing {
+            if deleted_at.is_some() {
+                return Err(Self::sync_contract_error(format!(
+                    "Group topic {topic_id} is tombstoned"
+                )));
+            }
+            if owner_id != dto.owner_id || owner_type != "group" {
+                return Err(Self::sync_contract_error(format!(
+                    "Group topic {topic_id} owner conflicts with the existing live topic"
+                )));
+            }
+        }
         let now = chrono::Utc::now().timestamp_millis();
 
-        tx.execute(
+        let changed = tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
             SELECT ?, ?, ?, 'group', ?, 1, 0, ?
             WHERE EXISTS (SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)
@@ -691,6 +860,11 @@ impl DbWriteQueue {
             WHERE topics.deleted_at IS NULL",
             rusqlite::params![topic_id, &dto.name, &dto.owner_id, dto.created_at, now, &dto.owner_id]
         )?;
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Group topic {topic_id} upsert affected {changed} rows"
+            )));
+        }
 
         Ok(())
     }
@@ -703,8 +877,13 @@ impl DbWriteQueue {
         render_bytes: Vec<Vec<u8>>,
         content_hashes: Vec<String>,
     ) -> rusqlite::Result<()> {
-        if messages.is_empty() {
-            return Ok(());
+        if messages.len() != contents.len()
+            || messages.len() != render_bytes.len()
+            || messages.len() != content_hashes.len()
+        {
+            return Err(Self::sync_contract_error(format!(
+                "Topic {topic_id} message batch vectors have inconsistent lengths"
+            )));
         }
 
         let topic_is_live: bool = tx.query_row(
@@ -713,7 +892,22 @@ impl DbWriteQueue {
             |row| row.get(0),
         )?;
         if !topic_is_live {
+            return Err(Self::sync_contract_error(format!(
+                "Message batch parent topic {topic_id} is missing or deleted"
+            )));
+        }
+        if messages.is_empty() {
             return Ok(());
+        }
+        if messages.iter().any(|message| {
+            message
+                .topic_id
+                .as_deref()
+                .is_some_and(|message_topic| message_topic != topic_id)
+        }) {
+            return Err(Self::sync_contract_error(format!(
+                "Message batch contains a topic id conflicting with {topic_id}"
+            )));
         }
 
         // Pull batches do not carry a causally newer restore marker. Filter local
@@ -955,9 +1149,32 @@ impl DbWriteQueue {
             msg_ids.push(msg.id.clone());
             if let Some(ref attachments) = msg.attachments {
                 for (i, att) in attachments.iter().enumerate() {
-                    let hash = att.hash.clone().unwrap_or_else(|| {
-                        crate::vcp_modules::infra::utils::calculate_sha256(att.src.as_bytes())
-                    });
+                    let hash = att.hash.clone().ok_or_else(|| {
+                        Self::sync_contract_error(format!(
+                            "Attachment {} on message {} is missing its SHA-256 hash",
+                            att.name, msg.id
+                        ))
+                    })?;
+                    if hash != hash.to_ascii_lowercase()
+                        || !crate::vcp_modules::infra::utils::is_valid_cas_hash(&hash)
+                    {
+                        return Err(Self::sync_contract_error(format!(
+                            "Attachment {} on message {} has an invalid SHA-256 hash",
+                            att.name, msg.id
+                        )));
+                    }
+                    let status = att.status.as_deref().ok_or_else(|| {
+                        Self::sync_contract_error(format!(
+                            "Attachment {hash} on message {} is missing status",
+                            msg.id
+                        ))
+                    })?;
+                    if !matches!(status, "ready" | "desktop_only") {
+                        return Err(Self::sync_contract_error(format!(
+                            "Attachment {hash} on message {} has invalid status {status}",
+                            msg.id
+                        )));
+                    }
 
                     Self::rusqlite_upsert_attachment_core(tx, &hash, att, msg.timestamp as i64)?;
 
@@ -967,7 +1184,7 @@ impl DbWriteQueue {
                         i as i32,
                         att.name.clone(),
                         att.src.clone(),
-                        att.status.clone().unwrap_or_else(|| "ready".to_string()),
+                        status.to_string(),
                         msg.timestamp as i64,
                     ));
                 }
@@ -978,7 +1195,7 @@ impl DbWriteQueue {
         for chunk in msg_ids.chunks(999) {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
             let sql = format!(
-                "DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN ({})",
+                "DELETE FROM message_attachments WHERE deleted_at IS NULL AND topic_id = ? AND msg_id IN ({})",
                 placeholders
             );
             let mut stmt = tx.prepare_cached(&sql)?;
