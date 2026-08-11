@@ -11,7 +11,17 @@ const MAX_PHASE3_STATE_BYTES: usize = 64 * 1024 * 1024;
 pub struct Phase3Message;
 
 #[derive(Debug)]
+pub struct TargetedTopicHashState {
+    pub owner_type: String,
+    pub owner_id: String,
+    pub config_hash: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug)]
 pub struct TopicLocalState {
+    pub owner_type: String,
+    pub owner_id: String,
     pub topic_hash: String,
     pub messages: HashMap<String, String>,
 }
@@ -59,7 +69,7 @@ impl Phase3Message {
     pub async fn get_targeted_topic_hashes(
         pool: &SqlitePool,
         owners: &[String],
-    ) -> Result<HashMap<String, (String, String)>, String> {
+    ) -> Result<HashMap<String, TargetedTopicHashState>, String> {
         if owners.is_empty() {
             return Ok(HashMap::new());
         }
@@ -72,7 +82,8 @@ impl Phase3Message {
                 .collect::<Vec<_>>()
                 .join(", ");
             let query_str = format!(
-                "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id IN ({}) AND deleted_at IS NULL",
+                "SELECT topic_id, owner_type, owner_id, config_hash, content_hash
+                 FROM topics WHERE owner_id IN ({}) AND deleted_at IS NULL",
                 placeholders
             );
             let mut query = sqlx::query(&query_str);
@@ -93,8 +104,30 @@ impl Phase3Message {
                 let content_hash: String = row.try_get("content_hash").map_err(|error| {
                     format!("Targeted topic {topic_id} content hash decode failed: {error}")
                 })?;
+                let owner_type: String = row.try_get("owner_type").map_err(|error| {
+                    format!("Targeted topic {topic_id} owner type decode failed: {error}")
+                })?;
+                let owner_id: String = row.try_get("owner_id").map_err(|error| {
+                    format!("Targeted topic {topic_id} owner id decode failed: {error}")
+                })?;
+                if !matches!(owner_type.as_str(), "agent" | "group")
+                    || owner_id.is_empty()
+                    || !owners.contains(&owner_id)
+                {
+                    return Err(format!(
+                        "Targeted topic {topic_id} has invalid owner identity"
+                    ));
+                }
                 if result
-                    .insert(topic_id.clone(), (config_hash, content_hash))
+                    .insert(
+                        topic_id.clone(),
+                        TargetedTopicHashState {
+                            owner_type,
+                            owner_id,
+                            config_hash,
+                            content_hash,
+                        },
+                    )
                     .is_some()
                 {
                     return Err(format!(
@@ -128,7 +161,8 @@ impl Phase3Message {
                 .collect::<Vec<_>>()
                 .join(", ");
             let topic_query = format!(
-                "SELECT topic_id, content_hash FROM topics WHERE topic_id IN ({}) AND deleted_at IS NULL",
+                "SELECT topic_id, owner_type, owner_id, content_hash
+                 FROM topics WHERE topic_id IN ({}) AND deleted_at IS NULL",
                 placeholders
             );
             let mut query = sqlx::query(&topic_query);
@@ -142,10 +176,21 @@ impl Phase3Message {
                 let topic_hash: String = row.try_get("content_hash").map_err(|error| {
                     format!("Topic {topic_id} content hash decode failed: {error}")
                 })?;
+                let owner_type: String = row.try_get("owner_type").map_err(|error| {
+                    format!("Topic {topic_id} owner type decode failed: {error}")
+                })?;
+                let owner_id: String = row
+                    .try_get("owner_id")
+                    .map_err(|error| format!("Topic {topic_id} owner id decode failed: {error}"))?;
+                if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
+                    return Err(format!("Topic {topic_id} has invalid owner identity"));
+                }
                 if result
                     .insert(
                         topic_id.clone(),
                         TopicLocalState {
+                            owner_type,
+                            owner_id,
                             topic_hash,
                             messages: HashMap::new(),
                         },
@@ -292,15 +337,16 @@ mod tests {
             .expect("open database");
         sqlx::query(
             "CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT,
+                content_hash TEXT, deleted_at INTEGER
              );
              CREATE TABLE messages (
                 topic_id TEXT, msg_id TEXT, content_hash TEXT, deleted_at INTEGER,
                 PRIMARY KEY(topic_id, msg_id)
              );
              INSERT INTO topics VALUES
-                ('live', 'topic-hash', NULL),
-                ('deleted', 'deleted-hash', 9);",
+                ('live', 'agent', 'agent-a', 'topic-hash', NULL),
+                ('deleted', 'agent', 'agent-a', 'deleted-hash', 9);",
         )
         .execute(&pool)
         .await

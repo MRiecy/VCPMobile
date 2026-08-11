@@ -42,6 +42,7 @@ impl Phase1Metadata {
                     .try_get("deleted_at")
                     .map_err(|error| format!("Agent manifest tombstone decode failed: {error}"))?,
                 owner_type: None,
+                owner_id: None,
             });
         }
 
@@ -83,6 +84,7 @@ impl Phase1Metadata {
                     .try_get("deleted_at")
                     .map_err(|error| format!("Group manifest tombstone decode failed: {error}"))?,
                 owner_type: None,
+                owner_id: None,
             });
         }
 
@@ -117,7 +119,7 @@ impl Phase1Metadata {
                 .collect::<Vec<_>>()
                 .join(", ");
             let query_str = format!(
-                "SELECT topic_id, config_hash, content_hash, updated_at, owner_type, deleted_at
+                "SELECT topic_id, config_hash, content_hash, updated_at, owner_type, owner_id, deleted_at
                  FROM topics WHERE owner_id IN ({})",
                 placeholders
             );
@@ -151,6 +153,14 @@ impl Phase1Metadata {
                         "Topic manifest {id} has unsupported owner type {owner_type}"
                     ));
                 }
+                let owner_id: String = row.try_get("owner_id").map_err(|error| {
+                    format!("Topic manifest owner id decode failed for {id}: {error}")
+                })?;
+                if owner_id.is_empty() || !expected_owners.contains(&owner_id) {
+                    return Err(format!(
+                        "Topic manifest {id} returned unexpected owner {owner_id}"
+                    ));
+                }
                 let updated_at = row.try_get("updated_at").map_err(|error| {
                     format!("Topic manifest timestamp decode failed for {id}: {error}")
                 })?;
@@ -165,6 +175,7 @@ impl Phase1Metadata {
                     ts: updated_at,
                     deleted_at,
                     owner_type: Some(owner_type),
+                    owner_id: Some(owner_id),
                 });
             }
         }
@@ -241,6 +252,7 @@ impl Phase1Metadata {
                     .map_err(|error| format!("Avatar manifest timestamp decode failed: {error}"))?,
                 deleted_at,
                 owner_type: None,
+                owner_id: None,
             });
         }
 
@@ -283,5 +295,35 @@ mod tests {
         assert_eq!(manifest.items[0].deleted_at, Some(9));
         assert_eq!(manifest.items[1].id, "user:user_avatar");
         assert_eq!(manifest.items[1].deleted_at, None);
+    }
+
+    #[tokio::test]
+    async fn targeted_topic_manifest_carries_exact_owner_identity() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT, config_hash TEXT, content_hash TEXT,
+                updated_at INTEGER, owner_type TEXT, owner_id TEXT,
+                deleted_at INTEGER
+             );
+             INSERT INTO topics VALUES
+                ('topic-a', 'config-hash', 'content-hash', 10,
+                 'agent', 'agent-a', NULL);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create topic fixture");
+
+        let manifest =
+            Phase1Metadata::build_targeted_topic_manifest(&pool, &["agent-a".to_string()])
+                .await
+                .expect("build topic manifest");
+        assert_eq!(manifest.items.len(), 1);
+        assert_eq!(manifest.items[0].owner_type.as_deref(), Some("agent"));
+        assert_eq!(manifest.items[0].owner_id.as_deref(), Some("agent-a"));
     }
 }

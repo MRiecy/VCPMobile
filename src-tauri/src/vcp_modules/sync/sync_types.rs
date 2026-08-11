@@ -124,6 +124,9 @@ pub struct EntityState {
     /// 所有者类型 (仅用于 topic 类型，区分 agent_topic 和 group_topic)
     #[serde(rename = "ownerType", skip_serializing_if = "Option::is_none")]
     pub owner_type: Option<String>,
+    /// 所有者 ID（仅用于 topic，和 ownerType 共同构成无歧义身份）
+    #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
 }
 
 /// 阶段一：同步清单 (Manifest)

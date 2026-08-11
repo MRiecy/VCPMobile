@@ -1692,10 +1692,18 @@ async fn run_sync_session(
                                                 continue 'attempt;
                                             }
                                             let mut hash_map = serde_json::Map::new();
-                                            for (topic_id, (conf_h, cont_h)) in topic_hashes {
-                                                hash_map.insert(topic_id, json!({
-                                                    "configHash": conf_h,
-                                                    "contentHash": cont_h
+                                            let mut topic_states = Vec::new();
+                                            for (topic_id, state) in topic_hashes {
+                                                hash_map.insert(topic_id.clone(), json!({
+                                                    "configHash": state.config_hash.clone(),
+                                                    "contentHash": state.content_hash.clone()
+                                                }));
+                                                topic_states.push(json!({
+                                                    "topicId": topic_id,
+                                                    "ownerType": state.owner_type,
+                                                    "ownerId": state.owner_id,
+                                                    "configHash": state.config_hash,
+                                                    "contentHash": state.content_hash,
                                                 }));
                                             }
                                             {
@@ -1714,6 +1722,7 @@ async fn run_sync_session(
                                             let msg = json!({
                                                 "type": "SYNC_TOPIC_HASH_BATCH_V2",
                                                 "hashes": hash_map,
+                                                "topics": topic_states,
                                             });
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                                 terminate_after_protocol_send_failure(
@@ -3282,6 +3291,8 @@ fn build_diff_batches(
             msg_map.insert(msg_id, serde_json::Value::String(hash));
         }
         let topic_obj = serde_json::json!({
+            "ownerType": state.owner_type,
+            "ownerId": state.owner_id,
             "topicHash": state.topic_hash,
             "messages": msg_map,
         });
@@ -3738,6 +3749,8 @@ mod tests {
             states.insert(
                 format!("topic-{index}"),
                 TopicLocalState {
+                    owner_type: "agent".to_string(),
+                    owner_id: "agent-a".to_string(),
                     topic_hash: "h".repeat(64),
                     messages: HashMap::from([(
                         format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
@@ -3760,6 +3773,8 @@ mod tests {
         let oversized = HashMap::from([(
             "topic-oversized".to_string(),
             TopicLocalState {
+                owner_type: "agent".to_string(),
+                owner_id: "agent-a".to_string(),
                 topic_hash: "h".repeat(64),
                 messages: HashMap::from([("x".repeat(MAX_WS_DIFF_BATCH_BYTES), "m".repeat(64))]),
             },
@@ -3772,6 +3787,8 @@ mod tests {
         let oversized_topic = HashMap::from([(
             "topic-too-many".to_string(),
             TopicLocalState {
+                owner_type: "agent".to_string(),
+                owner_id: "agent-a".to_string(),
                 topic_hash: "h".repeat(64),
                 messages: too_many_messages,
             },

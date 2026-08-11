@@ -1,3 +1,4 @@
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask};
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::sync_dto::{
@@ -7,6 +8,7 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde_json::Value;
+use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
@@ -24,6 +26,7 @@ const PULL_WORKER_BUDGET_UNITS: usize = MAX_NDJSON_LINE_BYTES / PULL_WORKER_BUDG
 const MAX_DIRECT_ENTITY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ENTITY_BATCH_ITEMS: usize = 10_000;
 const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
+const SQLITE_BIND_CHUNK: usize = 400;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -100,6 +103,8 @@ impl NdjsonBudget {
 
 struct TopicNDJSONFrame {
     topic_id: String,
+    owner_type: Option<String>,
+    owner_id: Option<String>,
     messages: Vec<crate::vcp_modules::sync_dto::MessagePullSyncDTO>,
     error: Option<String>,
     legacy_attachment_warnings: usize,
@@ -246,6 +251,19 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
         .filter(|topic_id| !topic_id.is_empty())
         .ok_or_else(|| "NDJSON frame contains missing or empty topicId".to_string())?
         .to_string();
+    let owner_identity = match (object.get("ownerType"), object.get("ownerId")) {
+        (None | Some(Value::Null), None | Some(Value::Null)) => None,
+        (Some(Value::String(owner_type)), Some(Value::String(owner_id)))
+            if matches!(owner_type.as_str(), "agent" | "group") && !owner_id.is_empty() =>
+        {
+            Some((owner_type.clone(), owner_id.clone()))
+        }
+        _ => {
+            return Err(format!(
+                "NDJSON frame for {topic_id} requires valid ownerType and ownerId together"
+            ))
+        }
+    };
     let error = match object.get("_error") {
         None | Some(Value::Null) => None,
         Some(Value::String(error)) if !error.is_empty() => Some(error.clone()),
@@ -258,6 +276,8 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
     if error.is_some() {
         return Ok(TopicNDJSONFrame {
             topic_id,
+            owner_type: owner_identity.as_ref().map(|identity| identity.0.clone()),
+            owner_id: owner_identity.map(|identity| identity.1),
             messages: Vec::new(),
             error,
             legacy_attachment_warnings: 0,
@@ -357,11 +377,34 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
 
     Ok(TopicNDJSONFrame {
         topic_id,
+        owner_type: owner_identity.as_ref().map(|identity| identity.0.clone()),
+        owner_id: owner_identity.map(|identity| identity.1),
         messages,
         error: None,
         legacy_attachment_warnings: warnings.count,
         warning_samples: warnings.samples,
     })
+}
+
+fn validate_returned_topic_identity(
+    frame: &TopicNDJSONFrame,
+    expected: &HashMap<String, (String, String)>,
+) -> Result<(), String> {
+    let Some((expected_owner_type, expected_owner_id)) = expected.get(&frame.topic_id) else {
+        return Err(format!(
+            "NDJSON returned unexpected topicId {}",
+            frame.topic_id
+        ));
+    };
+    if frame.owner_type.as_deref() != Some(expected_owner_type.as_str())
+        || frame.owner_id.as_deref() != Some(expected_owner_id.as_str())
+    {
+        return Err(format!(
+            "NDJSON topic {} owner identity conflicts with the local database",
+            frame.topic_id
+        ));
+    }
+    Ok(())
 }
 
 fn validate_requested_message_ids(
@@ -405,8 +448,6 @@ async fn process_topic_messages<R: Runtime>(
     prerender_enabled: bool,
 ) -> Result<(usize, usize), String> {
     let t_start = std::time::Instant::now();
-    use crate::vcp_modules::db_manager::DbState;
-    use sqlx::Row;
     let db = app.state::<DbState>();
 
     // 1. 批量收集所有附件 hash，一次性查询本地路径（替代 N+1 查询）
@@ -1110,11 +1151,79 @@ impl PullExecutor {
         let expected_topics = expected_message_ids.keys().cloned().collect::<HashSet<_>>();
         let mut seen_topics = HashSet::new();
 
+        let db = app.state::<DbState>();
+        let mut expected_topic_identities = HashMap::new();
+        for request_chunk in requests.chunks(SQLITE_BIND_CHUNK) {
+            let placeholders = request_chunk
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let query_text = format!(
+                "SELECT topic_id, owner_type, owner_id FROM topics
+                 WHERE topic_id IN ({placeholders}) AND deleted_at IS NULL"
+            );
+            let mut query = sqlx::query(&query_text);
+            for (topic_id, _) in request_chunk {
+                query = query.bind(topic_id);
+            }
+            let rows = query
+                .fetch_all(&db.pool)
+                .await
+                .map_err(|error| format!("Pull topic identity lookup failed: {error}"))?;
+            for row in rows {
+                let topic_id = row
+                    .try_get::<String, _>("topic_id")
+                    .map_err(|error| format!("Pull topic id decode failed: {error}"))?;
+                let owner_type = row.try_get::<String, _>("owner_type").map_err(|error| {
+                    format!("Pull topic {topic_id} owner type decode failed: {error}")
+                })?;
+                let owner_id = row.try_get::<String, _>("owner_id").map_err(|error| {
+                    format!("Pull topic {topic_id} owner id decode failed: {error}")
+                })?;
+                if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
+                    return Err(format!("Pull topic {topic_id} has invalid owner identity"));
+                }
+                if expected_topic_identities
+                    .insert(topic_id.clone(), (owner_type, owner_id))
+                    .is_some()
+                {
+                    return Err(format!(
+                        "Pull topic identity query returned duplicate topic {topic_id}"
+                    ));
+                }
+            }
+        }
+        if expected_topic_identities.len() != expected_topics.len() {
+            let mut missing = expected_topics
+                .iter()
+                .filter(|topic_id| !expected_topic_identities.contains_key(*topic_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            missing.sort();
+            return Err(format!(
+                "Pull topic identity lookup omitted topics: {:?}",
+                missing.into_iter().take(8).collect::<Vec<_>>()
+            ));
+        }
+
         let url = format!("{}/api/mobile-sync/download-messages-stream", http_url);
         let req_body: Vec<serde_json::Value> = requests
             .iter()
-            .map(|(tid, ids)| serde_json::json!({ "topicId": tid, "msgIds": ids }))
-            .collect();
+            .map(
+                |(topic_id, message_ids)| -> Result<serde_json::Value, String> {
+                    let (owner_type, owner_id) = expected_topic_identities
+                        .get(topic_id)
+                        .ok_or_else(|| format!("Pull topic {topic_id} identity disappeared"))?;
+                    Ok(serde_json::json!({
+                        "topicId": topic_id,
+                        "ownerType": owner_type,
+                        "ownerId": owner_id,
+                        "msgIds": message_ids,
+                    }))
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         let res = client
             .post(&url)
@@ -1279,10 +1388,8 @@ impl PullExecutor {
                 let frame = parse_topic_ndjson_frame(&line)?;
                 drop(line);
                 ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
+                validate_returned_topic_identity(&frame, &expected_topic_identities)?;
                 let topic_id = frame.topic_id;
-                if !expected_topics.contains(&topic_id) {
-                    return Err(format!("NDJSON returned unexpected topicId {topic_id}"));
-                }
                 if !seen_topics.insert(topic_id.clone()) {
                     return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
                 }
@@ -1408,10 +1515,8 @@ impl PullExecutor {
             let frame = parse_topic_ndjson_frame(&trailing)?;
             drop(trailing);
             ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
+            validate_returned_topic_identity(&frame, &expected_topic_identities)?;
             let topic_id = frame.topic_id;
-            if !expected_topics.contains(&topic_id) {
-                return Err(format!("NDJSON returned unexpected topicId {topic_id}"));
-            }
             if !seen_topics.insert(topic_id.clone()) {
                 return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
             }
@@ -1540,17 +1645,44 @@ impl PullExecutor {
 mod ndjson_budget_tests {
     use super::{
         parse_topic_ndjson_frame, pull_worker_permits, validate_requested_message_ids,
-        NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
+        validate_returned_topic_identity, NdjsonBudget, MAX_NDJSON_LINE_BYTES,
+        MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
     use serde_json::json;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Semaphore;
 
     const PROTOCOL_1_1_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_1_golden.json");
     const PROTOCOL_1_1_GOLDEN_SHA256: &str =
-        "62654d4ecf6fc144c40b4635b5248e851a880ca003229bad37337e693bdb81ae";
+        "3b5f56d0731c1babede9aba001d9664117fae6bbc8d97cae56882f12a48e8e60";
+
+    #[test]
+    fn pull_frame_owner_identity_must_match_the_local_topic() {
+        let frame = parse_topic_ndjson_frame(
+            json!({
+                "topicId": "topic-a",
+                "ownerType": "agent",
+                "ownerId": "agent-a",
+                "messages": [],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("parse owner frame");
+        let expected = HashMap::from([(
+            "topic-a".to_string(),
+            ("agent".to_string(), "agent-a".to_string()),
+        )]);
+        validate_returned_topic_identity(&frame, &expected).expect("matching owner");
+
+        let conflicting = HashMap::from([(
+            "topic-a".to_string(),
+            ("group".to_string(), "group-a".to_string()),
+        )]);
+        assert!(validate_returned_topic_identity(&frame, &conflicting).is_err());
+    }
 
     #[test]
     fn protocol_1_1_golden_bundle_and_canonical_output_are_stable() {

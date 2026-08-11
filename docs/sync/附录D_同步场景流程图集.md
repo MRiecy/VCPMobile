@@ -380,6 +380,8 @@ Mobile                              Desktop
   │  SYNC_MESSAGE_DIFF_BATCH          │
   │  topics: {                        │
   │    T1: {                          │
+  │      ownerType: "agent",          │
+  │      ownerId: "A1",               │
   │      topicHash: "...",            │
   │      messages: {}     // 空       │
   │    }                              │
@@ -402,6 +404,8 @@ Mobile                              Desktop
   │  │   pull_messages_batch       │  │
   │  │ HTTP POST /download-messages│  │
   │  │ Body: {topicId:"T1",        │  │
+  │  │        ownerType:"agent",   │  │
+  │  │        ownerId:"A1",        │  │
   │  │        msgIds:["M1"]}       │  │
   │  └─────────────────────────────┘  │
   │               ──────────────────> │

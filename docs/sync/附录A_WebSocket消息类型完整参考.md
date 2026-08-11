@@ -80,9 +80,10 @@ last_updated: 2026-05-13
 | `dataType` | `string` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 实体类型枚举值：`agent`、`group`、`avatar`、`topic`；序列化为小写 |
 | `phase` (number) | `number` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 阶段编号：`1`=Owner Metadata, `2`=Topic Metadata；用于桌面端日志分类 |
 | `targetedOwners` | `string[]` | `SYNC_MANIFEST` (phase=2) | 否 | `[]` | V2 优化字段：仅针对特定 Owner ID 列表的话题构建清单；为空数组时视为全量 |
-| `hashes` | `object` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | Key 为 `topicId`，Value 为 `{configHash: string, contentHash: string}` 对象 |
+| `hashes` | `object` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | 兼容哈希 Map；中央路径收到严格 `topics` 列表时不得单独依赖该 Map 推断 Owner |
+| `topics` (array) | `object[]` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | 每项为 `{topicId, ownerType, ownerId, configHash, contentHash}`，提供无歧义 Topic 身份 |
 | `changedTopics` | `string[]` | `SYNC_TOPIC_HASH_RESULTS` | 是 | `[]` | 双哈希比对后判定为变更的话题 ID 列表；空数组表示所有话题一致，可跳过 Phase 3 |
-| `topics` | `object` | `SYNC_MESSAGE_DIFF_BATCH` | 是 | — | Key 为 `topicId`，Value 含 `topicHash`（话题聚合哈希）与 `messages`（消息哈希映射） |
+| `topics` (map) | `object` | `SYNC_MESSAGE_DIFF_BATCH` | 是 | — | Key 为 `topicId`，Value 含必填 `ownerType + ownerId + topicHash + messages` |
 | `results` | `object` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | Key 为 `topicId`，Value 为严格判别联合；必须精确覆盖当前请求 topic |
 | `ok` | `boolean` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | `true` 使用 `toPull/toPush`；`false` 使用 `error` 并立即终止 attempt |
 | `toPull` / `toPush` | `string[]` / `boolean` | `ok:true` | 是 | — | 成功分支严禁携带 `error` |
@@ -111,6 +112,7 @@ last_updated: 2026-05-13
 | `ts` | `i64` | `ts` | 否 | 是 | — | 绝对时间戳 / 逻辑时钟，毫秒级 Unix Epoch；LWW（Last-Write-Wins，最后写入胜出）裁决标准 |
 | `deleted_at` | `Option<i64>` | `deletedAt` | 是 | 否 | `None` | 软删除时间戳；非空表示该实体已被逻辑删除，用于双向删除同步 |
 | `owner_type` | `Option<String>` | `ownerType` | 是 | 否 | `None` | 仅用于 `topic` 类型，区分 `"agent"` 和 `"group"`，指导路由到 `AgentTopicSyncDTO` 或 `GroupTopicSyncDTO` |
+| `owner_id` | `Option<String>` | `ownerId` | 是 | 否 | `None` | 仅用于 `topic` 类型；与 `ownerType`、Topic ID 共同构成复合身份，协议 1.1 的 Topic manifest 中必须出现 |
 
 ---
 
@@ -121,6 +123,7 @@ last_updated: 2026-05-13
 | `id` | `string` | 始终 | 是 | 实体唯一标识符 |
 | `action` | `string` | 始终 | 是 | 操作类型：`PULL`、`PUSH`、`DELETE`、`PUSH_DELETE`、`SKIP` |
 | `ownerType` | `string` | Topic / Agent / Group 类型 Diff 结果 | 否 | 所有者类型，用于路由到正确的 Pull/Push Executor；`agent_topic` 或 `group_topic` |
+| `ownerId` | `string` | Topic 的 `PUSH`/`PULL` 结果 | 条件 | 精确父实体 ID；不得由 Topic ID 或路径模糊推导 |
 | `deletedAt` | `number` | `action` 为 `DELETE` 或 `PUSH_DELETE` 时 | 条件 | 软删除时间戳，毫秒级 Unix Epoch |
 | `mismatchedContent` | `boolean` | 仅 Agent/Group 类型的 Diff 结果 | 否 | V2 标记；`true` 表示 `content_hash` 不匹配，用于引导后续 targeted topic sync |
 

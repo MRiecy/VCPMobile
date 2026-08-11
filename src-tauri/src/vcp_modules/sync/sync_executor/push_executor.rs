@@ -913,6 +913,7 @@ async fn serialize_topic_messages<R: Runtime>(
     tx: &mut Transaction<'_, Sqlite>,
     topic_id: &str,
     owner_type: &str,
+    owner_id: &str,
     expected_message_count: usize,
 ) -> Result<Vec<u8>, String> {
     let mut line = BoundedJsonLine::new(MAX_NDJSON_LINE_BYTES);
@@ -920,6 +921,14 @@ async fn serialize_topic_messages<R: Runtime>(
         .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
     serde_json::to_writer(&mut line, topic_id)
         .map_err(|error| format!("Message push topic id serialization failed: {error}"))?;
+    line.write_all(b",\"ownerType\":")
+        .map_err(|error| format!("Message push owner prefix failed for {topic_id}: {error}"))?;
+    serde_json::to_writer(&mut line, owner_type)
+        .map_err(|error| format!("Message push owner type serialization failed: {error}"))?;
+    line.write_all(b",\"ownerId\":")
+        .map_err(|error| format!("Message push owner prefix failed for {topic_id}: {error}"))?;
+    serde_json::to_writer(&mut line, owner_id)
+        .map_err(|error| format!("Message push owner id serialization failed: {error}"))?;
     line.write_all(b",\"messages\":[")
         .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
 
@@ -1277,7 +1286,8 @@ impl PushExecutor {
                     format!("Message push snapshot failed for {topic_id}: {error}")
                 })?;
             let topic_row = sqlx::query(
-                "SELECT owner_type FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
+                "SELECT owner_type, owner_id FROM topics
+                 WHERE topic_id = ? AND deleted_at IS NULL",
             )
             .bind(topic_id)
             .fetch_optional(&mut *read_tx)
@@ -1288,6 +1298,14 @@ impl PushExecutor {
             let owner_type: String = topic_row.try_get("owner_type").map_err(|error| {
                 format!("Message push owner type decode failed for {topic_id}: {error}")
             })?;
+            let owner_id: String = topic_row.try_get("owner_id").map_err(|error| {
+                format!("Message push owner id decode failed for {topic_id}: {error}")
+            })?;
+            if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
+                return Err(format!(
+                    "Message push topic {topic_id} has invalid owner identity"
+                ));
+            }
             let preflight = preflight_topic_messages(&mut read_tx, topic_id).await?;
             let topic_message_count = preflight
                 .live_count
@@ -1318,6 +1336,7 @@ impl PushExecutor {
                 &mut read_tx,
                 topic_id,
                 &owner_type,
+                &owner_id,
                 preflight.live_count,
             )
             .await?;
