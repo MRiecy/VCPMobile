@@ -4,6 +4,7 @@ use crate::vcp_modules::sync_dto::{
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
+use crate::vcp_modules::sync_types::is_valid_avatar_owner;
 use rusqlite::OptionalExtension;
 
 use std::collections::HashSet;
@@ -109,7 +110,8 @@ mod tests {
                 ('agent-live', 'live', '', '', 0, 0, 0, 0, '', '', 1, NULL),
                 ('agent-deleted', 'deleted', '', '', 0, 0, 0, 0, '', '', 1, 9);
              INSERT INTO groups VALUES
-                ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, 9);
+                ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, 9),
+                ('group-live', 'live-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, NULL);
              INSERT INTO group_members VALUES ('group-deleted', 'old-member', NULL, 0, 1);
              INSERT INTO avatars VALUES
                 ('agent', 'agent-deleted', 'old-hash', 'image/png', x'09', NULL, 1, 9);
@@ -132,7 +134,7 @@ mod tests {
                 stream_output: true,
             },
         )
-        .expect("guarded agent upsert");
+        .expect_err("tombstoned agent upsert must fail closed");
         DbWriteQueue::rusqlite_upsert_group(
             &tx,
             "group-deleted",
@@ -149,9 +151,17 @@ mod tests {
                 created_at: 2,
             },
         )
-        .expect("guarded group upsert");
+        .expect_err("tombstoned group upsert must fail closed");
         DbWriteQueue::rusqlite_upsert_avatar(&tx, "agent", "agent-deleted", &[1, 2, 3])
             .expect_err("tombstoned avatar upsert must fail closed");
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "agent", "missing-agent", &[1])
+            .expect_err("orphan agent avatar must fail closed");
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "group", "agent-live", &[1])
+            .expect_err("wrong-type avatar owner must fail closed");
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "system", "system", &[1])
+            .expect_err("unsupported avatar owner must fail closed");
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "user", "user_avatar", &[1])
+            .expect("fixed user avatar owner must remain supported");
         DbWriteQueue::rusqlite_upsert_agent_topic(
             &tx,
             "topic-deleted",
@@ -501,23 +511,59 @@ impl DbWriteQueue {
                     }
 
                     if !unique_agents.is_empty() {
-                        let placeholders = vec!["?"; unique_agents.len()].join(",");
-                        let sql = format!("SELECT agent_id FROM agents WHERE agent_id IN ({}) AND deleted_at IS NULL", placeholders);
-                        let mut stmt = tx.prepare(&sql)?;
-                        let valid_ids: Vec<String> = stmt.query_map(rusqlite::params_from_iter(unique_agents.iter()), |r| r.get(0))?
-                            .filter_map(|r| r.ok()).collect();
-                        for aid in valid_ids {
+                        let mut requested = unique_agents.into_iter().collect::<Vec<_>>();
+                        requested.sort();
+                        let mut valid_ids = HashSet::new();
+                        for chunk in requested.chunks(400) {
+                            let placeholders = vec!["?"; chunk.len()].join(",");
+                            let sql = format!(
+                                "SELECT agent_id FROM agents WHERE agent_id IN ({}) AND deleted_at IS NULL",
+                                placeholders
+                            );
+                            let mut stmt = tx.prepare(&sql)?;
+                            let decoded = stmt
+                                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| row.get(0))?
+                                .collect::<rusqlite::Result<Vec<String>>>()?;
+                            valid_ids.extend(decoded);
+                        }
+                        let expected = requested.iter().cloned().collect::<HashSet<_>>();
+                        if valid_ids != expected {
+                            let mut missing = expected.difference(&valid_ids).cloned().collect::<Vec<_>>();
+                            missing.sort();
+                            return Err(Self::sync_contract_error(format!(
+                                "Agent hash bubble is missing live owners {missing:?}"
+                            )));
+                        }
+                        for aid in requested {
                             Self::rusqlite_bubble_agent_hash(&tx, &aid)?;
                         }
                     }
 
                     if !unique_groups.is_empty() {
-                        let placeholders = vec!["?"; unique_groups.len()].join(",");
-                        let sql = format!("SELECT group_id FROM groups WHERE group_id IN ({}) AND deleted_at IS NULL", placeholders);
-                        let mut stmt = tx.prepare(&sql)?;
-                        let valid_ids: Vec<String> = stmt.query_map(rusqlite::params_from_iter(unique_groups.iter()), |r| r.get(0))?
-                            .filter_map(|r| r.ok()).collect();
-                        for gid in valid_ids {
+                        let mut requested = unique_groups.into_iter().collect::<Vec<_>>();
+                        requested.sort();
+                        let mut valid_ids = HashSet::new();
+                        for chunk in requested.chunks(400) {
+                            let placeholders = vec!["?"; chunk.len()].join(",");
+                            let sql = format!(
+                                "SELECT group_id FROM groups WHERE group_id IN ({}) AND deleted_at IS NULL",
+                                placeholders
+                            );
+                            let mut stmt = tx.prepare(&sql)?;
+                            let decoded = stmt
+                                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| row.get(0))?
+                                .collect::<rusqlite::Result<Vec<String>>>()?;
+                            valid_ids.extend(decoded);
+                        }
+                        let expected = requested.iter().cloned().collect::<HashSet<_>>();
+                        if valid_ids != expected {
+                            let mut missing = expected.difference(&valid_ids).cloned().collect::<Vec<_>>();
+                            missing.sort();
+                            return Err(Self::sync_contract_error(format!(
+                                "Group hash bubble is missing live owners {missing:?}"
+                            )));
+                        }
+                        for gid in requested {
                             Self::rusqlite_bubble_group_hash(&tx, &gid)?;
                         }
                     }
@@ -598,10 +644,15 @@ impl DbWriteQueue {
         id: &str,
         dto: &AgentSyncDTO,
     ) -> rusqlite::Result<()> {
+        if id.is_empty() {
+            return Err(Self::sync_contract_error(
+                "Agent upsert requires a non-empty id",
+            ));
+        }
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_agent_config_hash(dto);
 
-        tx.execute(
+        let changed = tx.execute(
             "INSERT INTO agents (
                 agent_id, name, system_prompt, model, temperature, 
                 context_token_limit, max_output_tokens, 
@@ -632,6 +683,12 @@ impl DbWriteQueue {
             ],
         )?;
 
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Agent {id} is tombstoned"
+            )));
+        }
+
         Ok(())
     }
 
@@ -640,6 +697,11 @@ impl DbWriteQueue {
         id: &str,
         dto: &GroupSyncDTO,
     ) -> rusqlite::Result<()> {
+        if id.is_empty() {
+            return Err(Self::sync_contract_error(
+                "Group upsert requires a non-empty id",
+            ));
+        }
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_group_config_hash(dto);
 
@@ -676,10 +738,12 @@ impl DbWriteQueue {
             ],
         )?;
 
-        // A local tombstone is monotonic. A stale remote snapshot must not rewrite
-        // members after the group upsert itself was rejected by the conflict guard.
-        if changed == 0 {
-            return Ok(());
+        // A local tombstone is monotonic. A stale remote snapshot must fail the
+        // attempt instead of being counted as a successful no-op.
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Group {id} is tombstoned"
+            )));
         }
 
         tx.execute("DELETE FROM group_members WHERE group_id = ?", [id])?;
@@ -709,10 +773,29 @@ impl DbWriteQueue {
         let dominant_color: Option<String> = None;
         let now = chrono::Utc::now().timestamp_millis();
 
-        if owner_id.is_empty() || !matches!(owner_type, "agent" | "group") {
+        if !is_valid_avatar_owner(owner_type, owner_id) {
             return Err(Self::sync_contract_error(
                 "Avatar requires a non-empty owner id and a supported owner type",
             ));
+        }
+        let parent_is_live = match owner_type {
+            "agent" => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+                [owner_id],
+                |row| row.get::<_, bool>(0),
+            )?,
+            "group" => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+                [owner_id],
+                |row| row.get::<_, bool>(0),
+            )?,
+            "user" => true,
+            _ => false,
+        };
+        if !parent_is_live {
+            return Err(Self::sync_contract_error(format!(
+                "Avatar owner {owner_type}/{owner_id} is missing or deleted"
+            )));
         }
         let changed = tx.execute(
             "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at) 
@@ -1178,13 +1261,49 @@ impl DbWriteQueue {
 
                     Self::rusqlite_upsert_attachment_core(tx, &hash, att, msg.timestamp as i64)?;
 
+                    // Resolve readiness inside the same write transaction as the relation.
+                    // If CAS registration committed before us, the preserved core path wins;
+                    // if it commits after us, its promotion UPDATE observes this relation.
+                    let current_path: String = tx.query_row(
+                        "SELECT internal_path FROM attachments WHERE hash = ?",
+                        [&hash],
+                        |row| row.get(0),
+                    )?;
+                    let clean_path = current_path.trim_start_matches("file://");
+                    let verified_path = if clean_path.is_empty() {
+                        None
+                    } else {
+                        match std::fs::metadata(clean_path) {
+                            Ok(metadata) if metadata.is_file() => Some(clean_path),
+                            Ok(_) => None,
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => {
+                                return Err(Self::sync_contract_error(format!(
+                                    "Failed to inspect local attachment {hash}: {error}"
+                                )));
+                            }
+                        }
+                    };
+                    let (relation_src, relation_status) = match verified_path {
+                        Some(path) => (format!("file://{path}"), "ready".to_string()),
+                        None => {
+                            if !current_path.trim().is_empty() {
+                                tx.execute(
+                                    "UPDATE attachments SET internal_path = '' WHERE hash = ?",
+                                    [&hash],
+                                )?;
+                            }
+                            (String::new(), "desktop_only".to_string())
+                        }
+                    };
+
                     all_relations.push((
                         msg.id.clone(),
                         hash,
                         i as i32,
                         att.name.clone(),
-                        att.src.clone(),
-                        status.to_string(),
+                        relation_src,
+                        relation_status,
                         msg.timestamp as i64,
                     ));
                 }
@@ -1254,13 +1373,12 @@ impl DbWriteQueue {
         let mut stmt = tx.prepare("SELECT content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC")?;
         let hashes: Vec<String> = stmt
             .query_map([topic_id], |r| r.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
 
         // 2. 计算 config_hash (元数据)
         let owner_type: String = tx.query_row(
-            "SELECT owner_type FROM topics WHERE topic_id = ?",
+            "SELECT owner_type FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
             [topic_id],
             |r| r.get(0),
         )?;
@@ -1268,15 +1386,24 @@ impl DbWriteQueue {
         let config_hash = if owner_type == "agent" {
             let dto = Self::rusqlite_load_agent_topic_dto(tx, topic_id)?;
             HashAggregator::compute_agent_topic_metadata_hash(&dto)
-        } else {
+        } else if owner_type == "group" {
             let dto = Self::rusqlite_load_group_topic_dto(tx, topic_id)?;
             HashAggregator::compute_group_topic_metadata_hash(&dto)
+        } else {
+            return Err(Self::sync_contract_error(format!(
+                "Topic {topic_id} has unsupported owner type {owner_type}"
+            )));
         };
 
-        tx.execute(
-            "UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ?",
+        let changed = tx.execute(
+            "UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ? AND deleted_at IS NULL",
             rusqlite::params![root_hash, config_hash, topic_id],
         )?;
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Topic {topic_id} disappeared during hash update"
+            )));
+        }
         Ok(())
     }
 
@@ -1292,10 +1419,15 @@ impl DbWriteQueue {
             hashes.push(row.get::<_, String>(1)?);
         }
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
-        tx.execute(
-            "UPDATE agents SET content_hash = ? WHERE agent_id = ?",
+        let changed = tx.execute(
+            "UPDATE agents SET content_hash = ? WHERE agent_id = ? AND deleted_at IS NULL",
             [root_hash, agent_id.to_string()],
         )?;
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Agent {agent_id} disappeared during hash update"
+            )));
+        }
         Ok(())
     }
 
@@ -1311,10 +1443,15 @@ impl DbWriteQueue {
             hashes.push(row.get::<_, String>(1)?);
         }
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
-        tx.execute(
-            "UPDATE groups SET content_hash = ? WHERE group_id = ?",
+        let changed = tx.execute(
+            "UPDATE groups SET content_hash = ? WHERE group_id = ? AND deleted_at IS NULL",
             [root_hash, group_id.to_string()],
         )?;
+        if changed != 1 {
+            return Err(Self::sync_contract_error(format!(
+                "Group {group_id} disappeared during hash update"
+            )));
+        }
         Ok(())
     }
 

@@ -2,12 +2,15 @@ use crate::vcp_modules::agent_service;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
 use crate::vcp_modules::sync_dto::{
-    AgentMessageSyncDTO, AgentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO, UserMessageSyncDTO,
+    AgentMessageSyncDTO, AgentSyncDTO, AttachmentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
+    UserMessageSyncDTO,
 };
 use futures_util::StreamExt;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -19,6 +22,8 @@ const MAX_SYNC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const MESSAGE_REQUEST_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SYNC_TOPICS: usize = 10_000;
 const MAX_SYNC_MESSAGES: usize = 100_000;
+const MAX_MESSAGES_PER_TOPIC: usize = 10_000;
+const MESSAGE_PAGE_SIZE: usize = 100;
 const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_ATTACHMENT_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -95,9 +100,93 @@ pub struct PushBatchResult {
     pub error: Option<String>,
 }
 
+#[derive(Debug)]
+struct MessageTombstone {
+    topic_id: String,
+    message_id: String,
+    deleted_at: i64,
+}
+
+struct TopicMessagePreflight {
+    live_count: usize,
+    tombstone_count: usize,
+}
+
+struct CountingWriter {
+    bytes: usize,
+    limit: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized byte count overflow"))?;
+        if self.bytes > self.limit {
+            return Err(std::io::Error::other(
+                "serialized value exceeds byte budget",
+            ));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MessageTombstoneRequest<'a> {
+    topic_id: &'a str,
+    msg_id: &'a str,
+    deleted_at: i64,
+}
+
 struct MessagePushFrame {
     outcome: PushBatchResult,
     needed_attachment_hashes: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OutboundMessageSyncDTO {
+    User(UserMessageSyncDTO),
+    Agent(AgentMessageSyncDTO),
+    Group(GroupMessageSyncDTO),
+}
+
+struct BoundedJsonLine {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedJsonLine {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for BoundedJsonLine {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+            return Err(std::io::Error::other("JSON line exceeds its byte budget"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn parse_message_push_frames(
@@ -198,7 +287,7 @@ async fn send_message_chunk(
     client: &reqwest::Client,
     http_url: &str,
     sync_token: &str,
-    body: String,
+    body: Vec<u8>,
     expected_topic_ids: &[String],
 ) -> Result<Vec<MessagePushFrame>, String> {
     let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
@@ -239,6 +328,653 @@ fn record_message_frames(
         }
         results.push(frame.outcome);
     }
+}
+
+async fn preflight_topic_messages(
+    tx: &mut Transaction<'_, Sqlite>,
+    topic_id: &str,
+) -> Result<TopicMessagePreflight, String> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS message_count,
+                COALESCE(SUM(
+                    LENGTH(CAST(msg_id AS BLOB)) + LENGTH(CAST(role AS BLOB)) +
+                    COALESCE(LENGTH(CAST(name AS BLOB)), 0) +
+                    COALESCE(LENGTH(CAST(agent_id AS BLOB)), 0) +
+                    LENGTH(CAST(content AS BLOB)) +
+                    COALESCE(LENGTH(CAST(group_id AS BLOB)), 0) +
+                    COALESCE(LENGTH(CAST(finish_reason AS BLOB)), 0) +
+                    LENGTH(CAST(content_hash AS BLOB))
+                ), 0) AS raw_bytes
+         FROM messages
+         WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("Message push preflight failed for {topic_id}: {error}"))?;
+    let message_count: i64 = row
+        .try_get("message_count")
+        .map_err(|error| format!("Message push count decode failed for {topic_id}: {error}"))?;
+    let message_count = usize::try_from(message_count)
+        .map_err(|_| format!("Message push count is invalid for {topic_id}"))?;
+    let message_bytes: i64 = row
+        .try_get("raw_bytes")
+        .map_err(|error| format!("Message push size decode failed for {topic_id}: {error}"))?;
+    let message_bytes = usize::try_from(message_bytes)
+        .map_err(|_| format!("Message push size is invalid for {topic_id}"))?;
+
+    let attachment_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(
+                    LENGTH(CAST(ma.hash AS BLOB)) + LENGTH(CAST(ma.display_name AS BLOB)) +
+                    COALESCE(LENGTH(CAST(ma.src AS BLOB)), 0) +
+                    COALESCE(LENGTH(CAST(ma.status AS BLOB)), 0) +
+                    COALESCE(LENGTH(CAST(a.mime_type AS BLOB)), 0) +
+                    COALESCE(LENGTH(CAST(a.image_frames AS BLOB)), 0)
+                ), 0)
+         FROM message_attachments ma
+         LEFT JOIN attachments a ON a.hash = ma.hash
+         JOIN messages m ON m.topic_id = ma.topic_id AND m.msg_id = ma.msg_id
+         WHERE ma.topic_id = ? AND ma.deleted_at IS NULL AND m.deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("Message attachment preflight failed for {topic_id}: {error}"))?;
+    let attachment_bytes = usize::try_from(attachment_bytes)
+        .map_err(|_| format!("Message attachment size is invalid for {topic_id}"))?;
+    let tombstone_row = sqlx::query(
+        "SELECT COUNT(*) AS tombstone_count,
+                COALESCE(SUM(LENGTH(CAST(msg_id AS BLOB)) + 64), 0) AS raw_bytes
+         FROM messages
+         WHERE topic_id = ? AND deleted_at IS NOT NULL",
+    )
+    .bind(topic_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| format!("Message tombstone preflight failed for {topic_id}: {error}"))?;
+    let tombstone_count: i64 = tombstone_row.try_get("tombstone_count").map_err(|error| {
+        format!("Message tombstone count decode failed for {topic_id}: {error}")
+    })?;
+    let tombstone_count = usize::try_from(tombstone_count)
+        .map_err(|_| format!("Message tombstone count is invalid for {topic_id}"))?;
+    let tombstone_bytes: i64 = tombstone_row
+        .try_get("raw_bytes")
+        .map_err(|error| format!("Message tombstone size decode failed for {topic_id}: {error}"))?;
+    let tombstone_bytes = usize::try_from(tombstone_bytes)
+        .map_err(|_| format!("Message tombstone size is invalid for {topic_id}"))?;
+    let total_count = message_count
+        .checked_add(tombstone_count)
+        .ok_or_else(|| format!("Message count overflow for {topic_id}"))?;
+    if total_count > MAX_MESSAGES_PER_TOPIC {
+        return Err(format!(
+            "Message push topic {topic_id} contains {total_count} live messages and tombstones, limit is {MAX_MESSAGES_PER_TOPIC}"
+        ));
+    }
+
+    let raw_bytes = message_bytes
+        .checked_add(attachment_bytes)
+        .and_then(|bytes| bytes.checked_add(tombstone_bytes))
+        .ok_or_else(|| format!("Message push size overflow for {topic_id}"))?;
+    if raw_bytes > MAX_NDJSON_LINE_BYTES {
+        return Err(format!(
+            "Message push topic {topic_id} exceeds the 32 MiB line limit before serialization"
+        ));
+    }
+    Ok(TopicMessagePreflight {
+        live_count: message_count,
+        tombstone_count,
+    })
+}
+
+async fn load_message_tombstones(
+    tx: &mut Transaction<'_, Sqlite>,
+    topic_id: &str,
+    expected_count: usize,
+) -> Result<Vec<MessageTombstone>, String> {
+    let rows = sqlx::query(
+        "SELECT msg_id, deleted_at FROM messages
+         WHERE topic_id = ? AND deleted_at IS NOT NULL
+         ORDER BY deleted_at ASC, msg_id ASC",
+    )
+    .bind(topic_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| format!("Message tombstone query failed for {topic_id}: {error}"))?;
+    if rows.len() != expected_count {
+        return Err(format!(
+            "Message tombstones for {topic_id} changed during serialization: expected {expected_count}, got {}",
+            rows.len()
+        ));
+    }
+
+    rows.into_iter()
+        .map(|row| {
+            let message_id: String = row.try_get("msg_id").map_err(|error| {
+                format!("Message tombstone id decode failed for {topic_id}: {error}")
+            })?;
+            let deleted_at: i64 = row.try_get("deleted_at").map_err(|error| {
+                format!(
+                    "Message tombstone timestamp decode failed for {topic_id}/{message_id}: {error}"
+                )
+            })?;
+            if message_id.is_empty() || deleted_at < 0 {
+                return Err(format!(
+                    "Message tombstone {topic_id}/{message_id} has an invalid identity or timestamp"
+                ));
+            }
+            Ok(MessageTombstone {
+                topic_id: topic_id.to_string(),
+                message_id,
+                deleted_at,
+            })
+        })
+        .collect()
+}
+
+fn message_tombstone_body_len(tombstone: &MessageTombstone) -> Result<usize, String> {
+    let request = MessageTombstoneRequest {
+        topic_id: &tombstone.topic_id,
+        msg_id: &tombstone.message_id,
+        deleted_at: tombstone.deleted_at,
+    };
+    let mut writer = CountingWriter {
+        bytes: 0,
+        limit: MAX_CONTROL_RESPONSE_BYTES,
+    };
+    serde_json::to_writer(&mut writer, &request).map_err(|error| {
+        format!(
+            "Message tombstone {}/{} exceeds its serialized byte budget: {error}",
+            tombstone.topic_id, tombstone.message_id
+        )
+    })?;
+    Ok(writer.bytes)
+}
+
+fn validate_message_tombstone_response(
+    value: &serde_json::Value,
+    tombstone: &MessageTombstone,
+) -> Result<(), String> {
+    let topic_matches = value.get("topicId").and_then(serde_json::Value::as_str)
+        == Some(tombstone.topic_id.as_str());
+    let message_matches = value.get("msgId").and_then(serde_json::Value::as_str)
+        == Some(tombstone.message_id.as_str());
+    if !topic_matches || !message_matches {
+        return Err(format!(
+            "Delete message response requires matching topicId and msgId for {}/{}",
+            tombstone.topic_id, tombstone.message_id
+        ));
+    }
+    Ok(())
+}
+
+async fn push_message_tombstone(
+    client: &reqwest::Client,
+    http_url: &str,
+    sync_token: &str,
+    tombstone: &MessageTombstone,
+) -> Result<(), String> {
+    let request = MessageTombstoneRequest {
+        topic_id: &tombstone.topic_id,
+        msg_id: &tombstone.message_id,
+        deleted_at: tombstone.deleted_at,
+    };
+    let body = serde_json::to_vec(&request).map_err(|error| {
+        format!(
+            "Message tombstone {}/{} serialization failed: {error}",
+            tombstone.topic_id, tombstone.message_id
+        )
+    })?;
+    if body.len() > MAX_CONTROL_RESPONSE_BYTES {
+        return Err(format!(
+            "Message tombstone {}/{} exceeds the request byte limit",
+            tombstone.topic_id, tombstone.message_id
+        ));
+    }
+    let idempotency_key = crate::vcp_modules::infra::utils::calculate_sha256_slices(&[
+        b"delete-message",
+        tombstone.topic_id.as_bytes(),
+        tombstone.message_id.as_bytes(),
+        tombstone.deleted_at.to_string().as_bytes(),
+    ]);
+    let response = client
+        .post(format!("{http_url}/api/mobile-sync/delete-message"))
+        .header("x-sync-token", sync_token)
+        .header("Authorization", format!("Bearer {sync_token}"))
+        .header("x-idempotency-key", idempotency_key)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "Delete message {}/{} request failed: {error}",
+                tombstone.topic_id, tombstone.message_id
+            )
+        })?;
+    let value = parse_success_response(response, "Delete message").await?;
+    validate_message_tombstone_response(&value, tombstone)
+}
+
+fn append_topic_failure(result: &mut PushBatchResult, message: String) {
+    result.success = false;
+    match &mut result.error {
+        Some(existing) if !existing.is_empty() => {
+            existing.push_str("; ");
+            existing.push_str(&message);
+        }
+        _ => result.error = Some(message),
+    }
+}
+
+async fn push_message_tombstone_chunk(
+    client: &reqwest::Client,
+    http_url: &str,
+    sync_token: &str,
+    tombstones: Vec<MessageTombstone>,
+    results: &mut [PushBatchResult],
+) -> Result<(), String> {
+    if tombstones.is_empty() {
+        return Ok(());
+    }
+    let result_indexes = results
+        .iter()
+        .enumerate()
+        .map(|(index, result)| (result.topic_id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    const MAX_CONCURRENT_MESSAGE_DELETES: usize = 3;
+    for chunk in tombstones.chunks(MAX_CONCURRENT_MESSAGE_DELETES) {
+        let futures = chunk
+            .iter()
+            .map(|tombstone| push_message_tombstone(client, http_url, sync_token, tombstone));
+        for (tombstone, outcome) in chunk
+            .iter()
+            .zip(futures_util::future::join_all(futures).await)
+        {
+            if let Err(error) = outcome {
+                let index = result_indexes
+                    .get(&tombstone.topic_id)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!(
+                            "Message tombstone result references missing topic {}",
+                            tombstone.topic_id
+                        )
+                    })?;
+                append_topic_failure(
+                    &mut results[index],
+                    format!("Message tombstone {} failed: {error}", tombstone.message_id),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn load_outbound_message_page(
+    tx: &mut Transaction<'_, Sqlite>,
+    topic_id: &str,
+    cursor: Option<(i64, &str)>,
+) -> Result<Vec<crate::vcp_modules::chat_manager::ChatMessage>, String> {
+    let mut query = if cursor.is_some() {
+        sqlx::query(
+            "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
+                    group_id, finish_reason, content_hash
+             FROM messages
+             WHERE topic_id = ? AND deleted_at IS NULL
+               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
+             ORDER BY timestamp ASC, msg_id ASC
+             LIMIT ?",
+        )
+    } else {
+        sqlx::query(
+            "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
+                    group_id, finish_reason, content_hash
+             FROM messages
+             WHERE topic_id = ? AND deleted_at IS NULL
+             ORDER BY timestamp ASC, msg_id ASC
+             LIMIT ?",
+        )
+    };
+    query = query.bind(topic_id);
+    if let Some((timestamp, message_id)) = cursor {
+        query = query.bind(timestamp).bind(timestamp).bind(message_id);
+    }
+    query = query.bind(MESSAGE_PAGE_SIZE as i64);
+    let rows = query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| format!("Message page query failed for {topic_id}: {error}"))?;
+
+    let mut messages = Vec::with_capacity(rows.len());
+    for row in rows {
+        let message_id: String = row
+            .try_get("msg_id")
+            .map_err(|error| format!("Message id decode failed for {topic_id}: {error}"))?;
+        let timestamp: i64 = row.try_get("timestamp").map_err(|error| {
+            format!("Message timestamp decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        let timestamp = u64::try_from(timestamp)
+            .map_err(|_| format!("Message {topic_id}/{message_id} has a negative timestamp"))?;
+        let content_hash: String = row.try_get("content_hash").map_err(|error| {
+            format!("Message hash decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        let is_group_message: i64 = row.try_get("is_group_message").map_err(|error| {
+            format!("Message group flag decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        messages.push(crate::vcp_modules::chat_manager::ChatMessage {
+            id: message_id,
+            role: row
+                .try_get("role")
+                .map_err(|error| format!("Message role decode failed for {topic_id}: {error}"))?,
+            name: row
+                .try_get("name")
+                .map_err(|error| format!("Message name decode failed for {topic_id}: {error}"))?,
+            content: row.try_get("content").map_err(|error| {
+                format!("Message content decode failed for {topic_id}: {error}")
+            })?,
+            timestamp,
+            is_thinking: Some(false),
+            agent_id: row
+                .try_get("agent_id")
+                .map_err(|error| format!("Message agent decode failed for {topic_id}: {error}"))?,
+            group_id: row
+                .try_get("group_id")
+                .map_err(|error| format!("Message group decode failed for {topic_id}: {error}"))?,
+            topic_id: Some(topic_id.to_string()),
+            is_group_message: Some(is_group_message != 0),
+            finish_reason: row.try_get("finish_reason").map_err(|error| {
+                format!("Message finish reason decode failed for {topic_id}: {error}")
+            })?,
+            attachments: None,
+            blocks: None,
+            shell: None,
+            content_hash: (!content_hash.is_empty()).then_some(content_hash),
+        });
+    }
+
+    if messages.is_empty() {
+        return Ok(messages);
+    }
+
+    let placeholders = (0..messages.len())
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let attachment_query = format!(
+        "SELECT ma.msg_id, ma.hash AS relation_hash, ma.display_name, ma.src, ma.status,
+                a.hash AS stored_hash, a.mime_type, a.size, a.internal_path,
+                a.image_frames, a.thumbnail_path, a.created_at
+         FROM message_attachments ma
+         LEFT JOIN attachments a ON a.hash = ma.hash
+         WHERE ma.topic_id = ? AND ma.msg_id IN ({placeholders}) AND ma.deleted_at IS NULL
+         ORDER BY ma.msg_id, ma.attachment_order ASC"
+    );
+    let mut attachment_query = sqlx::query(&attachment_query).bind(topic_id);
+    for message in &messages {
+        attachment_query = attachment_query.bind(&message.id);
+    }
+    let attachment_rows = attachment_query
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| format!("Message attachment page query failed for {topic_id}: {error}"))?;
+    let message_ids = messages
+        .iter()
+        .map(|message| message.id.clone())
+        .collect::<HashSet<_>>();
+    let mut attachments_by_message = HashMap::new();
+    for row in attachment_rows {
+        let message_id: String = row
+            .try_get("msg_id")
+            .map_err(|error| format!("Attachment message id decode failed: {error}"))?;
+        if !message_ids.contains(&message_id) {
+            return Err(format!(
+                "Attachment query returned unexpected message {topic_id}/{message_id}"
+            ));
+        }
+        let relation_hash: String = row.try_get("relation_hash").map_err(|error| {
+            format!("Attachment hash decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        let stored_hash: Option<String> = row.try_get("stored_hash").map_err(|error| {
+            format!("Stored attachment hash decode failed for {relation_hash}: {error}")
+        })?;
+        if stored_hash.as_deref() != Some(relation_hash.as_str()) {
+            return Err(format!(
+                "Attachment {relation_hash} referenced by {topic_id}/{message_id} is missing locally"
+            ));
+        }
+        let size: Option<i64> = row.try_get("size").map_err(|error| {
+            format!("Attachment size decode failed for {relation_hash}: {error}")
+        })?;
+        let size = u64::try_from(
+            size.ok_or_else(|| format!("Attachment {relation_hash} has no local size metadata"))?,
+        )
+        .map_err(|_| format!("Attachment {relation_hash} has a negative size"))?;
+        let created_at: Option<i64> = row.try_get("created_at").map_err(|error| {
+            format!("Attachment timestamp decode failed for {relation_hash}: {error}")
+        })?;
+        let created_at = created_at
+            .map(|value| {
+                u64::try_from(value)
+                    .map_err(|_| format!("Attachment {relation_hash} has a negative timestamp"))
+            })
+            .transpose()?;
+        let image_frames: Option<String> = row.try_get("image_frames").map_err(|error| {
+            format!("Attachment frame decode failed for {relation_hash}: {error}")
+        })?;
+        let image_frames = image_frames
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    format!("Attachment {relation_hash} has invalid image frames: {error}")
+                })
+            })
+            .transpose()?;
+        attachments_by_message
+            .entry(message_id)
+            .or_insert_with(Vec::new)
+            .push(crate::vcp_modules::chat_manager::Attachment {
+                r#type: row
+                    .try_get::<Option<String>, _>("mime_type")
+                    .map_err(|error| {
+                        format!("Attachment MIME decode failed for {relation_hash}: {error}")
+                    })?
+                    .ok_or_else(|| format!("Attachment {relation_hash} has no MIME metadata"))?,
+                src: row
+                    .try_get::<Option<String>, _>("src")
+                    .map_err(|error| {
+                        format!("Attachment source decode failed for {relation_hash}: {error}")
+                    })?
+                    .unwrap_or_default(),
+                name: row.try_get("display_name").map_err(|error| {
+                    format!("Attachment name decode failed for {relation_hash}: {error}")
+                })?,
+                size,
+                hash: Some(relation_hash),
+                status: row
+                    .try_get("status")
+                    .map_err(|error| format!("Attachment status decode failed: {error}"))?,
+                internal_path: row
+                    .try_get::<Option<String>, _>("internal_path")
+                    .map_err(|error| format!("Attachment path decode failed: {error}"))?
+                    .ok_or_else(|| "Attachment has no local path metadata".to_string())?,
+                extracted_text: None,
+                image_frames,
+                thumbnail_path: row
+                    .try_get("thumbnail_path")
+                    .map_err(|error| format!("Attachment thumbnail decode failed: {error}"))?,
+                created_at,
+            });
+    }
+    for message in &mut messages {
+        if let Some(attachments) = attachments_by_message.remove(&message.id) {
+            message.attachments = Some(attachments);
+        }
+    }
+    Ok(messages)
+}
+
+async fn build_message_dto<R: Runtime>(
+    app: &AppHandle<R>,
+    message: crate::vcp_modules::chat_manager::ChatMessage,
+    owner_type: &str,
+    avatar_colors: &mut HashMap<String, String>,
+) -> Result<OutboundMessageSyncDTO, String> {
+    if message.id.is_empty() || message.role.is_empty() {
+        return Err("Outbound messages require non-empty id and role".to_string());
+    }
+    if message.role == "user" {
+        let attachments = message
+            .attachments
+            .map(|attachments| {
+                attachments
+                    .into_iter()
+                    .map(|attachment| {
+                        let hash = attachment
+                            .hash
+                            .as_deref()
+                            .and_then(canonical_sha256)
+                            .ok_or_else(|| {
+                                format!(
+                                    "Outbound message {} attachment {} has no valid SHA-256 hash",
+                                    message.id, attachment.name
+                                )
+                            })?;
+                        Ok(AttachmentSyncDTO {
+                            r#type: attachment.r#type,
+                            name: attachment.name,
+                            size: attachment.size,
+                            hash,
+                            status: attachment.status,
+                            extracted_text: attachment.extracted_text,
+                            image_frames: attachment.image_frames,
+                            created_at: attachment.created_at,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .transpose()?;
+        return Ok(OutboundMessageSyncDTO::User(UserMessageSyncDTO {
+            id: message.id,
+            role: message.role,
+            name: message.name,
+            content: message.content,
+            timestamp: message.timestamp,
+            attachments,
+            content_hash: message.content_hash,
+        }));
+    }
+
+    if !matches!(owner_type, "agent" | "group") {
+        return Err(format!(
+            "Outbound message owner type {owner_type} is unsupported"
+        ));
+    }
+    let agent_id = message.agent_id.unwrap_or_default();
+    let avatar_color = if let Some(color) = avatar_colors.get(&agent_id) {
+        color.clone()
+    } else {
+        let color = query_avatar_color(&app.state::<DbState>().pool, &agent_id)
+            .await?
+            .unwrap_or_else(|| "#6B7280".to_string());
+        avatar_colors.insert(agent_id.clone(), color.clone());
+        color
+    };
+    if owner_type == "group" {
+        Ok(OutboundMessageSyncDTO::Group(GroupMessageSyncDTO {
+            id: message.id,
+            role: message.role,
+            name: message.name,
+            content: message.content,
+            timestamp: message.timestamp,
+            agent_id,
+            group_id: message.group_id.unwrap_or_default(),
+            topic_id: message.topic_id.unwrap_or_default(),
+            is_group_message: true,
+            avatar_color,
+            content_hash: message.content_hash,
+        }))
+    } else {
+        Ok(OutboundMessageSyncDTO::Agent(AgentMessageSyncDTO {
+            id: message.id,
+            role: message.role,
+            name: message.name,
+            content: message.content,
+            timestamp: message.timestamp,
+            agent_id,
+            is_thinking: message.is_thinking,
+            finish_reason: message.finish_reason,
+            avatar_color,
+            content_hash: message.content_hash,
+        }))
+    }
+}
+
+async fn serialize_topic_messages<R: Runtime>(
+    app: &AppHandle<R>,
+    tx: &mut Transaction<'_, Sqlite>,
+    topic_id: &str,
+    owner_type: &str,
+    expected_message_count: usize,
+) -> Result<Vec<u8>, String> {
+    let mut line = BoundedJsonLine::new(MAX_NDJSON_LINE_BYTES);
+    line.write_all(br#"{"topicId":"#)
+        .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
+    serde_json::to_writer(&mut line, topic_id)
+        .map_err(|error| format!("Message push topic id serialization failed: {error}"))?;
+    line.write_all(b",\"messages\":[")
+        .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
+
+    let mut cursor: Option<(i64, String)> = None;
+    let mut serialized_count = 0usize;
+    let mut avatar_colors = HashMap::new();
+    loop {
+        let page = load_outbound_message_page(
+            tx,
+            topic_id,
+            cursor
+                .as_ref()
+                .map(|(timestamp, message_id)| (*timestamp, message_id.as_str())),
+        )
+        .await?;
+        if page.is_empty() {
+            break;
+        }
+        let page_len = page.len();
+        for message in page {
+            let timestamp = i64::try_from(message.timestamp).map_err(|_| {
+                format!(
+                    "Outbound message {} timestamp exceeds the supported range",
+                    message.id
+                )
+            })?;
+            let next_cursor = (timestamp, message.id.clone());
+            let dto = build_message_dto(app, message, owner_type, &mut avatar_colors).await?;
+            if serialized_count > 0 {
+                line.write_all(b",").map_err(|error| {
+                    format!("Message push separator failed for {topic_id}: {error}")
+                })?;
+            }
+            serde_json::to_writer(&mut line, &dto).map_err(|error| {
+                format!(
+                    "Message push topic {topic_id} exceeds the 32 MiB line limit or contains invalid data: {error}"
+                )
+            })?;
+            serialized_count = serialized_count
+                .checked_add(1)
+                .ok_or_else(|| "Message push count overflow".to_string())?;
+            cursor = Some(next_cursor);
+        }
+        if page_len < MESSAGE_PAGE_SIZE {
+            break;
+        }
+    }
+    if serialized_count != expected_message_count {
+        return Err(format!(
+            "Message push topic {topic_id} changed during serialization: expected {expected_message_count}, got {serialized_count}"
+        ));
+    }
+    line.write_all(b"]}\n")
+        .map_err(|error| format!("Message push suffix failed for {topic_id}: {error}"))?;
+    Ok(line.into_bytes())
 }
 
 pub struct PushExecutor;
@@ -398,7 +1134,57 @@ impl PushExecutor {
         owner_type: &str,
         owner_id: &str,
     ) -> Result<(), String> {
+        if !crate::vcp_modules::sync_types::is_valid_avatar_owner(owner_type, owner_id) {
+            return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
+        }
         let db = app.state::<DbState>();
+
+        let parent_is_live = match owner_type {
+            "agent" => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+            )
+            .bind(owner_id)
+            .fetch_one(&db.pool)
+            .await
+            .map_err(|error| format!("Push avatar owner lookup failed: {error}"))?,
+            "group" => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+            )
+            .bind(owner_id)
+            .fetch_one(&db.pool)
+            .await
+            .map_err(|error| format!("Push avatar owner lookup failed: {error}"))?,
+            "user" => true,
+            _ => false,
+        };
+        if !parent_is_live {
+            return Err(format!(
+                "Avatar owner {owner_type}/{owner_id} is missing or deleted"
+            ));
+        }
+
+        let image_size: Option<i64> = sqlx::query_scalar(
+            "SELECT LENGTH(image_data) FROM avatars
+             WHERE owner_id = ? AND owner_type = ? AND deleted_at IS NULL",
+        )
+        .bind(owner_id)
+        .bind(owner_type)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|error| {
+            format!("Push avatar {owner_type}/{owner_id} size lookup failed: {error}")
+        })?;
+        let image_size = image_size.ok_or_else(|| {
+            format!("Avatar {owner_type}/{owner_id} is missing from the local database")
+        })?;
+        let image_size = usize::try_from(image_size)
+            .map_err(|_| format!("Avatar {owner_type}/{owner_id} has an invalid image size"))?;
+        if image_size > crate::vcp_modules::avatar_service::MAX_AVATAR_BYTES {
+            return Err(format!(
+                "Avatar {owner_type}/{owner_id} exceeds the {}-byte upload limit",
+                crate::vcp_modules::avatar_service::MAX_AVATAR_BYTES
+            ));
+        }
 
         let row = sqlx::query(
             "SELECT image_data, mime_type FROM avatars
@@ -413,8 +1199,12 @@ impl PushExecutor {
         let r = row.ok_or_else(|| {
             format!("Avatar {owner_type}/{owner_id} is missing from the local database")
         })?;
-        let image_data: Vec<u8> = r.get("image_data");
-        let mime_type: String = r.get("mime_type");
+        let image_data: Vec<u8> = r.try_get("image_data").map_err(|error| {
+            format!("Avatar {owner_type}/{owner_id} image decode failed: {error}")
+        })?;
+        let mime_type: String = r.try_get("mime_type").map_err(|error| {
+            format!("Avatar {owner_type}/{owner_id} MIME decode failed: {error}")
+        })?;
 
         let url = format!(
             "{}/api/mobile-sync/upload-avatar?id={}&type={}",
@@ -475,65 +1265,36 @@ impl PushExecutor {
         let mut attachment_topics: HashMap<String, HashSet<String>> = HashMap::new();
         let mut total_request_bytes = 0usize;
         let mut total_messages = 0usize;
-        let mut request_body = String::new();
+        let mut request_body = Vec::new();
         let mut request_topics = Vec::new();
+        let mut request_tombstones = Vec::new();
 
-        // Query and serialize in bounded topic groups so neither SQLite bind variables nor the
-        // HTTP client need to buffer the entire sync set at once.
-        for topic_chunk in topic_ids.chunks(1) {
-            let placeholders = topic_chunk
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ");
-            let topic_query = format!(
-                "SELECT topic_id, owner_id, owner_type FROM topics WHERE topic_id IN ({})",
-                placeholders
-            );
-            let mut query = sqlx::query(&topic_query);
-            for topic_id in topic_chunk {
-                query = query.bind(topic_id);
-            }
-            let topic_rows = query
-                .fetch_all(&db.pool)
-                .await
-                .map_err(|error| format!("Message push topic query failed: {error}"))?;
-            let mut owner_map = HashMap::new();
-            for row in topic_rows {
-                owner_map.insert(
-                    row.get::<String, _>("topic_id"),
-                    (
-                        row.get::<String, _>("owner_id"),
-                        row.get::<String, _>("owner_type"),
-                    ),
-                );
-            }
-            for topic_id in topic_chunk {
-                if !owner_map.contains_key(topic_id) {
-                    return Err(format!("Message push topic {topic_id} is missing locally"));
-                }
-            }
-
-            // Enforce the attempt-wide message budget before materializing message bodies and
-            // attachment relations for this chunk. A single topic can otherwise make the
-            // bounded topic query allocate far beyond the protocol's 100k-message ceiling.
-            let count_query = format!(
-                "SELECT COUNT(*) AS message_count FROM messages WHERE deleted_at IS NULL AND topic_id IN ({})",
-                placeholders
-            );
-            let mut query = sqlx::query(&count_query);
-            for topic_id in topic_chunk {
-                query = query.bind(topic_id);
-            }
-            let chunk_message_count = query
-                .fetch_one(&db.pool)
-                .await
-                .map_err(|error| format!("Message push count query failed: {error}"))?
-                .get::<i64, _>("message_count");
-            let chunk_message_count = usize::try_from(chunk_message_count)
-                .map_err(|_| "Message push count is outside the supported range".to_string())?;
+        // Each topic is preflighted, paged, and serialized directly into a bounded writer. This
+        // avoids retaining a full history, a cloned DTO tree, and a JSON String simultaneously.
+        for topic_id in topic_ids {
+            let mut read_tx =
+                db.pool.begin().await.map_err(|error| {
+                    format!("Message push snapshot failed for {topic_id}: {error}")
+                })?;
+            let topic_row = sqlx::query(
+                "SELECT owner_type FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
+            )
+            .bind(topic_id)
+            .fetch_optional(&mut *read_tx)
+            .await
+            .map_err(|error| format!("Message push topic query failed: {error}"))?;
+            let topic_row = topic_row
+                .ok_or_else(|| format!("Message push topic {topic_id} is missing locally"))?;
+            let owner_type: String = topic_row.try_get("owner_type").map_err(|error| {
+                format!("Message push owner type decode failed for {topic_id}: {error}")
+            })?;
+            let preflight = preflight_topic_messages(&mut read_tx, topic_id).await?;
+            let topic_message_count = preflight
+                .live_count
+                .checked_add(preflight.tombstone_count)
+                .ok_or_else(|| format!("Message push count overflow for {topic_id}"))?;
             total_messages = total_messages
-                .checked_add(chunk_message_count)
+                .checked_add(topic_message_count)
                 .ok_or_else(|| "Message push count overflow".to_string())?;
             if total_messages > MAX_SYNC_MESSAGES {
                 return Err(format!(
@@ -541,52 +1302,82 @@ impl PushExecutor {
                 ));
             }
 
-            let messages_by_topic = crate::vcp_modules::message_service::load_multi_topic_messages(
-                &db.pool,
-                topic_chunk,
-            )
-            .await?;
-            for topic_id in topic_chunk {
-                let history = messages_by_topic.get(topic_id).cloned().unwrap_or_default();
-                let owner_type = &owner_map
-                    .get(topic_id)
-                    .ok_or_else(|| format!("Message push topic {topic_id} has no owner"))?
-                    .1;
-                let dto_messages = build_message_dtos(app, &history, owner_type).await?;
-                let mut line = serde_json::to_string(&serde_json::json!({
-                    "topicId": topic_id,
-                    "messages": dto_messages,
-                }))
-                .map_err(|error| format!("Message push serialization failed: {error}"))?;
-                line.push('\n');
-                if line.len() > MAX_NDJSON_LINE_BYTES {
-                    return Err(format!(
-                        "Message push topic {topic_id} exceeds the 32 MiB line limit"
-                    ));
-                }
+            let topic_tombstones =
+                load_message_tombstones(&mut read_tx, topic_id, preflight.tombstone_count).await?;
+            for tombstone in &topic_tombstones {
                 total_request_bytes = total_request_bytes
-                    .checked_add(line.len())
+                    .checked_add(message_tombstone_body_len(tombstone)?)
                     .ok_or_else(|| "Message push byte count overflow".to_string())?;
                 if total_request_bytes > MAX_SYNC_BODY_BYTES {
                     return Err("Message push exceeds the 256 MiB total limit".to_string());
                 }
+            }
 
-                if !request_body.is_empty()
-                    && request_body.len() + line.len() > MESSAGE_REQUEST_CHUNK_BYTES
-                {
-                    let frames = send_message_chunk(
-                        client,
-                        http_url,
-                        sync_token,
-                        std::mem::take(&mut request_body),
-                        &request_topics,
-                    )
-                    .await?;
-                    record_message_frames(frames, &mut results, &mut attachment_topics);
-                    request_topics.clear();
-                }
-                request_body.push_str(&line);
-                request_topics.push(topic_id.clone());
+            let line = serialize_topic_messages(
+                app,
+                &mut read_tx,
+                topic_id,
+                &owner_type,
+                preflight.live_count,
+            )
+            .await?;
+            read_tx.commit().await.map_err(|error| {
+                format!("Message push snapshot close failed for {topic_id}: {error}")
+            })?;
+            total_request_bytes = total_request_bytes
+                .checked_add(line.len())
+                .ok_or_else(|| "Message push byte count overflow".to_string())?;
+            if total_request_bytes > MAX_SYNC_BODY_BYTES {
+                return Err("Message push exceeds the 256 MiB total limit".to_string());
+            }
+            if !request_body.is_empty()
+                && request_body.len().saturating_add(line.len()) > MESSAGE_REQUEST_CHUNK_BYTES
+            {
+                let frames = send_message_chunk(
+                    client,
+                    http_url,
+                    sync_token,
+                    std::mem::take(&mut request_body),
+                    &request_topics,
+                )
+                .await?;
+                record_message_frames(frames, &mut results, &mut attachment_topics);
+                push_message_tombstone_chunk(
+                    client,
+                    http_url,
+                    sync_token,
+                    std::mem::take(&mut request_tombstones),
+                    &mut results,
+                )
+                .await?;
+                request_topics.clear();
+            }
+            request_tombstones.extend(topic_tombstones);
+            if request_body.is_empty() {
+                request_body = line;
+            } else {
+                request_body.extend_from_slice(&line);
+            }
+            request_topics.push(topic_id.clone());
+            if request_body.len() >= MESSAGE_REQUEST_CHUNK_BYTES {
+                let frames = send_message_chunk(
+                    client,
+                    http_url,
+                    sync_token,
+                    std::mem::take(&mut request_body),
+                    &request_topics,
+                )
+                .await?;
+                record_message_frames(frames, &mut results, &mut attachment_topics);
+                push_message_tombstone_chunk(
+                    client,
+                    http_url,
+                    sync_token,
+                    std::mem::take(&mut request_tombstones),
+                    &mut results,
+                )
+                .await?;
+                request_topics.clear();
             }
         }
 
@@ -595,7 +1386,25 @@ impl PushExecutor {
                 send_message_chunk(client, http_url, sync_token, request_body, &request_topics)
                     .await?;
             record_message_frames(frames, &mut results, &mut attachment_topics);
+            push_message_tombstone_chunk(
+                client,
+                http_url,
+                sync_token,
+                request_tombstones,
+                &mut results,
+            )
+            .await?;
         }
+
+        // Online WebSocket notifications are only a latency optimization. Tombstones are also
+        // replayed through the acknowledged HTTP endpoint so deletions made while disconnected
+        // converge on the next Phase 3 push. Tombstones are released with each 8 MiB request
+        // chunk rather than accumulating up to the 256 MiB attempt budget in resident memory.
+        let result_indexes = results
+            .iter()
+            .enumerate()
+            .map(|(index, result)| (result.topic_id.clone(), index))
+            .collect::<HashMap<_, _>>();
 
         let hashes_to_upload = {
             let tracker = uploaded_hashes.read().await;
@@ -627,18 +1436,16 @@ impl PushExecutor {
         }
 
         if !attachment_failures.is_empty() {
-            let mut result_indexes = HashMap::new();
-            for (index, result) in results.iter().enumerate() {
-                result_indexes.insert(result.topic_id.clone(), index);
-            }
             for (hash, error) in attachment_failures {
                 if let Some(topics) = attachment_topics.get(&hash) {
                     for topic_id in topics {
                         if let Some(index) = result_indexes.get(topic_id).copied() {
-                            results[index].success = false;
-                            results[index].error = Some(format!(
-                                "Attachment {hash} required by topic {topic_id} failed: {error}"
-                            ));
+                            append_topic_failure(
+                                &mut results[index],
+                                format!(
+                                    "Attachment {hash} required by topic {topic_id} failed: {error}"
+                                ),
+                            );
                         }
                     }
                 }
@@ -666,58 +1473,6 @@ fn generate_idempotency_key(action: &str, entity_type: &str, id: &str) -> String
     ])
 }
 
-async fn build_message_dtos<R: Runtime>(
-    app: &AppHandle<R>,
-    history: &[crate::vcp_modules::chat_manager::ChatMessage],
-    owner_type: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    let db = app.state::<DbState>();
-    let mut results = Vec::new();
-
-    for msg in history {
-        if msg.id.is_empty() || msg.role.is_empty() {
-            return Err("Outbound messages require non-empty id and role".to_string());
-        }
-        if msg.timestamp > i64::MAX as u64 {
-            return Err(format!(
-                "Outbound message {} timestamp exceeds the supported range",
-                msg.id
-            ));
-        }
-        let msg_value = if msg.role == "user" {
-            let mut dto = UserMessageSyncDTO::from(msg);
-            if let Some(attachments) = dto.attachments.as_mut() {
-                for attachment in attachments {
-                    attachment.hash = canonical_sha256(&attachment.hash).ok_or_else(|| {
-                        format!(
-                            "Outbound message {} attachment {} has no valid SHA-256 hash",
-                            msg.id, attachment.name
-                        )
-                    })?;
-                }
-            }
-            serde_json::to_value(dto).map_err(|error| error.to_string())?
-        } else if owner_type == "group" {
-            let avatar_color =
-                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default())
-                    .await?
-                    .unwrap_or_else(|| "#6B7280".to_string());
-            let dto = GroupMessageSyncDTO::from_message(msg, avatar_color);
-            serde_json::to_value(dto).map_err(|error| error.to_string())?
-        } else {
-            let avatar_color =
-                query_avatar_color(&db.pool, &msg.agent_id.clone().unwrap_or_default())
-                    .await?
-                    .unwrap_or_else(|| "#6B7280".to_string());
-            let dto = AgentMessageSyncDTO::from_message(msg, avatar_color);
-            serde_json::to_value(dto).map_err(|error| error.to_string())?
-        };
-        results.push(msg_value);
-    }
-
-    Ok(results)
-}
-
 async fn upload_attachment<R: Runtime>(
     app: &AppHandle<R>,
     client: &reqwest::Client,
@@ -737,8 +1492,12 @@ async fn upload_attachment<R: Runtime>(
 
     let att_row =
         row.ok_or_else(|| format!("Attachment {hash} is missing from the local index"))?;
-    let mime_type: String = att_row.get("mime_type");
-    let internal_path: String = att_row.get("internal_path");
+    let mime_type: String = att_row
+        .try_get("mime_type")
+        .map_err(|error| format!("Attachment {hash} MIME decode failed: {error}"))?;
+    let internal_path: String = att_row
+        .try_get("internal_path")
+        .map_err(|error| format!("Attachment {hash} path decode failed: {error}"))?;
     if internal_path.trim().is_empty() {
         return Err(format!("Attachment {hash} has no local file path"));
     }
@@ -748,10 +1507,18 @@ async fn upload_attachment<R: Runtime>(
         .fetch_optional(&db.pool)
         .await
         .map_err(|error| format!("Attachment {hash} display name query failed: {error}"))?;
-    let display_name = name_row
-        .map(|row| row.get::<String, _>("display_name"))
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "unnamed".to_string());
+    let display_name = match name_row {
+        Some(row) => {
+            let name: String = row.try_get("display_name").map_err(|error| {
+                format!("Attachment {hash} display name decode failed: {error}")
+            })?;
+            if name.is_empty() {
+                return Err(format!("Attachment {hash} has an empty display name"));
+            }
+            name
+        }
+        None => return Err(format!("Attachment {hash} has no live message relation")),
+    };
 
     let file_path = internal_path.trim_start_matches("file://");
     let mut file = tokio::fs::File::open(file_path)
@@ -887,5 +1654,145 @@ mod tests {
         let frames = parse_message_push_frames(valid, &expected).expect("hard-cut result");
         assert_eq!(frames.len(), 1);
         assert!(frames[0].needed_attachment_hashes.is_empty());
+    }
+
+    #[test]
+    fn bounded_writer_emits_valid_ndjson_and_rejects_overflow() {
+        let mut line = BoundedJsonLine::new(64);
+        line.write_all(br#"{"topicId":"#).unwrap();
+        serde_json::to_writer(&mut line, "topic").unwrap();
+        line.write_all(b",\"messages\":[]}\n").unwrap();
+        let bytes = line.into_bytes();
+        serde_json::from_slice::<serde_json::Value>(&bytes[..bytes.len() - 1])
+            .expect("bounded line must remain valid JSON");
+
+        let mut tiny = BoundedJsonLine::new(3);
+        assert!(tiny.write_all(b"four").is_err());
+        assert!(tiny.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outbound_message_loader_uses_stable_bounded_pages() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        sqlx::query(
+            "CREATE TABLE messages (
+                msg_id TEXT NOT NULL, topic_id TEXT NOT NULL, role TEXT NOT NULL,
+                name TEXT, agent_id TEXT, content TEXT NOT NULL, timestamp BIGINT NOT NULL,
+                is_group_message INTEGER NOT NULL, group_id TEXT, finish_reason TEXT,
+                content_hash TEXT NOT NULL, deleted_at BIGINT,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             CREATE TABLE message_attachments (
+                topic_id TEXT, msg_id TEXT, hash TEXT, attachment_order INTEGER,
+                display_name TEXT, src TEXT, status TEXT, deleted_at BIGINT
+             );
+             CREATE TABLE attachments (
+                hash TEXT PRIMARY KEY, mime_type TEXT, size BIGINT, internal_path TEXT,
+                image_frames TEXT, thumbnail_path TEXT, created_at BIGINT
+             );",
+        )
+        .execute(&pool)
+        .await
+        .expect("create fixture");
+        for index in 0..=MESSAGE_PAGE_SIZE {
+            sqlx::query(
+                "INSERT INTO messages (
+                    msg_id, topic_id, role, content, timestamp, is_group_message, content_hash
+                 ) VALUES (?, 'topic', 'user', 'body', ?, 0, 'hash')",
+            )
+            .bind(format!("message-{index:03}"))
+            .bind(index as i64)
+            .execute(&pool)
+            .await
+            .expect("insert message");
+        }
+        sqlx::query(
+            "INSERT INTO messages (
+                msg_id, topic_id, role, content, timestamp, is_group_message,
+                content_hash, deleted_at
+             ) VALUES ('message-deleted', 'topic', 'user', 'gone', 200, 0, 'DELETED', 1234)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert tombstone");
+
+        let mut read_tx = pool.begin().await.expect("begin snapshot");
+        let preflight = preflight_topic_messages(&mut read_tx, "topic")
+            .await
+            .expect("preflight");
+        assert_eq!(preflight.live_count, MESSAGE_PAGE_SIZE + 1);
+        assert_eq!(preflight.tombstone_count, 1);
+        let tombstones = load_message_tombstones(&mut read_tx, "topic", 1)
+            .await
+            .expect("load tombstone");
+        assert_eq!(tombstones[0].message_id, "message-deleted");
+        assert_eq!(tombstones[0].deleted_at, 1234);
+        let first = load_outbound_message_page(&mut read_tx, "topic", None)
+            .await
+            .expect("first page");
+        assert_eq!(first.len(), MESSAGE_PAGE_SIZE);
+        assert_eq!(first.first().unwrap().id, "message-000");
+        assert_eq!(first.last().unwrap().id, "message-099");
+        let second = load_outbound_message_page(&mut read_tx, "topic", Some((99, "message-099")))
+            .await
+            .expect("second page");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, "message-100");
+    }
+
+    #[test]
+    fn tombstone_request_is_exactly_budgeted_and_response_identity_is_checked() {
+        let tombstone = MessageTombstone {
+            topic_id: "topic-a".to_string(),
+            message_id: "message-a".to_string(),
+            deleted_at: 1234,
+        };
+        let request = MessageTombstoneRequest {
+            topic_id: &tombstone.topic_id,
+            msg_id: &tombstone.message_id,
+            deleted_at: tombstone.deleted_at,
+        };
+        assert_eq!(
+            message_tombstone_body_len(&tombstone).expect("count body"),
+            serde_json::to_vec(&request).expect("serialize body").len()
+        );
+        validate_message_tombstone_response(
+            &serde_json::json!({
+                "success": true,
+                "topicId": "topic-a",
+                "msgId": "message-a"
+            }),
+            &tombstone,
+        )
+        .expect("matching identity");
+        assert!(validate_message_tombstone_response(
+            &serde_json::json!({
+                "success": true,
+                "topicId": "topic-b",
+                "msgId": "message-a"
+            }),
+            &tombstone,
+        )
+        .is_err());
+        for malformed in [
+            serde_json::json!({ "success": true, "msgId": "message-a" }),
+            serde_json::json!({ "success": true, "topicId": "topic-a" }),
+            serde_json::json!({
+                "success": true,
+                "topicId": 1,
+                "msgId": "message-a"
+            }),
+            serde_json::json!({
+                "success": true,
+                "topicId": "topic-a",
+                "msgId": 1
+            }),
+        ] {
+            assert!(validate_message_tombstone_response(&malformed, &tombstone).is_err());
+        }
     }
 }

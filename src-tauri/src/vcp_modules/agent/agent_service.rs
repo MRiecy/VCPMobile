@@ -136,7 +136,7 @@ async fn read_agent_config_locked<R: Runtime>(
     let agent_row = sqlx::query(
         "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
          FROM agents a
-         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
+         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.agent_id = ? AND a.deleted_at IS NULL"
     )
     .bind(agent_id)
@@ -241,7 +241,7 @@ pub async fn get_agents(
     let agent_rows = sqlx::query(
         "SELECT a.agent_id, a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
          FROM agents a
-         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
+         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.deleted_at IS NULL"
     )
     .fetch_all(pool)
@@ -483,12 +483,13 @@ pub async fn delete_agent(
     state: State<'_, AgentConfigState>,
     agent_id: String,
 ) -> Result<bool, String> {
-    delete_agent_internal(&app_handle, &state, &agent_id).await?;
+    let deleted_at = delete_agent_internal(&app_handle, &state, &agent_id, None).await?;
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
             data_type: SyncDataType::Agent,
             id: agent_id,
+            deleted_at,
         });
     }
 
@@ -499,7 +500,8 @@ pub async fn delete_agent_internal<R: Runtime>(
     app_handle: &AppHandle<R>,
     state: &AgentConfigState,
     agent_id: &str,
-) -> Result<(), String> {
+    requested_deleted_at: Option<i64>,
+) -> Result<i64, String> {
     // 与 save/update 共享同一把实体锁，避免迟到写入在删除后重新填充 cache。
     // 锁条目有意保留：删除后若同 ID 被重新创建，仍必须沿用同一所有权串行化。
     let mutex = state.acquire_lock(agent_id).await;
@@ -507,15 +509,38 @@ pub async fn delete_agent_internal<R: Runtime>(
 
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    let now = crate::vcp_modules::infra::utils::now_millis();
+    let now = requested_deleted_at.unwrap_or_else(crate::vcp_modules::infra::utils::now_millis);
+    if now < 0 {
+        return Err("Agent delete requires a non-negative deletedAt".to_string());
+    }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    sqlx::query("UPDATE agents SET deleted_at = ? WHERE agent_id = ?")
-        .bind(now)
-        .bind(agent_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let existing_deleted_at: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT deleted_at FROM agents WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    match existing_deleted_at {
+        None => return Err(format!("Agent {agent_id} does not exist")),
+        Some(Some(existing)) => {
+            tx.commit().await.map_err(|e| e.to_string())?;
+            state.caches.remove(agent_id);
+            return Ok(existing);
+        }
+        Some(None) => {}
+    }
+
+    let agent_delete =
+        sqlx::query("UPDATE agents SET deleted_at = ? WHERE agent_id = ? AND deleted_at IS NULL")
+            .bind(now)
+            .bind(agent_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if agent_delete.rows_affected() != 1 {
+        return Err(format!("Agent {agent_id} disappeared during delete"));
+    }
 
     // 级联将该 Agent 下的所有话题标记为逻辑删除
     sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL")
@@ -533,6 +558,16 @@ pub async fn delete_agent_internal<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        "UPDATE avatars SET deleted_at = ?
+         WHERE owner_type = 'agent' AND owner_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // 级联清除该 Agent 下的所有活跃生成，杜绝已删除消息复活
     sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'agent'")
         .bind(agent_id)
@@ -540,12 +575,10 @@ pub async fn delete_agent_internal<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
-
     tx.commit().await.map_err(|e| e.to_string())?;
 
     state.caches.remove(agent_id);
-    Ok(())
+    Ok(now)
 }
 
 /// 创建 Agent (原子化数据库插入)
@@ -676,7 +709,7 @@ pub async fn get_assistants_snapshot(
     let agent_rows = sqlx::query(
         "SELECT a.agent_id, a.name, a.model, av.dominant_color
          FROM agents a
-         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
+         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.deleted_at IS NULL",
     )
     .fetch_all(pool)
@@ -703,7 +736,7 @@ pub async fn get_assistants_snapshot(
     let group_rows = sqlx::query(
         "SELECT g.group_id, g.name, av.dominant_color
          FROM groups g
-         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
+         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.deleted_at IS NULL",
     )
     .fetch_all(pool)

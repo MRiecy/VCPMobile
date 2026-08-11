@@ -103,7 +103,7 @@ async fn read_group_config_locked<R: Runtime>(
     let group_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
         "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
          FROM groups g
-         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
+         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.group_id = ? AND g.deleted_at IS NULL"
     )
     .bind(group_id)
@@ -213,7 +213,7 @@ pub async fn get_groups(
     let group_rows = sqlx::query(
         "SELECT g.group_id, g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
          FROM groups g
-         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group'
+         LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.deleted_at IS NULL"
     )
     .fetch_all(pool)
@@ -590,12 +590,13 @@ pub async fn delete_group(
     state: State<'_, GroupManagerState>,
     group_id: String,
 ) -> Result<bool, String> {
-    delete_group_internal(&app_handle, &state, &group_id).await?;
+    let deleted_at = delete_group_internal(&app_handle, &state, &group_id, None).await?;
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
             data_type: SyncDataType::Group,
             id: group_id,
+            deleted_at,
         });
     }
 
@@ -606,7 +607,8 @@ pub async fn delete_group_internal<R: Runtime>(
     app_handle: &AppHandle<R>,
     state: &GroupManagerState,
     group_id: &str,
-) -> Result<(), String> {
+    requested_deleted_at: Option<i64>,
+) -> Result<i64, String> {
     // 与 save/update 共享同一把实体锁，避免迟到写入在删除后重新填充 cache。
     // 锁条目有意保留：删除后若同 ID 被重新创建，仍必须沿用同一所有权串行化。
     let mutex = state.acquire_lock(group_id).await;
@@ -614,15 +616,38 @@ pub async fn delete_group_internal<R: Runtime>(
 
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-    let now = crate::vcp_modules::infra::utils::now_millis();
+    let now = requested_deleted_at.unwrap_or_else(crate::vcp_modules::infra::utils::now_millis);
+    if now < 0 {
+        return Err("Group delete requires a non-negative deletedAt".to_string());
+    }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ?")
-        .bind(now)
-        .bind(group_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let existing_deleted_at: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT deleted_at FROM groups WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    match existing_deleted_at {
+        None => return Err(format!("Group {group_id} does not exist")),
+        Some(Some(existing)) => {
+            tx.commit().await.map_err(|e| e.to_string())?;
+            state.caches.remove(group_id);
+            return Ok(existing);
+        }
+        Some(None) => {}
+    }
+
+    let group_delete =
+        sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ? AND deleted_at IS NULL")
+            .bind(now)
+            .bind(group_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if group_delete.rows_affected() != 1 {
+        return Err(format!("Group {group_id} disappeared during delete"));
+    }
 
     // 级联将该 Group 下的所有话题标记为逻辑删除
     sqlx::query("UPDATE topics SET deleted_at = ? WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL")
@@ -640,6 +665,16 @@ pub async fn delete_group_internal<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        "UPDATE avatars SET deleted_at = ?
+         WHERE owner_type = 'group' AND owner_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(group_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     // 级联清除该 Group 下的所有活跃生成，杜绝已删除消息复活
     sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'group'")
         .bind(group_id)
@@ -647,10 +682,8 @@ pub async fn delete_group_internal<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
-
     tx.commit().await.map_err(|e| e.to_string())?;
 
     state.caches.remove(group_id);
-    Ok(())
+    Ok(now)
 }

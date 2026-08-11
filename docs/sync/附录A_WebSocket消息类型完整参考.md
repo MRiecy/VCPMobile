@@ -31,7 +31,7 @@ last_updated: 2026-05-13
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 10 | `SYNC_MANIFEST` | M→D | Phase 1 发送 Agent/Group/Avatar 清单；Phase 2 发送 Topic 清单（附带 `targetedOwners`） | `data: EntityState[]`（实体状态数组），`dataType: string`（`agent`/`group`/`avatar`/`topic`），`phase: number`（1 或 2），`targetedOwners: string[]`（V2 Phase 2 优化） | `SyncCommand::StartManualSync` 触发 Phase 1 的三个 Manifest；`PipelineCommand::StartTopicMetadata` 触发 Phase 2 的靶向 Topic Manifest | `handleSyncManifest`（`sync/manifest.js`）：加载本地清单、两轮遍历比对、输出 Action 列表 | `sync_service.rs`, `manifest_builder.rs`, `sync/manifest.js` |
+| 10 | `SYNC_MANIFEST` | M→D | Phase 1 先发 Agent/Group，drain 后再发 Avatar；Phase 2 发送 Topic 清单（附带 `targetedOwners`） | `data: EntityState[]`（实体状态数组），`dataType: string`（`agent`/`group`/`avatar`/`topic`），`phase: number`（1 或 2），`targetedOwners: string[]`（V2 Phase 2 优化） | `SyncCommand::StartManualSync` 触发 Owner 波次；Owner 完成门触发 Avatar 波次；`PipelineCommand::StartTopicMetadata` 触发 Phase 2 靶向 Topic Manifest | `handleSyncManifest`（`sync/manifest.js`）：加载本地清单、两轮遍历比对、输出 Action 列表 | `sync_service.rs`, `phase1_metadata.rs`, `sync/manifest.js` |
 | 11 | `SYNC_DIFF_RESULTS` | D→M | 桌面端完成 `SYNC_MANIFEST` 比对后返回差异动作列表 | `data: DiffResult[]`（差异结果数组），`dataType: string`，`phase: number` | `run_sync_session` WS 处理器中解析 JSON，按 `action` 字段分类为 `batch_pull_requests`、`push_topics_to_fetch`、`other_items` 三类并行执行 | `handleSyncManifest` 返回：`getLocalManifest` → 两轮遍历算法 → 组装 `SYNC_DIFF_RESULTS` | `sync_service.rs`, `sync/manifest.js` |
 | 12 | `SYNC_TOPIC_HASH_BATCH` | M→D | **已废弃**：V1 协议中 Phase 2 发送 Topic 单哈希批量比对请求 | `hashes: Record<topicId, contentHash>`（Key 为话题 ID，Value 为单哈希字符串） | 旧版代码保留兼容路径；V2 中不再主动发送 | `handleSyncTopicHashBatch`（`sync/diff.js`）：逐 Topic 查询 `aggregated_hash` 比对 | `sync_service.rs`（旧代码）, `sync/diff.js` |
 | 13 | `SYNC_TOPIC_HASH_BATCH_V2` | M→D | Phase 2.5 发送 Topic 双哈希（Dual-Hash）批量比对请求；仅针对 Phase 1 筛选出的 `changed_owners` 下的话题 | `hashes: Record<topicId, {configHash: string, contentHash: string}>` | `PipelineCommand::StartTopicValidation` 触发；调用 `Phase3Message::get_targeted_topic_hashes` 批量查询 SQLite，组装为 JSON Map | `handleSyncTopicHashBatchV2`（`sync/diff.js`）：逐 Topic 查询 `hash`（对应 `config_hash`）与 `aggregated_hash`（对应 `content_hash`），双字段均一致才判定为未变更 | `sync_service.rs`, `phase3_message.rs`, `sync/diff.js` |
@@ -46,10 +46,10 @@ last_updated: 2026-05-13
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
 | 17 | `SYNC_ENTITY_UPDATE` | M→D | 移动端检测到本地实体变更时实时通知（如用户修改 Agent 配置、新建 Topic） | `id: string`（实体 ID），`dataType: string`（实体类型），`hash: string`（新哈希），`ts: i64`（更新时间戳） | `SyncCommand::NotifyLocalChange` 触发发送；由前端业务逻辑或数据库触发器调用 | `index.js` 中调用 `upsertEntityIndex` 更新桌面端索引数据库；若实体不存在则插入新记录 | `sync_service.rs`, `index.js` |
-| 18 | `SYNC_DELETE_NOTIFY` | M→D | 移动端实体被软删除后通知桌面端同步删除状态 | `id: string`，`dataType: string`，`deletedAt: i64`（软删除时间戳） | `SyncCommand::NotifyDelete` 触发发送；在执行 `DeleteExecutor::soft_delete_*` 后发出 | `index.js` 中根据 `dataType` 调用 `deleteEntity`（Agent/Group/Topic）或 `deleteMessage`（消息） | `sync_service.rs`, `index.js` |
-| 19 | `SYNC_ENTITY_DELETE` | M→D | `PUSH_DELETE` 动作执行后，移动端二次通知桌面端确认删除；与 `SYNC_DELETE_NOTIFY` 语义相同但触发路径不同 | `id: string`，`dataType: string` | `SyncCommand::NotifyDelete` 在处理 `PUSH_DELETE` Action 时触发；通过 `tx_internal.send` 异步发送 | 桌面端执行软删除索引更新；对 Agent/Group 类型可能同时执行物理目录删除（`fs.rm`） | `sync_service.rs`, `index.js` |
+| 18 | `SYNC_DELETE_NOTIFY` | D→M | 桌面端通知 Mobile 执行远端墓碑 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | WS owner 在 60 秒可取消边界内调用 `DeleteExecutor::soft_delete_*`；缺字段/错型立即终止 attempt | 桌面端实体或消息删除后发送 | `sync_service.rs`, `index.js` |
+| 19 | `SYNC_ENTITY_DELETE` | M→D | Mobile 本地删除或处理 `PUSH_DELETE` 后通知桌面端 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | `SyncCommand::NotifyDelete` / `NotifyMessageDelete` 发送；传输失败进入共享重试预算 | 桌面端按原时间戳幂等软删除；Message 离线遗漏另由 HTTP 墓碑重放补齐 | `sync_service.rs`, `index.js` |
 | 20 | `SYNC_ERROR` | D→M | 桌面端遇到不可恢复错误（如数据库损坏、配置解析失败） | `code: number`（错误码），`message: string`（错误描述） | 移动端记录错误日志（`emit_sync_log`），更新同步状态为 `error`；可能断开连接 | 桌面端内部错误处理触发，如 `handleSyncManifest` 中 `data` 非数组时返回 | `sync_service.rs`, `index.js` |
-| 21 | `SYNC_ACK` | D→M | 桌面端确认收到 `SYNC_ENTITY_UPDATE` 或 `SYNC_DELETE_NOTIFY` | `id: string`（对应实体 ID） | 移动端不处理，可选输出调试日志；设计为异步 fire-and-forget | `index.js` 中统一返回确认帧，结构简单 | `sync_service.rs`, `index.js` |
+| 21 | `SYNC_ACK` | D→M | 桌面端确认收到 `SYNC_ENTITY_UPDATE` 或 `SYNC_ENTITY_DELETE` | `id: string`（对应实体 ID） | 移动端不处理，可选输出调试日志；设计为异步 fire-and-forget | `index.js` 中统一返回确认帧，结构简单 | `sync_service.rs`, `index.js` |
 
 ---
 
@@ -146,14 +146,15 @@ last_updated: 2026-05-13
 | `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "1.1.0"`；旧 1.0.0 拒绝、不降级 |
 | `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | 看门狗检查周期 `10s × 6 = 60s` |
 | `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
-| `SYNC_MANIFEST` | Phase 1（3条：agent/group/avatar）Phase 2（1条：topic） | `handleSyncManifest` | `SYNC_DIFF_RESULTS` | Phase 1/2 | Agent/Group 批量 chunk=50；Topic chunk=1000 |
+| `SYNC_MANIFEST` | Phase 1（Owner 两条，drain 后 Avatar 一条）；Phase 2（Topic 一条） | `handleSyncManifest` | `SYNC_DIFF_RESULTS` | Phase 1/2 | 波次缺任一整帧响应 60 秒后失败 |
 | `SYNC_DIFF_RESULTS` | —（接收） | `run_sync_session` 差异任务派发 | 无 | Phase 1/2 | `pending_tasks` + `total_tasks` 原子计数 |
-| `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2.5 开始时 | `handleSyncTopicHashBatchV2` | `SYNC_TOPIC_HASH_RESULTS` | Phase 2.5 | 无显式批次限制 |
-| `SYNC_TOPIC_HASH_RESULTS` | —（接收） | `run_sync_session` 设置 `changed_topics` | 无 | Phase 2.5 | 空数组时跳过 Phase 3 |
-| `SYNC_MESSAGE_DIFF_BATCH` | Phase 3 分批发送 | `handleSyncMessageDiffBatch` | `SYNC_DIFF_RESULTS_BATCH` | Phase 3 | `MAX_MESSAGES_PER_BATCH = 10000` |
+| `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2.5 开始时 | `handleSyncTopicHashBatchV2` | `SYNC_TOPIC_HASH_RESULTS` | Phase 2.5 | 当前 attempt 最多 10,000 Topic，超限在网络前失败 |
+| `SYNC_TOPIC_HASH_RESULTS` | —（接收） | `run_sync_session` 设置 `changed_topics` | 无 | Phase 2.5 | 必须为已发 Topic 的无重复子集，最多 10,000；空数组时跳过 Phase 3 |
+| `SYNC_MESSAGE_DIFF_BATCH` | Phase 3 分批发送 | `handleSyncMessageDiffBatch` | `SYNC_DIFF_RESULTS_BATCH` | Phase 3 | 单批/单 Topic 最多 10,000 消息，attempt 最多 100,000 |
 | `SYNC_DIFF_RESULTS_BATCH` | —（接收） | `run_sync_session` Push 先于 Pull 执行 | 无 | Phase 3 | `Phase3Tracker` HashSet 去重防下溢 |
 | `SYNC_ENTITY_UPDATE` | 本地实体变更时实时发送 | `index.js` `upsertEntityIndex` | `SYNC_ACK` | 实时通知 | 无批次限制 |
-| `SYNC_DELETE_NOTIFY` | 本地软删除后实时发送 | `index.js` `deleteEntity`/`deleteMessage` | `SYNC_ACK` | 实时通知 | 无批次限制 |
+| `SYNC_ENTITY_DELETE` | 本地软删除提交后实时发送 | `index.js` `deleteEntity`/`deleteMessage` | `SYNC_ACK` | 实时通知 | Message 离线遗漏由 Phase 3 HTTP 重放 |
+| `SYNC_DELETE_NOTIFY` | —（接收） | `DeleteExecutor::soft_delete_*` | 无 | 实时通知 | 严格要求 `deletedAt`；Message 另需 `topicId` |
 | `SYNC_LOG_EVENT` | —（接收） | `emit_sync_log` 转发前端 | 无 | 全阶段 | WS 广播给所有已连接客户端 |
 
 ---
@@ -227,7 +228,8 @@ last_updated: 2026-05-13
 | `StartMessages` | `PHASE_START` (messages), `SYNC_MESSAGE_DIFF_BATCH` | Phase 2.5 完成且 `changedTopics` 非空 | 桌面端 |
 | `Finalize` | `PHASE_COMPLETED` (messages + 四元身份) | Phase 3 所有 Topic 完成 | 桌面端 |
 | `NotifyLocalChange` | `SYNC_ENTITY_UPDATE` | 本地实体变更监听器触发 | 桌面端 |
-| `NotifyDelete` | `SYNC_DELETE_NOTIFY`, `SYNC_ENTITY_DELETE` | 本地软删除执行后 | 桌面端 |
+| `NotifyDelete` | `SYNC_ENTITY_DELETE` | 本地实体软删除提交后 | 桌面端 |
+| `NotifyMessageDelete` | `SYNC_ENTITY_DELETE` | 本地消息软删除提交后 | 桌面端 |
 
 ---
 
@@ -243,7 +245,7 @@ last_updated: 2026-05-13
 | `PHASE_START` | 记录日志，返回 `PHASE_ACK` | `index.js` | `PHASE_ACK` |
 | `PHASE_COMPLETED` | 记录日志；最终帧原样回显四元身份 | `index.js` | `PHASE_ACK` |
 | `SYNC_ENTITY_UPDATE` | `upsertEntityIndex(...)` | `index.js` | `SYNC_ACK` |
-| `SYNC_DELETE_NOTIFY` | `deleteEntity` / `deleteMessage` | `index.js` | `SYNC_ACK` |
+| `SYNC_ENTITY_DELETE` | `deleteEntity` / `deleteMessage` | `index.js` | `SYNC_ACK` |
 | `VERSION_ACK` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 | `PHASE_ACK` | —（桌面端发送） | 普通阶段仅记录；最终阶段精确匹配 pending key | — |
 | `SYNC_LOG_EVENT` | —（桌面端发送，移动端不接收） | — | — |
@@ -290,7 +292,7 @@ last_updated: 2026-05-13
 | `DESKTOP_*` | 桌面端主动上报的进度消息 | `DESKTOP_PHASE_START` | 前缀标识来源端，避免命名冲突 |
 | `VERSION_*` | 握手协议 | `VERSION_CHECK`, `VERSION_ACK` | 仅握手阶段使用 |
 | `*_BATCH` / `*_BATCH_V2` | 批量请求 | `SYNC_TOPIC_HASH_BATCH_V2` | V2 后缀表示协议升级版本 |
-| `*_NOTIFY` / `*_UPDATE` | 实时通知 | `SYNC_ENTITY_UPDATE`, `SYNC_DELETE_NOTIFY` | 无会话阶段限制，随时发送 |
+| `*_NOTIFY` / `*_UPDATE` / `*_DELETE` | 实时通知 | `SYNC_ENTITY_UPDATE`, `SYNC_ENTITY_DELETE`, `SYNC_DELETE_NOTIFY` | 无会话阶段限制，但仍属于当前 session/attempt |
 
 ---
 
@@ -312,4 +314,4 @@ last_updated: 2026-05-13
 
 ---
 
-*本附录基于 VCPMobile v0.9.13 双端源代码整理。消息类型、字段结构与处理逻辑以实际代码实现为准。*
+*当前硬切兼容基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.1.0` + wire protocol `1.1`；旧字段与 1.0 peer 不兼容。*

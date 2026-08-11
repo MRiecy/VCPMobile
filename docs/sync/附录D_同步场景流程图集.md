@@ -624,4 +624,4 @@ Phase 2.5 的 `SYNC_TOPIC_HASH_BATCH_V2` 对双哈希执行严格相等判断，
 
 ---
 
-*本文档基于 VCPMobile v0.9.13 同步协议编写。所有 ASCII 流程图均映射到实际代码路径，可作为调试同步异常时的参照基准。*
+*当前场景基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.1.0` + wire protocol `1.1`。流程图中的完成态以精确结果门和最终 ACK 为准。*

@@ -273,8 +273,12 @@ mod tests {
             .await
             .expect("open test database");
         sqlx::query(
-            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, content_hash TEXT);
-             CREATE TABLE groups (group_id TEXT PRIMARY KEY, content_hash TEXT);
+            "CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE groups (
+                group_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+             );
              CREATE TABLE topics (
                 topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
@@ -284,7 +288,7 @@ mod tests {
                 topic_id TEXT, msg_id TEXT, timestamp INTEGER,
                 content_hash TEXT, deleted_at INTEGER
              );
-             INSERT INTO agents VALUES ('agent', 'owner-before');
+             INSERT INTO agents VALUES ('agent', 'owner-before', NULL);
              INSERT INTO topics VALUES
                 ('topic', 'agent', 'agent', 'Topic', 1, 1, 0, 0, 1,
                  'config-before', 'content-before', NULL);

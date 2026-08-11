@@ -29,6 +29,16 @@ pub fn compute_merkle_root(mut hashes: Vec<String>) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Protocol-level avatar identity contract. Agent and group avatars use a
+/// non-empty entity id; the only user avatar identity is the fixed singleton.
+pub fn is_valid_avatar_owner(owner_type: &str, owner_id: &str) -> bool {
+    match owner_type {
+        "agent" | "group" => !owner_id.is_empty(),
+        "user" => owner_id == "user_avatar",
+        _ => false,
+    }
+}
+
 pub fn stable_stringify(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {
@@ -128,6 +138,16 @@ pub struct SyncManifest {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn avatar_owner_contract_is_closed_and_keeps_the_user_singleton() {
+        assert!(is_valid_avatar_owner("agent", "agent-1"));
+        assert!(is_valid_avatar_owner("group", "group-1"));
+        assert!(is_valid_avatar_owner("user", "user_avatar"));
+        assert!(!is_valid_avatar_owner("user", "other"));
+        assert!(!is_valid_avatar_owner("agent", ""));
+        assert!(!is_valid_avatar_owner("system", "system"));
+    }
 
     #[test]
     fn test_stable_stringify_sorts_object_keys_recursively() {

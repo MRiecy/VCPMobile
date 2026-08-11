@@ -508,6 +508,18 @@ async fn bootstrap_legacy_if_needed(
     .await
     .map_err(|e| format!("Bootstrap: failed to inspect FTS table: {e}"))?;
 
+    let avatar_columns = sqlx::query("PRAGMA table_info(avatars)")
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| format!("Bootstrap: failed to inspect avatar columns: {e}"))?;
+    let mut has_avatar_deleted_at = false;
+    for row in avatar_columns {
+        let name: String = row
+            .try_get("name")
+            .map_err(|e| format!("Bootstrap: failed to decode avatar column: {e}"))?;
+        has_avatar_deleted_at |= name == "deleted_at";
+    }
+
     // 向 _sqlx_migrations 写入虚拟记录（migrator.run() 会自动建表后再读取）
     // 此处借用 pool 直接执行，因为 _sqlx_migrations 尚不存在，
     // 所以先让 migrator 自己建表，再插入记录。
@@ -534,6 +546,7 @@ async fn bootstrap_legacy_if_needed(
             1 => true,           // 初始表必然存在（用户能运行说明 Migration 1 已执行）
             2 => has_deleted_at, // deleted_at 列存在则 Migration 2 已执行
             3 => has_fts,        // messages_fts 表存在则 Migration 3 已执行
+            6 => has_avatar_deleted_at,
             _ => false,
         };
 
@@ -1008,6 +1021,119 @@ mod tests {
                 .await
                 .expect("read seeded versions");
         assert_eq!(versions, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn fresh_migrations_create_avatar_tombstone_column() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+
+        let columns = sqlx::query("PRAGMA table_info(avatars)")
+            .fetch_all(&pool)
+            .await
+            .expect("read avatar columns");
+        assert!(columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "deleted_at")
+        }));
+    }
+
+    #[tokio::test]
+    async fn tracked_legacy_schema_without_avatar_tombstone_runs_migration_six() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::query(
+            "CREATE TABLE avatars (
+                owner_type TEXT, owner_id TEXT, image_data BLOB,
+                PRIMARY KEY(owner_type, owner_id)
+             );
+             CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+             );",
+        )
+        .execute(&pool)
+        .await
+        .expect("create tracked legacy fixture");
+        let migrator = sqlx::migrate!("./migrations");
+        for migration in migrator
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= 5)
+        {
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations
+                 (version, description, success, checksum, execution_time)
+                 VALUES (?, ?, 1, ?, 0)",
+            )
+            .bind(migration.version)
+            .bind(migration.description.as_ref())
+            .bind(migration.checksum.as_ref())
+            .execute(&pool)
+            .await
+            .expect("seed prior migration");
+        }
+
+        migrator.run(&pool).await.expect("apply migration six");
+        let columns = sqlx::query("PRAGMA table_info(avatars)")
+            .fetch_all(&pool)
+            .await
+            .expect("read avatar columns");
+        assert!(columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "deleted_at")
+        }));
+        let version_six: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 6")
+                .fetch_one(&pool)
+                .await
+                .expect("read migration six record");
+        assert_eq!(version_six, 1);
+    }
+
+    #[tokio::test]
+    async fn untracked_legacy_schema_with_avatar_tombstone_seeds_migration_six() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::query(
+            "CREATE TABLE messages (msg_id TEXT);
+             CREATE TABLE message_attachments (hash TEXT, deleted_at INTEGER);
+             CREATE TABLE messages_fts (msg_id TEXT);
+             CREATE TABLE avatars (
+                owner_type TEXT, owner_id TEXT, image_data BLOB, deleted_at BIGINT,
+                PRIMARY KEY(owner_type, owner_id)
+             );",
+        )
+        .execute(&pool)
+        .await
+        .expect("create untracked legacy fixture");
+        let migrator = sqlx::migrate!("./migrations");
+        bootstrap_legacy_if_needed(&pool, &migrator)
+            .await
+            .expect("bridge legacy migration state");
+        let version_six: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 6")
+                .fetch_one(&pool)
+                .await
+                .expect("read seeded migration six");
+        assert_eq!(version_six, 1);
     }
 
     #[tokio::test]

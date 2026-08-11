@@ -269,7 +269,7 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 | 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
 |-----|------|-----|---------|---------|---------|-------------|-------------|------------|
 | `/delete-entity` | `POST` | `x-sync-token` | `JSON` — `{ id, type, deletedAt }` | `JSON` — `{ success }` | 无 | *通过 WebSocket 触发*<br>`SYNC_ENTITY_DELETE` | `deleteEntity` | `routes.js`<br>`sync_service.rs` |
-| `/delete-message` | `POST` | `x-sync-token` | `JSON` — `{ msgId, deletedAt }` | `JSON` — `{ success }` | 无 | *通过 WebSocket 触发*<br>`SYNC_DELETE_NOTIFY` | `deleteMessage` | `routes.js`<br>`sync_service.rs` |
+| `/delete-message` | `POST` | `x-sync-token` | `JSON` — `{ topicId, msgId, deletedAt }` | `JSON` — `{ success:true, topicId, msgId }` | 1 MiB（Mobile 侧） | `PushExecutor::push_messages_batch` 离线墓碑补传；在线另发 WS | `deleteMessage` | `routes.js`<br>`push_executor.rs` |
 
 ### 4.1 POST /delete-entity
 
@@ -298,17 +298,19 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 **请求体结构**
 ```json
 {
+  "topicId": "topic-uuid",
   "msgId": "message-uuid",
   "deletedAt": 1715000000000
 }
 ```
 
 **字段约束**
+- `topicId`: 必填，消息所属 Topic ID，用于消除跨 Topic 同名 `msgId` 歧义
 - `msgId`: 必填，消息 UUID
 - `deletedAt`: 必填，Unix 时间戳（毫秒）
 
 **移动端触发方式**
-与 `/delete-entity` 相同，移动端通过 WebSocket 发送 `SYNC_DELETE_NOTIFY`（`dataType = Message`），由桌面端 `deleteMessage` 执行消息软删除。桌面端在 `messages` 表中设置 `deleted_at` 字段。
+在线删除提交后会发送带 `topicId`、`msgId`、`deletedAt` 的 `SYNC_ENTITY_DELETE`。若删除发生时没有会话，Phase 3 在下一次 `toPush` 时从同一 Topic 快照重放 `/delete-message`；桌面端必须返回匹配请求身份的 `{success:true,topicId,msgId}`。旧 `{success:true}` 响应不再兼容。
 
 ---
 

@@ -129,6 +129,7 @@ async fn download_attachment(
 
 /// 批量加载多个 topic 的全量消息 — 一次性 SQL 查询，按 topic_id 分组
 /// 避免 push_messages_batch 场景下的 N+1 查询
+#[allow(dead_code)] // Retained for non-sync callers; MobileSync now uses bounded keyset pages.
 pub async fn load_multi_topic_messages(
     pool: &sqlx::SqlitePool,
     topic_ids: &[String],
@@ -435,7 +436,7 @@ pub async fn load_chat_history_internal(
     let agents = match sqlx::query(
         "SELECT a.agent_id, a.name, av.dominant_color 
          FROM agents a
-         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent'
+         LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.deleted_at IS NULL",
     )
     .fetch_all(pool)
@@ -475,7 +476,8 @@ pub async fn load_chat_history_internal(
         .unwrap_or_else(|| "User".to_string());
 
     let user_avatar_color: Option<String> = sqlx::query_scalar(
-        "SELECT dominant_color FROM avatars WHERE owner_type = 'user' AND owner_id = 'user_avatar'",
+        "SELECT dominant_color FROM avatars
+         WHERE owner_type = 'user' AND owner_id = 'user_avatar' AND deleted_at IS NULL",
     )
     .fetch_optional(pool)
     .await
@@ -1049,25 +1051,81 @@ pub async fn patch_single_message<R: tauri::Runtime>(
     Ok(blocks)
 }
 
+pub struct MessageDeletionResult {
+    pub deleted_ids: Vec<String>,
+    pub active_ids: Vec<String>,
+    pub deleted_at: i64,
+}
+
 pub async fn delete_messages(
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
     topic_id: &str,
     msg_ids: Vec<String>,
-) -> Result<(), String> {
+    deleted_at: Option<i64>,
+) -> Result<MessageDeletionResult, String> {
     if msg_ids.is_empty() {
-        return Ok(());
+        return Ok(MessageDeletionResult {
+            deleted_ids: Vec::new(),
+            active_ids: Vec::new(),
+            deleted_at: deleted_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+        });
+    }
+    if topic_id.is_empty()
+        || msg_ids.len() > 10_000
+        || msg_ids.iter().any(|id| id.is_empty())
+        || msg_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != msg_ids.len()
+    {
+        return Err("Message delete requires a topic and 1..=10000 unique message ids".to_string());
     }
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let select_deleted_ids = format!(
+        "SELECT msg_id FROM messages
+         WHERE topic_id = ? AND deleted_at IS NULL AND msg_id IN ({placeholders})"
+    );
+    let mut deleted_query = sqlx::query_scalar(&select_deleted_ids).bind(topic_id);
+    for id in &msg_ids {
+        deleted_query = deleted_query.bind(id);
+    }
+    let deleted_ids: Vec<String> = deleted_query
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let select_active_ids = format!(
+        "SELECT msg_id FROM active_generations
+         WHERE topic_id = ? AND msg_id IN ({placeholders})"
+    );
+    let mut active_query = sqlx::query_scalar(&select_active_ids).bind(topic_id);
+    for id in &msg_ids {
+        active_query = active_query.bind(id);
+    }
+    let active_ids = active_query
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
     let delete_query = format!(
-        "UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND msg_id IN ({})",
+        "UPDATE messages SET deleted_at = ?
+         WHERE topic_id = ? AND deleted_at IS NULL AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = deleted_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let mut q = sqlx::query(&delete_query).bind(now).bind(topic_id);
     for id in &msg_ids {
         q = q.bind(id);
     }
-    q.execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    let deleted = q.execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    if deleted.rows_affected() != deleted_ids.len() as u64 {
+        return Err(format!(
+            "Message delete changed {} rows, expected {} for topic {topic_id}",
+            deleted.rows_affected(),
+            deleted_ids.len()
+        ));
+    }
 
     // 物理强清除 render_cache 缓存，杜绝幽灵缓存残留
     let delete_cache_query = format!(
@@ -1128,15 +1186,25 @@ pub async fn delete_messages(
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
 
-    sqlx::query("UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(msg_count)
-        .bind(now)
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let topic_update = sqlx::query(
+        "UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(msg_count)
+    .bind(now)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if topic_update.rows_affected() != 1 {
+        return Err(format!("Topic {topic_id} is missing or deleted"));
+    }
+    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(MessageDeletionResult {
+        deleted_ids,
+        active_ids,
+        deleted_at: now,
+    })
 }
 
 pub async fn truncate_history_after_timestamp(
@@ -1146,13 +1214,22 @@ pub async fn truncate_history_after_timestamp(
     _owner_type: &str,
     topic_id: &str,
     timestamp: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<MessageDeletionResult, String> {
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
 
     let active_ids: Vec<String> = sqlx::query_scalar(
         "SELECT ag.msg_id FROM active_generations ag \
          JOIN messages m ON m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
          WHERE ag.topic_id = ? AND m.timestamp > ?",
+    )
+    .bind(topic_id)
+    .bind(timestamp)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let deleted_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT msg_id FROM messages
+         WHERE topic_id = ? AND timestamp > ? AND deleted_at IS NULL",
     )
     .bind(topic_id)
     .bind(timestamp)
@@ -1183,13 +1260,20 @@ pub async fn truncate_history_after_timestamp(
     .map_err(|e| e.to_string())?;
 
     let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ?")
+    let deleted = sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ? AND deleted_at IS NULL")
         .bind(now)
         .bind(topic_id)
         .bind(timestamp)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    if deleted.rows_affected() != deleted_ids.len() as u64 {
+        return Err(format!(
+            "History truncation changed {} rows, expected {} for topic {topic_id}",
+            deleted.rows_affected(),
+            deleted_ids.len()
+        ));
+    }
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
     )
@@ -1198,15 +1282,26 @@ pub async fn truncate_history_after_timestamp(
     .await
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
-    sqlx::query("UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(msg_count)
-        .bind(timestamp)
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let topic_update = sqlx::query(
+        "UPDATE topics SET msg_count = ?, updated_at = ?
+         WHERE topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(msg_count)
+    .bind(now)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if topic_update.rows_affected() != 1 {
+        return Err(format!("Topic {topic_id} is missing or deleted"));
+    }
+    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(active_ids)
+    Ok(MessageDeletionResult {
+        deleted_ids,
+        active_ids,
+        deleted_at: now,
+    })
 }
 
 async fn decode_valid_render_cache(
@@ -1704,7 +1799,7 @@ mod stream_lifecycle_tests {
         .await
         .expect("begin generation");
 
-        delete_messages(&pool, "topic-1", vec!["message-deleted".to_string()])
+        delete_messages(&pool, "topic-1", vec!["message-deleted".to_string()], None)
             .await
             .expect("delete generation");
         assert!(commit_stream_message(

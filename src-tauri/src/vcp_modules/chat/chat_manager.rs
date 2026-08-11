@@ -1,6 +1,8 @@
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::message_service;
+use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Attachment {
@@ -192,18 +194,36 @@ pub async fn patch_single_message(
 
 #[tauri::command]
 pub async fn delete_messages(
+    app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     active_requests: tauri::State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
     topic_id: String,
     msg_ids: Vec<String>,
 ) -> Result<(), String> {
-    message_service::delete_messages(&db_state.pool, &topic_id, msg_ids.clone()).await?;
-    for msg_id in msg_ids {
-        if let Err(error) = active_requests.cancel(&msg_id) {
+    let result = message_service::delete_messages(&db_state.pool, &topic_id, msg_ids, None).await?;
+    for msg_id in &result.active_ids {
+        if let Err(error) = active_requests.cancel(msg_id) {
             log::warn!("Failed to cancel deleted generation {}: {}", msg_id, error);
         }
     }
+    notify_message_deletions(&app_handle, &topic_id, &result);
     Ok(())
+}
+
+pub fn notify_message_deletions<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    topic_id: &str,
+    result: &message_service::MessageDeletionResult,
+) {
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        for message_id in &result.deleted_ids {
+            let _ = sync_state.ws_sender.send(SyncCommand::NotifyMessageDelete {
+                topic_id: topic_id.to_string(),
+                message_id: message_id.clone(),
+                deleted_at: result.deleted_at,
+            });
+        }
+    }
 }
 
 #[tauri::command]
@@ -216,8 +236,8 @@ pub async fn truncate_history_after_timestamp(
     topic_id: String,
     timestamp: i64,
 ) -> Result<(), String> {
-    let cancelled_ids = message_service::truncate_history_after_timestamp(
-        app_handle,
+    let deletion = message_service::truncate_history_after_timestamp(
+        app_handle.clone(),
         &db_state.pool,
         &owner_id,
         &owner_type,
@@ -225,8 +245,8 @@ pub async fn truncate_history_after_timestamp(
         timestamp,
     )
     .await?;
-    for msg_id in cancelled_ids {
-        if let Err(error) = active_requests.cancel(&msg_id) {
+    for msg_id in &deletion.active_ids {
+        if let Err(error) = active_requests.cancel(msg_id) {
             log::warn!(
                 "Failed to cancel truncated generation {}: {}",
                 msg_id,
@@ -234,6 +254,7 @@ pub async fn truncate_history_after_timestamp(
             );
         }
     }
+    notify_message_deletions(&app_handle, &topic_id, &deletion);
     Ok(())
 }
 

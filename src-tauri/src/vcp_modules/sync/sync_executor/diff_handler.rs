@@ -28,9 +28,14 @@ fn consume_manifest_response_type(
         .and_then(Value::as_u64)
         .and_then(|phase| u8::try_from(phase).ok())
         .ok_or_else(|| "SYNC_DIFF_RESULTS.phase must be an integer".to_string())?;
-    if msg_phase != current_phase {
+    let expected_wire_phase = match current_phase {
+        1 | 2 => 1,
+        3 => 2,
+        _ => current_phase,
+    };
+    if msg_phase != expected_wire_phase {
         return Err(format!(
-            "SYNC_DIFF_RESULTS phase mismatch: expected {current_phase}, got {msg_phase}"
+            "SYNC_DIFF_RESULTS phase mismatch: expected {expected_wire_phase}, got {msg_phase}"
         ));
     }
     let data_type_name = data_type.to_string();
@@ -43,6 +48,30 @@ fn consume_manifest_response_type(
         ));
     }
     Ok(remaining.is_empty())
+}
+
+fn next_manifest_command(current_phase: u8, attempt_id: u64) -> Option<SyncCommand> {
+    match current_phase {
+        1 => Some(SyncCommand::StartAvatarMetadata { attempt_id }),
+        2 => Some(SyncCommand::StartTopicMetadata { attempt_id }),
+        3 => Some(SyncCommand::StartTopicValidation { attempt_id }),
+        _ => None,
+    }
+}
+
+fn parse_delete_timestamp(item: &Value, id: &str, action: &str) -> Result<Option<i64>, String> {
+    if !matches!(action, "DELETE" | "PUSH_DELETE") {
+        return Ok(None);
+    }
+    item.get("deletedAt")
+        .and_then(Value::as_i64)
+        .filter(|deleted_at| *deleted_at >= 0)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "SYNC_DIFF_RESULTS item {id} delete action requires a non-negative integer deletedAt"
+            )
+        })
 }
 
 impl DiffHandler {
@@ -89,6 +118,7 @@ impl DiffHandler {
                     matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP")
                 })
                 .ok_or_else(|| format!("SYNC_DIFF_RESULTS item {id} has an invalid action"))?;
+            parse_delete_timestamp(item, id, action)?;
             if item.get("mismatchedContent").is_some()
                 && item
                     .get("mismatchedContent")
@@ -194,10 +224,8 @@ impl DiffHandler {
                 );
 
                 if current_pending == 0 {
-                    if current_phase == 1 {
-                        let _ = tx_internal.send(SyncCommand::StartTopicMetadata { attempt_id });
-                    } else if current_phase == 2 {
-                        let _ = tx_internal.send(SyncCommand::StartTopicValidation { attempt_id });
+                    if let Some(command) = next_manifest_command(current_phase, attempt_id) {
+                        let _ = tx_internal.send(command);
                     }
                 } else {
                     let tx_internal_wd = tx_internal.clone();
@@ -277,6 +305,10 @@ impl DiffHandler {
                         let mut owners = changed_owners.lock().await;
                         owners.insert(id.clone());
                     }
+                }
+
+                if action == "SKIP" {
+                    continue;
                 }
 
                 if action == "PULL"
@@ -363,7 +395,7 @@ impl DiffHandler {
                                 "vcp-sync-progress",
                                 json!({
                                     "sessionId": session_id,
-                                    "phase": if manifest_phase_in.load(Ordering::SeqCst) == 1 {
+                                    "phase": if manifest_phase_in.load(Ordering::SeqCst) <= 2 {
                                         "owner_metadata"
                                     } else {
                                         "topic_metadata"
@@ -378,15 +410,10 @@ impl DiffHandler {
                                     == manifest_expected_in.load(Ordering::SeqCst)
                             {
                                 let phase = manifest_phase_in.load(Ordering::SeqCst);
-                                if phase == 1 {
-                                    let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata {
-                                        attempt_id: attempt_id_inner,
-                                    });
-                                } else if phase == 2 {
-                                    let _ =
-                                        tx_internal_in.send(SyncCommand::StartTopicValidation {
-                                            attempt_id: attempt_id_inner,
-                                        });
+                                if let Some(command) =
+                                    next_manifest_command(phase, attempt_id_inner)
+                                {
+                                    let _ = tx_internal_in.send(command);
                                 }
                             }
                         }
@@ -412,17 +439,73 @@ impl DiffHandler {
                     let mut batch_push_requests = Vec::new();
 
                     // 异步批量查询 Topic 元数据
-                    for (id, _diff_owner_id, owner_type) in push_topics_to_fetch {
+                    for (id, diff_owner_id, owner_type) in push_topics_to_fetch {
                         log::debug!("[SyncDebug] Fetching metadata for topic: {}", id);
-                        let row_res = sqlx::query("SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?")
+                        let row_res = sqlx::query(
+                            "SELECT topic_id, title, created_at, locked, unread, owner_id, owner_type
+                             FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
+                        )
                             .bind(&id)
                             .fetch_optional(&db.pool)
                             .await;
 
                         match row_res {
                             Ok(Some(r)) => {
-                                let db_owner_id: String = r.get("owner_id");
-                                let tid: String = r.get("topic_id");
+                                let decoded = (|| -> Result<_, String> {
+                                    Ok((
+                                        r.try_get::<String, _>("topic_id")
+                                            .map_err(|error| format!("topic id: {error}"))?,
+                                        r.try_get::<String, _>("title")
+                                            .map_err(|error| format!("title: {error}"))?,
+                                        r.try_get::<i64, _>("created_at")
+                                            .map_err(|error| format!("created_at: {error}"))?,
+                                        r.try_get::<i64, _>("locked")
+                                            .map_err(|error| format!("locked: {error}"))?,
+                                        r.try_get::<i64, _>("unread")
+                                            .map_err(|error| format!("unread: {error}"))?,
+                                        r.try_get::<String, _>("owner_id")
+                                            .map_err(|error| format!("owner_id: {error}"))?,
+                                        r.try_get::<String, _>("owner_type")
+                                            .map_err(|error| format!("owner_type: {error}"))?,
+                                    ))
+                                })();
+                                let (
+                                    tid,
+                                    title,
+                                    created_at,
+                                    locked,
+                                    unread,
+                                    db_owner_id,
+                                    db_owner_type,
+                                ) = match decoded {
+                                    Ok(decoded) => decoded,
+                                    Err(error) => {
+                                        let _ = tx_internal_in.send(
+                                            SyncCommand::FailAttemptDetailed {
+                                                attempt_id: attempt_id_inner,
+                                                code: "TOPIC_PUSH_DB_DECODE_FAILED".to_string(),
+                                                message: format!(
+                                                    "Failed to decode topic {id} for push: {error}"
+                                                ),
+                                                failed_topic_ids: vec![id],
+                                            },
+                                        );
+                                        return;
+                                    }
+                                };
+                                if db_owner_id != diff_owner_id || db_owner_type != owner_type {
+                                    let _ = tx_internal_in.send(
+                                        SyncCommand::FailAttemptDetailed {
+                                            attempt_id: attempt_id_inner,
+                                            code: "TOPIC_PUSH_OWNER_CONFLICT".to_string(),
+                                            message: format!(
+                                                "Topic {id} owner does not match the Phase 1 decision"
+                                            ),
+                                            failed_topic_ids: vec![id],
+                                        },
+                                    );
+                                    return;
+                                }
                                 log::debug!(
                                     "[SyncDebug] Found topic {} (owner: {})",
                                     tid,
@@ -435,9 +518,9 @@ impl DiffHandler {
                                     "agent_topic"
                                 };
                                 let dto = if owner_type == "group" {
-                                    json!({ "id": tid, "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "ownerId": db_owner_id })
+                                    json!({ "id": tid, "name": title, "createdAt": created_at, "ownerId": db_owner_id })
                                 } else {
-                                    json!({ "id": tid, "name": r.get::<String, _>("title"), "createdAt": r.get::<i64, _>("created_at"), "locked": r.get::<i64, _>("locked") != 0, "unread": r.get::<i64, _>("unread") != 0, "ownerId": db_owner_id })
+                                    json!({ "id": tid, "name": title, "createdAt": created_at, "locked": locked != 0, "unread": unread != 0, "ownerId": db_owner_id })
                                 };
                                 batch_push_requests
                                     .push(json!({ "id": id, "type": type_str, "data": dto }));
@@ -523,14 +606,8 @@ impl DiffHandler {
                             == manifest_expected_in.load(Ordering::SeqCst)
                     {
                         let phase = manifest_phase_in.load(Ordering::SeqCst);
-                        if phase == 1 {
-                            let _ = tx_internal_in.send(SyncCommand::StartTopicMetadata {
-                                attempt_id: attempt_id_inner,
-                            });
-                        } else if phase == 2 {
-                            let _ = tx_internal_in.send(SyncCommand::StartTopicValidation {
-                                attempt_id: attempt_id_inner,
-                            });
+                        if let Some(command) = next_manifest_command(phase, attempt_id_inner) {
+                            let _ = tx_internal_in.send(command);
                         }
                     }
                 }).await;
@@ -556,6 +633,7 @@ impl DiffHandler {
                         .for_each_concurrent(15, |item| {
                             let action = item["action"].as_str().unwrap_or_default().to_string();
                             let id = item["id"].as_str().unwrap_or_default().to_string();
+                            let deleted_at = item.get("deletedAt").and_then(Value::as_i64);
                             let h_task = h_in.clone();
                             let c_task = c_in.clone();
                             let b_task = b_in.clone();
@@ -646,37 +724,68 @@ impl DiffHandler {
                                     }
                                 } else if action == "DELETE" || action == "PUSH_DELETE" {
                                     use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                    let delete_result = match &data_type_task {
-                                        SyncDataType::Agent => {
-                                            DeleteExecutor::soft_delete_agent(&h_task, &id).await
-                                        }
-                                        SyncDataType::Group => {
-                                            DeleteExecutor::soft_delete_group(&h_task, &id).await
-                                        }
-                                        SyncDataType::Avatar => {
-                                            let parts: Vec<&str> = id.split(':').collect();
-                                            if parts.len() != 2 {
-                                                Err(format!("invalid avatar id: {id}"))
-                                            } else {
-                                                DeleteExecutor::soft_delete_avatar(
-                                                    &h_task, parts[0], parts[1],
+                                    let delete_result = match deleted_at {
+                                        Some(deleted_at) if deleted_at >= 0 => match &data_type_task {
+                                            SyncDataType::Agent => {
+                                                DeleteExecutor::soft_delete_agent(
+                                                    &h_task,
+                                                    &id,
+                                                    deleted_at,
                                                 )
                                                 .await
                                             }
-                                        }
-                                        SyncDataType::Topic => {
-                                            DeleteExecutor::soft_delete_topic(&h_task, &id).await
-                                        }
+                                            SyncDataType::Group => {
+                                                DeleteExecutor::soft_delete_group(
+                                                    &h_task,
+                                                    &id,
+                                                    deleted_at,
+                                                )
+                                                .await
+                                            }
+                                            SyncDataType::Avatar => {
+                                                let parts: Vec<&str> = id.split(':').collect();
+                                                if parts.len() != 2 {
+                                                    Err(format!("invalid avatar id: {id}"))
+                                                } else {
+                                                    DeleteExecutor::soft_delete_avatar(
+                                                        &h_task,
+                                                        parts[0],
+                                                        parts[1],
+                                                        deleted_at,
+                                                    )
+                                                    .await
+                                                }
+                                            }
+                                            SyncDataType::Topic => {
+                                                DeleteExecutor::soft_delete_topic(
+                                                    &h_task,
+                                                    &id,
+                                                    deleted_at,
+                                                )
+                                                .await
+                                            }
+                                            _ => Err(format!(
+                                                "unsupported DELETE data type: {:?}",
+                                                data_type_task
+                                            )),
+                                        },
                                         _ => Err(format!(
-                                            "unsupported DELETE data type: {:?}",
-                                            data_type_task
+                                            "DELETE action for {id} is missing a valid deletedAt"
                                         )),
                                     };
                                     if delete_result.is_ok() && action == "PUSH_DELETE" {
-                                        tx_internal_task.send(SyncCommand::NotifyDelete {
-                                            data_type: data_type_task.clone(),
-                                            id: id.clone(),
-                                        }).map_err(|error| error.to_string())
+                                        match deleted_at {
+                                            Some(deleted_at) => tx_internal_task
+                                                .send(SyncCommand::NotifyDelete {
+                                                    data_type: data_type_task.clone(),
+                                                    id: id.clone(),
+                                                    deleted_at,
+                                                })
+                                                .map_err(|error| error.to_string()),
+                                            None => Err(format!(
+                                                "PUSH_DELETE action for {id} is missing deletedAt"
+                                            )),
+                                        }
                                     } else {
                                         delete_result
                                     }
@@ -694,7 +803,7 @@ impl DiffHandler {
                                         "vcp-sync-progress",
                                         json!({
                                             "sessionId": session_id,
-                                            "phase": if manifest_phase_task.load(Ordering::SeqCst) == 1 {
+                                            "phase": if manifest_phase_task.load(Ordering::SeqCst) <= 2 {
                                                 "owner_metadata"
                                             } else {
                                                 "topic_metadata"
@@ -709,16 +818,10 @@ impl DiffHandler {
                                             == manifest_expected_task.load(Ordering::SeqCst)
                                     {
                                         let phase = manifest_phase_task.load(Ordering::SeqCst);
-                                        if phase == 1 {
-                                            let _ = tx_internal_task
-                                                .send(SyncCommand::StartTopicMetadata {
-                                                    attempt_id: attempt_id_task,
-                                                });
-                                        } else if phase == 2 {
-                                            let _ = tx_internal_task
-                                                .send(SyncCommand::StartTopicValidation {
-                                                    attempt_id: attempt_id_task,
-                                                });
+                                        if let Some(command) =
+                                            next_manifest_command(phase, attempt_id_task)
+                                        {
+                                            let _ = tx_internal_task.send(command);
                                         }
                                     }
                                     }
@@ -750,7 +853,8 @@ impl DiffHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::consume_manifest_response_type;
+    use super::{consume_manifest_response_type, next_manifest_command, parse_delete_timestamp};
+    use crate::vcp_modules::sync_service::SyncCommand;
     use crate::vcp_modules::sync_types::SyncDataType;
     use serde_json::json;
     use std::collections::HashSet;
@@ -791,5 +895,55 @@ mod tests {
             &expected,
         )
         .expect("last expected type"));
+    }
+
+    #[test]
+    fn avatar_wave_uses_owner_wire_phase_and_precedes_topics() {
+        let expected = Mutex::new(HashSet::from(["avatar".to_string()]));
+        assert!(consume_manifest_response_type(
+            &json!({"phase": 1}),
+            &SyncDataType::Avatar,
+            2,
+            &expected,
+        )
+        .expect("avatar response"));
+        assert!(matches!(
+            next_manifest_command(1, 7),
+            Some(SyncCommand::StartAvatarMetadata { attempt_id: 7 })
+        ));
+        assert!(matches!(
+            next_manifest_command(2, 7),
+            Some(SyncCommand::StartTopicMetadata { attempt_id: 7 })
+        ));
+        assert!(matches!(
+            next_manifest_command(3, 7),
+            Some(SyncCommand::StartTopicValidation { attempt_id: 7 })
+        ));
+    }
+
+    #[test]
+    fn delete_actions_require_a_stable_non_negative_timestamp() {
+        assert_eq!(
+            parse_delete_timestamp(
+                &json!({"action": "DELETE", "deletedAt": 42}),
+                "entity",
+                "DELETE",
+            )
+            .expect("valid timestamp"),
+            Some(42)
+        );
+        for value in [
+            json!({"action": "DELETE"}),
+            json!({"action": "DELETE", "deletedAt": null}),
+            json!({"action": "DELETE", "deletedAt": "42"}),
+            json!({"action": "DELETE", "deletedAt": -1}),
+        ] {
+            assert!(parse_delete_timestamp(&value, "entity", "DELETE").is_err());
+        }
+        assert_eq!(
+            parse_delete_timestamp(&json!({"action": "SKIP"}), "entity", "SKIP")
+                .expect("non-delete action"),
+            None
+        );
     }
 }

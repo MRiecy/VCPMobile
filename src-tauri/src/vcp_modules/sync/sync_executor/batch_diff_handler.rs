@@ -14,6 +14,9 @@ use tokio::sync::mpsc;
 
 pub struct BatchDiffHandler;
 
+const MAX_PHASE3_TOPICS: usize = 10_000;
+const MAX_PHASE3_MESSAGES: usize = 100_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phase3ProtocolError {
     pub code: String,
@@ -205,6 +208,13 @@ fn parse_topic_decision(
                 topic_id,
             )
         })?;
+    if to_pull_values.len() > MAX_PHASE3_TOPICS {
+        return Err(Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_BUDGET_EXCEEDED",
+            format!("Phase 3 toPull for {topic_id} exceeds {MAX_PHASE3_TOPICS} message budget"),
+            topic_id,
+        ));
+    }
     let mut seen = HashSet::new();
     let mut to_pull = Vec::with_capacity(to_pull_values.len());
     for value in to_pull_values {
@@ -342,6 +352,12 @@ impl BatchDiffHandler {
                 "Phase 3 response is missing results",
             )
         })?;
+        if results.len() > MAX_PHASE3_TOPICS {
+            return Err(Phase3ProtocolError::new(
+                "PHASE3_DECISION_BUDGET_EXCEEDED",
+                format!("Phase 3 response exceeds {MAX_PHASE3_TOPICS} topic budget"),
+            ));
+        }
         {
             let expected = expected_batch_topics.lock().await;
             validate_phase3_result_topics(&expected, results).map_err(|message| {
@@ -360,11 +376,30 @@ impl BatchDiffHandler {
             // 分类 topics: push_only, push_pull, pull_only
             let mut push_topic_ids: Vec<String> = Vec::new();
             let mut pull_batch: Vec<(String, Vec<String>)> = Vec::new();
+            let mut total_pull_messages = 0usize;
 
             for (topic_id, result) in results {
                 let decision = parse_topic_decision(topic_id, result)?;
                 let to_pull_ids = decision.to_pull;
                 let to_push = decision.to_push;
+                total_pull_messages = total_pull_messages
+                    .checked_add(to_pull_ids.len())
+                    .ok_or_else(|| {
+                        Phase3ProtocolError::for_topic(
+                            "PHASE3_DECISION_BUDGET_EXCEEDED",
+                            "Phase 3 toPull message count overflow",
+                            topic_id,
+                        )
+                    })?;
+                if total_pull_messages > MAX_PHASE3_MESSAGES {
+                    return Err(Phase3ProtocolError::for_topic(
+                        "PHASE3_DECISION_BUDGET_EXCEEDED",
+                        format!(
+                            "Phase 3 response exceeds {MAX_PHASE3_MESSAGES} toPull message budget"
+                        ),
+                        topic_id,
+                    ));
+                }
 
                 // Phase 2.5 已判定该 topic 聚合哈希有变化；即使消息 diff 是合法
                 // no-op，也必须进入 finalizer 的 hash-repair 集。

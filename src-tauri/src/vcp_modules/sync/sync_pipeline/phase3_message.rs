@@ -1,8 +1,12 @@
+use futures_util::TryStreamExt;
 use sqlx::Row;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 
 const SQLITE_BIND_CHUNK: usize = 400;
+const MAX_PHASE3_MESSAGES_PER_TOPIC: usize = 10_000;
+const MAX_PHASE3_MESSAGES: usize = 100_000;
+const MAX_PHASE3_STATE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct Phase3Message;
 
@@ -10,6 +14,44 @@ pub struct Phase3Message;
 pub struct TopicLocalState {
     pub topic_hash: String,
     pub messages: HashMap<String, String>,
+}
+
+#[derive(Default)]
+struct Phase3StateBudget {
+    messages: usize,
+    bytes: usize,
+}
+
+impl Phase3StateBudget {
+    fn observe_topic(
+        &mut self,
+        topic_id: &str,
+        messages: usize,
+        raw_bytes: usize,
+    ) -> Result<(), String> {
+        if messages > MAX_PHASE3_MESSAGES_PER_TOPIC {
+            return Err(format!(
+                "Phase 3 topic {topic_id} exceeds the {MAX_PHASE3_MESSAGES_PER_TOPIC}-message limit"
+            ));
+        }
+        self.messages = self
+            .messages
+            .checked_add(messages)
+            .ok_or_else(|| "Phase 3 message count overflow".to_string())?;
+        if self.messages > MAX_PHASE3_MESSAGES {
+            return Err(format!(
+                "Phase 3 state exceeds the {MAX_PHASE3_MESSAGES}-message limit"
+            ));
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(raw_bytes)
+            .ok_or_else(|| "Phase 3 state size overflow".to_string())?;
+        if self.bytes > MAX_PHASE3_STATE_BYTES {
+            return Err("Phase 3 state exceeds the 64 MiB memory budget".to_string());
+        }
+        Ok(())
+    }
 }
 
 impl Phase3Message {
@@ -39,18 +81,20 @@ impl Phase3Message {
             }
             let rows = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
             for row in rows {
-                let topic_id: String = row.get("topic_id");
+                let topic_id: String = row
+                    .try_get("topic_id")
+                    .map_err(|error| format!("Targeted topic id decode failed: {error}"))?;
                 if topic_id == "default" {
                     continue;
                 }
+                let config_hash: String = row.try_get("config_hash").map_err(|error| {
+                    format!("Targeted topic {topic_id} config hash decode failed: {error}")
+                })?;
+                let content_hash: String = row.try_get("content_hash").map_err(|error| {
+                    format!("Targeted topic {topic_id} content hash decode failed: {error}")
+                })?;
                 if result
-                    .insert(
-                        topic_id.clone(),
-                        (
-                            row.get::<String, _>("config_hash"),
-                            row.get::<String, _>("content_hash"),
-                        ),
-                    )
+                    .insert(topic_id.clone(), (config_hash, content_hash))
                     .is_some()
                 {
                     return Err(format!(
@@ -92,12 +136,17 @@ impl Phase3Message {
                 query = query.bind(id);
             }
             for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
-                let topic_id: String = row.get("topic_id");
+                let topic_id: String = row
+                    .try_get("topic_id")
+                    .map_err(|error| format!("Topic hash id decode failed: {error}"))?;
+                let topic_hash: String = row.try_get("content_hash").map_err(|error| {
+                    format!("Topic {topic_id} content hash decode failed: {error}")
+                })?;
                 if result
                     .insert(
                         topic_id.clone(),
                         TopicLocalState {
-                            topic_hash: row.get("content_hash"),
+                            topic_hash,
                             messages: HashMap::new(),
                         },
                     )
@@ -118,6 +167,51 @@ impl Phase3Message {
             ));
         }
 
+        // Bound the state before loading message IDs/hashes into memory. SQLite LENGTH over BLOB
+        // values counts UTF-8 bytes rather than characters, matching the wire budget.
+        let mut budget = Phase3StateBudget::default();
+        for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+            let placeholders = topic_chunk
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let count_query = format!(
+                "SELECT topic_id, COUNT(*) AS message_count,
+                        COALESCE(SUM(
+                            LENGTH(CAST(msg_id AS BLOB)) +
+                            LENGTH(CAST(content_hash AS BLOB)) + 16
+                        ), 0) AS state_bytes
+                 FROM messages
+                 WHERE topic_id IN ({placeholders})
+                 GROUP BY topic_id"
+            );
+            let mut query = sqlx::query(&count_query);
+            for id in topic_chunk {
+                query = query.bind(id);
+            }
+            for row in query
+                .fetch_all(pool)
+                .await
+                .map_err(|error| format!("Phase 3 message budget query failed: {error}"))?
+            {
+                let topic_id: String = row
+                    .try_get("topic_id")
+                    .map_err(|error| format!("Phase 3 budget topic id decode failed: {error}"))?;
+                let message_count: i64 = row.try_get("message_count").map_err(|error| {
+                    format!("Phase 3 message count decode failed for {topic_id}: {error}")
+                })?;
+                let message_count = usize::try_from(message_count)
+                    .map_err(|_| format!("Phase 3 message count is invalid for {topic_id}"))?;
+                let state_bytes: i64 = row.try_get("state_bytes").map_err(|error| {
+                    format!("Phase 3 state size decode failed for {topic_id}: {error}")
+                })?;
+                let state_bytes = usize::try_from(state_bytes)
+                    .map_err(|_| format!("Phase 3 state size is invalid for {topic_id}"))?;
+                budget.observe_topic(&topic_id, message_count, state_bytes)?;
+            }
+        }
+
         // 2. 批量查询所有消息 hash (包含已软删除的消息)
         for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
             let placeholders = topic_chunk
@@ -133,11 +227,24 @@ impl Phase3Message {
             for id in topic_chunk {
                 query = query.bind(id);
             }
-            for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
-                let topic_id: String = row.get("topic_id");
-                let msg_id: String = row.get("msg_id");
-                let hash: String = row.get("content_hash");
-                let deleted_at: Option<i64> = row.get("deleted_at");
+            let mut rows = query.fetch(pool);
+            while let Some(row) = rows
+                .try_next()
+                .await
+                .map_err(|error| format!("Phase 3 message hash query failed: {error}"))?
+            {
+                let topic_id: String = row
+                    .try_get("topic_id")
+                    .map_err(|error| format!("Message hash topic id decode failed: {error}"))?;
+                let msg_id: String = row
+                    .try_get("msg_id")
+                    .map_err(|error| format!("Message id decode failed for {topic_id}: {error}"))?;
+                let hash: String = row.try_get("content_hash").map_err(|error| {
+                    format!("Message hash decode failed for {topic_id}/{msg_id}: {error}")
+                })?;
+                let deleted_at: Option<i64> = row.try_get("deleted_at").map_err(|error| {
+                    format!("Message tombstone decode failed for {topic_id}/{msg_id}: {error}")
+                })?;
                 let state = result.get_mut(&topic_id).ok_or_else(|| {
                     format!("Message hash query returned an unknown topic {topic_id}")
                 })?;
@@ -164,7 +271,17 @@ impl Phase3Message {
 
 #[cfg(test)]
 mod tests {
-    use super::Phase3Message;
+    use super::{Phase3Message, Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC};
+
+    #[test]
+    fn phase3_state_budget_rejects_an_oversized_single_topic_before_loading_rows() {
+        let mut budget = Phase3StateBudget::default();
+        let error = budget
+            .observe_topic("topic", MAX_PHASE3_MESSAGES_PER_TOPIC + 1, 1)
+            .expect_err("oversized topic must fail before hash materialization");
+        assert!(error.contains("topic"));
+        assert!(error.contains("message limit"));
+    }
 
     #[tokio::test]
     async fn requested_topic_hashes_require_exact_live_coverage() {

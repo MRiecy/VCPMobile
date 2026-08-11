@@ -1,8 +1,8 @@
 ---
 title: 附录C - 数据库Schema对照表
 scope: 双端
-version: 1.1.3
-last_updated: 2026-07-04
+version: 1.1.4
+last_updated: 2026-08-11
 ---
 
 # 附录C - 数据库 Schema 对照表
@@ -12,6 +12,8 @@ last_updated: 2026-07-04
 本文档以表格形式精确列出 VCPMobile（移动端）与 VCPMobileSync（桌面端插件）在同步场景下涉及的全部数据库表结构。移动端使用原生 SQLite（WAL 模式）持久化实体全量数据；桌面端插件使用 `better-sqlite3` 维护轻量级索引库，用于快速 Diff 与哈希比对，实体正文仍存储于桌面端原有 JSON 文件系统中。
 
 > **v1.1.3 变更**：移动端 Schema 管理由硬编码 `setup_tables` 改为 `src-tauri/migrations/` 下的版本化 SQL 迁移；新增 `active_generations`、`messages_fts`、`tarven_rules` 等表；`messages.content` 由 zstd 压缩 BLOB 改为明文 TEXT；`message_attachments` 新增 `deleted_at` 字段。
+
+> **v1.1.4 变更**：Migration 0006 为 `avatars` 增加 `deleted_at`。legacy bridge 只在真实列已存在时 seed v6；无列数据库由 sqlx 正常执行迁移，避免重复 `ALTER TABLE` 或漏迁移。
 
 阅读本文档时，建议配合 `02_数据模型与类型系统.md` 理解字段默认值、DTO 映射与哈希计算规则。
 
@@ -25,13 +27,14 @@ last_updated: 2026-07-04
 
 | 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
 |-----|-------|-----|-----|-----|----------|
-| avatars | owner_type | TEXT | NOT NULL, PK(1) | 实体类型：`agent`、`group`、`user`、`system` | `avatar_index.owner_type` |
-| avatars | owner_id | TEXT | NOT NULL, PK(2) | 对应实体 UUID 或固定值 `user_avatar` | `avatar_index.owner_id` |
+| avatars | owner_type | TEXT | NOT NULL, PK(1) | 封闭枚举：`agent`、`group`、`user` | `avatar_index.owner_type` |
+| avatars | owner_id | TEXT | NOT NULL, PK(2) | Agent/Group UUID；`user` 仅允许 `user_avatar` | `avatar_index.owner_id` |
 | avatars | avatar_hash | TEXT | NOT NULL | 头像二进制 SHA-256 摘要，用于 WebSocket 快速 Diff | `avatar_index.hash` |
 | avatars | mime_type | TEXT | NOT NULL | 图像 MIME 类型，如 `image/webp`、`image/png` | 由文件扩展名推导 |
 | avatars | image_data | BLOB | NOT NULL | 头像物理二进制数据，移动端真理之源 | `UserData/avatars/*` 或同级文件 |
 | avatars | dominant_color | TEXT | — | 前端 Canvas 计算主色调（rgb/hex），后端仅存储。commit `df3f219` 将计算从后端 FFmpeg 移至前端 `extractDominantColorFromBlob` | — |
 | avatars | updated_at | BIGINT | NOT NULL | 逻辑时钟，毫秒时间戳 | `avatar_index.updated_at` |
+| avatars | deleted_at | BIGINT | — | Migration 0006 头像墓碑；非空时读取隐藏且不可被普通 upsert 复活 | `avatar_index.deleted_at` |
 
 > **设计说明**：`avatars` 表采用复合主键 `(owner_type, owner_id)`，实现多态头像的统一存储。头像二进制以 BLOB 形式保存在移动端数据库内部，桌面端则分散存储为独立图像文件。
 
@@ -417,4 +420,4 @@ Rust 端通过 `serde` 的自定义序列化将这些字段映射为 `bool`，�
 
 ---
 
-*最后更新：2026-07-04 | VCP Mobile v1.1.3*
+*最后更新：2026-08-11 | VCP Mobile v1.1.4*

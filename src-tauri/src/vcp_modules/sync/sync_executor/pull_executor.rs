@@ -4,6 +4,7 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +14,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_NDJSON_TRANSPORT_CHUNK_BYTES: usize = MAX_NDJSON_LINE_BYTES;
 const MAX_NDJSON_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_NDJSON_ENTITIES: usize = 100_000;
 const MAX_WARNING_SAMPLES: usize = 8;
@@ -21,6 +23,7 @@ const PULL_WORKER_BUDGET_UNIT_BYTES: usize = 1024 * 1024;
 const PULL_WORKER_BUDGET_UNITS: usize = MAX_NDJSON_LINE_BYTES / PULL_WORKER_BUDGET_UNIT_BYTES;
 const MAX_DIRECT_ENTITY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ENTITY_BATCH_ITEMS: usize = 10_000;
+const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -165,13 +168,18 @@ fn canonicalize_attachment(
     attachment_index: usize,
     warnings: &mut BoundedWarnings,
 ) -> Result<Option<Value>, String> {
-    let mut object = value.as_object().cloned().ok_or_else(|| {
-        format!("Message {message_id} attachment {attachment_index} must be an object")
-    })?;
+    let mut object = match value {
+        Value::Object(object) => object,
+        _ => {
+            return Err(format!(
+                "Message {message_id} attachment {attachment_index} must be an object"
+            ))
+        }
+    };
 
-    let nested = match object.get("_fileManagerData") {
+    let nested = match object.remove("_fileManagerData") {
         None | Some(Value::Null) => None,
-        Some(Value::Object(nested)) => Some(nested.clone()),
+        Some(Value::Object(nested)) => Some(nested),
         Some(_) => {
             warnings.push(format!(
                 "message={message_id} attachment={attachment_index}: invalid _fileManagerData"
@@ -199,15 +207,15 @@ fn canonicalize_attachment(
         return Ok(None);
     };
 
-    if let Some(nested) = nested {
+    if let Some(mut nested) = nested {
         for (nested_key, public_key) in [
             ("extractedText", "extractedText"),
             ("imageFrames", "imageFrames"),
             ("createdAt", "createdAt"),
         ] {
             if !object.contains_key(public_key) {
-                if let Some(value) = nested.get(nested_key) {
-                    object.insert(public_key.to_string(), value.clone());
+                if let Some(value) = nested.remove(nested_key) {
+                    object.insert(public_key.to_string(), value);
                 }
             }
         }
@@ -228,9 +236,10 @@ fn canonicalize_attachment(
 fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "NDJSON frame must be an object".to_string())?;
+    let mut object = match value {
+        Value::Object(object) => object,
+        _ => return Err("NDJSON frame must be an object".to_string()),
+    };
     let topic_id = object
         .get("topicId")
         .and_then(Value::as_str)
@@ -256,18 +265,27 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
         });
     }
 
-    let raw_messages = object
-        .get("messages")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("NDJSON frame for {topic_id} requires messages array"))?;
+    let raw_messages = match object.remove("messages") {
+        Some(Value::Array(messages)) => messages,
+        _ => {
+            return Err(format!(
+                "NDJSON frame for {topic_id} requires messages array"
+            ))
+        }
+    };
+    if raw_messages.len() > MAX_NDJSON_ENTITIES {
+        return Err(format!(
+            "NDJSON frame for {topic_id} exceeds {MAX_NDJSON_ENTITIES} message budget"
+        ));
+    }
     let mut warnings = BoundedWarnings::default();
     let mut seen_message_ids = HashSet::new();
     let mut messages = Vec::with_capacity(raw_messages.len());
     for raw_message in raw_messages {
-        let mut message = raw_message
-            .as_object()
-            .cloned()
-            .ok_or_else(|| format!("Topic {topic_id} contains a non-object message"))?;
+        let mut message = match raw_message {
+            Value::Object(message) => message,
+            _ => return Err(format!("Topic {topic_id} contains a non-object message")),
+        };
         let message_id = message
             .get("id")
             .and_then(Value::as_str)
@@ -434,12 +452,19 @@ async fn process_topic_messages<R: Runtime>(
                     .try_get::<String, _>("internal_path")
                     .map_err(|error| format!("Failed to decode attachment path: {error}"))?;
                 let clean_path = path.trim_start_matches("file://");
-                if !clean_path.is_empty()
-                    && tokio::fs::metadata(clean_path)
-                        .await
-                        .is_ok_and(|metadata| metadata.is_file())
-                {
-                    path_map.insert(hash, clean_path.to_string());
+                if !clean_path.is_empty() {
+                    match tokio::fs::metadata(clean_path).await {
+                        Ok(metadata) if metadata.is_file() => {
+                            path_map.insert(hash, clean_path.to_string());
+                        }
+                        Ok(_) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "Failed to inspect local attachment {hash}: {error}"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -867,6 +892,9 @@ impl PullExecutor {
         owner_id: &str,
         write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
+        if !crate::vcp_modules::sync_types::is_valid_avatar_owner(owner_type, owner_id) {
+            return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
+        }
         let url = format!(
             "{}/api/mobile-sync/download-avatar?id={}&type={}",
             http_url, owner_id, owner_type
@@ -1042,10 +1070,29 @@ impl PullExecutor {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
+        if requests.len() > MAX_MESSAGE_PULL_TOPICS {
+            return Err(format!(
+                "Pull request exceeds {MAX_MESSAGE_PULL_TOPICS} topic budget"
+            ));
+        }
         let mut expected_message_ids = HashMap::new();
+        let mut total_message_ids = 0usize;
         for (topic_id, message_ids) in requests {
             if topic_id.is_empty() || expected_message_ids.contains_key(topic_id) {
                 return Err("Pull request contains empty or duplicate topicId".to_string());
+            }
+            if message_ids.len() > MAX_ENTITY_BATCH_ITEMS {
+                return Err(format!(
+                    "Pull request for {topic_id} exceeds {MAX_ENTITY_BATCH_ITEMS} message budget"
+                ));
+            }
+            total_message_ids = total_message_ids
+                .checked_add(message_ids.len())
+                .ok_or_else(|| "Pull request message count overflow".to_string())?;
+            if total_message_ids > MAX_NDJSON_ENTITIES {
+                return Err(format!(
+                    "Pull request exceeds {MAX_NDJSON_ENTITIES} message budget"
+                ));
             }
             let exact_messages = if message_ids.is_empty() {
                 None
@@ -1132,7 +1179,7 @@ impl PullExecutor {
 
         // ── NDJSON 解析协程 ──
         let mut stream = res.bytes_stream();
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut buffer = BytesMut::new();
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
         let mut ndjson_budget = NdjsonBudget::new(requests.len());
 
@@ -1145,6 +1192,9 @@ impl PullExecutor {
             };
             let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
             ndjson_budget.observe_chunk(chunk.len())?;
+            if chunk.len() > MAX_NDJSON_TRANSPORT_CHUNK_BYTES {
+                return Err("NDJSON transport chunk exceeds 32MB budget".to_string());
+            }
 
             // 检测流级错误帧
             if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#)
@@ -1157,7 +1207,39 @@ impl PullExecutor {
                 }
             }
 
-            buffer.extend_from_slice(&chunk);
+            // Preserve the transport allocation whenever possible. If a partial line exists,
+            // copy only the prefix needed to complete that one bounded frame and defer the
+            // remaining zero-copy slice until the frame has been consumed.
+            let mut deferred_chunk: Option<Bytes> = None;
+            if buffer.is_empty() {
+                buffer = match chunk.try_into_mut() {
+                    Ok(bytes) => bytes,
+                    Err(bytes) => BytesMut::from(bytes.as_ref()),
+                };
+            } else if let Some(pos) = chunk.iter().position(|&byte| byte == b'\n') {
+                let completed_len = buffer
+                    .len()
+                    .checked_add(pos + 1)
+                    .ok_or_else(|| "NDJSON frame size overflow".to_string())?;
+                if completed_len > MAX_NDJSON_LINE_BYTES {
+                    return Err("NDJSON frame exceeds 32MB budget".to_string());
+                }
+                buffer.extend_from_slice(&chunk[..=pos]);
+                if pos + 1 < chunk.len() {
+                    deferred_chunk = Some(chunk.slice(pos + 1..));
+                }
+            } else {
+                let next_len = buffer
+                    .len()
+                    .checked_add(chunk.len())
+                    .ok_or_else(|| "NDJSON frame size overflow".to_string())?;
+                if next_len > MAX_NDJSON_LINE_BYTES {
+                    return Err("NDJSON frame exceeds 32MB budget".to_string());
+                }
+                buffer.extend_from_slice(&chunk);
+                search_start = buffer.len();
+                continue;
+            }
 
             // 逐行解析 NDJSON（优化为从游标处开始扫描，实现 O(N) 性能）
             while let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
@@ -1165,15 +1247,38 @@ impl PullExecutor {
                 if line_end + 1 > MAX_NDJSON_LINE_BYTES {
                     return Err("NDJSON frame exceeds 32MB budget".to_string());
                 }
-                let line = buffer.drain(..=line_end).collect::<Vec<_>>();
+                let line = buffer.split_to(line_end + 1);
                 search_start = 0; // 成功切分一行后，后续扫描从头开始（因为 buffer 已被 drain）
+                if buffer.is_empty() {
+                    if let Some(bytes) = deferred_chunk.take() {
+                        buffer = match bytes.try_into_mut() {
+                            Ok(bytes) => bytes,
+                            Err(bytes) => BytesMut::from(bytes.as_ref()),
+                        };
+                    }
+                }
 
                 if line.len() <= 1 {
                     continue;
                 }
 
+                // Reserve the frame's weighted memory budget before JSON parsing expands it into
+                // Value/DTO allocations. The permit is kept through the worker and is released
+                // immediately on protocol-error or empty-message branches.
+                while let Some(result) = spawn_handles.try_join_next() {
+                    if let Err(error) = result {
+                        log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
+                    }
+                }
+                let line_bytes = line.len();
+                let permit = sem
+                    .clone()
+                    .acquire_many_owned(pull_worker_permits(line_bytes)?)
+                    .await
+                    .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                 let frame = parse_topic_ndjson_frame(&line)?;
-                ndjson_budget.observe_frame(line.len(), frame.messages.len())?;
+                drop(line);
+                ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
                 let topic_id = frame.topic_id;
                 if !expected_topics.contains(&topic_id) {
                     return Err(format!("NDJSON returned unexpected topicId {topic_id}"));
@@ -1220,17 +1325,6 @@ impl PullExecutor {
                     continue;
                 }
 
-                // Permit 在 spawn 前取得，避免大量已生成任务在运行时队列中堆积。
-                while let Some(result) = spawn_handles.try_join_next() {
-                    if let Err(error) = result {
-                        log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
-                    }
-                }
-                let permit = sem
-                    .clone()
-                    .acquire_many_owned(pull_worker_permits(line.len())?)
-                    .await
-                    .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                 let app_clone = app.clone();
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
@@ -1299,8 +1393,21 @@ impl PullExecutor {
             if buffer.len() > MAX_NDJSON_LINE_BYTES {
                 return Err("NDJSON trailing frame exceeds 32MB budget".to_string());
             }
-            let frame = parse_topic_ndjson_frame(&buffer)?;
-            ndjson_budget.observe_frame(buffer.len(), frame.messages.len())?;
+            let trailing = std::mem::take(&mut buffer);
+            let trailing_bytes = trailing.len();
+            while let Some(result) = spawn_handles.try_join_next() {
+                if let Err(error) = result {
+                    log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
+                }
+            }
+            let permit = sem
+                .clone()
+                .acquire_many_owned(pull_worker_permits(trailing_bytes)?)
+                .await
+                .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
+            let frame = parse_topic_ndjson_frame(&trailing)?;
+            drop(trailing);
+            ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
             let topic_id = frame.topic_id;
             if !expected_topics.contains(&topic_id) {
                 return Err(format!("NDJSON returned unexpected topicId {topic_id}"));
@@ -1335,19 +1442,9 @@ impl PullExecutor {
                 let pull_dtos = frame.messages;
                 let legacy_attachment_warnings = frame.legacy_attachment_warnings;
                 if !pull_dtos.is_empty() {
-                    while let Some(result) = spawn_handles.try_join_next() {
-                        if let Err(error) = result {
-                            log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
-                        }
-                    }
                     let app_clone = app.clone();
                     let wq_clone = write_queue.clone();
                     let tx_clone = tx.clone();
-                    let permit = sem
-                        .clone()
-                        .acquire_many_owned(pull_worker_permits(buffer.len())?)
-                        .await
-                        .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
                     spawn_handles.spawn(async move {
                         let _permit = permit;
                         let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> =
@@ -1447,6 +1544,9 @@ mod ndjson_budget_tests {
     };
     use serde_json::json;
     use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
 
     const PROTOCOL_1_1_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_1_golden.json");
     const PROTOCOL_1_1_GOLDEN_SHA256: &str =
@@ -1710,6 +1810,32 @@ mod ndjson_budget_tests {
             pull_worker_permits(MAX_NDJSON_LINE_BYTES).unwrap(),
             PULL_WORKER_BUDGET_UNITS as u32
         );
+    }
+
+    #[tokio::test]
+    async fn maximum_frame_holds_the_parse_budget_until_worker_release() {
+        let semaphore = Arc::new(Semaphore::new(PULL_WORKER_BUDGET_UNITS));
+        let first = semaphore
+            .clone()
+            .acquire_many_owned(PULL_WORKER_BUDGET_UNITS as u32)
+            .await
+            .expect("reserve first maximum frame");
+        let waiter_semaphore = semaphore.clone();
+        let mut second = tokio::spawn(async move {
+            waiter_semaphore
+                .acquire_many_owned(PULL_WORKER_BUDGET_UNITS as u32)
+                .await
+        });
+
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut second)
+            .await
+            .is_err());
+        drop(first);
+        let _second_permit = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second frame should proceed after release")
+            .expect("permit task should complete")
+            .expect("semaphore should remain open");
     }
 
     #[test]

@@ -145,18 +145,31 @@ pub struct AttachmentSyncDTO {
     pub created_at: Option<u64>,
 }
 
-impl From<&Attachment> for AttachmentSyncDTO {
-    fn from(att: &Attachment) -> Self {
-        Self {
+impl TryFrom<&Attachment> for AttachmentSyncDTO {
+    type Error = String;
+
+    fn try_from(att: &Attachment) -> Result<Self, Self::Error> {
+        let hash = att
+            .hash
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash))
+            .ok_or_else(|| {
+                format!(
+                    "Attachment {} requires a valid SHA-256 content hash",
+                    att.name
+                )
+            })?;
+        Ok(Self {
             r#type: att.r#type.clone(),
             name: att.name.clone(),
             size: att.size,
-            hash: att.hash.clone().unwrap_or_default(),
+            hash,
             status: att.status.clone(),
             extracted_text: att.extracted_text.clone(),
             image_frames: att.image_frames.clone(),
             created_at: att.created_at,
-        }
+        })
     }
 }
 
@@ -176,9 +189,14 @@ pub struct UserMessageSyncDTO {
     pub content_hash: Option<String>,
 }
 
-impl From<&ChatMessage> for UserMessageSyncDTO {
-    fn from(msg: &ChatMessage) -> Self {
-        Self {
+impl TryFrom<&ChatMessage> for UserMessageSyncDTO {
+    type Error = String;
+
+    fn try_from(msg: &ChatMessage) -> Result<Self, Self::Error> {
+        if msg.id.is_empty() || msg.role.is_empty() {
+            return Err("User message requires non-empty id and role".to_string());
+        }
+        Ok(Self {
             id: msg.id.clone(),
             role: msg.role.clone(),
             name: msg.name.clone(),
@@ -187,9 +205,15 @@ impl From<&ChatMessage> for UserMessageSyncDTO {
             attachments: msg
                 .attachments
                 .as_ref()
-                .map(|atts| atts.iter().map(AttachmentSyncDTO::from).collect()),
+                .map(|attachments| {
+                    attachments
+                        .iter()
+                        .map(AttachmentSyncDTO::try_from)
+                        .collect::<Result<Vec<_>, String>>()
+                })
+                .transpose()?,
             content_hash: msg.content_hash.clone(),
-        }
+        })
     }
 }
 
@@ -216,6 +240,7 @@ pub struct AgentMessageSyncDTO {
 }
 
 impl AgentMessageSyncDTO {
+    #[allow(dead_code)] // The bounded push path builds this DTO by moving owned fields.
     pub fn from_message(msg: &ChatMessage, avatar_color: String) -> Self {
         Self {
             id: msg.id.clone(),
@@ -257,6 +282,7 @@ pub struct GroupMessageSyncDTO {
 }
 
 impl GroupMessageSyncDTO {
+    #[allow(dead_code)] // The bounded push path builds this DTO by moving owned fields.
     pub fn from_message(msg: &ChatMessage, avatar_color: String) -> Self {
         Self {
             id: msg.id.clone(),
@@ -400,7 +426,7 @@ mod tests {
             src: "/local/path.png".to_string(),
             name: "path.png".to_string(),
             size: 42,
-            hash: Some("hash-1".to_string()),
+            hash: Some("A".repeat(64)),
             status: Some("ready".to_string()),
             internal_path: "internal/path.png".to_string(),
             extracted_text: Some("text".to_string()),
@@ -409,11 +435,11 @@ mod tests {
             created_at: Some(100),
         };
 
-        let dto = AttachmentSyncDTO::from(&attachment);
+        let dto = AttachmentSyncDTO::try_from(&attachment).expect("valid attachment DTO");
         assert_eq!(dto.r#type, "image");
         assert_eq!(dto.name, "path.png");
         assert_eq!(dto.size, 42);
-        assert_eq!(dto.hash, "hash-1");
+        assert_eq!(dto.hash, "a".repeat(64));
         assert_eq!(dto.status.as_deref(), Some("ready"));
         assert_eq!(dto.extracted_text.as_deref(), Some("text"));
         assert_eq!(dto.image_frames.as_ref().unwrap()[0], "frame-1");
@@ -424,6 +450,26 @@ mod tests {
         assert!(!obj.contains_key("src"));
         assert!(!obj.contains_key("internalPath"));
         assert!(!obj.contains_key("thumbnailPath"));
+    }
+
+    #[test]
+    fn attachment_sync_dto_rejects_missing_or_invalid_hash() {
+        let mut attachment = Attachment {
+            r#type: "file".to_string(),
+            src: String::new(),
+            name: "missing.bin".to_string(),
+            size: 1,
+            hash: None,
+            status: None,
+            internal_path: String::new(),
+            extracted_text: None,
+            image_frames: None,
+            thumbnail_path: None,
+            created_at: None,
+        };
+        assert!(AttachmentSyncDTO::try_from(&attachment).is_err());
+        attachment.hash = Some("not-a-sha256".to_string());
+        assert!(AttachmentSyncDTO::try_from(&attachment).is_err());
     }
 
     #[test]

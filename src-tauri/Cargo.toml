@@ -36,6 +36,7 @@ tauri-plugin-opener = "2.5.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
+bytes = "1"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "fs", "net"] }
 futures-util = "0.3"
 url = "2"

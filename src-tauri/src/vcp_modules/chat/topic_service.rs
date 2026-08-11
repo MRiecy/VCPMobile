@@ -207,6 +207,32 @@ pub async fn delete_topic(
     let now = chrono::Utc::now().timestamp_millis();
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
 
+    let stored_owner =
+        sqlx::query("SELECT owner_id, owner_type, deleted_at FROM topics WHERE topic_id = ?")
+            .bind(&topic_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Topic {topic_id} does not exist"))?;
+    let stored_owner_id: String = stored_owner
+        .try_get("owner_id")
+        .map_err(|error| format!("Topic {topic_id} owner id decode failed: {error}"))?;
+    let stored_owner_type: String = stored_owner
+        .try_get("owner_type")
+        .map_err(|error| format!("Topic {topic_id} owner type decode failed: {error}"))?;
+    if stored_owner_id != owner_id || stored_owner_type != owner_type {
+        return Err(format!(
+            "Topic {topic_id} owner does not match delete request"
+        ));
+    }
+    let stored_deleted_at: Option<i64> = stored_owner
+        .try_get("deleted_at")
+        .map_err(|error| format!("Topic {topic_id} tombstone decode failed: {error}"))?;
+    if stored_deleted_at.is_some() {
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
     let active_ids: Vec<String> =
         sqlx::query_scalar("SELECT msg_id FROM active_generations WHERE topic_id = ?")
             .bind(&topic_id)
@@ -214,12 +240,16 @@ pub async fn delete_topic(
             .await
             .map_err(|e| e.to_string())?;
 
-    sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ?")
-        .bind(now)
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let deleted =
+        sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
+            .bind(now)
+            .bind(&topic_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    if deleted.rows_affected() != 1 {
+        return Err(format!("Topic {topic_id} disappeared during delete"));
+    }
 
     // 级联将该话题下的所有消息标记为逻辑删除
     sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
@@ -239,6 +269,10 @@ pub async fn delete_topic(
         HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await?;
     } else if owner_type == "group" {
         HashAggregator::bubble_group_hash(&mut tx, &owner_id).await?;
+    } else {
+        return Err(format!(
+            "Topic {topic_id} has unsupported owner type {owner_type}"
+        ));
     }
     tx.commit().await.map_err(|e| e.to_string())?;
 
@@ -256,6 +290,7 @@ pub async fn delete_topic(
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
             data_type: SyncDataType::Topic,
             id: topic_id.clone(),
+            deleted_at: now,
         });
     }
 
@@ -586,7 +621,7 @@ pub async fn regenerate_topic_response(
     let timestamp: i64 = row.get("timestamp");
 
     // 3. 截断该消息之后的所有历史
-    let cancelled_ids = crate::vcp_modules::message_service::truncate_history_after_timestamp(
+    let deletion = crate::vcp_modules::message_service::truncate_history_after_timestamp(
         app_handle.clone(),
         &db_state.pool,
         &owner_id,
@@ -595,8 +630,8 @@ pub async fn regenerate_topic_response(
         timestamp,
     )
     .await?;
-    for msg_id in cancelled_ids {
-        if let Err(error) = active_requests.cancel(&msg_id) {
+    for msg_id in &deletion.active_ids {
+        if let Err(error) = active_requests.cancel(msg_id) {
             log::warn!(
                 "Failed to cancel regenerated generation {}: {}",
                 msg_id,
@@ -604,6 +639,7 @@ pub async fn regenerate_topic_response(
             );
         }
     }
+    crate::vcp_modules::chat_manager::notify_message_deletions(&app_handle, &topic_id, &deletion);
 
     // 4. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
     let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {
