@@ -9,6 +9,11 @@ Current scope:
 - Android dumpsys/logcat snapshot collection
 - Rust Criterion benchmark artifact capture
 
+Timestamped device captures under `tests/perf/reports/` are local-only and
+ignored by Git because they can contain device serials, logcat, and unrelated
+system state. Extract only a sanitized aggregate into tracked documentation.
+Debug/HMR measurements are diagnostic baselines, not Release acceptance data.
+
 Long soak tests are intentionally left as a documented/manual gate for now; they
 require a fixed real device, stable power/network conditions, and explicit
 approval of thresholds.
@@ -29,6 +34,10 @@ node tests/perf/scripts/collect_android_dumpsys.cjs --mode debug --out-dir tests
 node tests/perf/scripts/run_rust_bench.cjs --no-run --out-dir tests/perf/reports/rust-bench
 node tests/perf/scripts/run_rust_bench.cjs --out-dir tests/perf/reports/rust-bench
 ```
+
+The startup helper resolves the installed package's explicit Launcher activity
+before calling `am start -W`. This is required on Android builds where a
+package-only MAIN/LAUNCHER intent does not resolve reliably.
 
 ## START_NOT_STICKY note
 

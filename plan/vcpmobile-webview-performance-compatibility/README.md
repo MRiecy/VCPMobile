@@ -49,7 +49,14 @@
 - 生产发布目标是签名 Android `arm64-v8a` APK；desktop/iOS/TV 不在支持矩阵。
 - 仓库当前 E2E 是 Node.js + adb smoke，不是 Maestro；没有 Playwright desktop E2E。
 - 软件与生成物验证由实际 runner 输出记录，不在计划里维护易漂移的模块数、测试数、bundle KB 或 CSS 命中数。
-- 多设备真机验收仍未归档，因此不得标记 `DEVICE-VERIFIED`。
+- 已取得一台现代 Android 手机的局部真机证据，但多设备矩阵仍未归档，因此不得标记 `DEVICE-VERIFIED`。
+
+## 局部真机证据
+
+- 2026-08-13 在 commit `5a56fea` 的 arm64 Debug 包上完成 OPPO PHZ110 快速 UI 验收；APK SHA-256 为 `5b155e418d463e740006720ad37fe518ec4db2a468944261e7b96e234c62e0a7`。设备为 Android 16 / API 36、Google WebView `150.0.7871.181`、360 × 792 CSS px、DPR 3、字体缩放 1.0、手势导航、竖屏。
+- 验收人快速检查了当前可达 UI、滚动、左右抽屉与键盘，未发现可见回归；受控交互为 5715 frames / 9 frame deadline misses（0.16%），未观察到 FATAL、ANR 或 Chromium fatal error。
+- 原生顶部 cutout 120 physical px 经 DPR 3 转为 `--vcp-safe-top: 40px`；键盘 900 physical px 转为 `--vcp-ime-offset: 300px`，visual viewport 同步从 792px 降至 492px，没有单位错误或重复累加。
+- 本机自动旋转关闭，本轮没有归档 landscape 证据；平板、折叠/分屏、1.5× 字体、三键导航与最低 WebView 仍待验收，所以状态继续为 `DEVICE-EVIDENCE-PENDING`。
 
 ## 本轮软件验证记录
 

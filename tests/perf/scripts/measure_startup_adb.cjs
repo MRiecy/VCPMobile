@@ -7,7 +7,8 @@ function usage() {
   node tests/perf/scripts/measure_startup_adb.cjs [--mode debug|release] [--samples 10] [--out <json>]
 
 Uses adb am start -W to measure cold launch. Boot-ready metrics require future app
-instrumentation; this script records Android Activity launch timings now.
+instrumentation; this script resolves the explicit Launcher activity and records
+Android Activity launch timings now.
 `);
 }
 
@@ -47,6 +48,31 @@ function parseAmStart(output) {
   };
 }
 
+function resolveLauncherComponent(pkg) {
+  const output = runAdb([
+    'shell',
+    'cmd',
+    'package',
+    'resolve-activity',
+    '--brief',
+    '-a',
+    'android.intent.action.MAIN',
+    '-c',
+    'android.intent.category.LAUNCHER',
+    '--user',
+    '0',
+    pkg,
+  ], { allowFailure: true });
+  const component = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .findLast((line) => line.includes('/'));
+  if (!component) {
+    throw new Error(`无法解析 ${pkg} 的 Launcher Activity：\n${output}`);
+  }
+  return component;
+}
+
 function stats(values) {
   const clean = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
   if (clean.length === 0) return null;
@@ -66,12 +92,13 @@ function stats(values) {
 const args = parseArgs(process.argv.slice(2));
 const device = getDeviceInfo();
 const pkg = getPackageName(args.mode);
-console.log(`[startup] device=${device.serial} ${device.manufacturer} ${device.model} sdk=${device.sdk} package=${pkg}`);
+const component = resolveLauncherComponent(pkg);
+console.log(`[startup] device=${device.serial} ${device.manufacturer} ${device.model} sdk=${device.sdk} package=${pkg} component=${component}`);
 
 const samples = [];
 for (let i = 0; i < args.samples; i += 1) {
   runAdb(['shell', 'am', 'force-stop', pkg], { allowFailure: true });
-  const output = runAdb(['shell', 'am', 'start', '-W', '-p', pkg, '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER']);
+  const output = runAdb(['shell', 'am', 'start', '-W', '-n', component]);
   const parsed = parseAmStart(output);
   samples.push({ index: i + 1, ...parsed });
   console.log(`[startup] #${i + 1} total=${parsed.total_time_ms} wait=${parsed.wait_time_ms} this=${parsed.this_time_ms}`);
@@ -81,6 +108,7 @@ const report = {
   generated_at: new Date().toISOString(),
   mode: args.mode,
   package: pkg,
+  component,
   device,
   samples,
   total_time_ms: stats(samples.map((sample) => sample.total_time_ms)),
