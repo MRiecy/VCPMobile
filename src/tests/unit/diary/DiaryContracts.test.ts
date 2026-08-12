@@ -82,11 +82,10 @@ describe("diary cross-layer contracts", () => {
     expect(overlaySource).toContain("isDiaryCenterOpen.value");
   });
 
-  it("closes the right drawer before pushing DiaryCenter", () => {
+  it("opens DiaryCenter without changing the right drawer intent", () => {
     const handler = rightSidebarSource.match(/const openDiaryCenter = \(\) => \{([\s\S]*?)\n\};/)?.[1] ?? "";
-    expect(handler.indexOf("emit('close')")).toBeGreaterThanOrEqual(0);
-    expect(handler.indexOf("overlayStore.openDiaryCenter()"))
-      .toBeGreaterThan(handler.indexOf("emit('close')"));
+    expect(handler).toContain("overlayStore.openDiaryCenter()");
+    expect(handler).not.toContain("emit('close')");
   });
 });
 

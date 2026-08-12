@@ -544,7 +544,7 @@ html.dark .vcp-markdown-block code:not(pre code) {
 
 /* Dark Theme Overrides for Diary */
 html.dark .vcp-diary-block {
-    background: #2c2a3a !important;
+    background: rgba(44, 42, 58, 0.95) !important;
     border-color: #4a485f;
     color: #d8d2c9 !important;
     box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
@@ -554,41 +554,70 @@ html.dark .vcp-diary-header {
     border-bottom-color: #4a485f;
 }
 
-html.dark .vcp-diary-title {
+html.dark .vcp-diary-title,
+html.dark .vcp-diary-update-title {
     color: #ffb74d;
 }
 
-html.dark .vcp-diary-maid-name {
+html.dark .vcp-diary-date,
+html.dark .vcp-diary-update-label,
+html.dark .vcp-diary-update-arrow {
+    color: #a0a0b0;
+}
+
+html.dark .vcp-diary-maid-info,
+html.dark .vcp-diary-update-meta {
+    color: #b0bec5;
+}
+
+html.dark .vcp-diary-maid-name,
+html.dark .vcp-diary-folder-name {
     color: #ffcc80;
     background: rgba(255, 183, 77, 0.1);
 }
 
+html.dark .vcp-diary-meta-separator {
+    color: #7f7f90;
+    opacity: 0.75;
+}
+
+html.dark .vcp-diary-content,
+html.dark .vcp-diary-update-content {
+    color: #c5c8c6;
+}
+
 html.dark .vcp-diary-block.is-valet {
-    background: #202b36 !important;
-    border-color: #3f566a;
-    color: #d4e0e8 !important;
+    background: rgba(38, 50, 65, 0.95) !important;
+    border-color: #3e536b;
+    color: #d4dde8 !important;
 }
 
 html.dark .vcp-diary-block.is-valet .vcp-diary-header {
-    border-bottom-color: #3f566a;
+    border-bottom-color: #3e536b;
 }
 
-html.dark .vcp-diary-block.is-valet .vcp-diary-title,
-html.dark .vcp-diary-block.is-valet .vcp-diary-maid-name {
-    color: #9cc8e8;
+html.dark .vcp-diary-block.is-valet .vcp-diary-title {
+    color: #90caf9;
 }
 
 html.dark .vcp-diary-block.is-valet .vcp-diary-date,
-html.dark .vcp-diary-block.is-valet .vcp-diary-maid-info {
-    color: #aac0d0;
+html.dark .vcp-diary-block.is-valet .vcp-diary-maid-info,
+html.dark .vcp-diary-block.is-valet .vcp-diary-maid-name,
+html.dark .vcp-diary-block.is-valet .vcp-diary-folder-name {
+    color: #bbdefb;
 }
 
-html.dark .vcp-diary-block.is-valet .vcp-diary-maid-name {
-    background: rgba(120, 177, 216, 0.1);
+html.dark .vcp-diary-block.is-valet .vcp-diary-maid-name,
+html.dark .vcp-diary-block.is-valet .vcp-diary-folder-name {
+    background: rgba(144, 202, 249, 0.1);
+}
+
+html.dark .vcp-diary-block.is-valet .vcp-diary-content {
+    color: #d4dde8;
 }
 
 html.dark .vcp-diary-update-block {
-    background: #2c2a3a;
+    background: rgba(44, 42, 58, 0.95);
     border-color: #4a485f;
     color: #d8d2c9;
     box-shadow: 0 2px 7px rgba(0, 0, 0, 0.22);
@@ -598,38 +627,47 @@ html.dark .vcp-diary-update-header {
     border-bottom-color: #4a485f;
 }
 
-html.dark .vcp-diary-update-meta,
-html.dark .vcp-diary-update-label,
-html.dark .vcp-diary-update-arrow {
-    color: #c6ad9e;
-}
-
 html.dark .vcp-diary-update-side {
     background: rgba(255, 255, 255, 0.025);
     border-left-color: #75665e;
 }
 
 html.dark .vcp-diary-update-after {
-    background: rgba(120, 177, 216, 0.06);
-    border-left-color: #6b9bbb;
+    background: rgba(102, 187, 106, 0.08);
+    border-left-color: #66bb6a;
 }
 
 html.dark .vcp-diary-update-after .vcp-diary-update-label {
-    color: #9cc8e8;
+    color: #81c784;
 }
 
 html.dark .vcp-diary-update-block.is-valet {
-    background: #202b36;
-    border-color: #3f566a;
-    color: #d4e0e8;
+    background: rgba(38, 50, 65, 0.95);
+    border-color: #3e536b;
+    color: #d4dde8;
 }
 
 html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-header {
-    border-bottom-color: #3f566a;
+    border-bottom-color: #3e536b;
 }
 
-html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-meta {
-    color: #aac0d0;
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-title {
+    color: #90caf9;
+}
+
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-meta,
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-maid-name,
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-folder-name {
+    color: #bbdefb;
+}
+
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-maid-name,
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-folder-name {
+    background: rgba(144, 202, 249, 0.1);
+}
+
+html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-content {
+    color: #d4dde8;
 }
 
 /* --- Diary content overrides (placed after .vcp-markdown-block to win cascade) --- */

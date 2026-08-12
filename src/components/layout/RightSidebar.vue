@@ -23,7 +23,6 @@ const openDistributedView = () => {
 };
 
 const openDiaryCenter = () => {
-  emit('close');
   overlayStore.openDiaryCenter();
 };
 
