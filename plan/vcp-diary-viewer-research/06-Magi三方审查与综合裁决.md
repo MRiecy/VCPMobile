@@ -1,7 +1,8 @@
 # 06｜Magi 三方审查与综合裁决
 
 > 审查日期：2026-08-12。  
-> 方法：三位审查者分别只读检查 VCPChat 与 VCPMobile，再由主审按源码证据、用户目标和交付风险综合裁决。  
+> 复核状态：已按产品负责人实测反馈，并以官方最新 VCPToolBox/VCPChat 线性版本完成二次裁决。
+> 方法：三位审查者分别只读检查 VCPChat、VCPToolBox 与 VCPMobile，再由主审按源码证据、运行态事实、用户目标和交付风险综合裁决。
 > 边界：三方均未修改 VCPChat；本报告记录意见，不以多数票替代事实。
 
 ## 1. 审查任务
@@ -38,18 +39,20 @@
 
 ## 2. 三方共同确认的事实
 
-三方独立审查后没有分歧的事实：
+二次复核后冻结以下事实：
 
 1. 桌面 VCPMemo 的实际管理模型是“文件夹 → memo 文件 → 整文件内容”；没有条目切段事实。
-2. 管理路由使用 Basic admin credentials；DailyNote/LightMemo tool 使用 Bearer API Key。
-3. 桌面 list/read/refresh 缺少 generation；整文件保存是 last-write-wins，没有 dirty guard 或条件写。
-4. 桌面 `marked.parse → innerHTML`、宽松 CSP 和错误文本插入不可复制到 Mobile。
-5. 桌面卡片网格、重度 blur、大阴影、hover/scale、持续 Canvas 与人为 800ms 延迟不适合手机。
-6. VCPMobile 已有 SettingsState、reqwest 有界读取范式、SlidePage、overlayStore、ModalHistory、键盘 Insets、DOMPurify 与 VueUse 列表能力。
-7. VCPMobile 没有远端 Diary service、Diary Store、离线缓存、写队列或 Agent ID→folder 契约。
-8. 现有 `DiaryBlock.vue` 是聊天协议展示资产，不是远端整文件管理器。
-9. 当前源码层级为 `editor=70, viewer=80`；实现应使用语义层名，避免扩散数字漂移。
-10. 旧版排版研究稿的三级模型和“排除编辑”前提不能继续作为施工 SSOT。
+2. 管理路由使用 Basic admin credentials；DailyNote/LightMemo Tool 使用 Bearer API Key。
+3. 最新 VCPToolBox 已提供 folder/list/get/search/save/move/delete-batch/folder-delete/associative-discovery 管理路由；DailyNote 创建与 LightMemo 语义查询走 Human Tool。
+4. admin save/move/delete 通过 `runExternalFileMutation` 串行提交文件变化，再异步调度 SQLite/Rust 索引；HTTP 成功不等于语义索引已经追平。
+5. 上游没有 ETag、revision、`If-Match` 或原子 rename endpoint；桌面运行态重命名能力由用户实测确认，不能再由单个前端 handler 的缺失反推产品无此功能。
+6. 日记正文属于用户明确接受的可信 HTML 圈，允许 `marked.parse → innerHTML`；文件名、摘要、Tool 元信息和错误文本不因此获得 HTML 信任。
+7. 单目录实际为数百至数千文件，正文平均数 KiB、范围约数百字节至数十 KiB，因此首版文件列表必须窗口化，同时保留高余量响应预算。
+8. Agent 与 folder 相互独立；公共 folder 可被多个 Agent 和用户共同写入。分类名称长期稳定；LightMemo 语义排除服从服务端，本机隐藏是默认空、可逆且独立的附加发现性过滤。
+9. VCPMobile 已有 SettingsState、reqwest 有界读取范式、SlidePage、overlayStore、ModalHistory、键盘 Insets 和 VueUse 列表能力，但没有远端 Diary service、Diary Store 或离线写队列。
+10. 现有 `DiaryBlock.vue` 是聊天协议展示资产，不是远端整文件管理器。
+11. 当前源码层级为 `editor=70, viewer=80`；实现应使用语义层名，避免扩散数字漂移。
+12. 旧版排版研究稿的三级模型和“排除编辑”前提不能继续作为施工 SSOT。
 
 ## 3. 分角色裁决
 
@@ -63,12 +66,12 @@
 - list/read/search 只设 loading、不设 generation 与 target commit gate；
 - 保存不记录 baseline，或 POST 超时后自动重试；
 - 把 GET→POST hash 检查宣称为原子 CAS；
-- 未证明 raw-save 的索引一致性就宣布编辑可用；
-- 复用桌面 `innerHTML` 或现有 trusted-circle renderer 处理远端日记；
+- 把“文件已提交”误报成“语义索引已同步”，或等待索引追平才允许写入成功；
 - 将服务端自然语言错误直接送入 `v-html`；
+- 在 Vue 中手工拼接 Human Tool 块而绕过 ESCAPE serializer；
 - 用无界 `NoteKey → lock/cache` 映射制造长期状态。
 
-Melchior 推荐的最小系统：一个 typed Rust service、一个有界 client、一个 mutation gate、一个 active search owner；业务数据仍由一个前端 feature Store 管理。
+Melchior 推荐的最小系统：一个 typed Rust service、一个有界 client、一个全局 Diary mutation gate、普通/语义搜索各自的 active owner，以及一个 Human Tool serializer；业务数据仍由一个前端 feature Store 管理。服务端本身也是单一外部 mutation FIFO，因此无需维护无界的按文件锁表。
 
 ### 3.2 Balthasar 的体验否决线
 
@@ -91,16 +94,16 @@ Balthasar 推荐：右侧栏入口、当前文件夹选择层、高密度线性�
 
 以下任一设计出现，务实交付审查不通过：
 
-- 首版同时做创建、批量管理、语义搜索、工作台、图谱、离线与同步；
+- 把当前核心范围继续扩张到工作台、联想图谱、离线数据库与跨设备同步；
 - 新增第二套路由、网络 client、同步实体、SQLite 日记库或 Android 插件命令；
 - list/reader/editor 各建 Store 或全局 page type；
-- 未测量真实列表规模就引入新虚拟滚动依赖；
+- 已知数千文件规模却仍渲染完整 DOM 列表，或为窗口化再引入新依赖；
 - 复用通用 FullScreenEditor，却不补 target、dirty、busy、conflict；
 - 为计划图美观而预建十余空组件、缓存层或抽象接口；
 - 在现有 dirty worktree 中修改 `mod.rs`/`lib.rs` 前不做 checkpoint；
 - 以“桌面已有”为唯一理由恢复低频能力。
 
-Casper 推荐：P0 契约冻结 → P1 只读纵切 → P2 普通搜索与受保护编辑。每阶段有独立退出条件，低价值能力允许永久后置。
+Casper 推荐：P0 契约与 fixture → P1 浏览/普通搜索 → P2 编辑/重命名 → P3 创建/管理/语义搜索。P1—P3 共同构成当前里程碑，每阶段独立可验证；工作台和联想能力才允许后置。
 
 ## 4. 主要分歧与主审裁决
 
@@ -113,15 +116,15 @@ Casper 推荐：P0 契约冻结 → P1 只读纵切 → P2 普通搜索与受保
 
 理由：用户感知仍是列表进入文档；工程上只需一个生命周期根和一个 store，Android 返回顺序更容易证明。
 
-### 分歧 B｜首版是否恢复创建、删除与批量移动
+### 分歧 B｜当前里程碑是否恢复管理与语义能力
 
 - Balthasar 从“复原桌面任务完整性”出发，认为这些能力有清晰手机表达。
 - Melchior 指出 create 走另一套鉴权与文本协议，delete/move 有 partial-success 和 tombstone 风险。
-- Casper 认为它们会显著扩大首版写入、选择态和故障矩阵。
+- Casper 初审认为它们会显著扩大首版写入、选择态和故障矩阵。
 
-**裁决**：Release 1 不含创建、删除、移动。P2 只保留用户明确要求的整文件编辑；管理操作进入 P3。
+**二次裁决**：管理与 LightMemo 语义搜索是产品核心，全部进入当前里程碑。以 P1—P3 控制施工风险，而不是删除范围：P1 浏览/普通搜索，P2 编辑/重命名，P3 创建、移动、删除、批量、本机隐藏文件夹和语义搜索。
 
-理由：编辑已经需要解决索引一致性与冲突，首版再叠加多种 mutation 会削弱可靠性。后置不代表永久删除，04 已为 P3 固定接口与测试前提。
+理由：工程阶段是可验证的交付顺序，不是把核心功能降级成未来愿望。P3 必须通过 partial-success、ESCAPE、最终一致索引和选择态测试，才算当前里程碑完成。
 
 ### 分歧 C｜搜索取消只做前端提交门还是 Rust 主动取消
 
@@ -133,9 +136,9 @@ Casper 推荐：P0 契约冻结 → P1 只读纵切 → P2 普通搜索与受保
 ### 分歧 D｜首版是否直接使用虚拟列表
 
 - 固定行高设计适合窗口化；VCPMobile 也已有 `useVirtualList`。
-- 但真实文件数量尚未采集，窗口化会增加测量、滚动恢复和动态高度约束。
+- 用户已确认单目录数百至数千文件；普通完整 DOM 列表不再是合理默认。
 
-**裁决**：P1 先用普通线性列表，P0 记录规模，L8 真机 profile。若出现可复现瓶颈，再复用 `@vueuse/core/useVirtualList`，不新增依赖。
+**二次裁决**：P1 直接复用 `@vueuse/core/useVirtualList`，固定 84px 行高并覆盖 overscan、稳定 key、返回滚动恢复；不新增依赖。L8 真机 profile 用于校准，而不是决定是否窗口化。
 
 ### 分歧 E｜阅读器是否需要沉浸式隐藏顶栏与翻页
 
@@ -149,7 +152,21 @@ Casper 推荐：P0 契约冻结 → P1 只读纵切 → P2 普通搜索与受保
 - 桌面每次输入整篇重渲染，反馈即时但成本高。
 - 手机软键盘场景更需要稳定输入和可用底部动作。
 
-**裁决**：Release 1 默认手动切换预览；若实测确有需求，采用 300–500ms debounce。重型 Markdown 扩展按需加载，不在每次键击执行。
+**裁决**：当前版本默认手动切换预览；若实测确有需求，采用 300–500ms debounce。重型 Markdown 扩展按需加载，不在每次键击执行。
+
+### 分歧 G｜是否认为桌面没有文件名重命名
+
+- 静态检查发现最新 `handleSaveMemo()` 仍按当前 `{folder,file}` 保存，最新管理路由也没有专用 rename endpoint。
+- 用户已经在当前桌面运行态确认文件名可重命名，运行事实不能被不完整的静态调用链否定。
+
+**二次裁决**：当前版本必须提供重命名。施工前捕获桌面实际请求；若部署没有专用 endpoint，则采用“写入新文件 → 读回校验 → 删除旧文件”的兼容 transaction。目标已存在时拒绝覆盖；删除源失败时明确返回新旧并存，不伪装成原子操作。
+
+### 分歧 H｜可信正文是否需要独立严格净化
+
+- 初审从通用远端内容模型出发，建议独立严格 sanitizer。
+- 产品负责人明确日记正文属于可信 HTML，桌面保留 raw HTML 的表达能力需要复现。
+
+**二次裁决**：正文允许 `marked.parse → v-html/innerHTML`，最多复用项目已有的轻量 trusted-content 过滤，不建立 Diary 专用严格白名单。信任不外溢到文件名、摘要、语义元信息或错误；保存永远使用原始草稿字符串，不从 DOM 反序列化。
 
 ## 5. 综合方案
 
@@ -158,11 +175,12 @@ Casper 推荐：P0 契约冻结 → P1 只读纵切 → P2 普通搜索与受保
 ~~~text
 右侧栏：日记中心
   └─ DiaryCenterView（唯一全局 SlidePage）
-      ├─ list：当前文件夹 + 高密度 memo 文件列表
-      ├─ search：当前文件夹 / 全部文件夹
-      ├─ reader：整文件安全 Markdown、连续滚动、可选择
+      ├─ list：稳定分类 + 本机隐藏偏好 + 窗口化 memo 文件列表
+      ├─ search：当前文件夹 / 全部文件夹普通搜索 + LightMemo 语义搜索
+      ├─ reader：整文件可信 HTML、连续滚动、可选择
       ├─ editor：单栏草稿、dirty/saving/conflict/uncertain
-      └─ preview：手动切换的严格净化预览
+      ├─ manager：创建、重命名、移动、删除、批量选择
+      └─ preview：手动切换，复用正文可信渲染链
 ~~~
 
 ### 技术形态
@@ -172,44 +190,46 @@ Vue components
   → one Composition Pinia store
   → typed Tauri commands
   → one Rust DiaryServiceState
-  → bounded same-origin Basic Auth client
-  → VCP admin_api/dailynotes
+  → bounded same-origin client + Human Tool serializer
+  ├─ Basic → VCP admin_api/dailynotes
+  └─ Bearer → DailyNote / LightMemo
 ~~~
 
-### 首版边界
+### 当前里程碑边界
 
 保留：
 
 - 文件夹与文件浏览；
 - 任意文件名 fallback；
-- 整文件安全阅读；
+- 整文件可信 HTML 阅读；
 - 当前文件夹/全局普通搜索；
-- 受保护的整文件编辑；
+- LightMemo 语义搜索；
+- 受保护的整文件编辑与文件名重命名；
+- DailyNote 创建、移动、删除、批量选择、空文件夹与本机隐藏管理；
 - 局部错误、刷新、空态和认证引导。
 
 后置：
 
-- DailyNote 创建；
-- 删除、移动、批量选择和文件夹偏好；
-- 语义搜索与联想发现；
-- 工作台和图谱；
-- 条目切分、Agent 深链、离线数据库和跨设备同步。
+- 多文档工作台；
+- 联想发现和图谱；
+- 条目切分、Agent→folder 猜测映射、离线数据库和跨设备同步。
 
 ## 6. 综合通过条件
 
-Magi 对方案给出 `CONDITIONAL PASS`，条件为：
+Magi 二次复核给出 `PASS FOR CONSTRUCTION`；以下是施工验收条件，而非缩减产品范围的理由：
 
-1. P0 用实际部署 fixture 校准 API、path prefix、body budget 和错误；
-2. 写入前确认条件写能力与 admin raw-save 的索引一致性；
-3. Rust 保存协议不得把 best-effort 预检描述成 CAS；
-4. 远端 Markdown 通过独立严格 sanitizer profile；
-5. 所有读链路都有 generation + target 提交门，搜索还有主动取消；
-6. UI 遵循线性、高密度、实色、无内容 blur 的移动表达；
-7. Release 1 严守 P1/P2，不夹带 P3/P4；
-8. 施工前按项目协议确认并提交工作区 checkpoint。
+1. P0 在开工时复核官方最新 ref，并用实际部署 fixture 校准 path prefix、鉴权、body budget 和错误；
+2. Rust 保存明确称为 best-effort 冲突预检，不宣称 CAS，超时后不自动重写；
+3. 文件 mutation 成功与语义索引追平分别建模，测量追平延迟并提供可重试状态；
+4. 捕获桌面重命名运行态请求；没有原子 endpoint 时，通过兼容 transaction 的重名、校验失败和源删除失败测试；
+5. 可信正文可直接渲染 raw HTML，所有非正文远端字符串仍使用文本绑定；
+6. 所有读链路都有 generation + target 提交门，普通/语义搜索还有各自主动取消 owner；
+7. 文件列表从 P1 起窗口化，UI 遵循线性、高密度、实色、无内容 blur 的移动表达；
+8. P1—P3 全部通过才算当前里程碑完成；工作台和联想发现不得偷渡，也不得用它们拖延核心交付；
+9. 若施工涉及新模块目录或修改 `mod.rs`/`lib.rs`，先按项目存档协议建立 checkpoint。
 
-若 Q-006“raw-save 后索引一致性”不能通过，综合裁决自动降级为 `PASS-READ-ONLY`：可以发布可靠浏览与普通搜索，不得用不一致写入满足功能表。
+若部署 smoke 暴露契约漂移，状态记为 `BLOCKED-BY-DEPLOYMENT` 并报告具体端点或响应；不能把浏览纵切改名为“已完成首版”。
 
 ## 7. 最终一句话
 
-> 三方一致同意移植 VCPMemo 的领域能力，不移植它的桌面窗口形态和技术债；用一个有界、可取消、可冲突提示的移动端文件中心，先把“可靠地找到、读懂、谨慎修改 Agent 记忆”做完整。
+> 三方二次裁决同意完整移植 VCPMemo 当前核心：用一个有界、可取消、可冲突提示的移动端日记中心，完成“找、读、写、改名、管理、语义检索”，同时不移植桌面窗口形态、工作台和关系图谱负担。

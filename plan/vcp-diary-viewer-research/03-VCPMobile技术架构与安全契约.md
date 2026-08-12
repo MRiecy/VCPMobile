@@ -9,10 +9,10 @@
 flowchart LR
     UI[DiaryCenterView<br/>列表/阅读/编辑] --> STORE[useDiaryStore<br/>唯一前端状态所有者]
     STORE -->|Tauri invoke: typed args| CMD[Diary commands]
-    CMD --> SERVICE[DiaryServiceState<br/>reqwest + search owner + mutation gate]
+    CMD --> SERVICE[DiaryServiceState<br/>reqwest + search owners + mutation gate]
     SERVICE --> SETTINGS[SettingsState<br/>URL/admin credentials]
     SERVICE -->|Basic Auth| ADMIN[VCP admin_api/dailynotes]
-    SERVICE -. Phase 3 Bearer .-> TOOL[VCP v1/human/tool]
+    SERVICE -->|Bearer + Tool ESCAPE| TOOL[VCP v1/human/tool<br/>DailyNote / LightMemo]
     ADMIN -->|bounded JSON| SERVICE
     SERVICE -->|typed DTO / stable error code| STORE
     STORE --> UI
@@ -23,21 +23,22 @@ flowchart LR
 - **VCP 服务**：远端文件最终事实源；
 - **Rust**：凭据、URL、HTTP、大小/超时、schema、hash、保存冲突与响应归一化；
 - **Pinia Store**：当前视图、资源数据、请求 generation、搜索意图和编辑草稿；
-- **Vue 组件**：展示、可访问交互、严格净化后的 Markdown；
+- **Vue 组件**：展示、可访问交互、可信 Markdown/raw HTML 直接渲染；
 - **overlayStore / ModalHistory**：唯一全局页面和返回键所有者。
 
 ## 2. 模块落点
 
 ### 2.1 Rust
 
-建议在现有 chat 领域共置，因为 DailyNote 解析和 Markdown 资产已位于该领域：
+Diary 是独立远端文件管理领域，不挂在 chat 的消息解析/渲染模块之下：
 
 ~~~text
-src-tauri/src/vcp_modules/chat/
-├─ diary_service.rs           # DTO、校验、HTTP、hash、commands、纯逻辑测试
-└─ mod.rs                     # 声明 diary_service
+src-tauri/src/vcp_modules/diary/
+├─ mod.rs                     # 领域声明与最小 re-export
+├─ diary_service.rs           # HTTP、校验、hash、owners、commands、纯逻辑测试
+└─ diary_types.rs             # DTO 与稳定错误类型
 
-src-tauri/src/vcp_modules/mod.rs  # facade re-export
+src-tauri/src/vcp_modules/mod.rs  # 声明 diary 领域并做最小 facade re-export
 src-tauri/src/lib.rs              # manage state + command 注册
 ~~~
 
@@ -54,12 +55,14 @@ src/features/diary/
 ├─ DiaryCenterView.vue        # 唯一全局 SlidePage，组织内部视图
 ├─ diaryStore.ts              # 一个 Composition Pinia Store
 ├─ types.ts                   # command DTO 与 UI view model
-├─ diaryMarkdown.ts           # marked + strict DOMPurify profile
+├─ diaryMarkdown.ts           # marked 配置与可信 HTML 渲染 helper
 └─ components/
    ├─ DiaryFolderSheet.vue
    ├─ DiaryNoteList.vue
    ├─ DiaryReader.vue
-   └─ DiaryEditor.vue
+   ├─ DiaryEditor.vue
+   ├─ DiaryManager.vue
+   └─ DiaryComposer.vue
 ~~~
 
 接线修改：
@@ -78,23 +81,24 @@ src/features/diary/
 DiaryServiceState {
     http_client,
     mutation_gate,
-    active_search_owner,
+    active_text_search_owner,
+    active_semantic_search_owner,
 }
 ~~~
 
 职责：
 
 - `http_client`：连接池、redirect policy、connect/total timeout；
-- `mutation_gate`：串行化本 Mobile 进程的 diary mutation；
-- `active_search_owner`：新搜索取消旧搜索，并确保旧 owner 不能清理新状态。
+- `mutation_gate`：串行化本 Mobile 进程的 save/rename/create/move/delete mutation；
+- 两类 search owner：普通搜索与 LightMemo 语义检索分别取消旧请求，并确保旧 owner 不能清理新状态。
 
-它**不持有**当前 folder、当前 document、列表缓存或编辑草稿。写操作低频，一个全局 mutation gate 比无界 `NoteKey → Mutex` 映射更简单，也避免锁表泄漏。若未来批量操作证明吞吐不足，再用测量结果调整。
+它**不持有**当前 folder、当前 document、列表缓存或编辑草稿。VCPToolBox 本身把外部 mutation 串行入队；Mobile 使用一个全局 mutation gate 与服务端所有权保持一致，避免无界 `NoteKey → Mutex` 锁表。
 
 所有网络和文件 I/O 必须 async；Tauri command 中不使用 `unwrap()` 或 `expect()`。
 
 ## 4. Command 与 DTO
 
-### 4.1 Release 1 commands
+### 4.1 当前里程碑 commands
 
 | Command | 参数 | 返回 | 备注 |
 |---|---|---|---|
@@ -103,17 +107,20 @@ DiaryServiceState {
 | `diary_get_note` | `DiaryNoteKey` | `DiaryDocument` | 返回 raw content + SHA-256 |
 | `diary_search` | `requestId, term, folder?` | `DiarySearchResponse` | 新 owner 取消旧 owner |
 | `diary_cancel_search` | `requestId?` | `()` | 页面关闭或清空搜索 |
+| `diary_semantic_search` | `requestId, query, folder?, searchAll, k` | `DiarySemanticResponse` | Bearer LightMemo，显式提交 |
+| `diary_cancel_semantic_search` | `requestId?` | `()` | 与普通搜索独立 |
 | `diary_save_note` | `DiarySaveRequest` | `DiarySaveOutcome` | 复读、冲突、保存、验证 |
+| `diary_rename_note` | `source, targetFile, baselineHash` | `DiaryRenameOutcome` | 专用端点优先，否则可恢复 transaction |
+| `diary_create_note` | `DiaryCreateRequest` | `DiaryCreateOutcome` | DailyNote + Tool ESCAPE |
+| `diary_move_notes` | `sources, targetFolder` | `DiaryBatchOutcome` | 保留 partial success |
+| `diary_delete_notes` | `sources` | `DiaryBatchOutcome` | 保留 partial success |
+| `diary_delete_empty_folder` | `folder` | `()` | 只删空目录 |
 
-### 4.2 后续 commands
+### 4.2 后续 command
 
-- `diary_create_note`
-- `diary_move_notes`
-- `diary_delete_notes`
-- `diary_delete_empty_folder`
 - `diary_associative_discovery`
 
-语义检索可以复用 Human Tool 能力，但必须有单独 DTO 和取消生命周期，不能解析成不受约束的 HTML。
+LightMemo 是当前范围，必须有独立 DTO、Bearer 配置态与取消生命周期；输出中的 chunk 先归一化为 `folder + file` 文件结果，再按本机 `hiddenFolders` 做附加过滤。服务端结果是语义允许范围的权威上限；禁止为了镜像 `EXCLUDED_FOLDERS` 去消费会返回全插件配置文本的 `/admin_api/plugins`。联想发现和工作台仍后置。
 
 ### 4.3 DTO 草案
 
@@ -151,9 +158,45 @@ type DiarySaveOutcome = {
   contentHash: string
   verified: boolean
 }
+
+type DiarySemanticHit = {
+  key: DiaryNoteKey
+  preview: string
+  score?: number
+}
+
+type DiarySemanticResponse = {
+  hits: DiarySemanticHit[]
+  indexMayBeCatchingUp: boolean
+}
+
+type DiaryRenameOutcome = {
+  key: DiaryNoteKey
+  contentHash: string
+  status: 'renamed' | 'copied_source_retained'
+}
+
+type DiaryCreateRequest = {
+  maid: string
+  date: string
+  folder?: string
+  fileNameSuffix?: string
+  tag?: string
+  content: string
+}
+
+type DiaryCreateOutcome = {
+  key: DiaryNoteKey
+  indexStatus: 'queued'
+}
+
+type DiaryBatchOutcome = {
+  succeeded: DiaryNoteKey[]
+  errors: Array<{ key: DiaryNoteKey; message: string }>
+}
 ~~~
 
-不把未经确认的 `tags`、`agentId`、`entryCount`、`matchOffset` 或 `revision` 放进 DTO。
+不把未经确认的 `agentId`、`entryCount`、`matchOffset` 或 `revision` 放进文件 DTO。`Tag` 只属于 DailyNote 创建参数；LightMemo chunk 必须先折叠成文件命中，不能成为可编辑实体。
 
 ## 5. 错误契约
 
@@ -161,16 +204,23 @@ type DiarySaveOutcome = {
 
 | code | 含义 | UI |
 |---|---|---|
-| `DIARY_CONFIG_MISSING` | URL 或管理员凭据缺失 | 前往设置 |
-| `DIARY_AUTH_REQUIRED` | 401/403 | 检查管理员凭据 |
+| `DIARY_CONFIG_MISSING` | URL、对应管理员凭据或语义检索 API Key 缺失 | 前往设置 |
+| `DIARY_INVALID_REQUEST` | 400 或本地字段校验失败 | 对应字段就地提示 |
+| `DIARY_AUTH_REQUIRED` | 401 | 检查对应 Basic/Bearer 凭据 |
+| `DIARY_FORBIDDEN` | 403 | 路径、符号链接或 IP 被拒绝 |
 | `DIARY_NOT_FOUND` | folder/file 已不存在 | 返回列表并刷新 |
+| `DIARY_RATE_LIMITED` | 429，可能带 Retry-After | 倒计时后再试 |
 | `DIARY_CONFLICT` | 远端 hash 已不同 | 保留草稿，进入冲突动作层 |
 | `DIARY_TIMEOUT` | connect/total/idle timeout | 重试；mutation 进入结果核验 |
 | `DIARY_TRANSPORT` | DNS、TLS、断网 | 保留已有数据 |
 | `DIARY_RESPONSE_TOO_LARGE` | 超过客户端预算 | 不截断、不渲染 |
 | `DIARY_INVALID_RESPONSE` | JSON/schema/UTF-8 不合法 | 可重试并记录安全摘要 |
-| `DIARY_SERVER_ERROR` | 其他 4xx/5xx | 局部错误 |
+| `DIARY_SERVICE_UNAVAILABLE` | 503，服务未配置或搜索队列满 | 按原因设置/重试 |
+| `DIARY_SERVER_ERROR` | 其他 5xx | 局部错误 |
 | `DIARY_SAVE_UNCERTAIN` | 无法确认保存结果 | 保留草稿，禁止宣称成功 |
+| `DIARY_PARTIAL_SUCCESS` | move/delete 部分成功 | 成功项退出，失败项保留 |
+| `DIARY_RENAME_SOURCE_RETAINED` | 新文件已验证、旧文件删除失败 | 明确显示两份文件均存在 |
+| `DIARY_TOOL_ERROR` | DailyNote/LightMemo 返回插件错误 | 保留输入并允许重试 |
 
 日志只记录 code、HTTP status、operation ID 和脱敏 target hash；不记录 Authorization、密码、完整正文、完整错误 body 或带敏感 query 的 URL。
 
@@ -182,7 +232,7 @@ Rust 每次 command 从 `SettingsState` 读取配置快照：
 2. 拒绝 embedded username/password、NUL、控制字符；
 3. 去掉 query 与 fragment；
 4. 移除已知末尾 `/v1/chat/completions`；
-5. P0 确认后决定是否保留反向代理 path prefix，不能盲目只取 host；
+5. 保留 `/v1/chat/completions` 之前的反向代理 path prefix，不能只取 origin；
 6. 使用 URL path-segment API 拼接固定 `admin_api/dailynotes`；
 7. folder/file 各自作为单一 segment 编码，并在客户端防御性拒绝空值、`.`、`..`、`/`、`\`、绝对路径形式。
 
@@ -192,7 +242,7 @@ Rust 每次 command 从 `SettingsState` 读取配置快照：
 
 ## 7. HTTP 预算
 
-下表是 **Mobile 初始提案**，不是现有服务端事实；P0 用真实数据 P50/P95/max 校准：
+已知正文为数百字节至数十 KiB、平均数 KiB，单目录为数百至数千文件。下表按这一产品事实留出数量级余量，同时防止异常响应耗尽 WebView 内存：
 
 | 项目 | 初始值 |
 |---|---:|
@@ -201,9 +251,11 @@ Rust 每次 command 从 `SettingsState` 读取配置快照：
 | search total timeout | 40s（服务端自身 30s） |
 | streaming idle timeout | 15s |
 | 解码后单篇正文 | 2 MiB |
-| list/search JSON body | 4 MiB |
+| list/search JSON body | 8 MiB |
 | error body | 64 KiB |
-| 单次 summary 数量 | 5000 |
+| 单次 folder summary 数量 | 10000 |
+| 普通搜索结果 | 200（服务端硬上限） |
+| LightMemo 结果 k | 跟随上游默认 5，客户端硬上限 50 |
 | 编辑提交正文 | 2 MiB UTF-8 bytes |
 
 每个响应同时检查：
@@ -215,19 +267,22 @@ Rust 每次 command 从 `SettingsState` 读取配置快照：
 
 超过边界必须 fail closed，不能静默截断后允许编辑保存。现有可复用范式见 `message_service.rs:20-115`。
 
+单目录已知可达数千文件，`DiaryNoteList` 从首版起复用 `@vueuse/core/useVirtualList`：固定 84px 行高、稳定 key=`folder + file`、适量 overscan；不新增虚拟滚动依赖，也不对正文做窗口化。
+
 ## 8. 前端 Store 所有权
 
 `useDiaryStore` 只保留一套状态：
 
 ~~~text
 navigation:
-  screen = list | reader | editor | preview
+  screen = list | reader | editor | preview | manager | composer
 
 resources:
   folders
   selectedFolder
   notes
-  search { query, scope, results, limited }
+  textSearch { query, scope, results, limited }
+  semanticSearch { query, scope, results, state }
   document { key, content, contentHash }
 
 editor:
@@ -235,16 +290,27 @@ editor:
   dirty
   saveState
 
+management:
+  selectedKeys
+  tombstones
+  activeMutation
+
+local preferences:
+  hiddenFolders      # default empty; local discovery filter only
+  collapsedCategories
+  folderOrder
+
 request ownership:
   foldersGeneration
   notesGeneration + targetFolder
-  searchGeneration + requestId
+  textSearchGeneration + requestId
+  semanticSearchGeneration + requestId
   documentGeneration + targetKey
 ~~~
 
 不要为 shelf、reader、editor 分三个 Store；也不要把全局页面栈复制进 Diary Store。
 
-内容不写入 localStorage/Pinia persist。MVP 只在内存保留当前 document、baseline 和 draft；退出干净页面可释放。若未来需要崩溃恢复，单独设计有上限的 draft 表，绝不演化成离线 mutation queue。
+正文、搜索结果和草稿不写入 localStorage/Pinia persist，只在内存保留当前 document、baseline 和 draft。`hiddenFolders`、`collapsedCategories` 与 `folderOrder` 是本机显示偏好，可用现有 Pinia persist 单独持久化，不进入 Delta Sync；其中 `hiddenFolders` 默认空，对文件夹列表、普通搜索和 LightMemo 已返回结果做附加展示过滤，但不充当访问控制，显式 `{folder,file}` 深链仍按服务端鉴权裁决。语义搜索先使用 LightMemo 已执行 `EXCLUDED_FOLDERS` 后的结果，Mobile 不复制或改写服务端排除配置，本机恢复也不能扩大服务端语义范围。若未来需要崩溃恢复，单独设计有上限的 draft 表，绝不演化成离线 mutation queue。
 
 ## 9. 异步提交门
 
@@ -278,7 +344,7 @@ if owner == notesGeneration:
 
 刷新时保留旧内容，成功后原子替换，避免闪白。项目已有 `LatestIntentOwner` 和 Topic/Sync generation 模式可参考；当前 utility 的 ID 前缀是 `local-share`，应复用机制而不是生搬名称。
 
-搜索还需要 Rust 侧 active owner/cancellation，避免快速输入留下多个最长 30 秒的服务端扫描。新请求取消旧 token；完成清理必须再次核对 owner。
+普通搜索和 LightMemo 分别需要 Rust active owner/cancellation。普通搜索可能占用最长 30 秒的服务端扫描；语义检索还有 embedding/RAG 延迟。新请求取消同类旧 token；完成清理必须再次核对 owner。
 
 ## 10. 保存与冲突
 
@@ -339,47 +405,63 @@ Rust 应在可行时重新 GET：
 
 GET→POST 之间仍有 TOCTOU。只有服务端 revision/ETag/If-Match 或事务化 compare-and-swap 才能真正消除多客户端覆盖。产品文案与验收报告必须把当前方案称为“冲突预检”，不能称为原子 CAS。
 
-此外，P0 必须验证 admin raw-save 后 KnowledgeBase/RAG 索引更新；只验证文件内容变化不等于记忆系统一致。
+最新 VCPToolBox 已确认 admin save/move/delete 进入 `runExternalFileMutation`，文件提交后把 upsert/delete 放入 SQLite/Rust 索引批处理。因为管理路由使用 `waitForIndex: false`，HTTP 成功只证明文件 mutation 完成；Store 应把相关语义结果标记 stale，并允许稍后重试，不阻塞保存成功提示。
 
-## 11. Markdown 与内容安全
+### 10.4 重命名 transaction
 
-### 11.1 独立严格 profile
+重命名属于当前范围。执行顺序：
 
-远程日记按不可信内容处理。首版采用现有依赖：
+1. 固定 `{sourceKey,targetFile,baselineHash,operationId}`；
+2. 校验并规范化目标扩展名；
+3. GET 源正文并核对 baseline；
+4. 探测目标；目标已存在则 `DIARY_CONFLICT`，禁止覆盖；
+5. 若部署提供经 fixture 证实的专用 rename，调用它并读回验证；
+6. 否则 POST 相同正文到目标 key，GET 目标并核对 hash；
+7. 目标已确认后调用 `delete-batch` 删除源；
+8. 删除成功后原子迁移 Store key；删除失败则返回 `DIARY_RENAME_SOURCE_RETAINED`，保留两份文件并刷新列表。
+
+兼容 transaction 不是原子 rename。目标探测与 POST 之间也存在跨客户端 TOCTOU；Mobile 会拒绝已知重名，但在上游没有 create-if-absent/rename 条件端点时不能声称消除了并发覆盖窗口。不能在删除源失败时自动删除已验证的新文件“回滚”，因为这可能把用户唯一确认成功的新副本再次置于风险中。
+
+### 10.5 创建、移动与删除
+
+- DailyNote 创建将 `fileNameSuffix` 序列化为 Tool 的 `fileName`；它只是日期/时刻文件名后的可选后缀。成功响应必须解析服务端最终分配的 `folder + fileName`；
+- move/delete 原样保留服务端 `moved/deleted/errors`，不能把 HTTP 200 等同于全量成功；
+- 成功删除/移出的 key 立即进入 tombstone，迟到 list/get 不得复活；
+- 文件夹删除只在当前列表确认空后开放，服务端 400 仍是最终裁决；
+- mutation 完成后相关普通列表刷新，LightMemo 结果标记为可能等待索引追平。
+
+## 11. Markdown 与可信 HTML
+
+### 11.1 产品信任决策
+
+日记正文来自用户自己管理的 VCP 服务，按可信内容处理。当前版本保留 raw HTML：
 
 ~~~text
-raw content
+raw diary content
   → marked.parse
-  → feature-local DOMPurify strict profile
-  → vcp-markdown-block typography
-  → main DOM
+  → 可选复用现有轻量 trusted-content filter
+  → v-html / innerHTML
 ~~~
 
-要求：
+不新增 Diary 专属 DOMPurify 严格 profile，不建立标签/属性白名单，也不把合法 HTML 转义成纯文本。可直接采用桌面 `marked → innerHTML` 语义；如果复用现有过滤，必须先用包含图片、音频、表格、样式和自定义 HTML 的真实日记 fixture 验证不会破坏内容。
 
-- 禁止 raw `script/style/iframe/form/object/embed/meta/base/link`；
-- 禁止所有事件属性；
-- 禁止 `javascript:`、`vbscript:` 和活动型 data document；
-- 只允许受控的 Markdown 标签/属性；
-- 外链添加 `noopener noreferrer`，由受控 opener 打开；
-- 外部图片默认不自动跨 origin 加载；同源图片 lazy load；
-- 错误、文件名、摘要、搜索高亮使用 Vue 文本节点，不拼 HTML；
-- HTML 被移除时正文仍可读，不显示空白。
+日记正文使用 feature-local 的可信内容渲染 helper，不借用聊天消息的解析或渲染链。
 
-不能直接复用：
+信任边界仅覆盖 `DiaryDocument.content`：
 
-- 桌面 `marked → innerHTML`；
-- `HtmlPreviewBlock` 为完整沙箱文档放宽的 DOMPurify 配置；
-- `astRenderer` 的 trusted-circle active-content guard。
+- folder/file、preview、搜索 scope、批量错误和服务端 `error/message/details` 走 Vue 插值或 `textContent`；
+- LightMemo 返回的路径和元信息先解析成 DTO，再以文本渲染；
+- HTML 只在 reader/preview 的专用正文容器进入 DOM；
+- 编辑器始终保留并保存原始正文，不把浏览器规范化后的 `innerHTML` 回写到文件。
 
-若未来改为 Rust Markdown AST，也必须在进入主 DOM 前删除 `raw_html/raw_html_inline` 或再经过同等严格净化；“来自 Rust”不等于安全。
+这是明确的产品取舍；无需把它包装成通用 Web 安全保证。
 
 ### 11.2 编辑预览
 
 - 默认手动切换预览；
 - 若实测需要实时预览，使用 300–500ms debounce；
 - 预览只处理当前正文；
-- KaTeX、Mermaid、代码高亮按需加载，并单独做安全/性能验收；
+- KaTeX、Mermaid、代码高亮按需加载，并单独做性能与内容兼容验收；
 - 不在每次键击上执行桌面式整篇 Markdown + KaTeX。
 
 ## 12. 页面、层级与返回
@@ -399,7 +481,7 @@ Diary 根页关闭由 overlayStore 处理；内部状态先由 ModalHistory 消�
 - 回前台：只把干净的列表/文档标为 stale；dirty editor 不自动 GET 覆盖；
 - 无网：已加载正文可继续读，并明确“可能不是最新”；
 - 不离线排队 save/delete/move；
-- MVP 不保证 Android 杀进程后的草稿恢复；
+- 当前版本不保证 Android 杀进程后的草稿恢复；
 - 不把日记正文加入 Delta Sync 或 SQLite 缓存。
 
 ## 14. 安全与并发验收
@@ -408,19 +490,22 @@ Diary 根页关闭由 overlayStore 处理；内部状态先由 ModalHistory 消�
 
 - URL scheme、userinfo、path prefix、路径段和 redirect；
 - Basic Auth 只在 Rust 出现；
-- 401/403/404/429/5xx、超时、断网、畸形 JSON；
+- 400/401/403/404/429/499/500/503/504、超时、断网、畸形 JSON；
 - 有/无 Content-Length 的超大响应；
 - A→B→A folder/document/search 的迟到 success/error/finally；
-- 新搜索取消旧 Rust owner；
+- 普通/语义新搜索分别取消同类旧 Rust owner；
 - dirty back、saving back、保存多击；
 - baseline conflict、force overwrite 二次确认、POST 超时后读回；
-- 删除后迟到 GET 不复活（后续 mutation 阶段）；
-- script、事件属性、危险 URL、恶意 SVG/data document；
-- 文件名和服务端错误不进入 `v-html`。
+- rename 重名、成功、目标创建后源删除失败以及 Store key 迁移；
+- create 的 Tool ESCAPE、marker 字面量与插件错误；
+- move/delete partial success 与删除后迟到 GET 不复活；
+- 数千 summary 的虚拟列表、滚动恢复与刷新原子替换；
+- raw HTML 在 reader/preview 中按可信内容保留；
+- 文件名、preview、LightMemo 元信息和服务端错误不进入 `v-html`。
 
 ## 15. 明确不改
 
-首版不修改：
+当前里程碑不修改：
 
 - `src/core/router/index.ts`
 - Sync V2 类型与协议
