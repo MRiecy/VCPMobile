@@ -32,10 +32,9 @@ vcp-mobile.keystore
 # AI Knowledge Base & Docs
 plans_back.zip
 .gemini_snapshot.json
-*.md
-!docs/**/*.md
-!README.md
-!CLAUDE.md
+/*.md
+!/README.md
+!/CLAUDE.md
 VCPMobile.code-workspace
 
 # Large Assets & Scripts
@@ -62,4 +61,3 @@ src-tauri/gen/android/app/src/main/assets/
 # Android plugin build artifacts
 src-tauri/plugins/**/android/build/
 src-tauri/plugins/**/android/.tauri/
-
