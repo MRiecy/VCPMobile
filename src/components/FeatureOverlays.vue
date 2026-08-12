@@ -13,7 +13,7 @@
  * 注意：此组件内的视图通过 SlidePage 管理滑入/滑出动画，
  * 物理上它们会渲染在 GlobalOverlayManager 提供的容器中。
  */
-import { ref, onMounted, defineAsyncComponent } from 'vue';
+import { ref, onMounted, defineAsyncComponent, watch } from 'vue';
 import { useOverlayStore } from '../core/stores/overlay';
 import { useSettingsStore } from '../core/stores/settings';
 import ToolInteractionOverlay from '../features/distributed/ToolInteractionOverlay.vue';
@@ -29,11 +29,21 @@ const RebuildSessionView = defineAsyncComponent(() => import('../features/settin
 const DistributedView = defineAsyncComponent(() => import('../features/distributed/DistributedView.vue'));
 const SettingsView = defineAsyncComponent(() => import('../features/settings/SettingsView.vue'));
 const RagObserverView = defineAsyncComponent(() => import('../features/rag/RagObserver.vue'));
+const DiaryCenterView = defineAsyncComponent(() => import('../features/diary/DiaryCenterView.vue'));
 
 
 const overlayStore = useOverlayStore();
 const settingsStore = useSettingsStore();
 const isMounted = ref(false);
+const diaryMounted = ref(false);
+
+watch(
+  () => overlayStore.isDiaryCenterOpen,
+  (isOpen) => {
+    if (isOpen) diaryMounted.value = true;
+  },
+  { immediate: true },
+);
 
 onMounted(() => {
   isMounted.value = true;
@@ -88,6 +98,25 @@ onMounted(() => {
       :z-index="overlayStore.getPageZIndex('ragObserver')"
       @close="overlayStore.closeRagObserver()"
     />
+
+    <Suspense v-if="diaryMounted">
+      <DiaryCenterView
+        :is-open="overlayStore.isDiaryCenterOpen"
+        :z-index="overlayStore.getPageZIndex('diaryCenter')"
+        :open-target="overlayStore.diaryOpenTarget"
+        @target-consumed="overlayStore.clearDiaryOpenTarget()"
+        @close="overlayStore.closeDiaryCenter()"
+      />
+      <template #fallback>
+        <div
+          v-if="overlayStore.isDiaryCenterOpen"
+          class="fixed inset-0 pointer-events-auto grid place-items-center bg-[var(--primary-bg)] text-sm text-[var(--primary-text)]"
+          :style="{ zIndex: overlayStore.getPageZIndex('diaryCenter') }"
+        >
+          正在打开日记中心…
+        </div>
+      </template>
+    </Suspense>
 
     <!-- 仅当用户已启用分布式计算时才挂载事件监听器，避免常驻不必要的后台监听 -->
     <ToolInteractionOverlay v-if="settingsStore.settings?.distributedEnabled" />

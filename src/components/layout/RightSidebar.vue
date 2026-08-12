@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { watch, ref } from 'vue';
-import { X, Trash2, Bug, Sparkles } from 'lucide-vue-next';
+import { X, Trash2, Bug, Sparkles, BookOpenText } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
 import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
@@ -20,6 +20,11 @@ const overlayStore = useOverlayStore();
 
 const openDistributedView = () => {
   overlayStore.openDistributed();
+};
+
+const openDiaryCenter = () => {
+  emit('close');
+  overlayStore.openDiaryCenter();
 };
 
 const sidebarRef = ref<HTMLElement | null>(null);
@@ -184,9 +189,15 @@ watch(
           <Sparkles :size="14" class="text-blue-400" />
           <span class="font-bold text-[11px] leading-none">灵视中心</span>
         </button>
-        <div class="col-span-1 border border-dashed border-black/10 dark:border-white/10 rounded-full flex items-center justify-center text-[10px] opacity-25 text-primary-text py-3">
-          <span>待开发</span>
-        </div>
+        <button
+          type="button"
+          class="col-span-1 min-h-12 px-4 border border-black/10 dark:border-white/10 rounded flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)]"
+          aria-label="打开日记中心"
+          @click="openDiaryCenter"
+        >
+          <BookOpenText :size="15" class="text-[var(--highlight-text)]" />
+          <span class="font-bold text-[11px] leading-none">日记中心</span>
+        </button>
         <div class="col-span-1 border border-dashed border-black/10 dark:border-white/10 rounded-full flex items-center justify-center text-[10px] opacity-25 text-primary-text py-3">
           <span>待开发</span>
         </div>

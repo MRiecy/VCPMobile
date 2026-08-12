@@ -6,8 +6,24 @@ import { useSyncSessionStore } from './syncSession';
 import { useRebuildSessionStore } from './rebuildSession';
 import type { OverlayActionItem, ContextMenuConfig, PromptConfig, EditorConfig, ConfirmConfig } from '../types/overlay';
 
+export type OverlayPageType =
+  | 'settings'
+  | 'agentSettings'
+  | 'groupSettings'
+  | 'syncSession'
+  | 'rebuildSession'
+  | 'tarvenSettings'
+  | 'distributed'
+  | 'ragObserver'
+  | 'diaryCenter';
+
+interface DiaryOpenTarget {
+  folder: string;
+  file: string;
+}
+
 interface PageStackItem {
-  type: string;
+  type: OverlayPageType;
   id?: string;
   modalId: string;
 }
@@ -19,6 +35,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const confirmConfig = ref<ConfirmConfig | null>(null);
   const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
+  const diaryOpenTarget = ref<DiaryOpenTarget | null>(null);
 
   // --- Page Stack (Virtual Navigation Stack) ---
   const pageStack = ref<PageStackItem[]>([]);
@@ -33,6 +50,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isTarvenSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'tarvenSettings'));
   const isDistributedOpen = computed(() => pageStack.value.some(p => p.type === 'distributed'));
   const isRagObserverOpen = computed(() => pageStack.value.some(p => p.type === 'ragObserver'));
+  const isDiaryCenterOpen = computed(() => pageStack.value.some(p => p.type === 'diaryCenter'));
 
 
   const agentSettingsId = computed(() => {
@@ -45,13 +63,13 @@ export const useOverlayStore = defineStore('overlay', () => {
     return page?.id || '';
   });
 
-  const getPageZIndex = (type: string) => {
+  const getPageZIndex = (type: OverlayPageType) => {
     const index = pageStack.value.findIndex(p => p.type === type);
     if (index === -1) return LAYER_PAGE_BASE;
     return LAYER_PAGE_BASE + Math.min(index, LAYER_PAGE_MAX_OFFSET);
   };
 
-  const pushPage = (type: string, id?: string) => {
+  const pushPage = (type: OverlayPageType, id?: string) => {
     const modalId = `Page:${type}:${id || ''}`;
     const top = pageStack.value[pageStack.value.length - 1];
     if (top && top.type === type && top.id === id) return;
@@ -188,6 +206,22 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openDiaryCenter = (target?: DiaryOpenTarget) => {
+    if (target) diaryOpenTarget.value = { ...target };
+    if (isDiaryCenterOpen.value) return;
+    pushPage('diaryCenter');
+  };
+
+  const clearDiaryOpenTarget = () => {
+    diaryOpenTarget.value = null;
+  };
+
+  const closeDiaryCenter = () => {
+    if (pageStackTop.value?.type !== 'diaryCenter') return;
+    diaryOpenTarget.value = null;
+    popPage();
+  };
+
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
@@ -279,6 +313,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     isTarvenSettingsOpen,
     isDistributedOpen,
     isRagObserverOpen,
+    isDiaryCenterOpen,
+    diaryOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
     closeSettings,
@@ -296,6 +332,9 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeDistributed,
     openRagObserver,
     closeRagObserver,
+    openDiaryCenter,
+    closeDiaryCenter,
+    clearDiaryOpenTarget,
     // Modals
     promptConfig,
     confirmConfig,
