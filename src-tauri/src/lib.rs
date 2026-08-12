@@ -23,6 +23,12 @@ use vcp_modules::context_injection::{
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
 use vcp_modules::db_manager::search_messages_fts;
+use vcp_modules::diary::{
+    diary_cancel_search, diary_cancel_semantic_search, diary_create_note,
+    diary_delete_empty_folder, diary_delete_notes, diary_get_note, diary_list_folders,
+    diary_list_notes, diary_move_notes, diary_rename_note, diary_save_note, diary_search,
+    diary_semantic_search, DiaryServiceState,
+};
 use vcp_modules::emoticon_manager::{
     fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
 };
@@ -94,6 +100,10 @@ pub fn run() {
             app.manage(vcp_modules::agent_service::AgentConfigState::new());
             app.manage(vcp_modules::group_service::GroupManagerState::new());
             app.manage(vcp_modules::settings_manager::SettingsState::new());
+            app.manage(
+                DiaryServiceState::new()
+                    .map_err(|error| std::io::Error::other(error.command_string()))?,
+            );
             app.manage(vcp_modules::model_manager::ModelManagerState::new());
             app.manage(vcp_modules::emoticon_manager::EmoticonManagerState::default());
 
@@ -251,6 +261,19 @@ pub fn run() {
             read_settings,
             get_settings_recovery_status,
             update_settings,
+            diary_list_folders,
+            diary_list_notes,
+            diary_get_note,
+            diary_search,
+            diary_cancel_search,
+            diary_semantic_search,
+            diary_cancel_semantic_search,
+            diary_save_note,
+            diary_rename_note,
+            diary_create_note,
+            diary_move_notes,
+            diary_delete_notes,
+            diary_delete_empty_folder,
             handle_group_chat_message,
             create_agent,
             create_group,

@@ -1,6 +1,7 @@
-// 1. 声明 7 大物理子领域
+// 1. 声明物理子领域
 pub mod agent;
 pub mod chat;
+pub mod diary;
 pub mod group;
 pub mod infra;
 pub mod persistence;
