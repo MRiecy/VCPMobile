@@ -1,5 +1,21 @@
 # 02. WebView 兼容与 UI 响应式规范
 
+> 状态：`SUPERSEDED-BY-PROJECT-SPEC`
+> 本文保留专项设计推导。当前可执行规范已迁移到 [`docs/ANDROID_UI_COMPATIBILITY.md`](../../docs/ANDROID_UI_COMPATIBILITY.md)；其中平台范围、1024/1280 窗口模式、CSS fallback、四边 Insets 和证据等级优先于本文任何旧快照、数量或待实施措辞。
+
+## 当前冻结摘要
+
+- 只支持 Android `arm64-v8a` 触控手机、平板与按窗口宽度响应的折叠屏；desktop/iOS/TV 不支持。
+- Vite `build.target/cssTarget` 固定为 `chrome87`，只冻结生成语法门槛，不替代设备支持证据。
+- `<1024px`：左右均 overlay；`1024–1279px`：左栏常驻、右栏抽屉；`>=1280px`：双栏常驻。
+- 所有模式复用同一 DOM/Store，响应式只决定 presentation；旋转、分屏和折叠状态按新 viewport 重算。
+- 关键 CSS 先有稳定基础声明，再使用 `color-mix()` 等增强；装饰特性不能决定内容存在。
+- 原生层提供四边 safe Insets 与 raw IME，前端只转换一次并使用 `max(0, imeBottom-safeBottom)`。
+- 强渲染语义、安全与交互不得按设备降级。
+
+<details>
+<summary>历史设计正文（仅供追溯）</summary>
+
 ## 1. 兼容基线的定义
 
 VCPMobile 的兼容性不能用一句“支持 Android 8”表达。至少要同时记录四个维度：
@@ -245,3 +261,5 @@ happy-dom 配置禁用 CSS，不能承担这里的兼容证明；桌面 Chromium
 - 未经真机 Profile 就全局删除动画、阴影或原子类。
 
 兼容工程的目标是让单一路径具备稳健基础和可选增强，而不是让旧设备长期运行一个功能残缺的分支。
+
+</details>

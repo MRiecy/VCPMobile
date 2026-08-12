@@ -423,7 +423,7 @@ const drawSpectrum = () => {
          ]">
 
       <!-- 头部状态栏 -->
-      <div class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top)+8px)] pb-3 border-b relative z-10"
+      <div class="flex items-center justify-between px-4 pt-[calc(var(--vcp-safe-top,0px)+8px)] pb-3 border-b relative z-10"
            :class="themeStore.isDarkResolved ? 'bg-[#1a202c] border-white/5 text-slate-300' : 'bg-[#edf0f2] border-gray-300/60 shadow-sm text-slate-700'">
         <div class="flex items-center gap-3">
           <div class="flex items-center gap-2">

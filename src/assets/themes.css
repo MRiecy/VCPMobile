@@ -5,9 +5,23 @@
   --primary-text: #e0e0e0;
   --border-color: #3a3a3e;
 
-  /* 移动端安全区 - 增加物理回退值 (24px 是安卓常见的刘海高度) */
-  --vcp-safe-top: env(safe-area-inset-top, 24px);
-  --vcp-safe-bottom: env(safe-area-inset-bottom, 48px); /* env() 为主源；JS 桥接收到原生 WindowInsets 后覆盖 */
+  /* Web 环境先读取 CSS env；Android 启动后由 WindowInsets 四边快照统一覆盖。 */
+  --vcp-safe-top: max(env(safe-area-inset-top, 0px), 24px);
+  --vcp-safe-right: env(safe-area-inset-right, 0px);
+  --vcp-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --vcp-safe-left: env(safe-area-inset-left, 0px);
+  --vcp-ime-offset: 0px;
+
+  /* 旧 WebView 的稳定语义面；现代混色仅在下方 @supports 中增强。 */
+  --vcp-panel-bg-90: var(--secondary-bg);
+  --vcp-panel-bg-97: var(--secondary-bg);
+  --vcp-accent-bg-25: var(--accent-bg, var(--secondary-bg));
+  --vcp-highlight-bg-10: var(--accent-bg, var(--secondary-bg));
+  --vcp-highlight-bg-15: var(--accent-bg, var(--secondary-bg));
+  --vcp-highlight-border-30: var(--highlight-text, var(--border-color));
+  --vcp-highlight-border-40: var(--highlight-text, var(--border-color));
+  --vcp-border-subtle: var(--border-color);
+  --vcp-highlight-shadow: rgba(0, 0, 0, 0.08);
 
   /* === VCP 全局层级系统 ===
    * 用途：统一管理 z-index，消除魔法数字
@@ -25,6 +39,20 @@
   --layer-toast: 90;
   --layer-boot: 100;
   --layer-gate: 110;
+}
+
+@supports (background-color: color-mix(in srgb, black, transparent)) {
+  :root {
+    --vcp-panel-bg-90: color-mix(in srgb, var(--secondary-bg) 90%, transparent);
+    --vcp-panel-bg-97: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
+    --vcp-accent-bg-25: color-mix(in srgb, var(--accent-bg) 25%, transparent);
+    --vcp-highlight-bg-10: color-mix(in srgb, var(--highlight-text) 10%, transparent);
+    --vcp-highlight-bg-15: color-mix(in srgb, var(--highlight-text) 15%, transparent);
+    --vcp-highlight-border-30: color-mix(in srgb, var(--highlight-text) 30%, transparent);
+    --vcp-highlight-border-40: color-mix(in srgb, var(--highlight-text) 40%, transparent);
+    --vcp-border-subtle: color-mix(in srgb, var(--border-color) 15%, transparent);
+    --vcp-highlight-shadow: color-mix(in srgb, var(--highlight-text) 8%, transparent);
+  }
 }
 
 html, body, #app {
@@ -51,6 +79,13 @@ body {
 /* --- 根容器防拉伸 (Targeted Rubber-band Control) --- */
 .no-rubber-band {
   overscroll-behavior-y: contain !important;
+}
+
+/* Full-screen shells opt in once so landscape cutouts cannot cover child content. */
+.vcp-safe-inline {
+  box-sizing: border-box;
+  padding-left: var(--vcp-safe-left, 0px);
+  padding-right: var(--vcp-safe-right, 0px);
 }
 
 /* 抽屉层级修正 */
@@ -92,7 +127,7 @@ body {
 }
 /* 增强型磨砂玻璃面板 — 深度集成主题变量与原生滤镜 */
 .glass-panel {
-  background-color: color-mix(in srgb, var(--secondary-bg) 90%, transparent);
+  background-color: var(--vcp-panel-bg-90);
   
   /* 针对亮色模式的阴影优化 */
   box-shadow: 
@@ -103,17 +138,17 @@ body {
 
 /* 选中态/高亮态面板 */
 .glass-panel-active {
-  background-color: color-mix(in srgb, var(--accent-bg) 25%, transparent);
-  border-color: color-mix(in srgb, var(--highlight-text) 40%, transparent);
+  background-color: var(--vcp-accent-bg-25);
+  border-color: var(--vcp-highlight-border-40);
   box-shadow: 
-    inset 0 0 12px color-mix(in srgb, var(--highlight-text) 8%, transparent),
+    inset 0 0 12px var(--vcp-highlight-shadow),
     0 4px 20px -5px rgba(0, 0, 0, 0.15);
 }
 
 /* --- 消息气泡标准化管理 --- */
 .message-bubble {
   transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  border: 1px solid color-mix(in srgb, var(--border-color) 15%, transparent);
+  border: 1px solid var(--vcp-border-subtle);
 }
 
 /* 用户气泡 */
@@ -153,4 +188,3 @@ body {
 .theme-switching svg * {
   transition: none !important;
 }
-

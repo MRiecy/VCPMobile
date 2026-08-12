@@ -54,10 +54,16 @@ const openSettings = () => {
 </script>
 
 <template>
-  <aside ref="sidebarRef" class="vcp-drawer vcp-drawer-left flex flex-col" :class="{ 'is-open': layoutStore.leftDrawerOpen }">
+  <aside
+    id="agent-sidebar"
+    ref="sidebarRef"
+    class="vcp-drawer vcp-drawer-left flex flex-col min-w-0 min-h-0 overflow-hidden"
+    :class="{ 'is-open': layoutStore.leftDrawerOpen }"
+    aria-label="助手与话题侧栏"
+  >
 
     <!-- 顶部 Tabs -->
-    <div class="pt-safe px-4 pt-6 pb-2 shrink-0 border-b border-black/5 dark:border-white/5">
+    <div class="vcp-drawer-header px-4 pb-2 shrink-0 border-b border-black/5 dark:border-white/5">
       <h2 class="text-xl font-black opacity-90 mb-4 tracking-tighter text-blue-500 dark:text-blue-400 px-2">VCP MOBILE
       </h2>
 
@@ -66,7 +72,7 @@ const openSettings = () => {
     </div>
 
     <!-- 内容区 -->
-    <div class="flex-1 overflow-hidden">
+    <div class="flex-1 min-h-0 overflow-hidden">
       <template v-if="activeTab === 'agents'">
         <div class="h-full overflow-y-auto px-4 py-4 space-y-2 vcp-scrollable no-rubber-band">
           <AgentList :searchQuery="searchQuery" @select-agent="handleSelectItem" @select-group="handleSelectItem" />
@@ -116,34 +122,51 @@ const openSettings = () => {
   position: absolute;
   top: 0;
   bottom: 0;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
   width: 82vw;
   max-width: 340px;
-  background-color: var(--secondary-bg);
-  background-color: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
-  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: hidden;
+  pointer-events: none;
+  background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
+  transition:
+    transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+    visibility 0s linear 0.4s;
   z-index: var(--layer-drawer);
 }
 
 .vcp-drawer-left {
   left: 0;
+  padding-left: var(--vcp-workspace-safe-left, 0px);
   transform: translateX(-100%);
   border-right: 1px solid transparent;
 }
 
 .vcp-drawer-left.is-open {
+  visibility: visible;
+  pointer-events: auto;
   transform: translateX(0);
+  transition-delay: 0s;
 }
 
-@media (min-width: 768px) {
+.vcp-drawer-header {
+  padding-top: calc(var(--vcp-safe-top, 24px) + 1.5rem);
+}
+
+@media (min-width: 1024px) {
   .vcp-drawer {
     position: relative;
+    top: auto;
+    bottom: auto;
+    left: auto;
+    flex: 0 0 280px;
     transform: translateX(0) !important;
     width: 280px;
     max-width: 280px;
+    visibility: visible;
+    pointer-events: auto;
     z-index: var(--layer-local);
-  }
-
-  .vcp-drawer-left {
     transition: none;
   }
 }

@@ -225,7 +225,7 @@ function handleInput(event: Event): void {
 
 .diary-editor-meta > span:first-child {
   padding: 3px 7px;
-  border: 1px solid color-mix(in srgb, var(--highlight-text) 36%, var(--diary-line));
+  border: 1px solid var(--diary-highlight-line-subtle);
   border-radius: 999px;
   color: var(--highlight-text);
   font-weight: 800;
@@ -252,7 +252,7 @@ function handleInput(event: Event): void {
 }
 
 .diary-editor-input:focus {
-  border-color: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
+  border-color: var(--diary-highlight-line-strong);
 }
 
 .diary-editor-error {
@@ -289,7 +289,7 @@ function handleInput(event: Event): void {
 }
 
 .diary-footer-button.primary {
-  border-color: color-mix(in srgb, var(--highlight-text) 55%, var(--diary-line));
+  border-color: var(--diary-highlight-line-strong);
   color: var(--highlight-text);
 }
 

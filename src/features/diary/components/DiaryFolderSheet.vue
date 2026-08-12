@@ -119,6 +119,7 @@ function activateFolder(folder: string): void {
       />
       <section
         class="diary-folder-sheet absolute inset-x-0 bottom-0 max-h-[76vh] flex flex-col text-[var(--primary-text)]"
+        style="left: var(--vcp-safe-left, 0px); right: var(--vcp-safe-right, 0px)"
         role="dialog"
         aria-modal="true"
         :aria-label="title"
@@ -237,7 +238,7 @@ function activateFolder(folder: string): void {
   align-self: center;
   margin-top: 8px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--diary-muted-text) 34%, transparent);
+  background: var(--diary-muted-surface);
 }
 
 .diary-sheet-header {
@@ -299,7 +300,7 @@ function activateFolder(folder: string): void {
 }
 
 .diary-folder-search:focus-within {
-  border-color: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
+  border-color: var(--diary-highlight-line-strong);
 }
 
 .diary-folder-manage-row {
@@ -363,8 +364,8 @@ function activateFolder(folder: string): void {
 }
 
 .diary-folder-current {
-  border-color: color-mix(in srgb, var(--highlight-text) 26%, transparent);
-  background: color-mix(in srgb, var(--highlight-text) 8%, var(--diary-surface-soft));
+  border-color: var(--diary-highlight-line-subtle);
+  background: var(--diary-highlight-surface);
 }
 
 .diary-folder-current::before {

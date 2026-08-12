@@ -935,13 +935,13 @@ html.dark .vcp-tool-block.is-tool-result .detail-key {
   overflow-y: auto;
 }
 
-/* --- 4. ToolBlock 全屏浏览器面板样式 (z-viewer 70 层级对齐) --- */
+/* --- 4. ToolBlock 全屏浏览器面板样式（viewer 语义层） --- */
 
 .vcp-fullscreen-tool-panel {
-  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(1rem + var(--vcp-safe-bottom, 48px));
-  padding-left: calc(1rem + env(safe-area-inset-left, 0px));
-  padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+  padding-top: calc(1rem + var(--vcp-safe-top, 0px));
+  padding-bottom: calc(1rem + var(--vcp-safe-bottom, 0px));
+  padding-left: calc(1rem + var(--vcp-safe-left, 0px));
+  padding-right: calc(1rem + var(--vcp-safe-right, 0px));
 }
 
 .vcp-fullscreen-tool-panel.is-tool-result {
@@ -1175,5 +1175,4 @@ html:not(.dark) .vcp-tool-call-summary-chip.status-unknown {
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 

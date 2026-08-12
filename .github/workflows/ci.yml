@@ -35,6 +35,9 @@ jobs:
       - name: Frontend Unit Tests
         run: pnpm test:run
 
+      - name: Frontend Production Build
+        run: pnpm build
+
       - name: Setup Java
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:

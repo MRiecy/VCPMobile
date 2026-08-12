@@ -55,7 +55,7 @@ const handleAction = (action: ActionItem) => {
     <Transition name="slide-up">
       <div v-if="modelValue"
         class="fixed bottom-0 left-0 right-0 z-sheet bg-white/90 dark:bg-gray-900/90 rounded-t-[2rem] shadow-2xl p-4 flex flex-col border-t border-white/20 dark:border-white/5"
-        style="padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 16px);">
+        style="padding-right: calc(var(--vcp-safe-right, 0px) + 16px); padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 16px); padding-left: calc(var(--vcp-safe-left, 0px) + 16px);">
 
         <!-- 顶部拉手条 -->
         <div class="w-12 h-1.5 bg-black/10 dark:bg-white/20 rounded-full mx-auto mb-4"></div>

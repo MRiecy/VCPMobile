@@ -166,7 +166,16 @@ class PluginContractTest {
 
         assertTrue("helper 不得在插件 init 时无条件启动", !initBody.contains("startHelperServiceInternal"))
         assertTrue("Insets 必须按显示帧合并", insets.contains("postOnAnimation(frameCallback)"))
-        assertTrue("Insets manager 必须支持解绑并发送归零态", insets.contains("fun detach()") && insets.contains("InsetSnapshot(0, false"))
+        assertTrue(
+            "Insets manager 必须支持解绑并归零 IME",
+            insets.contains("fun detach()") && insets.contains("previous?.withoutIme()"),
+        )
+        val replayAssignment = insets.indexOf("window.__VCP_NATIVE_INSETS__ =")
+        val eventDispatch = insets.indexOf("window.dispatchEvent(new CustomEvent('vcp-keyboard-inset'")
+        assertTrue(
+            "Insets snapshot 必须先写入 window replay 再派发事件",
+            replayAssignment >= 0 && eventDispatch > replayAssignment,
+        )
     }
 
     @Test

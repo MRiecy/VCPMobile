@@ -84,11 +84,11 @@ const progressPercent = computed(() => {
     <Transition name="prompt-fade">
       <div
         v-if="isOpen"
-        class="fixed inset-0 z-dialog flex items-start justify-center pt-[12vh] bg-black/60 backdrop-blur-[6px]"
+        class="fixed inset-0 z-dialog flex items-start justify-center pt-[12vh] bg-black/65"
         @click.self="handleDismiss"
       >
         <div
-          class="bg-white/90 dark:bg-[#101f26]/85 backdrop-blur-xl w-11/12 max-w-sm rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/20 dark:border-white/10 p-6 transform transition-all relative overflow-hidden"
+          class="bg-white/95 dark:bg-[#101f26]/95 w-11/12 max-w-sm rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-white/20 dark:border-white/10 p-6 transform transition-all relative overflow-hidden"
         >
           <!-- 科技发光环背景装饰 -->
           <div

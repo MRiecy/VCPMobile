@@ -1,5 +1,11 @@
 # 06. 分期实施与 Magi 综合裁决
 
+> 状态：`SUPERSEDED-ROADMAP / IMPLEMENTED / SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PENDING`
+> 下文 Phase 0–5 是历史施工推导，不再作为路线图，尤其性能埋点、启动 SLA、A/B 和 RC 性能门禁均已延期。当前实现/验证/设备证据状态见 [README.md](./README.md)，长期规范见 [`docs/ANDROID_UI_COMPATIBILITY.md`](../../docs/ANDROID_UI_COMPATIBILITY.md)。
+
+<details>
+<summary>历史 Magi 推导与阶段路线（非执行规范）</summary>
+
 ## 1. 三方独立审查
 
 ### 1.1 Melchior：逻辑与系统
@@ -211,6 +217,8 @@ perf(render): coalesce rich-content postprocessing
 - 支持基线、CSS 规范和 Release 设备证据进入长期文档/门禁；
 - 当前 Diary 与其他无关工作没有被污染。
 
+</details>
+
 ## 7. 当前交付状态
 
-本轮完成的是研究、实证构建和施工方案，没有修改生产代码、没有构建 APK、没有执行真机测量。当前结论可直接指导下一轮 Phase 0/1，但不得把 `DEVICE-EVIDENCE-PENDING` 标记成已验收。
+兼容实现已落地；静态检查、前端全量测试、生产构建、Android 插件 strict JVM 测试、Android 生成树初始化与 diff 检查均通过，当前工作树状态为 `IMPLEMENTED / SOFTWARE-VERIFIED`。具名手机、平板与折叠/分屏窗口的 WebView 截图和触控证据尚未归档，保持 `DEVICE-EVIDENCE-PENDING`。性能扩建与固定 SLA 已延期，既有性能资产不删除。

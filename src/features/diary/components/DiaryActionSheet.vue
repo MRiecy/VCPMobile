@@ -27,6 +27,7 @@ const emit = defineEmits<{
       <button type="button" class="absolute inset-0 w-full h-full border-0 bg-black/45" aria-label="关闭操作面板" @click="emit('close')" />
       <section
         class="diary-action-sheet absolute inset-x-0 bottom-0 text-[var(--primary-text)] pb-[var(--vcp-safe-bottom,48px)]"
+        style="left: var(--vcp-safe-left, 0px); right: var(--vcp-safe-right, 0px)"
         role="dialog"
         aria-modal="true"
         :aria-label="title"
@@ -84,7 +85,7 @@ const emit = defineEmits<{
   margin: 8px auto 0;
   display: block;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--diary-muted-text) 34%, transparent);
+  background: var(--diary-muted-surface);
 }
 
 .diary-action-header {

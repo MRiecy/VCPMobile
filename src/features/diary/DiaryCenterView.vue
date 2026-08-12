@@ -822,14 +822,43 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .diary-center-root {
-  --diary-muted-text: var(
-    --secondary-text,
-    color-mix(in srgb, var(--primary-text) 64%, transparent)
-  );
-  --diary-surface: color-mix(in srgb, var(--secondary-bg) 78%, var(--primary-bg));
-  --diary-surface-soft: color-mix(in srgb, var(--secondary-bg) 42%, var(--primary-bg));
-  --diary-line: color-mix(in srgb, var(--border-color) 72%, transparent);
+  --diary-muted-text: var(--secondary-text, var(--primary-text));
+  --diary-surface: var(--secondary-bg);
+  --diary-surface-soft: var(--primary-bg);
+  --diary-line: var(--border-color);
+  --diary-surface-focus: var(--secondary-bg);
+  --diary-highlight-line-subtle: var(--highlight-text);
+  --diary-highlight-line: var(--highlight-text);
+  --diary-highlight-line-strong: var(--highlight-text);
+  --diary-highlight-surface: var(--accent-bg, var(--secondary-bg));
+  --diary-highlight-surface-transparent: var(--accent-bg, var(--secondary-bg));
+  --diary-muted-surface: var(--secondary-bg);
+  --diary-loading-surface: var(--secondary-bg);
+  --diary-warning-surface: var(--warning-color, #eab308);
+  --diary-focus-outline: var(--highlight-text);
   --diary-header-safe-top: max(var(--vcp-safe-top, 0px), 32px);
+}
+
+@supports (background-color: color-mix(in srgb, black, transparent)) {
+  .diary-center-root {
+    --diary-muted-text: var(
+      --secondary-text,
+      color-mix(in srgb, var(--primary-text) 64%, transparent)
+    );
+    --diary-surface: color-mix(in srgb, var(--secondary-bg) 78%, var(--primary-bg));
+    --diary-surface-soft: color-mix(in srgb, var(--secondary-bg) 42%, var(--primary-bg));
+    --diary-line: color-mix(in srgb, var(--border-color) 72%, transparent);
+    --diary-surface-focus: color-mix(in srgb, var(--secondary-bg) 88%, var(--primary-bg));
+    --diary-highlight-line-subtle: color-mix(in srgb, var(--highlight-text) 36%, var(--diary-line));
+    --diary-highlight-line: color-mix(in srgb, var(--highlight-text) 50%, var(--diary-line));
+    --diary-highlight-line-strong: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
+    --diary-highlight-surface: color-mix(in srgb, var(--highlight-text) 9%, var(--diary-surface-soft));
+    --diary-highlight-surface-transparent: color-mix(in srgb, var(--highlight-text) 9%, transparent);
+    --diary-muted-surface: color-mix(in srgb, var(--diary-muted-text) 34%, transparent);
+    --diary-loading-surface: color-mix(in srgb, var(--diary-muted-text) 16%, transparent);
+    --diary-warning-surface: color-mix(in srgb, var(--warning-color, #eab308) 34%, transparent);
+    --diary-focus-outline: color-mix(in srgb, var(--highlight-text) 70%, transparent);
+  }
 }
 
 .diary-list-header {
@@ -938,8 +967,8 @@ onBeforeUnmount(() => {
 }
 
 .diary-search-field:focus-within {
-  border-color: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
-  background: color-mix(in srgb, var(--secondary-bg) 88%, var(--primary-bg));
+  border-color: var(--diary-highlight-line-strong);
+  background: var(--diary-surface-focus);
 }
 
 .diary-search-field input:focus,
@@ -965,9 +994,9 @@ onBeforeUnmount(() => {
   min-width: 52px;
   height: 36px;
   padding: 0 12px;
-  border: 1px solid color-mix(in srgb, var(--highlight-text) 50%, var(--diary-line));
+  border: 1px solid var(--diary-highlight-line);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--highlight-text) 9%, transparent);
+  background: var(--diary-highlight-surface-transparent);
   color: var(--highlight-text);
   font-size: 11px;
   font-weight: 700;
@@ -1020,14 +1049,14 @@ onBeforeUnmount(() => {
 }
 
 .diary-segment.active {
-  border-color: color-mix(in srgb, var(--highlight-text) 44%, var(--diary-line));
+  border-color: var(--diary-highlight-line);
   color: var(--highlight-text);
-  background: color-mix(in srgb, var(--highlight-text) 9%, var(--diary-surface-soft));
+  background: var(--diary-highlight-surface);
 }
 
 .diary-batch-button {
   min-height: 48px;
-  border: 1px solid color-mix(in srgb, var(--highlight-text) 48%, var(--diary-line));
+  border: 1px solid var(--diary-highlight-line);
   border-radius: 12px;
   background: var(--diary-surface);
   color: var(--highlight-text);
@@ -1055,7 +1084,7 @@ onBeforeUnmount(() => {
 }
 
 button:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--highlight-text) 70%, transparent);
+  outline: 2px solid var(--diary-focus-outline);
   outline-offset: 1px;
 }
 

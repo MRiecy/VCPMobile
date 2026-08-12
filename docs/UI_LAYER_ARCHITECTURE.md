@@ -1,8 +1,8 @@
 # UI 层级架构规范
 
-> 文档类型：工程规范  
-> 版本：v1.0.3
-> 日期：2026-06-05  
+> 文档类型：工程规范
+> 版本：v1.1.4
+> 日期：2026-08-13
 > 关联变更：commit `f7dbd21` 之后的一组重构提交
 
 ---
@@ -22,7 +22,7 @@
 
 ## 2. 层级体系总表
 
-项目采用 **11 级分层架构**，每层间隔 10，预留插入空间。
+项目采用 **12 级分层架构**（L0–L11），每层间隔 10，预留插入空间。
 
 | 层级 | 语义名 | 数值 | 用途 | 代表性组件 |
 |------|--------|------|------|-----------|
@@ -42,7 +42,7 @@
 **层叠秩序口诀**：
 
 ```
-内容 < 局部 < 抽屉 < 覆盖 < 页面 < 弹层 < 对话框 < 查看器 < 编辑器 < Toast < 启动 < 门禁
+内容 < 局部 < 抽屉 < 覆盖 < 页面 < 弹层 < 对话框 < 编辑器 < 查看器 < Toast < 启动 < 门禁
 ```
 
 ---
@@ -93,10 +93,9 @@ theme: {
     toast: '90',
     boot: '100',
     gate: '110',
-    },
-    },
-    }
-
+  },
+}
+```
 
 适用场景：Vue Template 的 `class` 属性中直接使用，如 `class="fixed inset-0 z-dialog"`。
 
@@ -170,7 +169,7 @@ const zIndex = getPageZIndex(stackIndex); // 40 + min(index, 9)
 
 1. **全局宏观层级必须使用语义化命名**。禁止在任何全局覆盖层组件中直接使用裸露的 `z-50`、`z-[999]` 等魔法数字。
 2. **局部微观层级保持自由**。组件内部的角标、hover 覆盖、加载状态等（如 `z-10`、`z-20`）属于组件内部层叠上下文，不影响全局秩序，可继续使用常规数值。
-3. **新增覆盖层前先查表**。若无法归入已有 11 个层级，再提议新增。每层之间预留 10 的间隔，供未来插入。
+3. **新增覆盖层前先查表**。若无法归入已有 12 个层级，再提议新增。每层之间预留 10 的间隔，供未来插入。
 4. **SlidePage 页面栈使用动态计算**。通过 `overlayStore.getPageZIndex(type)` 确保页面打开顺序与层级正相关。
 5. **BootScreen 的 error 层是唯一例外**。允许使用 `z-[101]`（boot + 1），因为它只在 BootScreen 内部与 loading 层区分。
 
@@ -188,7 +187,7 @@ const zIndex = getPageZIndex(stackIndex); // 40 + min(index, 9)
 
 | 文件 | 修改内容 |
 |------|----------|
-| `uno.config.ts` | `theme.zIndex` 扩展 11 个语义层级 |
+| `uno.config.ts` | `theme.zIndex` 扩展 12 个语义层级 |
 | `src/assets/themes.css` | `:root` 注入 `--layer-*` CSS 变量 |
 
 ### 6.3 Store & 基础组件
@@ -221,7 +220,7 @@ const zIndex = getPageZIndex(stackIndex); // 40 + min(index, 9)
 | 文件 | 原值 | 新值 |
 |------|------|------|
 | `AgentSidebar.vue` | `z-index: 60` (移动端) | `var(--layer-drawer)` |
-| `AgentSidebar.vue` | `z-index: 10` (桌面端) | `var(--layer-local)` |
+| `AgentSidebar.vue` | 大宽度 Android 窗口常驻态 `z-index: 10` | `var(--layer-local)` |
 | `RightSidebar.vue` | `z-index: 60` | `var(--layer-drawer)` |
 | `App.vue` (遮罩) | 无 z-index | `z-drawer` |
 | `ChatView.vue` (置底按钮) | `z-50` | `z-local` |
@@ -298,7 +297,7 @@ const getPageZIndex = (type: string) => {
 - ...
 - 第十个及以上 → 49（封顶）
 
-**封顶原因**：Toast(50) 以上有独立的提示/弹层系统，页面栈不应无限侵占上层空间。
+**封顶原因**：Toast(90) 及更高层有独立的通知、启动与权限门禁系统，页面栈不应无限侵占上层空间。
 
 ---
 
@@ -313,7 +312,7 @@ const getPageZIndex = (type: string) => {
 
 ### 9.2 新增层级（极少发生）
 
-若现有 11 个层级无法容纳新的 UI 类型：
+若现有 12 个层级无法容纳新的 UI 类型：
 
 1. 在 `layers.ts` 中新增常量（如 `LAYER_GUIDE = 55`）。
 2. 在 `uno.config.ts` 的 `theme.zIndex` 中同步添加。
@@ -368,7 +367,7 @@ const getPageZIndex = (type: string) => {
 
 - **角度阈值**：`absY / absX < 0.577`（约 30°），防止垂直滚动误触发；
 - **排除区**：`.no-swipe` 和 `.vcp-scrollable` 类内的触摸事件被忽略；
-- **层级影响**：抽屉的打开/关闭不再依赖移动端宽度门控（`window.innerWidth < 768`），`layout.ts` 中 `setLeftDrawer(true)` 和 `setRightDrawer(true)` 始终调用 `registerModal`，确保桌面端和移动端的行为一致性。
+- **层级影响**：`layoutStore` 的抽屉开关不依赖任何 viewport 宽度门控，`setLeftDrawer(true)` 和 `setRightDrawer(true)` 始终维护模态历史。CSS 再按 `<1024` overlay、`1024–1279` 左常驻/右抽屉、`>=1280` 双常驻决定呈现；这里的大宽度模式仍是触控平板/折叠屏，不建立桌面端支持。
 
 ### 11.3 WebGLFluidBackground — 流体极光背景
 

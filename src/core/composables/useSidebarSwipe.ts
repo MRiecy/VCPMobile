@@ -101,16 +101,24 @@ export function useSidebarSwipe(target: Ref<HTMLElement | null>, options: Sideba
 
         if (!layoutStore.leftDrawerOpen && !layoutStore.rightDrawerOpen) {
           // 从左往右划 -> 开启左侧边栏 (需要一定位移以防误触)
-          if (direction.value === 'right' && absX > 60) {
+          if (
+            direction.value === 'right' &&
+            absX > 60 &&
+            !window.matchMedia('(min-width: 1024px)').matches
+          ) {
             layoutStore.setLeftDrawer(true);
           }
           // 从右往左划 -> 开启右侧边栏
-          else if (direction.value === 'left' && absX > 60) {
+          else if (
+            direction.value === 'left' &&
+            absX > 60 &&
+            !window.matchMedia('(min-width: 1280px)').matches
+          ) {
             layoutStore.setRightDrawer(true);
           }
         }
       } else if (options.type === 'left') {
-        if (layoutStore.leftDrawerOpen) {
+        if (layoutStore.leftDrawerOpen && !window.matchMedia('(min-width: 1024px)').matches) {
           // 向左滑 -> 关闭左侧边栏
           if (direction.value === 'left' && absX > 50) {
             layoutStore.setLeftDrawer(false);
@@ -121,7 +129,7 @@ export function useSidebarSwipe(target: Ref<HTMLElement | null>, options: Sideba
           }
         }
       } else if (options.type === 'right') {
-        if (layoutStore.rightDrawerOpen) {
+        if (layoutStore.rightDrawerOpen && !window.matchMedia('(min-width: 1280px)').matches) {
           // 向右滑 -> 关闭右侧边栏
           if (direction.value === 'right' && absX > 50) {
             layoutStore.setRightDrawer(false);

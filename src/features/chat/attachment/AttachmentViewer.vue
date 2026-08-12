@@ -183,12 +183,12 @@ const saveToAlbum = async () => {
   <Transition name="viewer-fade">
     <div
       v-show="isOpen && file && hasLocalCapability"
-      class="vcp-attachment-viewer fixed inset-0 z-viewer flex flex-col pointer-events-auto"
+      class="vcp-attachment-viewer vcp-safe-inline fixed inset-0 z-viewer flex flex-col pointer-events-auto"
       @click.self="close"
     >
       <!-- Toolbar -->
       <div
-        class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 border-b border-black/5 dark:border-white/5 shrink-0 z-10"
+        class="flex items-center justify-between px-4 pt-[calc(var(--vcp-safe-top,0px)+8px)] pb-3 border-b border-black/5 dark:border-white/5 shrink-0 z-10"
       >
         <div class="flex flex-col overflow-hidden mr-4 min-w-0">
           <span class="text-sm font-bold text-gray-800 dark:text-gray-200 truncate">{{

@@ -67,11 +67,11 @@ const handleClose = async () => {
 
 <template>
   <SlidePage :is-open="store.isOpen" :z-index="props.zIndex">
-    <div class="fixed inset-0 flex flex-col bg-[#0a0f14] text-white overflow-hidden"
+    <div class="vcp-safe-inline fixed inset-0 flex flex-col bg-[#0a0f14] text-white overflow-hidden"
          :class="{ 'pointer-events-none': !store.isOpen }">
 
       <!-- 顶部栏 -->
-      <div class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top)+8px)] pb-3">
+      <div class="flex items-center justify-between px-4 pt-[calc(var(--vcp-safe-top,0px)+8px)] pb-3">
         <div class="flex items-center gap-2">
           <div class="w-2 h-2 rounded-full" :class="statusDotClass"></div>
           <span class="text-xs font-bold uppercase tracking-widest">{{ statusLabel }}</span>

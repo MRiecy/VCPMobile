@@ -2,8 +2,8 @@
 id: VUE-AGEN-012
 title: Agent侧边栏与列表交互
 description: VCP Mobile 前端 AgentSidebar 布局、AgentList 拖拽排序、Swipe 手势与搜索过滤的交互设计
-version: 1.0.3
-date: 2026-06-05
+version: 1.1.4
+date: 2026-08-13
 ---
 
 # 12. Agent侧边栏与列表交互
@@ -13,6 +13,8 @@ date: 2026-06-05
 ### 1.1 领域定位
 
 `Agent侧边栏与列表交互`是 VCP Mobile 前端 **Agent 领域** 的入口级交互系统，负责智能体（Agent）与群组（Group）的列表展示、筛选、排序、快速操作，以及作为全局导航枢纽的侧边栏容器管理。它是用户与 AI 助手建立会话前的第一道交互界面，直接影响核心聊天功能的可达性。
+
+本模块只服务 Android `arm64-v8a` 触控手机、平板与按窗口宽度响应的折叠屏。文中的“大宽度常驻”不是桌面端适配；Windows/macOS/Linux 用户使用 VCPChat。权威平台与布局契约见 [`docs/ANDROID_UI_COMPATIBILITY.md`](../../../ANDROID_UI_COMPATIBILITY.md)。
 
 功能边界严格限定为：
 
@@ -45,7 +47,7 @@ date: 2026-06-05
 ┌─────────────────────────────────────────────────────────────┐
 │                    App.vue (根布局)                          │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │         AgentSidebar.vue (z-drawer, z-local@md)       │  │
+│  │   AgentSidebar.vue (overlay:z-drawer / pane:z-local)  │  │
 │  │  ┌─────────────────────────────────────────────────┐  │  │
 │  │  │ 顶部区: SidebarTabs + SidebarSearch              │  │  │
 │  │  ├─────────────────────────────────────────────────┤  │  │
@@ -81,7 +83,7 @@ date: 2026-06-05
 | 原则 | 说明 |
 |------|------|
 | **单层状态源** | `layoutStore.leftDrawerOpen` 是侧边栏可见性的唯一真相源，任何组件（包括手势、遮罩点击、物理返回键）均通过 `setLeftDrawer(bool)` 修改，禁止直接赋值 |
-| **触控优先** | 全部手势为移动端设计：Swipe 展开编辑、拖拽排序柄（`.drag-handle`）、边缘滑动打开/关闭侧边栏；桌面端（`md` 断点以上）侧边栏常驻，动画与手势禁用 |
+| **触控优先** | 全部手势为 Android 触控设计：Swipe 展开编辑、拖拽排序柄（`.drag-handle`）、边缘滑动打开/关闭；大宽度 Android 窗口可把侧栏常驻，但不建立桌面端交互支持 |
 | **本地过滤** | 搜索过滤纯前端进行，不调用后端 Command，保证 0 网络延迟；过滤字段仅限 `name`，保证性能 |
 | **乐观更新** | 拖拽排序后先更新本地 `settingsStore.settings.agentOrder`，再异步持久化到后端；若后端失败，下次启动时自动回读到旧顺序 |
 | **手势仲裁** | Swipe 与垂直滚动、侧边栏关闭、排序拖拽共享同一触控面，通过方向锁定（`hasDeterminedDirection`）+ 排序状态互斥 + `stopPropagation` 分层解决冲突 |
@@ -114,8 +116,8 @@ date: 2026-06-05
 > 源码位置：`src/components/layout/AgentSidebar.vue` 第 51–106 行
 
 关键布局类：
-- `.vcp-drawer-left`：绝对定位，`width: 82vw / max-width: 340px`
-- `.pt-safe`：刘海屏顶部安全区内边距
+- `.vcp-drawer-left`：overlay 模式绝对定位，`width: 82vw / max-width: 340px`
+- `.vcp-drawer-header`：统一消费 `--vcp-safe-top`，适配状态栏与刘海
 - `pb-[calc(var(--vcp-safe-bottom,16px)+8px)]`：底部安全区 + 额外间距
 - `.vcp-scrollable.no-rubber-band`：内容区滚动，禁用橡皮筋回弹（防止与侧边栏手势冲突）
 
@@ -171,11 +173,12 @@ date: 2026-06-05
 - **属性**：仅 `transform`（GPU 合成层，避免重排）
 - **层级**：语义化 `z-drawer`（`var(--layer-drawer)` = 20），位于 `content`（0）之上、`overlay`（30）之下
 
-**桌面端适配**（`@media (min-width: 768px)`）：
-- `position: relative` — 不再覆盖主内容
-- `transform: translateX(0) !important` — 强制常驻，无视 `is-open`
-- `transition: none` — 禁用动画
-- `z-index: var(--layer-local)` — 降级为局部层级（10）
+**大宽度 Android 窗口常驻**（`@media (min-width: 1024px)`）：
+- 左侧栏改为 `position: relative` 与固定 280px pane，不再覆盖主内容；
+- `visibility/pointer-events` 保持可用，`transform` 归零并禁用过渡；
+- 层级从 drawer（20）回到 local（10）；
+- 1024px 是当前由主区可读宽度与侧栏宽度推导的 CSS viewport 阈值，不叫“桌面断点”。分屏或折叠后低于阈值时自动回到 overlay drawer；
+- 右侧栏使用独立的 1280px 常驻阈值，因此 1024–1279px 是左栏常驻、右栏仍为抽屉的 single-pane 模式。
 
 ### 2.4 手势滑动打开（useSidebarSwipe）
 
@@ -1007,4 +1010,4 @@ SortableJS onEnd
 | ToastOnly | — | 通知配置项，仅显示 Toast 浮层，不写入通知中心历史 | `notificationStore.ts` |
 
 ---
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-08-13 | VCP Mobile v1.1.4*

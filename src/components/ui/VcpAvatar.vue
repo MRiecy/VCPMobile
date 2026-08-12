@@ -34,10 +34,10 @@ const resolvedColor = computed(() => props.target?.avatarCalculatedColor || prop
 const borderStyle = computed(() => {
   const color = resolvedColor.value;
   if (!color) return {};
-  // 使用 color-mix 混合出 80% 不透明度的边框，使其更自然地融入背景
-  const mixedColor = `color-mix(in srgb, ${color} 80%, transparent)`;
   return {
-    borderColor: mixedColor,
+    // 动态 inline style 无法像样式表一样提供 color-mix 声明级 fallback。
+    // 直接使用已计算的主题色，确保旧 WebView 仍保留头像边界。
+    borderColor: color,
     boxShadow: `0 0 8px ${color}33` // 减弱发光
   };
 });

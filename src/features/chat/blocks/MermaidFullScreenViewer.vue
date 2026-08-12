@@ -296,11 +296,11 @@ const exportToGallery = () => {
       leave-from-class="translate-y-0 opacity-100"
       leave-to-class="translate-y-10 opacity-0"
     >
-      <div v-if="visible" class="fixed inset-0 z-viewer flex flex-col select-none overflow-hidden pb-[calc(var(--vcp-safe-bottom,48px))]"
+      <div v-if="visible" class="vcp-safe-inline fixed inset-0 z-viewer flex flex-col select-none overflow-hidden pb-[var(--vcp-safe-bottom,0px)]"
         :class="themeStore.isDarkResolved ? 'bg-[#0d1117] text-gray-200' : 'bg-[#f8fafc] text-gray-800'">
         
         <!-- Header -->
-        <div class="h-14 flex items-center justify-between px-4 border-b pt-[env(safe-area-inset-top)] box-content"
+        <div class="h-14 flex items-center justify-between px-4 border-b pt-[var(--vcp-safe-top,0px)] box-content"
           :class="themeStore.isDarkResolved ? 'border-white/5 bg-[#0d1117]' : 'border-black/5 bg-[#f8fafc]'">
           <div class="flex items-center gap-3">
             <button @click="emit('close')" class="p-2 -ml-2 active:scale-95 transition-transform">

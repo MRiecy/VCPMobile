@@ -490,7 +490,7 @@ onUnmounted(() => {
     <Transition name="rendered-image-viewer">
       <div
         v-if="state.isOpen"
-        class="fixed inset-0 flex flex-col bg-[#05070a] text-white pointer-events-auto select-none z-viewer"
+        class="rendered-image-viewer vcp-safe-inline fixed inset-0 flex flex-col bg-[#05070a] text-white pointer-events-auto select-none z-viewer"
         @click.self="close"
       >
         <div

@@ -25,7 +25,7 @@ const confirmRestart = async () => {
   <!-- 0. 全局初始化加载层 (通用) -->
   <Transition name="fade">
     <div v-if="lifecycleStore.state !== 'READY' && lifecycleStore.state !== 'ERROR' && lifecycleStore.state !== 'MIGRATED' && lifecycleStore.state !== 'MIGRATING'"
-      class="fixed inset-0 z-boot bg-white/96 dark:bg-gray-950/96 flex flex-col items-center justify-center gap-6 px-8 text-center">
+      class="vcp-boot-surface vcp-safe-inline fixed inset-0 z-boot bg-white/96 dark:bg-gray-950/96 flex flex-col items-center justify-center gap-6 px-8 text-center">
       <div class="w-18 h-18 relative">
         <div class="absolute inset-0 rounded-full border-4 border-blue-500/15"></div>
         <div
@@ -44,7 +44,7 @@ const confirmRestart = async () => {
   <!-- 0.3 数据库迁移进度展示层 -->
   <Transition name="fade">
     <div v-if="lifecycleStore.state === 'MIGRATING'"
-      class="fixed inset-0 z-boot bg-white/96 dark:bg-gray-950/96 flex flex-col items-center justify-center gap-6 px-8 text-center">
+      class="vcp-boot-surface vcp-safe-inline fixed inset-0 z-boot bg-white/96 dark:bg-gray-950/96 flex flex-col items-center justify-center gap-6 px-8 text-center">
       <div class="w-18 h-18 relative">
         <div class="absolute inset-0 rounded-full border-4 border-blue-500/15"></div>
         <div
@@ -63,7 +63,7 @@ const confirmRestart = async () => {
   <!-- 0.4 数据库迁移完成确认弹窗 -->
   <Transition name="fade">
     <div v-if="lifecycleStore.state === 'MIGRATED'"
-      class="fixed inset-0 z-boot bg-white/95 dark:bg-gray-950/95 flex flex-col items-center justify-center p-8 text-center">
+      class="vcp-boot-surface vcp-safe-inline fixed inset-0 z-boot bg-white/95 dark:bg-gray-950/95 flex flex-col items-center justify-center p-8 text-center">
       <div
         class="w-full max-w-sm rounded-3xl border border-blue-500/20 bg-white/90 dark:bg-white/5 shadow-2xl px-6 py-8 flex flex-col items-center gap-6">
         <div class="w-16 h-16 bg-blue-500/10 text-blue-500 rounded-2xl flex items-center justify-center">
@@ -90,7 +90,7 @@ const confirmRestart = async () => {
   <!-- 0.5 全局错误看板 -->
   <Transition name="fade">
     <div v-if="lifecycleStore.state === 'ERROR'"
-      class="fixed inset-0 z-boot bg-white/98 dark:bg-gray-950/98 flex flex-col items-center justify-center p-8 text-center">
+      class="vcp-boot-surface vcp-safe-inline fixed inset-0 z-boot bg-white/98 dark:bg-gray-950/98 flex flex-col items-center justify-center p-8 text-center">
       <div
         class="w-full max-w-md rounded-3xl border border-red-500/20 bg-white/80 dark:bg-white/5 shadow-2xl shadow-red-500/10 px-6 py-8 flex flex-col items-center">
         <div class="w-16 h-16 bg-red-500/10 text-red-500 rounded-2xl flex items-center justify-center mb-6">
@@ -114,6 +114,21 @@ const confirmRestart = async () => {
 </template>
 
 <style scoped>
+.vcp-boot-surface {
+  overflow-y: auto;
+  padding-top: calc(var(--vcp-safe-top, 0px) + 2rem);
+  padding-right: calc(var(--vcp-safe-right, 0px) + 2rem);
+  padding-bottom: calc(var(--vcp-safe-bottom, 0px) + 2rem);
+  padding-left: calc(var(--vcp-safe-left, 0px) + 2rem);
+}
+
+@media (max-height: 480px) {
+  .vcp-boot-surface {
+    justify-content: flex-start;
+    gap: 1rem;
+  }
+}
+
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity 0.3s ease;

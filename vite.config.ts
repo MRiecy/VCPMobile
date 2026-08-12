@@ -96,6 +96,12 @@ export default defineConfig(async () => ({
   },
 
   build: {
+    // Android WebView compatibility baseline. This freezes the current Vite 6
+    // default-era behavior so dependency upgrades cannot silently raise the
+    // emitted JS/CSS syntax floor. It is a build contract, not a substitute
+    // for the tracked real-device/WebView acceptance matrix.
+    target: "chrome87",
+    cssTarget: "chrome87",
     // Mermaid 的冷门图表包按需加载，原始体积偏大但不进入首屏；其余常驻依赖显式拆包，
     // 让主应用 chunk 保持在默认 500KB 门槛以内。
     chunkSizeWarningLimit: 700,

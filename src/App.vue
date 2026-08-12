@@ -16,26 +16,13 @@ import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
 import { useAssistantStore } from "./core/stores/assistant";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
+import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
 import { LatestIntentOwner } from "./core/utils/latestIntentOwner";
 
 // 初始化应用生命周期监听
 useAppLifecycle();
-
-
-// Native safe-area bridge: CSS env(safe-area-inset-bottom) often reports 0
-// on Android WebView even when viewport-fit=cover is set. This takes the real
-// value from WindowInsetsCompat (always accurate) and overrides --vcp-safe-bottom
-// directly, replacing the static 48px floor defined in themes.css.
-const handleSafeAreaInset = (e: Event) => {
-  const detail = (e as CustomEvent<{ safeAreaBottom?: number }>).detail;
-  if (detail && typeof detail.safeAreaBottom === 'number' && detail.safeAreaBottom >= 0) {
-    const dpr = window.devicePixelRatio || 1;
-    document.documentElement.style.setProperty(
-      '--vcp-safe-bottom',
-      `${Math.round(detail.safeAreaBottom / dpr)}px`,
-    );
-  }
-};
+// 根组件持有唯一的原生 Insets 桥，确保编辑器尚未挂载时四边安全区也已生效。
+const releaseNativeInsetsBridge = retainNativeInsetsBridge();
 
 // Layout Components
 import BootScreen from "./components/layout/BootScreen.vue";
@@ -78,6 +65,14 @@ const layoutStore = useLayoutStore();
 const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
 const { processPayload } = useNotificationProcessor();
+const leftSidebarPersistent = window.matchMedia("(min-width: 1024px)");
+const rightSidebarPersistent = window.matchMedia("(min-width: 1280px)");
+
+const reconcileDrawerPresentation = () => {
+  // 常驻栏不再是 modal：跨过断点时清掉抽屉 intent 和对应 history entry。
+  if (leftSidebarPersistent.matches) layoutStore.setLeftDrawer(false);
+  if (rightSidebarPersistent.matches) layoutStore.setRightDrawer(false);
+};
 const { initGlobalFixer } = useEmoticonFixer();
 const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
 const router = useRouter();
@@ -379,7 +374,9 @@ onMounted(async () => {
   window.addEventListener("vcp-hardware-back", handleExitRequest);
   window.addEventListener("vcp-share-intent", handleShareIntent);
   window.addEventListener("vcp-notification-click", handleNotificationClick);
-  window.addEventListener("vcp-keyboard-inset", handleSafeAreaInset);
+  leftSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
+  rightSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
+  reconcileDrawerPresentation();
 
 
   // 初始化全局表情包修复器
@@ -426,7 +423,9 @@ onUnmounted(() => {
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
   window.removeEventListener("vcp-notification-click", handleNotificationClick);
-  window.removeEventListener("vcp-keyboard-inset", handleSafeAreaInset);
+  leftSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);
+  rightSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);
+  releaseNativeInsetsBridge();
 
 });
 </script>
@@ -443,26 +442,41 @@ onUnmounted(() => {
     <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors" style="transition-duration: 350ms;"
       :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
 
-    <!-- 2. 主内容区先渲染，抽屉与遮罩在后声明，靠 DOM 顺位自然覆盖 -->
-    <main v-if="lifecycleStore.state === 'READY'" class="flex-1 min-w-0 relative overflow-hidden">
-      <router-view v-slot="{ Component }">
-        <component v-if="Component" :is="Component" />
-      </router-view>
-    </main>
+    <!-- 2. 单一横向工作区：CSS 按可用宽度决定抽屉、单栏或双栏呈现 -->
+    <div
+      v-if="lifecycleStore.state === 'READY'"
+      class="vcp-workspace-row flex-1 min-w-0 min-h-0 relative overflow-hidden"
+    >
+      <!-- 对应侧栏仍为 drawer 时显示遮罩；DOM 置于侧栏前，确保侧栏稳定位于其上 -->
+      <Transition name="fade">
+        <div
+          v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
+          class="vcp-drawer-overlay absolute inset-0 z-drawer bg-black/12"
+          :class="{
+            'is-left-open': layoutStore.leftDrawerOpen,
+            'is-right-open': layoutStore.rightDrawerOpen,
+          }"
+          @click.self="
+            layoutStore.setLeftDrawer(false);
+            layoutStore.setRightDrawer(false);
+          "
+        ></div>
+      </Transition>
 
-    <!-- 3. 抽屉遮罩层位于主内容之后、抽屉之前，点击空白即可关闭 -->
-    <Transition name="fade">
-      <div v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-        class="vcp-overlay fixed inset-0 z-drawer bg-black/12 md:hidden" @click.self="
-          layoutStore.setLeftDrawer(false);
-        layoutStore.setRightDrawer(false);
-        "></div>
-    </Transition>
+      <AgentSidebar class="vcp-workspace-left" />
 
-    <!-- 4. 左右抽屉在遮罩之后声明，不写 z-index 也能稳定压过主内容 -->
-    <AgentSidebar v-if="lifecycleStore.state === 'READY'" />
-    <RightSidebar v-if="lifecycleStore.state === 'READY'" class="pointer-events-auto shrink-0" :is-open="layoutStore.rightDrawerOpen"
-      @close="layoutStore.setRightDrawer(false)" />
+      <main class="vcp-workspace-main flex-1 min-w-0 min-h-0 relative overflow-hidden">
+        <router-view v-slot="{ Component }">
+          <component v-if="Component" :is="Component" />
+        </router-view>
+      </main>
+
+      <RightSidebar
+        class="vcp-workspace-right"
+        :is-open="layoutStore.rightDrawerOpen"
+        @close="layoutStore.setRightDrawer(false)"
+      />
+    </div>
 
     <!-- 5. 全局覆盖层管理器 -->
     <GlobalOverlayManager v-if="lifecycleStore.state === 'READY'" />
@@ -507,6 +521,40 @@ body,
   background-color: transparent;
   color: var(--primary-text);
   height: 100%;
+}
+
+.vcp-workspace-row {
+  --vcp-workspace-safe-left: var(--vcp-safe-left, 0px);
+  --vcp-workspace-safe-right: var(--vcp-safe-right, 0px);
+  display: flex;
+  flex-direction: row;
+  isolation: isolate;
+}
+
+.vcp-workspace-main {
+  box-sizing: border-box;
+  padding-left: var(--vcp-workspace-safe-left);
+  padding-right: var(--vcp-workspace-safe-right);
+}
+
+@media (min-width: 1024px) {
+  .vcp-workspace-main {
+    padding-left: 0;
+  }
+
+  .vcp-drawer-overlay:not(.is-right-open) {
+    display: none;
+  }
+}
+
+@media (min-width: 1280px) {
+  .vcp-workspace-main {
+    padding-right: 0;
+  }
+
+  .vcp-drawer-overlay {
+    display: none;
+  }
 }
 
 .vcp-background-layer {

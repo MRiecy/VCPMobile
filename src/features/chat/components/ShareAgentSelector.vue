@@ -67,8 +67,12 @@ onUnmounted(() => {
     <Transition name="slide-up">
       <div
         v-if="isOpen"
-        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 backdrop-blur-xl rounded-t-[1.8rem] shadow-2xl p-5 flex flex-col border-t border-white/20 dark:border-white/5"
-        :style="{ paddingBottom: 'calc(var(--vcp-safe-bottom, 48px) + 12px)' }"
+        class="fixed bottom-0 left-0 right-0 z-sheet bg-white dark:bg-zinc-900 rounded-t-3xl shadow-2xl p-5 flex flex-col border-t border-black/10 dark:border-white/10"
+        :style="{
+          paddingRight: 'calc(var(--vcp-safe-right, 0px) + 1.25rem)',
+          paddingBottom: 'calc(var(--vcp-safe-bottom, 48px) + 12px)',
+          paddingLeft: 'calc(var(--vcp-safe-left, 0px) + 1.25rem)',
+        }"
       >
         <!-- 拖手线 -->
         <div class="w-10 h-1 bg-black/10 dark:bg-white/15 rounded-full mx-auto mb-4"></div>

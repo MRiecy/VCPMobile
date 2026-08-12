@@ -1,6 +1,6 @@
 # VCP Mobile 技术文档
 
-> 版本：1.1.4 | 最后更新：2026-08-12 | 文档总数：99 份 | 总行数：65,513 行
+> 版本：1.1.4 | 最后更新：2026-08-13 | 文档总数：100 份
 
 ## 文档体系
 
@@ -8,7 +8,7 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 
 | 知识库 | 路径 | 文档数 | 覆盖范围 | 入口 |
 |--------|------|--------|----------|------|
-| 顶层架构规范 | `docs/` | 8 份 | 跨层架构约定、测试、依赖管理、UI 层级、Android 存储与归档说明 | -- |
+| 顶层架构规范 | `docs/` | 9 份 | 跨层架构约定、Android UI 兼容、测试、依赖管理、UI 层级、Android 存储与归档说明 | [Android UI 兼容](ANDROID_UI_COMPATIBILITY.md) |
 | Rust 后端模块 | `docs/modules/` | 31 份 | 25 个导航条目；其中 AST Diff 专栏含 6 份 Markdown | [总览](modules/00_总览与导航.md) |
 | Android 插件 | `docs/plugins/` | 13 份 | `tauri-plugin-vcp-mobile` 原生 Android 子系统（含 ForegroundGuardian） | [总览](plugins/00_总览与导航.md) |
 | 同步子系统 | `docs/sync/` | 20 份 | Sync V2 全链路协议（Rust + Node.js 双端） | [总览](sync/00_总览与导航.md) |
@@ -34,9 +34,10 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 6. [日记中心](vue_docs/features/diary/26_日记中心.md) -- 远端浏览、搜索、编辑、创建与管理
 
 ### Android 原生开发者
-1. [插件总览](plugins/00_总览与导航.md)
-2. [插件初始化与命令路由](plugins/01_插件初始化与命令路由.md)
-3. [浮动窗口与会话共享](plugins/10_浮动窗口与会话共享.md) -- v1.0.3 新增，v1.1.3 浮动助手功能已暂停使用
+1. [Android UI 兼容性规范](ANDROID_UI_COMPATIBILITY.md) -- arm64 产品边界、手机/平板/折叠屏适配与设备证据
+2. [插件总览](plugins/00_总览与导航.md)
+3. [插件初始化与命令路由](plugins/01_插件初始化与命令路由.md)
+4. [浮动窗口与会话共享](plugins/10_浮动窗口与会话共享.md) -- v1.0.3 新增，v1.1.3 浮动助手功能已暂停使用
 
 ### 同步功能开发者
 1. [同步总览](sync/00_总览与导航.md)

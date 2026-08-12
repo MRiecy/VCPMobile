@@ -40,7 +40,7 @@ function submit(): void {
 </script>
 
 <template>
-  <div v-if="open" class="fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] px-4 bg-black/45 no-swipe" role="presentation" @click.self="emit('close')">
+  <div v-if="open" class="fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] pl-[calc(var(--vcp-safe-left,0px)+1rem)] pr-[calc(var(--vcp-safe-right,0px)+1rem)] bg-black/45 no-swipe" role="presentation" @click.self="emit('close')">
     <section class="diary-rename-dialog" role="dialog" aria-modal="true" aria-label="重命名文件">
       <header class="diary-rename-header">
         <span class="diary-rename-icon"><FilePenLine :size="18" /></span>
@@ -141,7 +141,7 @@ function submit(): void {
 }
 
 .diary-rename-input:focus {
-  border-color: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
+  border-color: var(--diary-highlight-line-strong);
 }
 
 .diary-dialog-button {
@@ -155,7 +155,7 @@ function submit(): void {
 }
 
 .diary-dialog-button.primary {
-  border-color: color-mix(in srgb, var(--highlight-text) 55%, var(--diary-line));
+  border-color: var(--diary-highlight-line-strong);
   color: var(--highlight-text);
 }
 

@@ -1,68 +1,76 @@
-# VCPMobile WebView 性能与兼容性专项研讨
+# VCPMobile Android WebView 多设备兼容专项
 
-> 状态：`RESEARCHED / IMPLEMENTATION-PENDING / DEVICE-EVIDENCE-PENDING`
+> 状态：`IMPLEMENTED / SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PENDING`
 >
-> 审计日期：2026-08-12
+> 实施日期：2026-08-13
 >
-> 审计快照：`99fce5f`，另有未提交的 Diary 功能工作区变更
+> 恢复基线：clean checkpoint `cecdbe4`（已包含最新 Diary 功能）
 >
-> 主题：Release 首屏、旧 Android WebView、平板响应式布局、消息强渲染性能
+> 主题：Android arm64 平台治理、手机/平板/折叠屏窗口适配、WebView CSS/Insets 与强渲染保护
 
 ## 结论
 
-这不是一个“把 Vue 换掉”或“把消息气泡做简单”的问题。当前代码已经具备静态启动占位、Rust AST 管线、流式差分、`v-memo`、KaTeX/Mermaid 动态导入和消息分页等正确基础；真正需要处理的是四个更具体的边界：
+本轮目标已经收敛为**Android 多设备兼容与项目规范**。实现已落地并通过当前工作树的软件验证：工作区采用横向 shell，窄窗口为双抽屉，中等窗口常驻左栏，宽窗口可双栏；CSS 建立稳定 fallback；原生 Insets 覆盖四边并以 IME 净增量避让；平台、测试与文档口径统一。
 
-1. **首屏测量口径缺失。** 现有脚本只记录 Android Activity 的 `am start -W`，尚未测到 Vue mount、`AppLifecycle.READY`、首个可交互帧或富内容稳定帧，因此目前不能把延迟归因给 Vue、IPC 或消息渲染中的任何一项。
-2. **启动门禁装入了非首屏必需工作。** `READY` 当前等待设置、助手/群组、所有头像二进制和恢复会话的 5 条历史；其中“批量头像全部转 Blob”是明确的高风险候选，但仍需分段实测定责。
-3. **拆包并未等于延迟执行。** Chat 路由、`MessageRenderer`、全局覆盖层和更新提示仍通过静态引用进入首屏依赖图；多个异步 Overlay 组件又在 `READY` 后立即挂载，从而立刻请求其 chunk。
-4. **旧机问题首先是兼容契约与布局问题。** `minSdk 26` 只定义 Android API 安装下限，不定义用户设备实际采用的 WebView 包和版本。当前还存在一个源码可证的平板根布局矛盾：根容器始终是纵向 flex，而左右侧栏在 `768px` 后变为普通流中的相对定位元素，极可能被排到主界面下方并被根容器裁掉。
+产品支持只覆盖 Android `arm64-v8a` 触控手机、平板和按当前窗口宽度响应的折叠屏。Windows/macOS/Linux desktop、iOS、Android TV 均不支持；桌面端由 VCPChat 承担。host scaffold、Vite preview 与非 Android fallback 仅用于开发测试。
 
-本专项坚持一条不可协商的产品约束：
+当前只剩具名多设备验收尚未归档。软件测试绿色不能替代 Android WebView 真机证据。
 
-> **性能优化不得关闭、删除、纯文本化或降级消息的 Markdown、代码高亮、KaTeX、Mermaid、SVG/MathML、raw HTML、Tool、Thought、Diary、附件与流式 AST 差分能力。**
+兼容专项坚持一条不可协商的产品约束：
 
-允许优化的是加载时机、调度、缓存、离屏挂载、兼容性 fallback 和资源优先级；不允许把“少渲染一种内容”包装成性能提升。
+> **兼容修复不得关闭、删除、纯文本化或降级消息的 Markdown、代码高亮、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thought、Diary、附件与流式 AST 差分能力。**
+
+性能优化已延期且不是本轮完成条件；仓库既有 perf 脚本与 Criterion 资产保留，不删除、不扩建、不冻结 SLA。
 
 ## 文档导航
 
 | 文档 | 主要内容 | 用途 |
 |---|---|---|
-| [01-现状证据与问题分层.md](./01-现状证据与问题分层.md) | 启动调用链、构建产物、明确事实、瓶颈假设与证据缺口 | 确定问题边界 |
-| [02-WebView兼容与UI响应式规范.md](./02-WebView兼容与UI响应式规范.md) | WebView 支持基线、CSS 分级、平板布局、安全区与样式准则 | 冻结兼容设计规范 |
-| [03-首屏与运行时性能优化方案.md](./03-首屏与运行时性能优化方案.md) | 首屏关键路径、候选实验、运行时调度与回滚条件 | 指导代码施工 |
-| [04-消息强渲染能力保护契约.md](./04-消息强渲染能力保护契约.md) | 能力清单、允许/禁止优化、fixture 与等价性验收 | 防止性能工程伤害内容能力 |
-| [05-测量矩阵与验收门禁.md](./05-测量矩阵与验收门禁.md) | 埋点、设备矩阵、统计方法、视觉/交互门禁与 CI 分工 | 形成可复现证据 |
-| [06-分期实施与Magi综合裁决.md](./06-分期实施与Magi综合裁决.md) | 三贤者审查、优先级、文件落点、提交策略与停止条件 | 直接交付实施负责人 |
+| [01-现状证据与问题分层.md](./01-现状证据与问题分层.md) | `cecdbe4` 基线、已解决问题与剩余证据边界 | 说明为何进入已实现态 |
+| [02-WebView兼容与UI响应式规范.md](./02-WebView兼容与UI响应式规范.md) | Android 支持基线、CSS、窗口布局与 Insets | 兼容规范；长期权威版在 `docs/ANDROID_UI_COMPATIBILITY.md` |
+| [03-首屏与运行时性能优化方案.md](./03-首屏与运行时性能优化方案.md) | 历史性能研究 | `DEFERRED`，不再指导本轮施工 |
+| [04-消息强渲染能力保护契约.md](./04-消息强渲染能力保护契约.md) | 能力清单、fixture 与语义/交互等价性 | 兼容修复硬门禁 |
+| [05-测量矩阵与验收门禁.md](./05-测量矩阵与验收门禁.md) | 自动化与具名设备矩阵 | 关闭 `DEVICE-EVIDENCE-PENDING` |
+| [06-分期实施与Magi综合裁决.md](./06-分期实施与Magi综合裁决.md) | Magi 裁决、完成清单与交付边界 | 专项收尾记录 |
 
 ## 当前证据等级
 
 | 等级 | 含义 | 本轮结果 |
 |---|---|---|
-| `CONFIRMED-CODE` | 当前源码或生成产物可以直接证明 | 启动门禁组成、依赖图、平板根布局矛盾、CSS fallback 缺口 |
-| `DIAGNOSTIC-BUILD` | 当前 dirty worktree 的一次生产 Web build 快照 | `pnpm build` 通过；首屏资源约 926 KB raw / 264 KB gzip，尚不能由单一 commit 复现 |
-| `HYPOTHESIS-HIGH` | 有明确机制与高风险数据上限，但尚未分段计时 | 全量头像 IPC/Blob、READY 后 Overlay 导入风暴、全局 KaTeX CSS |
-| `DEVICE-PENDING` | 必须在实际 Android WebView 上确认 | Release 首屏耗时、旧机具体丢样式、平板截图、GPU 合成与最终阈值 |
+| `IMPLEMENTED` | 兼容实现与规范已落地 | 横向 workspace、三种宽度表现、CSS fallback、四边 Insets |
+| `SOFTWARE-VERIFIED` | 当前未提交工作树的软件验证已完成 | 静态检查、前端测试、生产构建、Android 插件 JVM 测试与生成树初始化均通过 |
+| `DEVICE-EVIDENCE-PENDING` | 必须在实际 Android WebView 上确认 | 具名手机、平板、折叠/分屏窗口的截图与触控可达性 |
 
-任何后续报告都必须保留这些标签。特别是，Rust 亚毫秒 benchmark、Debug 构建、`am start -W`、happy-dom 单测和现代桌面 Chrome 都不能替代 Release APK 的真机首屏结论。
+任何后续报告都必须保留证据标签。尤其 happy-dom、host browser 与 Rust benchmark 不能替代 Android WebView 的真实 CSS 几何、系统 Insets 和触控结论。
 
 ## 本轮事实快照
 
-- 当前分支：`main`，HEAD `99fce5f`，相对远端领先 1 个提交。
-- 工作区已有 Diary 相关未提交改动；本专项只新增本目录文档，没有修改这些代码。
-- `pnpm build` 在当前工作区通过，Vite 共转换 4450 个模块。
-- 当前忽略的 `dist/index.html` 将 main、Vue vendor、Tauri vendor、render vendor 和主 CSS 全部列入初始脚本或 `modulepreload`。
-- `dist/` 被 `.gitignore` 忽略，且构建包含当前 Diary WIP，因此数值只能作为诊断快照，不能直接冻结为长期基线。
-- 当前没有连接 Android 设备，也没有为本专项构建 Release APK；所有真机耗时和截图结论仍待采集。
+- 恢复基线为 clean `cecdbe4`，且已包含正式集成的 Diary 功能。
+- 生产发布目标是签名 Android `arm64-v8a` APK；desktop/iOS/TV 不在支持矩阵。
+- 仓库当前 E2E 是 Node.js + adb smoke，不是 Maestro；没有 Playwright desktop E2E。
+- 软件与生成物验证由实际 runner 输出记录，不在计划里维护易漂移的模块数、测试数、bundle KB 或 CSS 命中数。
+- 多设备真机验收仍未归档，因此不得标记 `DEVICE-VERIFIED`。
+
+## 本轮软件验证记录
+
+- `pnpm check`：通过（Vue TypeScript + Rust `cargo check --locked`）。
+- `pnpm test:run -- --reporter=verbose`：24 个文件、122 项测试通过。
+- `pnpm build`：通过，生产构建转换 4450 个模块。
+- Android 插件 strict Gradle JVM 测试：37 项通过，0 failure/error/skip。
+- `pnpm tauri android init --ci`：通过；生成树保留本轮 Android manifest 契约。
+- 专项治理测试：7 项通过；`git diff --check` 通过。
+
+这些结果只证明以 `cecdbe4` 为恢复基线的当前工作树达到 `SOFTWARE-VERIFIED`，不代表 APK 或设备矩阵已验收。
 
 ## 已冻结的总体决策
 
-1. 先补全测量面，再逐个候选 A/B；不凭 bundle 名称或主观手感重构。
-2. 沿用现有 `AppLifecycle` 状态所有权，在其内部区分“阻塞交互的核心工作”和“READY 后的暖机工作”；不另建第二套启动状态机。
-3. 兼容策略采用同一份 DOM、同一份主题语义和“基础声明在前、现代增强在后”；不做 UA sniff，不创建旧机专用主题。
-4. 移动基线保持抽屉覆盖；平板是否常驻双栏以可用宽度为主、方向只作辅助信号，不能用单一 `768px` 断点把所有设备强制成双栏。
-5. Android 安全区以原生 `WindowInsetsCompat` 的四边数据为权威，CSS `env()` 作为 Web 环境 fallback；功能组件不得各自发明安全区公式。
-6. 消息强渲染的语义与最终 DOM/视觉结果是硬门禁；性能优化若需要删能力，方案直接否决。
-7. 首轮只做可独立回滚的低风险实验；不进行依赖全升级、God File 拆分、全面虚拟列表或全局 polyfill。
+1. 生产支持仅限 Android arm64 触控手机、平板与按窗口宽度响应的折叠屏；桌面由 VCPChat。
+2. 兼容策略采用同一份 DOM/Store 和“基础声明在前、现代增强在后”；不做 UA/机型分支。
+3. Vite JS/CSS target 显式冻结为 `chrome87`，只作为生成语法契约，不冒充设备支持证明。
+4. 窄窗口为 overlay，1024px 起可常驻左栏，1280px 起可双栏；窗口变化重新推导而不复制业务状态。
+5. Android 安全区以原生四边 Insets 为权威，前端只消费一次 DPR 转换后的语义变量；IME 使用扣除 safe bottom 后的净增量。
+6. 消息强渲染的语义、交互与安全边界是硬门禁。
+7. 性能优化延期，既有 `tests/perf/` 与 Criterion 资产原样保留为人工诊断工具。
 
 ## 外部依据
 
@@ -72,6 +80,6 @@
 - Chrome 官方兼容资料显示，`color-mix()` 从 Chrome 111 才进入支持矩阵：[CSS color-mix()](https://developer.chrome.com/docs/css-ui/css-color-mix)。
 - Chrome 官方资料显示，`content-visibility: auto` 从 Chrome 85 提供；本项目只能把它视为性能增强，不能作为内容存在的前提：[New in Chrome 85](https://developer.chrome.com/blog/new-in-chrome-85)。
 
-## 一句话实施准则
+## 一句话交付准则
 
-> 先测出时间花在哪里，再把非关键工作移出首屏；用兼容 fallback 保住结构，用调度和缓存保住强渲染，绝不靠删内容换速度。
+> 当前工作树已通过软件验证；下一步只以具名 Android 设备证据关闭 `DEVICE-EVIDENCE-PENDING`，性能扩建保持延期。

@@ -35,6 +35,10 @@
 
 **VCP Mobile**（代号 Project Avatar）是 [VCPChat](https://github.com/MRiecy/VCPChat) 的移动端进化版，一个基于 **Tauri v2 + Vue 3 + Rust** 构建的 Android 原生应用。核心目标是将 AI Agent 的交互能力以低延迟、高内存安全性的方式带入物理移动端。
 
+> **支持范围**：生产运行、构建、发布与兼容性承诺仅覆盖 Android `arm64-v8a` 触控手机、平板，以及按当前窗口宽度响应的折叠屏。不支持 Windows/macOS/Linux 桌面端、iOS、Android TV 或其他 ABI；桌面用户请使用 VCPChat。仓库中的 Vite 预览、host Rust 编译、非 Android fallback 与 Tauri desktop scaffold 仅用于开发和测试，详见 [`docs/ANDROID_UI_COMPATIBILITY.md`](docs/ANDROID_UI_COMPATIBILITY.md)。
+
+Web 生成目标显式冻结为 Chrome/WebView 87 时代语法（JS/CSS `chrome87`），用于防止构建工具升级静默抬高语法门槛；它不是最低 WebView 支持承诺，真实兼容结论仍需目标 Android 设备证据。
+
 与桌面端 VCPChat 不同，Project Avatar 并非简单的界面适配，而是一次架构层面的彻底重构。我们采用了 **Double-Track 3-Tier 架构** —— Rust 核心层、Tauri IPC 桥接层、Vue 3 渲染层物理隔离，使每一个层级都可以独立演进而不产生耦合债务。
 
 与市面上其他移动端 AI 应用相比，VCP Mobile 的独特之处在于：
@@ -154,7 +158,7 @@ v1.1.2 引入的认知广播观察面板，让 AI 在 RAG 检索、工具调用�
 
 ### 🏗️ Semantic Z-Index / SlidePage 虚拟导航
 
-11 级语义化层级系统，彻底消灭 `z-[999]` 魔法数字。
+12 级语义化层级系统，彻底消灭 `z-[999]` 魔法数字。
 
 | 语义名 | 数值 | 用途 |
 |--------|------|------|
@@ -165,8 +169,8 @@ v1.1.2 引入的认知广播观察面板，让 AI 在 RAG 检索、工具调用�
 | `page` | 40+ | SlidePage 虚拟页面栈 |
 | `sheet` | 50 | BottomSheet、ModelSelector |
 | `dialog` | 60 | Prompt、ContextMenu |
-| `viewer` | 70 | AttachmentViewer、AvatarCropper |
-| `editor` | 80 | 全屏 HTML 编辑器 |
+| `editor` | 70 | HtmlPreviewBlock 全屏 HTML 预览 |
+| `viewer` | 80 | AttachmentViewer、FullScreenEditor、AvatarCropper |
 | `toast` | 90 | Toast 通知 |
 | `boot` | 100 | 启动屏 |
 | `gate` | 110 | 权限引导页 |
@@ -374,7 +378,7 @@ VCPMobile/
 |------|------|
 | `src/main.ts` | Vue/Pinia/Router 实例创建，全局指令注册，初始化监听 |
 | `src/App.vue` | 根布局：BootScreen 引导、侧边栏手势、全局事件监听 |
-| `src/core/constants/layers.ts` | 语义化 Z-Index 体系（content → gate，共 11 层） |
+| `src/core/constants/layers.ts` | 语义化 Z-Index 体系（content → gate，共 12 层） |
 | `src/core/stores/chatStreamStore.ts` | SSE Stream 状态驱动，Backend-Driven Streaming 核心 |
 | `src-tauri/src/lib.rs` | Tauri 命令路由、managed state 注入、启动钩子 |
 | `src-tauri/src/vcp_modules/chat/chat_manager.rs` | 对话生命周期管理、消息发送编排 |
@@ -384,6 +388,7 @@ VCPMobile/
 | `src-tauri/plugins/vcp-mobile/android/.../ForegroundGuardian.kt` | v1.1.3 进程级 WakeLock/WifiLock 调度单例 |
 | `docs/ARCHIVED_SYNC_ARCHITECTURE.md` | 增量同步协议历史规范 |
 | `docs/sync/00_总览与导航.md` | 同步 V2 子文档导航 |
+| `docs/ANDROID_UI_COMPATIBILITY.md` | Android arm64 平台边界、窗口宽度响应式与设备证据规范 |
 | `docs/UI_LAYER_ARCHITECTURE.md` | 全局 UI 层级与 Z-Index 语义化规范 |
 | `uno.config.ts` | UnoCSS 主题色、快捷类、断点配置 |
 | `vite.config.ts` | Vite 插件链、Tauri 感知开发服务器 |
@@ -392,7 +397,7 @@ VCPMobile/
 
 | 工作流 | 文件 | 触发条件 | 执行内容 |
 |--------|------|----------|----------|
-| CI | `.github/workflows/ci.yml` | push / PR 到 main | `vue-tsc --noEmit` + `cargo fmt --check` + `cargo clippy -- -D warnings` |
+| CI | `.github/workflows/ci.yml` | push / PR 到 main/master | 前端类型、Vitest 与生产 build；Rust fmt/test/integration/clippy；Android 生成树与插件 JVM 测试；benchmark 编译与依赖审计 |
 | Release | `.github/workflows/release.yml` | GitHub Release published | 构建 `aarch64` Release APK 并上传 |
 
 Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。APK 自动重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`。
@@ -423,7 +428,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 ### 安全设计
 
 - **路径遍历防护**：`file_manager.rs` 中的 `ensure_safe_path()` 限制所有文件访问在 `app_config_dir` 下
-- **内存限制**：文件上传 ≤ 20 MB，`read_local_file_base64` ≤ 50 MB，防止 OOM
+- **内存限制**：IPC `store_file` ≤ 2 MB，`read_local_file_base64` ≤ 50 MB，防止 OOM
 - **密钥管理**：Release 签名信息仅通过环境变量或 GitHub Actions secrets 注入，缺少任一签名输入时构建直接失败
 - **数据库**：SQLite 启用 WAL（Write-Ahead Logging）模式，降低并发写入锁竞争
 - **网络**：HTTP 客户端使用 `rustls-tls`，禁用原生 TLS；支持 gzip 压缩
@@ -436,8 +441,8 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 
 | Knowledge Base | Path | Docs Count | Scope | Audience |
 |----------------|------|:----------:|-------|----------|
-| Frontend Docs | `docs/vue_docs/` | 26 | 全部 Vue/TS 源码 | 前端开发者 |
-| Rust Modules | `docs/modules/` | 30 | `vcp_modules/` + `distributed/` | 后端开发者 |
+| Frontend Docs | `docs/vue_docs/` | 27 | 全部 Vue/TS 源码 | 前端开发者 |
+| Rust Modules | `docs/modules/` | 31 | `vcp_modules/` + `distributed/` | 后端开发者 |
 | Sync Protocol | `docs/sync/` | 20 | Delta Sync V2 全链路 | 同步功能开发者 |
 | Plugin Docs | `docs/plugins/` | 13 | `tauri-plugin-vcp-mobile` | 原生插件开发者 |
 
@@ -452,6 +457,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 - **"Android lifecycle bridge 的事件流向？"** → `docs/plugins/...`
 - **"Attachment upload protocol 的分块策略？"** → `docs/modules/07_...`
 - **"UI Z-Index 层级语义化规范？"** → `docs/UI_LAYER_ARCHITECTURE.md`
+- **"Android 手机/平板/折叠屏支持到什么范围？"** → `docs/ANDROID_UI_COMPATIBILITY.md`
 - **"Android 权限管理与前台服务规范？"** → `docs/ANDROID_PLUGIN_MANAGEMENT.md`
 - **"Backend-Driven Streaming 的消息生命周期？"** → `docs/vue_docs/features/chat/...`
 - **"Release 构建优化配置详解？"** → `docs/modules/...`
@@ -491,7 +497,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 - Node.js (v22+) & pnpm (10.x)
 - Android Studio & Android NDK (`29.0.13846066`)
 - Java 17 (temurin)
-- 支持 Windows / macOS / Linux 的开发环境
+- Windows / macOS / Linux host 开发环境（仅用于开发与测试，不是 VCP Mobile 产品支持平台）
 
 **完整命令流：**
 
@@ -555,7 +561,8 @@ strip = true
   - `src/tests/unit/chat/...`
   - `src/tests/unit/components/ui/...`
   - `src/tests/unit/components/settings/...`
-- **Android E2E 与性能测试**：`tests/e2e-android/`（adb 环境/权限/冒烟脚本）、`tests/perf/`（APK 体积/启动耗时/Rust bench）
+- **Android E2E**：`tests/e2e-android/` 使用仓库内 Node.js + adb 环境/权限/冒烟脚本；当前没有 Maestro 或 Playwright 流程
+- **性能资产**：`tests/perf/` 与 Criterion benchmark 保留为人工诊断/报告型资产，不是当前兼容专项或 Release 的自动性能门禁
 - **Rust workspace 测试**：覆盖 Chat/Sync/Distributed/DB/Updater/文件边界及 Android 插件 Rust 侧；数量以 `cargo test --locked --workspace --lib -- --list` 为准。
 - **Rust 集成测试**：`file_extractor_integration` 使用仓库内固定 DOCX/XLSX/PDF/PPTX fixture。
 

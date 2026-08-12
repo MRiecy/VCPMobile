@@ -210,7 +210,10 @@ onUnmounted(() => {
       <div class="flex items-center gap-3 min-w-0 flex-1">
         <!-- 侧边栏按钮 (使用内联 SVG 确保 100% 可见) -->
         <button @click="layoutStore.toggleLeftDrawer()"
-          class="w-10 h-10 shrink-0 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5">
+          class="vcp-left-drawer-trigger w-10 h-10 shrink-0 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5"
+          aria-label="打开助手与话题侧栏"
+          aria-controls="agent-sidebar"
+          :aria-expanded="layoutStore.leftDrawerOpen">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
             stroke-linecap="round">
             <line x1="3" y1="12" x2="21" y2="12"></line>
@@ -266,7 +269,10 @@ onUnmounted(() => {
         </button>
         <!-- 通知中心按钮 -->
         <button @click="layoutStore.toggleRightDrawer()"
-          class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5 relative">
+          class="vcp-right-drawer-trigger w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5 relative"
+          aria-label="打开通知与工具侧栏"
+          aria-controls="notification-sidebar"
+          :aria-expanded="layoutStore.rightDrawerOpen">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
@@ -301,7 +307,9 @@ onUnmounted(() => {
           }}
         </p>
         <button v-if="!sessionStore.currentSelectedItem" @click="layoutStore.toggleLeftDrawer()"
-          class="mt-10 px-8 py-4 bg-primary text-white rounded-2xl text-sm font-bold shadow-lg shadow-primary/20 active:scale-95 transition-all">
+          class="vcp-left-drawer-trigger mt-10 px-8 py-4 bg-primary text-white rounded-2xl text-sm font-bold shadow-lg shadow-primary/20 active:scale-95 transition-all"
+          aria-controls="agent-sidebar"
+          :aria-expanded="layoutStore.leftDrawerOpen">
           立即开始
         </button>
       </div>
@@ -350,14 +358,24 @@ onUnmounted(() => {
   /* 强制适配刘海屏，增加保底 padding */
   padding-top: calc(var(--vcp-safe-top, 24px));
   padding-bottom: 12px;
-  background-color: var(--secondary-bg);
-  background-color: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
+  background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
   border-bottom: 1px solid transparent;
 }
 
 .vcp-input-footer {
-  background-color: var(--secondary-bg);
-  background-color: color-mix(in srgb, var(--secondary-bg) 90%, transparent);
+  background-color: var(--vcp-panel-bg-90, var(--secondary-bg));
+}
+
+@media (min-width: 1024px) {
+  .vcp-left-drawer-trigger {
+    display: none;
+  }
+}
+
+@media (min-width: 1280px) {
+  .vcp-right-drawer-trigger {
+    display: none;
+  }
 }
 
 /* 隐藏滚动条 */

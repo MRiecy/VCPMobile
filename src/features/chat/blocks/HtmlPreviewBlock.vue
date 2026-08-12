@@ -177,11 +177,11 @@ onUnmounted(() => {
         leave-from-class="translate-y-0 opacity-100"
         leave-to-class="translate-y-10 opacity-0"
       >
-        <div v-if="isFullScreen" class="fixed inset-0 z-editor flex flex-col pb-[calc(var(--vcp-safe-bottom,48px))]"
+        <div v-if="isFullScreen" class="vcp-safe-inline fixed inset-0 z-editor flex flex-col pb-[var(--vcp-safe-bottom,0px)]"
           :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-[#f6f8fa] text-gray-900'">
           
           <!-- 全屏 Header -->
-          <div class="h-14 flex items-center justify-between px-4 border-b pt-[env(safe-area-inset-top)] box-content"
+          <div class="h-14 flex items-center justify-between px-4 border-b pt-[var(--vcp-safe-top,0px)] box-content"
             :class="themeStore.isDarkResolved ? 'border-white/5 bg-[#0d1117]' : 'border-black/5 bg-white'">
             <div class="flex items-center gap-4">
               <button @click="isFullScreen = false" class="p-2 -ml-2 active:scale-90 transition-transform">

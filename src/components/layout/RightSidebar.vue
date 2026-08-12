@@ -133,8 +133,14 @@ watch(
 </script>
 
 <template>
-  <aside ref="sidebarRef" class="vcp-drawer vcp-drawer-right pt-safe flex flex-col" :class="{ 'is-open': props.isOpen }">
-    <div class="px-5 py-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center shrink-0">
+  <aside
+    id="notification-sidebar"
+    ref="sidebarRef"
+    class="vcp-drawer vcp-drawer-right flex flex-col min-w-0 min-h-0 overflow-hidden"
+    :class="{ 'is-open': props.isOpen }"
+    aria-label="通知与工具侧栏"
+  >
+    <div class="vcp-drawer-header px-5 pb-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center shrink-0">
       <div class="flex items-center gap-2">
         <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-70 text-primary-text">Notifications</h3>
         <span v-if="store.unreadCount > 0"
@@ -154,8 +160,9 @@ watch(
           <Trash2 :size="16" />
         </button>
         <button @click="emit('close')" 
-          class="w-10 h-10 flex items-center justify-center opacity-40 hover:opacity-100 transition-opacity text-primary-text active:scale-90"
-          title="Close">
+          class="vcp-drawer-close w-10 h-10 flex items-center justify-center opacity-40 hover:opacity-100 transition-opacity text-primary-text active:scale-90"
+          title="关闭通知栏"
+          aria-label="关闭通知栏">
           <X :size="20" />
         </button>
       </div>
@@ -211,34 +218,56 @@ watch(
   position: absolute;
   top: 0;
   bottom: 0;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
   width: 82vw;
   max-width: 340px;
-  background-color: var(--secondary-bg);
-  background-color: color-mix(in srgb, var(--secondary-bg) 97%, transparent);
-  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: hidden;
+  pointer-events: none;
+  background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
+  transition:
+    transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+    visibility 0s linear 0.4s;
   z-index: var(--layer-drawer);
 }
 
 .vcp-drawer-right {
   right: 0;
+  padding-right: var(--vcp-workspace-safe-right, 0px);
   transform: translateX(100%);
   border-left: 1px solid transparent;
 }
 
 .vcp-drawer-right.is-open {
+  visibility: visible;
+  pointer-events: auto;
   transform: translateX(0);
+  transition-delay: 0s;
 }
 
-@media (min-width: 768px) {
+.vcp-drawer-header {
+  padding-top: calc(var(--vcp-safe-top, 24px) + 1rem);
+}
+
+@media (min-width: 1280px) {
   .vcp-drawer {
     position: relative;
+    top: auto;
+    right: auto;
+    bottom: auto;
+    flex: 0 0 300px;
     transform: translateX(0) !important;
     width: 300px;
     max-width: 300px;
+    visibility: visible;
+    pointer-events: auto;
+    z-index: var(--layer-local);
+    transition: none;
   }
 
-  .vcp-drawer-right {
-    transition: none;
+  .vcp-drawer-close {
+    display: none;
   }
 }
 

@@ -914,8 +914,8 @@ watch(
                         : 'bg-black/5 dark:bg-white/5 border-transparent opacity-60 text-primary-text hover:opacity-100'"
                       :style="selectedFoldBlockIdx[plugin.id] === index
                         ? {
-                            backgroundColor: 'color-mix(in srgb, var(--highlight-text) 15%, transparent)',
-                            borderColor: 'color-mix(in srgb, var(--highlight-text) 30%, transparent)'
+                            backgroundColor: 'var(--vcp-highlight-bg-15)',
+                            borderColor: 'var(--vcp-highlight-border-30)'
                           }
                         : {}"
                     >
@@ -933,7 +933,7 @@ watch(
                   <span
                     @click="copyPlaceholder(plugin.placeholder)"
                     class="font-mono px-1.5 py-0.5 rounded border border-[var(--highlight-text)]/20 active:scale-95 transition-all cursor-pointer font-semibold text-[9px]"
-                    style="background-color: color-mix(in srgb, var(--highlight-text) 10%, transparent); color: var(--highlight-text);"
+                    style="background-color: var(--vcp-highlight-bg-10); color: var(--highlight-text);"
                   >
                     {{ plugin.placeholder }}
                   </span>

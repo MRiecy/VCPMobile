@@ -1,9 +1,35 @@
 import { ref, onMounted, onUnmounted, type Ref } from "vue";
 
-interface KeyboardInsetDetail {
-  height: number;
-  visible: boolean;
+export interface NativeInsetsSnapshot {
+  safeTopPx: number;
+  safeRightPx: number;
+  safeBottomPx: number;
+  safeLeftPx: number;
+  imeBottomPx: number;
+  imeVisible: boolean;
+}
+
+interface LegacyKeyboardInsetDetail {
+  height?: number;
+  visible?: boolean;
   safeAreaBottom?: number;
+}
+
+type KeyboardInsetDetail = Partial<NativeInsetsSnapshot> & LegacyKeyboardInsetDetail;
+
+interface CssInsetsSnapshot {
+  safeTop: number;
+  safeRight: number;
+  safeBottom: number;
+  safeLeft: number;
+  imeExtraBottom: number;
+  imeVisible: boolean;
+}
+
+declare global {
+  interface Window {
+    __VCP_NATIVE_INSETS__?: NativeInsetsSnapshot;
+  }
 }
 
 interface UseKeyboardInsetsReturn {
@@ -11,6 +37,103 @@ interface UseKeyboardInsetsReturn {
   isKeyboardOpen: Ref<boolean>;
   safeAreaBottom: Ref<number>;
   forceRecalculate: () => void;
+}
+
+const keyboardHeight = ref(0);
+const isKeyboardOpen = ref(false);
+const safeAreaBottom = ref(0);
+let nativeBridgeUsers = 0;
+let nativeBridgeAttached = false;
+let nativeSnapshotSeen = false;
+
+const nonNegativePx = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+
+export function normalizeNativeInsets(detail: KeyboardInsetDetail): NativeInsetsSnapshot {
+  return {
+    safeTopPx: nonNegativePx(detail.safeTopPx),
+    safeRightPx: nonNegativePx(detail.safeRightPx),
+    safeBottomPx: nonNegativePx(detail.safeBottomPx ?? detail.safeAreaBottom),
+    safeLeftPx: nonNegativePx(detail.safeLeftPx),
+    imeBottomPx: nonNegativePx(detail.imeBottomPx ?? detail.height),
+    imeVisible: detail.imeVisible ?? detail.visible ?? false,
+  };
+}
+
+export function nativeInsetsToCss(
+  snapshot: NativeInsetsSnapshot,
+  devicePixelRatio: number,
+): CssInsetsSnapshot {
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? devicePixelRatio
+    : 1;
+  const toCssPx = (value: number) => Math.round(nonNegativePx(value) / dpr);
+  const safeBottomPx = nonNegativePx(snapshot.safeBottomPx);
+  const rawImeBottomPx = snapshot.imeVisible ? nonNegativePx(snapshot.imeBottomPx) : 0;
+
+  return {
+    safeTop: toCssPx(snapshot.safeTopPx),
+    safeRight: toCssPx(snapshot.safeRightPx),
+    safeBottom: toCssPx(safeBottomPx),
+    safeLeft: toCssPx(snapshot.safeLeftPx),
+    imeExtraBottom: toCssPx(Math.max(0, rawImeBottomPx - safeBottomPx)),
+    imeVisible: snapshot.imeVisible,
+  };
+}
+
+function applyNativeInsets(detail: KeyboardInsetDetail): void {
+  const snapshot = normalizeNativeInsets(detail);
+  const css = nativeInsetsToCss(snapshot, window.devicePixelRatio || 1);
+  const rootStyle = document.documentElement.style;
+
+  nativeSnapshotSeen = true;
+  safeAreaBottom.value = css.safeBottom;
+  keyboardHeight.value = css.imeExtraBottom;
+  isKeyboardOpen.value = css.imeVisible;
+
+  rootStyle.setProperty("--vcp-safe-top", `${css.safeTop}px`);
+  rootStyle.setProperty("--vcp-safe-right", `${css.safeRight}px`);
+  rootStyle.setProperty("--vcp-safe-bottom", `${css.safeBottom}px`);
+  rootStyle.setProperty("--vcp-safe-left", `${css.safeLeft}px`);
+  rootStyle.setProperty("--vcp-ime-offset", `${css.imeExtraBottom}px`);
+}
+
+const handleNativeInset = (event: Event) => {
+  const detail = (event as CustomEvent<KeyboardInsetDetail>).detail;
+  if (detail) applyNativeInsets(detail);
+};
+
+function replayNativeInsets(): boolean {
+  const snapshot = window.__VCP_NATIVE_INSETS__;
+  if (!snapshot) return false;
+  applyNativeInsets(snapshot);
+  return true;
+}
+
+/**
+ * Retains the single window-level native Insets listener and immediately replays
+ * the snapshot cached by the Android bridge. App.vue uses this even when no
+ * text editor is mounted so every full-screen surface receives four-edge safe
+ * area variables from the same owner.
+ */
+export function retainNativeInsetsBridge(): () => void {
+  nativeBridgeUsers += 1;
+  if (!nativeBridgeAttached) {
+    window.addEventListener("vcp-keyboard-inset", handleNativeInset);
+    nativeBridgeAttached = true;
+  }
+  replayNativeInsets();
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    nativeBridgeUsers = Math.max(0, nativeBridgeUsers - 1);
+    if (nativeBridgeUsers === 0 && nativeBridgeAttached) {
+      window.removeEventListener("vcp-keyboard-inset", handleNativeInset);
+      nativeBridgeAttached = false;
+    }
+  };
 }
 
 /**
@@ -25,23 +148,7 @@ interface UseKeyboardInsetsReturn {
  * （tauri-apps/tauri#10631、#13479），因此必须依赖原生事件或 DOM 级 fallback。
  */
 export function useKeyboardInsets(): UseKeyboardInsetsReturn {
-  const keyboardHeight = ref(0);
-  const isKeyboardOpen = ref(false);
-  const safeAreaBottom = ref(0);
-
-  // --- 策略 1：原生注入事件（最可靠） ---
-  const handleNativeInset = (e: Event) => {
-    const detail = (e as CustomEvent<KeyboardInsetDetail>).detail;
-    if (detail && typeof detail.height === "number") {
-      // Android WindowInsets 返回的是物理像素，需转换为 CSS 逻辑像素
-      const dpr = window.devicePixelRatio || 1;
-      keyboardHeight.value = Math.round(detail.height / dpr);
-      isKeyboardOpen.value = detail.visible;
-      if (typeof detail.safeAreaBottom === "number") {
-        safeAreaBottom.value = Math.round(detail.safeAreaBottom / dpr);
-      }
-    }
-  };
+  let releaseNativeBridge: (() => void) | null = null;
 
   // --- 策略 2：Virtual Keyboard API ---
   let vkCleanup: (() => void) | null = null;
@@ -52,6 +159,7 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
     vk.overlaysContent = true;
 
     const onGeometryChange = (e: any) => {
+      if (nativeSnapshotSeen) return;
       const height = e.target?.boundingRect?.height ?? 0;
       keyboardHeight.value = height;
       isKeyboardOpen.value = height > 0;
@@ -69,6 +177,7 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
   let focusOutDelayTimeout: ReturnType<typeof setTimeout> | null = null;
 
   const estimateFromScroll = () => {
+    if (nativeSnapshotSeen) return;
     // 延迟等待键盘动画完成
     focusTimeout = setTimeout(() => {
       const diff =
@@ -105,7 +214,7 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
         active instanceof HTMLInputElement ||
         active instanceof HTMLTextAreaElement ||
         (active as HTMLElement)?.isContentEditable;
-      if (!stillEditing) {
+      if (!stillEditing && !nativeSnapshotSeen) {
         keyboardHeight.value = 0;
         isKeyboardOpen.value = false;
       }
@@ -114,19 +223,19 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
 
   // --- 公共方法：强制重算 ---
   const forceRecalculate = () => {
-    // 优先尝试原生事件已在监听器中处理；此处作为兜底再触发一次 scroll 估算
-    estimateFromScroll();
+    if (!replayNativeInsets()) estimateFromScroll();
   };
 
   onMounted(() => {
-    window.addEventListener("vcp-keyboard-inset", handleNativeInset);
+    releaseNativeBridge = retainNativeInsetsBridge();
     setupVirtualKeyboard();
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
   });
 
   onUnmounted(() => {
-    window.removeEventListener("vcp-keyboard-inset", handleNativeInset);
+    releaseNativeBridge?.();
+    releaseNativeBridge = null;
     if (vkCleanup) vkCleanup();
     document.removeEventListener("focusin", handleFocusIn);
     document.removeEventListener("focusout", handleFocusOut);

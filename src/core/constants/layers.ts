@@ -10,14 +10,13 @@
  *   drawer   (20)  → 左右抽屉 + 遮罩
  *   overlay  (30)  → 全局覆盖容器（GlobalOverlayManager）
  *   page     (40+) → SlidePage 页面栈（40 + stackIndex）
- *   toast    (50)  → Toast 通知
- *   dialog   (60)  → Prompt、UpdatePrompt、ContextMenu
  *   sheet    (50)  → BottomSheet、ModelSelector
  *   dialog   (60)  → Prompt、UpdatePrompt、ContextMenu
  *   editor   (70)  → HtmlPreviewBlock（全屏HTML）
  *   viewer   (80)  → AttachmentViewer、FullScreenEditor、AvatarCropper
  *   toast    (90)  → Toast 通知
  *   boot     (100) → BootScreen（启动屏）
+ *   gate     (110) → PermissionGate（权限引导页）
  */
 
 export const LAYER_CONTENT = 0;

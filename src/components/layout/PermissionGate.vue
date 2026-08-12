@@ -174,20 +174,20 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
+  <div class="vcp-permission-gate vcp-safe-inline fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
     <!-- Top Section: 米白（所有步骤共享） -->
-    <div class="w-full bg-[#FAF6EE] flex flex-col items-center pt-12 px-5 pb-3 shrink-0">
+    <div class="vcp-permission-hero w-full bg-[#FAF6EE] flex flex-col items-center pt-12 px-5 pb-3 shrink-0">
       <!-- Top Illustration Area -->
       <div class="relative w-full flex flex-col items-center mb-1">
         <!-- Background Decorative Blobs -->
         <div class="absolute -top-12 -right-6 w-36 h-36 bg-blue-500/8 rounded-full blur-3xl"></div>
         <div class="absolute top-8 -left-12 w-44 h-44 bg-cyan-400/8 rounded-full blur-3xl"></div>
 
-        <div class="w-32 h-32 rounded-3xl flex items-center justify-center mb-1 relative z-10">
+        <div class="vcp-permission-logo w-32 h-32 rounded-3xl flex items-center justify-center mb-1 relative z-10">
           <img src="/vcpmobile.svg" class="w-24 h-24" />
         </div>
         <h1 class="text-xl font-semibold text-gray-900 tracking-[0.05em] mb-1">VCP Mobile Android</h1>
-        <p class="text-sm text-[#8B7D6B] text-center leading-relaxed px-4">
+        <p class="vcp-permission-description text-sm text-[#8B7D6B] text-center leading-relaxed px-4">
           将 VCPMobile 部署到你的手机，通过这台手机和智能体对话，建议使用闲置手机
         </p>
       </div>
@@ -474,6 +474,32 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.vcp-permission-gate {
+  padding-top: var(--vcp-safe-top, 0px);
+}
+
+@media (max-height: 520px) {
+  .vcp-permission-hero {
+    padding-top: 0.75rem;
+    padding-bottom: 0.25rem;
+  }
+
+  .vcp-permission-logo {
+    width: 4.5rem;
+    height: 4.5rem;
+  }
+
+  .vcp-permission-logo img {
+    width: 3.5rem;
+    height: 3.5rem;
+  }
+
+  .vcp-permission-description {
+    font-size: 0.75rem;
+    line-height: 1.25;
+  }
+}
+
 .fade-enter-active,
 .fade-leave-active {
   transition: opacity 0.3s ease;

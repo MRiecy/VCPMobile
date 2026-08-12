@@ -94,12 +94,12 @@ const handleTouchMove = (e: TouchEvent) => {
   <Teleport to="body">
     <Transition name="slide-up">
       <div v-if="isOpen" v-bind="$attrs"
-        class="fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden"
-        :style="{ paddingBottom: `calc(var(--vcp-safe-bottom, 48px) + ${keyboardHeight}px)` }">
+        class="vcp-safe-inline fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden"
+        :style="{ paddingBottom: `calc(var(--vcp-safe-bottom, 0px) + ${keyboardHeight}px)` }">
 
         <!-- 顶部导航栏 -->
         <div
-          class="flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top,24px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10">
+          class="flex items-center justify-between px-4 pt-[calc(var(--vcp-safe-top,0px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10">
           <button @click="handleCancel"
             class="p-2 -ml-2 rounded-full active:bg-black/5 dark:active:bg-white/5 text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">
             <X :size="24" />

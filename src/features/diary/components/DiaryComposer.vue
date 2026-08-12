@@ -276,7 +276,7 @@ function updateField<K extends keyof DiaryComposerDraft>(field: K, event: Event)
 
 .diary-field input:focus,
 .diary-field textarea:focus {
-  border-color: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
+  border-color: var(--diary-highlight-line-strong);
 }
 
 .diary-compose-error {
@@ -302,7 +302,7 @@ function updateField<K extends keyof DiaryComposerDraft>(field: K, event: Event)
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid color-mix(in srgb, var(--highlight-text) 55%, var(--diary-line));
+  border: 1px solid var(--diary-highlight-line-strong);
   border-radius: 12px;
   background: var(--diary-surface);
   color: var(--highlight-text);

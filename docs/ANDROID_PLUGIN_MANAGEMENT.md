@@ -2,7 +2,7 @@
 
 > **文档编号**: ARCH-ANDROID-001  
 > **版本**: 1.1.4
-> **日期**: 2026-07-04
+> **日期**: 2026-08-13
 > **附录新增**: 2026-05-19 | 附录 A（插件生态速查）+ 附录 B（权限实战手册）  
 > **状态**: 已迁移至 `tauri-plugin-vcp-mobile`  
 > **适用范围**: `src-tauri/plugins/vcp-mobile` 及 Android 原生层全部自定义代码
@@ -153,10 +153,27 @@ src-tauri/plugins/vcp-mobile/
 ### 4.3 evaluateJavascript 事件格式标准
 
 ```kotlin
-val json = "{\"height\":$keyboardHeight,\"visible\":$isKeyboardVisible,\"safeAreaBottom\":$safeAreaBottom}"
-val script = "window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', { detail: $json }))"
+val json = "{" +
+    "\"safeTopPx\":${snapshot.safeTopPx}," +
+    "\"safeRightPx\":${snapshot.safeRightPx}," +
+    "\"safeBottomPx\":${snapshot.safeBottomPx}," +
+    "\"safeLeftPx\":${snapshot.safeLeftPx}," +
+    "\"imeBottomPx\":${snapshot.imeBottomPx}," +
+    "\"imeVisible\":${snapshot.imeVisible}" +
+    "}"
+val script = "window.__VCP_NATIVE_INSETS__ = $json; " +
+    "window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', " +
+    "{ detail: window.__VCP_NATIVE_INSETS__ }))"
 webView.evaluateJavascript(script, null)
 ```
+
+Insets 事件的附加约束：
+
+- `safe*Px` 是 system bars 与 display cutout 逐边取最大值，所有数字均为 Android 物理像素；
+- `imeBottomPx` 保留 raw IME bottom，`imeVisible=false` 时为 0；前端统一派生 `max(0, imeBottomPx-safeBottomPx)`，禁止组件直接叠加 raw IME 与 safe bottom；
+- 必须先更新 `window.__VCP_NATIVE_INSETS__` 再 dispatch，供 App 根级 `retainNativeInsetsBridge()` 冷启动重放；
+- 当前固定 schema 不使用通用 `serializeValue`，也没有 `queryCurrentState/KeyboardState`；attach 主动读取并请求 Insets，window cache 承担前端重放；
+- 前端按 DPR 只转换一次，写入 `--vcp-safe-top/right/bottom/left` 与 `--vcp-ime-offset`。
 
 ---
 
@@ -238,6 +255,7 @@ Android 13+ 上，没有 `POST_NOTIFICATIONS` 静态声明 + 动态请求，**�
 
 > **目的**：为 VCP Mobile 后续功能扩展提供插件选型依据，减少重复造轮子。
 > **统计口径**：基于 Tauri v2.0+ 官方插件列表与 awesome-tauri 社区生态（2026-05）。
+> **产品边界**：下表中的 Desktop/iOS 条目只是上游生态事实，不表示 VCP Mobile 支持或计划支持这些平台；本项目只发布 Android `arm64-v8a`，桌面由 VCPChat 承担。
 
 ---
 
@@ -757,4 +775,4 @@ window.addEventListener('vcp-permission-change', (e: CustomEvent) => {
 
 ---
 
-*最后更新：2026-08-11 | VCP Mobile v1.1.4*
+*最后更新：2026-08-13 | VCP Mobile v1.1.4*

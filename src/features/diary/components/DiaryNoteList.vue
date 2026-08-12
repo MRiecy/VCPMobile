@@ -197,7 +197,7 @@ defineExpose({ getScrollTop, restoreScrollTop });
 .diary-loading-copy span {
   display: block;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--diary-muted-text) 16%, transparent);
+  background: var(--diary-loading-surface);
   animation: diary-loading-pulse 1.2s ease-in-out infinite alternate;
 }
 
@@ -285,7 +285,7 @@ defineExpose({ getScrollTop, restoreScrollTop });
 }
 
 .diary-note-slot:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--highlight-text) 70%, transparent);
+  outline: 2px solid var(--diary-focus-outline);
   outline-offset: -3px;
 }
 
@@ -316,9 +316,9 @@ defineExpose({ getScrollTop, restoreScrollTop });
   align-items: center;
   justify-content: center;
   padding: 0 7px;
-  border: 1px solid color-mix(in srgb, var(--highlight-text) 36%, var(--diary-line));
+  border: 1px solid var(--diary-highlight-line-subtle);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--highlight-text) 8%, transparent);
+  background: var(--diary-highlight-surface-transparent);
   color: var(--highlight-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 9px;
@@ -405,8 +405,8 @@ defineExpose({ getScrollTop, restoreScrollTop });
 }
 
 .diary-row-selected .diary-note-surface {
-  border-color: color-mix(in srgb, var(--highlight-text) 58%, var(--diary-line));
-  background: color-mix(in srgb, var(--highlight-text) 8%, var(--diary-surface-soft));
+  border-color: var(--diary-highlight-line-strong);
+  background: var(--diary-highlight-surface);
 }
 
 .diary-row-selected .diary-note-surface::before {

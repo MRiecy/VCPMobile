@@ -2,8 +2,8 @@
 id: PLUGIN-KEYBOARD-004
 title: 键盘 Insets 管理
 description: 通过 WindowInsetsCompat 监听键盘状态并实时推送到前端
-version: 1.1.3
-date: 2026-08-11
+version: 1.1.4
+date: 2026-08-13
 related_files:
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/KeyboardInsetsManager.kt
 ---
@@ -12,7 +12,7 @@ related_files:
 
 ## 1. 功能概述
 
-监听 Android 系统软键盘的弹出与收起事件，将键盘高度、可见性状态及安全区域底部距离通过 `evaluateJavascript` 实时注入前端，使 Vue 层能够动态调整输入框和消息列表的布局，避免键盘遮挡内容。
+监听 Android `WindowInsetsCompat`，把 system bars 与 display cutout 合并后的**四边安全区**、原始 IME bottom 与可见性通过 `evaluateJavascript` 实时注入前端。Vue 根桥接统一转换为 CSS px，并只应用扣除底部安全区后的 IME 净增量，避免导航栏重复计入。
 
 > **设计决策**：使用 `evaluateJavascript` + `CustomEvent` 而非 Tauri 官方事件通道（`Plugin.trigger()`），因为前端使用 `window.addEventListener` 监听，与 `vcp-hardware-back`、`vcp-exit-requested` 等窗口级事件保持一致的接收范式。v1.1.3 起生命周期事件已迁移至 Tauri Event `vcp-lifecycle-changed`。参见 `docs/ANDROID_PLUGIN_MANAGEMENT.md` §4.1。
 
@@ -21,15 +21,19 @@ related_files:
 ## 2. 代码结构
 
 ```
-src-tauri/plugins/vcp-mobile/android/.../KeyboardInsetsManager.kt (94 lines)
+src-tauri/plugins/vcp-mobile/android/.../KeyboardInsetsManager.kt
 ├── KeyboardInsetsManager(activity: Activity)
 │   ├── attach(webView: WebView)
-│   ├── queryCurrentState(): KeyboardState
-│   ├── emit(eventName, detail)
-│   ├── serializeValue(value): String
-│   └── escapeJson(s): String
-│
-└── data class KeyboardState(val height: Int, val visible: Boolean)
+│   ├── detach()
+│   ├── schedule(snapshot): 同帧合并
+│   ├── emitSnapshot(snapshot)
+│   └── snapshotFrom(insets)
+├── EdgeInsetsPx(top, right, bottom, left)
+├── InsetSnapshot(safeTopPx, safeRightPx, safeBottomPx, safeLeftPx,
+│                imeBottomPx, imeVisible)
+├── mergeInsetSnapshot(...)
+├── netImeBottomPx(snapshot)
+└── buildInsetsJavascript(snapshot)
 ```
 
 ---
@@ -42,122 +46,91 @@ src-tauri/plugins/vcp-mobile/android/.../KeyboardInsetsManager.kt (94 lines)
 fun attach(webView: WebView) {
     webViewRef = webView
     val rootView = activity.window.decorView.rootView
+    this.rootView = rootView
 
     ViewCompat.setOnApplyWindowInsetsListener(rootView) { _, insets ->
-        val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-        val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-        val isKeyboardVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
-        val keyboardHeight = if (isKeyboardVisible) ime.bottom else 0
-
-        emit("vcp-keyboard-inset", mapOf(
-            "height" to keyboardHeight,
-            "visible" to isKeyboardVisible,
-            "safeAreaBottom" to systemBars.bottom
-        ))
-
-        insets  // 必须返回 insets，否则其他监听器收不到
+        schedule(snapshotFrom(insets))
+        insets
     }
+    ViewCompat.getRootWindowInsets(rootView)?.let { schedule(snapshotFrom(it)) }
+    ViewCompat.requestApplyInsets(rootView)
 }
 ```
 
 | Insets 类型 | 含义 | 用途 |
 |-------------|------|------|
-| `WindowInsetsCompat.Type.systemBars()` | 系统栏（状态栏 + 导航栏）区域 | 获取 `safeAreaBottom`，用于计算底部安全距离 |
-| `WindowInsetsCompat.Type.ime()` | 输入法（软键盘）区域 | 获取键盘高度 `ime.bottom` |
+| `WindowInsetsCompat.Type.systemBars()` | 系统栏（状态栏 + 导航栏）区域 | 四边安全区候选 |
+| `WindowInsetsCompat.Type.displayCutout()` | 刘海/挖孔/侧边切口 | 与 system bars 逐边取最大值 |
+| `WindowInsetsCompat.Type.ime()` | 输入法（软键盘）区域 | 保留原始 `ime.bottom` 物理像素 |
 | `isVisible(Type.ime())` | 键盘当前是否可见 | 区分"键盘收起"与"键盘高度为 0" |
 
 ### 3.2 事件格式
 
-```kotlin
-val script = """
-    window.dispatchEvent(
-        new CustomEvent('vcp-keyboard-inset', {
-            detail: {
-                height: 876,
-                visible: true,
-                safeAreaBottom: 42
-            }
-        })
-    )
-"""
-webViewRef?.evaluateJavascript(script, null)
+```javascript
+window.__VCP_NATIVE_INSETS__ = {
+  safeTopPx: 96,
+  safeRightPx: 0,
+  safeBottomPx: 72,
+  safeLeftPx: 0,
+  imeBottomPx: 876,
+  imeVisible: true
+};
+window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', {
+  detail: window.__VCP_NATIVE_INSETS__
+}));
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `height` | `number` | 键盘高度（px）。键盘收起时为 `0` |
-| `visible` | `boolean` | 键盘是否可见 |
-| `safeAreaBottom` | `number` | 底部系统导航栏高度（px） |
+| `safeTopPx` / `safeRightPx` / `safeBottomPx` / `safeLeftPx` | `number` | system bars 与 display cutout 逐边最大值，Android 物理像素 |
+| `imeBottomPx` | `number` | IME 原始 bottom，Android 物理像素；收起时为 0 |
+| `imeVisible` | `boolean` | IME 是否可见 |
+
+先赋值 `window.__VCP_NATIVE_INSETS__` 再发事件是冷启动防丢契约：若 Kotlin 在 Vue listener 安装前发射，App 根桥接仍能立即重放缓存快照。
 
 ---
 
 ## 4. 前端接收方式
 
 ```typescript
-window.addEventListener('vcp-keyboard-inset', (e: CustomEvent) => {
-    const { height, visible, safeAreaBottom } = e.detail;
-    // 动态调整输入栏 padding-bottom 或消息列表高度
-});
+const release = retainNativeInsetsBridge();
+// App 根桥在整个应用生命周期持有 listener，并立即重放
+// window.__VCP_NATIVE_INSETS__。
+
+// 卸载时对称释放；内部引用计数避免多个编辑器重复绑定。
+onUnmounted(release);
 ```
 
-> **注意**：前端不使用 `@tauri-apps/api/event` 的 `listen()`，因为 Kotlin 侧未使用 `Plugin.trigger()` 发射事件。两者通道不互通。
+`useKeyboardInsets()` 复用同一个引用计数桥，并为 Web/host 环境保留 Virtual Keyboard API 与 focus/scroll fallback。收到过原生快照后 fallback 不再覆盖原生真相源。前端兼容解析旧 `height/visible/safeAreaBottom` 字段，但当前 Kotlin 只发新六字段格式。
 
 ---
 
-## 5. 状态查询（同步）
+## 5. 快照重放与单位转换
 
-```kotlin
-fun queryCurrentState(): KeyboardState {
-    val rootView = activity.window.decorView.rootView
-    val insets = ViewCompat.getRootWindowInsets(rootView) ?: return KeyboardState(0, false)
-    val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-    val visible = insets.isVisible(WindowInsetsCompat.Type.ime())
-    return KeyboardState(
-        height = if (visible) ime.bottom else 0,
-        visible = visible
-    )
-}
+```typescript
+const css = nativeInsetsToCss(snapshot, window.devicePixelRatio || 1);
+// imeExtraBottom = max(0, imeBottomPx - safeBottomPx) / DPR
+
+document.documentElement.style.setProperty('--vcp-safe-top', `${css.safeTop}px`);
+document.documentElement.style.setProperty('--vcp-safe-right', `${css.safeRight}px`);
+document.documentElement.style.setProperty('--vcp-safe-bottom', `${css.safeBottom}px`);
+document.documentElement.style.setProperty('--vcp-safe-left', `${css.safeLeft}px`);
+document.documentElement.style.setProperty('--vcp-ime-offset', `${css.imeExtraBottom}px`);
 ```
 
-用于前端初始化时获取当前键盘状态（而非等待下一次 Insets 变化事件）。
+旧文档中的 `queryCurrentState(): KeyboardState` 已删除。当前策略是 Android attach 时主动读取 `getRootWindowInsets` 并请求 apply；每次注入都更新 window cache，前端 listener retain 时同步重放。原生字段始终是物理像素，DPR 转换只在前端唯一桥接点执行一次。
 
 ---
 
-## 6. JSON 序列化实现
+## 6. 有界 JavaScript 构造
 
-由于 `evaluateJavascript` 需要注入完整的 JavaScript 对象字面量，Kotlin 侧手写了一个轻量级 JSON 序列化器：
+当前 payload 只有六个已归一化的 Int/Boolean 字段，`buildInsetsJavascript` 直接构造固定 schema，不再存在通用 `serializeValue` / `escapeJson`：
 
 ```kotlin
-private fun serializeValue(value: Any?): String {
-    return when (value) {
-        null -> "null"
-        is String -> "\"${escapeJson(value)}\""
-        is Boolean -> value.toString()
-        is Number -> value.toString()
-        is Map<*, *> -> {
-            val entries = value.entries.joinToString(", ") { (k, v) ->
-                "\"$k\": ${serializeValue(v)}"
-            }
-            "{ $entries }"
-        }
-        else -> "\"${escapeJson(value.toString())}\""
-    }
-}
-
-private fun escapeJson(s: String): String {
-    return s
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\b", "\\b")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-}
+internal fun buildInsetsJavascript(snapshot: InsetSnapshot): String
 ```
 
-> **为什么不使用 Gson/Moshi？**
-> - Tauri 插件的 Kotlin 侧默认不引入 Gson。
-> - 序列化对象结构简单（仅单层 Map），手写序列化器避免增加依赖体积。
+字段没有用户字符串输入，schema 可由 JVM 契约测试直接断言；不要重新引入通用 JSON serializer 或任意事件名。
 
 ---
 
@@ -170,9 +143,14 @@ override fun load(webView: WebView) {
     keyboardInsetsManager.attach(webView)
     // ...
 }
+
+override fun onDestroy(activity: AppCompatActivity) {
+    keyboardInsetsManager.detach()
+    // ...
+}
 ```
 
-`attach()` 在 `Plugin.load(webView)` 时调用，确保 WebView 初始化完成后立即注册 Insets 监听器。
+`attach()` 在 `Plugin.load(webView)` 时调用，确保 WebView 初始化完成后立即注册并主动请求 Insets；`onDestroy()` 对称 `detach()`，撤销 listener 与 frame callback，并在需要时先发出 IME 已收起快照。
 
 ---
 
@@ -180,12 +158,16 @@ override fun load(webView: WebView) {
 
 1. **必须返回 `insets`**：`setOnApplyWindowInsetsListener` 的 lambda 必须返回传入的 `insets` 对象，否则系统栏的内边距计算会被中断，导致布局异常。
 
-2. **不干预 WebView 布局**：`KeyboardInsetsManager` 仅负责**信息推送**，不通过 `setPadding` 修改 WebView 布局。前端通过 CSS `env(safe-area-inset-bottom)` 和动态计算完全接管布局调整。
+2. **不干预 WebView 布局**：`KeyboardInsetsManager` 仅负责信息推送，不通过 `setPadding` 修改 WebView。前端统一写入 `--vcp-safe-top/right/bottom/left` 与 `--vcp-ime-offset`；`env()` 仅是无原生快照时的 Web fallback。
 
-3. **`safeAreaBottom` 的用途**：部分设备使用手势导航栏（无实体按钮），`safeAreaBottom` 帮助前端区分"键盘高度"和"导航栏高度"，避免双重 padding。
+3. **IME 只应用净增量**：组件不得把 raw `imeBottomPx` 与 safe bottom 直接相加；统一使用 `max(0, imeBottomPx - safeBottomPx)` 转换后的 `--vcp-ime-offset`。
 
 4. **同帧只提交最新快照**：Insets 高频回调先写入 `pending`，再通过 `postOnAnimation` 合并到下一帧；相同 `InsetSnapshot` 不重复执行 `evaluateJavascript`。`detach()` 必须移除已排队的 frame callback 并清空 `pending/lastSent`，防止 Activity 重建后旧 WebView 收到迟到事件。
 
+5. **四边同源**：system bars 与 display cutout 必须逐边取最大值；横屏 left/right 切口不能由 bottom-only 逻辑代替。
+
+6. **根桥长期持有**：App 不应等待某个输入组件挂载才安装 listener；根级 `retainNativeInsetsBridge()` 负责全生命周期接收与冷启动重放。
+
 ---
 
-*最后更新：2026-08-11 | VCP Mobile v1.1.3*
+*最后更新：2026-08-13 | VCP Mobile v1.1.4*

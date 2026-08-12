@@ -15,7 +15,7 @@ const props = withDefaults(defineProps<Props>(), {
   <Transition name="slide-page">
     <div
       v-show="props.isOpen"
-      class="fixed inset-0 pointer-events-auto bg-[var(--primary-bg)]"
+      class="vcp-safe-inline fixed inset-0 pointer-events-auto bg-[var(--primary-bg)]"
       :style="{ zIndex: props.zIndex }"
     >
       <slot />
