@@ -73,7 +73,9 @@ describe("diary cross-layer contracts", () => {
   });
 
   it("uses a real first-open latch and a guarded diary page close", () => {
-    expect(featureOverlaysSource).toContain("const diaryMounted = ref(false)");
+    expect(featureOverlaysSource).toContain(
+      "const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen)",
+    );
     expect(featureOverlaysSource).toContain('v-if="diaryMounted"');
     expect(featureOverlaysSource).toContain("import('../features/diary/DiaryCenterView.vue')");
     expect(overlaySource).toContain("pageStackTop.value?.type !== 'diaryCenter'");

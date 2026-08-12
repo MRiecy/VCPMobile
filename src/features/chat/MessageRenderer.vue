@@ -65,7 +65,7 @@ function isAstDebugEnabled(): boolean {
 }
 
 function astDebugLog(...args: unknown[]): void {
-  if (isAstDebugEnabled()) {
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
     console.warn(...args);
   }
 }
@@ -109,7 +109,9 @@ function rebuildTailSnapshot(sandbox: HTMLElement): void {
 
 function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
   astFailureCount += 1;
-  astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
+    astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
+  }
   if (getTailSnapshotNodes().length > 0) {
     rebuildTailSnapshot(sandbox);
     // 【意图性设计说明】：此处直接 return 退出，不执行下方的关闭降级逻辑，是有意为之的保活设计。
@@ -841,7 +843,10 @@ watch(
     tailSandboxRef,
   ],
   ([frame, _snapshot, sandbox]) => {
-    astDebugLog(`[AST Diff Watch] Msg ${props.message.id} frame=${frame ? frame.frameSeq : 'none'}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, epoch=${frame?.epoch}, revision=${frame?.revision}`);
+    const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
+    if (debugEnabled) {
+      astDebugLog(`[AST Diff Watch] Msg ${props.message.id} frame=${frame ? frame.frameSeq : 'none'}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, epoch=${frame?.epoch}, revision=${frame?.revision}`);
+    }
 
     if (!useAstForCurrentTail.value || !sandbox) {
       if (lastSandbox) {
@@ -905,7 +910,9 @@ watch(
       return;
     }
 
-    astDebugLog(`[AST Diff Apply] Executing frame ${frame.frameSeq} (${mutations.length} mutations) for ${props.message.id}`);
+    if (debugEnabled) {
+      astDebugLog(`[AST Diff Apply] Executing frame ${frame.frameSeq} (${mutations.length} mutations) for ${props.message.id}`);
+    }
     const result = applyFrame(mutations, props.message.id, sandbox);
     if (result.ok) {
       lastAppliedFrameSeq = frame.frameSeq;

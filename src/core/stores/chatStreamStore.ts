@@ -423,35 +423,37 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       const aurora = event.aurora;
       if (aurora) {
-        recordStreamTrace({
-          messageId: actualMessageId,
-          auroraPayload: {
-            stableChanged: aurora.stableChanged,
-            stableBlocksCount: aurora.stableBlocks?.length || 0,
-            stableBlocksHashes:
-              aurora.stableBlocks?.map((b: any) => b.hash) || [],
-            tailChanged: aurora.tailChanged,
-            tailContent: aurora.tail || "",
-            tailBlockType: aurora.tailBlock?.type || null,
-            tailFrame: aurora.tailFrame
+        if (import.meta.env.DEV && isStreamDebugEnabled()) {
+          recordStreamTrace({
+            messageId: actualMessageId,
+            auroraPayload: {
+              stableChanged: aurora.stableChanged,
+              stableBlocksCount: aurora.stableBlocks?.length || 0,
+              stableBlocksHashes:
+                aurora.stableBlocks?.map((b: any) => b.hash) || [],
+              tailChanged: aurora.tailChanged,
+              tailContent: aurora.tail || "",
+              tailBlockType: aurora.tailBlock?.type || null,
+              tailFrame: aurora.tailFrame
+                ? {
+                    epoch: aurora.tailFrame.epoch,
+                    revision: aurora.tailFrame.revision,
+                    frameSeq: aurora.tailFrame.frameSeq,
+                    reset: aurora.tailFrame.reset,
+                    mutationsCount: aurora.tailFrame.mutations?.length || 0,
+                    hasSnapshot: !!aurora.tailFrame.snapshot,
+                  }
+                : null,
+            },
+            msgSnapshot: msg
               ? {
-                  epoch: aurora.tailFrame.epoch,
-                  revision: aurora.tailFrame.revision,
-                  frameSeq: aurora.tailFrame.frameSeq,
-                  reset: aurora.tailFrame.reset,
-                  mutationsCount: aurora.tailFrame.mutations?.length || 0,
-                  hasSnapshot: !!aurora.tailFrame.snapshot,
+                  contentLength: msg.content?.length || 0,
+                  blocksCount: msg.blocks?.length || 0,
+                  tailContentLength: msg.tailContent?.length || 0,
                 }
               : null,
-          },
-          msgSnapshot: msg
-            ? {
-                contentLength: msg.content?.length || 0,
-                blocksCount: msg.blocks?.length || 0,
-                tailContentLength: msg.tailContent?.length || 0,
-              }
-            : null,
-        });
+          });
+        }
 
         // 1. 初始化或获取该 messageId 的帧合并状态
         let update = rAFPendingUpdates.get(actualMessageId);
@@ -481,9 +483,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           update.blocks = aurora.stableBlocks;
         }
         if (aurora.tailFrame) {
-          streamDebugLog(
-            `[chatStreamStore] Received tailFrame seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`,
-          );
+          if (import.meta.env.DEV && isStreamDebugEnabled()) {
+            streamDebugLog(
+              `[chatStreamStore] Received tailFrame seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`,
+            );
+          }
           const latestSnapshot =
             aurora.tailFrame.snapshot ||
             aurora.tailSnapshot ||

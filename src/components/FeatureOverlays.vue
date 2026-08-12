@@ -5,19 +5,18 @@
  * 职责：作为所有全局业务 Feature 视图的统一挂载点。
  *
  * 架构说明：
- * 1. Settings/Agent/Group 设置页保持常驻 DOM（isMounted），以保留组件本地状态（表单草稿等）
- *    和确保 SlidePage 的 leave 动画正常完成。
+ * 1. Settings/Agent/Group 等低频页面首次打开时才挂载，挂载后保持常驻 DOM，
+ *    以保留组件本地状态（表单草稿等）并确保 SlidePage 的 leave 动画正常完成。
  * 2. SyncSessionView 使用 v-if 按需渲染，因其状态完全由 syncSessionStore 管理，
  *    且已纳入 OverlayStore pageStack 统一管控。
  *
  * 注意：此组件内的视图通过 SlidePage 管理滑入/滑出动画，
  * 物理上它们会渲染在 GlobalOverlayManager 提供的容器中。
  */
-import { ref, onMounted, defineAsyncComponent, watch } from 'vue';
+import { defineAsyncComponent, ref, watch } from 'vue';
 import { useOverlayStore } from '../core/stores/overlay';
 import { useSettingsStore } from '../core/stores/settings';
 import ToolInteractionOverlay from '../features/distributed/ToolInteractionOverlay.vue';
-import TarvenSettingsView from '../features/chat/components/TarvenSettings.vue';
 
 // 相对低频的设置页按需懒加载：用户首次打开时才下载 chunk，SlidePage 动画天然遮盖加载延迟
 const AgentSettingsView = defineAsyncComponent(() => import('../features/agent/AgentSettingsView.vue'));
@@ -30,35 +29,40 @@ const DistributedView = defineAsyncComponent(() => import('../features/distribut
 const SettingsView = defineAsyncComponent(() => import('../features/settings/SettingsView.vue'));
 const RagObserverView = defineAsyncComponent(() => import('../features/rag/RagObserver.vue'));
 const DiaryCenterView = defineAsyncComponent(() => import('../features/diary/DiaryCenterView.vue'));
+const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
 
 
 const overlayStore = useOverlayStore();
 const settingsStore = useSettingsStore();
-const isMounted = ref(false);
-const diaryMounted = ref(false);
 
-watch(
-  () => overlayStore.isDiaryCenterOpen,
-  (isOpen) => {
-    if (isOpen) diaryMounted.value = true;
-  },
-  { immediate: true },
-);
+const createFirstOpenLatch = (isOpen: () => boolean) => {
+  const mounted = ref(isOpen());
+  watch(isOpen, (open) => {
+    if (open) mounted.value = true;
+  });
+  return mounted;
+};
 
-onMounted(() => {
-  isMounted.value = true;
-});
+const settingsMounted = createFirstOpenLatch(() => overlayStore.isSettingsOpen);
+const agentSettingsMounted = createFirstOpenLatch(() => overlayStore.isAgentSettingsOpen);
+const groupSettingsMounted = createFirstOpenLatch(() => overlayStore.isGroupSettingsOpen);
+const tarvenSettingsMounted = createFirstOpenLatch(() => overlayStore.isTarvenSettingsOpen);
+const distributedMounted = createFirstOpenLatch(() => overlayStore.isDistributedOpen);
+const ragObserverMounted = createFirstOpenLatch(() => overlayStore.isRagObserverOpen);
+const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
 </script>
 
 <template>
-  <div v-if="isMounted">
+  <div>
     <SettingsView
+      v-if="settingsMounted"
       :is-open="overlayStore.isSettingsOpen"
       :z-index="overlayStore.getPageZIndex('settings')"
       @close="overlayStore.closeSettings()"
     />
 
     <AgentSettingsView
+      v-if="agentSettingsMounted"
       :is-open="overlayStore.isAgentSettingsOpen"
       :id="overlayStore.agentSettingsId"
       :z-index="overlayStore.getPageZIndex('agentSettings')"
@@ -66,6 +70,7 @@ onMounted(() => {
     />
 
     <GroupSettingsView
+      v-if="groupSettingsMounted"
       :is-open="overlayStore.isGroupSettingsOpen"
       :id="overlayStore.groupSettingsId"
       :z-index="overlayStore.getPageZIndex('groupSettings')"
@@ -73,6 +78,7 @@ onMounted(() => {
     />
 
     <TarvenSettingsView
+      v-if="tarvenSettingsMounted"
       :is-open="overlayStore.isTarvenSettingsOpen"
       :z-index="overlayStore.getPageZIndex('tarvenSettings')"
       @close="overlayStore.closeTarvenSettings()"
@@ -88,12 +94,14 @@ onMounted(() => {
     />
 
     <DistributedView
+      v-if="distributedMounted"
       :is-open="overlayStore.isDistributedOpen"
       :z-index="overlayStore.getPageZIndex('distributed')"
       @close="overlayStore.closeDistributed()"
     />
 
     <RagObserverView
+      v-if="ragObserverMounted"
       :is-open="overlayStore.isRagObserverOpen"
       :z-index="overlayStore.getPageZIndex('ragObserver')"
       @close="overlayStore.closeRagObserver()"

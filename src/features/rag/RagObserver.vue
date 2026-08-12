@@ -168,30 +168,46 @@ const filterTabs = [
 ] as const;
 
 // 监听是否打开，挂载和注销 Tauri WebSocket 监听
-watch(() => props.isOpen, (isOpen) => {
+watch(() => props.isOpen, async (isOpen) => {
   if (isOpen) {
     store.initListener();
-    drawSpectrum();
+    await nextTick();
+    drawSpectrum(true);
   } else {
     store.destroyListener();
-    if (animationFrameId) {
+    if (animationFrameId !== null) {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
     }
   }
 });
 
-onMounted(() => {
+watch(() => store.triggerSpectrumAnimation, (isAnimating) => {
+  if (!props.isOpen) return;
+  if (isAnimating || animationFrameId === null) {
+    drawSpectrum(false);
+  }
+});
+
+const handleSpectrumResize = () => {
+  if (props.isOpen) drawSpectrum(!store.triggerSpectrumAnimation);
+};
+
+onMounted(async () => {
+  window.addEventListener('resize', handleSpectrumResize);
   if (props.isOpen) {
     store.initListener();
-    drawSpectrum();
+    await nextTick();
+    drawSpectrum(true);
   }
 });
 
 onUnmounted(() => {
+  window.removeEventListener('resize', handleSpectrumResize);
   store.destroyListener();
-  if (animationFrameId) {
+  if (animationFrameId !== null) {
     cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
   }
 });
 
@@ -332,20 +348,23 @@ const getTitleStyle = (type: string) => {
   };
 };
 
-// 24柱全宽跳动音频频谱微动画
-const drawSpectrum = () => {
-  let phase = 0;
+// 24 柱事件驱动频谱：事件期间逐帧绘制，回落到静态分割线后停止 rAF。
+let spectrumPhase = 0;
+const drawSpectrum = (settleImmediately = false) => {
+  if (animationFrameId !== null) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
 
   const render = () => {
+    animationFrameId = null;
     // 动态在循环内部解包，一旦组件销毁且 canvas 被设为 null，循环自动安全终止
     const canvas = spectrumCanvas.value;
     if (!canvas) {
-      animationFrameId = null;
       return;
     }
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      animationFrameId = null;
       return;
     }
 
@@ -362,7 +381,6 @@ const drawSpectrum = () => {
     const height = canvas.height;
 
     if (width === 0 || height === 0) {
-      animationFrameId = requestAnimationFrame(render);
       return;
     }
 
@@ -371,6 +389,12 @@ const drawSpectrum = () => {
     const isAnimating = store.triggerSpectrumAnimation;
     const spacing = 1.5 * dpr;
     const barWidth = (width - (numBars - 1) * spacing) / numBars;
+    const restingHeight = 1 * dpr;
+    let needsAnotherFrame = isAnimating;
+
+    if (settleImmediately && !isAnimating) {
+      barsHeights.fill(restingHeight);
+    }
 
     // 创建横向霓虹渐变
     const grad = ctx.createLinearGradient(0, 0, width, 0);
@@ -380,13 +404,13 @@ const drawSpectrum = () => {
     ctx.fillStyle = grad;
 
     if (isAnimating) {
-      phase += 0.06; // 控制正弦波流动的速度
+      spectrumPhase += 0.06; // 控制正弦波流动的速度
     }
 
     for (let i = 0; i < numBars; i++) {
       if (isAnimating) {
         // 计算正弦波的当前角度（使得 24 柱正好呈现大约 1.5 个周期的完整波形）
-        const angle = (i / numBars) * Math.PI * 2 * 1.5 - phase;
+        const angle = (i / numBars) * Math.PI * 2 * 1.5 - spectrumPhase;
         // 振幅限制在可用 Canvas 高度的一半，避免触顶溢出
         const amplitude = (height - 3 * dpr) / 2;
         const offset = height / 2;
@@ -395,7 +419,12 @@ const drawSpectrum = () => {
         barsHeights[i] += (targetHeight - barsHeights[i]) * 0.2;
       } else {
         // 静默时平滑收缩到 1px 物理高度的精致底部线
-        barsHeights[i] += (1 * dpr - barsHeights[i]) * 0.15;
+        barsHeights[i] += (restingHeight - barsHeights[i]) * 0.15;
+        if (Math.abs(barsHeights[i] - restingHeight) > 0.05 * dpr) {
+          needsAnotherFrame = true;
+        } else {
+          barsHeights[i] = restingHeight;
+        }
       }
 
       const x = i * (barWidth + spacing);
@@ -404,12 +433,11 @@ const drawSpectrum = () => {
       ctx.fillRect(x, y, barWidth, barsHeights[i]);
     }
 
-    animationFrameId = requestAnimationFrame(render);
+    if (needsAnotherFrame) {
+      animationFrameId = requestAnimationFrame(render);
+    }
   };
 
-  if (animationFrameId) {
-    cancelAnimationFrame(animationFrameId);
-  }
   render();
 };
 </script>
@@ -1176,7 +1204,7 @@ const drawSpectrum = () => {
                        :class="themeStore.isDarkResolved 
                          ? 'bg-purple-500/10 border-purple-500/20 border-l-purple-500 text-white/95' 
                          : 'bg-purple-100/30 border-purple-200/80 border-l-purple-600 text-purple-950 shadow-sm'">
-                    <Moon :size="12" class="text-purple-500 animate-pulse" />
+                    <Moon :size="12" class="text-purple-500" />
                     <div class="font-mono text-[10px]">{{ payloadCache[item.id].message }}</div>
                   </div>
                 </div>

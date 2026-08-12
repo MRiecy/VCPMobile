@@ -1,7 +1,7 @@
 # 06. 分期实施与 Magi 综合裁决
 
-> 状态：`SUPERSEDED-ROADMAP / IMPLEMENTED / SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PENDING`
-> 下文 Phase 0–5 是历史施工推导，不再作为路线图，尤其性能埋点、启动 SLA、A/B 和 RC 性能门禁均已延期。当前实现/验证/设备证据状态见 [README.md](./README.md)，长期规范见 [`docs/ANDROID_UI_COMPATIBILITY.md`](../../docs/ANDROID_UI_COMPATIBILITY.md)。
+> 状态：`COMPATIBILITY-IMPLEMENTED / PERFORMANCE-PHASE-1-D0/D1-PASS / DEVICE-AND-RELEASE-EVIDENCE-PENDING`
+> 下文 Phase 0–5 保留为候选地图，不作为一次性施工清单。当前只执行已有机制证据的 Phase 1 小步候选；完整启动埋点、固定 SLA 与 RC 自动门禁仍未获准升级为发布阻断。状态见 [README.md](./README.md)。
 
 <details>
 <summary>历史 Magi 推导与阶段路线（非执行规范）</summary>
@@ -221,4 +221,4 @@ perf(render): coalesce rich-content postprocessing
 
 ## 7. 当前交付状态
 
-兼容实现已落地；静态检查、前端全量测试、生产构建、Android 插件 strict JVM 测试、Android 生成树初始化与 diff 检查均通过，当前工作树状态为 `IMPLEMENTED / SOFTWARE-VERIFIED`。具名手机、平板与折叠/分屏窗口的 WebView 截图和触控证据尚未归档，保持 `DEVICE-EVIDENCE-PENDING`。性能扩建与固定 SLA 已延期，既有性能资产不删除。
+兼容实现已落地并保持 `IMPLEMENTED / SOFTWARE-VERIFIED`；完整手机、平板与折叠/分屏矩阵仍为 `DEVICE-EVIDENCE-PENDING`。性能 Phase 1 已实施静态 Core 状态、RAG 事件驱动频谱、Overlay 首开挂载、Tool 装饰停转及生产 debug 热路径消除，并取得 PHZ110 D0 因果证据与 D1 packaged Debug 成对复验：稳定 Chat `609 → 0 frames/10s`、首屏资源 `27 → 10`。R1 签名 Release、长时功耗/温度、固定 SLA 和自动发布门禁仍未启用。

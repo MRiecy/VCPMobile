@@ -11,7 +11,6 @@ const statusConfig = computed(() => {
     return {
       color: 'bg-red-500',
       shadow: 'shadow-red-500/50',
-      animate: 'animate-pulse',
       text: 'VCPLog 未连接'
     };
   }
@@ -23,7 +22,6 @@ const statusConfig = computed(() => {
       return {
         color: 'bg-green-500',
         shadow: 'shadow-green-500/50',
-        animate: 'vcp-core-pulse',
         text: 'Core Active'
       };
     case 'initializing':
@@ -31,21 +29,18 @@ const statusConfig = computed(() => {
       return {
         color: 'bg-yellow-500',
         shadow: 'shadow-yellow-500/50',
-        animate: 'animate-pulse',
         text: 'Booting...'
       };
     case 'error':
       return {
         color: 'bg-red-500',
         shadow: 'shadow-red-500/50',
-        animate: 'animate-bounce',
         text: 'Core Error'
       };
     default:
       return {
         color: 'bg-gray-400',
         shadow: 'shadow-gray-400/20',
-        animate: '',
         text: 'Unknown'
       };
   }
@@ -53,14 +48,17 @@ const statusConfig = computed(() => {
 </script>
 
 <template>
-  <div 
+  <div
     class="flex items-center gap-1.5 transition-all duration-300 select-none"
     :title="notificationStore.vcpCoreStatus.message"
+    :aria-label="statusConfig.text"
   >
-    <!-- 呼吸灯 -->
-    <div 
+    <!-- 所有状态使用静态颜色与文字，避免页头常驻刷新。 -->
+    <div
+      data-testid="core-status-dot"
+      aria-hidden="true"
       class="w-1.5 h-1.5 rounded-full transition-colors duration-500"
-      :class="[statusConfig.color, statusConfig.shadow, statusConfig.animate]"
+      :class="[statusConfig.color, statusConfig.shadow]"
     ></div>
     
     <!-- 状态文字 -->
@@ -69,23 +67,3 @@ const statusConfig = computed(() => {
     </span>
   </div>
 </template>
-
-<style scoped>
-.vcp-core-pulse {
-  animation: vcpCorePulse 2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-  /* 提升至 GPU 合成层 */
-  will-change: transform, opacity;
-  transform: translate3d(0, 0, 0);
-}
-
-@keyframes vcpCorePulse {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1.1) translate3d(0, 0, 0);
-  }
-  50% {
-    opacity: 0.6;
-    transform: scale(0.9) translate3d(0, 0, 0);
-  }
-}
-</style>

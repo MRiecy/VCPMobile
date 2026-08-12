@@ -171,6 +171,21 @@ describe('trusted-circle rich HTML active-content guard', () => {
     cleanupRegistry('stream-message');
   });
 
+  it('does not serialize AST debug payloads while runtime tracing is disabled', () => {
+    const sandbox = document.createElement('div');
+    const node = {
+      type: 'paragraph',
+      children: [{ type: 'text', value: 'kept' }],
+      toJSON: () => {
+        throw new Error('debug serialization must stay lazy');
+      },
+    } as unknown as MarkdownNode;
+
+    expect(() => rebuildSnapshot([node], 'no-debug-message', sandbox)).not.toThrow();
+    expect(sandbox.textContent).toBe('kept');
+    cleanupRegistry('no-debug-message');
+  });
+
   it('guards marked ToolBlock output without flattening its Markdown or safe local HTML', () => {
     const block: ContentBlock = {
       type: 'tool-result',

@@ -1,12 +1,14 @@
-# VCPMobile Android WebView 多设备兼容专项
+# VCPMobile Android WebView 多设备兼容与性能专项
 
-> 状态：`IMPLEMENTED / SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PENDING`
+> 兼容状态：`IMPLEMENTED / SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PENDING`
+>
+> 性能状态：`PERFORMANCE-REACTIVATED / PHASE-1-D0/D1-A/B-PASS / RELEASE-EVIDENCE-PENDING`
 >
 > 实施日期：2026-08-13
 >
 > 恢复基线：clean checkpoint `cecdbe4`（已包含最新 Diary 功能）
 >
-> 主题：Android arm64 平台治理、手机/平板/折叠屏窗口适配、WebView CSS/Insets 与强渲染保护
+> 主题：Android arm64 平台治理、多设备适配、WebView CSS/Insets、强渲染保护与证据驱动的运行时减负
 
 ## 结论
 
@@ -20,7 +22,7 @@
 
 > **兼容修复不得关闭、删除、纯文本化或降级消息的 Markdown、代码高亮、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thought、Diary、附件与流式 AST 差分能力。**
 
-性能优化已延期且不是本轮完成条件；仓库既有 perf 脚本与 Criterion 资产保留，不删除、不扩建、不冻结 SLA。
+性能工作已于 2026-08-13 重新激活，但仍坚持“先证明、再修改、一次一个机制”。本阶段不追求首屏瞬时化，也不冻结毫秒 SLA；先消除已被真机 A/B 证明的常驻刷新、未打开页面的提前实例化，以及生产热路径中无意义的调试数据构造。Debug/HMR 结果只标记为因果证据，不冒充签名 Release 或能耗结论。
 
 ## 文档导航
 
@@ -28,9 +30,9 @@
 |---|---|---|
 | [01-现状证据与问题分层.md](./01-现状证据与问题分层.md) | `cecdbe4` 基线、已解决问题与剩余证据边界 | 说明为何进入已实现态 |
 | [02-WebView兼容与UI响应式规范.md](./02-WebView兼容与UI响应式规范.md) | Android 支持基线、CSS、窗口布局与 Insets | 兼容规范；长期权威版在 `docs/ANDROID_UI_COMPATIBILITY.md` |
-| [03-首屏与运行时性能优化方案.md](./03-首屏与运行时性能优化方案.md) | 历史性能研究 | `DEFERRED`，不再指导本轮施工 |
+| [03-首屏与运行时性能优化方案.md](./03-首屏与运行时性能优化方案.md) | 当前性能证据、已实施候选与后续实验队列 | `ACTIVE`，按独立 A/B 推进 |
 | [04-消息强渲染能力保护契约.md](./04-消息强渲染能力保护契约.md) | 能力清单、fixture 与语义/交互等价性 | 兼容修复硬门禁 |
-| [05-测量矩阵与验收门禁.md](./05-测量矩阵与验收门禁.md) | 自动化与具名设备矩阵 | 关闭 `DEVICE-EVIDENCE-PENDING` |
+| [05-测量矩阵与验收门禁.md](./05-测量矩阵与验收门禁.md) | 兼容设备矩阵与性能证据分级 | 关闭设备证据缺口并约束性能声明 |
 | [06-分期实施与Magi综合裁决.md](./06-分期实施与Magi综合裁决.md) | Magi 裁决、完成清单与交付边界 | 专项收尾记录 |
 
 ## 当前证据等级
@@ -40,6 +42,8 @@
 | `IMPLEMENTED` | 兼容实现与规范已落地 | 横向 workspace、三种宽度表现、CSS fallback、四边 Insets |
 | `SOFTWARE-VERIFIED` | 当前未提交工作树的软件验证已完成 | 静态检查、前端测试、生产构建、Android 插件 JVM 测试与生成树初始化均通过 |
 | `DEVICE-EVIDENCE-PENDING` | 必须在实际 Android WebView 上确认 | 具名手机、平板、折叠/分屏窗口的截图与触控可达性 |
+| `PHASE-1-D0/D1-A/B-PASS` | Dev/HMR 因果定位与 packaged Debug 成对复验均已完成 | Chat 与 RAG 稳态帧提交、首屏资源图、独立 Debug APK |
+| `RELEASE-EVIDENCE-PENDING` | 尚无同 commit、同版本、签名 Release 的成对 APK | 不声明 Release 启动、功耗或长期内存收益 |
 
 任何后续报告都必须保留证据标签。尤其 happy-dom、host browser 与 Rust benchmark 不能替代 Android WebView 的真实 CSS 几何、系统 Insets 和触控结论。
 
@@ -50,6 +54,7 @@
 - 仓库当前 E2E 是 Node.js + adb smoke，不是 Maestro；没有 Playwright desktop E2E。
 - 软件与生成物验证由实际 runner 输出记录，不在计划里维护易漂移的模块数、测试数、bundle KB 或 CSS 命中数。
 - 已取得一台现代 Android 手机的局部真机证据，但多设备矩阵仍未归档，因此不得标记 `DEVICE-VERIFIED`。
+- 性能实现以 clean `50d782f` 为父基线；本提交只接纳已经有机制证据且不改变消息语义的候选。
 
 ## 局部真机证据
 
@@ -61,13 +66,24 @@
 ## 本轮软件验证记录
 
 - `pnpm check`：通过（Vue TypeScript + Rust `cargo check --locked`）。
-- `pnpm test:run -- --reporter=verbose`：24 个文件、122 项测试通过。
-- `pnpm build`：通过，生产构建转换 4450 个模块。
+- `pnpm test:run -- --reporter=verbose`：26 个文件、129 项测试通过。
+- `pnpm build`：通过，候选生产构建转换 4449 个模块。
 - Android 插件 strict Gradle JVM 测试：37 项通过，0 failure/error/skip。
 - `pnpm tauri android init --ci`：通过；生成树保留本轮 Android manifest 契约。
 - 专项治理测试：7 项通过；`git diff --check` 通过。
 
-这些结果只证明以 `cecdbe4` 为恢复基线的当前工作树达到 `SOFTWARE-VERIFIED`，不代表 APK 或设备矩阵已验收。
+性能 Phase 1 增加了稳态动画、首开挂载和调试热路径治理测试；最新数量以 runner 输出为准。上述结果只证明当前工作树达到 `SOFTWARE-VERIFIED`，不代表签名 APK、功耗或完整设备矩阵已验收。
+
+## 性能 Phase 1 证据
+
+- PHZ110 Debug/HMR 的静态 Chat：`CORE ACTIVE` 呼吸灯运行时 10 秒约 `+610` 帧，移除永久动画后 10 秒 `+0`；READY、初始化、断连与错误继续由颜色和文字区分。
+- 同一设备、同一已打开 RAG 页面：旧频谱 Canvas 空闲 10 秒 `+598` 帧；改为事件触发、回落后停止 rAF 后 10 秒 `+0`。
+- 首次冷开 Debug 页面 ResourceTiming 从 226 项降至 173 项，减少 53 项（23.5%）；Settings、Agent/Group、Tarven、Distributed、RAG 与 Diary 不再在关闭状态提前加载。验收人已打开并关闭 Settings/RAG，首开加载与关闭后 DOM 保留正常。
+- 同机同源生产 Web 构建中，主 JS 从 456.06 kB / gzip 135.88 kB 降到 416.50 kB / gzip 126.79 kB；主 CSS 从 211.22 kB / gzip 39.01 kB 降到 208.92 kB / gzip 38.57 kB。体积变化是 import graph 与无效调试代码消除的生成物证据，不等同于启动耗时收益。
+- production dist 已不再包含 AST/stream debug 的重对象字段、序列化日志字符串，以及被移除的常驻动画 keyframes。
+- D1 使用父基线 `50d782f` 与候选工作树分别构建 production-frontend Debug APK；两者均为 `com.vcp.avatar.debug`、`1.1.4-debug`、versionCode `1001004`。基线 `f80bdcc9…` 与候选 `6d4bc156…` 在同一 PHZ110、同一数据上成对复验：稳定 Chat 10 秒为 `609 → 0` frames，首屏 ResourceTiming 为 `27 → 10` 项，运行中的 CSS 动画为 `2 → 0`。
+- D1 单点内存快照为 PSS `265561 → 238060 KiB`、RSS `403768 → 374912 KiB`，只能作为后续长稳复测线索；5 次 process-cold `am start -W` 的中位数为 `480 → 506 ms`，未显示启动收益，样本量也不足以建立 SLA。
+- 当前设备上的候选 Debug APK SHA-256 为 `6d4bc156e87d60797a2c6a7623d6fd45b7d385e150e7f6407337e3d25402e31c`。正式 Release `com.vcp.avatar` 未参与安装、清数据或性能实验，其 SHA-256 始终保持官方 v1.1.3 资产 `d5ad6378…`。
 
 ## 已冻结的总体决策
 
@@ -77,7 +93,7 @@
 4. 窄窗口为 overlay，1024px 起可常驻左栏，1280px 起可双栏；窗口变化重新推导而不复制业务状态。
 5. Android 安全区以原生四边 Insets 为权威，前端只消费一次 DPR 转换后的语义变量；IME 使用扣除 safe bottom 后的净增量。
 6. 消息强渲染的语义、交互与安全边界是硬门禁。
-7. 性能优化延期，既有 `tests/perf/` 与 Criterion 资产原样保留为人工诊断工具。
+7. 性能优化作为独立 report-only 轨道推进；既有 `tests/perf/` 与 Criterion 保持人工诊断定位，不设置未经校准的 CI/Release SLA。
 
 ## 外部依据
 
@@ -89,4 +105,4 @@
 
 ## 一句话交付准则
 
-> 当前工作树已通过软件验证；下一步只以具名 Android 设备证据关闭 `DEVICE-EVIDENCE-PENDING`，性能扩建保持延期。
+> 兼容结论只由具名 Android 设备证据关闭；性能结论只由同身份 A/B 关闭，Debug 因果证据不得升级成 Release、能耗或全设备结论。

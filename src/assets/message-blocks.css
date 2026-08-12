@@ -719,26 +719,6 @@ html:not(.dark) .vcp-html-block .punctuation { color: #24292e !important; }
   to   { transform: rotate(360deg) translate3d(0, 0, 0); }
 }
 
-/* 工具图标专属轻量匀速旋转 */
-@keyframes vcp-icon-rotate {
-  0%   { transform: rotate(0deg) translate3d(0, 0, 0); }
-  100% { transform: rotate(360deg) translate3d(0, 0, 0); }
-}
-
-/* ToolUse 气泡背景 3D 流动渐变动效 */
-@keyframes vcp-bubble-background-flow-kf {
-  0%   { background-position: 0% 50%; }
-  50%  { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
-/* ToolUse 气泡外流动边框渐变动效 */
-@keyframes vcp-bubble-border-flow-kf {
-  0%   { background-position: 0% 50%; }
-  50%  { background-position: 200% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
 /* 抽屉/内容区下拉展开动效 */
 @keyframes slideDown {
   from { opacity: 0; transform: translateY(-10px); }
@@ -807,24 +787,20 @@ html.dark .vcp-thought-block {
 
 /* --- 3. ToolBlock (工具块/请求与结果) 全局统一样式 --- */
 
-/* 工具块基类容器，包含 GPU 合成层渲染隔离 */
+/* 工具块基类容器；稳态不常驻合成层。 */
 .vcp-tool-block {
   transition: all 0.3s;
   position: relative;
-  will-change: transform, opacity;
-  transform: translate3d(0, 0, 0);
 }
 
-/* ToolUse 状态：3D 流光渐变背景与发光气泡效果 */
+/* ToolUse 状态：保留静态渐变与明确状态色，执行中仅 Loader2 自旋。 */
 .vcp-tool-block.is-tool-use {
   background: linear-gradient(145deg, #3a7bd5 0%, #00d2ff 100%) !important;
-  background-size: 200% 200% !important;
-  animation: vcp-bubble-background-flow-kf 20s ease-in-out infinite;
   color: #ffffff !important;
   border: none !important;
 }
 
-/* ToolUse 专属：流动边框伪元素，借助 mask-composite 剔除内背景仅保留流光描边 */
+/* ToolUse 专属：静态渐变描边。 */
 .vcp-tool-block.is-tool-use::after {
   content: "";
   position: absolute;
@@ -836,16 +812,12 @@ html.dark .vcp-thought-block {
   border-radius: inherit;
   padding: 2px;
   background: linear-gradient(60deg, #76c4f7, #00d2ff, #3a7bd5, #ffffff, #3a7bd5, #00d2ff, #76c4f7);
-  background-size: 300% 300%;
-  animation: vcp-bubble-border-flow-kf 7s linear infinite;
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   z-index: 0;
   pointer-events: none;
-  will-change: transform, opacity;
-  transform: translate3d(0, 0, 0);
 }
 
 /* ToolResult 状态：亮色模式下作为默认基础样式呈现 */
@@ -868,13 +840,10 @@ html.dark .vcp-tool-block.is-tool-result {
   z-index: 1;
 }
 
-/* 工具图标容器：ToolUse 流式状态下保持匀速自旋转 */
+/* 工具图标保持静态；执行状态由紧邻文字的 Loader2 表达。 */
 .vcp-tool-block.is-tool-use .tool-icon-container {
   background: transparent !important;
   color: rgba(255, 255, 255, 0.9) !important;
-  animation: vcp-icon-rotate 4s linear infinite;
-  will-change: transform;
-  transform: translate3d(0, 0, 0);
 }
 
 .vcp-tool-block.is-tool-use .tool-label {
@@ -975,13 +944,6 @@ html.dark .vcp-fullscreen-tool-panel.is-tool-result .vcp-fullscreen-header {
 /* 滑动下拉动画类 */
 .animate-slide-down {
   animation: slideDown 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* 离屏优化：当工具块不可见时自动暂停无限动画，节省移动端 GPU 资源与耗电 */
-.vcp-tool-block.vcp-animation-paused.is-tool-use,
-.vcp-tool-block.vcp-animation-paused.is-tool-use::after,
-.vcp-tool-block.vcp-animation-paused.is-tool-use .tool-icon-container {
-  animation-play-state: paused !important;
 }
 
 /* 全屏模态淡入滑动过渡 */
@@ -1175,4 +1137,3 @@ html:not(.dark) .vcp-tool-call-summary-chip.status-unknown {
   white-space: pre-wrap;
   word-break: break-word;
 }
-

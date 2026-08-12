@@ -8,13 +8,13 @@ function isAstDebugEnabled(): boolean {
 }
 
 function astDebugLog(...args: unknown[]): void {
-  if (isAstDebugEnabled()) {
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
     console.warn(...args);
   }
 }
 
 function recordAstTrace(data: any): void {
-  if (isAstDebugEnabled()) {
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
     if (!(window as any).__VCP_AST_TRACES__) {
       (window as any).__VCP_AST_TRACES__ = [];
     }
@@ -115,11 +115,13 @@ export function cleanupRegistry(messageId: string): void {
   const size = registry ? registry.size : 0;
   registryShards.delete(messageId);
 
-  recordAstTrace({
-    type: "cleanup_registry",
-    messageId,
-    registrySizeReleased: size
-  });
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
+    recordAstTrace({
+      type: "cleanup_registry",
+      messageId,
+      registrySizeReleased: size
+    });
+  }
 }
 
 /**
@@ -207,7 +209,9 @@ function createDomFromNode(
   id: string,
   registry: Map<string, Node>
 ): Node {
-  astDebugLog(`[AST createDomFromNode] id=${id}, node=${JSON.stringify(node)}`);
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
+    astDebugLog(`[AST createDomFromNode] id=${id}, node=${JSON.stringify(node)}`);
+  }
   let el: HTMLElement;
   switch (node.type) {
     case "paragraph":
@@ -495,13 +499,15 @@ export function rebuildSnapshot(
     sandbox.appendChild(dom);
   }
 
-  recordAstTrace({
-    type: "snapshot_rebuild",
-    messageId,
-    nodesCount: nodes?.length || 0,
-    registryKeys: Array.from(registry.keys()),
-    html: sandbox.innerHTML
-  });
+  if (import.meta.env.DEV && isAstDebugEnabled()) {
+    recordAstTrace({
+      type: "snapshot_rebuild",
+      messageId,
+      nodesCount: nodes?.length || 0,
+      registryKeys: Array.from(registry.keys()),
+      html: sandbox.innerHTML
+    });
+  }
 }
 
 /**
@@ -513,7 +519,10 @@ function executeMutation(
   sandbox: HTMLElement
 ): ExecuteMutationResult {
   const registry = getRegistry(messageId);
-  astDebugLog(`[AST Mutation Exec] op=${mutation.op}, id=${mutation.id}, parent=${(mutation as any).parent || ''}, chunk=${(mutation as any).chunk || ''}, val=${(mutation as any).value || ''}`);
+  const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
+  if (debugEnabled) {
+    astDebugLog(`[AST Mutation Exec] op=${mutation.op}, id=${mutation.id}, parent=${(mutation as any).parent || ''}, chunk=${(mutation as any).chunk || ''}, val=${(mutation as any).value || ''}`);
+  }
 
   let status = "success";
   let detail = "";
@@ -654,7 +663,7 @@ function executeMutation(
             } else {
               oldNode.innerHTML = mutation.node.highlighted_html;
             }
-            astDebugLog(`[AST replace code_block optimized] id=${mutation.id}`);
+            if (debugEnabled) astDebugLog(`[AST replace code_block optimized] id=${mutation.id}`);
             break;
           }
 
@@ -667,7 +676,7 @@ function executeMutation(
           ) {
             cleanupSubtreeRefs(mutation.id, registry, false); // 保留外壳的 ref
             oldNode.textContent = mutation.node.code || "";
-            astDebugLog(`[AST replace mermaid optimized] id=${mutation.id}`);
+            if (debugEnabled) astDebugLog(`[AST replace mermaid optimized] id=${mutation.id}`);
             break;
           }
 
@@ -697,7 +706,7 @@ function executeMutation(
             // 增量 child diff），故只需保留根节点引用、清空全部子孙引用，杜绝悬空的 temp 子孙引用。
             cleanupSubtreeRefs(mutation.id, registry, true);
             registry.set(mutation.id, oldNode);
-            astDebugLog(`[AST replace morphdom optimized] id=${mutation.id}, type=${nodeType}`);
+            if (debugEnabled) astDebugLog(`[AST replace morphdom optimized] id=${mutation.id}, type=${nodeType}`);
             break;
           }
 
@@ -708,16 +717,16 @@ function executeMutation(
             newDom.classList.add("vcp-stream-element-fade-in");
           }
           parent.replaceChild(newDom, oldNode);
-          astDebugLog(`[AST replace success] id=${mutation.id}`);
+          if (debugEnabled) astDebugLog(`[AST replace success] id=${mutation.id}`);
         } else {
           status = "failed";
           detail = "Old node has no parentNode";
-          astDebugLog(`[AST replace fail - oldNode has no parent] id=${mutation.id}`);
+          if (debugEnabled) astDebugLog(`[AST replace fail - oldNode has no parent] id=${mutation.id}`);
         }
       } else {
         status = "failed";
         detail = "Old node not found in registry";
-        astDebugLog(`[AST replace fail - oldNode not found in registry] id=${mutation.id}`);
+        if (debugEnabled) astDebugLog(`[AST replace fail - oldNode not found in registry] id=${mutation.id}`);
       }
       break;
     }
@@ -838,37 +847,39 @@ function executeMutation(
       if (node) {
         if (node.parentNode) {
           node.parentNode.removeChild(node);
-          astDebugLog(`[AST remove success] id=${mutation.id}`);
+          if (debugEnabled) astDebugLog(`[AST remove success] id=${mutation.id}`);
           cleanupSubtreeRefs(mutation.id, registry, true);
         } else {
           status = "failed";
           detail = "Node has no parentNode";
-          astDebugLog(`[AST remove fail - node has no parent] id=${mutation.id}`);
+          if (debugEnabled) astDebugLog(`[AST remove fail - node has no parent] id=${mutation.id}`);
         }
       } else {
         status = "failed";
         detail = "Node not found in registry";
-        astDebugLog(`[AST remove fail - node not found in registry] id=${mutation.id}`);
+        if (debugEnabled) astDebugLog(`[AST remove fail - node not found in registry] id=${mutation.id}`);
       }
       break;
     }
   }
 
-  recordAstTrace({
-    type: "mutation",
-    messageId,
-    op: mutation.op,
-    mutationId: mutation.id,
-    mutationPayload: {
-      parent: (mutation as any).parent,
-      chunk: (mutation as any).chunk,
-      value: (mutation as any).value,
-      nodeType: (mutation as any).node?.type || null
-    },
-    status,
-    detail,
-    registrySize: registry.size
-  });
+  if (debugEnabled) {
+    recordAstTrace({
+      type: "mutation",
+      messageId,
+      op: mutation.op,
+      mutationId: mutation.id,
+      mutationPayload: {
+        parent: (mutation as any).parent,
+        chunk: (mutation as any).chunk,
+        value: (mutation as any).value,
+        nodeType: (mutation as any).node?.type || null
+      },
+      status,
+      detail,
+      registrySize: registry.size
+    });
+  }
 
   return status === "success" ? { ok: true } : { ok: false, reason: detail };
 }
@@ -881,7 +892,7 @@ export function applyFrame(
   messageId: string,
   sandbox: HTMLElement
 ): ApplyFrameResult {
-  const debugEnabled = isAstDebugEnabled();
+  const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
   const beforeHtml = debugEnabled ? sandbox.innerHTML : "";
   let result: ApplyFrameResult = { ok: true, applied: 0 };
 

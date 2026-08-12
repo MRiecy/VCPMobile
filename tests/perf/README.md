@@ -14,6 +14,20 @@ ignored by Git because they can contain device serials, logcat, and unrelated
 system state. Extract only a sanitized aggregate into tracked documentation.
 Debug/HMR measurements are diagnostic baselines, not Release acceptance data.
 
+Evidence labels used by the active performance lane:
+
+- `D0`: `tauri android dev` / Vite HMR under the isolated
+  `com.vcp.avatar.debug` package; use only for mechanism and DevTools A/B.
+- `D1`: production frontend with Android/Rust Debug; use for packaged-debug
+  replication, not as signed Release evidence.
+- `R1`: same-commit, same-version, signed arm64 Release A/B.
+
+The installed `com.vcp.avatar` package is the user's formal app and must never
+be overwritten by a performance experiment. Device experiments must resolve and
+verify the `.debug` application ID before install/launch. The current Gradle
+debug type uses `applicationIdSuffix = ".debug"`; scripts must still verify the
+resolved APK/package identity rather than infer it from the output filename.
+
 Long soak tests are intentionally left as a documented/manual gate for now; they
 require a fixed real device, stable power/network conditions, and explicit
 approval of thresholds.
@@ -38,6 +52,10 @@ node tests/perf/scripts/run_rust_bench.cjs --out-dir tests/perf/reports/rust-ben
 The startup helper resolves the installed package's explicit Launcher activity
 before calling `am start -W`. This is required on Android builds where a
 package-only MAIN/LAUNCHER intent does not resolve reliably.
+
+`am start -W` ends at Activity display. It does not measure AppLifecycle READY,
+chat-shell paint, rich rendering settled, or energy. Current results remain
+report-only; there is no frozen CI/Release threshold.
 
 ## START_NOT_STICKY note
 

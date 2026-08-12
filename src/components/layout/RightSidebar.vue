@@ -144,7 +144,7 @@ watch(
       <div class="flex items-center gap-2">
         <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-70 text-primary-text">Notifications</h3>
         <span v-if="store.unreadCount > 0"
-          class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white animate-pulse">
+          class="px-1.5 py-0.5 bg-blue-500 text-[9px] font-black rounded-full text-white">
           {{ store.unreadCount }}
         </span>
       </div>

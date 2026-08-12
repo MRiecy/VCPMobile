@@ -337,7 +337,7 @@ pnpm tauri android dev
 
 详见目录README.md
 
-现有性能脚本与 Criterion benchmark 作为人工诊断/报告型资产保留；当前兼容专项不新增性能施工，也不把这些脚本描述为 nightly、Release 或固定阈值门禁。
+现有性能脚本与 Criterion benchmark 作为人工诊断/报告型资产保留。性能 Phase 1 已恢复为独立的 report-only A/B 轨道；不得把 Debug/HMR 描述为签名 Release、能耗结论或固定阈值门禁。真机性能实验只允许使用 `com.vcp.avatar.debug`，不得覆盖用户安装的正式 `com.vcp.avatar`。
 
 ### 5.7 测试命令速查
 
@@ -441,8 +441,10 @@ VCPMobile/
 仓库不提供携带秘密的本地发布脚本。先在当前 shell 注入 `ANDROID_KEYSTORE_PATH`、`ANDROID_KEY_ALIAS`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_PASSWORD`；确需兼容受信 LAN HTTP/WS 时再显式设置 `VCP_TRUSTED_LAN_MODE=enabled`，然后执行：
 
 ```powershell
-pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict
+pnpm tauri android build --apk --target aarch64
 ```
+
+`src-tauri/gen/android/gradle/verification-metadata.xml` 会让 Gradle 默认启用 strict dependency verification；`tauri android build -- <args>` 的尾随参数会传给 Cargo runner，不能把 Gradle 的 `--dependency-verification` 放在该位置。
 
 ---
 

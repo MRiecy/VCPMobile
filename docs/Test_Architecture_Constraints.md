@@ -98,7 +98,7 @@ VCPMobile/
 ### 4.5 性能/稳定性
 - `cargo bench --locked --profile perf`：Rust 热路径人工 benchmark。
 - `tests/perf/scripts/`：APK 体积、冷启动、dumpsys/logcat 与 benchmark 归档。
-- 这些资产当前仅供本地人工诊断，不在 CI Release 中执行，也没有冻结回归阈值。兼容专项不得虚构 nightly/performance pipeline。
+- 这些资产当前仅供本地人工诊断，不在 CI Release 中执行，也没有冻结回归阈值。性能 Phase 1 已恢复为 report-only 的独立 A/B 轨道；不得虚构 nightly/performance pipeline，也不得把 Debug/HMR 结果升级成 Release 或能耗结论。
 
 ---
 
@@ -121,7 +121,7 @@ VCPMobile/
 | `.github/workflows/release.yml` | GitHub Release published | 校验同 commit CI/版本/签名并发布 arm64 APK | 证明发布 artifact 治理；不是发布前设备实验室 |
 | adb smoke | 具名人工执行 | 设备/安装/权限/启动/logcat/activity/process | 证明指定设备启动与诊断状态；不自动遍历 UI |
 | 多设备 UI 验收 | Release 前具名执行 | 手机/平板/折叠屏窗口、WebView、截图与触控矩阵 | 是 `DEVICE-VERIFIED` 的必要证据，当前 `DEVICE-EVIDENCE-PENDING` |
-| 性能脚本 | 出现可复现问题时人工执行 | APK size、`am start -W`、dumpsys、Criterion | 仅报告；不构成自动 Release SLA |
+| 性能脚本 | 独立性能候选人工执行 | APK size、`am start -W`、dumpsys、Criterion、具名页面帧 A/B | 仅报告；不构成自动 Release SLA |
 
 ---
 
@@ -144,7 +144,7 @@ VCPMobile/
 | 跨层与治理契约 | ✅ 已落地并持续维护 | 前端/Android/Release 文本和行为契约 |
 | Android adb smoke | ✅ 已落地 | Node.js + adb 脚本；不冒充完整 UI runner |
 | 多设备样式验收 | `DEVICE-EVIDENCE-PENDING` | 按 `ANDROID_UI_COMPATIBILITY.md` 归档具名证据 |
-| 性能测量扩建 | 延期/非当前范围 | 保留既有资产，等可复现问题再立项 |
+| 性能 Phase 1 | `ACTIVE / REPORT-ONLY` | D0 因果定位与 D1 packaged Debug A/B 已通过；R1、BootTrace 与固定 SLA 仍 pending |
 
 ---
 
@@ -165,12 +165,12 @@ VCPMobile/
 - **@Tauri与插件测试专家**：Tauri 层与 Android Kotlin 插件测试。
 - **@前端测试专家**：Vue 前端与渲染层测试。
 - **@移动端E2E测试专家**：Android 真机端到端验证。
-- **@性能与稳定性测试专家**：仅在独立性能任务中维护人工诊断资产与证据。
+- **@性能与稳定性测试专家**：在独立性能任务中维护人工诊断资产、证据等级与同身份 A/B。
 
 **协作铁律**：
 1. 先诊断后开方——基于实际代码事实，不假设。
 2. 架构师先行——本文件为全局约束，其他 Agent 不得擅自变更。
-3. 当前优先级——多设备 UI 与 Android WebView 兼容契约高于无问题驱动的性能优化。
+3. 当前优先级——兼容硬契约不可为性能让路；性能只接纳已有可复现证据且不降级强渲染的独立候选。
 4. 审批节点——新增 runner、架构方案、工具选型与目录结构、E2E 流程、CI 配置必须暂停报批。
 5. 代码隔离——新增测试归入既有测试目录，不以测试名义改变生产接口。
 6. 因地制宜——具体措施由各 Agent 根据实际代码分析后提出，禁止照搬外部模板。

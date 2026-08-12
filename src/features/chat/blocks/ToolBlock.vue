@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, watch, onUnmounted } from 'vue';
 import { ChevronDown, ChevronUp, Settings, Loader2, Maximize2, Copy, X } from 'lucide-vue-next';
 import type { ContentBlock } from '../../../core/types/chat';
 import { marked } from 'marked';
@@ -111,26 +111,8 @@ const copyAllDetails = () => {
       console.error('[ToolBlock] Copy all failed:', err);
     });
 };
-const toolBlockRef = ref<HTMLElement | null>(null);
-let observer: IntersectionObserver | null = null;
-
-onMounted(() => {
-  if (!toolBlockRef.value) return;
-  observer = new IntersectionObserver((entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting) {
-        toolBlockRef.value?.classList.remove('vcp-animation-paused');
-      } else {
-        toolBlockRef.value?.classList.add('vcp-animation-paused');
-      }
-    });
-  }, { threshold: 0 });
-  observer.observe(toolBlockRef.value);
-});
-
 onUnmounted(() => {
   unregisterModal(modalId);
-  observer?.disconnect();
   parsedMarkdownCache.clear();
 });
 
@@ -149,7 +131,7 @@ const isImageValue = (key: string, value: string): boolean => {
 </script>
 
 <template>
-  <div ref="toolBlockRef" class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
+  <div class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
     type === 'tool-use' ? 'is-tool-use' : 'is-tool-result tool-bubble',
     isExpanded ? 'shadow-md' : 'shadow-sm'
   ]">
@@ -294,4 +276,3 @@ const isImageValue = (key: string, value: string): boolean => {
     </Transition>
   </Teleport>
 </template>
-
