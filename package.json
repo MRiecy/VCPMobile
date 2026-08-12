@@ -13,6 +13,7 @@
     "test:run": "vitest run",
     "test:unit": "vitest run src/tests/unit",
     "test:integration": "cargo test --locked --manifest-path src-tauri/Cargo.toml --test file_extractor_integration",
+    "ci:prepare-android-settings": "node .github/generate-tauri-android-settings.mjs",
     "audit:rust": "cargo audit --file src-tauri/Cargo.lock --ignore RUSTSEC-2023-0071",
     "test:coverage": "vitest run --coverage",
     "e2e:android:env": "node tests/e2e-android/scripts/adb-env.cjs",

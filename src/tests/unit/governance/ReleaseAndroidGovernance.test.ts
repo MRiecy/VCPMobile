@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import ciWorkflow from '../../../../.github/workflows/ci.yml?raw';
 import releaseWorkflow from '../../../../.github/workflows/release.yml?raw';
+import androidSettingsGenerator from '../../../../.github/generate-tauri-android-settings.mjs?raw';
 import packageManifest from '../../../../package.json?raw';
 import tauriConfig from '../../../../src-tauri/tauri.conf.json?raw';
 import rootReadme from '../../../../README.md?raw';
@@ -145,6 +146,9 @@ describe('release and Android governance contracts', () => {
     expect(scripts.check).toContain('cargo check --locked');
     expect(scripts['test:integration']).toContain('--test file_extractor_integration');
     expect(scripts['test:integration']).toContain('--locked');
+    expect(scripts['ci:prepare-android-settings']).toBe(
+      'node .github/generate-tauri-android-settings.mjs',
+    );
     expect(Object.keys(scripts).some((name) => name.startsWith('io:'))).toBe(false);
     expect(scripts).not.toHaveProperty('memory:refresh');
     expect(scripts).not.toHaveProperty('dev:android');
@@ -153,6 +157,17 @@ describe('release and Android governance contracts', () => {
     expect(ciWorkflow).toContain('pnpm audit:rust');
     expect(ciWorkflow).toContain('cargo test --locked --workspace --lib');
     expect(ciWorkflow).toContain('cargo clippy --locked --workspace --lib --tests -- -D warnings');
+    const generatorIndex = ciWorkflow.indexOf('pnpm ci:prepare-android-settings');
+    const androidTestsIndex = ciWorkflow.indexOf(
+      ':tauri-plugin-vcp-mobile:testDebugUnitTest',
+    );
+    expect(generatorIndex).toBeGreaterThan(-1);
+    expect(generatorIndex).toBeLessThan(androidTestsIndex);
+    expect(ciWorkflow).toContain('test -s src-tauri/gen/android/tauri.settings.gradle');
+    expect(androidSettingsGenerator).toMatch(/["']metadata["'],\s*["']--locked["']/);
+    expect(androidSettingsGenerator).toContain("metadata.resolve?.root");
+    expect(androidSettingsGenerator).toContain('tauri.build.gradle.kts');
+    expect(androidSettingsGenerator).not.toMatch(/\/home\/|[A-Za-z]:\\\\/);
     expect(ciWorkflow).toContain('git status --porcelain --untracked-files=all --');
     expect(ciWorkflow).toContain('src-tauri/gen/android');
     expect(ciWorkflow).toContain('src-tauri/plugins/vcp-mobile/permissions');

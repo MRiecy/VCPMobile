@@ -70,8 +70,13 @@ jobs:
       - name: Rust Integration Tests
         run: pnpm test:integration
 
-      - name: Regenerate Android Tauri settings
+      - name: Initialize Android Tauri project
         run: pnpm tauri android init --ci
+
+      - name: Generate Android Tauri module settings
+        run: |
+          pnpm ci:prepare-android-settings
+          test -s src-tauri/gen/android/tauri.settings.gradle
 
       - name: Verify generated Android and plugin permission trees
         shell: bash
