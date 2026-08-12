@@ -1,6 +1,6 @@
 # VCP Mobile 技术文档
 
-> 版本：1.1.4 | 最后更新：2026-08-11 | 文档总数：87+ 份 | 总行数：~42,000 行
+> 版本：1.1.4 | 最后更新：2026-08-12 | 文档总数：99 份 | 总行数：65,513 行
 
 ## 文档体系
 
@@ -8,11 +8,11 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 
 | 知识库 | 路径 | 文档数 | 覆盖范围 | 入口 |
 |--------|------|--------|----------|------|
-| 顶层架构规范 | `docs/` | 5 份 | 跨层架构约定、依赖管理、UI 层级宪法、Android 存储 | -- |
-| Rust 后端模块 | `docs/modules/` | 23 份 | `vcp_modules/` 全部稳定模块 + `distributed/` 分布式节点 | [总览](modules/00_总览与导航.md) |
-| Android 插件 | `docs/plugins/` | 12 份 | `tauri-plugin-vcp-mobile` 原生 Android 子系统（v1.1.2 新增 ForegroundGuardian） | [总览](plugins/00_总览与导航.md) |
+| 顶层架构规范 | `docs/` | 8 份 | 跨层架构约定、测试、依赖管理、UI 层级、Android 存储与归档说明 | -- |
+| Rust 后端模块 | `docs/modules/` | 31 份 | 25 个导航条目；其中 AST Diff 专栏含 6 份 Markdown | [总览](modules/00_总览与导航.md) |
+| Android 插件 | `docs/plugins/` | 13 份 | `tauri-plugin-vcp-mobile` 原生 Android 子系统（含 ForegroundGuardian） | [总览](plugins/00_总览与导航.md) |
 | 同步子系统 | `docs/sync/` | 20 份 | Sync V2 全链路协议（Rust + Node.js 双端） | [总览](sync/00_总览与导航.md) |
-| Vue 前端 | `docs/vue_docs/` | 25 份 | Vue 3 + TypeScript 前端完整源码覆盖 | [总览](vue_docs/00_总览与导航.md) |
+| Vue 前端 | `docs/vue_docs/` | 27 份 | Vue 3 + TypeScript 前端完整源码覆盖 | [总览](vue_docs/00_总览与导航.md) |
 
 ## 快速导航（按角色）
 
@@ -23,6 +23,7 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 4. [Persistence 领域总览](modules/14_Persistence领域总览.md)
 5. [分布式节点能力](modules/15_分布式节点能力.md)
 6. [本地服务器与浮动助手](modules/22_本地服务器与浮动助手.md) -- v1.0.3 新增，v1.1.3 浮动助手功能已暂停使用
+7. [日记中心远端服务](modules/25_日记中心远端服务.md) -- 有界 HTTP、搜索 owner 与可核验写入
 
 ### Vue 前端开发者
 1. [前端总览](vue_docs/00_总览与导航.md)
@@ -30,6 +31,7 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 3. [状态管理总览](vue_docs/core/02_状态管理总览与Store全景图.md)
 4. [对话引擎总览](vue_docs/features/chat/08_对话引擎总览.md)
 5. [浮动助手系统](vue_docs/features/assistant/24_浮动助手系统.md) -- 历史技术资产；当前运行入口、构建产物与权限均已注销
+6. [日记中心](vue_docs/features/diary/26_日记中心.md) -- 远端浏览、搜索、编辑、创建与管理
 
 ### Android 原生开发者
 1. [插件总览](plugins/00_总览与导航.md)

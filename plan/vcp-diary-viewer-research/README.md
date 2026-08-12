@@ -1,6 +1,6 @@
 # VCPMemo 日记中心移动端移植研究
 
-> 状态：`IMPLEMENTATION-READY`（上游源码契约已冻结；部署联调仍需 fixture）
+> 状态：`IMPLEMENTATION-COMPLETE / AUTOMATED-REGRESSION-PASS / DEPLOYMENT-ACCEPTANCE-PENDING / ANDROID-ACCEPTANCE-PENDING`（P1—P3 代码已落地，当前仓库门禁与专项契约回归通过；真实 VCP 部署与 Android 真机旅程仍待验收）
 > 调研日期：2026-08-12  
 > 施工 SSOT：本目录的 `01`—`06` 文档；旧版《排版与交互研究报告》仅作视觉研究附件
 
@@ -41,7 +41,7 @@
 
 本研究固定在以下快照：
 
-- VCPMobile 当前 checkout：`4cb2424b422e1b8ac142093a9ba937019f07bec9`
+- VCPMobile 开工前 checkpoint：`99fce5f`（`save: checkpoint before diary center modules`）；本状态说明更新时实现仍位于后续工作区变更
 - VCPChat 官方 `main`：`856c1db0404ebff0365aea8b16fdc0a4a68f9d5e`（本轮末次复核；Memo 相关文件与本地 `29ab88c` 快照逐字节一致）
 - VCPToolBox：2026-08-12 检查官方 `main`，末次复核提交为 `351dadc74836ebf78d25fa942619cd34d9c82987`
 
@@ -68,9 +68,9 @@
 
 ## 仓库状态说明
 
-本目录的 README、`01`—`06`、旧研究附件和 PNG 资产当前都已被 Git 跟踪；顶层 `*.md` ignore 规则不会让这些既有 tracked 文件从 `git status` 消失。本次只修改这些研究文档，不调整 ignore 或仓库治理规则。
+本目录的 README、`01`—`06`、旧研究附件和 PNG 资产都由 Git 跟踪。施工前已展示状态并创建 `99fce5f` checkpoint；实现新增 Diary Rust/Vue 领域并修改 `mod.rs`/`lib.rs`，未修改 VCPChat、Router、SQLite schema、Sync V2 或 Android 插件。
 
-未来正式施工会新增模块并修改 `mod.rs`/`lib.rs`。依照项目存档协议，施工前必须先展示工作区状态，并就现有未提交内容的 checkpoint 范围取得用户确认。
+截至 2026-08-12，`pnpm check`、前端 113 项测试和应用 Rust lib 206 项测试（另含插件 Rust 3 项）均通过，production Web build、Rust Clippy、10 项 file-extractor integration 与 benchmark compile gate 也通过。自动化测试中 Diary 专项覆盖 26 项 Vue 行为与 26 项 Rust/HTTP 契约；这些结果证明当前 checkout 的实现与本地契约，不替代真实 VCP 部署或 Android L7/L8 验收。
 
 ## 一句话施工准则
 

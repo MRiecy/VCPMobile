@@ -1,9 +1,9 @@
 ---
 id: VUE-CORE-002
 title: 状态管理总览与Store全景图
-description: VCP Mobile 前端 18 个 Pinia Store 的职责分类、依赖关系与状态设计全景
-version: 1.0.3
-date: 2026-06-05
+description: VCP Mobile 前端 21 个 Pinia Store 的职责分类、依赖关系与状态设计全景
+version: 1.1.4
+date: 2026-08-12
 ---
 
 # 02. 状态管理总览与Store全景图
@@ -12,7 +12,7 @@ date: 2026-06-05
 
 ### 1.1 领域定位
 
-`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**状态中枢目录**，负责承载全部 18 个 Pinia Store。这些 Store 按领域边界划分为 6 大类，覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式、浮动助手六大业务域（浮动助手在 v1.1.3 已暂停使用）。
+`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**全局状态中枢目录**，承载 20 个 Pinia Store；`src/features/diary/diaryStore.ts` 另有 1 个功能共置 Store。21 个 Store 按领域边界覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式、浮动助手及日记中心（浮动助手在 v1.1.3 已暂停使用）。
 
 与 Rust 后端不同，前端 Store 不负责数据持久化（SQLite 由后端托管），而是承担以下职责：
 
@@ -26,7 +26,7 @@ date: 2026-06-05
 - HTTP 网络请求底层（由 Rust 后端 `vcp_client.rs` 负责）
 - 文件系统读写（由 Rust 后端 `file_manager.rs` 负责）
 
-### 1.2 模块构成表（18 个 Store）
+### 1.2 模块构成表（21 个 Store）
 
 | 分类 | 文件名 | Store 名 | 职责简述 | 持久化 |
 |------|--------|----------|----------|--------|
@@ -48,6 +48,7 @@ date: 2026-06-05
 | 同步与分布式 | `syncSession.ts` | `useSyncSessionStore` | 手动同步会话（WebSocket 连接、日志、进度） | ❌ |
 | 系统与设置 | `tarvenStore.ts` | `useTarvenStore` | Tarven 注入规则列表、启用状态、选择器开关 | ❌ |
 | 浮动助手 | `floatingAssistant.ts` | `useFloatingAssistantStore` | 浮动窗口 WebSocket IPC、消息队列、剪贴板、双模发送（v1.1.3 已暂停使用） | ❌ |
+| 日记中心 | `features/diary/diaryStore.ts` | `useDiaryStore` | 远端文件、普通/语义搜索、编辑基线、创建、批量管理与本机显示偏好 | ⚠️ 仅显示偏好 |
 
 > **持久化说明**：
 > - ✅ = `pinia-plugin-persistedstate` 自动持久化到 `localStorage`
@@ -1109,23 +1110,9 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 ### 6.7 前端 Store 的测试现状
 
-根据 `AGENTS.md` 的明确记录，**VCP Mobile 当前没有前端自动化测试**：
+项目已使用 Vitest + happy-dom + `@vue/test-utils`，并通过 `src/tests/mocks/tauri.ts` 统一模拟 `invoke`、Channel 和 Event。当前测试重点覆盖设置/UI 原语、聊天与同步并发、富 HTML 安全、Release 治理以及日记中心。
 
-- `package.json` 不含任何测试脚本（无 `test`、`test:unit`、`test:e2e`）
-- 未安装 Vitest、Jest、Cypress、Playwright 等测试框架
-- 18 个 Pinia Store 均无任何单元测试覆盖
-
-**验证手段**：以 `pnpm check`（`vue-tsc --noEmit` 前端类型检查 + `cargo check` Rust 编译检查）和真机/模拟器手动测试为主。
-
-这种现状的成因是：
-1. **Tauri IPC  mocking 成本高**：所有 Store 的核心逻辑都围绕 `invoke()` 展开，搭建稳定的 IPC mock 环境需要大量基础设施投入
-2. **UI 与状态高度耦合**：许多 Store 的 Action 同时触发 Toast 通知、DOM 操作（如 `themeStore` 的 CSS 变量注入）、物理返回键注册，难以在 headless 环境中验证
-3. **流式行为的时间敏感性**：`chatStreamStore` 的事件处理涉及定时器、Promise 竞态、状态机转换，单元测试的断言时机难以把握
-
-**未来改进方向**（非当前优先级）：
-- 为纯计算逻辑（如 `avatarStore` 的 `extractDominantColorFromBlob`、`modelStore` 的 `sortedModels`）引入 Vitest 单元测试
-- 为 `notificationStore` 的 `addNotification` 单例抑制逻辑编写边界条件测试
-- 使用 `@tauri-apps/api/mocks`（若可用）搭建最小 IPC mock 环境，覆盖 `settingsStore` 的读写流程
+Diary Store 专项测试验证 A→B→A 旧请求、搜索 request owner、不可变保存 snapshot、冲突保留草稿、partial-success tombstone 和返回门。测试脚本为 `pnpm test:run`，静态与 Rust 编译门为 `pnpm check`；Android 物理返回、键盘 Insets 与低端设备性能仍需真机验收。
 
 ---
 
@@ -1160,4 +1147,4 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 
 ---
 
-*最后更新：2026-06-05 | VCP Mobile v1.0.3*
+*最后更新：2026-08-12 | VCP Mobile v1.1.4*

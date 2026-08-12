@@ -218,9 +218,10 @@ type DiaryBatchOutcome = {
 | `DIARY_SERVICE_UNAVAILABLE` | 503，服务未配置或搜索队列满 | 按原因设置/重试 |
 | `DIARY_SERVER_ERROR` | 其他 5xx | 局部错误 |
 | `DIARY_SAVE_UNCERTAIN` | 无法确认保存结果 | 保留草稿，禁止宣称成功 |
-| `DIARY_PARTIAL_SUCCESS` | move/delete 部分成功 | 成功项退出，失败项保留 |
-| `DIARY_RENAME_SOURCE_RETAINED` | 新文件已验证、旧文件删除失败 | 明确显示两份文件均存在 |
-| `DIARY_TOOL_ERROR` | DailyNote/LightMemo 返回插件错误 | 保留输入并允许重试 |
+| `DIARY_CREATE_UNCERTAIN` | DailyNote 可能已创建但无法取得最终 key | 保留输入，禁止直接重试，先刷新核对 |
+| `DIARY_TOOL_ERROR` | DailyNote/LightMemo 明确返回插件失败 | 保留输入并允许修正后显式重试 |
+
+move/delete 的部分成功通过 `DiaryBatchOutcome.succeeded/errors` 表达；重命名源删除失败通过 `DiaryRenameOutcome.status = copied_source_retained` 表达。二者都不是错误 code，避免把已验证成功项抹掉。
 
 日志只记录 code、HTTP status、operation ID 和脱敏 target hash；不记录 Authorization、密码、完整正文、完整错误 body 或带敏感 query 的 URL。
 
@@ -310,7 +311,7 @@ request ownership:
 
 不要为 shelf、reader、editor 分三个 Store；也不要把全局页面栈复制进 Diary Store。
 
-正文、搜索结果和草稿不写入 localStorage/Pinia persist，只在内存保留当前 document、baseline 和 draft。`hiddenFolders`、`collapsedCategories` 与 `folderOrder` 是本机显示偏好，可用现有 Pinia persist 单独持久化，不进入 Delta Sync；其中 `hiddenFolders` 默认空，对文件夹列表、普通搜索和 LightMemo 已返回结果做附加展示过滤，但不充当访问控制，显式 `{folder,file}` 深链仍按服务端鉴权裁决。语义搜索先使用 LightMemo 已执行 `EXCLUDED_FOLDERS` 后的结果，Mobile 不复制或改写服务端排除配置，本机恢复也不能扩大服务端语义范围。若未来需要崩溃恢复，单独设计有上限的 draft 表，绝不演化成离线 mutation queue。
+正文、搜索结果和草稿不写入 localStorage/Pinia persist，只在内存保留当前 document、baseline 和 draft。`hiddenFolders`、`collapsedCategories` 与 `folderOrder` 是本机显示偏好，可用现有 Pinia persist 单独持久化，不进入 Delta Sync；其中 `hiddenFolders` 默认空，对文件夹列表、普通搜索和 LightMemo 已返回结果做附加展示过滤，但不充当访问控制。未来若有来自可信结果的显式 `{folder,file}` 打开请求，仍由服务端鉴权裁决；当前聊天块没有足够信息生成该 key。语义搜索先使用 LightMemo 已执行 `EXCLUDED_FOLDERS` 后的结果，Mobile 不复制或改写服务端排除配置，本机恢复也不能扩大服务端语义范围。若未来需要崩溃恢复，单独设计有上限的 draft 表，绝不演化成离线 mutation queue。
 
 ## 9. 异步提交门
 
@@ -418,7 +419,7 @@ GET→POST 之间仍有 TOCTOU。只有服务端 revision/ETag/If-Match 或事�
 5. 若部署提供经 fixture 证实的专用 rename，调用它并读回验证；
 6. 否则 POST 相同正文到目标 key，GET 目标并核对 hash；
 7. 目标已确认后调用 `delete-batch` 删除源；
-8. 删除成功后原子迁移 Store key；删除失败则返回 `DIARY_RENAME_SOURCE_RETAINED`，保留两份文件并刷新列表。
+8. 删除成功后原子迁移 Store key；删除失败则返回 `DiaryRenameOutcome.status = copied_source_retained`，保留两份文件并刷新列表。
 
 兼容 transaction 不是原子 rename。目标探测与 POST 之间也存在跨客户端 TOCTOU；Mobile 会拒绝已知重名，但在上游没有 create-if-absent/rename 条件端点时不能声称消除了并发覆盖窗口。不能在删除源失败时自动删除已验证的新文件“回滚”，因为这可能把用户唯一确认成功的新副本再次置于风险中。
 

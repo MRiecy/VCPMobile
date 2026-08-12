@@ -60,7 +60,7 @@ DiaryCenterView（唯一全局 SlidePage）
 - Agent 卡片按名称猜日记本：Agent 与 folder 相互独立，“公共”等日记本可由多个 Agent 与用户共同写入；
 - 新 Vue Router 路由：当前产品以 Overlay/SlidePage 为主。
 
-当前 P3 可以从 `DiaryBlock` 增加“查看所在文件”深链，但前提是工具结果能够返回唯一 `folder + file`。
+当前 `DiaryBlock.file_name` 只是 DailyNote 请求后缀，无法唯一定位服务端最终文件；P3 因而不显示“查看所在文件”。未来只有工具结果能可靠返回并关联唯一 `folder + file` 时再增加该入口。
 
 ## 3. 核心页面
 

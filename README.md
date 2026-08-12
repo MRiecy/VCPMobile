@@ -264,7 +264,7 @@ Vue → invoke("start_sync") → Rust sync service
 
 ### 3.3 状态管理
 
-全局状态由 **20 个 Pinia Stores** 与 **16 个 Composables** 组成，全部使用 **Composition API 风格**（`defineStore('id', () => { ... })` / `useXxx()`），摒弃 Options API。
+全局与功能状态由 **21 个 Pinia Stores** 与 **16 个 Composables** 组成，全部使用 **Composition API 风格**（`defineStore('id', () => { ... })` / `useXxx()`），摒弃 Options API。
 
 | Store | 职责 |
 |-------|------|
@@ -279,6 +279,7 @@ Vue → invoke("start_sync") → Rust sync service
 | `floatingAssistantStore` | 浮动助手位置、折叠状态、独立会话上下文 |
 | `notificationStore` | 本地通知、Toast、权限状态、点击恢复 |
 | `themeStore` | 主题切换、CSS 变量注入、跟随系统深色模式 |
+| `diaryStore` | 日记文件夹/文件、普通与语义搜索、编辑基线、创建和批量管理 |
 
 ### 3.4 Android 原生插件通信分层
 
@@ -312,7 +313,7 @@ VCPMobile/
 │   ├── main.ts                   # 应用入口
 │   ├── App.vue                   # 根布局（引导流程 + 侧边栏手势）
 │   ├── core/
-│   │   ├── stores/               # 20 Pinia Stores（Composition API）
+│   │   ├── stores/               # 20 全局 Pinia Stores（Composition API）
 │   │   ├── composables/          # 16 个全局组合式函数
 │   │   ├── router/               # Hash 模式路由
 │   │   ├── directives/           # v-intersection-observer, v-longpress
@@ -323,6 +324,7 @@ VCPMobile/
 │   │   ├── agent/                # Agent/Group CRUD、设置面板、拖拽排序
 │   │   ├── assistant/            # 浮动助手（全局悬浮窗快捷对话）
 │   │   ├── chat/                 # 对话引擎、消息渲染、输入增强
+│   │   ├── diary/                # 1 个功能 Store + 日记中心页面
 │   │   ├── distributed/          # 设备工具调用 UI
 │   │   ├── notification/         # 通知中心与 Toast
 │   │   ├── rag/                  # RAG 灵视中心（认知广播面板 + 载荷详情）
@@ -337,9 +339,10 @@ VCPMobile/
 ├── src-tauri/                    # Tauri v2 + Rust 后端
 │   ├── src/
 │   │   ├── lib.rs                # Tauri Command 注册、managed state
-│   │   ├── vcp_modules/          # 业务逻辑（7 大领域）
+│   │   ├── vcp_modules/          # 业务逻辑（8 大领域）
 │   │   │   ├── agent/
 │   │   │   ├── chat/
+│   │   │   ├── diary/
 │   │   │   ├── group/
 │   │   │   ├── infra/
 │   │   │   ├── persistence/
@@ -353,8 +356,8 @@ VCPMobile/
 │   │   └── permissions/          # Tauri v2 权限声明
 │   └── Cargo.toml                # Rust 依赖与 Release 优化配置
 ├── docs/                         # 四层技术文档体系
-│   ├── vue_docs/                 # 前端文档（26 份）
-│   ├── modules/                  # Rust 模块文档（30 份）
+│   ├── vue_docs/                 # 前端文档（27 份）
+│   ├── modules/                  # Rust 模块文档（31 份）
 │   ├── sync/                     # 同步协议文档（20 份）
 │   ├── plugins/                  # 原生插件文档（13 份）
 │   └── *.md                      # 顶层规范（架构、UI 层级、依赖管理）

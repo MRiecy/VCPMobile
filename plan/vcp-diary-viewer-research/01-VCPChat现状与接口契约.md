@@ -192,9 +192,9 @@ VCPMobile 聊天层已经兼容 DailyNote create/update 的消息展示：
 
 - Rust：`content_parser.rs:980-1105`
 - Vue：`features/chat/blocks/DiaryBlock.vue`
-- 测试：`tests/unit/chat/DailyNoteCompatibility.test.ts`
+- 测试：`src/tests/unit/chat/DailyNoteCompatibility.test.ts`
 
-这项资产只解决“聊天消息如何解析和展示”，不等于 Memo 管理服务。当前版本应复用其字段语义，并在工具结果包含明确 `folder + fileName` 时提供深链；不能拿 DiaryBlock 直接读取远端整文件。
+这项资产只解决“聊天消息如何解析和展示”，不等于 Memo 管理服务。现有 create 块中的 `file_name` 是请求后缀而非服务端最终文件名，不能据此打开远端整文件；当前版本不提供聊天块深链。未来只有在工具结果可被可靠关联且显式给出最终 `folder + fileName` 时才接入精确 key，仍不得按 Agent 名称猜测。
 
 ## 6. 桌面功能全貌
 
