@@ -50,6 +50,45 @@ const phaseLabel = computed(() => {
   return map[store.progressData.phase] || '同步处理';
 });
 
+const errorStageLabel = computed(() => {
+  const map: Record<string, string> = {
+    preflight: '设备预检',
+    startup: '同步启动',
+    connect: '建立连接',
+    handshake: '版本握手',
+    owner_metadata: '所有者元数据',
+    topic_metadata: '话题元数据',
+    topic_validation: '话题校验',
+    messages: '消息同步',
+    finalize: '同步收尾',
+    shutdown: '同步退出',
+    history: '历史续传',
+  };
+  return map[store.terminalError?.stage ?? ''] ?? '同步处理';
+});
+
+const errorOriginLabel = computed(() => {
+  const map: Record<string, string> = {
+    mobile_ui: '手机界面',
+    mobile_native: '手机系统',
+    mobile_sync: '手机同步核心',
+    desktop_plugin: '电脑同步插件',
+    desktop_cds: '电脑数据服务',
+  };
+  return map[store.terminalError?.origin ?? ''] ?? '同步组件';
+});
+
+const canRetry = computed(() => {
+  if (store.status === 'completed_with_warnings') return true;
+  return store.status === 'error' && ['manual', 'after_user_action'].includes(
+    store.terminalError?.retryAction ?? 'never',
+  );
+});
+
+const retryLabel = computed(() =>
+  store.terminalError?.retryAction === 'after_user_action' ? '处理后重试' : '重新同步',
+);
+
 const statusLabel = computed(() => {
   switch (store.status) {
     case 'connecting': return '连接中';
@@ -306,6 +345,9 @@ const handlePrerenderToggle = async (val: boolean) => {
                 <div class="mt-1 text-[10px] leading-relaxed text-white/55 break-words">
                   {{ store.terminalError.guidance }}
                 </div>
+                <div class="mt-2 font-mono text-[9px] leading-relaxed text-white/35 break-all">
+                  {{ errorStageLabel }} · {{ errorOriginLabel }} · {{ store.terminalError.code }}
+                </div>
                 <div class="mt-2 text-[9px] text-white/30">
                   {{ store.terminalError.logFile ? '详细记录已保存至历史日志。' : '本次未生成诊断日志。' }}
                 </div>
@@ -363,13 +405,13 @@ const handlePrerenderToggle = async (val: boolean) => {
         </div>
         <div v-if="store.activeTab === 'live'" class="flex items-center gap-2">
           <button
-            v-if="store.status === 'error' || store.status === 'completed_with_warnings'"
+            v-if="canRetry"
             :disabled="store.retryInFlight"
             @click="store.retrySync()"
             class="flex items-center gap-1 border-l-2 border-blue-400 px-2 py-1 text-[10px] text-blue-300 disabled:opacity-30"
           >
             <RotateCcw :size="12" :class="{ 'animate-spin': store.retryInFlight }" />
-            重新同步
+            {{ retryLabel }}
           </button>
           <button
             v-if="store.logs.length > 0"

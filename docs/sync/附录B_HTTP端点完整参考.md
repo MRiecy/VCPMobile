@@ -143,7 +143,7 @@ let dto: AgentSyncDTO = res.json().await?;
 1. `pull_executor.rs` 建立 HTTP POST 连接后，通过 `res.bytes_stream()` 流式读取 chunk。
 2. 使用缓冲区逐行解析 NDJSON，支持 chunk 边界跨越。
 3. 每解析出一行 topic 数据，先从 `NetworkAwareSemaphore(6–12)` 取得 permit，再 spawn 异步任务调用 `process_topic_messages()`。
-4. 单 topic 处理失败不中断流，错误通过 `_error` 字段返回。
+4. 单 topic 处理失败不中断流读取，错误通过 `_error: SyncError` 返回；Mobile 会保留根因并令当前 attempt 失败。
 
 **字段规范化**
 在 `process_topic_messages` 中，桌面端原始消息会经过以下规范化：
@@ -324,12 +324,14 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 | `404 Not Found` | 实体/附件/头像不存在 | `pull_agent_topic` / `pull_group_topic` 对 404 静默跳过；附件 404 则 UI 显示裂图 |
 | `500 Internal Server Error` | 桌面端处理异常 | 打印错误日志，当前任务失败，不影响其他并发任务 |
 
+所有非 2xx 响应统一返回 `{"error": SyncError}`，所有普通 JSON 的失败结果统一使用 `{"success":false,"error":SyncError}`。`SyncError` 必须包含 Wire 1.2 的 `code/origin/stage/kind/retry/message/failedTopicIds` 全部字段；旧字符串错误拒绝。
+
 ### 流式端点特殊错误帧
 
 对于 `/download-messages-stream` 和 `/upload-messages-batch` 这两个 NDJSON 流式端点：
 
-- **流级错误**（桌面端在开始传输后发生异常）：桌面端写入 `{"_stream_error": "error message"}\n` 后结束响应。
-- **Topic 级错误**：单 topic 处理失败时，桌面端写入 `{"topicId":"tid","_error":"reason"}\n`，移动端跳过该 topic 继续消费后续行。
+- **流级错误**（桌面端在开始传输后发生异常）：桌面端写入 `{"_stream_error": SyncError}\n` 后结束响应。
+- **Topic 级错误**：单 topic 处理失败时，桌面端写入 `{"topicId":"tid","_error":SyncError}\n`。移动端可继续消费以安全释放流，但该 Topic 和当前 attempt 不得标记成功。
 
 ### 并发与限流
 

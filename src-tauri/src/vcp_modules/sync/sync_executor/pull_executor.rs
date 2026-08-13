@@ -4,6 +4,10 @@ use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
+use crate::vcp_modules::sync_error::{
+    encode_http_sync_error_body, encode_wire_sync_error, encode_wire_sync_error_value,
+    parse_wire_sync_error, WireSyncError,
+};
 use crate::vcp_modules::sync_hash::HashAggregator;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
@@ -52,6 +56,25 @@ async fn read_response_limited(
         body.extend_from_slice(&chunk);
     }
     Ok((status, body))
+}
+
+fn http_status_error(operation: &str, status: reqwest::StatusCode, bytes: &[u8]) -> String {
+    match encode_http_sync_error_body(bytes) {
+        Ok(Some(encoded)) => encoded,
+        Ok(None) => {
+            format!("{operation} failed with HTTP {status} without a Wire 1.2 error object")
+        }
+        Err(error) => format!("{operation} returned an invalid Wire 1.2 error: {error}"),
+    }
+}
+
+fn parse_stream_error_frame(bytes: &[u8]) -> Result<Option<String>, String> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
+    match value.get("_stream_error") {
+        Some(error) => encode_wire_sync_error_value(error).map(Some),
+        None => Ok(None),
+    }
 }
 
 struct NdjsonBudget {
@@ -106,7 +129,7 @@ struct TopicNDJSONFrame {
     owner_type: Option<String>,
     owner_id: Option<String>,
     messages: Vec<crate::vcp_modules::sync_dto::MessagePullSyncDTO>,
-    error: Option<String>,
+    error: Option<WireSyncError>,
     legacy_attachment_warnings: usize,
     warning_samples: Vec<String>,
 }
@@ -266,14 +289,19 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
     };
     let error = match object.get("_error") {
         None | Some(Value::Null) => None,
-        Some(Value::String(error)) if !error.is_empty() => Some(error.clone()),
-        Some(_) => {
-            return Err(format!(
-                "NDJSON error frame for {topic_id} has invalid _error"
-            ))
-        }
+        Some(error) => Some(parse_wire_sync_error(error).map_err(|parse_error| {
+            format!("NDJSON error frame for {topic_id} is invalid: {parse_error}")
+        })?),
     };
     if error.is_some() {
+        if object
+            .get("messages")
+            .is_some_and(|messages| !matches!(messages, Value::Array(values) if values.is_empty()))
+        {
+            return Err(format!(
+                "NDJSON error frame for {topic_id} must not contain live messages"
+            ));
+        }
         return Ok(TopicNDJSONFrame {
             topic_id,
             owner_type: owner_identity.as_ref().map(|identity| identity.0.clone()),
@@ -681,10 +709,7 @@ impl PullExecutor {
         let (status, bytes) =
             read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull agent").await?;
         if !status.is_success() {
-            return Err(format!(
-                "Pull agent failed: {status} body={}",
-                String::from_utf8_lossy(&bytes)
-            ));
+            return Err(http_status_error("Pull agent", status, &bytes));
         }
         let dto: AgentSyncDTO = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Pull agent returned invalid JSON: {error}"))?;
@@ -721,10 +746,7 @@ impl PullExecutor {
         let (status, bytes) =
             read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull group").await?;
         if !status.is_success() {
-            return Err(format!(
-                "Pull group failed: {status} body={}",
-                String::from_utf8_lossy(&bytes)
-            ));
+            return Err(http_status_error("Pull group", status, &bytes));
         }
         let dto: GroupSyncDTO = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Pull group returned invalid JSON: {error}"))?;
@@ -788,10 +810,7 @@ impl PullExecutor {
         let (status, bytes) =
             read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Entity pull").await?;
         if !status.is_success() {
-            return Err(format!(
-                "Pull entities batch failed: {status} body={}",
-                String::from_utf8_lossy(&bytes)
-            ));
+            return Err(http_status_error("Pull entities batch", status, &bytes));
         }
         let results: Vec<serde_json::Value> =
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -830,10 +849,21 @@ impl PullExecutor {
             if item.get("success").and_then(Value::as_bool) != Some(true) {
                 let error = item
                     .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error");
+                    .ok_or_else(|| {
+                        format!(
+                            "Entity pull {type_name}/{id} failure is missing error",
+                            type_name = r#type
+                        )
+                    })
+                    .and_then(encode_wire_sync_error_value)?;
                 return Err(format!(
                     "Entity pull {type_name}/{id} failed: {error}",
+                    type_name = r#type
+                ));
+            }
+            if item.get("error").is_some() {
+                return Err(format!(
+                    "Successful entity pull {type_name}/{id} must not contain an error",
                     type_name = r#type
                 ));
             }
@@ -954,12 +984,11 @@ impl PullExecutor {
                 .await
             {
                 Ok(res) => {
-                    let status = res.status();
-                    if !status.is_success() {
-                        return Err(format!("Pull avatar failed: {status}"));
-                    }
                     match read_response_limited(res, MAX_AVATAR_RESPONSE_BYTES, "Pull avatar").await
                     {
+                        Ok((status, bytes)) if !status.is_success() => {
+                            return Err(http_status_error("Pull avatar", status, &bytes));
+                        }
                         Ok((_, bytes)) => {
                             write_queue
                                 .submit(DbWriteTask::Avatar {
@@ -1032,10 +1061,7 @@ impl PullExecutor {
             read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull agent topic")
                 .await?;
         if !status.is_success() {
-            return Err(format!(
-                "Pull agent_topic failed: {status} body={}",
-                String::from_utf8_lossy(&bytes)
-            ));
+            return Err(http_status_error("Pull agent topic", status, &bytes));
         }
         let dto: AgentTopicSyncDTO = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Pull agent topic returned invalid JSON: {error}"))?;
@@ -1073,10 +1099,7 @@ impl PullExecutor {
             read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull group topic")
                 .await?;
         if !status.is_success() {
-            return Err(format!(
-                "Pull group_topic failed: {status} body={}",
-                String::from_utf8_lossy(&bytes)
-            ));
+            return Err(http_status_error("Pull group topic", status, &bytes));
         }
         let dto: GroupTopicSyncDTO = serde_json::from_slice(&bytes)
             .map_err(|error| format!("Pull group topic returned invalid JSON: {error}"))?;
@@ -1238,11 +1261,7 @@ impl PullExecutor {
             let status = res.status();
             let (_, err_body) =
                 read_response_limited(res, MAX_ERROR_RESPONSE_BYTES, "Batch pull error").await?;
-            return Err(format!(
-                "Batch pull messages failed: HTTP {} body={}",
-                status,
-                String::from_utf8_lossy(&err_body)
-            ));
+            return Err(http_status_error("Batch pull messages", status, &err_body));
         }
 
         // ── 并发基础设施 ──
@@ -1305,14 +1324,11 @@ impl PullExecutor {
                 return Err("NDJSON transport chunk exceeds 32MB budget".to_string());
             }
 
-            // 检测流级错误帧
+            // 检测流级错误帧；Wire 1.2 要求错误对象完整保留。
             if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#)
             {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&chunk) {
-                    let msg = val["_stream_error"]
-                        .as_str()
-                        .unwrap_or("unknown stream error");
-                    return Err(format!("Desktop stream error: {}", msg));
+                if let Some(error) = parse_stream_error_frame(&chunk)? {
+                    return Err(error);
                 }
             }
 
@@ -1385,6 +1401,9 @@ impl PullExecutor {
                     .acquire_many_owned(pull_worker_permits(line_bytes)?)
                     .await
                     .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
+                if let Some(error) = parse_stream_error_frame(&line)? {
+                    return Err(error);
+                }
                 let frame = parse_topic_ndjson_frame(&line)?;
                 drop(line);
                 ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
@@ -1401,13 +1420,14 @@ impl PullExecutor {
                     );
                 }
                 if let Some(topic_err) = frame.error {
+                    let encoded = encode_wire_sync_error(&topic_err)?;
                     tx.send(BatchPullResult {
                         topic_id,
                         success: false,
                         parsed_count: 0,
                         failed_count: 0,
                         legacy_attachment_warnings: frame.legacy_attachment_warnings,
-                        error: Some(format!("Desktop error: {}", topic_err)),
+                        error: Some(encoded),
                     })
                     .await
                     .map_err(|_| "Pull result receiver closed".to_string())?;
@@ -1512,6 +1532,9 @@ impl PullExecutor {
                 .acquire_many_owned(pull_worker_permits(trailing_bytes)?)
                 .await
                 .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
+            if let Some(error) = parse_stream_error_frame(&trailing)? {
+                return Err(error);
+            }
             let frame = parse_topic_ndjson_frame(&trailing)?;
             drop(trailing);
             ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
@@ -1528,13 +1551,14 @@ impl PullExecutor {
                 );
             }
             if let Some(topic_err) = frame.error {
+                let encoded = encode_wire_sync_error(&topic_err)?;
                 tx.send(BatchPullResult {
                     topic_id,
                     success: false,
                     parsed_count: 0,
                     failed_count: 0,
                     legacy_attachment_warnings: frame.legacy_attachment_warnings,
-                    error: Some(format!("Desktop error: {}", topic_err)),
+                    error: Some(encoded),
                 })
                 .await
                 .map_err(|_| "Pull result receiver closed".to_string())?;
@@ -1654,9 +1678,9 @@ mod ndjson_budget_tests {
     use std::time::Duration;
     use tokio::sync::Semaphore;
 
-    const PROTOCOL_1_1_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_1_golden.json");
-    const PROTOCOL_1_1_GOLDEN_SHA256: &str =
-        "3b5f56d0731c1babede9aba001d9664117fae6bbc8d97cae56882f12a48e8e60";
+    const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
+    const PROTOCOL_1_2_GOLDEN_SHA256: &str =
+        "7226118ea55766f952575032efc8cfff883a19c9d196f637ac267cb8795fcef8";
 
     #[test]
     fn pull_frame_owner_identity_must_match_the_local_topic() {
@@ -1685,14 +1709,14 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn protocol_1_1_golden_bundle_and_canonical_output_are_stable() {
+    fn protocol_1_2_golden_bundle_and_canonical_output_are_stable() {
         assert_eq!(
-            crate::vcp_modules::infra::utils::calculate_sha256(PROTOCOL_1_1_GOLDEN),
-            PROTOCOL_1_1_GOLDEN_SHA256
+            crate::vcp_modules::infra::utils::calculate_sha256(PROTOCOL_1_2_GOLDEN),
+            PROTOCOL_1_2_GOLDEN_SHA256
         );
         let bundle: serde_json::Value =
-            serde_json::from_slice(PROTOCOL_1_1_GOLDEN).expect("golden bundle JSON");
-        assert_eq!(bundle["wireProtocol"], "1.1");
+            serde_json::from_slice(PROTOCOL_1_2_GOLDEN).expect("golden bundle JSON");
+        assert_eq!(bundle["wireProtocol"], "1.2");
 
         for case in bundle["validFrames"]
             .as_array()
@@ -1872,6 +1896,55 @@ mod ndjson_budget_tests {
         let attachments = parsed.messages[0].attachments.as_ref().unwrap();
         assert_eq!(attachments[0].hash, "f".repeat(64));
         assert_eq!(attachments[1].hash, "e".repeat(64));
+    }
+
+    #[test]
+    fn ndjson_error_frames_require_the_wire_1_2_object() {
+        let parsed = parse_topic_ndjson_frame(
+            json!({
+                "topicId": "topic-a",
+                "ownerType": "agent",
+                "ownerId": "agent-a",
+                "messages": [],
+                "_error": {
+                    "code": "TOPIC_NOT_FOUND",
+                    "origin": "desktop_plugin",
+                    "stage": "messages",
+                    "kind": "data",
+                    "retry": "manual",
+                    "message": "topic not found",
+                    "failedTopicIds": ["topic-a"]
+                }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("Wire 1.2 error frame");
+        assert_eq!(parsed.error.expect("error").code, "TOPIC_NOT_FOUND");
+        assert!(parse_topic_ndjson_frame(
+            json!({ "topicId": "topic-a", "messages": [], "_error": "legacy" })
+                .to_string()
+                .as_bytes(),
+        )
+        .is_err());
+        assert!(parse_topic_ndjson_frame(
+            json!({
+                "topicId": "topic-a",
+                "messages": [{"id":"message-a"}],
+                "_error": {
+                    "code": "TOPIC_NOT_FOUND",
+                    "origin": "desktop_plugin",
+                    "stage": "messages",
+                    "kind": "data",
+                    "retry": "manual",
+                    "message": "topic not found",
+                    "failedTopicIds": ["topic-a"]
+                }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .is_err());
     }
 
     #[test]

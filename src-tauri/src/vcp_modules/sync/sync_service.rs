@@ -1,5 +1,9 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
+use crate::vcp_modules::sync_error::{
+    build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
+    encode_wire_sync_error, parse_wire_sync_error, SyncErrorPayload,
+};
 use crate::vcp_modules::sync_executor::PullExecutor;
 use crate::vcp_modules::sync_hash::HashInitializer;
 use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
@@ -23,8 +27,8 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-const EXPECTED_PLUGIN_VERSION: &str = "1.1.0";
-const WIRE_PROTOCOL_VERSION: &str = "1.1";
+const EXPECTED_PLUGIN_VERSION: &str = "1.2.0";
+const WIRE_PROTOCOL_VERSION: &str = "1.2";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const PHASE3_WATCHDOG_TICK: Duration = Duration::from_secs(10);
@@ -46,6 +50,7 @@ struct VersionAck {
 #[derive(Debug, PartialEq, Eq)]
 enum VersionHandshakeError {
     Protocol(String),
+    Remote(String),
     Closed { code: Option<u16>, reason: String },
     Transport(String),
 }
@@ -68,6 +73,29 @@ fn parse_version_ack(payload: &Value) -> Result<VersionAck, String> {
         plugin_version: plugin_version.to_string(),
         protocol_version: protocol_version.to_string(),
     })
+}
+
+fn parse_version_handshake_payload(
+    payload: &Value,
+) -> Result<Option<VersionAck>, VersionHandshakeError> {
+    match payload.get("type").and_then(Value::as_str) {
+        Some("SYNC_ERROR") => {
+            let wire = payload
+                .get("error")
+                .ok_or_else(|| {
+                    VersionHandshakeError::Protocol("SYNC_ERROR.error is missing".to_string())
+                })
+                .and_then(|value| {
+                    parse_wire_sync_error(value).map_err(VersionHandshakeError::Protocol)
+                })?;
+            let encoded = encode_wire_sync_error(&wire).map_err(VersionHandshakeError::Protocol)?;
+            Err(VersionHandshakeError::Remote(encoded))
+        }
+        Some("SYNC_LOG_EVENT") => Ok(None),
+        _ => parse_version_ack(payload)
+            .map(Some)
+            .map_err(VersionHandshakeError::Protocol),
+    }
 }
 
 async fn send_ws_with_deadline(
@@ -623,171 +651,12 @@ fn parse_unique_nonempty_strings(
     Ok(result)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SyncErrorCategory {
-    Device,
-    Configuration,
-    Connection,
-    Compatibility,
-    Protocol,
-    Data,
-    Internal,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncErrorPayload {
-    code: String,
-    category: SyncErrorCategory,
-    message: String,
-    guidance: String,
-    failed_topic_ids: Vec<String>,
-    log_file: Option<String>,
-}
-
-fn sync_error_copy(code: &str) -> (SyncErrorCategory, &'static str, &'static str) {
-    match code {
-        "POWER_SAVE_MODE" => (
-            SyncErrorCategory::Device,
-            "系统省电模式已阻止本次同步",
-            "关闭系统省电模式后再试。",
-        ),
-        "BATTERY_TOO_LOW" => (
-            SyncErrorCategory::Device,
-            "当前电量不足，已暂停同步",
-            "电量达到 30% 后再试。",
-        ),
-        "CONFIG_LOOPBACK_ON_MOBILE" => (
-            SyncErrorCategory::Configuration,
-            "服务器地址仍指向本机，手机无法连接电脑",
-            "在同步设置中填写电脑的局域网 IP 和端口。",
-        ),
-        "TOKEN_MISMATCH" => (
-            SyncErrorCategory::Configuration,
-            "手机端与电脑端的同步令牌不一致",
-            "重新核对两端令牌后再试。",
-        ),
-        "SYNC_CONFIG_MISSING" => (
-            SyncErrorCategory::Configuration,
-            "同步服务器地址尚未配置完整",
-            "在同步设置中填写电脑端 WebSocket 和 HTTP 地址后再试。",
-        ),
-        "SYNC_CONFIG_INVALID" => (
-            SyncErrorCategory::Configuration,
-            "同步服务器地址格式不正确",
-            "检查同步设置中的协议、IP 和端口后再试。",
-        ),
-        "WS_PATH_INVALID" => (
-            SyncErrorCategory::Configuration,
-            "电脑端同步服务路径配置不正确",
-            "检查同步设置中的服务地址和路径后再试。",
-        ),
-        "SYNC_VERSION_INCOMPATIBLE" => (
-            SyncErrorCategory::Compatibility,
-            "手机端与电脑端同步版本不兼容",
-            "更新或重启电脑端同步插件后再试。",
-        ),
-        "SYNC_ALREADY_RUNNING" => (
-            SyncErrorCategory::Internal,
-            "已有同步任务正在运行",
-            "请等待当前同步结束后再试。",
-        ),
-        "VCP_LOG_DISCONNECTED" => (
-            SyncErrorCategory::Connection,
-            "尚未连接电脑端服务通道",
-            "确认电脑端服务已启动，并等待连接成功后再试。",
-        ),
-        "REMOTE_SYNC_FAILED" => (
-            SyncErrorCategory::Data,
-            "电脑端未能完成本次同步处理",
-            "可重试一次；若仍失败，请保留最新同步日志。",
-        ),
-        "HTTP_CLIENT_INIT_FAILED" => (
-            SyncErrorCategory::Internal,
-            "同步组件未能正常启动",
-            "重启应用后再试；若仍失败，请保留最新同步日志。",
-        ),
-        _ if code.starts_with("VERSION_") => (
-            SyncErrorCategory::Compatibility,
-            "手机端与电脑端同步版本不兼容",
-            "更新或重启电脑端同步插件后再试。",
-        ),
-        _ if code.contains("PROTOCOL")
-            || code.contains("ACK")
-            || code.contains("RESPONSE_TIMEOUT")
-            || code.contains("OVERLAP")
-            || code.contains("STALLED")
-            || code.ends_with("_INVALID") =>
-        {
-            (
-                SyncErrorCategory::Protocol,
-                "电脑端返回的同步响应不符合当前协议，已安全停止",
-                "重启电脑端同步插件；若再次出现，请保留最新同步日志。",
-            )
-        }
-        _ if code.contains("NETWORK")
-            || code.starts_with("WS_")
-            || code.starts_with("HTTP_")
-            || code == "CONNECTION_REFUSED" =>
-        {
-            (
-                SyncErrorCategory::Connection,
-                "无法连接电脑端同步服务",
-                "确认两端处于同一网络，且电脑端服务、IP、端口和防火墙配置正常。",
-            )
-        }
-        _ if code.contains("DB")
-            || code.contains("DRAIN")
-            || code.contains("HASH")
-            || code.contains("MANIFEST")
-            || code.contains("ENTITY")
-            || code.contains("FINAL")
-            || code.contains("PHASE3")
-            || code.contains("DIFF") =>
-        {
-            (
-                SyncErrorCategory::Data,
-                "部分数据未能完成处理，系统未将其标记为成功",
-                "可重试一次；若仍失败，请保留最新同步日志。",
-            )
-        }
-        _ => (
-            SyncErrorCategory::Internal,
-            "同步组件未能正常启动或结束",
-            "重启应用后再试；若仍失败，请保留最新同步日志。",
-        ),
-    }
-}
-
 fn build_sync_error_payload(
     code: &str,
     failed_topic_ids: Vec<String>,
     log_file: Option<String>,
 ) -> SyncErrorPayload {
-    let stable_code = if !code.is_empty()
-        && code.len() <= 64
-        && code
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-    {
-        code
-    } else {
-        "SYNC_ATTEMPT_FAILED"
-    };
-    let (category, message, guidance) = sync_error_copy(stable_code);
-    SyncErrorPayload {
-        code: stable_code.to_string(),
-        category,
-        message: message.to_string(),
-        guidance: guidance.to_string(),
-        failed_topic_ids: failed_topic_ids
-            .into_iter()
-            .filter(|id| !id.is_empty() && id.len() <= 512)
-            .take(8)
-            .collect(),
-        log_file,
-    }
+    build_local_error_payload(code, failed_topic_ids, log_file)
 }
 
 fn encode_sync_command_error(code: &str, detail: &str) -> String {
@@ -799,7 +668,7 @@ fn encode_sync_command_error(code: &str, detail: &str) -> String {
     let payload = build_sync_error_payload(code, Vec::new(), None);
     match serde_json::to_string(&payload) {
         Ok(json) => format!("SYNC_ERROR:{json}"),
-        Err(_) => "SYNC_ERROR:{\"code\":\"SYNC_COMMAND_FAILED\",\"category\":\"internal\",\"message\":\"同步组件未能正常启动或结束\",\"guidance\":\"重启应用后再试；若仍失败，请保留最新同步日志。\",\"failedTopicIds\":[],\"logFile\":null}".to_string(),
+        Err(_) => "SYNC_ERROR:{\"code\":\"SYNC_ATTEMPT_FAILED\",\"category\":\"internal\",\"origin\":\"mobile_sync\",\"stage\":\"startup\",\"retryAction\":\"manual\",\"message\":\"同步组件未能正常完成本次任务\",\"guidance\":\"重启应用后重新同步；若仍失败，请保留最新日志。\",\"failedTopicIds\":[],\"logFile\":null}".to_string(),
     }
 }
 
@@ -831,7 +700,13 @@ async fn publish_sync_error<R: Runtime>(
     if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
         return;
     }
-    emit_sync_log(app_handle, "error", &format!("[{code}] {message}"));
+    let wire_error = decode_wire_sync_error(message);
+    let diagnostic_code = wire_error.as_ref().map_or(code, |wire| wire.code.as_str());
+    emit_sync_log(
+        app_handle,
+        "error",
+        &format!("[{diagnostic_code}] {message}"),
+    );
     let log_file = sync_state
         .current_log_path
         .read()
@@ -839,7 +714,10 @@ async fn publish_sync_error<R: Runtime>(
         .as_deref()
         .and_then(|path| std::path::Path::new(path).file_name())
         .map(|name| name.to_string_lossy().into_owned());
-    let error = build_sync_error_payload(code, failed_topic_ids, log_file);
+    let error = match wire_error {
+        Some(wire) => build_wire_error_payload(&wire, failed_topic_ids, log_file),
+        None => build_sync_error_payload(code, failed_topic_ids, log_file),
+    };
     let user_message = error.message.clone();
     publish_sync_status_inner(
         app_handle,
@@ -1373,8 +1251,10 @@ async fn run_sync_session(
                                             .map_err(|error| VersionHandshakeError::Protocol(
                                                 format!("Malformed VERSION_ACK JSON: {error}")
                                             ))?;
-                                        return parse_version_ack(&payload)
-                                            .map_err(VersionHandshakeError::Protocol);
+                                        match parse_version_handshake_payload(&payload)? {
+                                            Some(ack) => return Ok(ack),
+                                            None => continue,
+                                        }
                                     }
                                     Ok(Message::Close(close_frame)) => {
                                         return Err(match close_frame {
@@ -1459,6 +1339,19 @@ async fn run_sync_session(
                                 &connection_status_for_task,
                                 "VERSION_ACK_INVALID",
                                 &message,
+                                Vec::new(),
+                            )
+                            .await;
+                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                            break;
+                        }
+                        Ok(Err(VersionHandshakeError::Remote(encoded))) => {
+                            publish_sync_error(
+                                &handle_clone,
+                                session_id,
+                                &connection_status_for_task,
+                                "REMOTE_SYNC_FAILED",
+                                &encoded,
                                 Vec::new(),
                             )
                             .await;
@@ -2957,48 +2850,33 @@ async fn run_sync_session(
                                         }
                                     },
                                     Some("SYNC_ERROR") => {
-                                        let Some(message) = payload.get("message").and_then(Value::as_str).filter(|value| !value.is_empty()) else {
-                                            fatal_error = true;
-                                            publish_sync_error(
-                                                &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
-                                                "PROTOCOL_FRAME_INVALID",
-                                                "SYNC_ERROR.message must be a non-empty string",
-                                                Vec::new(),
-                                            ).await;
-                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                            break;
-                                        };
-                                        let remote_code = match payload.get("code") {
-                                            Some(Value::String(code)) if !code.is_empty() => code.clone(),
-                                            Some(Value::Number(code)) if code.is_u64() => code.to_string(),
-                                            _ => {
+                                        let encoded = payload
+                                            .get("error")
+                                            .ok_or_else(|| "SYNC_ERROR.error is missing".to_string())
+                                            .and_then(parse_wire_sync_error)
+                                            .and_then(|wire| encode_wire_sync_error(&wire));
+                                        let encoded = match encoded {
+                                            Ok(encoded) => encoded,
+                                            Err(message) => {
                                                 fatal_error = true;
                                                 publish_sync_error(
                                                     &handle_clone,
                                                     session_id,
                                                     &connection_status_for_task,
                                                     "PROTOCOL_FRAME_INVALID",
-                                                    "SYNC_ERROR.code must be a non-empty string or unsigned integer",
+                                                    &message,
                                                     Vec::new(),
                                                 ).await;
                                                 let _ = close_ws_with_deadline(&mut ws_stream).await;
                                                 break;
                                             }
                                         };
-                                        let err_msg = format!("Desktop Error ({remote_code}): {message}");
-                                        log::error!(
-                                            "[SyncService] {}",
-                                            redact_sync_diagnostic(&err_msg)
-                                        );
-                                        emit_sync_log(&handle_clone, "error", &err_msg);
                                         publish_sync_error(
                                             &handle_clone,
                                             session_id,
                                             &connection_status_for_task,
                                             "REMOTE_SYNC_FAILED",
-                                            &err_msg,
+                                            &encoded,
                                             Vec::new(),
                                         ).await;
                                         fatal_error = true;
@@ -3886,6 +3764,7 @@ pub async fn clear_old_sync_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vcp_modules::sync_error::SyncErrorCategory;
     use std::sync::atomic::AtomicBool;
     use tokio_tungstenite::tungstenite::error::Error as WsError;
     use tokio_tungstenite::tungstenite::http::{Response, StatusCode};
@@ -3900,6 +3779,9 @@ mod tests {
         let json = serde_json::to_value(payload).expect("serialize sync error");
 
         assert_eq!(json["category"], "configuration");
+        assert_eq!(json["origin"], "mobile_sync");
+        assert_eq!(json["stage"], "connect");
+        assert_eq!(json["retryAction"], "after_user_action");
         assert_eq!(json["message"], "手机端与电脑端的同步令牌不一致");
         assert_eq!(json["guidance"], "重新核对两端令牌后再试。");
         assert!(json.get("detail").is_none());
@@ -3913,19 +3795,19 @@ mod tests {
     #[test]
     fn sync_error_classification_covers_connection_protocol_and_data_failures() {
         assert_eq!(
-            sync_error_copy("NETWORK_TIMEOUT").0,
+            build_sync_error_payload("NETWORK_TIMEOUT", Vec::new(), None).category,
             SyncErrorCategory::Connection
         );
         assert_eq!(
-            sync_error_copy("PROTOCOL_FRAME_INVALID").0,
+            build_sync_error_payload("PROTOCOL_FRAME_INVALID", Vec::new(), None).category,
             SyncErrorCategory::Protocol
         );
         assert_eq!(
-            sync_error_copy("SYNC_DB_DRAIN_FAILED").0,
-            SyncErrorCategory::Data
+            build_sync_error_payload("SYNC_DB_DRAIN_FAILED", Vec::new(), None).category,
+            SyncErrorCategory::Storage
         );
         assert_eq!(
-            sync_error_copy("SYNC_VERSION_INCOMPATIBLE").0,
+            build_sync_error_payload("SYNC_VERSION_INCOMPATIBLE", Vec::new(), None).category,
             SyncErrorCategory::Compatibility
         );
     }
@@ -4039,27 +3921,58 @@ mod tests {
     }
 
     #[test]
-    fn protocol_1_1_version_ack_is_strict_and_uses_public_field_names() {
+    fn protocol_1_2_version_ack_is_strict_and_uses_public_field_names() {
         let ack = parse_version_ack(&json!({
             "type": "VERSION_ACK",
-            "pluginVersion": "1.1.0",
-            "protocolVersion": "1.1",
+            "pluginVersion": "1.2.0",
+            "protocolVersion": "1.2",
         }))
-        .expect("strict 1.1 acknowledgement");
-        assert_eq!(ack.plugin_version, "1.1.0");
-        assert_eq!(ack.protocol_version, "1.1");
+        .expect("strict 1.2 acknowledgement");
+        assert_eq!(ack.plugin_version, "1.2.0");
+        assert_eq!(ack.protocol_version, "1.2");
 
         assert!(parse_version_ack(&json!({
             "type": "VERSION_ACK",
-            "version": "1.1.0",
+            "version": "1.2.0",
         }))
         .is_err());
         assert!(parse_version_ack(&json!({
             "type": "VERSION_ACK",
-            "pluginVersion": "1.1.0",
-            "protocolVersion": 1.1,
+            "pluginVersion": "1.2.0",
+            "protocolVersion": 1.2,
         }))
         .is_err());
+    }
+
+    #[test]
+    fn handshake_preserves_a_structured_desktop_error_before_version_ack() {
+        let result = parse_version_handshake_payload(&json!({
+            "type": "SYNC_ERROR",
+            "error": {
+                "code": "PLUGIN_VERSION_MISMATCH",
+                "origin": "desktop_plugin",
+                "stage": "handshake",
+                "kind": "compatibility",
+                "retry": "after_user_action",
+                "message": "plugin package mismatch",
+                "failedTopicIds": []
+            }
+        }));
+        let VersionHandshakeError::Remote(encoded) = result.expect_err("remote error") else {
+            panic!("expected structured remote error");
+        };
+        assert_eq!(
+            decode_wire_sync_error(&encoded)
+                .expect("encoded error")
+                .code,
+            "PLUGIN_VERSION_MISMATCH"
+        );
+        assert!(parse_version_handshake_payload(&json!({
+            "type": "SYNC_LOG_EVENT",
+            "level": "info"
+        }))
+        .expect("log frame")
+        .is_none());
     }
 
     #[test]

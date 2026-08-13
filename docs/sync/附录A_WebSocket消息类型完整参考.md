@@ -15,8 +15,8 @@ last_updated: 2026-08-13
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion: string`, `protocolVersion: "1.1"` | `run_sync_session` 发送并启动 `VERSION_CHECK_TIMEOUT` | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `index.js` |
-| 2 | `VERSION_ACK` | D→M | 桌面端收到 `VERSION_CHECK` 后立即回复 | `pluginVersion: "1.1.0"`, `protocolVersion: "1.1"` | 两字段精确匹配；缺失、错类型、旧 `version` 字段或不匹配均终止 attempt | 返回插件包版本与固定 wire 版本 | `sync_service.rs`, `index.js` |
+| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion: string`, `protocolVersion: "1.2"` | `run_sync_session` 发送并启动 `VERSION_CHECK_TIMEOUT` | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `index.js` |
+| 2 | `VERSION_ACK` | D→M | 桌面端收到 `VERSION_CHECK` 后立即回复 | `pluginVersion: "1.2.0"`, `protocolVersion: "1.2"` | 两字段精确匹配；缺失、错类型、旧 `version` 字段或不匹配均终止 attempt | 返回插件包版本与固定 wire 版本 | `sync_service.rs`, `index.js` |
 | 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
 | 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
 | 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
@@ -48,7 +48,7 @@ last_updated: 2026-08-13
 | 17 | `SYNC_ENTITY_UPDATE` | M→D | 移动端检测到本地实体变更时实时通知（如用户修改 Agent 配置、新建 Topic） | `id: string`（实体 ID），`dataType: string`（实体类型），`hash: string`（新哈希），`ts: i64`（更新时间戳） | `SyncCommand::NotifyLocalChange` 触发发送；由前端业务逻辑或数据库触发器调用 | `index.js` 中调用 `upsertEntityIndex` 更新桌面端索引数据库；若实体不存在则插入新记录 | `sync_service.rs`, `index.js` |
 | 18 | `SYNC_DELETE_NOTIFY` | D→M | 桌面端通知 Mobile 执行远端墓碑 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | WS owner 在 60 秒可取消边界内调用 `DeleteExecutor::soft_delete_*`；缺字段/错型立即终止 attempt | 桌面端实体或消息删除后发送 | `sync_service.rs`, `index.js` |
 | 19 | `SYNC_ENTITY_DELETE` | M→D | Mobile 本地删除或处理 `PUSH_DELETE` 后通知桌面端 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | `SyncCommand::NotifyDelete` / `NotifyMessageDelete` 发送；传输失败进入共享重试预算 | 桌面端按原时间戳幂等软删除；Message 离线遗漏另由 HTTP 墓碑重放补齐 | `sync_service.rs`, `index.js` |
-| 20 | `SYNC_ERROR` | D→M | 桌面端遇到不可恢复错误（如数据库损坏、配置解析失败） | `code: string | unsigned number`，`message: non-empty string` | 移动端将原始明细脱敏写入诊断日志，对 WebView 只发 `REMOTE_SYNC_FAILED` 的固定分类、原因和建议 | 桌面端内部错误处理触发，如 `handleSyncManifest` 中 `data` 非数组时返回 | `sync_service.rs`, `index.js` |
+| 20 | `SYNC_ERROR` | 双向 | 任一端遇到不可恢复错误 | `error: {code, origin, stage, kind, retry, message, failedTopicIds}` | 严格解析完整对象并保留根因；诊断 message 不进入 WebView 主文案 | `error-contract.js` 构造统一外壳 | `sync_error.rs`, `transport/websocket.js` |
 | 21 | `SYNC_ACK` | D→M | 桌面端确认收到 `SYNC_ENTITY_UPDATE` 或 `SYNC_ENTITY_DELETE` | `id: string`（对应实体 ID） | 移动端不处理，可选输出调试日志；设计为异步 fire-and-forget | `index.js` 中统一返回确认帧，结构简单 | `sync_service.rs`, `index.js` |
 
 ---
@@ -70,8 +70,8 @@ last_updated: 2026-08-13
 |--------|---------|---------|------|--------|------|
 | `type` | `string` | 所有消息 | 是 | — | 消息类型标识符，区分大小写，必须为首层字段 |
 | `mobileVersion` | `string` | `VERSION_CHECK` | 是 | — | 移动端应用版本号，编译期通过 `env!("CARGO_PKG_VERSION")` 嵌入 |
-| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 当前必须精确为 `1.1.0` |
-| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前必须精确为 `1.1` |
+| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 当前必须精确为 `1.2.0` |
+| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前必须精确为 `1.2` |
 | `phase` | `string` | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 是 | — | 阶段名称，取值：`owner_metadata`、`topic_metadata`、`messages` |
 | `sessionId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 移动端同步会话 owner generation；桌面端必须原样回显 |
 | `attemptId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 当前会话内的 reconnect attempt；桌面端必须原样回显 |
@@ -87,14 +87,19 @@ last_updated: 2026-08-13
 | `results` | `object` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | Key 为 `topicId`，Value 为严格判别联合；必须精确覆盖当前请求 topic |
 | `ok` | `boolean` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | `true` 使用 `toPull/toPush`；`false` 使用 `error` 并立即终止 attempt |
 | `toPull` / `toPush` | `string[]` / `boolean` | `ok:true` | 是 | — | 成功分支严禁携带 `error` |
-| `error` | `{code:string,message:string}` | `ok:false` | 是 | — | 失败分支严禁携带 `toPull/toPush` |
+| `error` | `SyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.2 对象；失败分支严禁携带 `toPull/toPush` |
 | `level` | `string` | `SYNC_LOG_EVENT` | 是 | — | 日志级别：`info`（白色）、`success`（绿色）、`warning`（黄色）、`error`（红色） |
-| `message` | `string` | `SYNC_LOG_EVENT`, `SYNC_ERROR` | 是 | — | 桌面端诊断文本；Mobile 持久化时脱敏，前端不直接展示 |
+| `message` | `string` | `SYNC_LOG_EVENT`, `SyncError` | 是 | — | 诊断文本；Mobile 持久化时脱敏，前端不直接展示 |
 | `id` | `string` | `SYNC_ENTITY_UPDATE`, `SYNC_DELETE_NOTIFY`, `SYNC_ACK` | 是 | — | 实体唯一标识符；对 Avatar 类型格式为 `owner_type:owner_id` |
 | `deletedAt` | `number` | `SYNC_DELETE_NOTIFY` | 是 | — | 软删除时间戳，毫秒级 Unix Epoch；非空即视为已删除 |
 | `hash` | `string` | `SYNC_ENTITY_UPDATE` | 是 | — | 实体当前内容指纹，64 字符十六进制 SHA-256；用于快速判断内容是否变更 |
 | `ts` | `i64` / `number` | `SYNC_ENTITY_UPDATE` | 是 | — | 实体最后更新时间戳，毫秒级 Unix Epoch；LWW 仲裁依据 |
-| `code` | `string \| unsigned number` | `SYNC_ERROR` | 是 | — | 桌面端诊断码；Mobile 不将其当作可信用户文案，对外归一为 `REMOTE_SYNC_FAILED` |
+| `code` | `string` | `SyncError` | 是 | — | 稳定大写机器码；已登记码映射固定中文文案，未知合法码保留但不展示原始 message |
+| `origin` | 闭合集合字符串 | `SyncError` | 是 | — | `mobile_ui/mobile_native/mobile_sync/desktop_plugin/desktop_cds` |
+| `stage` | 闭合集合字符串 | `SyncError` | 是 | — | 失败被确认时的精确阶段，不能统一降级为 `connect` |
+| `kind` | 闭合集合字符串 | `SyncError` | 是 | — | `device/configuration/connection/compatibility/protocol/data/storage/internal` |
+| `retry` | 闭合集合字符串 | `SyncError` | 是 | — | `automatic/after_user_action/manual/never`，直接控制 UI 行为 |
+| `failedTopicIds` | `string[]` | `SyncError` | 是 | `[]` | 去重且最多 8 项；仅用于诊断定位 |
 | `ownerType` | `string` | `SYNC_DIFF_RESULTS` 中 DiffResult | 否 | — | 仅 Topic 类型使用，区分 `agent` 与 `group`，指导路由到正确的 Pull/Push Executor |
 | `mismatchedContent` | `boolean` | `SYNC_DIFF_RESULTS` 中 DiffResult | 否 | `false` | V2 标记；`true` 表示 `content_hash` 不一致，用于填充 `changed_owners` 触发 targeted topic sync |
 | `action` | `string` | `SYNC_DIFF_RESULTS` 中 DiffResult | 是 | — | 差异动作：`PULL`（移动端拉取）、`PUSH`（移动端推送）、`DELETE`（移动端软删除）、`PUSH_DELETE`（移动端删除并通知桌面端）、`SKIP`（无需操作） |
@@ -112,7 +117,7 @@ last_updated: 2026-08-13
 | `ts` | `i64` | `ts` | 否 | 是 | — | 绝对时间戳 / 逻辑时钟，毫秒级 Unix Epoch；LWW（Last-Write-Wins，最后写入胜出）裁决标准 |
 | `deleted_at` | `Option<i64>` | `deletedAt` | 是 | 否 | `None` | 软删除时间戳；非空表示该实体已被逻辑删除，用于双向删除同步 |
 | `owner_type` | `Option<String>` | `ownerType` | 是 | 否 | `None` | 仅用于 `topic` 类型，区分 `"agent"` 和 `"group"`，指导路由到 `AgentTopicSyncDTO` 或 `GroupTopicSyncDTO` |
-| `owner_id` | `Option<String>` | `ownerId` | 是 | 否 | `None` | 仅用于 `topic` 类型；与 `ownerType`、Topic ID 共同构成复合身份，协议 1.1 的 Topic manifest 中必须出现 |
+| `owner_id` | `Option<String>` | `ownerId` | 是 | 否 | `None` | 仅用于 `topic` 类型；与 `ownerType`、Topic ID 共同构成复合身份，协议 1.2 的 Topic manifest 中必须出现 |
 
 ---
 
@@ -146,7 +151,7 @@ last_updated: 2026-08-13
 | 消息类型 | 移动端发送时机 | 桌面端处理函数 | 桌面端响应 | 所属协议阶段 | 关键常量/阈值 |
 |---------|-------------|-------------|-----------|------------|-------------|
 | `VERSION_CHECK` | WS 连接建立后 0ms | `index.js` switch-case | `VERSION_ACK` | 握手 | `VERSION_CHECK_TIMEOUT = 5s` |
-| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "1.1.0"`；旧 1.0.0 拒绝、不降级 |
+| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "1.2.0"`；旧 1.1.0 拒绝、不降级 |
 | `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | 看门狗检查周期 `10s × 6 = 60s` |
 | `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
 | `SYNC_MANIFEST` | Phase 1（Owner 两条，drain 后 Avatar 一条）；Phase 2（Topic 一条） | `handleSyncManifest` | `SYNC_DIFF_RESULTS` | Phase 1/2 | 波次缺任一整帧响应 60 秒后失败 |
@@ -308,7 +313,7 @@ last_updated: 2026-08-13
 | 消息重复同步 | `SYNC_DIFF_RESULTS_BATCH` | 检查 `Phase3Tracker` HashSet 去重是否失效；检查 `toPull` 列表是否包含已存在消息 | `sync_service.rs` `Phase3Tracker` |
 | 实体变更未实时同步 | `SYNC_ENTITY_UPDATE` | 检查前端是否调用 `notifyEntityUpdate`；检查桌面端 `upsertEntityIndex` 是否成功 | `index.js` `upsertEntityIndex` |
 | 删除后另一端仍有数据 | `SYNC_DELETE_NOTIFY` / `SYNC_ENTITY_DELETE` | 检查 `deletedAt` 是否正确设置；检查桌面端 `deleteEntity` 是否执行物理删除 | `sync_service.rs` `DeleteExecutor` |
-| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对桌面端 `plugin-manifest.json.version` 是否精确等于 `EXPECTED_PLUGIN_VERSION` 1.1.0；1.0.0 不兼容 | `sync_service.rs` 版本校验逻辑 |
+| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对桌面端 `plugin-manifest.json.version` 是否精确等于 `EXPECTED_PLUGIN_VERSION` 1.2.0；1.1.0 不兼容 | `sync_service.rs` 版本校验逻辑 |
 | WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查看门狗超时（60s 无 Phase 进展）；检查网络稳定性 | `sync_service.rs` 看门狗逻辑 |
 | Phase 2 数据传输量过大 | `SYNC_MANIFEST` (topic, phase=2) | 检查 `targetedOwners` 是否正确填充；确认 `changed_owners` 是否包含未变更 Owner | `manifest_builder.rs` `build_targeted_topic_manifest` |
 | 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_BATCH` | 检查是否已启用 Fast Path（话题级哈希匹配直接跳过）；检查分片策略 | `sync/diff.js` `handleSyncMessageDiffBatch` |
@@ -317,4 +322,4 @@ last_updated: 2026-08-13
 
 ---
 
-*当前硬切兼容基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.1.0` + wire protocol `1.1`；旧字段与 1.0 peer 不兼容。*
+*当前硬切兼容基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.2.0` + wire protocol `1.2`；旧字段、字符串错误与 1.1 peer 不兼容。*

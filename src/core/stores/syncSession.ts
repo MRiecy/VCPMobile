@@ -28,7 +28,27 @@ interface SyncTerminalError {
     | "compatibility"
     | "protocol"
     | "data"
+    | "storage"
     | "internal";
+  origin:
+    | "mobile_ui"
+    | "mobile_native"
+    | "mobile_sync"
+    | "desktop_plugin"
+    | "desktop_cds";
+  stage:
+    | "preflight"
+    | "startup"
+    | "connect"
+    | "handshake"
+    | "owner_metadata"
+    | "topic_metadata"
+    | "topic_validation"
+    | "messages"
+    | "finalize"
+    | "shutdown"
+    | "history";
+  retryAction: "automatic" | "after_user_action" | "manual" | "never";
   message: string;
   guidance: string;
   failedTopicIds: string[];
@@ -41,8 +61,8 @@ type BufferedSessionEvent = {
 };
 
 const MOBILE_VERSION = "1.1.4";
-const DESKTOP_PLUGIN_VERSION = "1.1.0";
-const WIRE_PROTOCOL_VERSION = "1.1";
+const DESKTOP_PLUGIN_VERSION = "1.2.0";
+const WIRE_PROTOCOL_VERSION = "1.2";
 const MAX_BUFFERED_SESSION_EVENTS = 32;
 const ERROR_CATEGORIES = new Set<SyncTerminalError["category"]>([
   "device",
@@ -51,45 +71,101 @@ const ERROR_CATEGORIES = new Set<SyncTerminalError["category"]>([
   "compatibility",
   "protocol",
   "data",
+  "storage",
   "internal",
+]);
+const ERROR_ORIGINS = new Set<SyncTerminalError["origin"]>([
+  "mobile_ui",
+  "mobile_native",
+  "mobile_sync",
+  "desktop_plugin",
+  "desktop_cds",
+]);
+const ERROR_STAGES = new Set<SyncTerminalError["stage"]>([
+  "preflight",
+  "startup",
+  "connect",
+  "handshake",
+  "owner_metadata",
+  "topic_metadata",
+  "topic_validation",
+  "messages",
+  "finalize",
+  "shutdown",
+  "history",
+]);
+const RETRY_ACTIONS = new Set<SyncTerminalError["retryAction"]>([
+  "automatic",
+  "after_user_action",
+  "manual",
+  "never",
 ]);
 
 const LOCAL_ERROR_COPY: Record<
   string,
-  Pick<SyncTerminalError, "category" | "message" | "guidance">
+  Pick<
+    SyncTerminalError,
+    | "category"
+    | "origin"
+    | "stage"
+    | "retryAction"
+    | "message"
+    | "guidance"
+  >
 > = {
   POWER_SAVE_MODE: {
     category: "device",
+    origin: "mobile_native",
+    stage: "preflight",
+    retryAction: "after_user_action",
     message: "系统省电模式已阻止本次同步",
     guidance: "关闭系统省电模式后再试。",
   },
   BATTERY_TOO_LOW: {
     category: "device",
+    origin: "mobile_native",
+    stage: "preflight",
+    retryAction: "after_user_action",
     message: "当前电量不足，已暂停同步",
     guidance: "电量达到 30% 后再试。",
   },
   LISTENER_SETUP_FAILED: {
     category: "internal",
+    origin: "mobile_ui",
+    stage: "startup",
+    retryAction: "manual",
     message: "同步面板未能正常接收进度",
     guidance: "关闭并重新打开同步面板后再试。",
   },
   INVALID_COMPLETION_EVENT: {
     category: "protocol",
-    message: "电脑端返回的同步响应不符合当前协议，已安全停止",
-    guidance: "重启电脑端同步插件；若再次出现，请保留最新同步日志。",
+    origin: "mobile_ui",
+    stage: "finalize",
+    retryAction: "after_user_action",
+    message: "同步响应不符合 Wire 1.2 规范，已安全停止",
+    guidance: "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
   },
   START_SYNC_FAILED: {
     category: "internal",
+    origin: "mobile_ui",
+    stage: "startup",
+    retryAction: "manual",
     message: "同步组件未能正常启动",
     guidance: "重启应用后再试；若仍失败，请保留最新同步日志。",
   },
   STOP_SYNC_FAILED: {
     category: "internal",
+    origin: "mobile_ui",
+    stage: "shutdown",
+    retryAction: "manual",
     message: "上一同步任务未能正常结束",
     guidance: "重启应用后再试；若仍失败，请保留最新同步日志。",
   },
   SYNC_ATTEMPT_FAILED: {
     category: "internal",
+    origin: "mobile_ui",
+    stage: "startup",
+    retryAction: "manual",
     message: "同步未能完成",
     guidance: "可重试一次；若仍失败，请保留最新同步日志。",
   },
@@ -113,6 +189,14 @@ const readSyncError = (value: unknown): SyncTerminalError | null => {
     !/^[A-Z][A-Z0-9_]{0,63}$/.test(source.code) ||
     typeof source.category !== "string" ||
     !ERROR_CATEGORIES.has(source.category as SyncTerminalError["category"]) ||
+    typeof source.origin !== "string" ||
+    !ERROR_ORIGINS.has(source.origin as SyncTerminalError["origin"]) ||
+    typeof source.stage !== "string" ||
+    !ERROR_STAGES.has(source.stage as SyncTerminalError["stage"]) ||
+    typeof source.retryAction !== "string" ||
+    !RETRY_ACTIONS.has(
+      source.retryAction as SyncTerminalError["retryAction"],
+    ) ||
     typeof source.message !== "string" ||
     source.message.trim().length === 0 ||
     source.message.length > 200 ||
@@ -141,6 +225,9 @@ const readSyncError = (value: unknown): SyncTerminalError | null => {
   return {
     code: source.code,
     category: source.category as SyncTerminalError["category"],
+    origin: source.origin as SyncTerminalError["origin"],
+    stage: source.stage as SyncTerminalError["stage"],
+    retryAction: source.retryAction as SyncTerminalError["retryAction"],
     message: source.message.trim(),
     guidance: source.guidance.trim(),
     failedTopicIds,
@@ -385,6 +472,15 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
 
   const retrySync = async () => {
     if (retryInFlight.value || !isTerminal()) return;
+    if (
+      status.value === "error" &&
+      terminalError.value &&
+      !["manual", "after_user_action"].includes(
+        terminalError.value.retryAction,
+      )
+    ) {
+      return;
+    }
     const generation = viewGeneration;
     const retryAttempt = ++startAttempt;
     retryInFlight.value = true;
@@ -442,6 +538,14 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
 
   const copyDiagnostics = async () => {
     try {
+      const failedTopicIds = [
+        ...summary.value.failedTopicIds,
+        ...(terminalError.value?.failedTopicIds ?? []),
+      ];
+      const safeFailedTopicIds = [...new Set(failedTopicIds)]
+        .slice(0, 8)
+        .map(sanitizeDiagnosticText)
+        .join(", ");
       const diagnostic = [
         `VCP Mobile: ${MOBILE_VERSION}`,
         `VCPMobileSync: ${DESKTOP_PLUGIN_VERSION}`,
@@ -450,10 +554,14 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         `Status: ${status.value}`,
         `Topics: ${summary.value.successfulTopics}/${summary.value.totalTopics}`,
         `Failed topics: ${summary.value.failedTopics}`,
+        `Failed topic IDs: ${safeFailedTopicIds || "none"}`,
         `Legacy attachment warnings: ${summary.value.legacyAttachmentWarnings}`,
         terminalError.value
           ? `Error code: ${sanitizeDiagnosticText(terminalError.value.code)}`
           : "Error: none",
+        `Error origin: ${terminalError.value?.origin ?? "unavailable"}`,
+        `Error stage: ${terminalError.value?.stage ?? "unavailable"}`,
+        `Retry action: ${terminalError.value?.retryAction ?? "unavailable"}`,
         `Log file: ${terminalError.value?.logFile ?? "unavailable"}`,
       ].join("\n");
       await navigator.clipboard.writeText(diagnostic);

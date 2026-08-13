@@ -1,4 +1,7 @@
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
+use crate::vcp_modules::sync_error::{
+    encode_wire_sync_error, parse_wire_sync_error, WireSyncError,
+};
 use crate::vcp_modules::sync_executor::{BatchPullResult, PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_service::{Phase3Tracker, SyncCommand};
@@ -39,6 +42,27 @@ impl Phase3ProtocolError {
             message: message.into(),
             failed_topic_ids: vec![topic_id.to_string()],
         }
+    }
+
+    fn from_wire(wire: WireSyncError, topic_id: &str) -> Result<Self, Self> {
+        let code = wire.code.clone();
+        let mut failed_topic_ids = wire.failed_topic_ids.clone();
+        if !failed_topic_ids.iter().any(|id| id == topic_id) {
+            failed_topic_ids.push(topic_id.to_string());
+        }
+        failed_topic_ids.truncate(8);
+        let message = encode_wire_sync_error(&wire).map_err(|error| {
+            Self::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 rejection for {topic_id} has invalid error: {error}"),
+                topic_id,
+            )
+        })?;
+        Ok(Self {
+            code,
+            message,
+            failed_topic_ids,
+        })
     }
 }
 
@@ -151,43 +175,21 @@ fn parse_topic_decision(
                 topic_id,
             ));
         }
-        let error = object
-            .get("error")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                Phase3ProtocolError::for_topic(
-                    "PHASE3_DECISION_INVALID",
-                    format!("Phase 3 rejection for {topic_id} requires error object"),
-                    topic_id,
-                )
-            })?;
-        let code = error
-            .get("code")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                Phase3ProtocolError::for_topic(
-                    "PHASE3_DECISION_INVALID",
-                    format!("Phase 3 rejection for {topic_id} requires error.code"),
-                    topic_id,
-                )
-            })?;
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                Phase3ProtocolError::for_topic(
-                    "PHASE3_DECISION_INVALID",
-                    format!("Phase 3 rejection for {topic_id} requires error.message"),
-                    topic_id,
-                )
-            })?;
-        return Err(Phase3ProtocolError::for_topic(
-            code,
-            format!("Phase 3 decision rejected {topic_id}: {message}"),
-            topic_id,
-        ));
+        let error = object.get("error").ok_or_else(|| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 rejection for {topic_id} requires error object"),
+                topic_id,
+            )
+        })?;
+        let wire = parse_wire_sync_error(error).map_err(|parse_error| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 rejection for {topic_id} has invalid error: {parse_error}"),
+                topic_id,
+            )
+        })?;
+        return Err(Phase3ProtocolError::from_wire(wire, topic_id)?);
     }
 
     if object.contains_key("error") {
@@ -626,11 +628,28 @@ mod tests {
 
         let rejection = parse_topic_decision(
             "topic-a",
-            &json!({ "ok": false, "error": { "code": "DESKTOP_DB", "message": "failed" } }),
+            &json!({
+                "ok": false,
+                "error": {
+                    "code": "SYNC_OWNER_CONFLICT",
+                    "origin": "desktop_cds",
+                    "stage": "messages",
+                    "kind": "data",
+                    "retry": "manual",
+                    "message": "failed",
+                    "failedTopicIds": ["topic-a"]
+                }
+            }),
         )
         .expect_err("desktop rejection must terminate phase 3");
-        assert_eq!(rejection.code, "DESKTOP_DB");
+        assert_eq!(rejection.code, "SYNC_OWNER_CONFLICT");
         assert_eq!(rejection.failed_topic_ids, vec!["topic-a"]);
+        assert_eq!(
+            crate::vcp_modules::sync_error::decode_wire_sync_error(&rejection.message)
+                .expect("encoded root error")
+                .origin,
+            crate::vcp_modules::sync_error::SyncErrorOrigin::DesktopCds
+        );
     }
 
     #[test]

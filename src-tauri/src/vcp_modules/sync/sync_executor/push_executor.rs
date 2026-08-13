@@ -5,6 +5,7 @@ use crate::vcp_modules::sync_dto::{
     AgentMessageSyncDTO, AgentSyncDTO, AttachmentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
     UserMessageSyncDTO,
 };
+use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sync_error_value};
 use futures_util::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -63,13 +64,42 @@ async fn parse_success_response(
     let (status, bytes) =
         read_response_limited(response, MAX_CONTROL_RESPONSE_BYTES, operation).await?;
     if !status.is_success() {
-        let body = String::from_utf8_lossy(&bytes);
-        return Err(format!("{operation} failed: HTTP {status} body={body}"));
+        return match encode_http_sync_error_body(&bytes) {
+            Ok(Some(encoded)) => Err(encoded),
+            Ok(None) => Err(format!(
+                "{operation} failed with HTTP {status} without a Wire 1.2 error object"
+            )),
+            Err(error) => Err(format!(
+                "{operation} returned an invalid Wire 1.2 error: {error}"
+            )),
+        };
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("{operation} returned invalid JSON: {error}"))?;
     if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Err(format!("{operation} returned success=false: {value}"));
+        let error = value.get("error").or_else(|| {
+            value
+                .get("results")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|results| {
+                    results
+                        .iter()
+                        .find(|result| {
+                            result.get("success").and_then(serde_json::Value::as_bool)
+                                == Some(false)
+                        })
+                        .and_then(|result| result.get("error"))
+                })
+        });
+        let encoded = error
+            .ok_or_else(|| format!("{operation} returned success=false without error"))
+            .and_then(encode_wire_sync_error_value)?;
+        return Err(encoded);
+    }
+    if value.get("error").is_some() {
+        return Err(format!(
+            "{operation} returned success=true together with error"
+        ));
     }
     Ok(value)
 }
@@ -208,6 +238,9 @@ fn parse_message_push_frames(
         }
         let data: serde_json::Value = serde_json::from_str(line)
             .map_err(|error| format!("Batch push response contains malformed NDJSON: {error}"))?;
+        if let Some(error) = data.get("_stream_error") {
+            return Err(encode_wire_sync_error_value(error)?);
+        }
         let topic_id = data
             .get("topicId")
             .and_then(serde_json::Value::as_str)
@@ -227,14 +260,20 @@ fn parse_message_push_frames(
             .get("success")
             .and_then(serde_json::Value::as_bool)
             .ok_or_else(|| format!("Batch push result for {topic_id} requires boolean success"))?;
-        let error = data
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .filter(|message| !message.is_empty())
-            .map(str::to_string);
+        let error = match data.get("error") {
+            Some(value) => Some(encode_wire_sync_error_value(value).map_err(|parse_error| {
+                format!("Batch push result for {topic_id} has invalid error: {parse_error}")
+            })?),
+            None => None,
+        };
         if !success && error.is_none() {
             return Err(format!(
                 "Failed batch push result for {topic_id} requires an error message"
+            ));
+        }
+        if success && error.is_some() {
+            return Err(format!(
+                "Successful batch push result for {topic_id} must not contain an error"
             ));
         }
 
@@ -303,10 +342,15 @@ async fn send_message_chunk(
     let (status, bytes) =
         read_response_limited(response, MAX_NDJSON_LINE_BYTES, "Batch push").await?;
     if !status.is_success() {
-        return Err(format!(
-            "Batch push messages failed: HTTP {status} body={}",
-            String::from_utf8_lossy(&bytes)
-        ));
+        return match encode_http_sync_error_body(&bytes) {
+            Ok(Some(encoded)) => Err(encoded),
+            Ok(None) => Err(format!(
+                "Batch push messages failed with HTTP {status} without a Wire 1.2 error object"
+            )),
+            Err(error) => Err(format!(
+                "Batch push messages returned an invalid Wire 1.2 error: {error}"
+            )),
+        };
     }
 
     parse_message_push_frames(&bytes, expected_topic_ids)
@@ -1116,9 +1160,14 @@ impl PushExecutor {
             if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
                 let error = result
                     .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("unknown error");
+                    .ok_or_else(|| format!("Batch push entity {id} failure is missing error"))
+                    .and_then(encode_wire_sync_error_value)?;
                 return Err(format!("Batch push entity {id} failed: {error}"));
+            }
+            if result.get("error").is_some() {
+                return Err(format!(
+                    "Successful batch push entity {id} must not contain an error"
+                ));
             }
         }
         if seen_ids != expected_ids {
@@ -1673,6 +1722,61 @@ mod tests {
         let frames = parse_message_push_frames(valid, &expected).expect("hard-cut result");
         assert_eq!(frames.len(), 1);
         assert!(frames[0].needed_attachment_hashes.is_empty());
+    }
+
+    #[test]
+    fn failed_message_push_preserves_wire_error_and_rejects_legacy_strings() {
+        let expected = vec!["topic".to_string()];
+        let valid = serde_json::to_vec(&serde_json::json!({
+            "topicId":"topic",
+            "success":false,
+            "neededAttachmentHashes":[],
+            "error":{
+                "code":"SYNC_OWNER_CONFLICT",
+                "origin":"desktop_cds",
+                "stage":"messages",
+                "kind":"data",
+                "retry":"manual",
+                "message":"owner conflict",
+                "failedTopicIds":["topic"]
+            }
+        }))
+        .expect("serialize result");
+        let frames = parse_message_push_frames(&valid, &expected).expect("Wire 1.2 result");
+        assert_eq!(
+            crate::vcp_modules::sync_error::decode_wire_sync_error(
+                frames[0].outcome.error.as_deref().expect("encoded error")
+            )
+            .expect("wire error")
+            .code,
+            "SYNC_OWNER_CONFLICT"
+        );
+
+        let legacy = serde_json::to_vec(&serde_json::json!({
+            "topicId":"topic",
+            "success":false,
+            "neededAttachmentHashes":[],
+            "error":"legacy"
+        }))
+        .expect("serialize legacy result");
+        assert!(parse_message_push_frames(&legacy, &expected).is_err());
+
+        let contradictory = serde_json::to_vec(&serde_json::json!({
+            "topicId":"topic",
+            "success":true,
+            "neededAttachmentHashes":[],
+            "error":{
+                "code":"SYNC_OWNER_CONFLICT",
+                "origin":"desktop_cds",
+                "stage":"messages",
+                "kind":"data",
+                "retry":"manual",
+                "message":"owner conflict",
+                "failedTopicIds":["topic"]
+            }
+        }))
+        .expect("serialize contradictory result");
+        assert!(parse_message_push_frames(&contradictory, &expected).is_err());
     }
 
     #[test]

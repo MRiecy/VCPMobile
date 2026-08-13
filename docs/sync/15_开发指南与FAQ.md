@@ -290,7 +290,7 @@ pub async fn on_attachment_phase_ready(&self) -> Result<(), String> {
 +-----------------------------------+
     |
     ├─ 否 → 检查 VCPDistributedServer 是否运行
-    |       检查 plugin-manifest.json 版本是否为 1.1.0
+    |       检查 plugin-manifest.json 版本是否为 1.2.0
     |       检查 5975 端口是否被占用
     |
     └─ 是 → 继续
@@ -361,8 +361,8 @@ VCP Mobile 采用**严格版本匹配**策略，不支持向前/向后兼容的�
 
 | 步骤 | 方向 | 消息 | 字段 | 处理位置 |
 |------|------|------|------|---------|
-| 1 | 移动 → 桌面 | `VERSION_CHECK` | `mobileVersion: string`, `protocolVersion: "1.1"` | `sync_service.rs` |
-| 2 | 桌面 → 移动 | `VERSION_ACK` | `pluginVersion: "1.1.0"`, `protocolVersion: "1.1"` | `index.js` |
+| 1 | 移动 → 桌面 | `VERSION_CHECK` | `mobileVersion: string`, `protocolVersion: "1.2"` | `sync_service.rs` |
+| 2 | 桌面 → 移动 | `VERSION_ACK` | `pluginVersion: "1.2.0"`, `protocolVersion: "1.2"` | `index.js` |
 | 3 | 移动端校验 | — | 两字段精确匹配 | `sync_service.rs` |
 
 **校验规则**：
@@ -370,8 +370,8 @@ VCP Mobile 采用**严格版本匹配**策略，不支持向前/向后兼容的�
 - 插件与 wire 版本均一致：继续同步流程。
 - 任一字段缺失、错类型或不一致：移动端断开 WS，状态置为 `error`，提示用户成对更新。
 - 超时未收到 `VERSION_ACK`（5秒）：视为桌面端插件过旧，同样断开。
-- 当前唯一接受的插件协议版本为 1.1.0。1.0.0 及更旧版本拒绝，不降级为 phase-only 最终 ACK。
-- 1.1.0 peer 必须对最终 `PHASE_COMPLETED` 原样回显 `phase`、`sessionId`、`attemptId`、`nonce`；缺失、错配或重放的 `PHASE_ACK` 均不会进入完成态。
+- 当前唯一接受的插件/wire 组合为 `1.2.0 / 1.2`。1.1.0 及更旧版本拒绝，不降级为旧字符串错误或 phase-only 最终 ACK。
+- 1.2.0 peer 必须对最终 `PHASE_COMPLETED` 原样回显 `phase`、`sessionId`、`attemptId`、`nonce`；缺失、错配或重放的 `PHASE_ACK` 均不会进入完成态。
 
 ### 5.2 字段增减的平滑升级
 
@@ -400,7 +400,7 @@ pub new_field: Option<String>,
 
 ### 5.3 版本升级 checklist
 
-当需要发布新协议版本（如 `1.1.0 → 1.2.0`）时，必须同步修改：
+当需要发布新协议版本（如 `1.2.0 → 1.3.0`）时，必须同步修改：
 
 | 位置 | 当前值 | 修改后 | 说明 |
 |------|--------|--------|------|
@@ -507,4 +507,4 @@ VCP Mobile 采用「先写消息、后补附件」的懒加载策略：
 
 ---
 
-*当前开发基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.1.0` + wire protocol `1.1`。协议变更必须同时更新双端契约与配对发布门禁。*
+*当前开发基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.2.0` + wire protocol `1.2`。协议变更必须同时更新双端契约、golden fixture 与配对发布门禁。*

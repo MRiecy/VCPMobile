@@ -628,4 +628,4 @@ Phase 2.5 的 `SYNC_TOPIC_HASH_BATCH_V2` 对双哈希执行严格相等判断，
 
 ---
 
-*当前场景基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.1.0` + wire protocol `1.1`。流程图中的完成态以精确结果门和最终 ACK 为准。*
+*当前场景基线：VCPMobile `1.1.4` + VCPMobileSync 包 `1.2.0` + wire protocol `1.2`。流程图中的完成态以精确结果门和最终 ACK 为准。*

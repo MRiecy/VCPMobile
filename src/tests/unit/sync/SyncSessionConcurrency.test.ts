@@ -30,6 +30,9 @@ function syncError(
   return {
     code,
     category: "data",
+    origin: "desktop_plugin",
+    stage: "messages",
+    retryAction: "manual",
     message,
     guidance: "可重试一次；若仍失败，请保留最新同步日志。",
     failedTopicIds,
@@ -442,6 +445,9 @@ describe("sync session ownership", () => {
     const commandError = {
       code: "TOKEN_MISMATCH",
       category: "configuration",
+      origin: "mobile_sync",
+      stage: "connect",
+      retryAction: "after_user_action",
       message: "手机端与电脑端的同步令牌不一致",
       guidance: "重新核对两端令牌后再试。",
       failedTopicIds: [],
@@ -571,7 +577,7 @@ describe("sync session ownership", () => {
     ).toBe(false);
   });
 
-  it("renders only the user-facing cause and guidance in the main error card", async () => {
+  it("renders fixed copy plus the safe stage, origin, and code tuple", async () => {
     const store = useSyncSessionStore();
     store.open();
     store.activeSessionId = 48;
@@ -591,9 +597,50 @@ describe("sync session ownership", () => {
     expect(wrapper.text()).toContain("部分数据未能完成处理，系统未将其标记为成功");
     expect(wrapper.text()).toContain("可重试一次；若仍失败，请保留最新同步日志。");
     expect(wrapper.text()).toContain("详细记录已保存至历史日志");
-    expect(wrapper.text()).not.toContain("DESKTOP_DB_SECRET_CODE");
+    expect(wrapper.text()).toContain("消息同步 · 电脑同步插件 · DESKTOP_DB_SECRET_CODE");
     expect(wrapper.text()).not.toContain("private-topic-id");
     expect(wrapper.text()).toContain("重新同步");
+  });
+
+  it("uses the contract retry action instead of offering every terminal error a retry", async () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 52;
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 52,
+      status: "error",
+      error: {
+        ...syncError("PLUGIN_VERSION_MISMATCH"),
+        category: "compatibility",
+        stage: "handshake",
+        retryAction: "after_user_action",
+        message: "手机端与电脑端同步版本不兼容",
+        guidance: "将两端更新到同一兼容版本后再试。",
+      },
+    });
+    const wrapper = mount(SyncSessionView);
+    await Promise.resolve();
+    expect(wrapper.text()).toContain("处理后重试");
+
+    store.activeSessionId = 53;
+    store.status = "connecting";
+    store.terminalError = null;
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 53,
+      status: "error",
+      error: {
+        ...syncError("SYNC_ALREADY_RUNNING"),
+        category: "internal",
+        origin: "mobile_sync",
+        stage: "startup",
+        retryAction: "never",
+        message: "已有同步任务正在运行",
+        guidance: "请等待当前同步结束。",
+      },
+    });
+    await Promise.resolve();
+    expect(wrapper.text()).not.toContain("处理后重试");
+    expect(wrapper.text()).not.toContain("重新同步");
   });
 
   it("uses standard log levels and safe history feedback", async () => {
@@ -702,6 +749,9 @@ describe("sync session ownership", () => {
       error: {
         code: "UPLOAD_FAILED",
         category: "data",
+        origin: "desktop_plugin",
+        stage: "messages",
+        retryAction: "manual",
         message:
           'Bearer secret-token; Bearer "alpha beta"; token=also-secret; C:\\Users\\me with space\\file.txt; upload failed at /home/me/file.txt; file:///mnt/private/cache.bin',
         guidance: "可重试一次；若仍失败，请保留最新同步日志。",
@@ -723,7 +773,7 @@ describe("sync session ownership", () => {
       writeText.mock.calls[writeText.mock.calls.length - 1]?.[0],
     );
     expect(diagnostic).toContain("VCP Mobile: 1.1.4");
-    expect(diagnostic).toContain("Wire protocol: 1.1");
+    expect(diagnostic).toContain("Wire protocol: 1.2");
     expect(diagnostic).toContain("Session: 51");
     expect(diagnostic).not.toContain("secret-token");
     expect(diagnostic).not.toContain("also-secret");
@@ -736,6 +786,11 @@ describe("sync session ownership", () => {
     expect(diagnostic).not.toContain("/Users");
     expect(diagnostic).not.toContain("private/file");
     expect(diagnostic).toContain("Error code: UPLOAD_FAILED");
+    expect(diagnostic).toContain("Error origin: desktop_plugin");
+    expect(diagnostic).toContain("Error stage: messages");
+    expect(diagnostic).toContain("Retry action: manual");
+    expect(diagnostic).toContain("Failed topic IDs:");
+    expect(diagnostic).toContain("[path]");
     expect(diagnostic).toContain("20260813_120000_000_51_sync.log");
   });
 });

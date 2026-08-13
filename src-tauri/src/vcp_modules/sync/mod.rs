@@ -1,4 +1,5 @@
 pub mod sync_dto;
+pub mod sync_error;
 pub mod sync_executor;
 pub mod sync_finalize;
 pub mod sync_hash;
