@@ -12,6 +12,8 @@ mod output;
 #[allow(dead_code)]
 pub mod profile;
 #[allow(dead_code)]
+mod projection;
+#[allow(dead_code)]
 pub mod provision;
 // P0 先冻结可复用协议/结果合同，P1 runtime 与 P2 local turn owner 接入后自然消费。
 #[allow(dead_code)]
@@ -21,6 +23,14 @@ pub mod result;
 pub mod runtime;
 #[allow(dead_code)]
 mod skills;
+#[allow(dead_code)]
+pub(crate) mod turn_coordinator;
+#[allow(dead_code)]
+pub(crate) mod turn_ledger;
+#[allow(dead_code)]
+pub(crate) mod turn_meta;
+#[allow(dead_code)]
+pub(crate) mod turn_types;
 
 pub use manifest::get_vcp_mobile_cli_manifest;
 pub use runtime::{

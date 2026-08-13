@@ -13,6 +13,18 @@ fn default_sync_log_level() -> String {
     "INFO".to_string()
 }
 
+/// 冻结在一次 Agent turn 开始处的 CLI 工具循环 owner。
+///
+/// 缺失字段（旧设置）安全迁移到本地回环；只有用户显式写入 `vcpPlugin`
+/// 才选择远端插件 owner，不能从旧的松散布尔设置反向推断。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MobileCliAgentRoute {
+    #[default]
+    LocalLoopback,
+    VcpPlugin,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -84,6 +96,10 @@ pub struct Settings {
     #[serde(default)]
     pub assistant_agent_id: String,
 
+    /// Agent CLI 工具循环路由；旧设置缺失时默认本地回环。
+    #[serde(default)]
+    pub mobile_cli_agent_route: MobileCliAgentRoute,
+
     /// 仅保留此字段用于前端未来扩展的透参
     #[serde(flatten)]
     #[serde(default)]
@@ -152,11 +168,27 @@ pub fn create_default_settings() -> Settings {
         sync_prerender_enabled: false,
         enable_assistant: false,
         assistant_agent_id: "".to_string(),
+        mobile_cli_agent_route: MobileCliAgentRoute::LocalLoopback,
         agent_order: vec![],
         group_order: vec![],
         current_theme_mode: Some("dark".to_string()),
         extra: serde_json::Value::Object(serde_json::Map::new()),
     }
+}
+
+impl Settings {
+    /// 在 turn owner 建立时复制一次路由；后续设置变更只影响下一次 turn。
+    fn mobile_cli_agent_route_snapshot(&self) -> MobileCliAgentRoute {
+        self.mobile_cli_agent_route
+    }
+}
+
+/// turn owner 的唯一设置读取 seam。调用方必须保存返回值，并把它显式传给每个模型 step。
+pub async fn freeze_mobile_cli_agent_route<R: Runtime>(
+    app_handle: &AppHandle<R>,
+) -> Result<MobileCliAgentRoute, String> {
+    let settings = read_settings(app_handle.clone(), app_handle.state()).await?;
+    Ok(settings.mobile_cli_agent_route_snapshot())
 }
 
 #[tauri::command]
@@ -407,7 +439,68 @@ pub async fn set_theme<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use sqlx::Row;
+
+    #[test]
+    fn mobile_cli_route_wire_contract_is_closed_and_defaults_local() {
+        let defaults = create_default_settings();
+        let wire = serde_json::to_value(&defaults).expect("serialize default settings");
+        assert_eq!(wire["mobileCliAgentRoute"], "localLoopback");
+
+        let explicit_remote: Settings = serde_json::from_value(json!({
+            "mobileCliAgentRoute": "vcpPlugin"
+        }))
+        .expect("deserialize explicit remote route");
+        assert_eq!(
+            explicit_remote.mobile_cli_agent_route,
+            MobileCliAgentRoute::VcpPlugin
+        );
+
+        assert!(serde_json::from_value::<Settings>(json!({
+            "mobileCliAgentRoute": "disabled"
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<Settings>(json!({
+            "mobileCliAgentRoute": "vcp_plugin"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn legacy_settings_fail_closed_without_inferencing_loose_tool_flag() {
+        let legacy: Settings = serde_json::from_value(json!({
+            "userName": "legacy-user",
+            "enableVcpToolInjection": true
+        }))
+        .expect("deserialize legacy settings");
+
+        assert_eq!(
+            legacy.mobile_cli_agent_route,
+            MobileCliAgentRoute::LocalLoopback
+        );
+        assert_eq!(
+            legacy
+                .extra
+                .get("enableVcpToolInjection")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn turn_start_route_snapshot_is_not_changed_mid_turn() {
+        let mut settings = create_default_settings();
+        let frozen = settings.mobile_cli_agent_route_snapshot();
+
+        settings.mobile_cli_agent_route = MobileCliAgentRoute::VcpPlugin;
+
+        assert_eq!(frozen, MobileCliAgentRoute::LocalLoopback);
+        assert_eq!(
+            settings.mobile_cli_agent_route_snapshot(),
+            MobileCliAgentRoute::VcpPlugin
+        );
+    }
 
     #[tokio::test]
     async fn newer_runtime_generation_supersedes_waiting_reconciler() {

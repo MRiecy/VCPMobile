@@ -27,6 +27,7 @@ pub struct ProvisionPaths {
     pub workspace: PathBuf,
     pub skills: PathBuf,
     pub output: PathBuf,
+    pub projection_root: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +37,7 @@ pub struct ProvisionedRuntime {
     pub workspace: PathBuf,
     pub skills: PathBuf,
     pub output: PathBuf,
+    pub projection_root: PathBuf,
     pub proot_binary: PathBuf,
 }
 
@@ -93,6 +95,7 @@ pub fn provision_verified_runtime_blocking(
     ensure_private_directory(&paths.workspace, "workspace")?;
     ensure_private_directory(&paths.skills, "skills")?;
     ensure_private_directory(&paths.output, "output")?;
+    ensure_private_directory(&paths.projection_root, "projectionRoot")?;
 
     cleanup_stale_staging_directories(&paths.rootfs_parent, &profile.profile_id)?;
     let final_root = paths.rootfs_parent.join(&profile.profile_id);
@@ -106,6 +109,7 @@ pub fn provision_verified_runtime_blocking(
                     workspace: paths.workspace,
                     skills: paths.skills,
                     output: paths.output,
+                    projection_root: paths.projection_root,
                     proot_binary: paths.proot_binary,
                 });
             }
@@ -180,6 +184,7 @@ pub fn provision_verified_runtime_blocking(
         workspace: paths.workspace,
         skills: paths.skills,
         output: paths.output,
+        projection_root: paths.projection_root,
         proot_binary: paths.proot_binary,
     })
 }

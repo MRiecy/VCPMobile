@@ -1,15 +1,20 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { defineComponent } from "vue";
+import { mount } from "@vue/test-utils";
 import {
   MAX_HISTORY_MESSAGES,
   useChatHistoryStore,
 } from "@/core/stores/chatHistoryStore";
 import { useChatSessionStore } from "@/core/stores/chatSessionStore";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
+import { useTopicStore } from "@/core/stores/topicListManager";
+import { useAppLifecycle } from "@/core/composables/useAppLifecycle";
 import { useSettingsStore } from "@/core/stores/settings";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useAttachmentStore } from "@/core/stores/attachmentStore";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
+import { flushPromises } from "@/tests/utils/flush";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -294,5 +299,196 @@ describe("chat conversation concurrency guards", () => {
     recovery.resolve({ status: "completed", content: "recovered" });
     await Promise.resolve();
     await Promise.resolve();
+  });
+
+  it("lets the backend finalize a durable turn while offline and fences late recovery frames", async () => {
+    const onlineDescriptor = Object.getOwnPropertyDescriptor(navigator, "onLine");
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      value: false,
+    });
+
+    try {
+      const session = useChatSessionStore();
+      session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+      mockInvoke("get_active_generations", () => [
+        {
+          msgId: "assistant-offline-finalizing",
+          topicId: "topic-a",
+          ownerId: "agent-a",
+          ownerType: "agent",
+          createdAt: 1,
+        },
+      ]);
+
+      let recoveryChannel: { emit: (event: unknown) => void } | undefined;
+      mockInvoke("recover_active_generation", (args) => {
+        recoveryChannel = args?.streamChannel as typeof recoveryChannel;
+        recoveryChannel?.emit({
+          type: "end",
+          messageId: "assistant-offline-finalizing",
+          turnAttempt: "attempt-offline",
+          stepIndex: 2,
+          projectionReset: false,
+          finishReason: "completed",
+          blocks: [],
+          context: { topicId: "topic-a", agentId: "agent-a" },
+        });
+        return { status: "completed", content: "durable offline result" };
+      });
+
+      const stream = useChatStreamStore();
+      await stream.checkAndRecoverInterruptedStreams();
+      await flushPromises();
+
+      expect(
+        invokeMock.mock.calls.filter(
+          ([command]) => command === "recover_active_generation",
+        ),
+      ).toHaveLength(1);
+      const recovered = stream.activeStreamMessages.get(
+        "assistant-offline-finalizing",
+      );
+      expect(recovered?.content).toBe("durable offline result");
+      expect(recovered?.finishReason).toBe("completed");
+      expect(stream.isMessageActive("assistant-offline-finalizing")).toBe(false);
+
+      recoveryChannel?.emit({
+        type: "thinking",
+        messageId: "assistant-offline-finalizing",
+        turnAttempt: "attempt-offline",
+        stepIndex: 2,
+        projectionReset: false,
+        context: { topicId: "topic-a", agentId: "agent-a" },
+      });
+      await flushPromises();
+
+      expect(recovered?.isThinking).toBe(false);
+      expect(stream.isMessageActive("assistant-offline-finalizing")).toBe(false);
+      expect(recovered?.content).toBe("durable offline result");
+    } finally {
+      if (onlineDescriptor) {
+        Object.defineProperty(navigator, "onLine", onlineDescriptor);
+      } else {
+        Reflect.deleteProperty(navigator, "onLine");
+      }
+    }
+  });
+
+  it("keeps one waiting skeleton for pending continuation and retries it on online", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const onlineDescriptor = Object.getOwnPropertyDescriptor(navigator, "onLine");
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      value: false,
+    });
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const topics = useTopicStore();
+    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
+    topics.topics = [
+      {
+        id: "topic-a",
+        name: "Topic A",
+        createdAt: 1,
+        msgCount: 7,
+      },
+    ];
+
+    mockInvoke("get_active_generations", () => [
+      {
+        msgId: "assistant-pending-continuation",
+        topicId: "topic-a",
+        ownerId: "agent-a",
+        ownerType: "agent",
+        agentId: "agent-a",
+        agentName: "Agent A",
+        createdAt: 1,
+      },
+    ]);
+    mockInvoke("get_system_snapshot", () => ({
+      core: "ready",
+      message: "ready",
+      log: "disconnected",
+      sync: "disconnected",
+      distributed: "disconnected",
+    }));
+
+    let recoveryCount = 0;
+    mockInvoke("recover_active_generation", (args) => {
+      recoveryCount += 1;
+      if (recoveryCount === 1) {
+        return {
+          status: "continuation_pending",
+          reason: "Bearer secret-key must never reach the visible projection",
+        };
+      }
+      const recoveryChannel = args?.streamChannel as
+        | { emit: (event: unknown) => void }
+        | undefined;
+      recoveryChannel?.emit({
+        type: "end",
+        messageId: "assistant-pending-continuation",
+        turnAttempt: "attempt-pending",
+        stepIndex: 2,
+        projectionReset: false,
+        finishReason: "completed",
+        blocks: [],
+        context: { topicId: "topic-a", agentId: "agent-a" },
+      });
+      return { status: "completed", content: "final continuation answer" };
+    });
+
+    const stream = useChatStreamStore();
+    await stream.checkAndRecoverInterruptedStreams();
+    await flushPromises();
+
+    const waitingMessage = stream.activeStreamMessages.get(
+      "assistant-pending-continuation",
+    );
+    expect(waitingMessage?.content).toBe(
+      "本地任务已保留，等待模型续轮。连接恢复后将自动继续。",
+    );
+    expect(waitingMessage?.content).not.toContain("secret-key");
+    expect(logSpy.mock.calls.flat().join(" ")).not.toContain("secret-key");
+    expect(waitingMessage?.isReconnecting).toBe(false);
+    expect(waitingMessage?.finishReason).toBeUndefined();
+    expect(stream.isMessageActive("assistant-pending-continuation")).toBe(false);
+    expect(history.currentChatHistory).toHaveLength(1);
+    expect(history.currentChatHistory[0]).toBe(waitingMessage);
+    expect(topics.topics[0]?.msgCount).toBe(7);
+
+    const LifecycleHarness = defineComponent({
+      setup() {
+        useAppLifecycle();
+        return () => null;
+      },
+    });
+    const wrapper = mount(LifecycleHarness);
+    await flushPromises();
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      value: true,
+    });
+    window.dispatchEvent(new Event("online"));
+    await flushPromises();
+    await flushPromises();
+
+    expect(recoveryCount).toBe(2);
+    expect(history.currentChatHistory).toHaveLength(1);
+    expect(history.currentChatHistory[0]).toBe(waitingMessage);
+    expect(waitingMessage?.content).toBe("final continuation answer");
+    expect(waitingMessage?.finishReason).toBe("completed");
+    expect(stream.isMessageActive("assistant-pending-continuation")).toBe(false);
+    expect(topics.topics[0]?.msgCount).toBe(7);
+    expect(logSpy.mock.calls.flat().join(" ")).not.toContain("secret-key");
+
+    wrapper.unmount();
+    logSpy.mockRestore();
+    if (onlineDescriptor) {
+      Object.defineProperty(navigator, "onLine", onlineDescriptor);
+    } else {
+      Reflect.deleteProperty(navigator, "onLine");
+    }
   });
 });

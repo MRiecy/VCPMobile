@@ -125,10 +125,167 @@ class CliProcessHostTest {
         assertFalse(argv.any { it == "/skills" || it.endsWith(":/skills") })
         assertTrue(argv.windowed(2).contains(listOf("-w", "/workspace/topic")))
         assertTrue(argv.contains("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
+        assertFalse(argv.any { it.contains("vcp-river-context") })
+        assertFalse(argv.any { it.startsWith("VCP_RIVER_CONTEXT_FILE=") })
         assertFalse(argv.any { it.startsWith("PROOT_LOADER=") || it.startsWith("PROOT_TMP_DIR=") })
         assertEquals(listOf("/bin/bash", "-lc", userCommand), argv.takeLast(3))
         assertEquals(1, argv.count { it == userCommand })
         assertFalse(argv.any { it.contains("/output") || it.contains("host-output") })
+    }
+
+    @Test
+    fun riverProjectionAddsOnlyOneFileBindAndFixedGuestEnvironment() {
+        val hostProjection =
+            "/private/no-backup/vcp-cli/projections/${"a".repeat(64)}/river-context.json"
+        val userCommand = "test -r \"${'$'}VCP_RIVER_CONTEXT_FILE\""
+        val argv = buildProotArguments(
+            prootPath = "/native/libvcp_proot.so",
+            rootfsPath = "/private/rootfs/profile",
+            workspacePath = "/private/workspace",
+            cwd = "/workspace",
+            command = userCommand,
+            riverContextHostPath = hostProjection,
+        )
+
+        assertEquals(
+            listOf(
+                "/dev",
+                "/proc",
+                "/private/workspace:/workspace",
+                "$hostProjection:/run/vcp-river-context.json",
+            ),
+            argv.windowed(2).filter { it.first() == "-b" }.map { it.last() },
+        )
+        assertTrue(argv.contains("VCP_RIVER_CONTEXT_FILE=/run/vcp-river-context.json"))
+        assertFalse(argv.any { it == "/private/no-backup/vcp-cli/projections:/run" })
+        assertFalse(argv.any { it.contains(":/output") || it.contains(":/skills") })
+        assertEquals(listOf("/bin/bash", "-lc", userCommand), argv.takeLast(3))
+        assertEquals(1, argv.count { it == userCommand })
+    }
+
+    @Test
+    fun riverProjectionVerifierRejectsHashSizeTypeSymlinkAndContainmentSubstitution() {
+        val root = Files.createTempDirectory("vcp-cli-river-projection").toFile().canonicalFile
+        val sibling = Files.createTempDirectory("vcp-cli-river-sibling").toFile().canonicalFile
+        val stem = "a".repeat(64)
+        val bytes = "{\"request\":\"frozen\"}".toByteArray()
+        val hash = sha256Hex(bytes)
+
+        fun projection(path: File, size: Long = bytes.size.toLong(), sha256: String = hash) =
+            RiverContextProjectionArgs().apply {
+                hostPath = path.absolutePath
+                sizeBytes = size
+                this.sha256 = sha256
+            }
+
+        fun freshSource(parent: File = File(root, stem)): File {
+            parent.deleteRecursively()
+            assertTrue(parent.mkdirs())
+            return File(parent, "river-context.json").apply { writeBytes(bytes) }
+        }
+
+        try {
+            var source = freshSource()
+            assertEquals(
+                source.canonicalFile,
+                verifyRiverContextProjection(root, stem, projection(source)),
+            )
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source, sha256 = "0".repeat(64)))
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source, sha256 = "a".repeat(65)))
+            }
+            val oversizedPath = projection(source).apply { hostPath = "/${"x".repeat(4097)}" }
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, oversizedPath)
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source, size = bytes.size + 1L))
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source, size = 128L * 1024L + 1L))
+            }
+
+            source.delete()
+            assertTrue(source.mkdir())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source, size = 1L))
+            }
+
+            source.deleteRecursively()
+            val siblingSource = File(sibling, "source.json").apply { writeBytes(bytes) }
+            Files.createSymbolicLink(source.toPath(), siblingSource.toPath())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source))
+            }
+
+            File(root, stem).deleteRecursively()
+            val siblingParent = File(sibling, "real-parent").apply { mkdirs() }
+            File(siblingParent, "river-context.json").writeBytes(bytes)
+            Files.createSymbolicLink(File(root, stem).toPath(), siblingParent.toPath())
+            source = File(root, "$stem/river-context.json")
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source))
+            }
+
+            source = freshSource()
+            val rootLink = File(sibling, "projection-root-link")
+            Files.createSymbolicLink(rootLink.toPath(), root.toPath())
+            val sourceThroughRootLink = File(rootLink, "$stem/river-context.json")
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(rootLink, stem, projection(sourceThroughRootLink))
+            }
+
+            val siblingAttempt = File(sibling, stem).apply { mkdirs() }
+            source = File(siblingAttempt, "river-context.json").apply { writeBytes(bytes) }
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source))
+            }
+
+            val wrongStemParent = File(root, "b".repeat(64))
+            source = freshSource(wrongStemParent)
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source))
+            }
+
+            source = File(wrongStemParent, "../${wrongStemParent.name}/river-context.json")
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection(source))
+            }
+        } finally {
+            root.deleteRecursively()
+            sibling.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun processFingerprintIncludesOptionalRiverProjectionIdentity() {
+        fun request(projection: RiverContextProjectionArgs? = null) = StartCliProcessArgs().apply {
+            operationId = "operation-1"
+            jobId = "job-1"
+            attemptId = "attempt-1"
+            runtimeGeneration = 7
+            command = "true"
+            rootfsPath = "/private/rootfs/profile"
+            cwd = "/workspace"
+            artifactMaxBytes = 1024
+            riverContextProjection = projection
+        }
+
+        val projection = RiverContextProjectionArgs().apply {
+            hostPath = "/private/projections/${"a".repeat(64)}/river-context.json"
+            sizeBytes = 17
+            sha256 = "b".repeat(64)
+        }
+        val withoutProjection = fingerprint(request())
+        val withProjection = fingerprint(request(projection))
+        assertTrue(withProjection != withoutProjection)
+
+        projection.sha256 = projection.sha256.uppercase()
+        assertEquals(withProjection, fingerprint(request(projection)))
+        projection.sizeBytes++
+        assertTrue(withProjection != fingerprint(request(projection)))
     }
 
     @Test

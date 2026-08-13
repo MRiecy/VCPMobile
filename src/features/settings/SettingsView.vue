@@ -2,9 +2,11 @@
 import { ref, onMounted, watch, computed, defineAsyncComponent } from "vue";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import {
+  DEFAULT_MOBILE_CLI_AGENT_ROUTE,
   diffSettingsPatch,
   useSettingsStore,
   type AppSettings,
+  type MobileCliAgentRoute,
 } from "../../core/stores/settings";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
@@ -20,6 +22,7 @@ import AboutSection from "./components/AboutSection.vue"; // 实测解析延迟�
 
 // 低频子页面（advanced / power）：懒加载，用户点进子页面时才解析
 // const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
+const AiLogicSettingsSection = defineAsyncComponent(() => import("./components/AiLogicSettingsSection.vue"));
 const TopicSummarySection = defineAsyncComponent(() => import("./components/TopicSummarySection.vue"));
 const DistributedSettingsSection = defineAsyncComponent(() => import("../distributed/DistributedSettingsSection.vue"));
 const MaintenanceSection = defineAsyncComponent(() => import("./components/MaintenanceSection.vue"));
@@ -61,11 +64,14 @@ const settings = ref<AppSettings>({
   groupOrder: [],
   topicSummaryModel: "gemini-3.1-flash-lite",
   syncLogLevel: "INFO",
+  mobileCliAgentRoute: DEFAULT_MOBILE_CLI_AGENT_ROUTE,
   // [SUSPENDED BETA] 浮动助手（划词悬浮球）功能当前已暂停使用，默认值保留供后续重启
   enableAssistant: false,
   assistantAgentId: "",
 });
 const settingsBaseline = ref<AppSettings | null>(null);
+const mobileCliRouteSaving = ref(false);
+const mobileCliRouteError = ref<string | null>(null);
 const cloneSettings = (value: AppSettings): AppSettings =>
   JSON.parse(JSON.stringify(value)) as AppSettings;
 
@@ -121,12 +127,12 @@ const loadSettings = async () => {
   }
 };
 
-const saveSettings = async () => {
+const saveSettings = async (): Promise<boolean> => {
   try {
     const baseline = settingsBaseline.value;
-    if (!baseline) return;
+    if (!baseline) return false;
     const patch = diffSettingsPatch(baseline, settings.value);
-    if (Object.keys(patch).length === 0) return;
+    if (Object.keys(patch).length === 0) return true;
     await settingsStore.updateSettings(patch);
     if (settingsStore.settings) {
       const persisted = cloneSettings(settingsStore.settings);
@@ -134,8 +140,53 @@ const saveSettings = async () => {
       settingsBaseline.value = cloneSettings(persisted);
     }
     console.log("Settings saved!");
+    return true;
   } catch (e) {
     console.error("Failed to save settings:", e);
+    return false;
+  }
+};
+
+const onMobileCliRouteChange = async (route: MobileCliAgentRoute) => {
+  if (
+    mobileCliRouteSaving.value ||
+    settings.value.mobileCliAgentRoute === route
+  ) {
+    return;
+  }
+
+  const previousRoute = settings.value.mobileCliAgentRoute;
+  const baseline = settingsBaseline.value;
+  const pendingLocalEdits = baseline
+    ? diffSettingsPatch(baseline, settings.value)
+    : {};
+  delete pendingLocalEdits.mobileCliAgentRoute;
+  settings.value.mobileCliAgentRoute = route;
+  mobileCliRouteSaving.value = true;
+  mobileCliRouteError.value = null;
+
+  try {
+    await settingsStore.updateSettings({ mobileCliAgentRoute: route });
+    if (
+      !settingsStore.settings ||
+      settingsStore.settings.mobileCliAgentRoute !== route
+    ) {
+      throw new Error("后端未确认所选 CLI Agent 路由");
+    }
+
+    const persisted = cloneSettings(settingsStore.settings);
+    settingsBaseline.value = cloneSettings(persisted);
+    settings.value = {
+      ...persisted,
+      ...pendingLocalEdits,
+      mobileCliAgentRoute: route,
+    };
+  } catch (error) {
+    console.error("Failed to save mobile CLI Agent route:", error);
+    settings.value.mobileCliAgentRoute = previousRoute;
+    mobileCliRouteError.value = "路由未保存；已恢复此前选择。";
+  } finally {
+    mobileCliRouteSaving.value = false;
   }
 };
 
@@ -315,6 +366,17 @@ watch(currentSubPage, (val) => {
                     </SettingsCard>
                   </div>
                   -->
+                  <div>
+                    <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">移动 CLI Agent</h3>
+                    <SettingsCard>
+                      <AiLogicSettingsSection
+                        :settings="settings"
+                        :saving="mobileCliRouteSaving"
+                        :save-error="mobileCliRouteError"
+                        @route-change="onMobileCliRouteChange"
+                      />
+                    </SettingsCard>
+                  </div>
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">话题总结</h3>
                     <SettingsCard>

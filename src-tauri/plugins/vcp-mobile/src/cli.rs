@@ -38,8 +38,17 @@ pub struct PrepareCliRuntimeResponse {
     pub workspace_path: String,
     pub skills_path: String,
     pub output_path: String,
+    pub projection_root_path: String,
     pub proot_path: String,
     pub proot_loader_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CliRiverContextProjection {
+    pub host_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +62,8 @@ pub struct StartCliProcessRequest {
     pub rootfs_path: String,
     pub cwd: String,
     pub artifact_max_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub river_context_projection: Option<CliRiverContextProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,7 +219,10 @@ pub async fn cancel_cli_process_inner<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::{CliProcessState, PrepareCliRuntimeRequest, StartCliProcessRequest};
+    use super::{
+        CliProcessState, CliRiverContextProjection, PrepareCliRuntimeRequest,
+        PrepareCliRuntimeResponse, StartCliProcessRequest,
+    };
 
     #[test]
     fn prepare_request_freezes_both_apk_native_executable_identities() {
@@ -233,6 +247,35 @@ mod tests {
     }
 
     #[test]
+    fn prepare_response_requires_projection_owner_root() {
+        let value = serde_json::json!({
+            "operationId": "operation-1",
+            "profileId": "profile-1",
+            "runtimeGeneration": 7,
+            "archivePath": "/private/assets/rootfs.tar.zst",
+            "rootfsParentPath": "/private/rootfs",
+            "workspacePath": "/private/workspace",
+            "skillsPath": "/private/skills",
+            "outputPath": "/private/output",
+            "projectionRootPath": "/private/projections",
+            "prootPath": "/native/libvcp_proot.so",
+            "prootLoaderPath": "/native/libvcp_proot_loader.so"
+        });
+        let response: PrepareCliRuntimeResponse =
+            serde_json::from_value(value.clone()).expect("deserialize prepare response");
+
+        assert_eq!(response.projection_root_path, "/private/projections");
+        let mut missing_projection_root = value;
+        missing_projection_root
+            .as_object_mut()
+            .expect("response object")
+            .remove("projectionRootPath");
+        assert!(
+            serde_json::from_value::<PrepareCliRuntimeResponse>(missing_projection_root).is_err()
+        );
+    }
+
+    #[test]
     fn start_request_uses_camel_case_and_keeps_command_as_data() {
         let request = StartCliProcessRequest {
             operation_id: "operation-1".to_string(),
@@ -243,6 +286,11 @@ mod tests {
             rootfs_path: "/private/rootfs".to_string(),
             cwd: "/workspace/topic".to_string(),
             artifact_max_bytes: 1024,
+            river_context_projection: Some(CliRiverContextProjection {
+                host_path: "/private/projections/attempt/river-context.json".to_string(),
+                size_bytes: 17,
+                sha256: "a".repeat(64),
+            }),
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
@@ -250,7 +298,31 @@ mod tests {
         assert_eq!(value["runtimeGeneration"], 7);
         assert_eq!(value["artifactMaxBytes"], 1024);
         assert_eq!(value["command"], "printf '%s' '$HOME'");
+        assert_eq!(
+            value["riverContextProjection"]["hostPath"],
+            "/private/projections/attempt/river-context.json"
+        );
+        assert_eq!(value["riverContextProjection"]["sizeBytes"], 17);
+        assert_eq!(value["riverContextProjection"]["sha256"], "a".repeat(64));
         assert!(value.get("operation_id").is_none());
+    }
+
+    #[test]
+    fn start_request_omits_absent_river_projection() {
+        let request = StartCliProcessRequest {
+            operation_id: "operation-2".to_string(),
+            job_id: "job-2".to_string(),
+            attempt_id: "attempt-2".to_string(),
+            runtime_generation: 8,
+            command: "true".to_string(),
+            rootfs_path: "/private/rootfs".to_string(),
+            cwd: "/workspace".to_string(),
+            artifact_max_bytes: 0,
+            river_context_projection: None,
+        };
+
+        let value = serde_json::to_value(request).expect("serialize request");
+        assert!(value.get("riverContextProjection").is_none());
     }
 
     #[test]

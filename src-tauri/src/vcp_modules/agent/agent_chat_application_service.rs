@@ -1,7 +1,10 @@
 use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigState};
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::cli::turn_coordinator::run_local_cli_turn;
+use crate::vcp_modules::cli::turn_types::{LocalCliTurnOutcome, LocalCliTurnStart};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
+use crate::vcp_modules::settings_manager::{freeze_mobile_cli_agent_route, MobileCliAgentRoute};
 use crate::vcp_modules::vcp_client::{
     perform_vcp_request, perform_vcp_request_registered, ActiveRequestLease, ActiveRequests,
     StreamEvent, VcpRequestPayload,
@@ -59,17 +62,6 @@ pub async fn internal_process_agent_chat_message(
     // 1. 读取 Agent 配置
     let agent_config =
         read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
-
-    // 【优化点】：此时已拿到智能体配置，立即启动前台服务保活以抢先渲染通知卡片，
-    // 从而与接下来的追加消息 SQLite IO、长历史读取、Tavern上下文编织等重度异步准备并行重叠
-    if let Err(e) =
-        tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_config.name)
-    {
-        log::warn!(
-            "[AgentChatAppService] Failed to start streaming service early: {}",
-            e
-        );
-    }
 
     // 2. 只有在需要时才将用户消息追加到数据库 (重新生成时设为 false)
     if append_user_msg {
@@ -129,16 +121,8 @@ pub async fn internal_process_agent_chat_message(
         "agentName": agent_config.name
     }));
 
-    let request_payload = VcpRequestPayload {
-        vcp_url: payload.vcp_url,
-        vcp_api_key: payload.vcp_api_key,
-        messages,
-        model_config,
-        message_id: thinking_id.clone(),
-        context: context.clone(),
-    };
-
-    let (_request_lease, abort_rx) =
+    let frozen_route = freeze_mobile_cli_agent_route(&app_handle).await?;
+    let (_request_lease, cancellation_token) =
         ActiveRequestLease::try_acquire(active_requests.0.clone(), thinking_id.clone())?;
     message_service::begin_stream_message(
         &db_state.pool,
@@ -151,15 +135,77 @@ pub async fn internal_process_agent_chat_message(
     )
     .await?;
 
+    // All fallible preparation and owner creation are complete before acquiring foreground
+    // service state, so every later model/coordinator outcome reaches the paired stop below.
+    if let Err(error) =
+        tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_config.name)
+    {
+        log::warn!("[AgentChatAppService] Failed to start streaming service: {error}");
+    }
+
     // 在发起 VCP 请求前，向前端发射 thinking 事件以初始化气泡
-    let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context));
+    let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context.clone()));
+
+    if frozen_route == MobileCliAgentRoute::LocalLoopback {
+        let outcome = run_local_cli_turn(
+            &app_handle,
+            &db_state.pool,
+            LocalCliTurnStart {
+                outer_message_id: thinking_id.clone(),
+                topic_id: topic_id.clone(),
+                owner_id: agent_id.clone(),
+                owner_type: "agent".to_string(),
+                speaker_agent_id: Some(agent_id.clone()),
+                messages,
+                model_config,
+                context: context.clone(),
+                vcp_url: payload.vcp_url,
+                vcp_api_key: payload.vcp_api_key,
+            },
+            frozen_route,
+            Some(stream_channel.clone()),
+            cancellation_token,
+        )
+        .await;
+        if let Err(error) = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
+            &app_handle,
+            &agent_config.name,
+        ) {
+            log::warn!("[AgentChatAppService] Failed to stop streaming service: {error}");
+        }
+        return match outcome? {
+            LocalCliTurnOutcome::ContinuationPending { reason, .. } => Ok(json!({
+                "status": "continuation_pending",
+                "messageId": thinking_id,
+                "reason": reason,
+            })),
+            LocalCliTurnOutcome::Finalized { .. } | LocalCliTurnOutcome::AlreadyTerminal { .. } => {
+                Ok(json!({ "status": "sent", "messageId": thinking_id }))
+            }
+        };
+    }
+
+    let request_payload = VcpRequestPayload {
+        vcp_url: payload.vcp_url,
+        vcp_api_key: payload.vcp_api_key,
+        messages,
+        model_config,
+        message_id: thinking_id.clone(),
+        context: context.clone(),
+        transport_request_id: None,
+        turn_attempt: None,
+        step_index: None,
+        projection_reset: None,
+        mobile_cli_agent_route: Some(frozen_route),
+        local_cli_projection_prefix: None,
+    };
 
     // 8. 发起请求
     let result = perform_vcp_request_registered(
         &app_handle,
         request_payload,
         Some(stream_channel.clone()),
-        abort_rx,
+        cancellation_token,
     )
     .await;
 
@@ -290,6 +336,12 @@ pub async fn handle_assistant_chat_stream(
         model_config,
         message_id: thinking_id.clone(),
         context: context.clone(),
+        transport_request_id: None,
+        turn_attempt: None,
+        step_index: None,
+        projection_reset: None,
+        mobile_cli_agent_route: None,
+        local_cli_projection_prefix: None,
     };
 
     // 发送 thinking 事件通知前端初始化气泡

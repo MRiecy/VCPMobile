@@ -1321,6 +1321,70 @@ async fn decode_valid_render_cache(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn finalize_stream_message<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    owner_id: &str,
+    owner_type: &str,
+    topic_id: String,
+    message_id: String,
+    full_content: String,
+    is_aborted: bool,
+    finish_reason: Option<String>,
+    stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
+    agent_id: Option<String>,
+) -> Result<(), String> {
+    finalize_stream_message_inner(
+        app_handle,
+        pool,
+        owner_id,
+        owner_type,
+        topic_id,
+        message_id,
+        full_content,
+        is_aborted,
+        finish_reason,
+        stream_channel,
+        agent_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finalize_stream_message_with_turn_projection<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    owner_id: &str,
+    owner_type: &str,
+    topic_id: String,
+    message_id: String,
+    full_content: String,
+    is_aborted: bool,
+    finish_reason: Option<String>,
+    stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
+    agent_id: Option<String>,
+    turn_attempt: String,
+    highest_step_index: u32,
+) -> Result<(), String> {
+    finalize_stream_message_inner(
+        app_handle,
+        pool,
+        owner_id,
+        owner_type,
+        topic_id,
+        message_id,
+        full_content,
+        is_aborted,
+        finish_reason,
+        stream_channel,
+        agent_id,
+        Some((turn_attempt, highest_step_index)),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_stream_message_inner<R: tauri::Runtime>(
     _app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     owner_id: &str,
@@ -1332,6 +1396,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     agent_id: Option<String>,
+    turn_projection: Option<(String, u32)>,
 ) -> Result<(), String> {
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
@@ -1394,12 +1459,18 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
         {
             Ok((blocks, start_timestamp)) => (Some(blocks), start_timestamp),
             Err(error) => {
-                if let Some(chan) = &stream_channel {
-                    let _ = chan.send(crate::vcp_modules::vcp_client::StreamEvent::error(
-                        message_id.clone(),
-                        context.clone(),
-                        format!("终态保存失败: {}", error),
-                    ));
+                // A projected local turn has a durable Finalizing claim and is recoverable. A
+                // terminal error frame here would create a frontend tombstone that rejects the
+                // later exact end, so only legacy one-shot callers retain the old error event.
+                if turn_projection.is_none() {
+                    if let Some(chan) = &stream_channel {
+                        let event = crate::vcp_modules::vcp_client::StreamEvent::error(
+                            message_id.clone(),
+                            context.clone(),
+                            format!("终态保存失败: {}", error),
+                        );
+                        let _ = chan.send(event);
+                    }
                 }
                 return Err(error);
             }
@@ -1407,13 +1478,17 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     };
 
     if let Some(chan) = stream_channel {
-        let _ = chan.send(crate::vcp_modules::vcp_client::StreamEvent::end(
+        let mut event = crate::vcp_modules::vcp_client::StreamEvent::end(
             message_id,
             context,
             Some(terminal_reason),
             end_blocks,
             Some(end_timestamp),
-        ));
+        );
+        if let Some((attempt, step)) = turn_projection {
+            event = event.with_turn_projection(attempt, step, false);
+        }
+        let _ = chan.send(event);
     }
 
     Ok(())

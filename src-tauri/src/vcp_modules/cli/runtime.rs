@@ -20,6 +20,9 @@ use super::output::{
     remove_job_outputs, require_filesystem_headroom, workspace_usage_bytes, OutputReadRequest,
 };
 use super::profile::{embedded_command_profile, VcpCliCommandProfile};
+use super::projection::{
+    gc_stale_river_projections, prepare_river_projection, remove_river_projection,
+};
 use super::protocol::{
     validate_structured_vcp_cli_action, VcpCliAction, DEFAULT_BOUNDED_READ_BYTES, MAX_POLL_WAIT_MS,
 };
@@ -82,6 +85,18 @@ pub struct MobileCliStatus {
 pub struct ExecuteVcpMobileCliRequest {
     pub operation_id: String,
     pub action: VcpCliAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub river_projection: Option<VcpCliRiverProjectionInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VcpCliRiverProjectionInput {
+    pub canonical_json: String,
+    pub sha256: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +206,7 @@ impl MobileCliRuntimeState {
         Ok(status_from_owner(&owner, &profile))
     }
 
-    async fn execute<R: Runtime>(
+    pub(crate) async fn execute<R: Runtime>(
         &self,
         app: &AppHandle<R>,
         request: ExecuteVcpMobileCliRequest,
@@ -208,7 +223,24 @@ impl MobileCliRuntimeState {
                 });
             }
         };
-        let action_sha256 = action_digest(&action)?;
+        if request.river_projection.is_some() && !matches!(action, VcpCliAction::Run { .. }) {
+            let generation = self.current_generation(app).await?;
+            return Ok(ExecuteVcpMobileCliResponse {
+                operation_id: request.operation_id,
+                runtime_generation: generation,
+                envelope: VcpCliResultEnvelope::error(
+                    VcpCliErrorCode::InvalidRequest,
+                    "river is only valid for action=run",
+                    "Remove river from this action and retry.",
+                ),
+            });
+        }
+        validate_session_id(request.session_id.as_deref())?;
+        let action_sha256 = action_digest(
+            &action,
+            request.river_projection.as_ref(),
+            request.session_id.as_deref(),
+        )?;
         self.ensure_initialized(app).await?;
 
         if let Some(response) = self
@@ -251,6 +283,8 @@ impl MobileCliRuntimeState {
                                 })?,
                             },
                             &action_sha256,
+                            request.river_projection.clone(),
+                            request.session_id.clone(),
                         )
                         .await?
                     }
@@ -470,6 +504,7 @@ impl MobileCliRuntimeState {
             workspace: PathBuf::from(staged.workspace_path),
             skills: PathBuf::from(staged.skills_path),
             output: PathBuf::from(staged.output_path),
+            projection_root: PathBuf::from(staged.projection_root_path),
         };
         let verified_profile = verify_staged_provision_inputs(&paths)
             .await
@@ -502,6 +537,12 @@ impl MobileCliRuntimeState {
             .map_err(|error| DomainError::internal(format!("CLI output GC task failed: {error}")))?
             .map_err(DomainError::internal)?;
 
+        let projection_root = runtime.projection_root.clone();
+        tauri::async_runtime::spawn_blocking(move || gc_stale_river_projections(&projection_root))
+            .await
+            .map_err(|error| DomainError::internal(format!("river projection GC failed: {error}")))?
+            .map_err(DomainError::internal)?;
+
         let mut owner = self.inner.lock().await;
         if owner.ledger.runtime_generation != generation {
             return Err(DomainError::internal(
@@ -522,6 +563,8 @@ impl MobileCliRuntimeState {
         operation_id: &str,
         parameters: RunParameters,
         action_sha256: &str,
+        river_projection: Option<VcpCliRiverProjectionInput>,
+        session_id: Option<String>,
     ) -> Result<ExecuteVcpMobileCliResponse, String> {
         let runtime = match self.ensure_provisioned(app, operation_id).await {
             Ok(runtime) => runtime,
@@ -553,8 +596,29 @@ impl MobileCliRuntimeState {
         let now = now_ms()?;
         let job_id = format!("job-{}", Uuid::new_v4());
         let attempt_id = format!("attempt-{}", Uuid::new_v4());
-        let generation = {
+        let generation = self.inner.lock().await.ledger.runtime_generation;
+        let river_context_projection = if let Some(input) = river_projection {
+            let root = runtime.projection_root.clone();
+            let job = job_id.clone();
+            let attempt = attempt_id.clone();
+            Some(
+                tauri::async_runtime::spawn_blocking(move || {
+                    prepare_river_projection(&root, generation, &job, &attempt, &input)
+                })
+                .await
+                .map_err(|error| format!("river projection task failed: {error}"))??,
+            )
+        } else {
+            None
+        };
+        let projection_path = river_context_projection
+            .as_ref()
+            .map(|projection| PathBuf::from(&projection.host_path));
+        let insertion = async {
             let mut owner = self.inner.lock().await;
+            if owner.ledger.runtime_generation != generation {
+                return Err("runtime generation changed before CLI job admission".to_string());
+            }
             let running = owner
                 .ledger
                 .jobs
@@ -567,21 +631,27 @@ impl MobileCliRuntimeState {
                 .min(profile.budgets.max_concurrent_jobs)
                 .min(4);
             if running >= concurrent_limit {
-                return Ok(ExecuteVcpMobileCliResponse {
-                    operation_id: operation_id.to_string(),
-                    runtime_generation: owner.ledger.runtime_generation,
-                    envelope: VcpCliResultEnvelope::error(
-                        VcpCliErrorCode::RuntimeUnavailable,
-                        "CLI concurrency limit reached",
-                        format!("At most {concurrent_limit} CLI jobs may run concurrently."),
-                    ),
-                });
+                return Err(format!(
+                    "CLI concurrency limit reached; at most {concurrent_limit} jobs may run"
+                ));
             }
-            let generation = owner.ledger.runtime_generation;
+            if let Some(session_id) = session_id.as_deref() {
+                if session_concurrency_reached(
+                    &owner.ledger.jobs,
+                    session_id,
+                    concurrent_limit.min(2),
+                ) {
+                    return Err(
+                        "CLI session concurrency limit reached; at most 2 jobs may run in one chat session"
+                            .to_string(),
+                    );
+                }
+            }
             let evicted = owner.ledger.insert_job(JobRecord {
                 id: job_id.clone(),
                 attempt_id: attempt_id.clone(),
                 runtime_generation: generation,
+                session_id: session_id.clone(),
                 state: VcpCliJobState::Starting,
                 command_preview: command_preview(&parameters.command),
                 description: parameters.description,
@@ -592,6 +662,7 @@ impl MobileCliRuntimeState {
                 deadline_at_ms: now.saturating_add(parameters.timeout_ms),
                 stdout_path: None,
                 stderr_path: None,
+                river_projection_path: projection_path.clone(),
                 stdout_bytes: 0,
                 stderr_bytes: 0,
                 stdout_truncated: false,
@@ -607,8 +678,8 @@ impl MobileCliRuntimeState {
                 }],
             })?;
             let stale_paths = evicted
-                .into_iter()
-                .flat_map(|job| [job.stdout_path, job.stderr_path])
+                .iter()
+                .flat_map(|job| [job.stdout_path.clone(), job.stderr_path.clone()])
                 .flatten()
                 .collect::<Vec<_>>();
             if !stale_paths.is_empty() {
@@ -617,9 +688,39 @@ impl MobileCliRuntimeState {
                     remove_job_outputs(&output, stale_paths)
                 });
             }
+            for stale in evicted {
+                if let Some(path) = stale.river_projection_path {
+                    let root = runtime.projection_root.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        remove_river_projection(
+                            &root,
+                            stale.runtime_generation,
+                            &stale.id,
+                            &stale.attempt_id,
+                            &path,
+                        )
+                    });
+                }
+            }
             persist_owner(&owner).await?;
-            generation
-        };
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = insertion {
+            if let Some(path) = projection_path {
+                let root = runtime.projection_root.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    remove_river_projection(&root, generation, &job_id, &attempt_id, &path)
+                })
+                .await;
+            }
+            return self
+                .domain_response(
+                    operation_id,
+                    DomainError::new(VcpCliErrorCode::RuntimeUnavailable, error),
+                )
+                .await;
+        }
 
         let start = StartCliProcessRequest {
             operation_id: operation_id.to_string(),
@@ -630,6 +731,7 @@ impl MobileCliRuntimeState {
             rootfs_path: runtime.rootfs.to_string_lossy().into_owned(),
             cwd: parameters.cwd,
             artifact_max_bytes: profile.budgets.artifact_bytes_per_job,
+            river_context_projection,
         };
         let job = self
             .job_snapshot(&job_id)
@@ -860,7 +962,16 @@ impl MobileCliRuntimeState {
         ) {
             return Ok(());
         }
-        replace_ledger_atomically(&mut owner, next).await
+        let terminal = next
+            .find_job(&job.id)
+            .filter(|current| current.is_terminal())
+            .cloned();
+        replace_ledger_atomically(&mut owner, next).await?;
+        drop(owner);
+        if let Some(terminal) = terminal {
+            self.cleanup_river_projection(&terminal).await?;
+        }
+        Ok(())
     }
 
     async fn monitor_job<R: Runtime>(
@@ -880,6 +991,7 @@ impl MobileCliRuntimeState {
             }
             let job = self.ensure_deadline_intent(&job).await?;
             if job.is_terminal() {
+                self.cleanup_river_projection(&job).await?;
                 return Ok(());
             }
             if let Some(intent) = job.terminal_intent.clone() {
@@ -1282,16 +1394,20 @@ impl MobileCliRuntimeState {
         operation_id: &str,
     ) -> Result<ExecuteVcpMobileCliResponse, String> {
         let owner = self.inner.lock().await;
+        let summaries = owner
+            .ledger
+            .jobs
+            .iter()
+            .rev()
+            .map(job_summary)
+            .collect::<Vec<_>>();
         Ok(ExecuteVcpMobileCliResponse {
             operation_id: operation_id.to_string(),
             runtime_generation: owner.ledger.runtime_generation,
             envelope: VcpCliResultEnvelope::success(VcpCliResultBody {
-                content: vec![VcpCliContentPart::text(format!(
-                    "{} retained CLI jobs.",
-                    owner.ledger.jobs.len()
-                ))],
+                content: vec![VcpCliContentPart::text(render_job_list(&summaries))],
                 job: None,
-                jobs: Some(owner.ledger.jobs.iter().rev().map(job_summary).collect()),
+                jobs: Some(summaries),
                 skill: None,
                 skills: None,
                 runtime: Some(VcpCliRuntimeInfo::local_loopback()),
@@ -1320,10 +1436,7 @@ impl MobileCliRuntimeState {
                     .await
             }
         };
-        let mut content = vec![VcpCliContentPart::text(format!(
-            "{} validated Skills are available.",
-            listed.skills.len()
-        ))];
+        let mut content = vec![VcpCliContentPart::text(render_skill_list(&listed.skills))];
         content.extend(listed.warnings.into_iter().map(VcpCliContentPart::text));
         let generation = self.inner.lock().await.ledger.runtime_generation;
         Ok(ExecuteVcpMobileCliResponse {
@@ -1464,31 +1577,29 @@ impl MobileCliRuntimeState {
                 false,
             ),
         };
-        let mut content = String::new();
+        let mut output_content = String::new();
         if !stdout.is_empty() {
-            content.push_str(&stdout);
+            output_content.push_str(&stdout);
         }
         if !stderr.is_empty() {
-            if !content.is_empty() {
-                content.push('\n');
+            if !output_content.is_empty() {
+                output_content.push('\n');
             }
-            content.push_str("[stderr]\n");
-            content.push_str(&stderr);
-        }
-        if content.is_empty() {
-            content = format!("CLI job {} is {:?}.", job.id, job.state).to_lowercase();
+            output_content.push_str("[stderr]\n");
+            output_content.push_str(&stderr);
         }
         if safety_projected {
-            content.push_str(
+            output_content.push_str(
                 "\n[output safety projection removed terminal controls and/or redacted sensitive text]",
             );
         }
         if artifact_error.is_some() {
             truncated = true;
-            content.push_str(
+            output_content.push_str(
                 "\n[output artifact integrity metadata unavailable; cursor text remains bounded]",
             );
         }
+        let content = render_job_result(&job, next_cursor.as_deref(), truncated, &output_content);
         Ok(ExecuteVcpMobileCliResponse {
             operation_id: operation_id.to_string(),
             runtime_generation: job.runtime_generation,
@@ -1609,6 +1720,50 @@ impl MobileCliRuntimeState {
                 }
             }
             replace_ledger_atomically(&mut owner, next).await?;
+        }
+        drop(owner);
+        if let Some(terminal) = self
+            .job_snapshot(&job.id)
+            .await
+            .filter(JobRecord::is_terminal)
+        {
+            self.cleanup_river_projection(&terminal).await?;
+        }
+        Ok(())
+    }
+
+    async fn cleanup_river_projection(&self, job: &JobRecord) -> Result<(), String> {
+        let Some(path) = job.river_projection_path.clone() else {
+            return Ok(());
+        };
+        let root = {
+            let owner = self.inner.lock().await;
+            owner
+                .provisioned
+                .as_ref()
+                .map(|runtime| runtime.projection_root.clone())
+                .ok_or_else(|| "river projection root is unavailable".to_string())?
+        };
+        let generation = job.runtime_generation;
+        let job_id = job.id.clone();
+        let attempt_id = job.attempt_id.clone();
+        let cleanup_path = path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            remove_river_projection(&root, generation, &job_id, &attempt_id, &cleanup_path)
+        })
+        .await
+        .map_err(|error| format!("river projection cleanup task failed: {error}"))??;
+
+        let mut owner = self.inner.lock().await;
+        if let Some(current) = owner.ledger.find_job_mut(&job.id) {
+            if current.attempt_id == job.attempt_id
+                && current.runtime_generation == job.runtime_generation
+                && current.is_terminal()
+                && current.river_projection_path.as_ref() == Some(&path)
+            {
+                current.river_projection_path = None;
+                persist_owner(&owner).await?;
+            }
         }
         Ok(())
     }
@@ -1760,12 +1915,90 @@ fn job_summary(job: &JobRecord) -> VcpCliJobSummary {
     }
 }
 
+fn render_job_list(jobs: &[VcpCliJobSummary]) -> String {
+    let mut text = format!("retained_jobs: {}", jobs.len());
+    for job in jobs {
+        text.push_str(&format!(
+            "\n- job_id: {} | state: {} | command: {}",
+            job.id,
+            job_state_name(job.state),
+            job.command_preview
+        ));
+    }
+    if jobs.is_empty() {
+        text.push_str("\nNo retained jobs. Use action=run to start one.");
+    } else {
+        text.push_str("\nUse action=poll or action=cancel with job_id.");
+    }
+    text
+}
+
+fn render_skill_list(skills: &[super::result::VcpCliSkillSummary]) -> String {
+    let mut text = format!("validated_skills: {}", skills.len());
+    for skill in skills {
+        text.push_str(&format!(
+            "\n- skill_id: {} | name: {} | version: {} | source: {} | sha256: {}",
+            skill.id,
+            skill.name,
+            skill.version.as_deref().unwrap_or("unknown"),
+            skill.source,
+            skill.sha256
+        ));
+    }
+    text.push_str("\nUse action=read_skill with skill_id and resource_path=SKILL.md.");
+    text
+}
+
+fn render_job_result(
+    job: &JobRecord,
+    cursor: Option<&str>,
+    truncated: bool,
+    output: &str,
+) -> String {
+    let mut text = format!(
+        "job_id: {}\nstate: {}\ncursor: {}\ntruncated: {}\nexit_code: {}\nreason: {}",
+        job.id,
+        job_state_name(job.state),
+        cursor.unwrap_or("none"),
+        truncated,
+        job.exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        job.reason.as_deref().unwrap_or("none")
+    );
+    if output.is_empty() {
+        text.push_str("\noutput: no new bounded output");
+    } else {
+        text.push_str("\noutput:\n");
+        text.push_str(output);
+    }
+    if !job.is_terminal() {
+        text.push_str("\nnext: poll again with job_id and cursor, or cancel with job_id");
+    }
+    text
+}
+
+const fn job_state_name(state: VcpCliJobState) -> &'static str {
+    match state {
+        VcpCliJobState::Queued => "queued",
+        VcpCliJobState::Starting => "starting",
+        VcpCliJobState::Running => "running",
+        VcpCliJobState::Completed => "completed",
+        VcpCliJobState::Failed => "failed",
+        VcpCliJobState::TimedOut => "timed_out",
+        VcpCliJobState::Cancelled => "cancelled",
+        VcpCliJobState::Interrupted => "interrupted",
+        VcpCliJobState::WaitingUser => "waiting_user",
+    }
+}
+
 fn runtime_paths_record(runtime: &ProvisionedRuntime) -> RuntimePathsRecord {
     RuntimePathsRecord {
         rootfs: runtime.rootfs.clone(),
         workspace: runtime.workspace.clone(),
         skills: runtime.skills.clone(),
         output: runtime.output.clone(),
+        projection_root: runtime.projection_root.clone(),
         proot_binary: runtime.proot_binary.clone(),
     }
 }
@@ -1804,8 +2037,35 @@ fn validate_operation_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn action_digest(action: &VcpCliAction) -> Result<String, String> {
-    let bytes = serde_json::to_vec(action)
+fn validate_session_id(value: Option<&str>) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty()
+        || value.len() > 96
+        || !value.is_ascii()
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("session_id must be a bounded stable ASCII identifier".to_string());
+    }
+    Ok(())
+}
+
+fn session_concurrency_reached(jobs: &[JobRecord], session_id: &str, limit: usize) -> bool {
+    jobs.iter()
+        .filter(|job| !job.is_terminal() && job.session_id.as_deref() == Some(session_id))
+        .count()
+        >= limit
+}
+
+fn action_digest(
+    action: &VcpCliAction,
+    river_projection: Option<&VcpCliRiverProjectionInput>,
+    session_id: Option<&str>,
+) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(action, river_projection, session_id))
         .map_err(|error| format!("cannot serialize CLI action: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -1912,6 +2172,7 @@ mod tests {
             id: "job-race".to_string(),
             attempt_id: "attempt-race".to_string(),
             runtime_generation: generation,
+            session_id: None,
             state: VcpCliJobState::Running,
             command_preview: "sleep 300".to_string(),
             description: None,
@@ -1922,6 +2183,7 @@ mod tests {
             deadline_at_ms: 300_001,
             stdout_path: None,
             stderr_path: None,
+            river_projection_path: None,
             stdout_bytes: 0,
             stderr_bytes: 0,
             stdout_truncated: false,
@@ -2131,6 +2393,7 @@ mod tests {
                 id: "job-1".to_string(),
                 attempt_id: "attempt-1".to_string(),
                 runtime_generation: 3,
+                session_id: None,
                 state: VcpCliJobState::Starting,
                 command_preview: command_preview(&"打印 ".repeat(100)),
                 description: None,
@@ -2141,6 +2404,7 @@ mod tests {
                 deadline_at_ms: 1_001,
                 stdout_path: None,
                 stderr_path: None,
+                river_projection_path: None,
                 stdout_bytes: 0,
                 stderr_bytes: 0,
                 stdout_truncated: false,
@@ -2158,6 +2422,34 @@ mod tests {
         assert_eq!(status.jobs[0].state, VcpCliJobState::Starting);
         assert!(status.jobs[0].command_preview.len() <= 160);
         assert_eq!(status.background_reliability, "foreground_only");
+    }
+
+    #[test]
+    fn chat_session_allows_two_parallel_jobs_and_rejects_the_third() {
+        let mut first = running_test_job(1);
+        first.session_id = Some("chat:a".to_string());
+        let mut second = first.clone();
+        second.id = "job-second".to_string();
+        second.attempt_id = "attempt-second".to_string();
+        assert!(!session_concurrency_reached(
+            std::slice::from_ref(&first),
+            "chat:a",
+            2
+        ));
+        assert!(session_concurrency_reached(
+            &[first.clone(), second.clone()],
+            "chat:a",
+            2
+        ));
+        assert!(!session_concurrency_reached(
+            &[first.clone(), second],
+            "chat:b",
+            2
+        ));
+        first.state = VcpCliJobState::Completed;
+        assert!(!session_concurrency_reached(&[first], "chat:a", 2));
+        assert!(validate_session_id(Some("chat:0123abcdef")).is_ok());
+        assert!(validate_session_id(Some("chat path")).is_err());
     }
 
     #[test]
@@ -2195,6 +2487,7 @@ mod tests {
             id: "job-deadline".to_string(),
             attempt_id: "attempt-deadline".to_string(),
             runtime_generation: 1,
+            session_id: None,
             state: VcpCliJobState::Running,
             command_preview: "sleep 1".to_string(),
             description: None,
@@ -2205,6 +2498,7 @@ mod tests {
             deadline_at_ms: 1_100,
             stdout_path: None,
             stderr_path: None,
+            river_projection_path: None,
             stdout_bytes: 0,
             stderr_bytes: 0,
             stdout_truncated: false,

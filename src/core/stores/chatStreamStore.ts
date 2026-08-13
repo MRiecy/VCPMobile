@@ -10,6 +10,44 @@ import { useChatHistoryStore } from "./chatHistoryStore";
 import type { ChatMessage, MessageShell, TailFrame } from "../types/chat";
 import type { ConversationKey } from "./chatSessionStore";
 
+export interface ChatStreamEvent {
+  type: string;
+  messageId?: string;
+  message_id?: string;
+  context?: {
+    topicId?: string;
+    isGroupMessage?: boolean;
+    groupId?: string;
+    agentId?: string;
+    ownerId?: string;
+    agentName?: string;
+    [key: string]: unknown;
+  };
+  turnAttempt?: string;
+  stepIndex?: number;
+  projectionReset?: boolean;
+  aurora?: any;
+  blocks?: any[];
+  error?: string;
+  finishReason?: string;
+  timestamp?: number;
+}
+
+interface StreamProjectionCursor {
+  activeAttempt: string;
+  highestStep: number;
+  retiredAttempts: Set<string>;
+}
+
+interface StreamTerminalTombstone {
+  attempt: string | null;
+  step: number | null;
+  terminalAt: number;
+}
+
+const RECOVERY_CONTINUATION_PENDING_TEXT =
+  "本地任务已保留，等待模型续轮。连接恢复后将自动继续。";
+
 export const useChatStreamStore = defineStore("chatStream", () => {
   const streamingMessageId = ref<string | null>(null);
 
@@ -20,6 +58,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // 全局活跃流消息池：存储所有正在生成的响应对象 (messageId -> Reactive<ChatMessage>)
   // 无论是在前台还是后台，流式消息都从此池中获取，保证响应式链路不断裂
   const activeStreamMessages = reactive<Map<string, ChatMessage>>(new Map());
+  const streamProjectionCursors = new Map<string, StreamProjectionCursor>();
+  const streamTerminalTombstones = new Map<
+    string,
+    StreamTerminalTombstone
+  >();
   // 覆盖完整 recovery command 生命周期，避免扫描门闩释放后重复 claim 同一消息。
   const recoveryMessageIds = new Set<string>();
 
@@ -101,6 +144,47 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   }
 
   const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
+  const STREAM_TERMINAL_TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000;
+  const MAX_STREAM_TERMINAL_TOMBSTONES = 1000;
+
+  const pruneStreamTerminalTombstones = (now = Date.now()) => {
+    for (const [messageId, tombstone] of streamTerminalTombstones) {
+      if (now - tombstone.terminalAt <= STREAM_TERMINAL_TOMBSTONE_TTL_MS) {
+        continue;
+      }
+      streamTerminalTombstones.delete(messageId);
+    }
+
+    while (streamTerminalTombstones.size > MAX_STREAM_TERMINAL_TOMBSTONES) {
+      const oldestMessageId = streamTerminalTombstones.keys().next().value;
+      if (typeof oldestMessageId !== "string") break;
+      streamTerminalTombstones.delete(oldestMessageId);
+    }
+  };
+
+  const hasStreamTerminalTombstone = (messageId: string): boolean => {
+    const tombstone = streamTerminalTombstones.get(messageId);
+    if (!tombstone) return false;
+    if (Date.now() - tombstone.terminalAt > STREAM_TERMINAL_TOMBSTONE_TTL_MS) {
+      streamTerminalTombstones.delete(messageId);
+      return false;
+    }
+    return true;
+  };
+
+  const recordStreamTerminalTombstone = (
+    messageId: string,
+    event: ChatStreamEvent,
+  ) => {
+    streamTerminalTombstones.delete(messageId);
+    streamTerminalTombstones.set(messageId, {
+      attempt:
+        typeof event.turnAttempt === "string" ? event.turnAttempt : null,
+      step: Number.isInteger(event.stepIndex) ? event.stepIndex! : null,
+      terminalAt: Date.now(),
+    });
+    pruneStreamTerminalTombstones();
+  };
 
   // ===== rAF 30Hz 帧合并直推暂存池 =====
   // 记录每个消息最新的 Aurora 暂存数据，消灭定时器空转，硬件级防抖并实现30Hz降降基数
@@ -288,6 +372,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       // 只删除已完成的流（不在当前活跃会话中）
       if (!isMessageActive(id)) {
         activeStreamMessages.delete(id);
+        streamProjectionCursors.delete(id);
         remaining -= 1;
       }
     }
@@ -331,6 +416,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       cleanupTimers.delete(cleanupTimer);
       if (!activeStreamingIds.value.has(messageId)) {
         activeStreamMessages.delete(messageId);
+        streamProjectionCursors.delete(messageId);
         clearRAFUpdate(messageId, false); // 漏洞 2 修复：延迟清理时，强制安全注销 rAF 帧，杜绝句柄泄露
       }
     }, 1000);
@@ -352,17 +438,93 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       cleanupTimers.delete(cleanupTimer);
       if (!isMessageActive(messageId)) {
         activeStreamMessages.delete(messageId);
+        streamProjectionCursors.delete(messageId);
         clearRAFUpdate(messageId, false);
       }
     }, 1000);
     cleanupTimers.add(cleanupTimer);
   };
 
+  const acceptStreamProjectionEvent = (
+    messageId: string,
+    event: ChatStreamEvent,
+  ): { accepted: boolean; reset: boolean } => {
+    if (hasStreamTerminalTombstone(messageId)) {
+      return { accepted: false, reset: false };
+    }
+
+    const hasAttempt = event.turnAttempt !== undefined;
+    const hasStep = event.stepIndex !== undefined;
+    const cursor = streamProjectionCursors.get(messageId);
+
+    // 一旦流进入带代际协议，后续缺字段或部分字段的帧都不能回写该消息。
+    if (!hasAttempt && !hasStep) {
+      return { accepted: !cursor, reset: false };
+    }
+    if (
+      typeof event.turnAttempt !== "string" ||
+      event.turnAttempt.length === 0 ||
+      !Number.isInteger(event.stepIndex) ||
+      (event.stepIndex as number) < 0 ||
+      (event.projectionReset !== undefined &&
+        typeof event.projectionReset !== "boolean")
+    ) {
+      return { accepted: false, reset: false };
+    }
+
+    const attempt = event.turnAttempt;
+    const step = event.stepIndex as number;
+    if (!cursor) {
+      streamProjectionCursors.set(messageId, {
+        activeAttempt: attempt,
+        highestStep: step,
+        retiredAttempts: new Set(),
+      });
+      return { accepted: true, reset: true };
+    }
+
+    if (attempt === cursor.activeAttempt) {
+      if (step < cursor.highestStep) {
+        return { accepted: false, reset: false };
+      }
+      if (step > cursor.highestStep) {
+        cursor.highestStep = step;
+        return { accepted: true, reset: true };
+      }
+      // projectionReset 可在同一步的每帧重复携带；相同步骤只消费一次。
+      return { accepted: true, reset: false };
+    }
+
+    if (cursor.retiredAttempts.has(attempt)) {
+      return { accepted: false, reset: false };
+    }
+
+    cursor.retiredAttempts.add(cursor.activeAttempt);
+    cursor.activeAttempt = attempt;
+    cursor.highestStep = step;
+    return { accepted: true, reset: true };
+  };
+
+  const resetStreamProjection = (
+    messageId: string,
+    message: ChatMessage,
+  ) => {
+    // 必须先取消旧 rAF；旧 step 的暂存内容绝不能在 reset 后重新刷回。
+    clearRAFUpdate(messageId, false);
+    message.content = "";
+    message.blocks = [];
+    message.tailContent = "";
+    message.tailBlock = undefined;
+    message.tailFrame = undefined;
+    message.tailSnapshot = undefined;
+    message.finishReason = undefined;
+  };
+
   /**
    * 处理流式事件的核心逻辑 (会话隔离调度器)
    */
   const processStreamEvent = async (
-    event: any,
+    event: ChatStreamEvent,
     callbacks?: {
       onMessageCreated?: (msg: ChatMessage, topicId: string) => void;
       onStreamFinished?: (messageId: string, topicId: string) => void;
@@ -376,6 +538,15 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     const itemId = isGroup ? ctx.groupId : ctx.agentId || ctx.ownerId;
 
     if (!actualMessageId || !topicId || !itemId) return;
+
+    const projectionDecision = acceptStreamProjectionEvent(
+      actualMessageId,
+      event,
+    );
+    if (!projectionDecision.accepted) return;
+    if (type === "end" || type === "error") {
+      recordStreamTerminalTombstone(actualMessageId, event);
+    }
 
     let msg = activeStreamMessages.get(actualMessageId);
     const isNewStream = !msg;
@@ -398,7 +569,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }),
       });
       activeStreamMessages.set(actualMessageId, msg!);
+    }
 
+    if (projectionDecision.reset) {
+      resetStreamProjection(actualMessageId, msg!);
+    }
+
+    if (isNewStream) {
       topicStore.incrementTopicMsgCount(topicId);
       if (topicId !== sessionStore.currentTopicId) {
         topicStore.incrementTopicUnreadCount(topicId);
@@ -661,6 +838,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
     });
     rAFPendingUpdates.clear();
+    streamProjectionCursors.clear();
+    streamTerminalTombstones.clear();
   });
 
   const isRecovering = ref(false);
@@ -748,15 +927,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         addSessionStream(ownerId, topicId, msgId);
       }
 
-      // 3. 网络请求 Gate 门控
-      if (typeof navigator !== "undefined" && !navigator.onLine) {
-        console.log(
-          "[ChatStreamStore] Network offline. Suspending active generations cloud sync.",
-        );
-        isRecovering.value = false;
-        return;
-      }
-
       for (const gen of activeGens) {
         const { msgId, topicId, ownerId, ownerType } = gen;
         const currentKey = sessionStore.currentConversationKey;
@@ -832,7 +1002,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             },
           });
 
-        // 后端在一个 owner lease 内完成 query -> resume -> terminal commit。
+        // 后端在一个 owner lease 内先判定 durable 状态，再决定是否需要网络接续。
+        // navigator.onLine 不能前置否决：Finalizing/Interrupted 等状态必须可离线收口。
         // 扫描门闩可以释放，但 recoveryMessageIds 会覆盖整个长连接生命周期。
         void invoke<any>("recover_active_generation", {
           msgId,
@@ -840,9 +1011,30 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           isWarm,
         })
           .then((res) => {
-            console.log(`[ChatStreamStore] Recovery status for ${msgId}:`, res);
+            console.log(
+              `[ChatStreamStore] Recovery status for ${msgId}: ${String(res?.status ?? "unknown")}`,
+            );
             if (res.status === "already_running") {
               if (recoveryMessage) recoveryMessage.isReconnecting = false;
+              return;
+            }
+
+            if (res.status === "continuation_pending") {
+              if (recoveryMessage) {
+                recoveryMessage.isReconnecting = false;
+                recoveryMessage.isThinking = false;
+                recoveryMessage.finishReason = undefined;
+                recoveryMessage.content = RECOVERY_CONTINUATION_PENDING_TEXT;
+                recoveryMessage.blocks = [];
+                recoveryMessage.tailContent = "";
+                recoveryMessage.tailBlock = undefined;
+                recoveryMessage.tailFrame = undefined;
+                recoveryMessage.tailSnapshot = undefined;
+              }
+              // Durable active_generation/turn ledger remains the only retry truth. The next
+              // foreground/online scan will claim the same message; this pass only leaves a
+              // bounded, non-sensitive waiting projection instead of an empty cold skeleton.
+              removeSessionStream(ownerId, topicId, msgId);
               return;
             }
 

@@ -1057,6 +1057,13 @@ mod tests {
                 owner_type TEXT, owner_id TEXT, image_data BLOB,
                 PRIMARY KEY(owner_type, owner_id)
              );
+             CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT, deleted_at BIGINT
+             );
+             CREATE TABLE messages (
+                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+                finish_reason TEXT, deleted_at BIGINT, PRIMARY KEY(topic_id, msg_id)
+             );
              CREATE TABLE _sqlx_migrations (
                 version BIGINT PRIMARY KEY,
                 description TEXT NOT NULL,

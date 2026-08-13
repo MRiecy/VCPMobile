@@ -3,11 +3,14 @@
 
 use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigState};
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::cli::turn_coordinator::run_local_cli_turn;
+use crate::vcp_modules::cli::turn_types::{LocalCliTurnOutcome, LocalCliTurnStart};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
+use crate::vcp_modules::settings_manager::{freeze_mobile_cli_agent_route, MobileCliAgentRoute};
 use crate::vcp_modules::vcp_client::{
     perform_vcp_request_registered, ActiveRequestLease, ActiveRequests, CancelledGroupTurns,
     StreamEvent, VcpRequestPayload,
@@ -133,6 +136,7 @@ pub async fn internal_process_group_chat_message(
 
     // 5. 串行异步调度 (约束：群聊内部必须串行)
     let mut final_new_msgs = Vec::new();
+    let frozen_route = freeze_mobile_cli_agent_route(&app_handle).await?;
 
     for speaker in speakers {
         // 检查全局中断令牌：如果话题已被标记为取消，立即停止接力赛
@@ -158,17 +162,6 @@ pub async fn internal_process_group_chat_message(
         let agent_id = speaker.id.clone();
         let agent_name = speaker.name.clone();
         let message_id = format!("msg_group_{}", uuid::Uuid::new_v4());
-
-        // 【优化点】：此时已识别出当前轮次的发言者 agent_name，立即提前启动前台服务保活，
-        // 从而与接下来耗时的群组上下文组装、SQLite Tavern 级联编织等逻辑并行重叠。
-        if let Err(e) =
-            tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_name)
-        {
-            log::warn!(
-                "[GroupChatAppService] Failed to start streaming service early: {}",
-                e
-            );
-        }
 
         // 组装上下文
         let base_system_prompt =
@@ -227,15 +220,21 @@ pub async fn internal_process_group_chat_message(
         }));
 
         let request_payload = VcpRequestPayload {
-            vcp_url,
-            vcp_api_key,
-            messages,
-            model_config,
+            vcp_url: vcp_url.clone(),
+            vcp_api_key: vcp_api_key.clone(),
+            messages: messages.clone(),
+            model_config: model_config.clone(),
             message_id: message_id.clone(),
             context: context.clone(),
+            transport_request_id: None,
+            turn_attempt: None,
+            step_index: None,
+            projection_reset: None,
+            mobile_cli_agent_route: Some(frozen_route),
+            local_cli_projection_prefix: None,
         };
 
-        let (_request_lease, abort_rx) =
+        let (_request_lease, cancellation_token) =
             ActiveRequestLease::try_acquire(active_requests_map, message_id.clone())?;
         message_service::begin_stream_message(
             &db_pool,
@@ -248,19 +247,56 @@ pub async fn internal_process_group_chat_message(
         )
         .await?;
 
-        // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
-        if let Some(chan) = &stream_channel {
-            let _ = chan.send(StreamEvent::thinking(message_id.clone(), context));
+        if let Err(error) =
+            tauri_plugin_vcp_mobile::stream::start_stream_service_inner(&app_handle, &agent_name)
+        {
+            log::warn!("[GroupChatAppService] Failed to start streaming service: {error}");
         }
 
-        // 执行请求 (串行等待)
-        let res_result = perform_vcp_request_registered(
-            &app_handle,
-            request_payload,
-            stream_channel.clone(),
-            abort_rx,
-        )
-        .await;
+        // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
+        if let Some(chan) = &stream_channel {
+            let _ = chan.send(StreamEvent::thinking(message_id.clone(), context.clone()));
+        }
+
+        let local_outcome = if frozen_route == MobileCliAgentRoute::LocalLoopback {
+            Some(
+                run_local_cli_turn(
+                    &app_handle,
+                    &db_pool,
+                    LocalCliTurnStart {
+                        outer_message_id: message_id.clone(),
+                        topic_id: topic_id.clone(),
+                        owner_id: group_id.clone(),
+                        owner_type: "group".to_string(),
+                        speaker_agent_id: Some(agent_id.clone()),
+                        messages,
+                        model_config,
+                        context: context.clone(),
+                        vcp_url,
+                        vcp_api_key,
+                    },
+                    frozen_route,
+                    stream_channel.clone(),
+                    cancellation_token.clone(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let res_result = if local_outcome.is_none() {
+            Some(
+                perform_vcp_request_registered(
+                    &app_handle,
+                    request_payload,
+                    stream_channel.clone(),
+                    cancellation_token,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
 
         // 停止前台服务
         if let Err(e) =
@@ -272,6 +308,50 @@ pub async fn internal_process_group_chat_message(
             );
         }
 
+        if let Some(local_outcome) = local_outcome {
+            match local_outcome? {
+                LocalCliTurnOutcome::Finalized {
+                    content,
+                    finish_reason,
+                    ..
+                }
+                | LocalCliTurnOutcome::AlreadyTerminal {
+                    content,
+                    finish_reason,
+                } => {
+                    let ai_msg = ChatMessage {
+                        id: message_id,
+                        role: "assistant".to_string(),
+                        name: Some(agent_name),
+                        content,
+                        timestamp: crate::vcp_modules::infra::utils::now_millis() as u64,
+                        is_thinking: Some(false),
+                        agent_id: Some(agent_id.clone()),
+                        group_id: Some(group_id.clone()),
+                        topic_id: Some(topic_id.clone()),
+                        is_group_message: Some(true),
+                        finish_reason: Some(finish_reason),
+                        attachments: None,
+                        blocks: None,
+                        shell: None,
+                        content_hash: None,
+                    };
+                    full_history_for_context.push(ai_msg.clone());
+                    final_new_msgs.push(ai_msg);
+                    continue;
+                }
+                LocalCliTurnOutcome::ContinuationPending { reason, .. } => {
+                    log::warn!(
+                        "[GroupChatAppService] Local CLI continuation pending for {agent_id}: {reason}"
+                    );
+                    break;
+                }
+            }
+        }
+
+        let Some(res_result) = res_result else {
+            return Err("group CLI route produced no owned outcome".to_string());
+        };
         if let Ok((res, is_aborted)) = res_result {
             if let Some(full_content) = res["fullContent"].as_str() {
                 let finish_reason = if is_aborted {

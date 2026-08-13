@@ -120,8 +120,10 @@ NOT YET PASS FOR FEATURE CONSTRUCTION
 
 实施状态（2026-08-13）：`CODE + API36 DEVICE EVIDENCE COMPLETE`。协议/manifest/结果 golden、
 ToolRegistry allowlist、可复现 PRoot/rootfs、许可证与包体记录、API 36 命令探测和整树取消已通过。
-用户实际 VCPToolBox 的提示词微调与 central-loop fixture 无法由当前仓库代替，按用户裁决并入 P2/P3
-真实路由验收；这不再阻塞 P1 的离线 Runtime 施工，但在拿到实际 fixture 前不得宣称 VCP route 可用。
+用户实际 VCPToolBox 的提示词微调仍由用户拥有；central-loop fixture 已在 P2 设备验收中补齐：普通
+`/v1/chat/completions` 会执行显式工具块，而首个 system 中的 `[[VCPToolUse=Forbidden]]` 会在模型前
+被剥离并关闭中央 parser/executor。这不把 manifest 或提示词所有权转交 Mobile，也不证明真实
+Distributed adapter 已完成。
 
 交付：
 
@@ -175,6 +177,12 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 仍为 `foreground_only`，人工 PTY 延后且不影响结构化 P1 完成。
 
 ### P2｜默认本地 Agent 工具循环
+
+实施状态（2026-08-14）：`CODE COMPLETE / API36 FINAL GUARD-AND-RECOVERY RETEST PENDING`。typed route、
+单聊/Group coordinator、SQLite turn ledger、step projection、累计 ToolResult、元字段、River 单文件投影、
+恢复/finalizer 与预算门均已实现；Rust、Vue、Android plugin/JVM 静态与回归门已通过。API 36 已完成真实
+两步 Agent loop、exact-once marker、River truth 和进程重启恢复；产品自动 transport guard 与命令完成后
+断网续轮的最后两项故障注入因设备锁屏暂停，不能用 host/JVM 结果冒充真机完成。
 
 交付：
 

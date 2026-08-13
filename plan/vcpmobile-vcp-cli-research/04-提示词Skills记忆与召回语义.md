@@ -4,6 +4,8 @@
 
 本专项不设计 Mobile 侧 `CliPromptCatalog`、运行态提示词片段、Skills 轻目录注入、`mobile_system_prompt` 改写或 `context_assembler.rs` 新 seam。VCP 体系中，CLI 的主要工具提示词来源就是 manifest 的 `capabilities.invocationCommands[].description/example`；如何放进角色提示词、是否使用 DynamicTools、怎样手工微调，都由用户在 VCPToolBox 侧控制。
 
+P2 在 typed `localLoopback` 网络请求首部加入的 `[[VCPToolUse=Forbidden]]` 不改变这条裁决：它是 VCPToolBox 在转发模型前剥离的请求级执行-owner 标记，用于关闭中央 parser/executor，既不向模型描述 CLI，也不持久化到 Agent prompt 或聊天历史。manifest 内容与用户微调仍只有 VCPToolBox 一个所有者。
+
 Mobile 只拥有四件事：
 
 1. 输出同一份规范 `VCPMobileCLI` manifest；

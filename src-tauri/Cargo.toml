@@ -41,7 +41,7 @@ tokio = { version = "1", default-features = false, features = ["rt-multi-thread"
 futures-util = "0.3"
 url = "2"
 dashmap = "6"
-tokio-util = { version = "0.7", features = ["codec", "io"] }
+tokio-util = { version = "0.7", features = ["codec", "io", "rt"] }
 scraper = "0.19"
 ego-tree = "0.6"
 lru = "0.16.3"

@@ -3,6 +3,12 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotificationStore } from "./notification";
 
+export const DEFAULT_MOBILE_CLI_AGENT_ROUTE = "localLoopback" as const;
+
+export type MobileCliAgentRoute =
+  | typeof DEFAULT_MOBILE_CLI_AGENT_ROUTE
+  | "vcpPlugin";
+
 export interface AppSettings {
   userName: string;
   vcpServerUrl: string;
@@ -28,7 +34,23 @@ export interface AppSettings {
   distributedWsUrl?: string;
   distributedVcpKey?: string;
   distributedDeviceName?: string;
+  mobileCliAgentRoute: MobileCliAgentRoute;
   [key: string]: any;
+}
+
+export function normalizeMobileCliAgentRoute(
+  value: unknown,
+): MobileCliAgentRoute {
+  return value === "vcpPlugin" ? "vcpPlugin" : DEFAULT_MOBILE_CLI_AGENT_ROUTE;
+}
+
+export function normalizeAppSettings(settings: AppSettings): AppSettings {
+  return {
+    ...settings,
+    mobileCliAgentRoute: normalizeMobileCliAgentRoute(
+      settings.mobileCliAgentRoute,
+    ),
+  };
 }
 
 export function diffSettingsPatch(
@@ -62,7 +84,7 @@ export const useSettingsStore = defineStore("settings", () => {
     error.value = null;
     try {
       const fetchedSettings = await invoke<AppSettings>("read_settings");
-      settings.value = fetchedSettings;
+      settings.value = normalizeAppSettings(fetchedSettings);
       const recovery = await invoke<SettingsRecoveryStatus>("get_settings_recovery_status");
       if (recovery.recoveredCorrupt && !recoveryNotified.value) {
         recoveryNotified.value = true;
@@ -87,7 +109,7 @@ export const useSettingsStore = defineStore("settings", () => {
     error.value = null;
     try {
       const updated = await invoke<AppSettings>("update_settings", { updates });
-      settings.value = updated;
+      settings.value = normalizeAppSettings(updated);
 
       notificationStore.addNotification({
         type: "success",

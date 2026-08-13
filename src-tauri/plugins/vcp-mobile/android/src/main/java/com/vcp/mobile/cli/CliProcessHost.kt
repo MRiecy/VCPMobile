@@ -38,6 +38,7 @@ private const val MAX_ROOTFS_ARCHIVE_BYTES = 512L * 1024L * 1024L
 private const val MAX_PROOT_BYTES = 64L * 1024L * 1024L
 private const val MAX_PROOT_LOADER_BYTES = 4L * 1024L * 1024L
 private const val MAX_ARTIFACT_BYTES = 256L * 1024L * 1024L
+private const val MAX_RIVER_CONTEXT_BYTES = 128L * 1024L
 private const val MAX_COMMAND_BYTES = 64 * 1024
 private const val MAX_ACTIVE_PROCESSES = 4
 private const val MAX_REMEMBERED_PROCESSES = 1024
@@ -49,6 +50,8 @@ private const val ORPHAN_GRACE_MS = 250L
 private const val THREAD_JOIN_MS = 2_000L
 private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
 private const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+private const val GUEST_RIVER_CONTEXT_PATH = "/run/vcp-river-context.json"
+private const val RIVER_CONTEXT_FILE_NAME = "river-context.json"
 
 // The command is never interpolated into this host script. It is passed after the
 // handshake path as an argv element and reaches Bash as the argument following -lc.
@@ -70,6 +73,13 @@ class PrepareCliRuntimeArgs {
 }
 
 @InvokeArg
+class RiverContextProjectionArgs {
+    lateinit var hostPath: String
+    var sizeBytes: Long = 0
+    lateinit var sha256: String
+}
+
+@InvokeArg
 class StartCliProcessArgs {
     lateinit var operationId: String
     lateinit var jobId: String
@@ -79,6 +89,7 @@ class StartCliProcessArgs {
     lateinit var rootfsPath: String
     lateinit var cwd: String
     var artifactMaxBytes: Long = 0
+    var riverContextProjection: RiverContextProjectionArgs? = null
 }
 
 @InvokeArg
@@ -126,6 +137,7 @@ private data class PreparedRuntime(
     val workspace: File,
     val skills: File,
     val output: File,
+    val projectionRoot: File,
     val proot: File,
     val prootLoader: File,
     val prootTmpParent: File,
@@ -145,6 +157,7 @@ private data class PrepareResult(
         put("workspacePath", prepared.workspace.absolutePath)
         put("skillsPath", prepared.skills.absolutePath)
         put("outputPath", prepared.output.absolutePath)
+        put("projectionRootPath", prepared.projectionRoot.absolutePath)
         put("prootPath", prepared.proot.absolutePath)
         put("prootLoaderPath", prepared.prootLoader.absolutePath)
     }
@@ -365,34 +378,42 @@ internal fun buildProotArguments(
     workspacePath: String,
     cwd: String,
     command: String,
-): List<String> = listOf(
-    prootPath,
-    "-0",
-    "--kill-on-exit",
-    "--link2symlink",
-    "-r",
-    rootfsPath,
-    "-b",
-    "/dev",
-    "-b",
-    "/proc",
-    "-b",
-    "$workspacePath:/workspace",
-    "-w",
-    validateGuestCwd(cwd),
-    "/usr/bin/env",
-    "-i",
-    "HOME=/root",
-    "USER=root",
-    "LOGNAME=root",
-    "SHELL=/bin/bash",
-    "PATH=$GUEST_PATH",
-    "TMPDIR=/tmp",
-    "TERM=dumb",
-    "/bin/bash",
-    "-lc",
-    command,
-)
+    riverContextHostPath: String? = null,
+): List<String> = buildList {
+    add(prootPath)
+    add("-0")
+    add("--kill-on-exit")
+    add("--link2symlink")
+    add("-r")
+    add(rootfsPath)
+    add("-b")
+    add("/dev")
+    add("-b")
+    add("/proc")
+    add("-b")
+    add("$workspacePath:/workspace")
+    if (riverContextHostPath != null) {
+        add("-b")
+        add("$riverContextHostPath:$GUEST_RIVER_CONTEXT_PATH")
+    }
+    add("-w")
+    add(validateGuestCwd(cwd))
+    add("/usr/bin/env")
+    add("-i")
+    add("HOME=/root")
+    add("USER=root")
+    add("LOGNAME=root")
+    add("SHELL=/bin/bash")
+    add("PATH=$GUEST_PATH")
+    add("TMPDIR=/tmp")
+    add("TERM=dumb")
+    if (riverContextHostPath != null) {
+        add("VCP_RIVER_CONTEXT_FILE=$GUEST_RIVER_CONTEXT_PATH")
+    }
+    add("/bin/bash")
+    add("-lc")
+    add(command)
+}
 
 internal fun buildHostEnvironment(prootTmpPath: String, prootLoaderPath: String): Map<String, String> {
     require(prootTmpPath.startsWith('/') && !prootTmpPath.contains('\u0000')) {
@@ -481,6 +502,112 @@ internal fun verifyNativeExecutable(
     }
     require(candidate.canExecute()) { "native executable is not executable: $libraryName" }
     return candidate
+}
+
+/**
+ * Freezes the one-file River projection immediately before launch. The guest
+ * receives this file only; neither the projection root nor the output root is
+ * exposed. PRoot does not provide a trustworthy read-only bind, so the host
+ * never reads this projection again after the process starts.
+ */
+internal fun verifyRiverContextProjection(
+    projectionRoot: File,
+    expectedDirectoryName: String,
+    projection: RiverContextProjectionArgs,
+): File {
+    require(expectedDirectoryName.length == 64 && expectedDirectoryName.all { it in '0'..'9' || it in 'a'..'f' }) {
+        "river projection directory identity is invalid"
+    }
+    val expectedHash = validateRiverContextProjectionFields(projection)
+
+    val rootPath = projectionRoot.toPath()
+    val candidatePath = File(projection.hostPath).toPath()
+    require(rootPath.isAbsolute && rootPath == rootPath.normalize()) {
+        "river projection root is invalid"
+    }
+    require(candidatePath.isAbsolute && candidatePath == candidatePath.normalize()) {
+        "riverContextProjection.hostPath must be a normalized absolute path"
+    }
+    val parentPath = candidatePath.parent ?: error("river projection has no parent")
+    require(candidatePath.fileName.toString() == RIVER_CONTEXT_FILE_NAME) {
+        "river projection must use the fixed file name"
+    }
+    require(parentPath.fileName?.toString() == expectedDirectoryName && parentPath.parent == rootPath) {
+        "river projection is outside its prepared attempt directory"
+    }
+
+    val rootAttributes = java.nio.file.Files.readAttributes(
+        rootPath,
+        BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    val parentAttributes = java.nio.file.Files.readAttributes(
+        parentPath,
+        BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    val sourceAttributes = java.nio.file.Files.readAttributes(
+        candidatePath,
+        BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    require(rootAttributes.isDirectory && !rootAttributes.isSymbolicLink) {
+        "river projection root must be a real directory"
+    }
+    require(parentAttributes.isDirectory && !parentAttributes.isSymbolicLink) {
+        "river projection parent must be a real directory"
+    }
+    require(sourceAttributes.isRegularFile && !sourceAttributes.isSymbolicLink) {
+        "river projection must be a real regular file"
+    }
+    require(sourceAttributes.size() == projection.sizeBytes) {
+        "river projection size does not match the frozen request"
+    }
+
+    val canonicalRoot = projectionRoot.canonicalFile
+    val canonicalParent = parentPath.toFile().canonicalFile
+    val canonicalSource = candidatePath.toFile().canonicalFile
+    require(canonicalParent.parentFile == canonicalRoot && canonicalParent.name == expectedDirectoryName) {
+        "river projection parent escaped the prepared root"
+    }
+    require(canonicalSource.parentFile == canonicalParent && canonicalSource.name == RIVER_CONTEXT_FILE_NAME) {
+        "river projection escaped its prepared attempt directory"
+    }
+    val (actualBytes, actualHash) = sha256File(canonicalSource, MAX_RIVER_CONTEXT_BYTES)
+    require(actualBytes == projection.sizeBytes && actualHash == expectedHash) {
+        "river projection SHA-256 does not match the frozen request"
+    }
+
+    val finalParentAttributes = java.nio.file.Files.readAttributes(
+        parentPath,
+        BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    val finalSourceAttributes = java.nio.file.Files.readAttributes(
+        candidatePath,
+        BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    require(finalParentAttributes.isDirectory && !finalParentAttributes.isSymbolicLink) {
+        "river projection parent changed during verification"
+    }
+    require(
+        finalSourceAttributes.isRegularFile &&
+            !finalSourceAttributes.isSymbolicLink &&
+            finalSourceAttributes.size() == projection.sizeBytes,
+    ) { "river projection changed during verification" }
+    return canonicalSource
+}
+
+private fun validateRiverContextProjectionFields(projection: RiverContextProjectionArgs): String {
+    require(
+        projection.hostPath.toByteArray(StandardCharsets.UTF_8).size in 1..4096 &&
+            !projection.hostPath.contains('\u0000'),
+    ) { "riverContextProjection.hostPath is invalid" }
+    require(projection.sizeBytes in 1..MAX_RIVER_CONTEXT_BYTES) {
+        "riverContextProjection.sizeBytes is outside the supported range"
+    }
+    return validateSha256(projection.sha256, "riverContextProjection.sha256")
 }
 
 /** Copies to a sibling staging file and exposes the new bytes with one atomic rename. */
@@ -580,6 +707,7 @@ private class CliRuntimeInstaller(private val context: Context) {
 
         val rootfsParent = File(privateRoot, "rootfs").ensureDirectory()
         val output = File(privateRoot, "output").ensureDirectory()
+        val projectionRoot = File(privateRoot, "projections").ensureDirectory(mode = 0x1c0)
         val prootTmpParent = File(privateRoot, "proot-tmp").ensureDirectory(mode = 0x1c0)
         val handshakeParent = File(privateRoot, "handshakes").ensureDirectory(mode = 0x1c0)
         val workspace = File(context.filesDir, "vcp-cli/workspace").ensureDirectory()
@@ -593,6 +721,7 @@ private class CliRuntimeInstaller(private val context: Context) {
             workspace = workspace.canonicalFile,
             skills = skills.canonicalFile,
             output = output.canonicalFile,
+            projectionRoot = projectionRoot.canonicalFile,
             proot = proot,
             prootLoader = prootLoader,
             prootTmpParent = prootTmpParent.canonicalFile,
@@ -632,9 +761,10 @@ private fun validateIdentifier(value: String, field: String) {
     require(!value.contains('\u0000')) { "$field contains NUL" }
 }
 
-private fun fingerprint(args: StartCliProcessArgs): String {
+internal fun fingerprint(args: StartCliProcessArgs): String {
     val digest = MessageDigest.getInstance("SHA-256")
-    listOf(
+    val projection = args.riverContextProjection
+    val fields = mutableListOf(
         args.jobId,
         args.attemptId,
         args.runtimeGeneration.toString(),
@@ -642,7 +772,16 @@ private fun fingerprint(args: StartCliProcessArgs): String {
         args.rootfsPath,
         args.cwd,
         args.artifactMaxBytes.toString(),
-    ).forEach { value ->
+    )
+    if (projection == null) {
+        fields.add("river:none")
+    } else {
+        fields.add("river:present")
+        fields.add(projection.hostPath)
+        fields.add(projection.sizeBytes.toString())
+        fields.add(projection.sha256.lowercase())
+    }
+    fields.forEach { value ->
         val bytes = value.toByteArray(StandardCharsets.UTF_8)
         digest.update(byteArrayOf(
             (bytes.size ushr 24).toByte(),
@@ -784,6 +923,8 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             rootfs != prepared.rootfsParent
         ) { "rootfsPath is outside the prepared private root" }
 
+        args.riverContextProjection?.let(::validateRiverContextProjectionFields)
+
         val key = ProcessKey(args.jobId, args.attemptId, args.runtimeGeneration)
         val requestFingerprint = fingerprint(args)
         handles[key]?.let { existing ->
@@ -799,6 +940,13 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
 
         val stem = safeFileStem(key)
+        val riverContext = args.riverContextProjection?.let { projection ->
+            verifyRiverContextProjection(
+                projectionRoot = prepared.projectionRoot,
+                expectedDirectoryName = stem,
+                projection = projection,
+            )
+        }
         val stdoutFile = File(prepared.output, "$stem.stdout")
         val stderrFile = File(prepared.output, "$stem.stderr")
         val handshakeFile = File(prepared.handshakeParent, "$stem.pid")
@@ -823,6 +971,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 workspacePath = prepared.workspace.absolutePath,
                 cwd = cwd,
                 command = args.command,
+                riverContextHostPath = riverContext?.absolutePath,
             )
             val processBuilder = ProcessBuilder(buildHostCommand(handshakeFile.absolutePath, prootArguments))
             processBuilder.redirectErrorStream(false)

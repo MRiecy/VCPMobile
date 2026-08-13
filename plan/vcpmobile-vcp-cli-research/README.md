@@ -1,12 +1,14 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P1-CODE-AND-API36-EVIDENCE-COMPLETE / VCP-DEPLOYMENT-FIXTURE-DEFERRED / P2-NEXT`
+> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-NEXT`
 >
 > 研究日期：2026-08-13
 >
 > 当前范围：P0 已冻结工具协议、显式工具授权、Android Bash 资产与 manifest 交付；P1 已实现
 > `MobileCliRuntime`、Android ProcessHost、人工前台 UI、Skills action 与持久 Job/输出边界，并完成 API 36
-> 真机验收。用户实际 VCPToolBox 部署、Agent 本地多轮 loop 与后台能力分别留到 P2/P3/P5。
+> 真机验收；P2 已接入单聊/Group 本地多轮 coordinator、持久恢复、VCP 元字段和 typed route。当前只剩
+> 自动 transport guard 与断网续轮的 API 36 最终复验；真实 Distributed adapter、完整 recall 与后台能力
+> 分别属于 P3/P4/P5。
 
 ## P0 实施快照（2026-08-13）
 
@@ -38,8 +40,33 @@
   timeout、`setsid`、`nohup` 的父子 PID 全部消失且终态分别为 `cancelled/timed_out`；强制停止 Debug App
   后旧 Job 在 generation 前移时记 `interrupted`，marker 仍为一行，未重跑。
 
-仍未完成：真实 VCPToolBox 部署 fixture、Agent 本地多轮 loop、真实 Distributed CLI adapter、recall modes、
-后台前台服务与人工 PTY；它们分别属于 P2–P5。P1 的准确能力等级仍是 `foreground_only`。
+## P2 实施快照（2026-08-14）
+
+- `mobileCliAgentRoute` 是闭合的 `localLoopback | vcpPlugin` wire，缺失字段默认本地；一次 turn 开始后冻结，
+  旧 `enableVcpToolInjection` 不再反推 CLI route。设置页切换远端只做只读 preflight，不替用户开启
+  Distributed、写凭据或授权工具。
+- 单聊与 Group 在同一可见 assistant skeleton、同一 `ActiveRequestLease` 和唯一 finalizer 内运行多 step
+  coordinator。每步使用独立 transport ID，UI 以 `turnAttempt/stepIndex/projectionReset` 拒绝旧帧，
+  中间 Aurora 不发布假终态。
+- SQLite local-turn ledger 在执行前原子 claim 完整闭合 batch，按 stable operation ID 复用 Runtime 幂等；
+  工具结果先持久化再续模型。断网/进程回调含糊时保留 `continuation_pending`，恢复入口早于旧 helper，
+  已完成命令不重跑。
+- `ink=mark_history`、`river=text/last:N`、`archery=true/no_reply` 已有有界语义；`river` 以单 attempt
+  JSON snapshot 暴露到 `/run/vcp-river-context.json`，终态清理。`river=full/semantic:N` 与 `vref:N`
+  仍明确返回 `unsupported_mode`。
+- 模型单 step 上限 512 KiB、规范 tool payload 256 KiB、工具调用最多 8 次、turn 最长 30 分钟；越界
+  以 typed 终态结束，不执行截断后的调用。累计 ToolResult 以稳定 parser blocks 跨 step 投影，最终历史
+  与恢复 finalizer byte-stable、exact-once。
+- 用户实际 VCPToolBox 已证明普通 `/v1/chat/completions` 会抢执行显式工具块；首个 system 中的
+  `[[VCPToolUse=Forbidden]]` 会在模型前被服务端剥离并关闭中央 loop。P2 因而只在 typed
+  `localLoopback` 的临时 transport 投影自动加入该标记，`vcpPlugin` 不加入；manifest/Agent prompt
+  仍完全由 VCPToolBox 和用户管理。
+- API 36 已完成 River 读取/写攻击 truth、projection GC、进程重启恢复和一次真实 Agent 两步 loop：
+  ToolResult 可见、最终历史 marker 存在、命令 marker 恰为一行、中央 VCP 摘要不存在。该轮使用部署端
+  sentinel fixture；当前产品自动注入 guard 的重装复验与“命令完成后断网再恢复”故障注入仍待手机解锁。
+
+仍未完成：P2 上述两项最终设备复验、P3 真实 Distributed CLI adapter、P4 完整 recall、P5 后台前台
+服务与人工 PTY。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称 Doze 后台长稳。
 
 ## 结论
 
@@ -51,7 +78,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
                   Agent route
              ┌───────────┴───────────┐
              │                       │
- local_loopback（默认）       vcp_plugin（显式开启）
+ localLoopback（默认）        vcpPlugin（显式开启）
  Mobile 本地工具循环          VCPToolBox 工具循环
  进程内直调 Runtime           既有 Distributed WS
              │                       │
@@ -62,7 +89,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 ## 已冻结决策
 
-1. **默认路由是 `local_loopback`**。它不依赖 Distributed WebSocket，飞行模式下也能运行不需要网络的本地命令。
+1. **默认路由是 `localLoopback`**。它不依赖 Distributed WebSocket，飞行模式下也能运行不需要网络的本地命令。
 2. **分布式工具采用“显式扫描 + 显式授权”，默认全部关闭**。Registry 扫描得到完整工具清单，UI 对每个工具单独展示和授权；后端只持久化 `enabled_tools` allowlist，未在 allowlist 的工具一律不发布、不执行。干净安装、旧配置升级和新扫描出的工具都保持关闭。
 3. **一个工具身份、一个 manifest、一个 Runtime**。本地和远端只替换 transport/turn adapter，不复制 shell、job、工具说明或结果状态机。
 4. **manifest 是主要提示词源**。`invocationCommands[].description/example` 完整说明 Shell、参数、限制和示例，由 VCPToolBox 提取并允许用户手动微调；Mobile 不另建 `CliPromptCatalog`，也不改写 Agent 提示词。
@@ -110,9 +137,10 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 允许的准确表述是：
 
-> VCPMobile CLI 的 P0 协议/授权/可重建 Android Bash 资产与 P1 人工前台 Runtime 已完成；用户可以在
-> CLI 页面运行、查询、取消结构化 Bash Job，并在无网时读取受控 Skill。它尚未接入 Agent 本地多轮
-> loop、真实 VCP 插件或 Android 后台前台服务，因此只能称为人工前台 CLI，不是 Agent CLI 已完成。
+> VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime 与 P2 本地 Agent 多轮 loop 代码已完成；单聊和 Group
+> 共用可恢复、exact-once 的本地 coordinator，并支持首发 VCP 元字段。真实 VCP 插件、完整 recall 和
+> Android 后台前台服务尚未完成；P2 自动 transport guard 与断网恢复仍需最后一次 API 36 设备复验，
+> 因此当前不能把整个 VCP CLI 专项标记为完成。
 
 不得表述为“Agent CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
 或“iOS 已支持本地 Linux”。
