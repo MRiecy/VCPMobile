@@ -54,6 +54,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
     testImplementation("org.robolectric:robolectric:4.13")
     // Robolectric 默认会在测试运行期动态拉取 android-all；显式声明可让 Gradle 预解析并缓存，避免运行期 socket 失败。
     testImplementation("org.robolectric:android-all:9-robolectric-4913185-2")

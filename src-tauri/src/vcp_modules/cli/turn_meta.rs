@@ -4,18 +4,25 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::vcp_modules::chat::context_sanitizer::strip_thought_chains;
+use crate::vcp_modules::file_manager::AttachmentCasFile;
 use crate::vcp_modules::sync_logger::redact_sync_diagnostic;
 
 use super::protocol::{
     ValidatedVcpCliRequest, VcpArcheryMode, VcpMetaCapabilities, VcpMetaFields, VcpRiverMode,
 };
 use super::result::VcpCliResultEnvelope;
-use super::turn_types::{MAX_MARKED_HISTORY_BYTES, MAX_RIVER_MESSAGES, MAX_RIVER_PROJECTION_BYTES};
+use super::turn_types::{
+    MAX_MARKED_HISTORY_BYTES, MAX_RIVER_ARTIFACTS, MAX_RIVER_ARTIFACT_BYTES,
+    MAX_RIVER_ARTIFACT_TOTAL_BYTES, MAX_RIVER_ATTACHMENT_DESCRIPTORS, MAX_RIVER_MESSAGES,
+    MAX_RIVER_PROJECTION_BYTES,
+};
 
-const RIVER_SCHEMA: &str = "vcp.mobile.river-context.v1";
+const ATTEMPT_PROJECTION_SCHEMA: &str = "vcp.mobile.attempt-projection.v1";
 const TRUNCATION_MARKER: &str = "\n[context truncated]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +37,18 @@ pub struct RiverProjection {
     pub canonical_json: String,
     pub sha256: String,
     pub size_bytes: u64,
+    pub artifact_grants: Vec<ArtifactGrantV1>,
+}
+
+/// Host-only source grant. `source_path` is deliberately absent from the serialized bundle and
+/// from every public Tauri command. Runtime copies this source into an attempt-owned snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactGrantV1 {
+    pub source_path: PathBuf,
+    pub file_name: String,
+    pub guest_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,21 +59,66 @@ pub struct LocalMetaPlan {
 }
 
 #[derive(Serialize)]
-struct RiverDocument {
+struct AttemptProjectionBundleV1 {
     schema: &'static str,
+    river: RiverDocumentV1,
+    artifacts: Vec<ArtifactDescriptorV1>,
+    omissions: Vec<ProjectionOmissionV1>,
+}
+
+#[derive(Serialize)]
+struct RiverDocumentV1 {
+    mode: String,
     messages: Vec<RiverMessage>,
     truncated: bool,
 }
 
 #[derive(Clone, Serialize)]
 struct RiverMessage {
+    source_index: usize,
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    artifact_ids: Vec<String>,
+}
+
+#[derive(Clone)]
+struct ProjectedRiverMessage {
+    message: RiverMessage,
+    attachments: Vec<LocalAttachmentDescriptor>,
+}
+
+#[derive(Clone)]
+struct LocalAttachmentDescriptor {
+    name: String,
+    declared_size_bytes: u64,
+    sha256: Option<String>,
+    availability: String,
+}
+
+#[derive(Serialize)]
+struct ArtifactDescriptorV1 {
+    id: String,
+    name: String,
+    mime_type: String,
+    size_bytes: u64,
+    sha256: String,
+    guest_path: String,
+    source_unreachable: bool,
+    non_writeback: bool,
+}
+
+#[derive(Serialize)]
+struct ProjectionOmissionV1 {
+    message_index: usize,
+    attachment_name: String,
+    reason: &'static str,
 }
 
 pub fn plan_local_meta(
     request: &ValidatedVcpCliRequest,
     messages: &[Value],
+    resolved_artifacts: &HashMap<String, AttachmentCasFile>,
 ) -> Result<LocalMetaPlan, String> {
     request
         .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
@@ -63,7 +127,7 @@ pub fn plan_local_meta(
     let river_projection = request
         .meta
         .river
-        .map(|mode| build_river_projection(messages, mode))
+        .map(|mode| build_river_projection_with_artifacts(messages, mode, resolved_artifacts))
         .transpose()?;
     let continuation = match request.meta.archery {
         Some(VcpArcheryMode::Parallel) => LocalContinuationPolicy::Parallel,
@@ -94,10 +158,19 @@ pub fn build_river_projection(
     messages: &[Value],
     mode: VcpRiverMode,
 ) -> Result<RiverProjection, String> {
+    build_river_projection_with_artifacts(messages, mode, &HashMap::new())
+}
+
+fn build_river_projection_with_artifacts(
+    messages: &[Value],
+    mode: VcpRiverMode,
+    resolved_artifacts: &HashMap<String, AttachmentCasFile>,
+) -> Result<RiverProjection, String> {
     let selected_limit = match mode {
         VcpRiverMode::Text => MAX_RIVER_MESSAGES,
         VcpRiverMode::Last(limit) => usize::from(limit).min(MAX_RIVER_MESSAGES),
-        VcpRiverMode::Full | VcpRiverMode::Semantic(_) => {
+        VcpRiverMode::Full => MAX_RIVER_MESSAGES,
+        VcpRiverMode::Semantic(_) => {
             return Err(format!(
                 "unsupported_mode: river={} is not available on localLoopback",
                 mode.as_wire_value()
@@ -105,25 +178,25 @@ pub fn build_river_projection(
         }
     };
 
+    let include_artifacts = mode == VcpRiverMode::Full;
     let mut projected = messages
         .iter()
+        .enumerate()
         .rev()
-        .filter_map(project_river_message)
+        .filter_map(|(index, value)| project_river_message(index, value, include_artifacts))
         .take(selected_limit)
         .collect::<Vec<_>>();
     projected.reverse();
 
     let source_count = messages
         .iter()
-        .filter(|value| project_river_message(value).is_some())
+        .enumerate()
+        .filter(|(index, value)| project_river_message(*index, value, include_artifacts).is_some())
         .count();
     let mut truncated = source_count > projected.len();
     loop {
-        let document = RiverDocument {
-            schema: RIVER_SCHEMA,
-            messages: projected.clone(),
-            truncated,
-        };
+        let (document, artifact_grants) =
+            assemble_projection_bundle(&projected, mode, truncated, resolved_artifacts);
         let bytes = serde_json::to_vec(&document)
             .map_err(|error| format!("cannot serialize river projection: {error}"))?;
         if bytes.len() <= MAX_RIVER_PROJECTION_BYTES {
@@ -134,6 +207,7 @@ pub fn build_river_projection(
                 size_bytes: canonical_json.len() as u64,
                 canonical_json,
                 sha256,
+                artifact_grants,
             });
         }
 
@@ -146,30 +220,297 @@ pub fn build_river_projection(
             return Err("river projection overhead exceeds its hard limit".to_string());
         };
         let target = message
+            .message
             .content
             .len()
             .saturating_sub(bytes.len() - MAX_RIVER_PROJECTION_BYTES + 64);
         if target == 0 {
-            message.content.clear();
+            if message.message.content.is_empty() {
+                projected.remove(0);
+            } else {
+                message.message.content.clear();
+            }
         } else {
-            message.content = truncate_utf8(&message.content, target);
-            message.content.push_str(TRUNCATION_MARKER);
+            message.message.content = truncate_utf8(&message.message.content, target);
+            message.message.content.push_str(TRUNCATION_MARKER);
         }
     }
 }
 
-fn project_river_message(value: &Value) -> Option<RiverMessage> {
+pub fn river_full_candidate_hashes(messages: &[Value]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    selected_full_messages(messages)
+        .into_iter()
+        .flat_map(|message| message.attachments)
+        .take(MAX_RIVER_ATTACHMENT_DESCRIPTORS)
+        .filter(|attachment| matches!(attachment.availability.as_str(), "ready" | "done"))
+        .filter_map(|attachment| attachment.sha256)
+        .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash))
+        .filter(|hash| seen.insert(hash.clone()))
+        .collect()
+}
+
+pub fn selected_river_full_artifact_hashes(
+    messages: &[Value],
+    resolved_artifacts: &HashMap<String, AttachmentCasFile>,
+) -> Vec<String> {
+    let mut selected = Vec::new();
+    let mut selected_set = HashSet::new();
+    let mut total_bytes = 0_u64;
+    for attachment in selected_full_messages(messages)
+        .into_iter()
+        .flat_map(|message| message.attachments)
+        .take(MAX_RIVER_ATTACHMENT_DESCRIPTORS)
+    {
+        if !matches!(attachment.availability.as_str(), "ready" | "done") {
+            continue;
+        }
+        let Some(hash) = attachment.sha256.as_ref() else {
+            continue;
+        };
+        let Some(record) = resolved_artifacts.get(hash) else {
+            continue;
+        };
+        if record.size_bytes != attachment.declared_size_bytes
+            || record.size_bytes > MAX_RIVER_ARTIFACT_BYTES
+            || selected_set.contains(hash)
+            || selected.len() >= MAX_RIVER_ARTIFACTS
+            || total_bytes.saturating_add(record.size_bytes) > MAX_RIVER_ARTIFACT_TOTAL_BYTES
+        {
+            continue;
+        }
+        total_bytes = total_bytes.saturating_add(record.size_bytes);
+        selected_set.insert(hash.clone());
+        selected.push(hash.clone());
+    }
+    selected
+}
+
+fn selected_full_messages(messages: &[Value]) -> Vec<ProjectedRiverMessage> {
+    let mut projected = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, value)| project_river_message(index, value, true))
+        .take(MAX_RIVER_MESSAGES)
+        .collect::<Vec<_>>();
+    projected.reverse();
+    projected
+}
+
+fn project_river_message(
+    source_index: usize,
+    value: &Value,
+    include_artifacts: bool,
+) -> Option<ProjectedRiverMessage> {
     let object = value.as_object()?;
     let role = object.get("role")?.as_str()?.trim();
     if !matches!(role, "system" | "user" | "assistant" | "tool") {
         return None;
     }
-    let content = pure_text_content(object.get("content")?)?;
-    let content = redact_river_text(&strip_thought_chains(&content));
-    (!content.trim().is_empty()).then(|| RiverMessage {
-        role: role.to_string(),
-        content,
+    let content = object
+        .get("content")
+        .and_then(pure_text_content)
+        .map(|content| redact_river_text(&strip_thought_chains(&content)))
+        .unwrap_or_default();
+    let attachments = if include_artifacts {
+        local_attachment_descriptors(object.get("__vcpLocalAttachments"))
+    } else {
+        Vec::new()
+    };
+    (!content.trim().is_empty() || !attachments.is_empty()).then(|| ProjectedRiverMessage {
+        message: RiverMessage {
+            source_index,
+            role: role.to_string(),
+            content,
+            artifact_ids: Vec::new(),
+        },
+        attachments,
     })
+}
+
+fn local_attachment_descriptors(value: Option<&Value>) -> Vec<LocalAttachmentDescriptor> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let object = value.as_object()?;
+            Some(LocalAttachmentDescriptor {
+                name: bounded_attachment_name(
+                    object.get("name").and_then(Value::as_str).unwrap_or("附件"),
+                ),
+                declared_size_bytes: object
+                    .get("size_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                sha256: object
+                    .get("sha256")
+                    .and_then(Value::as_str)
+                    .map(str::to_ascii_lowercase),
+                availability: object
+                    .get("availability")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_ascii_lowercase(),
+            })
+        })
+        .collect()
+}
+
+fn assemble_projection_bundle(
+    projected: &[ProjectedRiverMessage],
+    mode: VcpRiverMode,
+    truncated: bool,
+    resolved_artifacts: &HashMap<String, AttachmentCasFile>,
+) -> (AttemptProjectionBundleV1, Vec<ArtifactGrantV1>) {
+    let mut messages = projected
+        .iter()
+        .map(|projected| projected.message.clone())
+        .collect::<Vec<_>>();
+    let mut artifacts = Vec::new();
+    let mut grants = Vec::new();
+    let mut omissions = Vec::new();
+    let mut included = HashMap::<String, String>::new();
+    let mut total_bytes = 0_u64;
+    let mut descriptor_count = 0_usize;
+    let mut descriptor_limit_reported = false;
+
+    if mode == VcpRiverMode::Full {
+        for (projected_index, projected_message) in projected.iter().enumerate() {
+            for attachment in &projected_message.attachments {
+                if descriptor_count >= MAX_RIVER_ATTACHMENT_DESCRIPTORS {
+                    if !descriptor_limit_reported {
+                        omissions.push(ProjectionOmissionV1 {
+                            message_index: projected_message.message.source_index,
+                            attachment_name: "additional attachments".to_string(),
+                            reason: "attachment_descriptor_limit",
+                        });
+                        descriptor_limit_reported = true;
+                    }
+                    continue;
+                }
+                descriptor_count += 1;
+                let omission = |reason| ProjectionOmissionV1 {
+                    message_index: projected_message.message.source_index,
+                    attachment_name: attachment.name.clone(),
+                    reason,
+                };
+                if !matches!(attachment.availability.as_str(), "ready" | "done") {
+                    omissions.push(omission("source_unavailable"));
+                    continue;
+                }
+                let Some(hash) = attachment
+                    .sha256
+                    .as_ref()
+                    .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash))
+                else {
+                    omissions.push(omission("missing_integrity_metadata"));
+                    continue;
+                };
+                if let Some(id) = included.get(hash) {
+                    messages[projected_index].artifact_ids.push(id.clone());
+                    continue;
+                }
+                let Some(record) = resolved_artifacts.get(hash) else {
+                    omissions.push(omission("local_cas_unavailable"));
+                    continue;
+                };
+                if record.sha256 != *hash || record.size_bytes != attachment.declared_size_bytes {
+                    omissions.push(omission("integrity_metadata_mismatch"));
+                    continue;
+                }
+                if record.size_bytes > MAX_RIVER_ARTIFACT_BYTES {
+                    omissions.push(omission("artifact_too_large"));
+                    continue;
+                }
+                if artifacts.len() >= MAX_RIVER_ARTIFACTS {
+                    omissions.push(omission("artifact_count_limit"));
+                    continue;
+                }
+                if total_bytes.saturating_add(record.size_bytes) > MAX_RIVER_ARTIFACT_TOTAL_BYTES {
+                    omissions.push(omission("artifact_total_limit"));
+                    continue;
+                }
+
+                let ordinal = artifacts.len();
+                let id = format!("river-artifact-{ordinal:02}-{}", &hash[..12]);
+                let extension = safe_artifact_extension(&record.mime_type);
+                let file_name = format!("{id}.{extension}");
+                let guest_path = format!("/run/{file_name}");
+                total_bytes = total_bytes.saturating_add(record.size_bytes);
+                included.insert(hash.clone(), id.clone());
+                messages[projected_index].artifact_ids.push(id.clone());
+                artifacts.push(ArtifactDescriptorV1 {
+                    id,
+                    name: attachment.name.clone(),
+                    mime_type: record.mime_type.clone(),
+                    size_bytes: record.size_bytes,
+                    sha256: hash.clone(),
+                    guest_path: guest_path.clone(),
+                    source_unreachable: true,
+                    non_writeback: true,
+                });
+                grants.push(ArtifactGrantV1 {
+                    source_path: record.path.clone(),
+                    file_name,
+                    guest_path,
+                    size_bytes: record.size_bytes,
+                    sha256: hash.clone(),
+                });
+            }
+        }
+    }
+
+    (
+        AttemptProjectionBundleV1 {
+            schema: ATTEMPT_PROJECTION_SCHEMA,
+            river: RiverDocumentV1 {
+                mode: mode.as_wire_value(),
+                messages,
+                truncated,
+            },
+            artifacts,
+            omissions,
+        },
+        grants,
+    )
+}
+
+fn bounded_attachment_name(value: &str) -> String {
+    let basename = value.rsplit(['/', '\\']).next().unwrap_or_default();
+    let filtered = basename
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let trimmed = filtered.trim();
+    if trimmed.is_empty() {
+        "附件".to_string()
+    } else {
+        truncate_utf8(trimmed, 256)
+    }
+}
+
+fn safe_artifact_extension(mime: &str) -> &'static str {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/heic" | "image/heif" => "heic",
+        "image/avif" => "avif",
+        "audio/mpeg" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/ogg" => "ogg",
+        "audio/flac" => "flac",
+        "audio/aac" => "aac",
+        "video/mp4" => "mp4",
+        "video/webm" => "webm",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        _ => "bin",
+    }
 }
 
 fn pure_text_content(value: &Value) -> Option<String> {
@@ -284,6 +625,8 @@ pub fn meta_fields_digest(meta: &VcpMetaFields) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use serde_json::json;
 
     use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
@@ -343,6 +686,151 @@ mod tests {
         assert!(projection.canonical_json.contains("\"truncated\":true"));
         assert!(projection.canonical_json.contains("69:"));
         assert!(!projection.canonical_json.contains("0:"));
+    }
+
+    #[test]
+    fn river_full_serializes_only_attempt_descriptors_and_explicit_omissions() {
+        let good_hash = "a".repeat(64);
+        let oversized_hash = "b".repeat(64);
+        let missing_hash = "c".repeat(64);
+        let unavailable_hash = "d".repeat(64);
+        let messages = vec![json!({
+            "role": "user",
+            "content": [{"type":"text", "text":"inspect the attachments"}],
+            "__vcpLocalAttachments": [
+                {"name":"/private/photo.png", "mime":"image/png", "size_bytes":5, "sha256":good_hash, "availability":"ready"},
+                {"name":"duplicate.png", "mime":"image/png", "size_bytes":5, "sha256":good_hash, "availability":"done"},
+                {"name":"large.bin", "mime":"application/octet-stream", "size_bytes":MAX_RIVER_ARTIFACT_BYTES + 1, "sha256":oversized_hash, "availability":"ready"},
+                {"name":"missing.bin", "mime":"application/octet-stream", "size_bytes":3, "sha256":missing_hash, "availability":"ready"},
+                {"name":"syncing.bin", "mime":"application/octet-stream", "size_bytes":3, "sha256":unavailable_hash, "availability":"syncing"}
+            ]
+        })];
+        let resolved = HashMap::from([
+            (
+                good_hash.clone(),
+                AttachmentCasFile {
+                    path: PathBuf::from("/canonical/private/attachment.png"),
+                    mime_type: "image/png".to_string(),
+                    size_bytes: 5,
+                    sha256: good_hash.clone(),
+                },
+            ),
+            (
+                oversized_hash.clone(),
+                AttachmentCasFile {
+                    path: PathBuf::from("/canonical/private/large.bin"),
+                    mime_type: "application/octet-stream".to_string(),
+                    size_bytes: MAX_RIVER_ARTIFACT_BYTES + 1,
+                    sha256: oversized_hash.clone(),
+                },
+            ),
+        ]);
+
+        let projection =
+            build_river_projection_with_artifacts(&messages, VcpRiverMode::Full, &resolved)
+                .expect("build river full projection");
+        assert_eq!(projection.artifact_grants.len(), 1);
+        assert_eq!(
+            projection.artifact_grants[0].source_path,
+            PathBuf::from("/canonical/private/attachment.png")
+        );
+        assert!(projection
+            .canonical_json
+            .contains("vcp.mobile.attempt-projection.v1"));
+        assert!(projection
+            .canonical_json
+            .contains("/run/river-artifact-00-"));
+        assert!(projection
+            .canonical_json
+            .contains("\"source_unreachable\":true"));
+        assert!(projection.canonical_json.contains("\"non_writeback\":true"));
+        assert!(projection.canonical_json.contains("artifact_too_large"));
+        assert!(projection.canonical_json.contains("local_cas_unavailable"));
+        assert!(projection.canonical_json.contains("source_unavailable"));
+        assert!(!projection.canonical_json.contains("/canonical/private"));
+        assert!(!projection.canonical_json.contains("/private/photo.png"));
+
+        assert_eq!(
+            river_full_candidate_hashes(&messages),
+            vec![good_hash.clone(), oversized_hash.clone(), missing_hash]
+        );
+        assert_eq!(
+            selected_river_full_artifact_hashes(&messages, &resolved),
+            vec![good_hash]
+        );
+    }
+
+    #[test]
+    fn river_full_count_and_total_budgets_are_visible_without_host_paths() {
+        let mut descriptors = Vec::new();
+        let mut resolved = HashMap::new();
+        for index in 0..17_u8 {
+            let hash = format!("{:064x}", index + 1);
+            descriptors.push(json!({
+                "name": format!("item-{index}.bin"),
+                "mime": "application/octet-stream",
+                "size_bytes": 1,
+                "sha256": hash,
+                "availability": "ready"
+            }));
+            resolved.insert(
+                hash.clone(),
+                AttachmentCasFile {
+                    path: PathBuf::from(format!("/host/cas/{hash}.bin")),
+                    mime_type: "application/octet-stream".to_string(),
+                    size_bytes: 1,
+                    sha256: hash,
+                },
+            );
+        }
+        let projection = build_river_projection_with_artifacts(
+            &[json!({
+                "role":"user",
+                "content":"count budget",
+                "__vcpLocalAttachments": descriptors
+            })],
+            VcpRiverMode::Full,
+            &resolved,
+        )
+        .expect("count-bounded full projection");
+        assert_eq!(projection.artifact_grants.len(), MAX_RIVER_ARTIFACTS);
+        assert!(projection.canonical_json.contains("artifact_count_limit"));
+        assert!(!projection.canonical_json.contains("/host/cas"));
+
+        let mut total_descriptors = Vec::new();
+        let mut total_resolved = HashMap::new();
+        for index in 0..5_u8 {
+            let hash = format!("{:064x}", index + 32);
+            total_descriptors.push(json!({
+                "name": format!("large-{index}.bin"),
+                "mime": "application/octet-stream",
+                "size_bytes": MAX_RIVER_ARTIFACT_BYTES,
+                "sha256": hash,
+                "availability": "ready"
+            }));
+            total_resolved.insert(
+                hash.clone(),
+                AttachmentCasFile {
+                    path: PathBuf::from(format!("/host/cas/{hash}.bin")),
+                    mime_type: "application/octet-stream".to_string(),
+                    size_bytes: MAX_RIVER_ARTIFACT_BYTES,
+                    sha256: hash,
+                },
+            );
+        }
+        let projection = build_river_projection_with_artifacts(
+            &[json!({
+                "role":"user",
+                "content":"total budget",
+                "__vcpLocalAttachments": total_descriptors
+            })],
+            VcpRiverMode::Full,
+            &total_resolved,
+        )
+        .expect("total-bounded full projection");
+        assert_eq!(projection.artifact_grants.len(), 4);
+        assert!(projection.canonical_json.contains("artifact_total_limit"));
+        assert!(!projection.canonical_json.contains("/host/cas"));
     }
 
     #[test]

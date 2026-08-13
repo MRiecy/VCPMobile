@@ -1,5 +1,6 @@
 package com.vcp.mobile.cli
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -12,6 +13,33 @@ import java.nio.file.Files
 import java.security.MessageDigest
 
 class CliProcessHostTest {
+    @Test
+    fun invokeArgsDecodeNestedRiverArtifactArray() {
+        val hash = "a".repeat(64)
+        val args = ObjectMapper().readValue(
+            """{
+                "operationId":"op","jobId":"job","attemptId":"attempt",
+                "runtimeGeneration":1,"command":"true","rootfsPath":"/rootfs",
+                "cwd":"/workspace","artifactMaxBytes":1024,
+                "riverContextProjection":{
+                    "hostPath":"/private/river-context.json","sizeBytes":12,"sha256":"$hash",
+                    "artifacts":[{
+                        "hostPath":"/private/river-artifact-00-aaaaaaaaaaaa.png",
+                        "guestPath":"/run/river-artifact-00-aaaaaaaaaaaa.png",
+                        "sizeBytes":7,"sha256":"$hash"
+                    }]
+                }
+            }""".trimIndent(),
+            StartCliProcessArgs::class.java,
+        )
+
+        assertEquals(1, args.riverContextProjection?.artifacts?.size)
+        assertEquals(
+            "/run/river-artifact-00-aaaaaaaaaaaa.png",
+            args.riverContextProjection?.artifacts?.single()?.guestPath,
+        )
+    }
+
     @Test
     fun handshakePidSnapshotWaitsForNewlineAndRejectsCompleteInvalidIdentity() {
         assertEquals(null, parseHandshakePidSnapshot(byteArrayOf()))
@@ -134,9 +162,11 @@ class CliProcessHostTest {
     }
 
     @Test
-    fun riverProjectionAddsOnlyOneFileBindAndFixedGuestEnvironment() {
+    fun riverProjectionAddsOnlyFencedFileBindsAndFixedGuestEnvironment() {
         val hostProjection =
             "/private/no-backup/vcp-cli/projections/${"a".repeat(64)}/river-context.json"
+        val hostArtifact =
+            "/private/no-backup/vcp-cli/projections/${"a".repeat(64)}/river-artifact-00-bbbbbbbbbbbb.png"
         val userCommand = "test -r \"${'$'}VCP_RIVER_CONTEXT_FILE\""
         val argv = buildProotArguments(
             prootPath = "/native/libvcp_proot.so",
@@ -145,6 +175,9 @@ class CliProcessHostTest {
             cwd = "/workspace",
             command = userCommand,
             riverContextHostPath = hostProjection,
+            riverArtifactBinds = listOf(
+                hostArtifact to "/run/river-artifact-00-bbbbbbbbbbbb.png",
+            ),
         )
 
         assertEquals(
@@ -153,6 +186,7 @@ class CliProcessHostTest {
                 "/proc",
                 "/private/workspace:/workspace",
                 "$hostProjection:/run/vcp-river-context.json",
+                "$hostArtifact:/run/river-artifact-00-bbbbbbbbbbbb.png",
             ),
             argv.windowed(2).filter { it.first() == "-b" }.map { it.last() },
         )
@@ -176,6 +210,7 @@ class CliProcessHostTest {
                 hostPath = path.absolutePath
                 sizeBytes = size
                 this.sha256 = sha256
+                artifacts = emptyArray()
             }
 
         fun freshSource(parent: File = File(root, stem)): File {
@@ -188,7 +223,7 @@ class CliProcessHostTest {
             var source = freshSource()
             assertEquals(
                 source.canonicalFile,
-                verifyRiverContextProjection(root, stem, projection(source)),
+                verifyRiverContextProjection(root, stem, projection(source)).contextFile,
             )
             assertThrows(IllegalArgumentException::class.java) {
                 verifyRiverContextProjection(root, stem, projection(source, sha256 = "0".repeat(64)))
@@ -260,6 +295,52 @@ class CliProcessHostTest {
     }
 
     @Test
+    fun riverArtifactVerifierFreezesAttemptCopyHashAndGuestLeaf() {
+        val root = Files.createTempDirectory("vcp-cli-river-artifact").toFile().canonicalFile
+        val stem = "c".repeat(64)
+        val parent = File(root, stem).apply { mkdirs() }
+        val contextBytes = "{\"schema\":\"vcp.mobile.attempt-projection.v1\"}".toByteArray()
+        val context = File(parent, "river-context.json").apply { writeBytes(contextBytes) }
+        val artifactBytes = "attempt copy".toByteArray()
+        val artifactHash = sha256Hex(artifactBytes)
+        val artifactLeaf = "river-artifact-00-${artifactHash.take(12)}.png"
+        val artifact = File(parent, artifactLeaf).apply { writeBytes(artifactBytes) }
+        val artifactArgs = RiverArtifactProjectionArgs().apply {
+            hostPath = artifact.absolutePath
+            guestPath = "/run/$artifactLeaf"
+            sizeBytes = artifactBytes.size.toLong()
+            sha256 = artifactHash
+        }
+        val projection = RiverContextProjectionArgs().apply {
+            hostPath = context.absolutePath
+            sizeBytes = contextBytes.size.toLong()
+            sha256 = sha256Hex(contextBytes)
+            artifacts = arrayOf(artifactArgs)
+        }
+
+        try {
+            val verified = verifyRiverContextProjection(root, stem, projection)
+            assertEquals(context.canonicalFile, verified.contextFile)
+            assertEquals(artifact.canonicalFile, verified.artifacts.single().hostFile)
+            assertEquals("/run/$artifactLeaf", verified.artifacts.single().guestPath)
+
+            artifactArgs.guestPath = "/run/renamed.png"
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection)
+            }
+            artifactArgs.guestPath = "/run/$artifactLeaf"
+            artifact.delete()
+            val sibling = File(parent, "sibling.bin").apply { writeBytes(artifactBytes) }
+            Files.createSymbolicLink(artifact.toPath(), sibling.toPath())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyRiverContextProjection(root, stem, projection)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun processFingerprintIncludesOptionalRiverProjectionIdentity() {
         fun request(projection: RiverContextProjectionArgs? = null) = StartCliProcessArgs().apply {
             operationId = "operation-1"
@@ -277,6 +358,14 @@ class CliProcessHostTest {
             hostPath = "/private/projections/${"a".repeat(64)}/river-context.json"
             sizeBytes = 17
             sha256 = "b".repeat(64)
+            artifacts = arrayOf(
+                RiverArtifactProjectionArgs().apply {
+                    hostPath = "/private/projections/${"a".repeat(64)}/river-artifact-00-cccccccccccc.png"
+                    guestPath = "/run/river-artifact-00-cccccccccccc.png"
+                    sizeBytes = 23
+                    sha256 = "c".repeat(64)
+                },
+            )
         }
         val withoutProjection = fingerprint(request())
         val withProjection = fingerprint(request(projection))
@@ -284,6 +373,9 @@ class CliProcessHostTest {
 
         projection.sha256 = projection.sha256.uppercase()
         assertEquals(withProjection, fingerprint(request(projection)))
+        projection.artifacts.single().sizeBytes++
+        assertTrue(withProjection != fingerprint(request(projection)))
+        projection.artifacts.single().sizeBytes--
         projection.sizeBytes++
         assertTrue(withProjection != fingerprint(request(projection)))
     }

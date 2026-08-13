@@ -11,6 +11,10 @@ pub const MAX_ASSISTANT_STEP_BYTES: usize = 512 * 1024;
 pub const MAX_TOOL_PAYLOAD_BYTES: usize = 256 * 1024;
 pub const MAX_RIVER_PROJECTION_BYTES: usize = 128 * 1024;
 pub const MAX_RIVER_MESSAGES: usize = 50;
+pub const MAX_RIVER_ATTACHMENT_DESCRIPTORS: usize = 64;
+pub const MAX_RIVER_ARTIFACTS: usize = 16;
+pub const MAX_RIVER_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_RIVER_ARTIFACT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_CONTINUATION_MESSAGES_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_MARKED_HISTORY_BYTES: usize = 32 * 1024;
 
@@ -191,6 +195,10 @@ mod tests {
         assert_eq!(MAX_TOOL_PAYLOAD_BYTES, 262_144);
         assert_eq!(MAX_RIVER_PROJECTION_BYTES, 131_072);
         assert_eq!(MAX_RIVER_MESSAGES, 50);
+        assert_eq!(MAX_RIVER_ATTACHMENT_DESCRIPTORS, 64);
+        assert_eq!(MAX_RIVER_ARTIFACTS, 16);
+        assert_eq!(MAX_RIVER_ARTIFACT_BYTES, 67_108_864);
+        assert_eq!(MAX_RIVER_ARTIFACT_TOTAL_BYTES, 268_435_456);
     }
 
     #[test]

@@ -150,7 +150,7 @@ parsed tool call + bounded turn context
             ↓
 LocalVcpMetaProcessor
   ├─ ink      → history visibility policy
-  ├─ river    → read-only attempt context projection
+  ├─ river    → source-unreachable、non-writeback attempt snapshot
   ├─ vref     → capability check / knowledge projection
   └─ archery  → scheduling + continuation policy
             ↓
@@ -166,7 +166,7 @@ MetaProcessor 拥有 N/字节上限、附件与秘密过滤、临时文件生命
 | VCP marker/escape/think 排除 | fixture 冻结 | 必须 | 回归 |
 | `ink=mark_history` | 识别并保留 | 有界历史摘要 | 与全局详情设置联测 |
 | `river=text/last:N` | 识别与值校验 | 只读 JSON projection | 语义与预算回归 |
-| `river=full` | 识别 | 明确 unsupported | 多模态权限/大小门后开放 |
+| `river=full` | 识别 | P4.2 已开放：有界 descriptor + attachment attempt copy | API 36 guest 读取/写攻击回归 |
 | `river=semantic:N` | 识别 | 明确 unsupported | 本机会话向量索引；失败回退 `last:N` |
 | `vref:N` | 识别；P4 收紧为 `1..50` | local 明确 unsupported；VCP route 仅主机 `file://` 时也 unsupported | 本机知识索引 + attempt copy grant；远端需引用物化 |
 | `archery=true` | 识别 | 映射异步 Job，成功不阻塞本轮 | 并发与通知完整化 |
@@ -183,4 +183,4 @@ MetaProcessor 拥有 N/字节上限、附件与秘密过滤、临时文件生命
 5. 插件关闭或远端断开时不发布真实 VCP manifest；若用户保留工具说明，调用会收到明确执行错误，不声称成功。
 6. `action=list_skills|read_skill` 可在飞行模式下列出/阅读已安装且校验通过的 Skill，不接受路径穿越，不自动执行脚本，也不因目录变更改写 Agent 提示词或 VCP 记忆。
 7. `ink/river/vref/archery` 每种 fixture 都证明保留字段不会进入 Bash command/argv；只有受控的 projection file 路径可以通过专用 env 名进入目标 Job。
-8. `river=text/last:N` 的 local fixture 与上游选取结果一致；`river=semantic:N`/`vref:N` 在索引或引用物化不可用时稳定返回标注 route/capability 的 `unsupported_mode`，不执行命令。
+8. `river=text/last:N` 的 local fixture 与上游选取结果一致；`river=full` 只复制 hash/size 校验通过的附件，省略项带稳定原因且 canonical CAS 无 write-back；`river=semantic:N`/`vref:N` 在索引或引用物化不可用时稳定返回标注 route/capability 的 `unsupported_mode`，不执行命令。

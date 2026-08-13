@@ -1,5 +1,7 @@
 //! Single outer owner for the local VCPMobileCLI model/tool continuation loop.
 
+use std::collections::{HashMap, HashSet};
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
@@ -14,10 +16,13 @@ use crate::vcp_modules::vcp_client::{
     is_typed_assistant_budget_error, perform_vcp_request_registered, StreamEvent, VcpRequestPayload,
 };
 
-use super::protocol::{parse_vcp_tool_requests, validate_vcp_mobile_cli_request, VcpCliAction};
+use super::protocol::{
+    parse_vcp_tool_requests, validate_vcp_mobile_cli_request, VcpCliAction, VcpRiverMode,
+};
 use super::result::{serialize_local_model_payload, VcpCliErrorCode, VcpCliResultEnvelope};
 use super::runtime::{
-    ExecuteVcpMobileCliRequest, MobileCliRuntimeState, VcpCliRiverProjectionInput,
+    ExecuteVcpMobileCliRequest, MobileCliRuntimeState, VcpCliArtifactGrantInput,
+    VcpCliRiverProjectionInput,
 };
 use super::turn_ledger::{
     claim_finalizer, claim_tool_batch, create_turn, load_live_turn, mark_interrupted,
@@ -25,7 +30,8 @@ use super::turn_ledger::{
     store_pending_continuation, store_tool_result, FinalizerClaim, ToolClaim,
 };
 use super::turn_meta::{
-    append_marked_history, marked_history_block, plan_local_meta, LocalContinuationPolicy,
+    append_marked_history, marked_history_block, plan_local_meta, river_full_candidate_hashes,
+    selected_river_full_artifact_hashes, LocalContinuationPolicy,
 };
 use super::turn_types::{
     LocalCliTurnOutcome, LocalCliTurnRecord, LocalCliTurnRoute, LocalCliTurnStart,
@@ -532,45 +538,60 @@ async fn execute_claimed_tool<R: Runtime>(
             LocalContinuationPolicy::Continue,
             false,
         ),
-        Ok(mut validated) => match plan_local_meta(&validated, messages) {
-            Err(error) => (
-                VcpCliResultEnvelope::error(
-                    VcpCliErrorCode::UnsupportedMode,
-                    error,
-                    "Remove the unsupported meta field and retry.",
+        Ok(mut validated) => {
+            let resolved_artifacts =
+                verified_river_full_artifacts(app, pool, &validated, messages).await;
+            match plan_local_meta(&validated, messages, &resolved_artifacts) {
+                Err(error) => (
+                    VcpCliResultEnvelope::error(
+                        VcpCliErrorCode::UnsupportedMode,
+                        error,
+                        "Remove the unsupported meta field and retry.",
+                    ),
+                    LocalContinuationPolicy::Continue,
+                    validated.meta.ink.is_some(),
                 ),
-                LocalContinuationPolicy::Continue,
-                validated.meta.ink.is_some(),
-            ),
-            Ok(plan) => {
-                if matches!(
-                    plan.continuation,
-                    LocalContinuationPolicy::Parallel | LocalContinuationPolicy::NoReply
-                ) {
-                    force_background(&mut validated.action);
+                Ok(plan) => {
+                    if matches!(
+                        plan.continuation,
+                        LocalContinuationPolicy::Parallel | LocalContinuationPolicy::NoReply
+                    ) {
+                        force_background(&mut validated.action);
+                    }
+                    let projection =
+                        plan.river_projection
+                            .map(|projection| VcpCliRiverProjectionInput {
+                                canonical_json: projection.canonical_json,
+                                sha256: projection.sha256,
+                                size_bytes: projection.size_bytes,
+                                artifact_grants: projection
+                                    .artifact_grants
+                                    .into_iter()
+                                    .map(|grant| VcpCliArtifactGrantInput {
+                                        source_path: grant.source_path,
+                                        file_name: grant.file_name,
+                                        guest_path: grant.guest_path,
+                                        size_bytes: grant.size_bytes,
+                                        sha256: grant.sha256,
+                                    })
+                                    .collect(),
+                            });
+                    let runtime = app.state::<MobileCliRuntimeState>();
+                    let response = runtime
+                        .execute(
+                            app,
+                            ExecuteVcpMobileCliRequest {
+                                operation_id: operation_id.to_string(),
+                                action: validated.action,
+                                session_id: Some(local_cli_session_id(record)),
+                                river_projection: projection,
+                            },
+                        )
+                        .await?;
+                    (response.envelope, plan.continuation, plan.mark_history)
                 }
-                let projection =
-                    plan.river_projection
-                        .map(|projection| VcpCliRiverProjectionInput {
-                            canonical_json: projection.canonical_json,
-                            sha256: projection.sha256,
-                            size_bytes: projection.size_bytes,
-                        });
-                let runtime = app.state::<MobileCliRuntimeState>();
-                let response = runtime
-                    .execute(
-                        app,
-                        ExecuteVcpMobileCliRequest {
-                            operation_id: operation_id.to_string(),
-                            action: validated.action,
-                            session_id: Some(local_cli_session_id(record)),
-                            river_projection: projection,
-                        },
-                    )
-                    .await?;
-                (response.envelope, plan.continuation, plan.mark_history)
             }
-        },
+        }
     };
     let local_payload = serialize_local_model_payload(&result)
         .map_err(|error| format!("cannot serialize local CLI result payload: {error}"))?;
@@ -595,6 +616,60 @@ async fn execute_claimed_tool<R: Runtime>(
     )
     .await?;
     Ok((operation_id.to_string(), result, local_payload, policy))
+}
+
+async fn verified_river_full_artifacts<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &Pool<Sqlite>,
+    request: &super::protocol::ValidatedVcpCliRequest,
+    messages: &[Value],
+) -> HashMap<String, crate::vcp_modules::file_manager::AttachmentCasFile> {
+    if request.meta.river != Some(VcpRiverMode::Full) {
+        return HashMap::new();
+    }
+
+    let mut resolved = HashMap::new();
+    for hash in river_full_candidate_hashes(messages) {
+        if let Ok(record) =
+            crate::vcp_modules::file_manager::resolve_attachment_cas_file(app, pool, &hash).await
+        {
+            resolved.insert(hash, record);
+        }
+    }
+
+    let mut verified = HashSet::new();
+    loop {
+        let pending = selected_river_full_artifact_hashes(messages, &resolved)
+            .into_iter()
+            .filter(|hash| !verified.contains(hash))
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            break;
+        }
+        for hash in pending {
+            let Some(record) = resolved.get(&hash) else {
+                continue;
+            };
+            if crate::vcp_modules::file_manager::verify_existing_cas(
+                &record.path,
+                &record.sha256,
+                record.size_bytes,
+            )
+            .await
+            .is_ok()
+            {
+                verified.insert(hash);
+            } else {
+                log::warn!(
+                    "[VCPMobileCLI] river=full omitted corrupt attachment CAS {}",
+                    &hash[..12]
+                );
+                resolved.remove(&hash);
+            }
+        }
+    }
+    resolved.retain(|hash, _| verified.contains(hash));
+    resolved
 }
 
 enum ClaimedRecoveryError {

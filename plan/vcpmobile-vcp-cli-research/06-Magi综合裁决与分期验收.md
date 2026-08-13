@@ -242,12 +242,17 @@ P4 按以下顺序施工，任一层未通过不得靠下一层掩盖：
 5. **P4.4｜`vref:N`**：先建立显式 knowledge grant/catalog，再做向量选取、文件去重和 attempt copy。
    VCPToolBox 主机 `file://` 与远端 artifact transport 仍是独立协议。
 
+2026-08-14 实施状态：P4.1 与 P4.2 产品代码及静态/回归门已完成。`river=full` 使用
+`AttemptProjectionBundleV1`，最多 16 个附件、单个 64 MiB、总计 256 MiB；canonical CAS 先经
+数据库关系、direct-file、size 与 SHA-256 复核，再复制到 attempt 目录。Android 只校验并 bind
+这些副本，`omissions` 保留稳定省略原因。API 36 的真实 guest 读取与改写副本/原 CAS 不变仍待验收。
+
 交付：
 
 - Skill 版本/变更失效、二进制 assets artifact 与只读 runtime path 联动；manifest 之外不增加 Mobile Skill 提示词注入；
 - `river=full` 的多模态权限/大小过滤；
 - `river=semantic:N` 的本机会话向量索引与 `last:N` 回退；
-- `vref:N` 的本机知识向量索引、Top-N 文件去重与 read-only grant；
+- `vref:N` 的本机知识向量索引、Top-N 文件去重与 source-unreachable/non-writeback grant；
 - DynamicTools/`vcp_fold` 继续由 VCPToolBox 处理，不在 Mobile 重做。
 
 硬验收：

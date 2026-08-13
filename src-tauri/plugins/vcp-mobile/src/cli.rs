@@ -45,10 +45,20 @@ pub struct PrepareCliRuntimeResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CliProjectedArtifact {
+    pub host_path: String,
+    pub guest_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CliRiverContextProjection {
     pub host_path: String,
     pub size_bytes: u64,
     pub sha256: String,
+    pub artifacts: Vec<CliProjectedArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +230,7 @@ pub async fn cancel_cli_process_inner<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CliProcessState, CliRiverContextProjection, PrepareCliRuntimeRequest,
+        CliProcessState, CliProjectedArtifact, CliRiverContextProjection, PrepareCliRuntimeRequest,
         PrepareCliRuntimeResponse, StartCliProcessRequest,
     };
 
@@ -290,6 +300,13 @@ mod tests {
                 host_path: "/private/projections/attempt/river-context.json".to_string(),
                 size_bytes: 17,
                 sha256: "a".repeat(64),
+                artifacts: vec![CliProjectedArtifact {
+                    host_path: "/private/projections/attempt/river-artifact-00-aaaaaaaaaaaa.png"
+                        .to_string(),
+                    guest_path: "/run/river-artifact-00-aaaaaaaaaaaa.png".to_string(),
+                    size_bytes: 23,
+                    sha256: "b".repeat(64),
+                }],
             }),
         };
 
@@ -304,7 +321,18 @@ mod tests {
         );
         assert_eq!(value["riverContextProjection"]["sizeBytes"], 17);
         assert_eq!(value["riverContextProjection"]["sha256"], "a".repeat(64));
+        assert_eq!(
+            value["riverContextProjection"]["artifacts"][0]["guestPath"],
+            "/run/river-artifact-00-aaaaaaaaaaaa.png"
+        );
         assert!(value.get("operation_id").is_none());
+
+        let mut missing_artifacts = value;
+        missing_artifacts["riverContextProjection"]
+            .as_object_mut()
+            .expect("river projection object")
+            .remove("artifacts");
+        assert!(serde_json::from_value::<StartCliProcessRequest>(missing_artifacts).is_err());
     }
 
     #[test]

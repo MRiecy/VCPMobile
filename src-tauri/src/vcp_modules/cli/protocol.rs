@@ -301,12 +301,12 @@ impl VcpMetaCapabilities {
         archery_no_reply: false,
     };
 
-    /// 已冻结的首期本地 loop 能力目标；full/semantic/vref 仍明确不支持。
+    /// 本地 loop 已支持 text/last 以及有界的 full attempt snapshot；semantic/vref 仍关闭。
     pub const LOCAL_LOOPBACK_INITIAL: Self = Self {
         mark_history: true,
         river_text: true,
         river_last: true,
-        river_full: false,
+        river_full: true,
         river_semantic: false,
         vref: false,
         archery_parallel: true,
@@ -1251,8 +1251,21 @@ mod tests {
     }
 
     #[test]
-    fn advanced_recall_modes_remain_explicitly_unsupported_for_initial_local_loop() {
-        for field in ["river:「始」full「末」", "vref:「始」3「末」"] {
+    fn river_full_is_local_while_semantic_and_vref_remain_explicitly_unsupported() {
+        let full = exactly_one_request(
+            "<<<[TOOL_REQUEST]>>>\n\
+             tool_name:「始」VCPMobileCLI「末」,\n\
+             command:「始」printf ok「末」,\n\
+             river:「始」full「末」\n\
+             <<<[END_TOOL_REQUEST]>>>",
+            "river full",
+        );
+        validate_vcp_mobile_cli_request(&full)
+            .expect("valid river full")
+            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .expect("local loop supports bounded river full projection");
+
+        for field in ["river:「始」semantic:3「末」", "vref:「始」3「末」"] {
             let input = format!(
                 "<<<[TOOL_REQUEST]>>>\n\
                  tool_name:「始」VCPMobileCLI「末」,\n\
@@ -1264,7 +1277,7 @@ mod tests {
             let validated = validate_vcp_mobile_cli_request(&raw).expect("valid meta syntax");
             let error = validated
                 .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
-                .expect_err("advanced recall is not available initially");
+                .expect_err("semantic and vref remain unavailable");
             assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
         }
     }

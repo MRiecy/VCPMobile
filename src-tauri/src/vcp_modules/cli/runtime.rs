@@ -105,6 +105,19 @@ pub struct VcpCliRiverProjectionInput {
     pub canonical_json: String,
     pub sha256: String,
     pub size_bytes: u64,
+    /// Host-only grants produced by the local coordinator. They are never accepted from or
+    /// serialized back to WebView callers; the canonical JSON carries only opaque descriptors.
+    #[serde(skip)]
+    pub artifact_grants: Vec<VcpCliArtifactGrantInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VcpCliArtifactGrantInput {
+    pub source_path: PathBuf,
+    pub file_name: String,
+    pub guest_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +626,20 @@ impl MobileCliRuntimeState {
         let profile = runtime.profile.clone();
         let workspace = runtime.workspace.clone();
         let workspace_limit = profile.budgets.workspace_default_bytes;
+        let projection_artifact_bytes = river_projection
+            .as_ref()
+            .map(|projection| {
+                projection
+                    .artifact_grants
+                    .iter()
+                    .try_fold(0_u64, |total, grant| total.checked_add(grant.size_bytes))
+                    .ok_or_else(|| "river artifact byte budget overflowed".to_string())
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let required_headroom = MIN_RUNTIME_STORAGE_HEADROOM_BYTES
+            .checked_add(projection_artifact_bytes)
+            .ok_or_else(|| "river artifact storage headroom overflowed".to_string())?;
         let storage_paths = vec![
             runtime.rootfs.clone(),
             runtime.workspace.clone(),
@@ -620,7 +647,7 @@ impl MobileCliRuntimeState {
         ];
         let usage = tauri::async_runtime::spawn_blocking(move || {
             workspace_usage_bytes(&workspace, workspace_limit)?;
-            require_filesystem_headroom(&storage_paths, MIN_RUNTIME_STORAGE_HEADROOM_BYTES)
+            require_filesystem_headroom(&storage_paths, required_headroom)
         })
         .await
         .map_err(|error| format!("workspace scan task failed: {error}"))?;
@@ -639,11 +666,19 @@ impl MobileCliRuntimeState {
         let generation = self.inner.lock().await.ledger.runtime_generation;
         let river_context_projection = if let Some(input) = river_projection {
             let root = runtime.projection_root.clone();
+            let attachments_root = crate::vcp_modules::file_manager::get_attachments_root_dir(app)?;
             let job = job_id.clone();
             let attempt = attempt_id.clone();
             Some(
                 tauri::async_runtime::spawn_blocking(move || {
-                    prepare_river_projection(&root, generation, &job, &attempt, &input)
+                    prepare_river_projection(
+                        &root,
+                        &attachments_root,
+                        generation,
+                        &job,
+                        &attempt,
+                        &input,
+                    )
                 })
                 .await
                 .map_err(|error| format!("river projection task failed: {error}"))??,
@@ -2723,6 +2758,29 @@ mod tests {
         assert!(validate_structured_vcp_cli_action(action).is_ok());
         assert!(validate_operation_id("operation-1").is_ok());
         assert!(validate_operation_id("bad operation").is_err());
+    }
+
+    #[test]
+    fn artifact_source_grants_are_never_part_of_the_public_request_wire() {
+        let projection = VcpCliRiverProjectionInput {
+            canonical_json: "{}".to_string(),
+            sha256: "a".repeat(64),
+            size_bytes: 2,
+            artifact_grants: vec![VcpCliArtifactGrantInput {
+                source_path: PathBuf::from("/private/canonical/secret.bin"),
+                file_name: "river-artifact-00-aaaaaaaaaaaa.bin".to_string(),
+                guest_path: "/run/river-artifact-00-aaaaaaaaaaaa.bin".to_string(),
+                size_bytes: 7,
+                sha256: "b".repeat(64),
+            }],
+        };
+        let wire = serde_json::to_value(&projection).expect("serialize projection request");
+        let encoded = wire.to_string();
+        assert!(wire.get("artifact_grants").is_none());
+        assert!(!encoded.contains("/private/canonical"));
+        let decoded: VcpCliRiverProjectionInput =
+            serde_json::from_value(wire).expect("decode public projection request");
+        assert!(decoded.artifact_grants.is_empty());
     }
 
     #[test]

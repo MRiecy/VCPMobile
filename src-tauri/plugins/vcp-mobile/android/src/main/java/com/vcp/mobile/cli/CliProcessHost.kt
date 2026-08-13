@@ -39,6 +39,9 @@ private const val MAX_PROOT_BYTES = 64L * 1024L * 1024L
 private const val MAX_PROOT_LOADER_BYTES = 4L * 1024L * 1024L
 private const val MAX_ARTIFACT_BYTES = 256L * 1024L * 1024L
 private const val MAX_RIVER_CONTEXT_BYTES = 128L * 1024L
+private const val MAX_RIVER_ARTIFACTS = 16
+private const val MAX_RIVER_ARTIFACT_BYTES = 64L * 1024L * 1024L
+private const val MAX_RIVER_ARTIFACT_TOTAL_BYTES = 256L * 1024L * 1024L
 private const val MAX_COMMAND_BYTES = 64 * 1024
 private const val MAX_ACTIVE_PROCESSES = 4
 private const val MAX_REMEMBERED_PROCESSES = 1024
@@ -73,10 +76,19 @@ class PrepareCliRuntimeArgs {
 }
 
 @InvokeArg
+class RiverArtifactProjectionArgs {
+    lateinit var hostPath: String
+    lateinit var guestPath: String
+    var sizeBytes: Long = 0
+    lateinit var sha256: String
+}
+
+@InvokeArg
 class RiverContextProjectionArgs {
     lateinit var hostPath: String
     var sizeBytes: Long = 0
     lateinit var sha256: String
+    lateinit var artifacts: Array<RiverArtifactProjectionArgs>
 }
 
 @InvokeArg
@@ -113,6 +125,16 @@ private data class ProcessKey(
     val jobId: String,
     val attemptId: String,
     val runtimeGeneration: Long,
+)
+
+internal data class VerifiedRiverArtifact(
+    val hostFile: File,
+    val guestPath: String,
+)
+
+internal data class VerifiedRiverProjection(
+    val contextFile: File,
+    val artifacts: List<VerifiedRiverArtifact>,
 )
 
 private data class GroupTermination(
@@ -379,40 +401,57 @@ internal fun buildProotArguments(
     cwd: String,
     command: String,
     riverContextHostPath: String? = null,
-): List<String> = buildList {
-    add(prootPath)
-    add("-0")
-    add("--kill-on-exit")
-    add("--link2symlink")
-    add("-r")
-    add(rootfsPath)
-    add("-b")
-    add("/dev")
-    add("-b")
-    add("/proc")
-    add("-b")
-    add("$workspacePath:/workspace")
-    if (riverContextHostPath != null) {
+    riverArtifactBinds: List<Pair<String, String>> = emptyList(),
+): List<String> {
+    require(riverArtifactBinds.size <= MAX_RIVER_ARTIFACTS) {
+        "river artifact bind count exceeds the item limit"
+    }
+    require(riverArtifactBinds.isEmpty() || riverContextHostPath != null) {
+        "river artifact binds require a context descriptor"
+    }
+    require(
+        riverArtifactBinds.map { it.first }.toSet().size == riverArtifactBinds.size &&
+            riverArtifactBinds.map { it.second }.toSet().size == riverArtifactBinds.size,
+    ) { "river artifact bind identities must be unique" }
+    return buildList {
+        add(prootPath)
+        add("-0")
+        add("--kill-on-exit")
+        add("--link2symlink")
+        add("-r")
+        add(rootfsPath)
         add("-b")
-        add("$riverContextHostPath:$GUEST_RIVER_CONTEXT_PATH")
+        add("/dev")
+        add("-b")
+        add("/proc")
+        add("-b")
+        add("$workspacePath:/workspace")
+        if (riverContextHostPath != null) {
+            add("-b")
+            add("$riverContextHostPath:$GUEST_RIVER_CONTEXT_PATH")
+        }
+        riverArtifactBinds.forEach { (hostPath, guestPath) ->
+            add("-b")
+            add("$hostPath:$guestPath")
+        }
+        add("-w")
+        add(validateGuestCwd(cwd))
+        add("/usr/bin/env")
+        add("-i")
+        add("HOME=/root")
+        add("USER=root")
+        add("LOGNAME=root")
+        add("SHELL=/bin/bash")
+        add("PATH=$GUEST_PATH")
+        add("TMPDIR=/tmp")
+        add("TERM=dumb")
+        if (riverContextHostPath != null) {
+            add("VCP_RIVER_CONTEXT_FILE=$GUEST_RIVER_CONTEXT_PATH")
+        }
+        add("/bin/bash")
+        add("-lc")
+        add(command)
     }
-    add("-w")
-    add(validateGuestCwd(cwd))
-    add("/usr/bin/env")
-    add("-i")
-    add("HOME=/root")
-    add("USER=root")
-    add("LOGNAME=root")
-    add("SHELL=/bin/bash")
-    add("PATH=$GUEST_PATH")
-    add("TMPDIR=/tmp")
-    add("TERM=dumb")
-    if (riverContextHostPath != null) {
-        add("VCP_RIVER_CONTEXT_FILE=$GUEST_RIVER_CONTEXT_PATH")
-    }
-    add("/bin/bash")
-    add("-lc")
-    add(command)
 }
 
 internal fun buildHostEnvironment(prootTmpPath: String, prootLoaderPath: String): Map<String, String> {
@@ -514,7 +553,7 @@ internal fun verifyRiverContextProjection(
     projectionRoot: File,
     expectedDirectoryName: String,
     projection: RiverContextProjectionArgs,
-): File {
+): VerifiedRiverProjection {
     require(expectedDirectoryName.length == 64 && expectedDirectoryName.all { it in '0'..'9' || it in 'a'..'f' }) {
         "river projection directory identity is invalid"
     }
@@ -596,7 +635,65 @@ internal fun verifyRiverContextProjection(
             !finalSourceAttributes.isSymbolicLink &&
             finalSourceAttributes.size() == projection.sizeBytes,
     ) { "river projection changed during verification" }
-    return canonicalSource
+    val artifactHostPaths = mutableSetOf<String>()
+    val artifactGuestPaths = mutableSetOf<String>()
+    val artifactHashes = mutableSetOf<String>()
+    var artifactTotalBytes = 0L
+    val artifacts = projection.artifacts.map { artifact ->
+        val expectedArtifactHash = validateRiverArtifactProjectionFields(artifact)
+        val artifactPath = File(artifact.hostPath).toPath()
+        require(artifactPath.isAbsolute && artifactPath == artifactPath.normalize()) {
+            "river artifact hostPath must be a normalized absolute path"
+        }
+        val artifactParent = artifactPath.parent ?: error("river artifact has no parent")
+        val artifactLeaf = artifactPath.fileName.toString()
+        require(isRiverArtifactLeaf(artifactLeaf) && artifact.guestPath == "/run/$artifactLeaf") {
+            "river artifact guest identity is invalid"
+        }
+        require(artifactParent == parentPath) {
+            "river artifact is outside its prepared attempt directory"
+        }
+        val artifactAttributes = java.nio.file.Files.readAttributes(
+            artifactPath,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        require(
+            artifactAttributes.isRegularFile &&
+                !artifactAttributes.isSymbolicLink &&
+                artifactAttributes.size() == artifact.sizeBytes,
+        ) { "river artifact must be the expected real regular file" }
+        val canonicalArtifact = artifactPath.toFile().canonicalFile
+        require(canonicalArtifact.parentFile == canonicalParent && canonicalArtifact.name == artifactLeaf) {
+            "river artifact escaped its prepared attempt directory"
+        }
+        val (actualArtifactBytes, actualArtifactHash) =
+            sha256File(canonicalArtifact, MAX_RIVER_ARTIFACT_BYTES)
+        require(actualArtifactBytes == artifact.sizeBytes && actualArtifactHash == expectedArtifactHash) {
+            "river artifact SHA-256 does not match the frozen request"
+        }
+        val finalArtifactAttributes = java.nio.file.Files.readAttributes(
+            artifactPath,
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        require(
+            finalArtifactAttributes.isRegularFile &&
+                !finalArtifactAttributes.isSymbolicLink &&
+                finalArtifactAttributes.size() == artifact.sizeBytes,
+        ) { "river artifact changed during verification" }
+        artifactTotalBytes = Math.addExact(artifactTotalBytes, artifact.sizeBytes)
+        require(artifactTotalBytes <= MAX_RIVER_ARTIFACT_TOTAL_BYTES) {
+            "river artifacts exceed the attempt byte budget"
+        }
+        require(
+            artifactHostPaths.add(canonicalArtifact.absolutePath) &&
+                artifactGuestPaths.add(artifact.guestPath) &&
+                artifactHashes.add(expectedArtifactHash),
+        ) { "river artifact identities must be unique" }
+        VerifiedRiverArtifact(canonicalArtifact, artifact.guestPath)
+    }
+    return VerifiedRiverProjection(canonicalSource, artifacts)
 }
 
 private fun validateRiverContextProjectionFields(projection: RiverContextProjectionArgs): String {
@@ -607,8 +704,34 @@ private fun validateRiverContextProjectionFields(projection: RiverContextProject
     require(projection.sizeBytes in 1..MAX_RIVER_CONTEXT_BYTES) {
         "riverContextProjection.sizeBytes is outside the supported range"
     }
+    require(projection.artifacts.size <= MAX_RIVER_ARTIFACTS) {
+        "riverContextProjection.artifacts exceeds the item limit"
+    }
+    projection.artifacts.forEach(::validateRiverArtifactProjectionFields)
     return validateSha256(projection.sha256, "riverContextProjection.sha256")
 }
+
+private fun validateRiverArtifactProjectionFields(artifact: RiverArtifactProjectionArgs): String {
+    require(
+        artifact.hostPath.toByteArray(StandardCharsets.UTF_8).size in 1..4096 &&
+            !artifact.hostPath.contains('\u0000'),
+    ) { "river artifact hostPath is invalid" }
+    require(
+        artifact.guestPath.toByteArray(StandardCharsets.UTF_8).size in 1..128 &&
+            !artifact.guestPath.contains('\u0000'),
+    ) { "river artifact guestPath is invalid" }
+    require(artifact.sizeBytes in 0..MAX_RIVER_ARTIFACT_BYTES) {
+        "river artifact sizeBytes is outside the supported range"
+    }
+    return validateSha256(artifact.sha256, "river artifact sha256")
+}
+
+private fun isRiverArtifactLeaf(value: String): Boolean =
+    value.length <= 96 &&
+        value.startsWith("river-artifact-") &&
+        value.none { !(it.isLowerCase() || it.isDigit() || it == '-' || it == '.') } &&
+        !value.contains("..") &&
+        File(value).name == value
 
 /** Copies to a sibling staging file and exposes the new bytes with one atomic rename. */
 internal fun copyVerifiedStreamAtomically(
@@ -780,6 +903,13 @@ internal fun fingerprint(args: StartCliProcessArgs): String {
         fields.add(projection.hostPath)
         fields.add(projection.sizeBytes.toString())
         fields.add(projection.sha256.lowercase())
+        fields.add(projection.artifacts.size.toString())
+        projection.artifacts.forEach { artifact ->
+            fields.add(artifact.hostPath)
+            fields.add(artifact.guestPath)
+            fields.add(artifact.sizeBytes.toString())
+            fields.add(artifact.sha256.lowercase())
+        }
     }
     fields.forEach { value ->
         val bytes = value.toByteArray(StandardCharsets.UTF_8)
@@ -971,7 +1101,10 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 workspacePath = prepared.workspace.absolutePath,
                 cwd = cwd,
                 command = args.command,
-                riverContextHostPath = riverContext?.absolutePath,
+                riverContextHostPath = riverContext?.contextFile?.absolutePath,
+                riverArtifactBinds = riverContext?.artifacts
+                    ?.map { artifact -> artifact.hostFile.absolutePath to artifact.guestPath }
+                    .orEmpty(),
             )
             val processBuilder = ProcessBuilder(buildHostCommand(handshakeFile.absolutePath, prootArguments))
             processBuilder.redirectErrorStream(false)

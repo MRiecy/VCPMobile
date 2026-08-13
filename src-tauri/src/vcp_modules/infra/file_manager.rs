@@ -2,6 +2,7 @@ use crate::vcp_modules::db_manager::DbState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::io::AsyncReadExt;
 
@@ -195,6 +196,105 @@ pub struct AttachmentData {
     pub created_at: u64,
     pub extracted_text: Option<String>,
     pub thumbnail_path: Option<String>,
+}
+
+/// Rust-internal CAS fact used by model preprocessing and the local CLI projection owner.
+/// The host path is never serialized into a model message, WebView response, or tool result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachmentCasFile {
+    pub path: PathBuf,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+pub(crate) async fn resolve_attachment_cas_file<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    pool: &sqlx::SqlitePool,
+    hash: &str,
+) -> Result<AttachmentCasFile, String> {
+    if !crate::vcp_modules::infra::utils::is_valid_cas_hash(hash) {
+        return Err("invalid attachment CAS hash".to_string());
+    }
+    let record = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT mime_type, size, internal_path FROM attachments WHERE hash = ? LIMIT 1",
+    )
+    .bind(hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("cannot read attachment CAS metadata: {error}"))?
+    .ok_or_else(|| "attachment is not present in the local CAS catalog".to_string())?;
+    let size_bytes = u64::try_from(record.1)
+        .map_err(|_| "attachment CAS size metadata is invalid".to_string())?;
+    let mime_type = normalize_attachment_mime(&record.0)?;
+    let internal_path = record.2.strip_prefix("file://").unwrap_or(&record.2);
+    let attachments_root = get_attachments_root_dir(app_handle)?;
+    let path = validate_attachment_cas_path(
+        &attachments_root,
+        Path::new(internal_path),
+        hash,
+        size_bytes,
+    )?;
+    Ok(AttachmentCasFile {
+        path,
+        mime_type,
+        size_bytes,
+        sha256: hash.to_string(),
+    })
+}
+
+fn normalize_attachment_mime(value: &str) -> Result<String, String> {
+    let mime = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let Some((kind, subtype)) = mime.split_once('/') else {
+        return Err("attachment CAS MIME metadata is invalid".to_string());
+    };
+    let valid_token = |token: &str| {
+        !token.is_empty()
+            && token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            })
+    };
+    if mime.len() > 128 || !valid_token(kind) || !valid_token(subtype) {
+        return Err("attachment CAS MIME metadata is invalid".to_string());
+    }
+    Ok(mime)
+}
+
+fn validate_attachment_cas_path(
+    attachments_root: &Path,
+    candidate: &Path,
+    hash: &str,
+    expected_size: u64,
+) -> Result<PathBuf, String> {
+    let source_metadata = fs::symlink_metadata(candidate)
+        .map_err(|error| format!("cannot inspect attachment CAS file: {error}"))?;
+    if !source_metadata.file_type().is_file() || source_metadata.len() != expected_size {
+        return Err("attachment CAS file is not the expected real regular file".to_string());
+    }
+    let canonical_root = fs::canonicalize(attachments_root)
+        .map_err(|error| format!("cannot resolve attachment CAS root: {error}"))?;
+    let canonical = fs::canonicalize(candidate)
+        .map_err(|error| format!("cannot resolve attachment CAS file: {error}"))?;
+    if canonical.parent() != Some(canonical_root.as_path()) {
+        return Err("attachment CAS file escaped its fixed root".to_string());
+    }
+    let stem = canonical
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "attachment CAS file name is invalid".to_string())?;
+    if stem != hash {
+        return Err("attachment CAS file name does not match its hash".to_string());
+    }
+    Ok(canonical)
 }
 
 /// 内部辅助函数：智能启发式检测文件是否可能为纯文本
@@ -931,23 +1031,9 @@ pub async fn get_attachment_real_path(
     hash: String,
     _original_name: String,
 ) -> Result<String, String> {
-    if !crate::vcp_modules::infra::utils::is_valid_cas_hash(&hash) {
-        return Err("非法的 Content-Addressable Storage (CAS) 哈希指纹格式".to_string());
-    }
-    let internal_path: Option<String> =
-        sqlx::query_scalar("SELECT internal_path FROM attachments WHERE hash = ? LIMIT 1")
-            .bind(&hash)
-            .fetch_optional(&db_state.pool)
-            .await
-            .map_err(|e| format!("读取附件元数据失败: {}", e))?;
-    let internal_path = internal_path.ok_or("本地附件库中未找到该文件")?;
-    let clean_path = internal_path
-        .strip_prefix("file://")
-        .unwrap_or(&internal_path);
-    let attachments_dir = get_attachments_root_dir(&app_handle)?;
-    let canonical_path =
-        canonical_file_within_root(&attachments_dir, std::path::Path::new(clean_path), "附件库")?;
-    Ok(canonical_path.to_string_lossy().to_string())
+    resolve_attachment_cas_file(&app_handle, &db_state.pool, &hash)
+        .await
+        .map(|record| record.path.to_string_lossy().into_owned())
 }
 
 /// 唤起系统默认应用打开文件或 URL
@@ -1295,9 +1381,10 @@ pub fn check_attachment_support(original_name: String) -> Result<bool, String> {
 #[cfg(test)]
 mod security_boundary_tests {
     use super::{
-        canonical_file_within_root, commit_registered_attachment, safe_storage_extension,
-        validated_attachment_file, validated_direct_file, verify_existing_cas,
-        verify_expected_hash, verify_small_existing_cas,
+        canonical_file_within_root, commit_registered_attachment, normalize_attachment_mime,
+        safe_storage_extension, validate_attachment_cas_path, validated_attachment_file,
+        validated_direct_file, verify_existing_cas, verify_expected_hash,
+        verify_small_existing_cas,
     };
     use std::fs;
 
@@ -1331,6 +1418,40 @@ mod security_boundary_tests {
         {
             std::os::unix::fs::symlink(&escaped, root.join("link.bin")).expect("symlink");
             assert!(canonical_file_within_root(&root, &root.join("link.bin"), "test").is_err());
+        }
+    }
+
+    #[test]
+    fn attachment_cas_resolution_requires_direct_hash_named_regular_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("attachments");
+        fs::create_dir(&root).expect("attachments root");
+        let hash = "a".repeat(64);
+        let valid = root.join(format!("{hash}.png"));
+        fs::write(&valid, b"image").expect("valid CAS file");
+        assert_eq!(
+            validate_attachment_cas_path(&root, &valid, &hash, 5).expect("valid CAS"),
+            fs::canonicalize(&valid).expect("canonical CAS")
+        );
+        assert!(validate_attachment_cas_path(&root, &valid, &"b".repeat(64), 5).is_err());
+        assert!(validate_attachment_cas_path(&root, &valid, &hash, 4).is_err());
+
+        #[cfg(unix)]
+        {
+            let link = root.join(format!("{}.png", "c".repeat(64)));
+            std::os::unix::fs::symlink(&valid, &link).expect("CAS symlink");
+            assert!(validate_attachment_cas_path(&root, &link, &"c".repeat(64), 5).is_err());
+        }
+    }
+
+    #[test]
+    fn attachment_mime_is_normalized_without_accepting_control_or_path_syntax() {
+        assert_eq!(
+            normalize_attachment_mime("Image/PNG; charset=binary").expect("valid MIME"),
+            "image/png"
+        );
+        for invalid in ["image", "image/", "/png", "image/png\nsecret", "image/p ng"] {
+            assert!(normalize_attachment_mime(invalid).is_err(), "{invalid}");
         }
     }
 

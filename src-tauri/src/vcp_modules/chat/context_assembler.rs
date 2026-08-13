@@ -71,6 +71,23 @@ pub async fn orchestrate_chat_context(
     Ok(messages)
 }
 
+fn bounded_attachment_name(value: &str) -> String {
+    let basename = value.rsplit(['/', '\\']).next().unwrap_or_default();
+    let filtered = basename
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let trimmed = filtered.trim();
+    if trimmed.is_empty() {
+        return "附件".to_string();
+    }
+    let mut end = trimmed.len().min(256);
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_string()
+}
+
 /// =================================================================
 /// 🌌 微观历史记录编织器 (assemble_history_for_vcp)
 /// =================================================================
@@ -92,9 +109,9 @@ pub async fn orchestrate_chat_context(
 /// -------------------------------------------------------------
 /// 1. 【文档类提取】：若附件（如 PDF、DOCX、TXT 等）已被 Rust 底层流水线提取为文本 `extracted_text`，
 ///    将以极其工整的形式通过内联闭环标签嵌入到文本尾部：
-///    `\n\n[附加文件: {path}] (文件名: {name})\n{text}\n[/附加文件结束: {name}]`
-/// 2. 【多模态富资产】：如果是图片、音频或视频资产，自动将其编译为带 MIME 与本地安全路径的 `local_file`
-///    标准 JSON 对象（供底层 VCP Client 执行多模态 Payload 投递），并辅以内联标记供纯文本后备降级渲染。
+///    `\n\n[附加文件] (文件名: {name})\n{text}\n[/附加文件结束: {name}]`
+/// 2. 【多模态富资产】：图片、音频或视频只编译为带 CAS hash/MIME 的 `local_file` 描述；
+///    host path 不进入模型消息。底层 VCP Client 按数据库 CAS 事实解析，River full 则生成 attempt copy。
 pub fn assemble_history_for_vcp(
     history: &[ChatMessage],
     is_group: bool,
@@ -139,17 +156,25 @@ pub fn assemble_history_for_vcp(
         combined_text.push_str(&msg.content);
 
         let mut content_parts = Vec::new();
+        let mut local_attachment_descriptors = Vec::new();
 
         if let Some(attachments) = &msg.attachments {
             for att in attachments {
+                let attachment_name = bounded_attachment_name(&att.name);
                 let is_desktop_only = att.status.as_deref() == Some("desktop_only");
-                let local_path = if !att.internal_path.is_empty() {
-                    att.internal_path.clone()
-                } else {
-                    att.src.trim_start_matches("file://").to_string()
-                };
-                let is_local_ready = matches!(att.status.as_deref(), Some("ready" | "done"))
-                    && !local_path.is_empty();
+                let valid_hash = att
+                    .hash
+                    .as_deref()
+                    .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash));
+                let is_local_ready =
+                    matches!(att.status.as_deref(), Some("ready" | "done")) && valid_hash.is_some();
+                local_attachment_descriptors.push(json!({
+                    "name": attachment_name,
+                    "mime": att.r#type,
+                    "size_bytes": att.size,
+                    "sha256": valid_hash,
+                    "availability": att.status.as_deref().unwrap_or("unknown")
+                }));
 
                 // 1. 处理提取的文本内容 (文档类)
                 if let Some(text) = &att.extracted_text {
@@ -157,12 +182,12 @@ pub fn assemble_history_for_vcp(
                         if is_desktop_only {
                             combined_text.push_str(&format!(
                                 "\n\n[桌面附件文本: {}]\n{}\n[/桌面附件文本结束: {}]",
-                                att.name, text, att.name
+                                attachment_name, text, attachment_name
                             ));
                         } else {
                             combined_text.push_str(&format!(
-                                "\n\n[附加文件: {}] (文件名: {})\n{}\n[/附加文件结束: {}]",
-                                local_path, att.name, text, att.name
+                                "\n\n[附加文件] (文件名: {})\n{}\n[/附加文件结束: {}]",
+                                attachment_name, text, attachment_name
                             ));
                         }
                     }
@@ -172,7 +197,7 @@ pub fn assemble_history_for_vcp(
                     if att.extracted_text.as_deref().unwrap_or_default().is_empty() {
                         combined_text.push_str(&format!(
                             "\n\n[桌面专用附件: {}，内容未同步至移动端]",
-                            att.name
+                            attachment_name
                         ));
                     }
                     continue;
@@ -186,26 +211,26 @@ pub fn assemble_history_for_vcp(
 
                 if (is_image || is_audio || is_video) && is_local_ready {
                     if is_image {
-                        combined_text.push_str(&format!(
-                            "\n\n[附加图片: {}] (文件名: {})",
-                            local_path, att.name
-                        ));
+                        combined_text
+                            .push_str(&format!("\n\n[附加图片] (文件名: {})", attachment_name));
                     } else {
-                        combined_text.push_str(&format!(
-                            "\n\n[附加文件: {}] (文件名: {})",
-                            local_path, att.name
-                        ));
+                        combined_text
+                            .push_str(&format!("\n\n[附加文件] (文件名: {})", attachment_name));
                     }
 
                     content_parts.push(json!({
                         "type": "local_file",
-                        "path": local_path,
-                        "mime": mime
+                        "hash": valid_hash,
+                        "name": attachment_name,
+                        "mime": mime,
+                        "size_bytes": att.size
                     }));
-                } else if att.extracted_text.is_none() && is_local_ready {
+                } else if att.extracted_text.is_none()
+                    && matches!(att.status.as_deref(), Some("ready" | "done"))
+                {
                     combined_text.push_str(&format!(
-                        "\n\n[附加文件: {}] (文件名: {})",
-                        local_path, att.name
+                        "\n\n[附加文件] (文件名: {}；本机 CAS 引用不可用)",
+                        attachment_name
                     ));
                 }
             }
@@ -253,6 +278,9 @@ pub fn assemble_history_for_vcp(
                 "timestamp": msg.timestamp,
                 "contentHash": msg.content_hash
             });
+        }
+        if !local_attachment_descriptors.is_empty() {
+            val["__vcpLocalAttachments"] = json!(local_attachment_descriptors);
         }
 
         // 将当前消息推入结果列表
@@ -315,7 +343,7 @@ mod desktop_only_tests {
     }
 
     #[test]
-    fn ready_media_requires_a_non_empty_local_path() {
+    fn ready_media_uses_hash_metadata_without_exposing_a_host_path() {
         let empty = message_with_attachment(Attachment {
             r#type: "image/png".into(),
             name: "missing.png".into(),
@@ -324,9 +352,11 @@ mod desktop_only_tests {
         });
         let ready = message_with_attachment(Attachment {
             r#type: "image/png".into(),
-            name: "ready.png".into(),
+            name: "/private/attachments/ready.png".into(),
             status: Some("ready".into()),
-            internal_path: "/cas/ready.png".into(),
+            hash: Some("b".repeat(64)),
+            internal_path: "/private/attachments/secret.png".into(),
+            src: "file:///private/attachments/secret.png".into(),
             ..Default::default()
         });
 
@@ -336,6 +366,9 @@ mod desktop_only_tests {
             .expect("serialize ready context");
         assert!(!empty_json.contains("local_file"));
         assert!(ready_json.contains("local_file"));
-        assert!(ready_json.contains("/cas/ready.png"));
+        assert!(ready_json.contains(&"b".repeat(64)));
+        assert!(ready_json.contains("__vcpLocalAttachments"));
+        assert!(!ready_json.contains("/private/attachments"));
+        assert!(!ready_json.contains("file://"));
     }
 }

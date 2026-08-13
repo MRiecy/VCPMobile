@@ -7,10 +7,11 @@ const MANIFEST_DESCRIPTION: &str =
 
 const INVOCATION_DESCRIPTION: &str = r#"在 Android 应用私有 PRoot guest 中执行非交互 Bash 命令，也可通过一等 action 发现、读取和显式物化 Mobile Skill。
 
-环境：Shell 固定为 Alpine Linux(musl) 的 /bin/bash -lc；默认 cwd=/workspace；guest 模拟 root 仅用于隔离 rootfs 和 apk，不拥有 Android root；不支持 sudo/apt/systemctl/GUI/adb。基线包含 GNU 常用文件命令、grep/sed/awk/find/diff/patch、tar/zip、curl/wget、git/ssh、jq、python3/pip/apk；其他命令先用 command -v 检查。支持管道、重定向、&& 和多行 Bash。每次 action=run 启动独立 Bash Job。工作区文件和 apk 安装结果持久；cd/export/alias 不跨 run 保留。canonical Skill catalog 永不挂载进 Bash；list_skills/read_skill 只发现和阅读，materialize_skill 才把经 hash 校验的副本放入 /workspace/.vcp-skills。该副本可被 guest 修改但不会写回 catalog。使用 river 时，已过滤上下文作为每次 attempt 独立的 JSON 快照，路径在 VCP_RIVER_CONTEXT_FILE；guest 的修改不会写回聊天上下文。vref 仅在真实索引和引用物化可用时通过 VCP_VREF_DIR 提供，否则命令启动前返回 unsupported_mode。
+环境：Shell 固定为 Alpine Linux(musl) 的 /bin/bash -lc；默认 cwd=/workspace；guest 模拟 root 仅用于隔离 rootfs 和 apk，不拥有 Android root；不支持 sudo/apt/systemctl/GUI/adb。基线包含 GNU 常用文件命令、grep/sed/awk/find/diff/patch、tar/zip、curl/wget、git/ssh、jq、python3/pip/apk；其他命令先用 command -v 检查。支持管道、重定向、&& 和多行 Bash。每次 action=run 启动独立 Bash Job。工作区文件和 apk 安装结果持久；cd/export/alias 不跨 run 保留。canonical Skill catalog 永不挂载进 Bash；list_skills/read_skill 只发现和阅读，materialize_skill 才把经 hash 校验的副本放入 /workspace/.vcp-skills。该副本可被 guest 修改但不会写回 catalog。river=text、river=last:N 与 river=full 会把已过滤上下文写为本次 attempt 的 JSON 快照，路径在 VCP_RIVER_CONTEXT_FILE；full 的 artifacts[].guest_path 指向有界附件副本（最多16个、单个64MiB、总计256MiB），omissions 说明未物化原因。guest 对上下文或附件副本的修改不会写回聊天记录或 canonical CAS。river=semantic:N 与 vref:N 尚不可用时在命令启动前返回 unsupported_mode。
 
 action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。
 - run 必需 command；可选 description、cwd、timeout_ms、run_in_background。普通 run 最多等待 8000ms，未完成也返回 job_id；run_in_background=true 立即返回 job_id。不要在 command 中用 nohup、setsid 或尾随 & 脱离任务，长任务使用 run_in_background。
+- run 可附加 VCP 元字段 ink=mark_history、river=text|last:N|full、archery=true|no_reply；这些字段由工具层处理，不会拼入 Bash command。
 - list_skills 返回已安装且校验通过的 Skill 索引。
 - read_skill 必需 skill_id；resource_path 默认 SKILL.md，可选 max_bytes。返回有界正文与不可作为 shell 路径的逻辑 skill_root。
 - materialize_skill 必需 skill_id；仅在没有活动 Job 时，把完整性校验通过的 Skill 复制为 /workspace 下的非回写快照并返回 materialized_path。它不会执行任何脚本；审阅后必须另发 run。
@@ -182,6 +183,10 @@ mod tests {
         assert!(command.description.contains(
             "action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。"
         ));
+        assert!(command
+            .description
+            .contains("river=text|last:N|full、archery=true|no_reply"));
+        assert!(command.description.contains("artifacts[].guest_path"));
         for action in [
             "action:「始」run「末」",
             "action:「始」list_skills「末」",

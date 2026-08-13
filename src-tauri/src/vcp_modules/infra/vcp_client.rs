@@ -773,6 +773,37 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     }
 }
 
+fn bounded_attachment_label(value: &str) -> String {
+    let basename = value.rsplit(['/', '\\']).next().unwrap_or_default();
+    let filtered = basename
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let trimmed = filtered.trim();
+    if trimmed.is_empty() {
+        return "附件".to_string();
+    }
+    let mut end = trimmed.len().min(256);
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    trimmed[..end].to_string()
+}
+
+fn short_hash(value: &str) -> String {
+    value
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .take(12)
+        .collect()
+}
+
+fn remove_internal_local_attachment_metadata(message: &mut Value) {
+    if let Some(object) = message.as_object_mut() {
+        object.remove("__vcpLocalAttachments");
+    }
+}
+
 /// 1. 抽离多模态消息预处理逻辑
 async fn preprocess_multimodal_messages<R: Runtime>(
     app: &AppHandle<R>,
@@ -786,6 +817,7 @@ async fn preprocess_multimodal_messages<R: Runtime>(
         }
 
         let mut msg = msg_val.clone();
+        remove_internal_local_attachment_metadata(&mut msg);
         let content = msg.get("content").cloned().unwrap_or(Value::Null);
 
         // 处理多模态或复杂内容数组
@@ -793,68 +825,73 @@ async fn preprocess_multimodal_messages<R: Runtime>(
             let mut new_parts = Vec::new();
             for part in content_array {
                 if let Some(obj) = part.as_object() {
-                    // 识别自定义的 local_file 类型并进行路径还原与编码
+                    // local_file 只携带 CAS hash；host path 不进入模型消息。
                     if obj.get("type").and_then(|t| t.as_str()) == Some("local_file") {
-                        if let Some(path_str) = obj.get("path").and_then(|p| p.as_str()) {
-                            let clean_path = path_str.replace("file://", "");
-                            let path_buf = std::path::PathBuf::from(&clean_path);
-
-                            let mut converted = false;
-                            // 提取扩展名决定 mime_type（在文件存在判断之前，确保降级提示也能按类型区分）
-                            let ext = path_buf
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("")
-                                .to_lowercase();
-                            let (mime, part_type) = match ext.as_str() {
-                                "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "heic"
-                                | "heif" | "avif" => ("image", "image_url"),
-                                "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" | "opus" | "amr" => {
-                                    ("audio", "input_audio")
-                                }
-                                "mp4" | "webm" | "3gp" | "3g2" | "mov" => ("video", "image_url"),
-                                _ => ("application", "file_url"), // 非支持多模态格式退化回退
-                            };
-
-                            if path_buf.exists() {
-                                if mime == "image" {
-                                    // 图片类型：长边 > 1120px 时缩放，避免多模态 payload 过大
-                                    let path_buf_clone = path_buf.clone();
-                                    let app_clone = app.clone();
-                                    match tokio::task::spawn_blocking(move || {
-                                        convert_local_image_for_multimodal(
-                                            &app_clone,
-                                            &path_buf_clone,
-                                        )
-                                    })
-                                    .await
-                                    {
-                                        Ok(Ok(data_url)) => {
-                                            new_parts.push(json!({
-                                                "type": part_type,
-                                                part_type: { "url": data_url }
-                                            }));
-                                            converted = true;
-                                        }
-                                        Ok(Err(e)) => {
-                                            log::warn!(
-                                                "[VCPClient] Image conversion failed for {:?}: {}",
-                                                path_buf,
-                                                e
-                                            );
-                                        }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "[VCPClient] Image conversion task panicked: {}",
-                                                e
-                                            );
-                                        }
+                        let hash = obj.get("hash").and_then(Value::as_str).unwrap_or_default();
+                        let label = bounded_attachment_label(
+                            obj.get("name").and_then(Value::as_str).unwrap_or("附件"),
+                        );
+                        let declared_mime = obj
+                            .get("mime")
+                            .and_then(Value::as_str)
+                            .unwrap_or("application/octet-stream");
+                        let resolved = {
+                            let pool = &app.state::<crate::vcp_modules::db_manager::DbState>().pool;
+                            crate::vcp_modules::file_manager::resolve_attachment_cas_file(
+                                app, pool, hash,
+                            )
+                            .await
+                        };
+                        let effective_mime = resolved
+                            .as_ref()
+                            .map(|record| record.mime_type.as_str())
+                            .unwrap_or(declared_mime);
+                        let media_kind = if effective_mime.starts_with("image/") {
+                            "image"
+                        } else if effective_mime.starts_with("audio/") {
+                            "audio"
+                        } else if effective_mime.starts_with("video/") {
+                            "video"
+                        } else {
+                            "application"
+                        };
+                        let mut converted = false;
+                        if let Ok(record) = resolved {
+                            let path_buf = record.path;
+                            if media_kind == "image" {
+                                // 图片类型：长边 > 1120px 时缩放，避免多模态 payload 过大
+                                let path_buf_clone = path_buf.clone();
+                                let app_clone = app.clone();
+                                match tokio::task::spawn_blocking(move || {
+                                    convert_local_image_for_multimodal(&app_clone, &path_buf_clone)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(data_url)) => {
+                                        new_parts.push(json!({
+                                            "type": "image_url",
+                                            "image_url": { "url": data_url }
+                                        }));
+                                        converted = true;
                                     }
-                                } else if mime == "video" {
-                                    // 视频：抽帧 → 每张帧作为 image_url
-                                    let path_clone = path_buf.clone();
-                                    let app_clone = app.clone();
-                                    match tokio::task::spawn_blocking(move || {
+                                    Ok(Err(e)) => {
+                                        log::warn!(
+                                                "[VCPClient] Image conversion failed for attachment CAS {}: {}",
+                                                short_hash(hash), e
+                                            );
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "[VCPClient] Image conversion task panicked: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            } else if media_kind == "video" {
+                                // 视频：抽帧 → 每张帧作为 image_url
+                                let path_clone = path_buf.clone();
+                                let app_clone = app.clone();
+                                match tokio::task::spawn_blocking(move || {
                                         crate::vcp_modules::media_processor::process_video_for_multimodal(&app_clone, &path_clone)
                                     }).await {
                                         Ok(Ok(frames)) => {
@@ -867,17 +904,17 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                             converted = true;
                                         }
                                         Ok(Err(e)) => {
-                                            log::warn!("[VCPClient] Video frame extraction failed for {:?}: {}", path_buf, e);
+                                            log::warn!("[VCPClient] Video frame extraction failed for attachment CAS {}: {}", short_hash(hash), e);
                                         }
                                         Err(e) => {
                                             log::warn!("[VCPClient] Video processing task panicked: {}", e);
                                         }
                                     }
-                                } else if mime == "audio" {
-                                    // 音频：提取为 MP3 (32kbps) 或 AAC (32kbps) -> input_audio
-                                    let path_clone = path_buf.clone();
-                                    let app_clone = app.clone();
-                                    match tokio::task::spawn_blocking(move || {
+                            } else if media_kind == "audio" {
+                                // 音频：提取为 MP3 (32kbps) 或 AAC (32kbps) -> input_audio
+                                let path_clone = path_buf.clone();
+                                let app_clone = app.clone();
+                                match tokio::task::spawn_blocking(move || {
                                         crate::vcp_modules::media_processor::process_audio_for_multimodal(&app_clone, &path_clone)
                                     }).await {
                                         Ok(Ok(audio_url)) => {
@@ -892,26 +929,30 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                             converted = true;
                                         }
                                         Ok(Err(e)) => {
-                                            log::warn!("[VCPClient] Audio extraction failed for {:?}: {}", path_buf, e);
+                                            log::warn!("[VCPClient] Audio extraction failed for attachment CAS {}: {}", short_hash(hash), e);
                                         }
                                         Err(e) => {
                                             log::warn!("[VCPClient] Audio processing task panicked: {}", e);
                                         }
                                     }
-                                }
                             }
+                        } else {
+                            log::warn!(
+                                "[VCPClient] Attachment CAS {} is unavailable for multimodal preprocessing",
+                                short_hash(hash)
+                            );
+                        }
 
-                            // 若文件不存在或读取失败，至少保留文本描述，避免内容静默丢失
-                            if !converted {
-                                let mut warn_msg = format!("[附件文件: {}]", clean_path);
-                                if mime == "image" {
-                                    warn_msg = format!("[附件文件: {}]\n<system_meta>[系统提示]：由于硬件环境限制或原图过大，该图片的视觉信息提取失败，已转为纯文本占位符，请提醒用户注意。</system_meta>", clean_path);
-                                }
-                                new_parts.push(json!({
-                                    "type": "text",
-                                    "text": warn_msg
-                                }));
+                        // 文件不存在或读取失败时仅保留逻辑名，绝不回送 host path。
+                        if !converted {
+                            let mut warning = format!("[附件文件: {label}]");
+                            if media_kind == "image" {
+                                warning.push_str("\n<system_meta>[系统提示]：该图片的视觉信息提取失败，已转为纯文本占位符。</system_meta>");
                             }
+                            new_parts.push(json!({
+                                "type": "text",
+                                "text": warning
+                            }));
                         }
                     } else {
                         new_parts.push(part.clone());
@@ -2647,6 +2688,30 @@ async fn resume_claimed_generation<R: Runtime>(
 #[cfg(test)]
 mod active_request_tests {
     use super::*;
+
+    #[test]
+    fn local_attachment_metadata_is_internal_and_labels_never_reveal_parent_paths() {
+        let mut message = json!({
+            "role": "user",
+            "content": "hello",
+            "__vcpLocalAttachments": [{
+                "sha256": "a".repeat(64),
+                "hostPath": "/data/user/0/private/secret.png"
+            }]
+        });
+        remove_internal_local_attachment_metadata(&mut message);
+        let wire = serde_json::to_string(&message).expect("serialize model message");
+        assert!(!wire.contains("__vcpLocalAttachments"));
+        assert!(!wire.contains("/data/user/0/private"));
+        assert_eq!(
+            bounded_attachment_label("/data/user/0/private/\nphoto.png"),
+            "photo.png"
+        );
+        assert_eq!(
+            short_hash(&format!("{}not-a-hash", "a".repeat(64))),
+            "a".repeat(12)
+        );
+    }
 
     #[tokio::test]
     async fn duplicate_attempt_is_rejected_and_cancel_reaches_every_step_clone() {
