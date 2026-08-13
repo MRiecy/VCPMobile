@@ -150,17 +150,17 @@ const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
     expandedPluginId.value = null;
   }
 
-  // 实时提取当前所有被禁用插件的 ID (排除当前被启用的，或加入被禁用的)
-  const currentDisabled = pluginsList.value
-    .filter(p => p.id === plugin.id ? !targetState : !p.enabled)
+  // 后端持久化的是显式授权 allowlist。新扫描工具不在列表中，因此默认关闭。
+  const currentEnabled = pluginsList.value
+    .filter(p => p.enabled)
     .map(p => p.id);
 
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("update_disabled_tools", { disabledNames: currentDisabled });
+    await invoke("update_enabled_tools", { enabledNames: currentEnabled });
   } catch (e) {
     plugin.enabled = !targetState;
-    console.error("[DistributedView] Failed to sync disabled tools to backend:", e);
+    console.error("[DistributedView] Failed to sync enabled tool allowlist to backend:", e);
     notificationStore.addNotification({
       type: "error",
       title: "工具配置未保存",
@@ -205,7 +205,7 @@ const loadPluginsMetadata = async () => {
         placeholder: tool.placeholder || undefined,
         icon: tool.icon || "i-ph:cube-bold",
         communication: tool.communication,
-        enabled: tool.enabled !== undefined ? tool.enabled : true,
+        enabled: tool.enabled === true,
         requiresRoot: !!tool.requiresRoot
       };
     });

@@ -118,6 +118,11 @@ NOT YET PASS FOR FEATURE CONSTRUCTION
 
 ### P0｜协议、运行时与证据冻结
 
+实施状态（2026-08-13）：`CODE + API36 DEVICE EVIDENCE COMPLETE`。协议/manifest/结果 golden、
+ToolRegistry allowlist、可复现 PRoot/rootfs、许可证与包体记录、API 36 命令探测和整树取消已通过。
+用户实际 VCPToolBox 的提示词微调与 central-loop fixture 无法由当前仓库代替，按用户裁决并入 P2/P3
+真实路由验收；这不再阻塞 P1 的离线 Runtime 施工，但在拿到实际 fixture 前不得宣称 VCP route 可用。
+
 交付：
 
 - 固定 `VCPMobileCLI` manifest/action/request/result golden fixtures，其中 `list_skills/read_skill` 必须作为 action 出现而非内部 Shell 命令；

@@ -23,6 +23,7 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")
+            assets.srcDirs("../../../runtime-assets/vcp-cli/android-assets")
         }
     }
 

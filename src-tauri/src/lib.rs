@@ -17,6 +17,7 @@ use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
 };
+use vcp_modules::cli::get_vcp_mobile_cli_manifest;
 use vcp_modules::context_injection::{
     delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
     save_tarven_rule, toggle_rule_enabled,
@@ -259,6 +260,7 @@ pub fn run() {
             batch_get_avatars,
             store_dominant_color,
             read_settings,
+            get_vcp_mobile_cli_manifest,
             get_settings_recovery_status,
             update_settings,
             diary_list_folders,
@@ -330,7 +332,7 @@ pub fn run() {
             distributed::get_distributed_status,
             distributed::get_registered_tools_metadata,
             distributed::get_distributed_tool_config_status,
-            distributed::update_disabled_tools,
+            distributed::update_enabled_tools,
             distributed::reset_distributed_tools_disabled,
             distributed::execute_distributed_tool,
             distributed::reconnect_distributed_client,
@@ -380,5 +382,20 @@ mod contract_tests {
             DISTRIBUTED_NETWORK_EVENT,
             "vcp-mobile://vcp-network-status-changed"
         );
+    }
+
+    #[test]
+    fn distributed_tool_authorization_command_uses_enabled_allowlist() {
+        let lib_source = include_str!("lib.rs");
+        let distributed_source = include_str!("distributed/mod.rs");
+        let production_lib_source = lib_source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production lib source");
+
+        assert!(production_lib_source.contains("distributed::update_enabled_tools,"));
+        assert!(!production_lib_source.contains("distributed::update_disabled_tools,"));
+        assert!(distributed_source.contains("enabled_names: Vec<String>"));
+        assert!(!distributed_source.contains("disabled_names: Vec<String>"));
     }
 }

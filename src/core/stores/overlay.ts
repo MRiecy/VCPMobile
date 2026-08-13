@@ -15,7 +15,8 @@ export type OverlayPageType =
   | 'tarvenSettings'
   | 'distributed'
   | 'ragObserver'
-  | 'diaryCenter';
+  | 'diaryCenter'
+  | 'cliManifest';
 
 interface DiaryOpenTarget {
   folder: string;
@@ -51,6 +52,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isDistributedOpen = computed(() => pageStack.value.some(p => p.type === 'distributed'));
   const isRagObserverOpen = computed(() => pageStack.value.some(p => p.type === 'ragObserver'));
   const isDiaryCenterOpen = computed(() => pageStack.value.some(p => p.type === 'diaryCenter'));
+  const isCliManifestOpen = computed(() => pageStack.value.some(p => p.type === 'cliManifest'));
 
 
   const agentSettingsId = computed(() => {
@@ -222,6 +224,15 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openCliManifest = () => {
+    pushPage('cliManifest');
+  };
+
+  const closeCliManifest = () => {
+    if (pageStackTop.value?.type !== 'cliManifest') return;
+    popPage();
+  };
+
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
@@ -314,6 +325,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     isDistributedOpen,
     isRagObserverOpen,
     isDiaryCenterOpen,
+    isCliManifestOpen,
     diaryOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
@@ -335,6 +347,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     openDiaryCenter,
     closeDiaryCenter,
     clearDiaryOpenTarget,
+    openCliManifest,
+    closeCliManifest,
     // Modals
     promptConfig,
     confirmConfig,

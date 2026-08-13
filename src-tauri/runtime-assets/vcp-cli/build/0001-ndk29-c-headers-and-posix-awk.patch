@@ -1,0 +1,19 @@
+diff --git a/src/extension/ashmem_memfd/ashmem_memfd.c b/src/extension/ashmem_memfd/ashmem_memfd.c
+index 13e46f4..9ab2b66 100644
+--- a/src/extension/ashmem_memfd/ashmem_memfd.c
++++ b/src/extension/ashmem_memfd/ashmem_memfd.c
+@@ -3,6 +3,7 @@
+ #include <stdlib.h>
++#include <string.h>
+ #include <signal.h>
+ #include <unistd.h>
+ #include <sys/syscall.h>  /* __NR_memfd_create,  */
+diff --git a/src/loader/loader-info.awk b/src/loader/loader-info.awk
+index 6cf1e23..a5e9861 100644
+--- a/src/loader/loader-info.awk
++++ b/src/loader/loader-info.awk
+@@ -2,2 +2,2 @@
+-/\ypokedata_workaround\y/{pokedata_workaround=strtonum("0x" $2)}
+-/\y_start\y/{start=strtonum("0x" $2)}
++/\ypokedata_workaround\y/{pokedata_workaround=("0x" $2)+0}
++/\y_start\y/{start=("0x" $2)+0}

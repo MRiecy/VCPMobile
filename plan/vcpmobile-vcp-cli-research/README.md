@@ -1,10 +1,27 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`RESEARCHED / ARCHITECTURE-FROZEN / IMPLEMENTATION-PENDING`
+> 状态：`P0-CODE-AND-DEVICE-EVIDENCE-COMPLETE / VCP-DEPLOYMENT-FIXTURE-DEFERRED / P1-NEXT`
 >
 > 研究日期：2026-08-13
 >
-> 当前范围：形成可施工方案并保存讨论结论；本轮不修改产品代码，不宣称 Android 真机或真实 VCP 部署已经验收。
+> 当前范围：P0 已冻结并实现工具协议、显式工具授权、Android Bash 运行环境资产及 manifest 交付页；
+> 用户实际 VCPToolBox 部署的提示词微调与 central-loop 联调按用户裁决留到 P2/P3，不宣称已经验收。
+
+## P0 实施快照（2026-08-13）
+
+- `VCPMobileCLI` 的 canonical manifest、VCP block parser、typed action、结果 envelope 与 local/distributed
+  两路投影已落地，并由 golden fixture 固定；`list_skills/read_skill` 是独立 action。
+- Distributed ToolRegistry 已改为“全 catalog 可见 + enabled allowlist”，fresh install、旧 disabled-name 配置、
+  损坏配置与新扫描工具都 fail-closed；关闭全部工具会向服务端发送空注册以撤下旧 manifest。
+- Android runtime profile 固定为非 Root App UID、Alpine 3.24.1(musl)、`/bin/bash -lc`、41 个广告命令。
+  PRoot 和 72 个增量 APK 均锁定来源/版本/SHA；rootfs 独立重建与仓库资产逐字一致。
+- Android 16/API 36/arm64 真机已验证 Bash 解释器、41 命令和负 PGID 整树终止。此证据仅支持前台
+  Runtime 开工，不代表 Doze、划卡或后台长稳。
+- “更多”托盘已有 VCP CLI manifest 查看、逐字复制和导出入口；Mobile 没有新增 prompt 注入或
+  SkillBridge。
+
+仍未完成：真实 VCPToolBox 部署 fixture、MobileCliRuntime、Agent 本地多轮 loop、真实 Distributed
+CLI adapter、recall modes 与后台/PTY；它们分别属于 P1–P5。
 
 ## 结论
 
@@ -73,8 +90,10 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 ## 当前完成定义
 
-本轮只完成研究与方案归档。允许的准确表述是：
+允许的准确表述是：
 
-> VCPMobile VCP CLI 已确认采用“默认本地回环、真实 VCP 插件显式开启、统一工具协议与 Runtime”的方向；协议 fixture、Android Runtime 选型、许可证/APK 预算、代码实现和真机长稳仍待 P0–P5 验收。
+> VCPMobile CLI 的 P0 协议、授权模型、可重建 Android Bash 资产和 API 36 前台 spike 已完成；CLI
+> 尚未接上产品 Runtime，因此当前页面仍只交付 manifest，不可宣称 Agent 或用户已经能执行命令。
 
-不得表述为“CLI 已可用”“后台长任务已稳定”“OpenMinis 代码可直接合并”或“iOS 已支持本地 Linux”。
+不得表述为“CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
+或“iOS 已支持本地 Linux”。

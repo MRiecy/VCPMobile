@@ -224,6 +224,12 @@ pub struct DistributedClient {
 }
 
 impl DistributedClient {
+    fn clear_registered_tools_for_session(status: &mut DistributedStatus, session_id: u64) {
+        if status.session_id == session_id {
+            status.registered_tools = 0;
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             status: Arc::new(RwLock::new(DistributedStatus::default())),
@@ -261,6 +267,7 @@ impl DistributedClient {
             s.server_id = None;
             s.client_id = None;
             s.last_error = None;
+            s.registered_tools = 0;
             s.session_id += 1;
             s.session_id
         };
@@ -347,6 +354,7 @@ impl DistributedClient {
             s.connected = false;
             s.server_id = None;
             s.client_id = None;
+            s.registered_tools = 0;
             stop_generation
         };
 
@@ -365,6 +373,7 @@ impl DistributedClient {
                 s.connected = false;
                 s.server_id = None;
                 s.client_id = None;
+                s.registered_tools = 0;
             }
         }
         Self::emit_status(app, &self.status).await;
@@ -479,6 +488,7 @@ impl DistributedClient {
                             s.connected = false;
                             s.server_id = None;
                             s.client_id = None;
+                            Self::clear_registered_tools_for_session(&mut s, session_id);
                             s.last_error = Some(exit_reason);
                         }
                     }
@@ -493,6 +503,7 @@ impl DistributedClient {
                                 s.state = ConnectionState::Connecting;
                             }
                             s.connected = false;
+                            Self::clear_registered_tools_for_session(&mut s, session_id);
                             s.last_error = Some(format!("Connection failed: {}", e));
                         }
                     }
@@ -535,6 +546,7 @@ impl DistributedClient {
                 s.connected = false;
                 s.server_id = None;
                 s.client_id = None;
+                Self::clear_registered_tools_for_session(&mut s, session_id);
             }
         }
         Self::emit_status(&app, &status).await;
@@ -867,12 +879,6 @@ impl DistributedClient {
         session_id: u64,
     ) {
         let tools = registry.get_all_manifests();
-
-        if tools.is_empty() {
-            log::info!("[Distributed] No tools to register.");
-            return;
-        }
-
         let count = tools.len();
         let msg = OutgoingMessage::RegisterTools {
             server_name: device_name.to_string(),
@@ -891,7 +897,11 @@ impl DistributedClient {
             }
         }
 
-        log::info!("[Distributed] Registered {} tools with main server.", count);
+        if count == 0 {
+            log::info!("[Distributed] Published an empty tool manifest set.");
+        } else {
+            log::info!("[Distributed] Registered {} tools with main server.", count);
+        }
     }
 
     /// Report IP addresses to the main server.
@@ -1225,6 +1235,72 @@ mod tests {
 
         assert_eq!(config.max_message_size, Some(MAX_INCOMING_MESSAGE_BYTES));
         assert_eq!(config.max_frame_size, Some(MAX_INCOMING_MESSAGE_BYTES));
+    }
+
+    #[test]
+    fn empty_registration_is_a_wire_message_that_withdraws_all_tools() {
+        let message = OutgoingMessage::RegisterTools {
+            server_name: "mobile".to_string(),
+            tools: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(message).unwrap(),
+            serde_json::json!({
+                "type": "register_tools",
+                "data": {
+                    "serverName": "mobile",
+                    "tools": []
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_empty_registration_withdraws_tools_and_keeps_count_zero() {
+        let registry = Arc::new(super::super::tools::build_registry());
+        let status = Arc::new(RwLock::new(DistributedStatus {
+            registered_tools: 4,
+            session_id: 9,
+            ..DistributedStatus::default()
+        }));
+
+        for _ in 0..2 {
+            let (ws_tx, mut ws_rx) = mpsc::channel::<OutboundFrame>(1);
+            let receiver = tokio::spawn(async move {
+                let frame = ws_rx.recv().await.expect("registration frame");
+                let value = match frame.message {
+                    WsMessage::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+                    other => panic!("unexpected registration frame: {other:?}"),
+                };
+                frame.completion.send(Ok(())).unwrap();
+                value
+            });
+
+            DistributedClient::register_tools("mobile", &ws_tx, &registry, &status, 9).await;
+            let value = receiver.await.unwrap();
+            assert_eq!(value["data"]["tools"], serde_json::json!([]));
+            assert_eq!(status.read().await.registered_tools, 0);
+        }
+    }
+
+    #[test]
+    fn registered_tool_count_clear_is_generation_guarded() {
+        let mut status = DistributedStatus {
+            state: ConnectionState::Connected,
+            connected: true,
+            server_id: Some("server".to_string()),
+            client_id: Some("client".to_string()),
+            registered_tools: 3,
+            session_id: 7,
+            ..DistributedStatus::default()
+        };
+
+        DistributedClient::clear_registered_tools_for_session(&mut status, 6);
+        assert_eq!(status.registered_tools, 3);
+
+        DistributedClient::clear_registered_tools_for_session(&mut status, 7);
+
+        assert_eq!(status.registered_tools, 0);
     }
 
     #[tokio::test]

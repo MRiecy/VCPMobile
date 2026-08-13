@@ -29,6 +29,7 @@ const DistributedView = defineAsyncComponent(() => import('../features/distribut
 const SettingsView = defineAsyncComponent(() => import('../features/settings/SettingsView.vue'));
 const RagObserverView = defineAsyncComponent(() => import('../features/rag/RagObserver.vue'));
 const DiaryCenterView = defineAsyncComponent(() => import('../features/diary/DiaryCenterView.vue'));
+const VcpCliManifestView = defineAsyncComponent(() => import('../features/cli/components/VcpCliManifestView.vue'));
 const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
 
 
@@ -50,6 +51,7 @@ const tarvenSettingsMounted = createFirstOpenLatch(() => overlayStore.isTarvenSe
 const distributedMounted = createFirstOpenLatch(() => overlayStore.isDistributedOpen);
 const ragObserverMounted = createFirstOpenLatch(() => overlayStore.isRagObserverOpen);
 const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
+const cliManifestMounted = createFirstOpenLatch(() => overlayStore.isCliManifestOpen);
 </script>
 
 <template>
@@ -105,6 +107,13 @@ const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
       :is-open="overlayStore.isRagObserverOpen"
       :z-index="overlayStore.getPageZIndex('ragObserver')"
       @close="overlayStore.closeRagObserver()"
+    />
+
+    <VcpCliManifestView
+      v-if="cliManifestMounted"
+      :is-open="overlayStore.isCliManifestOpen"
+      :z-index="overlayStore.getPageZIndex('cliManifest')"
+      @close="overlayStore.closeCliManifest()"
     />
 
     <Suspense v-if="diaryMounted">

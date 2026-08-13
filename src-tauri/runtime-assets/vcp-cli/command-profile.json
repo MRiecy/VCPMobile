@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "profileId": "vcp-mobile-cli-alpine-3.24.1-aarch64",
+  "platform": {
+    "host": "android",
+    "abi": "arm64-v8a",
+    "minSdk": 26,
+    "privilege": "app_uid_non_root"
+  },
+  "guest": {
+    "distribution": "alpine",
+    "version": "3.24.1",
+    "libc": "musl",
+    "libcVersion": "1.2.6-r2",
+    "simulatedUid": 0,
+    "androidRoot": false
+  },
+  "invocation": {
+    "shell": "/bin/bash",
+    "shellVersion": "5.3.9-r1",
+    "argv": ["/bin/bash", "-lc", "<command>"],
+    "defaultCwd": "/workspace",
+    "workspace": "/workspace",
+    "skills": "/skills",
+    "interactive": false,
+    "persistentShellState": false
+  },
+  "proot": {
+    "source": "https://github.com/termux/proot",
+    "tag": "v5.1.107.89",
+    "commit": "a89b3732ec6ae1db674510f0843b2f3db54d0a2f",
+    "sourceArchiveSha256": "e1240f63de03e6da536d74041c7937ddd8737ab27743857d79285724b948eca8",
+    "ndk": "29.0.13846066",
+    "androidApi": 26,
+    "patch": "build/0001-ndk29-c-headers-and-posix-awk.patch",
+    "binary": "../../plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot.so",
+    "binarySha256": "651a5778979523e61b534b34a7a649b64f5a43237f951d7d5651b8dcdbe69e86",
+    "binaryBytes": 281296,
+    "license": "GPL-2.0-or-later"
+  },
+  "talloc": {
+    "version": "2.4.2",
+    "source": "https://download.samba.org/pub/talloc/talloc-2.4.2.tar.gz",
+    "sourceArchiveSha256": "85ecf9e465e20f98f9950a52e9a411e14320bc555fa257d87697b7e7a9b1d8a6",
+    "linkage": "static_into_proot_executable",
+    "license": "LGPL-3.0-or-later"
+  },
+  "rootfs": {
+    "baseSource": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
+    "baseSha256": "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
+    "archive": "android-assets/vcp-cli-rootfs-3.24.1-aarch64.tar.zst",
+    "archiveSha256": "3bb7949b14b4d926b4080e611375b1eed25d152dbf0439b79d9cf36e186247e7",
+    "archiveBytes": 26870045,
+    "tarContentSha256": "19126a747094e5e0e6a762d0542ee34a34b36893e431ba56e8bd90fd6b58df43",
+    "logicalBytes": 107258068,
+    "installedPackageCount": 80,
+    "lockedIncrementalPackageCount": 72,
+    "packageLock": "alpine-packages.lock.tsv"
+  },
+  "commands": {
+    "shellAndFiles": [
+      "bash", "sh", "pwd", "ls", "mkdir", "cp", "mv", "rm", "ln", "touch", "cat", "head", "tail", "wc", "stat"
+    ],
+    "textAndSearch": [
+      "grep", "sed", "awk", "sort", "uniq", "cut", "tr", "xargs", "find", "diff", "patch"
+    ],
+    "archivesAndData": [
+      "tar", "gzip", "xz", "zip", "unzip", "file", "jq"
+    ],
+    "networkAndVcs": [
+      "curl", "wget", "git", "ssh", "scp"
+    ],
+    "scriptsAndPackages": [
+      "python3", "pip", "apk"
+    ]
+  },
+  "commandPaths": {
+    "bash": "/bin/bash",
+    "sh": "/bin/sh",
+    "pwd": "builtin:pwd",
+    "ls": "/bin/ls",
+    "mkdir": "/bin/mkdir",
+    "cp": "/bin/cp",
+    "mv": "/bin/mv",
+    "rm": "/bin/rm",
+    "ln": "/bin/ln",
+    "touch": "/bin/touch",
+    "cat": "/bin/cat",
+    "head": "/usr/bin/head",
+    "tail": "/usr/bin/tail",
+    "wc": "/usr/bin/wc",
+    "stat": "/bin/stat",
+    "grep": "/bin/grep",
+    "sed": "/bin/sed",
+    "awk": "/usr/bin/awk",
+    "sort": "/usr/bin/sort",
+    "uniq": "/usr/bin/uniq",
+    "cut": "/usr/bin/cut",
+    "tr": "/usr/bin/tr",
+    "xargs": "/usr/bin/xargs",
+    "find": "/usr/bin/find",
+    "diff": "/usr/bin/diff",
+    "patch": "/usr/bin/patch",
+    "tar": "/bin/tar",
+    "gzip": "/bin/gzip",
+    "xz": "/usr/bin/xz",
+    "zip": "/usr/bin/zip",
+    "unzip": "/usr/bin/unzip",
+    "file": "/usr/bin/file",
+    "jq": "/usr/bin/jq",
+    "curl": "/usr/bin/curl",
+    "wget": "/usr/bin/wget",
+    "git": "/usr/bin/git",
+    "ssh": "/usr/bin/ssh",
+    "scp": "/usr/bin/scp",
+    "python3": "/usr/bin/python3",
+    "pip": "/usr/bin/pip",
+    "apk": "/sbin/apk"
+  },
+  "unsupportedByDefault": [
+    "sudo", "apt", "dnf", "systemctl", "docker", "adb", "gui", "android_root", "shizuku"
+  ],
+  "budgets": {
+    "foregroundYieldMs": 8000,
+    "defaultTimeoutMs": 1800000,
+    "maxTimeoutMs": 43200000,
+    "defaultPollBytes": 65536,
+    "maxPollBytes": 262144,
+    "ringBytesPerJob": 1048576,
+    "artifactBytesPerJob": 268435456,
+    "workspaceDefaultBytes": 2147483648,
+    "defaultConcurrentJobs": 2,
+    "maxConcurrentJobs": 4
+  },
+  "apkBudget": {
+    "rawAssetBytes": 27151341,
+    "estimatedCompressedIncrementBytes": 26938827
+  },
+  "probe": {
+    "script": "probe-command-profile.sh",
+    "verifiedAt": "2026-08-13",
+    "deviceClass": "OPPO PHZ110",
+    "androidVersion": 16,
+    "androidApi": 36,
+    "abi": "arm64-v8a",
+    "allCommandsPresent": true,
+    "bashWasActualInterpreter": true,
+    "negativeProcessGroupSignalRemovedWholeTree": true,
+    "backgroundReliabilityClaim": "foreground_only"
+  }
+}

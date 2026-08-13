@@ -46,7 +46,7 @@ pub async fn get_distributed_status(
     Ok(client.get_status().await)
 }
 
-/// Get all registered tools metadata for frontend display.
+/// Get the complete scanned tool catalog for frontend display.
 #[tauri::command]
 pub async fn get_registered_tools_metadata(
     state: State<'_, DistributedState>,
@@ -54,7 +54,7 @@ pub async fn get_registered_tools_metadata(
     Ok(state.registry.get_tools_metadata())
 }
 
-/// Expose whether a damaged/missing config was recovered to all-disabled.
+/// Expose authorization load, migration and persistence status.
 #[tauri::command]
 pub async fn get_distributed_tool_config_status(
     state: State<'_, DistributedState>,
@@ -62,16 +62,16 @@ pub async fn get_distributed_tool_config_status(
     Ok(state.registry.config_status())
 }
 
-/// Update disabled tools list and re-register if connected.
+/// Persist the explicit enabled-tool allowlist and re-register if connected.
 #[tauri::command]
-pub async fn update_disabled_tools(
+pub async fn update_enabled_tools(
     app: tauri::AppHandle,
     state: State<'_, DistributedState>,
-    disabled_names: Vec<String>,
+    enabled_names: Vec<String>,
 ) -> Result<(), String> {
     let changed = state
         .registry
-        .persist_and_update_disabled(&app, disabled_names)
+        .persist_and_update_enabled(&app, enabled_names)
         .await?;
 
     if changed {
@@ -83,7 +83,7 @@ pub async fn update_disabled_tools(
     Ok(())
 }
 
-/// Explicit recovery entry: atomically persist and apply an all-disabled policy.
+/// Explicit recovery entry: atomically persist and apply an empty allowlist.
 #[tauri::command]
 pub async fn reset_distributed_tools_disabled(
     app: tauri::AppHandle,

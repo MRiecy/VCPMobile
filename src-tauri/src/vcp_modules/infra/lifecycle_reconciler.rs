@@ -81,7 +81,7 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
             );
             let config_status = distributed_state
                 .registry
-                .load_disabled_config(app_handle)
+                .load_enabled_config(app_handle)
                 .await;
             if config_status.state != crate::distributed::tool_registry::ToolConfigState::Ready {
                 log::warn!(

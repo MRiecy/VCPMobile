@@ -1,0 +1,153 @@
+{
+  "valid": [
+    {
+      "name": "run defaults",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」printf ok「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "run",
+        "command": "printf ok",
+        "description": null,
+        "cwd": "/workspace",
+        "timeout_ms": 1800000,
+        "run_in_background": false,
+        "meta": {}
+      }
+    },
+    {
+      "name": "run typed fields and all recognized meta",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」run「末」,\ncommand:「始」python3 train.py「末」,\ndescription:「始」run training「末」,\ncwd:「始」/workspace/model「末」,\ntimeout_ms:「始」21600000「末」,\nrun_in_background:「始」true「末」,\nink:「始」mark_history「末」,\nriver:「始」last:5「末」,\nvref:「始」3「末」,\narchery:「始」no_reply「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "run",
+        "command": "python3 train.py",
+        "description": "run training",
+        "cwd": "/workspace/model",
+        "timeout_ms": 21600000,
+        "run_in_background": true,
+        "meta": {
+          "ink": "mark_history",
+          "river": "last:5",
+          "vref": 3,
+          "archery": "no_reply"
+        }
+      }
+    },
+    {
+      "name": "list skills with history mark",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」,\nink:「始」mark_history「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "list_skills",
+        "meta": {
+          "ink": "mark_history"
+        }
+      }
+    },
+    {
+      "name": "read skill clamps output",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」read_skill「末」,\nskill_id:「始」example-skill「末」,\nresource_path:「始」references/guide.md「末」,\nmax_bytes:「始」999999「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "read_skill",
+        "skill_id": "example-skill",
+        "resource_path": "references/guide.md",
+        "max_bytes": 262144,
+        "meta": {}
+      }
+    },
+    {
+      "name": "poll typed fields",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」poll「末」,\njob_id:「始」job_01「末」,\ncursor:「始」c_42「末」,\nmax_output_bytes:「始」65536「末」,\nwait_ms:「始」8000「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "poll",
+        "job_id": "job_01",
+        "cursor": "c_42",
+        "max_output_bytes": 65536,
+        "wait_ms": 8000,
+        "meta": {}
+      }
+    },
+    {
+      "name": "cancel",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」cancel「末」,\njob_id:「始」job_01「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "cancel",
+        "job_id": "job_01",
+        "meta": {}
+      }
+    },
+    {
+      "name": "list jobs",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "list",
+        "meta": {}
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "missing run command",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」run「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "command"
+    },
+    {
+      "name": "unknown action",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」execute「末」,\ncommand:「始」true「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "action"
+    },
+    {
+      "name": "unknown field cannot reach shell",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nenvironment:「始」TOKEN=x「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "environment"
+    },
+    {
+      "name": "river is invalid on non run action",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」poll「末」,\njob_id:「始」job_01「末」,\nriver:「始」text「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "river"
+    },
+    {
+      "name": "vref is invalid on skill action",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」,\nvref:「始」2「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "vref"
+    },
+    {
+      "name": "malformed river",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nriver:「始」last:0「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "river"
+    },
+    {
+      "name": "unknown ink mode is unsupported",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nink:「始」semantic_memory「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "unsupported_mode",
+      "field": "ink"
+    },
+    {
+      "name": "duplicate command is ambiguous",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」one「末」,\ncommand:「始」two「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "command"
+    },
+    {
+      "name": "skill resource traversal",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」read_skill「末」,\nskill_id:「始」example「末」,\nresource_path:「始」../secret「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "resource_path"
+    },
+    {
+      "name": "timeout below floor",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\ntimeout_ms:「始」999「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "timeout_ms"
+    },
+    {
+      "name": "tool identity mismatch",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」PowerShellExecutor「末」,\ncommand:「始」true「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "code": "invalid_request",
+      "field": "tool_name"
+    }
+  ]
+}

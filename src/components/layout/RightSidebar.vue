@@ -10,6 +10,7 @@ import {
   Ellipsis,
   RefreshCw,
   Settings,
+  SquareTerminal,
 } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -54,6 +55,12 @@ const openMoreTool = (open: () => void) => {
 };
 
 const moreTools = [
+  {
+    id: 'vcp-cli',
+    label: 'VCP CLI',
+    icon: SquareTerminal,
+    open: () => overlayStore.openCliManifest(),
+  },
   {
     id: 'sync',
     label: '同步中心',

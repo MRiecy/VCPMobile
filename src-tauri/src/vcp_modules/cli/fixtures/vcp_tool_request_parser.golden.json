@@ -1,0 +1,111 @@
+{
+  "cases": [
+    {
+      "name": "canonical run and multiline value",
+      "input": "before\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」run「末」,\ncommand:「始」printf 'one\\ntwo'「末」,\nink:「始」mark_history「末」\n<<<[END_TOOL_REQUEST]>>>\nafter",
+      "expected": [
+        [
+          {
+            "key": "tool_name",
+            "value": "VCPMobileCLI"
+          },
+          {
+            "key": "action",
+            "value": "run"
+          },
+          {
+            "key": "command",
+            "value": "printf 'one\\ntwo'"
+          },
+          {
+            "key": "ink",
+            "value": "mark_history"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "escape field hides outer markers",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:{始escape}printf '%s\\n' '<<<[TOOL_REQUEST_ESCAPE]>>>' '<<<[END_TOOL_REQUEST_ESCAPE]>>>'{末escape}\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": [
+        [
+          {
+            "key": "tool_name",
+            "value": "VCPMobileCLI"
+          },
+          {
+            "key": "command",
+            "value": "printf '%s\\n' '<<<[TOOL_REQUEST]>>>' '<<<[END_TOOL_REQUEST]>>>'"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "nested mixed reasoning is excluded and unmatched closing keeps visible text",
+      "input": "<think data-x='1'>hidden <<<[TOOL_REQUEST]>>>\ntool_name:「始」Hidden「末」\n<<<[END_TOOL_REQUEST]>>><thinking>nested</thinking></think>\n</THINKING>\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": [
+        [
+          {
+            "key": "tool_name",
+            "value": "VCPMobileCLI"
+          },
+          {
+            "key": "action",
+            "value": "list"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "unclosed reasoning discards its tail",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」\n<<<[END_TOOL_REQUEST]>>>\n<thinking>never execute\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」danger「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": [
+        [
+          {
+            "key": "tool_name",
+            "value": "VCPMobileCLI"
+          },
+          {
+            "key": "action",
+            "value": "list_skills"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "incomplete block stops nested scanning",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始ESCAPE」unterminated\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": []
+    },
+    {
+      "name": "multiple complete blocks preserve order",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」\n<<<[END_TOOL_REQUEST]>>>\ntext\n<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」cancel「末」,\njob_id:「始」job_01「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": [
+        [
+          {
+            "key": "tool_name",
+            "value": "VCPMobileCLI"
+          },
+          {
+            "key": "action",
+            "value": "list_skills"
+          }
+        ],
+        [
+          {
+            "key": "tool_name",
+            "value": "VCPMobileCLI"
+          },
+          {
+            "key": "action",
+            "value": "cancel"
+          },
+          {
+            "key": "job_id",
+            "value": "job_01"
+          }
+        ]
+      ]
+    }
+  ]
+}
