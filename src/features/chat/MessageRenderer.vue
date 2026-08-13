@@ -413,12 +413,12 @@ function renderBlockHtml(block: ContentBlock): string {
   }
 }
 
-function getBlockKey(block: ContentBlock, index: number): string {
+function getBlockKey(block: ContentBlock, index: number, bubbleId: string): string {
   if (block.hash !== undefined && block.hash !== null) {
-    return `${block.type}-${String(block.hash)}-${index}`;
+    return `${bubbleId}-${block.type}-${String(block.hash)}-${index}`;
   }
   // Fallback for legacy data (index-based)
-  return `${block.type}-idx-${index}`;
+  return `${bubbleId}-${block.type}-idx-${index}`;
 }
 
 function escapeHtml(text: string): string {
@@ -940,6 +940,8 @@ onUnmounted(() => {
     <template v-for="(bubble, bubbleIndex) in messageBubbles" :key="bubble.id">
       <template v-if="shell">
         <MessageHeader
+          :class="bubbleIndex > 0 ? 'vcp-message-header-repeated' : ''"
+          :data-bubble-index="bubbleIndex"
           :is-user="shell.isUser"
           :display-name="shell.displayName"
           :name-style="{ color: shell.avatarColor }"
@@ -954,6 +956,8 @@ onUnmounted(() => {
           :bubble-style="{
             '--dynamic-color': shell.avatarColor,
           }"
+          :data-bubble-index="bubbleIndex"
+          :data-bubble-last="bubbleIndex === messageBubbles.length - 1 ? 'true' : 'false'"
           :class="bubbleIndex > 0 ? 'mt-2' : ''"
         >
           <!-- 初始思考指示灯：仅在此活跃气泡没有任何已确认 blocks，且仍在流式并未吐出 tail 时显示 -->
@@ -961,9 +965,9 @@ onUnmounted(() => {
 
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
-              <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index)">
-                <!-- v-memo=[index] 保证已稳定块零开销：Vue 缓存 VNode 子树，不重渲染、不触碰 DOM -->
-                <div v-memo="[getBlockKey(block, index)]">
+              <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index, bubble.id)">
+                <!-- v-memo 使用含 bubble ID 的稳定 key，避免分条气泡之间复用错误子树 -->
+                <div v-memo="[getBlockKey(block, index, bubble.id)]">
                   <DiaryBlock
                     v-if="block.type === 'diary' || block.type === 'diary-update'"
                     :block="block"
@@ -1042,7 +1046,8 @@ onUnmounted(() => {
           <StreamingTag v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1)" />
 
           <template #footer>
-            <div class="text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
+            <div class="vcp-message-time text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"
+              :data-bubble-last="bubbleIndex === messageBubbles.length - 1 ? 'true' : 'false'"
               :class="shell.isUser ? 'text-right' : 'text-left'">
               {{ formatTime(message.timestamp) }}
             </div>

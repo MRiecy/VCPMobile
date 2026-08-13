@@ -9,11 +9,35 @@ export const vLongpress: Directive = {
 
     const callback = binding.value;
     const delay = 600; // 长按触发时间 ms
+    const suppressClick = binding.modifiers['suppress-click'] === true;
     let pressTimer: number | null = null;
+    let suppressionExpiryTimer: number | null = null;
     let isTouchMoved = false;
+    let didLongPress = false;
+    let lastLongPressAt: number | null = null;
 
-    // 触发长按逻辑
+    const clearSuppressionExpiry = () => {
+      if (suppressionExpiryTimer !== null) {
+        clearTimeout(suppressionExpiryTimer);
+        suppressionExpiryTimer = null;
+      }
+    };
+
+    const armSuppressionExpiry = () => {
+      if (!suppressClick || !didLongPress) return;
+      clearSuppressionExpiry();
+      suppressionExpiryTimer = window.setTimeout(() => {
+        didLongPress = false;
+        suppressionExpiryTimer = null;
+      }, 700);
+    };
+
+    // 同一触摸长按可能同时产生 timer 与 contextmenu，只允许回调一次。
     const executeLongPress = (e: Event) => {
+      const now = Date.now();
+      if (lastLongPressAt !== null && now - lastLongPressAt < 800) return;
+      lastLongPressAt = now;
+      didLongPress = suppressClick;
       callback(e);
     };
 
@@ -22,15 +46,23 @@ export const vLongpress: Directive = {
       if (e.type === 'mousedown' && (e as MouseEvent).button !== 0) {
         return;
       }
+      clearSuppressionExpiry();
+      didLongPress = false;
       isTouchMoved = false;
 
       if (pressTimer === null) {
         pressTimer = window.setTimeout(() => {
+          pressTimer = null;
           if (!isTouchMoved) {
             executeLongPress(e);
           }
         }, delay);
       }
+    };
+
+    const end = () => {
+      cancel();
+      armSuppressionExpiry();
     };
 
     const cancel = () => {
@@ -55,35 +87,49 @@ export const vLongpress: Directive = {
 
     // Touch events (移动端)
     el.addEventListener('touchstart', start, { passive: true });
-    el.addEventListener('touchend', cancel);
+    el.addEventListener('touchend', end);
     el.addEventListener('touchmove', move, { passive: true });
-    el.addEventListener('touchcancel', cancel);
+    el.addEventListener('touchcancel', end);
 
     // Mouse events (桌面端模拟长按)
     el.addEventListener('mousedown', start);
-    el.addEventListener('mouseup', cancel);
+    el.addEventListener('mouseup', end);
     el.addEventListener('mousemove', move);
-    el.addEventListener('mouseleave', cancel);
+    el.addEventListener('mouseleave', end);
+
+    const onClickCapture = (e: MouseEvent) => {
+      if (!suppressClick || !didLongPress) return;
+      didLongPress = false;
+      clearSuppressionExpiry();
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+    };
+    el.addEventListener('click', onClickCapture, true);
 
     // Context menu (桌面端原生右键)
     const onContextMenu = (e: Event) => {
       e.preventDefault(); // 拦截原生右键菜单
       cancel(); // 取消可能正在进行的长按计时
       executeLongPress(e);
+      armSuppressionExpiry();
     };
     el.addEventListener('contextmenu', onContextMenu);
 
     // 保存清理函数
     (el as any)._longpressCleanup = () => {
       el.removeEventListener('touchstart', start);
-      el.removeEventListener('touchend', cancel);
+      el.removeEventListener('touchend', end);
       el.removeEventListener('touchmove', move);
-      el.removeEventListener('touchcancel', cancel);
+      el.removeEventListener('touchcancel', end);
       el.removeEventListener('mousedown', start);
-      el.removeEventListener('mouseup', cancel);
+      el.removeEventListener('mouseup', end);
       el.removeEventListener('mousemove', move);
-      el.removeEventListener('mouseleave', cancel);
+      el.removeEventListener('mouseleave', end);
+      el.removeEventListener('click', onClickCapture, true);
       el.removeEventListener('contextmenu', onContextMenu);
+      cancel();
+      clearSuppressionExpiry();
     };
   },
   unmounted(el: HTMLElement) {

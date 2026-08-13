@@ -1,6 +1,6 @@
 # VCPMobile 主题预览与消息呈现模式专项
 
-> 状态：`RESEARCH-COMPLETE / IMPLEMENTATION-NOT-STARTED / DEVICE-EVIDENCE-PENDING`
+> 状态：`RESEARCH-COMPLETE / SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PARTIAL`
 >
 > 调研日期：2026-08-13
 >
@@ -34,6 +34,8 @@
 
 主题设置页采用“局部草稿预览 → 明确确认 → 全局应用”：滑动主题视口只更新页面内的深色/浅色双栏实时预览，不改根 CSS 变量、不写 `localStorage`；只有点击“确认应用”才调用主题 Store 的正式提交动作。手机显示一个主卡并露出相邻卡，平板在同一横向视口显示多个卡；预览、选择器和确认按钮应在一个可用视口内，避免用户来回长距离上下滚动。
 
+2026-08-13 的实施补充要求把同一套“气泡 / 统一 / 刊物”三选项作为主题页的第二个设置入口，顺序固定在主题预览、横向选择和确认区之后。它与聊天顶栏长按入口共享同一 Store 枚举和 setter，点选即生效；主题的“确认应用”只提交主题草稿，不包裹或延迟消息呈现偏好。桌面端同名区域中的百分比宽度滑杆仍在本专项边界之外。
+
 ## 文档导航
 
 | 文档 | 内容 | 主要读者 |
@@ -61,6 +63,8 @@
 11. 实时预览使用局部 style/CSS 变量，绝不注入到 `document.documentElement`，也不执行候选 `extraCss`。
 12. “确认应用”是主题配色的唯一用户提交点；返回/关闭主题页丢弃未确认草稿，不弹阻断确认框。开发态 Vite HMR 继续只重载已应用的 TS 模块。
 13. 主题选择器使用单一横向 snap 视口：手机一主卡加相邻预告，平板同视口多卡；不恢复纵向长列表。
+14. 主题页在主题预览/选择/确认之后提供同一套消息呈现三选项；两处入口共享 `CHAT_PRESENTATION_OPTIONS` 与 `setPresentationMode`，不建立第二个状态 owner。
+15. 消息呈现点选立即保存；它不参与主题草稿事务，也不迁移桌面端的自定义百分比内容宽度控件。
 
 ## 完成定义
 
@@ -72,7 +76,39 @@
 - 旧 `.css` 主题别名可恢复到对应 TS 模块，成功提交后以 TS module key 持久化，且开发态 HMR 不退化；
 - 360px 窄手机、平板窗口、分屏/旋转和字体 1.5× 下，预览、横向选择和确认按钮仍在可达布局内；
 - `pnpm check`、`pnpm test:run`、`pnpm build` 通过；
-- 具名 Android arm64 设备记录 WebView、viewport、字体缩放、截图与触控结果后，才可从 `DEVICE-EVIDENCE-PENDING` 升级。
+- PHZ110 Android arm64 手机已记录 WebView、viewport、字体缩放、截图与核心触控结果；平板、分屏/折叠和最低 WebView 仍需独立设备证据，完成前不得升级为完整 `DEVICE-VERIFIED`。
+
+## 2026-08-13 实施与验收账本
+
+| 范围 | 当前证据 | 结论 |
+|---|---|---|
+| 双入口与单一 owner | ChatView 长按菜单和 ThemePicker 第二入口共用 `CHAT_PRESENTATION_OPTIONS` / `setPresentationMode` | 通过 |
+| 三种外壳 | 一个 `MessageRenderer` + ChatView data attribute + 精确语义 CSS | 通过 |
+| 阅读锚点 | near-bottom、负 offset、anchor 消失、重叠 generation、dispose 测试 | 通过 |
+| 主题草稿/确认 | 候选隔离、dark/light 局部壁纸、显式确认、失败重试、unmount 丢弃测试 | 通过 |
+| 强内容与分条 | 真实 MessageRenderer fixture 在三模式保持节点身份和 block 入口；同时修复分条 `v-memo` key 缺少 bubble ID 导致的重复文本 | 通过 |
+| 自动化 | `pnpm test:run -- --reporter=verbose`：31 files / 174 tests | 通过 |
+| 静态检查 | `pnpm check`：vue-tsc + `cargo check --locked` | 通过 |
+| 生产构建 | `pnpm build`：4452 modules transformed | 通过 |
+| 生成物/边界 | mode selectors 与三选项文案存在；无第二 renderer、UA 分支、内容区 blur、Rust/Android/capability diff | 通过 |
+| Android 真机 | PHZ110 / Android 16 / API 36 / arm64-v8a；360×792 CSS viewport；WebView 150；完成竖屏、横屏、长短按隔离、三模式、持久化、锚点与 1.5× 字体旅程 | 手机核心旅程通过；扩展设备矩阵待补 |
+
+### PHZ110 真机证据摘要
+
+| 项目 | 记录 |
+|---|---|
+| 应用边界 | 仅测试 `com.vcp.avatar.debug` `1.1.4-debug`；未操作用户自用的 `com.vcp.avatar` Release |
+| 设备 | OPPO PHZ110；Android 16 / API 36；`arm64-v8a`；手势导航 |
+| 显示 | 物理 1080×2376；有效 density 480；竖屏 CSS viewport 360×792；字体 1.0× 与临时 1.5× |
+| WebView | `com.google.android.webview` 150.0.7871.181 |
+| Debug 安装物 | arm64 Debug APK SHA-256 `1dc7542e323af8bb0c9cc773ded5b355a436d1a775bf0b870df37fd66f6d8847`；Dev 前端通过 USB ADB reverse 加载，APK hash 不能单独代表实时 Vite 内容 |
+| 核心交互 | 短按只切深浅；长按只开三选菜单；统一/刊物立即生效并跨重启恢复；恢复气泡后底部位置误差约 0.33px |
+| 布局 | 刊物隐藏头像且保持消息锚点；横屏主题页无横向溢出，维持单一纵向滚动 owner |
+| 1.5× 字体 | 首轮发现右侧短标签逐字竖排；响应式修正后标签保持横向、说明正常换行；测试后恢复 1.0× |
+| 状态恢复 | 已恢复“熊熊假日 / 深色 / 气泡”、原自动旋转设置与字体 1.0× |
+| 持久证据 | [`device-evidence/2026-08-13-PHZ110/README.md`](./device-evidence/2026-08-13-PHZ110/README.md) 与其中 6 张最小截图集 |
+
+因此当前可标记 `SOFTWARE-VERIFIED / DEVICE-EVIDENCE-PARTIAL`，不能标记完整 `DEVICE-VERIFIED` 或完整 DoD。尚缺：平板窗口、分屏/折叠、最低 WebView、强渲染真机矩阵，以及主题候选“确认前不应用、确认后提交”的定向真机旅程；这些仍按 `05-分期施工与验收门禁.md` 第 8 节执行。
 
 ## 一句话施工准则
 

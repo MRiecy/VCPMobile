@@ -3,6 +3,7 @@ export interface OverlayActionItem {
   icon?: any; // lucide-vue-next component
   danger?: boolean;
   disabled?: boolean;
+  selected?: boolean;
   handler: () => void;
 }
 
@@ -31,4 +32,3 @@ export interface ConfirmConfig {
   onConfirm: () => void;
   onCancel: () => void;
 }
-

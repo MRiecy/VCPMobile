@@ -77,7 +77,7 @@ const visibleSubPage = ref<string | null>(null);
 const categories = [
   { id: "identity", title: "用户身份", description: "头像、用户名与管理员账号" },
   { id: "connection", title: "服务器连接", description: "VCP Server API 与数据同步" },
-  { id: "theme", title: "主题切换", description: "视觉风格与壁纸" },
+  { id: "theme", title: "主题切换", description: "主题预览与消息呈现" },
   { id: "advanced", title: "高级功能", description: "话题总结、分布式节点与数据维护" },
   { id: "power", title: "电池优化", description: "电池白名单与进程锁定设置" },
   { id: "about", title: "关于", description: "版本与更新" },
@@ -263,7 +263,11 @@ watch(currentSubPage, (val) => {
 
             <div
               class="flex-1"
-              :class="currentSubPage === 'about' ? 'overflow-hidden flex flex-col pb-[calc(var(--vcp-safe-bottom,48px))]' : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
+              :class="currentSubPage === 'about'
+                ? 'overflow-hidden flex flex-col pb-[calc(var(--vcp-safe-bottom,48px))]'
+                : currentSubPage === 'theme'
+                  ? 'overflow-hidden flex flex-col min-h-0'
+                  : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
             >
               <!-- 用户身份 -->
               <template v-if="visibleSubPage === 'identity'">
@@ -296,11 +300,7 @@ watch(currentSubPage, (val) => {
 
               <!-- 主题切换 -->
               <template v-if="visibleSubPage === 'theme'">
-                <SettingsCard no-padding>
-                  <div class="p-4">
-                    <ThemePicker />
-                  </div>
-                </SettingsCard>
+                <ThemePicker />
               </template>
 
               <!-- 高级功能 -->

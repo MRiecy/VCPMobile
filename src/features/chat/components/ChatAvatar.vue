@@ -33,7 +33,7 @@ const ownerInfo = computed(() => {
 </script>
 
 <template>
-  <div class="flex-shrink-0 w-9 h-9">
+  <div class="vcp-message-avatar flex-shrink-0 w-9 h-9">
     <VcpAvatar
       v-if="ownerInfo"
       :owner-type="ownerInfo.type"

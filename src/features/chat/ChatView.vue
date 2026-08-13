@@ -4,7 +4,12 @@ import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useTopicStore } from "../../core/stores/topicListManager";
-import { useThemeStore } from "../../core/stores/theme";
+import {
+  CHAT_PRESENTATION_OPTIONS,
+  useThemeStore,
+  type ChatPresentationMode,
+} from "../../core/stores/theme";
+import { useOverlayStore } from "../../core/stores/overlay";
 import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -28,6 +33,7 @@ const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
 const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 const { keyboardHeight, forceRecalculate } = useKeyboardInsets();
 
 // 跟踪输入增强组件底部的扩展菜单状态
@@ -66,6 +72,7 @@ const {
   startAutoScroll,
   stopAutoScroll,
   checkAndLoadMore,
+  preserveViewportAcrossLayoutChange,
   reset: resetChatScroll,
   dispose: disposeChatScroll,
 } = useChatScroll({
@@ -75,6 +82,50 @@ const {
   isLoadingHistory: computed(() => historyStore.isLoadingHistory),
   onLoadMore: () => historyStore.loadMoreHistory(),
 });
+
+const isPresentationMenuOpen = computed(
+  () => overlayStore.contextMenuConfig?.title === "消息呈现",
+);
+
+const handlePresentationSelection = (mode: ChatPresentationMode) => {
+  const result = themeStore.setPresentationMode(mode);
+  if (!result.ok) {
+    notificationStore.addNotification({
+      id: "chat-presentation-save-failed",
+      type: "error",
+      title: "消息呈现切换失败",
+      message: result.error || "请检查本地存储后重试",
+      toastOnly: true,
+    });
+  }
+};
+
+const openPresentationMenu = () => {
+  try {
+    navigator.vibrate?.(25);
+  } catch {
+    // Haptics are an optional enhancement; unsupported devices stay silent.
+  }
+
+  overlayStore.openContextMenu(
+    CHAT_PRESENTATION_OPTIONS.map((option) => ({
+      label: option.label,
+      selected: themeStore.presentationMode === option.value,
+      handler: () => handlePresentationSelection(option.value),
+    })),
+    "消息呈现",
+  );
+};
+
+// The pre-flush watcher captures the old geometry before Vue patches the data
+// attribute. This protects both the long-press menu and the settings-page entry.
+watch(
+  () => themeStore.presentationMode,
+  () => {
+    void preserveViewportAcrossLayoutChange(() => undefined);
+  },
+  { flush: "pre" },
+);
 
 const scrollToLatest = async (smooth = true) => {
   if (historyStore.hasEvictedNewer && !historyStore.editingOriginalMessageId) {
@@ -204,7 +255,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="chatViewContainerRef" class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden" @touchmove="handleContainerTouchMove">
+  <div ref="chatViewContainerRef" class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden"
+    :data-presentation-mode="themeStore.presentationMode" @touchmove="handleContainerTouchMove">
     <!-- 1. Header (强制保底高度 80px，确保刘海屏可见) -->
     <header class="vcp-header-fixed shrink-0 flex items-center justify-between gap-3 px-4 border-b border-white/5">
       <div class="flex items-center gap-3 min-w-0 flex-1">
@@ -246,10 +298,11 @@ onUnmounted(() => {
 
 <div class="flex items-center gap-2 shrink-0">
         <!-- 黑白模式切换 (内联 SVG) -->
-        <button @click="themeStore.toggleTheme()"
+        <button @click="themeStore.toggleTheme()" v-longpress.suppress-click="openPresentationMenu"
           class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5"
           :class="themeStore.isDarkResolved ? 'text-blue-300/80' : 'text-yellow-500'
-            ">
+            " aria-label="切换深浅模式，长按切换消息呈现" aria-haspopup="dialog"
+          :aria-expanded="isPresentationMenuOpen">
           <svg v-if="themeStore.isDarkResolved" width="18" height="18" viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>

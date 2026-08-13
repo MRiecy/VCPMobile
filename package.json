@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:android": "node scripts/tauri_android_dev.cjs",
+    "dev:android:usb": "node scripts/tauri_android_dev.cjs --usb",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

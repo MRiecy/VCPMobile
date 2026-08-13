@@ -13,7 +13,7 @@ defineProps<{
 </script>
 
 <template>
-  <div class="flex items-center gap-2 mb-1.5 px-1 w-full" :class="isUser ? 'flex-row-reverse' : 'flex-row'">
+  <div class="vcp-message-header flex items-center gap-2 mb-1.5 px-1 w-full" :class="isUser ? 'flex-row-reverse' : 'flex-row'">
     <ChatAvatar
       :owner-type="ownerType"
       :owner-id="ownerId"

@@ -19,6 +19,13 @@ interface UseChatScrollOptions {
 
 type ScrollScene = "initial" | "following" | "free" | "loading-top";
 
+interface ViewportAnchor {
+  stickToBottom: boolean;
+  messageId?: string;
+  viewportOffset?: number;
+  fallbackScrollTop: number;
+}
+
 /**
  * ChatView 滚动管理组合式函数 —— 根治版
  *
@@ -51,6 +58,9 @@ export function useChatScroll(options: UseChatScrollOptions) {
   let loadMoreDebounceId: number | null = null;
   let loadRequestGeneration = 0;
   let loadInFlight = false;
+  let layoutChangeGeneration = 0;
+  let isLayoutChanging = false;
+  const layoutFrameResolvers = new Map<number, () => void>();
 
   const scrollToBottom = (smooth = false) => {
     const list = messageListRef.value;
@@ -59,6 +69,107 @@ export function useChatScroll(options: UseChatScrollOptions) {
       top: list.scrollHeight,
       behavior: smooth ? "smooth" : "auto",
     });
+  };
+
+  const waitForLayoutFrame = () => new Promise<void>((resolve) => {
+    const id = requestAnimationFrame(() => {
+      layoutFrameResolvers.delete(id);
+      resolve();
+    });
+    layoutFrameResolvers.set(id, resolve);
+  });
+
+  const cancelLayoutFrames = () => {
+    for (const [id, resolve] of layoutFrameResolvers) {
+      cancelAnimationFrame(id);
+      resolve();
+    }
+    layoutFrameResolvers.clear();
+  };
+
+  const captureViewportAnchor = (): ViewportAnchor | null => {
+    const list = messageListRef.value;
+    if (!list) return null;
+
+    const fallbackScrollTop = list.scrollTop;
+    const stickToBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+    if (stickToBottom) return { stickToBottom: true, fallbackScrollTop };
+
+    const listRect = list.getBoundingClientRect();
+    const messages = Array.from(list.querySelectorAll<HTMLElement>("[data-message-id]"));
+    const visible = messages.find((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.bottom > listRect.top && rect.top < listRect.bottom;
+    });
+
+    const messageId = visible?.getAttribute("data-message-id");
+    if (!visible || !messageId) {
+      return { stickToBottom: false, fallbackScrollTop };
+    }
+
+    return {
+      stickToBottom: false,
+      messageId,
+      viewportOffset: visible.getBoundingClientRect().top - listRect.top,
+      fallbackScrollTop,
+    };
+  };
+
+  const restoreViewportAnchor = (anchor: ViewportAnchor | null) => {
+    const list = messageListRef.value;
+    if (!list || !anchor) return;
+
+    if (anchor.stickToBottom) {
+      scrollToBottom(false);
+      showScrollToBottom.value = false;
+      if (scrollScene.value !== "loading-top") scrollScene.value = "following";
+      return;
+    }
+
+    const target = anchor.messageId
+      ? Array.from(list.querySelectorAll<HTMLElement>("[data-message-id]")).find(
+          (element) => element.getAttribute("data-message-id") === anchor.messageId,
+        )
+      : undefined;
+
+    if (target && anchor.viewportOffset !== undefined) {
+      const currentOffset = target.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      list.scrollTop += currentOffset - anchor.viewportOffset;
+    } else {
+      const maximumScrollTop = Math.max(0, list.scrollHeight - list.clientHeight);
+      list.scrollTop = Math.min(anchor.fallbackScrollTop, maximumScrollTop);
+    }
+
+    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+    showScrollToBottom.value = !nearBottom;
+    if (scrollScene.value !== "loading-top") {
+      scrollScene.value = nearBottom ? "following" : "free";
+    }
+  };
+
+  const preserveViewportAcrossLayoutChange = async (
+    change: () => void | Promise<void>,
+  ): Promise<void> => {
+    const anchor = captureViewportAnchor();
+    const generation = ++layoutChangeGeneration;
+    isLayoutChanging = true;
+
+    try {
+      await change();
+      if (generation !== layoutChangeGeneration) return;
+      await nextTick();
+      if (generation !== layoutChangeGeneration) return;
+      await waitForLayoutFrame();
+      if (generation !== layoutChangeGeneration) return;
+      await waitForLayoutFrame();
+      if (generation !== layoutChangeGeneration) return;
+      restoreViewportAnchor(anchor);
+    } finally {
+      if (generation === layoutChangeGeneration) {
+        isLayoutChanging = false;
+        lastScrollHeight = messageListRef.value?.scrollHeight || 0;
+      }
+    }
   };
 
   // --- 锚定元素 ---
@@ -159,6 +270,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
   const handleContentChange = () => {
     const list = messageListRef.value;
     if (!list) return;
+    if (isLayoutChanging) {
+      lastScrollHeight = list.scrollHeight;
+      return;
+    }
 
     const currentScrollHeight = list.scrollHeight;
     // 高度物理守卫：物理高度若无实质变化，瞬间拦截并退出。这极大释放了 CPU 性能，并从物理上秒杀了用户手动上滑时的误置底无限回弹 Bug
@@ -205,6 +320,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
     const target = list.querySelector(".messages-inner-container") || list;
 
     resizeObserver = new ResizeObserver(() => {
+      if (isLayoutChanging) {
+        lastScrollHeight = list.scrollHeight;
+        return;
+      }
       // 🌟 流式跟随状态下，或正在加载历史消息时，必须同步处理滚动，以防止 DOM 重排和滚动条设置跨帧引发的上下跳变。
       if (
         scrollScene.value === "following" ||
@@ -241,6 +360,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   // --- scroll 事件 ---
   const onScroll = () => {
+    if (isLayoutChanging) return;
     // 🌟 修复无限置底死锁：在 scroll 触发的第一时间，同步（非节流）判定是否已向上偏离底部。
     // 若已偏离，瞬间切入 free 状态，使紧随其后的 ResizeObserver 同步回调直接走 else 节流分支，打断强位置底。
     const list = messageListRef.value;
@@ -373,7 +493,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
   // --- 兼容旧 API（调用方 ChatView.vue 无需改动）---
   const reset = () => {
     loadRequestGeneration += 1;
+    layoutChangeGeneration += 1;
     loadInFlight = false;
+    isLayoutChanging = false;
+    cancelLayoutFrames();
     scrollScene.value = "initial";
     showScrollToBottom.value = false;
     loadAnchor = null;
@@ -407,7 +530,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   const dispose = () => {
     loadRequestGeneration += 1;
+    layoutChangeGeneration += 1;
     loadInFlight = false;
+    isLayoutChanging = false;
+    cancelLayoutFrames();
     stopContentObserver();
     if (scrollThrottleId) {
       cancelAnimationFrame(scrollThrottleId);
@@ -433,6 +559,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     startAutoScroll,
     stopAutoScroll,
     checkAndLoadMore,
+    preserveViewportAcrossLayoutChange,
     reset,
     dispose,
   };

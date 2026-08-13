@@ -165,6 +165,116 @@ body {
   border-bottom-left-radius: 4px !important;
 }
 
+/* --- 消息呈现模式：只改外壳，强渲染块继续走同一组件树 --- */
+.chat-view-container[data-presentation-mode="panel"] .messages-inner-container,
+.chat-view-container[data-presentation-mode="immersive"] .messages-inner-container {
+  gap: 0;
+  padding: 0.5rem;
+  background-color: var(--vcp-panel-bg-90);
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-item,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-item {
+  margin-bottom: 0 !important;
+  border-bottom: 1px solid var(--vcp-border-subtle);
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-item + .vcp-message-item,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-item + .vcp-message-item {
+  margin-top: 0 !important;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-item {
+  padding: 1rem 0.75rem !important;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-header,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-header {
+  flex-direction: row !important;
+  justify-content: flex-start;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-header-repeated,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-header-repeated,
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-time[data-bubble-last="false"],
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-time[data-bubble-last="false"] {
+  display: none;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-chat-bubble,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-chat-bubble {
+  align-items: stretch !important;
+  margin-top: 0 !important;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-chat-bubble[data-bubble-index]:not([data-bubble-index="0"]),
+.chat-view-container[data-presentation-mode="immersive"] .vcp-chat-bubble[data-bubble-index]:not([data-bubble-index="0"]) {
+  margin-top: 0.65rem !important;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-bubble-container,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-bubble-container {
+  width: 100% !important;
+  max-width: none !important;
+  min-height: 0;
+  padding: 0.25rem 0 !important;
+  color: var(--primary-text) !important;
+  background-color: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-bubble-container::before,
+.chat-view-container[data-presentation-mode="panel"] .vcp-bubble-container::after,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-bubble-container::before,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-bubble-container::after {
+  display: none !important;
+  animation: none !important;
+  transform: none !important;
+  will-change: auto !important;
+}
+
+.chat-view-container[data-presentation-mode="panel"] .vcp-message-time {
+  text-align: left !important;
+}
+
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-item {
+  padding: 1.5rem 1rem !important;
+}
+
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-avatar {
+  display: none;
+}
+
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-header,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-bubble-container,
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-time {
+  width: 100%;
+  max-width: 46rem !important;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-header {
+  margin-bottom: 0.75rem;
+}
+
+.chat-view-container[data-presentation-mode="immersive"] .vcp-message-time {
+  text-align: left !important;
+}
+
+.chat-view-container[data-presentation-mode="immersive"] .vcp-markdown-block {
+  line-height: 1.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-view-container[data-presentation-mode="panel"] .message-bubble,
+  .chat-view-container[data-presentation-mode="immersive"] .message-bubble {
+    transition: none;
+  }
+}
+
 /* 切换主题时的平滑过渡保护，让页面所有常规元素（顶部栏、分割线、表格、按钮等）平滑同步过渡，避免局部瞬间跳变闪烁 */
 .theme-switching,
 .theme-switching * {

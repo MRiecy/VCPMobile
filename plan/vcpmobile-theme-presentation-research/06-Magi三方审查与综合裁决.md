@@ -175,3 +175,13 @@ Casper 认可不新增后端和第二套 renderer。功能可由约 9 个既有�
 ## 8. 最终一句话
 
 > Melchior 保证状态与滚动不撒谎，Balthasar 保证手机上看得懂、摸得顺，Casper 保证只改真正属于这项功能的 owner。
+
+## 9. 2026-08-13 实施补充复审
+
+用户在开工时增加了主题页第二入口。三方复审后的裁决是：
+
+- **Melchior**：两处入口必须共享 `CHAT_PRESENTATION_OPTIONS`、normalizer 与 storage-first setter；滚动保护由 ChatView 的 pre-flush watcher统一覆盖，不能分别实现两套事务。
+- **Balthasar**：页面顺序固定为实时预览、横向主题选择与确认、消息呈现三选项；呈现点选立即生效，文案需明确长按入口也可快速切换。
+- **Casper**：不迁移 VCPChat 的百分比宽度、用户气泡开关或新 Store/IPC。`ThemePicker` 实现后超过维护阈值，因此只提取一个无状态 `ThemeLivePreview`，不扩建组件族。
+
+补充裁决为 `APPROVE WITH SAME GATES`：新入口改变的是调用位置，不改变既有单一 owner、主题草稿边界或 Android 真机验收要求。

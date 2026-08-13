@@ -13,7 +13,7 @@ const mergedStyle = computed(() => {
 </script>
 
 <template>
-  <div class="w-full min-w-0 flex flex-col" :class="[
+  <div class="vcp-chat-bubble w-full min-w-0 flex flex-col" :data-message-role="isUser ? 'user' : 'agent'" :class="[
     isUser ? 'items-end' : 'items-start',
     isStreaming ? 'streaming' : '',
   ]">
