@@ -8,6 +8,8 @@ index 13e46f4..9ab2b66 100644
  #include <signal.h>
  #include <unistd.h>
  #include <sys/syscall.h>  /* __NR_memfd_create,  */
+ #include <linux/ashmem.h> /* ASHMEM_GET_SIZE,  */
+ #include <linux/memfd.h>  /* MFD_CLOEXEC  */
 diff --git a/src/loader/loader-info.awk b/src/loader/loader-info.awk
 index 6cf1e23..a5e9861 100644
 --- a/src/loader/loader-info.awk

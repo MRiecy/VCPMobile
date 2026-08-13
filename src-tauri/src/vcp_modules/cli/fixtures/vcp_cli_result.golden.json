@@ -73,7 +73,7 @@
         "id": "example-skill",
         "name": "Example Skill",
         "resource_path": "SKILL.md",
-        "skill_root": "/skills/example-skill",
+        "skill_root": "vcp-skill://example-skill",
         "sha256": "abc123",
         "truncated": false
       },

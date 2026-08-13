@@ -52,7 +52,7 @@ P0 必须做一个最小 spike，比较两种进程宿主：
 /workspace                当前 chat/topic 的持久工作区
 /attachments              当前会话显式提供的附件
 /shared                   用户明确共享的全局目录
-/skills                   只读挂载、已校验的 Skill 文件；不承担提示词自动注入
+host Skill catalog        Rust action-only 目录；不挂载给 PRoot guest
 /tmp                      attempt 临时目录，按预算清理
 /mnt/<grant>              SAF 明确授权的外部目录
 ```
@@ -62,7 +62,7 @@ P0 必须做一个最小 spike，比较两种进程宿主：
 - 默认 cwd 是当前 topic workspace，不是应用配置根或 Android 共享存储根；
 - 所有 host bind mount 先经过 Rust canonical policy，再交给原生层；
 - SAF 权限按 grant 列表显式暴露，不扫描整个设备；
-- `/skills` 由 Mobile 管理的受控 Skill 目录提供，向 guest 只读挂载 `SKILL.md` 等资源；安全列举/阅读由 `VCPMobileCLI` 的 `list_skills/read_skill` action 提供，manifest 如何进入角色提示词仍由用户在 VCPToolBox 配置；
+- Skill 由 Mobile 管理的 host catalog 持有，不向 guest 做 bind；安全列举/阅读只由 `VCPMobileCLI` 的 `list_skills/read_skill` action 提供，manifest 如何进入角色提示词仍由用户在 VCPToolBox 配置；
 - 不把 VCP 记忆数据库或自动生成的“记忆投影”挂载进 CLI；需要的材料由用户或 VCP 流程显式写入 workspace；
 - 不把 VCP API key、模型 key、签名密码自动注入 shell env；
 - 用户自定义 env 只按白名单名字注入，结果回灌前做 secret redaction；
@@ -71,18 +71,20 @@ P0 必须做一个最小 spike，比较两种进程宿主：
 
 ### 3.1 Skill action 读取桥
 
-`/skills` 不能只是一个 Agent 不知如何使用的目录，也不应要求 Agent 从一段很长的 manifest 中记住隐藏内部命令。`VcpCliProtocol` 将以下两个 action 直接路由到 Rust 侧受控 Skill catalog；它们不启动 Bash、不创建 `CliJob`、不依赖网络：
+Skill 不能只是一个 Agent 不知如何使用的宿主目录，也不应要求 Agent 从一段很长的 manifest 中记住隐藏内部命令。`VcpCliProtocol` 将以下两个 action 直接路由到 Rust 侧受控 Skill catalog；它们不启动 Bash、不创建 `CliJob`、不依赖网络：
 
 ```text
 action=list_skills
 action=read_skill, skill_id=<id>, resource_path=SKILL.md, max_bytes=<n>
 ```
 
-- Skill catalog 扫描经校验的 `/skills/<id>/SKILL.md`，建立包含 `id/name/description/source/hash/version/integrity_status` 的有界索引；`list_skills` 只返回已安装且校验通过的项，不递归打印正文。该 catalog 是本专项待实现的 Rust owner，不假定当前产品已有同名 Store。
+- Skill catalog 扫描应用私有 host 目录中经校验的 `<id>/SKILL.md`，建立包含 `id/name/description/source/hash/version/integrity_status` 的有界索引；`list_skills` 只返回已安装且校验通过的项，不递归打印正文。该 catalog 由 Rust 独立拥有，不假定当前产品已有同名 Store。
 - `read_skill` 仅接受索引中的稳定 `skill_id`；`resource_path` 默认 `SKILL.md`，也可读取同一 Skill 下的 `references/`、`assets/` 或脚本文本。禁止绝对路径、`..`、符号链越界、特殊文件和超预算输出。
-- `read_skill` 返回有界正文、hash、截断状态和 guest 内只读 `skill_root=/skills/<id>`。Agent 理解说明后可用另一次 `action=run` 显式调用其中脚本；可写输出必须落到 `/workspace` 或 `/tmp`。
+- `read_skill` 返回有界正文、hash、截断状态和逻辑引用 `skill_root=vcp-skill://<id>`；该 URI 不是 Bash 路径。Agent 理解说明后若需运行脚本，必须先经明确的物化动作把指定资源复制到 `/workspace`，再用另一次 `action=run` 执行。
 - Skill action 不提供 `install`、`enable` 或隐式 `run`，不自动 source 脚本，不给 Skill 注入 API key、SAF 或 Android 权限。后续脚本执行仍经过普通 `run` 的确认门、超时、输出和网络策略。
 - manifest 直接列出两个 action 及字段，不把全部 Skill 名称或正文注入系统提示词。
+
+API 36 真机证伪了“chmod 后只读 bind”这一安全假设：PRoot `-0` 下 guest 仍可改写绑定的 host 文件，而 PRoot 没有只读 bind 选项。因此 action-only 不是临时 UI 约定，而是首发安全边界；`/skills`、host Skill 绝对路径和 host-managed output artifact 均不得出现在 PRoot bind argv。
 
 ## 4. Session 与 Job 模型
 
@@ -109,7 +111,7 @@ CliJob
   exit_code / terminal_reason
 ```
 
-每次 `action=run` 都创建独立 Bash 进程与进程组，不复用隐藏的长期 shell；因此 `cd`、`export`、alias 和 shell function 不跨调用持续。文件、安装包和 workspace 会持久。相互独立的 Job 可在全局与 per-session 并发额度内运行；同一路径并发写的冲突由 Runtime 风险门和 Agent 结果承担，不靠共享 shell 偶然串行。人工 PTY 使用独立 `manual` session，关闭终端不得取消 Agent Job。
+每次 `action=run` 都创建独立 Bash 进程与进程组，不复用隐藏的长期 shell；因此 `cd`、`export`、alias 和 shell function 不跨调用持续。文件、安装包和 workspace 会持久。P1 人工调用尚无 agent/topic 会话 owner，因此只执行全局并发额度；P2 将 route 与 chat owner 接入后再冻结 `CliSession` 并叠加 per-session 额度。同一路径并发写的冲突由 Runtime 风险门和 Agent 结果承担，不靠共享 shell 偶然串行。人工 PTY 使用独立 `manual` session，关闭终端不得取消 Agent Job。
 
 ### 4.2 状态机
 
@@ -153,8 +155,8 @@ OpenMinis Android 当前超时只取消等待回调，底层命令仍可能继�
 CLI 输出不能跟随 child stdout 无界堆积：
 
 - stdout/stderr 分通道采集并带单调 sequence；
-- 内存只保留 ring buffer 和当前 UI tail；
-- 完整输出按大小上限写入 sandbox artifact，超限后停止落盘并置 `truncated=true`；
+- 宿主直接持续 drain stdout/stderr 到 App 私有、按 Job/attempt 隔离的有界文件；内存不累积完整输出，前端只保留当前有界 UI tail；
+- 输出达到每 Job 落盘上限后停止追加并置 `truncated=true`；终态只暴露绑定 job/attempt 的 opaque artifact handle，不暴露宿主路径；
 - `poll` 使用 cursor/最大字节数，不重复发送全部历史；
 - 回灌模型的 text 再设独立 Token/字节预算，包含 exit code、截断提示和 artifact handle；
 - ANSI/OSC 控制序列先净化，禁止通过终端输出构造 WebView 脚本或伪造 Tauri action；
@@ -169,7 +171,7 @@ P0 以以下较宽松的首发预算做真机压测和 golden fixture；它们�
 | Job 执行期限 | 30 分钟 | Agent 可请求 1 秒–12 小时；到期必须杀完整进程组 |
 | `poll` 单次等待 | 0 秒 | 可请求 0–8 秒长轮询 |
 | 单次模型回灌 | 64 KiB UTF-8 字节 | 可请求至 256 KiB；按合法字符边界截断，更大输出必须 cursor 分页或 artifact |
-| 内存 tail/ring | 每 Job 1 MiB | stdout/stderr 分通道；达到上限覆盖旧 tail，不 OOM |
+| UI 内存 tail | 每视图 256 KiB | stdout/stderr 分通道；按 cursor 增量去重，达到上限丢弃旧 tail，不 OOM |
 | 完整输出 artifact | 每 Job 256 MiB | 超限停止落盘并标记 `truncated`; 不杀仍有价值的计算 |
 | CLI workspace | 默认 2 GiB | 用户可在存储设置调整；需保留系统安全余量和一键清理 |
 | 并发 | 默认 2 个运行 Job | P0 根据低/中/高端 arm64 真机把硬上限定在 2–4 |
@@ -265,10 +267,27 @@ guest 命令只负责参数与 stdout/exit code；本地 socket/JNI bridge 调�
 ## 11. Android 验收核心
 
 1. Distributed 关闭、飞行模式、VCPToolBox 不可达时，本地无网命令仍可执行。
-2. 每个 `run` 使用独立 Bash 进程；同 session 与不同 session 的并发都受额度约束，cwd/env/output 不互相污染。
+2. 每个 `run` 使用独立 Bash 进程；P1 全局并发受额度约束，P2 接入 chat owner 后再验收同 session/跨 session 额度，cwd/env/output 始终不互相污染。
 3. timeout/cancel 后进程树确实退出，随后命令不会收到迟到输出。
 4. App 进程死亡后 running Job 记为 interrupted，不自动重跑。
 5. 输出超限不会 OOM，模型与 UI 都收到明确截断事实。
 6. secret 不进入日志、Toast、VCP payload 或工具块。
 7. 前台阶段不申请 Root；后台阶段没有与用途不符的 FGS 类型。
 8. 通知 Stop 只取消目标 Job，release 的 lease 与 attempt 精确匹配。
+
+### 11.1 P1 API 36 设备证据（2026-08-14）
+
+当前 OPPO PHZ110（Android 16 / API 36 / arm64-v8a）只闭合人工前台 Runtime，不外推到后台：
+
+- APK `nativeLibraryDir` 中的 PRoot 与 unbundled loader 逐字匹配 profile SHA，产品 App domain 成功执行
+  `/bin/bash -lc`，解释器为 GNU Bash 5.3.9、cwd 为 `/workspace`；日志没有 App-data W^X denial。
+- airplane mode 开启、Wi-Fi 关闭、active default network 为 none，且 Distributed 为 false 时，本地命令
+  completed；`/skills` 下无 canonical Skill bind，`list_skills/read_skill` 返回内置 Skill 且不创建 Job。
+- 活动 poll 与普通 cancel 并发时状态为 `cancelled`；absolute deadline 为 `timed_out`；两者父/子 PID
+  都从 `/proc` 消失。`setsid`/`nohup` 的启动 PID 与实际 PID 共八个探针均为 gone。
+- 400,000 字节输出落入 400,000 字节 opaque artifact；UI/模型读取保持有界。控制序列被移除，Authorization、
+  常见 secret 赋值和 PEM body 被遮蔽。
+- App 强制停止前记录 generation 4 的 running Job；重启后 generation 5 将其标为 `interrupted`，workspace
+  marker 仍恰好一行，证明没有重跑。App 主进程及其 PRoot/sleep 子进程在停止后都消失。
+
+这些证据不证明 Doze、划卡、通知 Stop、FGS 合规、OEM 杀后台或 12 小时长稳；它们仍由 P5 独立验收。

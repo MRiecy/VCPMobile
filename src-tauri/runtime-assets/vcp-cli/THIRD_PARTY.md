@@ -4,12 +4,13 @@
 
 | Component | Pinned source | License evidence | Distribution note |
 |---|---|---|---|
-| Termux PRoot `v5.1.107.89` | `a89b3732ec6ae1db674510f0843b2f3db54d0a2f` | source headers: GPL v2 or later; repository `COPYING`: GPL v2 text | shipped as the separate executable `libvcp_proot.so`; publish corresponding patched source and build instructions |
+| Termux PRoot `v5.1.107.89` | `a89b3732ec6ae1db674510f0843b2f3db54d0a2f` | source headers: GPL v2 or later; repository `COPYING`: GPL v2 text | shipped as `libvcp_proot.so` plus its unbundled `libvcp_proot_loader.so`, both under APK `jniLibs`; publish corresponding patched source and build instructions |
 | talloc `2.4.2` | SHA-256 `85ecf9…d8a6` | source headers: LGPL v3 or later | statically linked into PRoot; release source/object/relink obligations require explicit review |
 
 The PRoot build carries only two maintenance changes: adding the C standard header required by NDK 29 and
 rewriting two GNU-awk-only numeric conversions into POSIX-compatible awk expressions. It does not contain
-OpenMinis native-offload code.
+OpenMinis native-offload code. `PROOT_UNBUNDLE_LOADER` is an upstream build mode, not an additional source
+patch; it prevents PRoot from materializing an executable loader into an app-writable runtime directory.
 
 ## Alpine guest
 
@@ -24,7 +25,7 @@ OpenMinis native-offload code.
 
 Before public distribution, release automation must attach or otherwise provide:
 
-1. the exact PRoot patch/build files and corresponding source archive;
+1. the exact PRoot patch/build files, both shipped ELF identities and corresponding source archive;
 2. talloc source plus whatever relinkable object/source offer the selected legal review requires;
 3. Alpine package notices/license texts and corresponding source availability;
 4. a notice that Android guest `root` is simulated and grants no Android Root privilege.

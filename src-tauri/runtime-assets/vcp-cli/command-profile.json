@@ -21,7 +21,7 @@
     "argv": ["/bin/bash", "-lc", "<command>"],
     "defaultCwd": "/workspace",
     "workspace": "/workspace",
-    "skills": "/skills",
+    "skillsAccess": "action_only",
     "interactive": false,
     "persistentShellState": false
   },
@@ -33,9 +33,13 @@
     "ndk": "29.0.13846066",
     "androidApi": 26,
     "patch": "build/0001-ndk29-c-headers-and-posix-awk.patch",
+    "loaderMode": "unbundled_required",
     "binary": "../../plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot.so",
-    "binarySha256": "651a5778979523e61b534b34a7a649b64f5a43237f951d7d5651b8dcdbe69e86",
-    "binaryBytes": 281296,
+    "binarySha256": "0d7168f851b42b83f7a75835cdb3a62181d12185620a1354038174706b0f367c",
+    "binaryBytes": 256456,
+    "loaderBinary": "../../plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot_loader.so",
+    "loaderSha256": "cb5e5b6900e198ca8160e9d355ea5b98d646333887a769411ff74132c1cec5df",
+    "loaderBytes": 17728,
     "license": "GPL-2.0-or-later"
   },
   "talloc": {
@@ -126,15 +130,14 @@
     "maxTimeoutMs": 43200000,
     "defaultPollBytes": 65536,
     "maxPollBytes": 262144,
-    "ringBytesPerJob": 1048576,
     "artifactBytesPerJob": 268435456,
     "workspaceDefaultBytes": 2147483648,
     "defaultConcurrentJobs": 2,
     "maxConcurrentJobs": 4
   },
   "apkBudget": {
-    "rawAssetBytes": 27151341,
-    "estimatedCompressedIncrementBytes": 26938827
+    "rawAssetBytes": 27144229,
+    "estimatedCompressedIncrementBytes": 26937424
   },
   "probe": {
     "script": "probe-command-profile.sh",

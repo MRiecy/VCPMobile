@@ -17,7 +17,10 @@ use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
 };
-use vcp_modules::cli::get_vcp_mobile_cli_manifest;
+use vcp_modules::cli::{
+    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_status,
+    MobileCliRuntimeState,
+};
 use vcp_modules::context_injection::{
     delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
     save_tarven_rule, toggle_rule_enabled,
@@ -107,6 +110,7 @@ pub fn run() {
             );
             app.manage(vcp_modules::model_manager::ModelManagerState::new());
             app.manage(vcp_modules::emoticon_manager::EmoticonManagerState::default());
+            app.manage(MobileCliRuntimeState::new());
 
             let handle = app.handle().clone();
 
@@ -261,6 +265,8 @@ pub fn run() {
             store_dominant_color,
             read_settings,
             get_vcp_mobile_cli_manifest,
+            get_vcp_mobile_cli_status,
+            execute_vcp_mobile_cli_action,
             get_settings_recovery_status,
             update_settings,
             diary_list_folders,

@@ -17,10 +17,10 @@ VCPToolBox 已提供精确占位符、`{{VCPAllTools}}`、`{{VCPDynamicTools}}` 
 
 ## 2. 本地 CLI 目录与 Skills
 
-本地 guest 允许保留：
+应用私有 host catalog 允许保留：
 
 ```text
-/skills/<id>/SKILL.md
+<catalog-root>/<id>/SKILL.md
                可选 references/
                可选 scripts/
                可选 assets/
@@ -30,7 +30,7 @@ VCPToolBox 已提供精确占位符、`{{VCPAllTools}}`、`{{VCPDynamicTools}}` 
 
 Skill action 的唯一规范说明来自 `VCPMobileCLI` manifest；用户决定如何在 VCPToolBox 中放置或微调这份说明。Mobile 不承诺 OpenMinis 的 Top-20 提示词注入策略，也不采集 use count 给提示词排序，更不额外注入一份 Skill 摘要目录。
 
-第三方 Skill 仍是潜在可执行内容：导入时保留来源与 hash，默认不因为出现 `scripts/` 就自动运行，也不因 Skill 已安装或校验通过而授予 Root、SAF 外部目录或密钥。`read_skill` 只是阅读，不是对文档内指令的隐式授权；执行脚本必须由 Agent 另发 `action=run`。VCP 自有记忆继续是长期事实与日记/知识召回的真源；本专项不创建 `/memory` 投影或平行记忆数据库。
+第三方 Skill 仍是潜在可执行内容：导入时保留来源与 hash，默认不因为出现 `scripts/` 就自动运行，也不因 Skill 已安装或校验通过而授予 Root、SAF 外部目录或密钥。catalog 不挂载到 PRoot；`read_skill` 只是阅读，返回 `vcp-skill://<id>` 逻辑引用，不是对文档内指令的隐式授权。执行脚本必须先经明确动作物化到 `/workspace`，再由 Agent 另发 `action=run`。VCP 自有记忆继续是长期事实与日记/知识召回的真源；本专项不创建 `/memory` 投影或平行记忆数据库。
 
 ## 3. `ink`、mark、river、vref 的精确语义
 

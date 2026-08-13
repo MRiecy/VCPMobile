@@ -104,7 +104,7 @@ class PluginContractTest {
 
     @Test
     fun rustRunMobilePluginMethodNamesExistInKotlinPlugin() {
-        val rustSources = listOf("src/system.rs", "src/stream.rs")
+        val rustSources = listOf("src/system.rs", "src/stream.rs", "src/cli.rs")
             .map { File(pluginRoot, it).readText() }
             .joinToString("\n")
         val kotlinPlugin = File(
@@ -219,12 +219,98 @@ class PluginContractTest {
     @Test
     fun rustMobilePluginCallsDoNotHoldHandleMutexWhileWaitingForKotlin() {
         val libRs = File(pluginRoot, "src/lib.rs").readText()
-        val commandSources = listOf("src/system.rs", "src/stream.rs")
+        val commandSources = listOf("src/system.rs", "src/stream.rs", "src/cli.rs")
             .map { File(pluginRoot, it).readText() }
             .joinToString("\n")
 
         assertTrue("PluginHandle 必须在锁内 clone", libRs.contains(".as_ref()\n            .cloned()"))
         assertTrue("command 必须通过短锁 helper 获取句柄", commandSources.contains("mobile_plugin_handle()?"))
         assertTrue("command 不得直接持锁跨 run_mobile_plugin", !commandSources.contains("plugin_handle.lock()"))
+    }
+
+    @Test
+    fun cliProcessHostBridgeIsInternalAndCannotBypassRustJobOwner() {
+        val rustCli = File(pluginRoot, "src/cli.rs").readText()
+        val kotlinPlugin = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
+        ).readText()
+        val processHost = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/cli/CliProcessHost.kt",
+        ).readText()
+        val publicSurfaces = listOf(
+            "src/lib.rs",
+            "build.rs",
+            "permissions/default.toml",
+            "permissions/all.toml",
+            "guest-js/index.ts",
+        ).associateWith { File(pluginRoot, it).readText() }
+        val internalMethods = listOf(
+            "prepareCliRuntime",
+            "startCliProcess",
+            "inspectCliProcess",
+            "cancelCliProcess",
+        )
+        val internalRustFunctions = listOf(
+            "prepare_cli_runtime_inner",
+            "start_cli_process_inner",
+            "inspect_cli_process_inner",
+            "cancel_cli_process_inner",
+        )
+
+        internalMethods.forEach { method ->
+            assertTrue("Rust internal bridge 缺少 method $method", rustCli.contains("\"$method\""))
+            assertTrue("Kotlin thin delegate 缺少 $method", kotlinPlugin.contains("fun $method("))
+            publicSurfaces.forEach { (path, content) ->
+                assertTrue("$path 不得公开内部 CLI method $method", !content.contains(method))
+            }
+        }
+        internalRustFunctions.forEach { function ->
+            assertTrue("Rust CLI bridge 缺少 $function", rustCli.contains("pub async fn $function"))
+            assertTrue("内部 bridge 不得成为 #[tauri::command]", !rustCli.contains("#[tauri::command]\npub async fn $function"))
+        }
+        assertTrue("CLI ProcessHost 不得调用 Root/libsu", !processHost.contains("libsu") && !processHost.contains("Shell.getShell"))
+        assertTrue("CLI ProcessHost 不得接入 Guardian", !processHost.contains("ForegroundGuardian"))
+        assertTrue("CLI ProcessHost 不得新增 localhost bridge", !processHost.contains("ServerSocket") && !processHost.contains("localhost"))
+        assertTrue("onDestroy 必须先关闭 CLI ProcessHost", kotlinPlugin.indexOf("cliProcessHost.close()") < kotlinPlugin.indexOf("executorDomains.shutdownNow()"))
+    }
+
+    @Test
+    fun cliProcessHostFreezesPrivateOutputAndWholeGroupCleanupContracts() {
+        val processHost = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/cli/CliProcessHost.kt",
+        ).readText()
+        val buildScript = File(
+            pluginRoot,
+            "../../runtime-assets/vcp-cli/build/build_proot.sh",
+        ).canonicalFile.readText()
+        val commandProfile = File(
+            pluginRoot,
+            "../../runtime-assets/vcp-cli/command-profile.json",
+        ).canonicalFile.readText()
+
+        assertTrue("host environment 必须先 clear 防止继承密钥", processHost.contains("processBuilder.environment().apply {\n                clear()"))
+        assertTrue("PRoot 必须使用私有 PROOT_TMP_DIR", processHost.contains("\"PROOT_TMP_DIR\" to prootTmpPath"))
+        assertTrue("PRoot 必须显式使用 APK nativeLibraryDir loader", processHost.contains("\"PROOT_LOADER\" to prootLoaderPath"))
+        assertTrue("PRoot loader 必须从 nativeLibraryDir 解析", processHost.contains("verifyNativeExecutable(\n            nativeLibraryDirectory,\n            PROOT_LOADER_LIBRARY_NAME"))
+        assertTrue("APK native ELF 必须在原始 path 上 NOFOLLOW 校验", processHost.contains("LinkOption.NOFOLLOW_LINKS"))
+        assertTrue("APK native ELF 必须拒绝 symlink", processHost.contains("attributes.isRegularFile && !attributes.isSymbolicLink"))
+        assertTrue("PRoot 构建必须禁用 bundled loader", buildScript.contains("PROOT_UNBUNDLE_LOADER=\"${'$'}unbundled_loader_fallback\""))
+        assertTrue("构建必须单独冻结 loader ELF", buildScript.contains("built_loader=\"${'$'}proot_root/src/loader/loader\""))
+        assertTrue("profile 必须声明 unbundled loader", commandProfile.contains("\"loaderMode\": \"unbundled_required\""))
+        assertTrue("profile 必须固定 APK loader 名", commandProfile.contains("libvcp_proot_loader.so"))
+        assertTrue("PRoot 必须在退出时清理全部 tracee", processHost.contains("\"--kill-on-exit\""))
+        assertTrue("用户命令必须保持 Bash -lc 独立 argv", processHost.contains("\"/bin/bash\",\n    \"-lc\",\n    command"))
+        assertTrue("不允许向 guest 暴露 /sys", !processHost.contains("\"/sys\""))
+        assertTrue("host-managed output 不得 bind 到 guest", !processHost.contains("outputPath:/output") && !processHost.contains("prepared.output.absolutePath:/output"))
+        assertTrue("canonical Skills 不得 bind 给 fake-root guest", !processHost.contains(":/skills"))
+        assertTrue("signal 前必须复核完整 process identity", processHost.contains("current.startTimeTicks == handle.identity.startTimeTicks"))
+        assertTrue("取消必须向负 PGID 发信号", processHost.contains("Os.kill(-pgid, signal)"))
+        assertTrue("强杀前必须给 PRoot tracee 清理窗口", processHost.indexOf("OsConstants.SIGQUIT") < processHost.indexOf("OsConstants.SIGKILL"))
+        assertTrue("普通退出也必须清理残留 process group", processHost.contains("terminateOwnedGroup(handle, ORPHAN_GRACE_MS)"))
+        assertTrue("Exited 前必须等待 stdout/stderr drain", processHost.contains("drainReadersForTerminal(handle)") && processHost.contains("!handle.stdoutReader.isAlive && !handle.stderrReader.isAlive"))
+        assertTrue("完成 handle 必须可安全淘汰", processHost.contains("completed.isCompleted()") && processHost.contains("handles.remove(key, completed)"))
     }
 }

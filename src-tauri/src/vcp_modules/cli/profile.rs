@@ -1,6 +1,6 @@
 //! `VCPMobileCLI` Android runtime profile 的 P0 校验器。
 //!
-//! 所有入口只接受相对仓库根；小型 JSON/TSV 有界读取，大型 rootfs/PRoot
+//! 所有入口只接受相对仓库根；小型 JSON/TSV 有界读取，大型 rootfs/PRoot/loader
 //! 仅以固定缓冲区流式计算 size 与 SHA-256，不进入可执行文件或整块内存。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,6 +19,15 @@ use super::protocol::{
 };
 
 pub const COMMAND_PROFILE_RELATIVE_PATH: &str = "runtime-assets/vcp-cli/command-profile.json";
+
+const EMBEDDED_COMMAND_PROFILE_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/runtime-assets/vcp-cli/command-profile.json"
+));
+const EMBEDDED_PACKAGE_LOCK: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/runtime-assets/vcp-cli/alpine-packages.lock.tsv"
+));
 
 const PROFILE_DIRECTORY: &str = "runtime-assets/vcp-cli";
 const MAX_PROFILE_BYTES: u64 = 256 * 1024;
@@ -93,7 +102,7 @@ pub struct ProfileInvocation {
     pub argv: Vec<String>,
     pub default_cwd: String,
     pub workspace: String,
-    pub skills: String,
+    pub skills_access: String,
     pub interactive: bool,
     pub persistent_shell_state: bool,
 }
@@ -108,9 +117,13 @@ pub struct ProfileProot {
     pub ndk: String,
     pub android_api: u32,
     pub patch: String,
+    pub loader_mode: String,
     pub binary: String,
     pub binary_sha256: String,
     pub binary_bytes: u64,
+    pub loader_binary: String,
+    pub loader_sha256: String,
+    pub loader_bytes: u64,
     pub license: String,
 }
 
@@ -169,7 +182,6 @@ pub struct ProfileBudgets {
     pub max_timeout_ms: u64,
     pub default_poll_bytes: usize,
     pub max_poll_bytes: usize,
-    pub ring_bytes_per_job: u64,
     pub artifact_bytes_per_job: u64,
     pub workspace_default_bytes: u64,
     pub default_concurrent_jobs: usize,
@@ -227,6 +239,7 @@ pub struct ValidatedCommandProfile {
     pub contract: ValidatedCommandProfileContract,
     pub rootfs: VerifiedRuntimeAsset,
     pub proot: VerifiedRuntimeAsset,
+    pub proot_loader: VerifiedRuntimeAsset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,11 +334,71 @@ pub async fn load_command_profile_contract(
     })
 }
 
-/// 在逻辑合同通过后，流式校验 profile 指向的 rootfs 与 PRoot 实物。
+/// APK 编译时冻结且完成全部逻辑/lock 不变量校验的 profile。
+/// 运行时 staged 资产只接受这个身份；
+/// 大型 rootfs/PRoot/loader 本身仍通过 plugin stage 后流式验证，不被 `include_bytes!`。
+pub fn embedded_command_profile() -> Result<VcpCliCommandProfile, ProfileValidationError> {
+    let profile = serde_json::from_str(EMBEDDED_COMMAND_PROFILE_JSON).map_err(|error| {
+        ProfileValidationError::new(
+            ProfileValidationErrorKind::InvalidJson,
+            "embeddedCommandProfile",
+            format!("invalid typed JSON: {error}"),
+        )
+    })?;
+    let locked_packages = parse_package_lock(EMBEDDED_PACKAGE_LOCK)?;
+    validate_profile_contract(&profile, &locked_packages)?;
+    Ok(profile)
+}
+
+pub async fn verify_staged_runtime_assets(
+    profile: &VcpCliCommandProfile,
+    rootfs_archive: PathBuf,
+    proot_binary: PathBuf,
+    proot_loader: PathBuf,
+) -> Result<
+    (
+        VerifiedRuntimeAsset,
+        VerifiedRuntimeAsset,
+        VerifiedRuntimeAsset,
+    ),
+    ProfileValidationError,
+> {
+    let rootfs = verify_regular_asset(
+        rootfs_archive,
+        profile.rootfs.archive_bytes,
+        &profile.rootfs.archive_sha256,
+        "rootfs.archive",
+    )
+    .await?;
+    let proot = verify_regular_asset(
+        proot_binary,
+        profile.proot.binary_bytes,
+        &profile.proot.binary_sha256,
+        "proot.binary",
+    )
+    .await?;
+    let loader = verify_regular_asset(
+        proot_loader,
+        profile.proot.loader_bytes,
+        &profile.proot.loader_sha256,
+        "proot.loaderBinary",
+    )
+    .await?;
+    Ok((rootfs, proot, loader))
+}
+
+/// 在逻辑合同通过后，流式校验 profile 指向的 rootfs、PRoot 与 unbundled loader 实物。
 pub async fn verify_command_profile_assets(
     repository_root: &Path,
     contract: &ValidatedCommandProfileContract,
-) -> Result<(VerifiedRuntimeAsset, VerifiedRuntimeAsset), ProfileValidationError> {
+) -> Result<
+    (
+        VerifiedRuntimeAsset,
+        VerifiedRuntimeAsset,
+        VerifiedRuntimeAsset,
+    ),
+    ProfileValidationError,
+> {
     validate_relative_repository_root(repository_root)?;
     let rootfs_path = resolve_profile_asset_path(
         repository_root,
@@ -336,6 +409,11 @@ pub async fn verify_command_profile_assets(
         repository_root,
         &contract.profile.proot.binary,
         "proot.binary",
+    )?;
+    let loader_path = resolve_profile_asset_path(
+        repository_root,
+        &contract.profile.proot.loader_binary,
+        "proot.loaderBinary",
     )?;
 
     let rootfs = verify_regular_asset(
@@ -352,19 +430,28 @@ pub async fn verify_command_profile_assets(
         "proot.binary",
     )
     .await?;
-    Ok((rootfs, proot))
+    let loader = verify_regular_asset(
+        loader_path,
+        contract.profile.proot.loader_bytes,
+        &contract.profile.proot.loader_sha256,
+        "proot.loaderBinary",
+    )
+    .await?;
+    Ok((rootfs, proot, loader))
 }
 
-/// P0/CI 主入口：typed JSON、lock 与两个发行实物必须同时通过。
+/// P0/CI 主入口：typed JSON、lock 与三个发行实物必须同时通过。
 pub async fn load_and_validate_command_profile(
     repository_root: &Path,
 ) -> Result<ValidatedCommandProfile, ProfileValidationError> {
     let contract = load_command_profile_contract(repository_root).await?;
-    let (rootfs, proot) = verify_command_profile_assets(repository_root, &contract).await?;
+    let (rootfs, proot, proot_loader) =
+        verify_command_profile_assets(repository_root, &contract).await?;
     Ok(ValidatedCommandProfile {
         contract,
         rootfs,
         proot,
+        proot_loader,
     })
 }
 
@@ -422,9 +509,9 @@ fn validate_profile_contract(
         "/workspace",
     )?;
     require_equal(
-        "invocation.skills",
-        profile.invocation.skills.as_str(),
-        "/skills",
+        "invocation.skillsAccess",
+        profile.invocation.skills_access.as_str(),
+        "action_only",
     )?;
     require_false("invocation.interactive", profile.invocation.interactive)?;
     require_false(
@@ -437,8 +524,15 @@ fn validate_profile_contract(
         &profile.proot.source_archive_sha256,
     )?;
     validate_git_commit("proot.commit", &profile.proot.commit)?;
+    require_equal(
+        "proot.loaderMode",
+        profile.proot.loader_mode.as_str(),
+        "unbundled_required",
+    )?;
     validate_sha256("proot.binarySha256", &profile.proot.binary_sha256)?;
     require_positive("proot.binaryBytes", profile.proot.binary_bytes)?;
+    validate_sha256("proot.loaderSha256", &profile.proot.loader_sha256)?;
+    require_positive("proot.loaderBytes", profile.proot.loader_bytes)?;
     require_equal(
         "proot.androidApi",
         profile.proot.android_api,
@@ -446,6 +540,13 @@ fn validate_profile_contract(
     )?;
     resolve_profile_relative_components(&profile.proot.patch, "proot.patch")?;
     resolve_profile_relative_components(&profile.proot.binary, "proot.binary")?;
+    resolve_profile_relative_components(&profile.proot.loader_binary, "proot.loaderBinary")?;
+    if profile.proot.binary == profile.proot.loader_binary {
+        return Err(ProfileValidationError::invariant(
+            "proot.loaderBinary",
+            "must be a separate APK-native executable from the PRoot binary",
+        ));
+    }
 
     validate_sha256(
         "talloc.sourceArchiveSha256",
@@ -487,19 +588,25 @@ fn validate_profile_contract(
         .rootfs
         .archive_bytes
         .checked_add(profile.proot.binary_bytes)
+        .and_then(|bytes| bytes.checked_add(profile.proot.loader_bytes))
         .ok_or_else(|| {
             ProfileValidationError::invariant("apkBudget.rawAssetBytes", "asset size overflow")
         })?;
-    if profile.apk_budget.raw_asset_bytes < physical_asset_bytes {
-        return Err(ProfileValidationError::invariant(
-            "apkBudget.rawAssetBytes",
-            "must cover rootfs archive plus PRoot binary",
-        ));
-    }
+    require_equal(
+        "apkBudget.rawAssetBytes",
+        profile.apk_budget.raw_asset_bytes,
+        physical_asset_bytes,
+    )?;
     require_positive(
         "apkBudget.estimatedCompressedIncrementBytes",
         profile.apk_budget.estimated_compressed_increment_bytes,
     )?;
+    if profile.apk_budget.estimated_compressed_increment_bytes > physical_asset_bytes {
+        return Err(ProfileValidationError::invariant(
+            "apkBudget.estimatedCompressedIncrementBytes",
+            "must not exceed the raw runtime asset bytes",
+        ));
+    }
 
     Ok(())
 }
@@ -622,11 +729,6 @@ fn validate_budgets(profile: &VcpCliCommandProfile) -> Result<(), ProfileValidat
         "budgets.maxPollBytes",
         budgets.max_poll_bytes,
         MAX_BOUNDED_READ_BYTES,
-    )?;
-    require_equal(
-        "budgets.ringBytesPerJob",
-        budgets.ring_bytes_per_job,
-        1_048_576_u64,
     )?;
     require_equal(
         "budgets.artifactBytesPerJob",
@@ -1156,6 +1258,14 @@ mod tests {
             "budgets.maxTimeoutMs",
         ));
 
+        let mut loader_mode = contract.profile.clone();
+        loader_mode.proot.loader_mode = "bundled".to_string();
+        cases.push((
+            loader_mode,
+            contract.locked_packages.clone(),
+            "proot.loaderMode",
+        ));
+
         let mut packages = contract.locked_packages.clone();
         packages.pop();
         cases.push((contract.profile.clone(), packages, "rootfs.packageLock"));
@@ -1183,6 +1293,17 @@ mod tests {
         assert_eq!(
             PathBuf::from_iter(proot),
             PathBuf::from("plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot.so")
+        );
+        let loader = resolve_profile_relative_components(
+            "../../plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot_loader.so",
+            "proot.loaderBinary",
+        )
+        .expect("profile unbundled loader path stays inside repository");
+        assert_eq!(
+            PathBuf::from_iter(loader),
+            PathBuf::from(
+                "plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot_loader.so"
+            )
         );
         let rootfs = resolve_profile_relative_components(
             "android-assets/vcp-cli-rootfs-3.24.1-aarch64.tar.zst",
@@ -1234,7 +1355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repository_rootfs_and_proot_match_profile_bytes_and_sha256() {
+    async fn repository_rootfs_proot_and_loader_match_profile_bytes_and_sha256() {
         let validated = load_and_validate_command_profile(Path::new(RELATIVE_REPOSITORY_ROOT))
             .await
             .expect("repository runtime assets must match profile");
@@ -1246,8 +1367,13 @@ mod tests {
             validated.proot.bytes,
             validated.contract.profile.proot.binary_bytes
         );
+        assert_eq!(
+            validated.proot_loader.bytes,
+            validated.contract.profile.proot.loader_bytes
+        );
         assert!(validated.rootfs.repository_path.is_relative());
         assert!(validated.proot.repository_path.is_relative());
+        assert!(validated.proot_loader.repository_path.is_relative());
         assert!(validated.rootfs.repository_path.ends_with(
             "runtime-assets/vcp-cli/android-assets/vcp-cli-rootfs-3.24.1-aarch64.tar.zst"
         ));
@@ -1255,5 +1381,8 @@ mod tests {
             .proot
             .repository_path
             .ends_with("plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot.so"));
+        assert!(validated.proot_loader.repository_path.ends_with(
+            "plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot_loader.so"
+        ));
     }
 }

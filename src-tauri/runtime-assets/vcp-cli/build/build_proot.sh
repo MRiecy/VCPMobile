@@ -3,7 +3,7 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 vcp_cli_dir=$(cd "$script_dir/.." && pwd)
-tauri_dir=$(cd "$vcp_cli_dir/../../.." && pwd)
+tauri_dir=$(cd "$vcp_cli_dir/../.." && pwd)
 
 proot_version=5.1.107.89
 proot_url="https://github.com/termux/proot/archive/v${proot_version}.zip"
@@ -11,8 +11,11 @@ proot_sha256=e1240f63de03e6da536d74041c7937ddd8737ab27743857d79285724b948eca8
 talloc_version=2.4.2
 talloc_url="https://download.samba.org/pub/talloc/talloc-${talloc_version}.tar.gz"
 talloc_sha256=85ecf9e465e20f98f9950a52e9a411e14320bc555fa257d87697b7e7a9b1d8a6
-expected_binary_sha256=651a5778979523e61b534b34a7a649b64f5a43237f951d7d5651b8dcdbe69e86
-expected_binary_bytes=281296
+expected_binary_sha256=0d7168f851b42b83f7a75835cdb3a62181d12185620a1354038174706b0f367c
+expected_binary_bytes=256456
+expected_loader_sha256=cb5e5b6900e198ca8160e9d355ea5b98d646333887a769411ff74132c1cec5df
+expected_loader_bytes=17728
+unbundled_loader_fallback=/vcp-mobile/unbundled-loader-required
 
 android_ndk=${VCP_CLI_ANDROID_NDK:?Set VCP_CLI_ANDROID_NDK to Android NDK 29.0.13846066}
 if [ "$(basename "$android_ndk")" != "29.0.13846066" ]; then
@@ -28,8 +31,10 @@ ranlib="$toolchain_bin/llvm-ranlib"
 strip="$toolchain_bin/llvm-strip"
 objcopy="$toolchain_bin/llvm-objcopy"
 objdump="$toolchain_bin/llvm-objdump"
+readelf="$toolchain_bin/llvm-readelf"
+strings="$toolchain_bin/llvm-strings"
 
-for required_tool in curl sha256sum unzip tar make patch "$cc" "$ar" "$ranlib" "$strip" "$objcopy" "$objdump"; do
+for required_tool in curl sha256sum unzip tar make patch "$cc" "$ar" "$ranlib" "$strip" "$objcopy" "$objdump" "$readelf" "$strings"; do
   if ! command -v "$required_tool" >/dev/null 2>&1 && [ ! -x "$required_tool" ]; then
     printf 'Missing build tool: %s\n' "$required_tool" >&2
     exit 2
@@ -92,21 +97,59 @@ make -C "$proot_root/src" \
   STRIP="$strip" \
   OBJCOPY="$objcopy" \
   OBJDUMP="$objdump" \
-  CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -DARG_MAX=131072 -I$talloc_root -I$compat_dir" \
+  PROOT_UNBUNDLE_LOADER="$unbundled_loader_fallback" \
+  CPPFLAGS="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -DARG_MAX=131072 -I$talloc_root -I$compat_dir -DPROOT_UNBUNDLE_LOADER=\\\"$unbundled_loader_fallback\\\"" \
   CFLAGS="-O2 -Wall -Wextra -fPIE -ffile-prefix-map=$work_dir=/usr/src/vcp-mobile-cli" \
   LDFLAGS="-Wl,-z,noexecstack -pie -L$work_dir/talloc-build -ltalloc" \
   -j"${VCP_CLI_BUILD_JOBS:-4}"
 
 built_binary="$proot_root/src/proot"
+built_loader="$proot_root/src/loader/loader"
 "$strip" "$built_binary"
+"$strip" "$built_loader"
 actual_sha256=$(sha256sum "$built_binary" | cut -d' ' -f1)
 actual_bytes=$(stat -c '%s' "$built_binary")
-if [ "$actual_sha256" != "$expected_binary_sha256" ] || [ "$actual_bytes" != "$expected_binary_bytes" ]; then
-  printf 'PRoot output drift: sha256=%s bytes=%s\n' "$actual_sha256" "$actual_bytes" >&2
+actual_loader_sha256=$(sha256sum "$built_loader" | cut -d' ' -f1)
+actual_loader_bytes=$(stat -c '%s' "$built_loader")
+if [ "$actual_sha256" != "$expected_binary_sha256" ] || \
+   [ "$actual_bytes" != "$expected_binary_bytes" ] || \
+   [ "$actual_loader_sha256" != "$expected_loader_sha256" ] || \
+   [ "$actual_loader_bytes" != "$expected_loader_bytes" ]; then
+  printf 'PRoot output drift: binary_sha256=%s binary_bytes=%s loader_sha256=%s loader_bytes=%s\n' \
+    "$actual_sha256" "$actual_bytes" "$actual_loader_sha256" "$actual_loader_bytes" >&2
   exit 4
 fi
 
+if ! "$readelf" --file-header "$built_binary" | grep -E 'Type:.*DYN' >/dev/null ||
+   ! "$readelf" --file-header "$built_binary" | grep -E 'Machine:.*AArch64' >/dev/null ||
+   ! "$readelf" --dynamic-table "$built_binary" | grep -E 'FLAGS_1.*PIE' >/dev/null; then
+  printf 'PRoot binary is not the expected PIE ELF\n' >&2
+  exit 5
+fi
+if ! "$readelf" --file-header "$built_loader" | grep -E 'Type:.*EXEC' >/dev/null ||
+   ! "$readelf" --file-header "$built_loader" | grep -E 'Machine:.*AArch64' >/dev/null; then
+  printf 'PRoot loader is not the expected executable ELF\n' >&2
+  exit 5
+fi
+for elf in "$built_binary" "$built_loader"; do
+  if "$readelf" --program-headers --wide "$elf" | awk '$1 == "LOAD" && /W/ && /E/ { found=1 } END { exit(found ? 0 : 1) }'; then
+    printf 'Executable has a writable+executable LOAD segment: %s\n' "$elf" >&2
+    exit 5
+  fi
+done
+if ! "$strings" "$built_binary" | grep -F "$unbundled_loader_fallback/loader" >/dev/null; then
+  printf 'PRoot binary does not carry the fail-closed unbundled-loader fallback\n' >&2
+  exit 5
+fi
+if "$strings" "$built_binary" | grep -F 'prooted' >/dev/null; then
+  printf 'PRoot binary still contains the bundled loader extraction path\n' >&2
+  exit 5
+fi
+
 output=${1:-"$tauri_dir/plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot.so"}
-mkdir -p "$(dirname "$output")"
+loader_output=${2:-"$tauri_dir/plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot_loader.so"}
+mkdir -p "$(dirname "$output")" "$(dirname "$loader_output")"
 install -m 0755 "$built_binary" "$output"
+install -m 0755 "$built_loader" "$loader_output"
 printf 'Built %s (%s bytes, sha256=%s)\n' "$output" "$actual_bytes" "$actual_sha256"
+printf 'Built %s (%s bytes, sha256=%s)\n' "$loader_output" "$actual_loader_bytes" "$actual_loader_sha256"

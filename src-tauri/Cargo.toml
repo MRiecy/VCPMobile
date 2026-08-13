@@ -73,6 +73,7 @@ syntect = { version = "5.3.0", default-features = false, features = ["html", "pa
 rustc-hash = "1.1.0"
 memmap2 = "0.9.11"
 zstd = "0.13"
+tar = "0.4"
 encoding_rs = "0.8"
 chardetng = "0.1"
 mime_guess = "2.0"

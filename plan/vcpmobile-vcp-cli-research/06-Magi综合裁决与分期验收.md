@@ -150,14 +150,14 @@ ToolRegistry allowlist、可复现 PRoot/rootfs、许可证与包体记录、API
 
 若进程树无法可靠杀、许可证不可接受或中央 VCP 无法让出 loop，状态为 `BLOCKED-P0`，不得继续堆 UI。
 
-### P1｜MobileCliRuntime + 人工前台调用
+### P1｜MobileCliRuntime + 人工前台调用（完成，2026-08-14）
 
 交付：
 
-- Android host 非 Root 的 PRoot sandbox、workspace/session、`run/poll/cancel/list`；guest 可模拟 root 管理隔离 rootfs；
+- Android host 非 Root 的 PRoot sandbox、持久 workspace、`run/poll/cancel/list`；guest 可模拟 root 管理隔离 rootfs；P1 人工调用只有 runtime 级 owner，agent/topic session 由 P2 接入；
 - Rust Job ledger + Android ProcessHost；
-- ring buffer/artifact/cursor/redaction；
-- `list_skills/read_skill` 一等 action 与 Rust 侧受控 Skill catalog 读取桥；
+- App 私有有界输出文件、opaque artifact/cursor/redaction 与前端有界 tail；
+- `list_skills/read_skill` 一等 action 与 Rust 侧受控、action-only Skill catalog 读取桥；Skill 不 bind 进 guest；
 - 简单 CLI 页面和 Job 列表；人工 PTY 可放在 P1 末或 P5 前，但不阻塞结构化命令；
 - 前台运行能力 truth。
 
@@ -165,10 +165,14 @@ ToolRegistry allowlist、可复现 PRoot/rootfs、许可证与包体记录、API
 
 - Distributed off + 飞行模式执行本地无网命令；
 - timeout/cancel 无残留进程和迟到输出；
-- 每个 Job 的 cwd/env/output 独立，session 内外并发都受全局与 per-session 额度约束；
+- 每个 Job 的 cwd/env/output 独立，P1 全局并发受额度约束；P2 冻结 agent/topic session 后再叠加 per-session 额度；
 - 进程死亡后状态为 interrupted；
 - 无 Android Root/Shizuku、无 API key/env 泄漏、无 OOM；guest 模拟 root 不越过 App UID；
-- `list_skills/read_skill` 可在飞行模式列出和阅读 Skill，调用不创建伪 Job，不能路径越界或因阅读自动执行脚本。
+- `list_skills/read_skill` 可在飞行模式列出和阅读 Skill，调用不创建伪 Job，不能路径越界或因阅读自动执行脚本；PRoot argv 不含 `/skills` 或 host Skill 路径，返回值只含 `vcp-skill://<id>` 逻辑引用。
+
+设备结论：API 36 已按上述门禁通过。普通 cancel、absolute timeout、`setsid/nohup` 清树、并发隔离、
+opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` 都有 Debug 产品路径证据；能力 truth
+仍为 `foreground_only`，人工 PTY 延后且不影响结构化 P1 完成。
 
 ### P2｜默认本地 Agent 工具循环
 

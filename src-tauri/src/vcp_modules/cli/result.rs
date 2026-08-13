@@ -50,6 +50,7 @@ impl VcpCliErrorCode {
 #[serde(rename_all = "snake_case")]
 pub enum VcpCliJobState {
     Queued,
+    Starting,
     Running,
     Completed,
     Failed,
@@ -85,8 +86,11 @@ pub struct VcpCliJobResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VcpCliJobSummary {
     pub id: String,
+    pub attempt_id: String,
     pub state: VcpCliJobState,
+    pub command_preview: String,
     pub description: Option<String>,
+    pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
 
@@ -418,7 +422,7 @@ mod tests {
                 id: "example-skill".to_string(),
                 name: "Example Skill".to_string(),
                 resource_path: "SKILL.md".to_string(),
-                skill_root: "/skills/example-skill".to_string(),
+                skill_root: "vcp-skill://example-skill".to_string(),
                 sha256: "abc123".to_string(),
                 truncated: false,
             }),

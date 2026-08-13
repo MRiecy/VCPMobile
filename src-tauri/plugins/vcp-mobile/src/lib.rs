@@ -3,6 +3,7 @@ use tauri::{
     Manager, Runtime,
 };
 
+pub mod cli;
 mod screen;
 pub mod stream;
 pub mod system;

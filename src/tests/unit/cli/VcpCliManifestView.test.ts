@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
 import { openFileNative, writeTempFile } from "tauri-plugin-vcp-mobile";
 import VcpCliManifestView from "@/features/cli/components/VcpCliManifestView.vue";
 import featureOverlaysSource from "@/components/FeatureOverlays.vue?raw";
@@ -13,8 +12,16 @@ import {
   VCP_CLI_MANIFEST_COMMAND,
   parseCanonicalVcpCliManifest,
 } from "@/features/cli/manifest";
+import {
+  VCP_CLI_ACTION_COMMAND,
+  VCP_CLI_STATUS_COMMAND,
+  type VcpCliActionResponse,
+  type VcpCliResultBody,
+  type VcpCliRuntimeStatus,
+} from "@/features/cli/vcpCliStore";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import { flushPromises } from "@/tests/utils/flush";
+import { mountWithPinia } from "@/tests/utils/mount";
 
 const canonicalManifest = cliManifestGoldenSource.trimEnd();
 const manifestFixture = JSON.parse(canonicalManifest) as Record<
@@ -23,9 +30,39 @@ const manifestFixture = JSON.parse(canonicalManifest) as Record<
 >;
 
 function mountView() {
-  return mount(VcpCliManifestView, {
+  return mountWithPinia(VcpCliManifestView, {
     props: { isOpen: true, zIndex: 44 },
   });
+}
+
+const readyStatus: VcpCliRuntimeStatus = {
+  available: true,
+  availability_reason: null,
+  background_reliability: "foreground_only",
+  runtime_generation: 1,
+  phase: "ready",
+  profile_id: "alpine-arm64-v1",
+  max_concurrent_jobs: 2,
+  running_jobs: 0,
+  jobs: [],
+};
+
+function successResponse(
+  operationId: string,
+  result: Partial<VcpCliResultBody> = {},
+): VcpCliActionResponse {
+  return {
+    operation_id: operationId,
+    runtime_generation: 1,
+    envelope: { status: "success", result: { content: [], ...result } },
+  };
+}
+
+async function openManifestTab(
+  wrapper: ReturnType<typeof mountView>,
+): Promise<void> {
+  await wrapper.get('[data-vcp-cli-tab="manifest"]').trigger("click");
+  await flushPromises();
 }
 
 describe("VCP CLI canonical manifest boundary", () => {
@@ -41,6 +78,11 @@ describe("VCP CLI canonical manifest boundary", () => {
       "/cache/VCPMobileCLI.manifest.json",
     );
     vi.mocked(openFileNative).mockResolvedValue(undefined);
+    mockInvoke(VCP_CLI_STATUS_COMMAND, () => readyStatus);
+    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
+      const request = args?.request as { operation_id: string };
+      return successResponse(request.operation_id);
+    });
     mockInvoke(VCP_CLI_MANIFEST_COMMAND, () => canonicalManifest);
   });
 
@@ -60,6 +102,7 @@ describe("VCP CLI canonical manifest boundary", () => {
 
   it("loads through the canonical command and explains prompt ownership", async () => {
     const wrapper = mountView();
+    await openManifestTab(wrapper);
     await flushPromises();
 
     expect(invokeMock).toHaveBeenCalledWith(VCP_CLI_MANIFEST_COMMAND);
@@ -68,13 +111,12 @@ describe("VCP CLI canonical manifest boundary", () => {
     );
     expect(wrapper.text()).toContain("提示词由用户 / VCPToolBox 所有");
     expect(wrapper.text()).toContain("不会自动注入、追加或改写 Agent 提示词");
-    expect(wrapper.text()).toContain(
-      "不代表 CLI Runtime、Job 或人工终端已经可用",
-    );
+    expect(wrapper.text()).toContain("当前可用性与 Job 状态以运行页的 Rust");
   });
 
   it("copies and exports the exact backend text with controlled Android APIs", async () => {
     const wrapper = mountView();
+    await openManifestTab(wrapper);
     await flushPromises();
 
     await wrapper.get('[data-vcp-cli-action="copy"]').trigger("click");
@@ -98,6 +140,7 @@ describe("VCP CLI canonical manifest boundary", () => {
 
   it("records only that the one-time guide was read and allows reopening it", async () => {
     const wrapper = mountView();
+    await openManifestTab(wrapper);
     await flushPromises();
 
     const guideToggle = wrapper.get(
@@ -122,6 +165,7 @@ describe("VCP CLI canonical manifest boundary", () => {
 
   it("enables system sharing only when the WebView exposes a real share function", async () => {
     const unavailable = mountView();
+    await openManifestTab(unavailable);
     await flushPromises();
     expect(
       unavailable.get('[data-vcp-cli-action="share"]').attributes("disabled"),
@@ -136,6 +180,7 @@ describe("VCP CLI canonical manifest boundary", () => {
       value: share,
     });
     const available = mountView();
+    await openManifestTab(available);
     await flushPromises();
     await available.get('[data-vcp-cli-action="share"]').trigger("click");
     await flushPromises();
@@ -149,6 +194,7 @@ describe("VCP CLI canonical manifest boundary", () => {
   it("does not enable delivery actions for a non-canonical backend shape", async () => {
     mockInvoke(VCP_CLI_MANIFEST_COMMAND, () => manifestFixture);
     const wrapper = mountView();
+    await openManifestTab(wrapper);
     await flushPromises();
 
     expect(wrapper.text()).toContain("manifest 暂不可用");

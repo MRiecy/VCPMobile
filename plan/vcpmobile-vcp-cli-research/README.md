@@ -1,11 +1,12 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-CODE-AND-DEVICE-EVIDENCE-COMPLETE / VCP-DEPLOYMENT-FIXTURE-DEFERRED / P1-NEXT`
+> 状态：`P0-P1-CODE-AND-API36-EVIDENCE-COMPLETE / VCP-DEPLOYMENT-FIXTURE-DEFERRED / P2-NEXT`
 >
 > 研究日期：2026-08-13
 >
-> 当前范围：P0 已冻结并实现工具协议、显式工具授权、Android Bash 运行环境资产及 manifest 交付页；
-> 用户实际 VCPToolBox 部署的提示词微调与 central-loop 联调按用户裁决留到 P2/P3，不宣称已经验收。
+> 当前范围：P0 已冻结工具协议、显式工具授权、Android Bash 资产与 manifest 交付；P1 已实现
+> `MobileCliRuntime`、Android ProcessHost、人工前台 UI、Skills action 与持久 Job/输出边界，并完成 API 36
+> 真机验收。用户实际 VCPToolBox 部署、Agent 本地多轮 loop 与后台能力分别留到 P2/P3/P5。
 
 ## P0 实施快照（2026-08-13）
 
@@ -20,8 +21,25 @@
 - “更多”托盘已有 VCP CLI manifest 查看、逐字复制和导出入口；Mobile 没有新增 prompt 注入或
   SkillBridge。
 
-仍未完成：真实 VCPToolBox 部署 fixture、MobileCliRuntime、Agent 本地多轮 loop、真实 Distributed
-CLI adapter、recall modes 与后台/PTY；它们分别属于 P1–P5。
+## P1 实施快照（2026-08-14）
+
+- Runtime 以 generation、job、attempt 和 durable operation binding 为事实源；`run/poll/cancel/list` 共用同一
+  ledger。取消、超时、启动含糊与存储越界都先持久化 attempt 级 terminal intent，再跨 Android bridge
+  终止进程树，迟到的 Bash 255 不能抢写 `failed`。
+- Android ProcessHost 以 App UID 启动 Alpine 3.24.1 + GNU Bash 5.3.9；PRoot 与独立 loader 均从 APK
+  `nativeLibraryDir` 执行，绕开 targetSdk 29+ 对 App 可写目录的 W^X 禁止。guest 只 bind `/dev`、`/proc`
+  和 `/workspace`，不 bind Skill catalog、host artifact 或 `/sys`。
+- stdout/stderr 持续 drain 到 App 私有有界文件，cursor 按 attempt 校验；UI 每视图只保留 256 KiB tail。
+  终态 artifact 是 opaque `vcp-cli-output-pair.v1` 引用，不暴露宿主路径；ANSI/OSC/C0/C1 与常见凭据形态
+  在展示/回灌投影前净化。
+- 同一 SlidePage 已提供“运行 / Skills / Manifest”：显式按钮启动命令，线性 Job 列表可 poll/cancel，
+  `list_skills/read_skill` 在 Rust catalog 内用 `openat + O_NOFOLLOW` 读取，返回 `vcp-skill://<id>`。
+- API 36/arm64 真机已证明：Distributed 关闭且无活动网络时 Bash 与 Skills 可用；普通 cancel、absolute
+  timeout、`setsid`、`nohup` 的父子 PID 全部消失且终态分别为 `cancelled/timed_out`；强制停止 Debug App
+  后旧 Job 在 generation 前移时记 `interrupted`，marker 仍为一行，未重跑。
+
+仍未完成：真实 VCPToolBox 部署 fixture、Agent 本地多轮 loop、真实 Distributed CLI adapter、recall modes、
+后台前台服务与人工 PTY；它们分别属于 P2–P5。P1 的准确能力等级仍是 `foreground_only`。
 
 ## 结论
 
@@ -55,7 +73,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 8. **Android host 坚持非 Root 用户态沙箱**。首发目标 Shell 固定为 PRoot guest 内的 Alpine Linux (musl) + GNU Bash，Agent 命令以 `/bin/bash -lc` 执行；guest 可模拟 root 管理自身 rootfs 和 `apk`，但不能越过 App UID。P0 验证可行性；若不可行必须回到 manifest 重新裁决，不得静默改用 `ash`。Android Root/Shizuku 只能作为未来显式 elevated backend。
 9. **长任务由 job 生命周期拥有，不由聊天 SSE 拥有**。模型续轮断线不能导致命令重跑；超时/取消必须终止目标进程组并阻止迟到输出污染后续任务。
 10. **VCP 通用元字段也属于本地回环契约**。`ink: mark_history`、`river=text/last:N`、`archery=true/no_reply` 在本地 loop 首发落地；`river=full`、`river=semantic:N` 和 `vref:N` 按实际多模态/索引能力分期开放。未具备时返回 `unsupported_mode`，不能静默忽略或伪装等价。
-11. **Skill 是 manifest 中可见的一等 action，不是隐藏 Shell 子命令**。`VCPMobileCLI` 直接提供 `action=list_skills|read_skill`；前者列出校验通过的 Skill，后者按 `skill_id + resource_path` 阅读 `SKILL.md` 或受控资源并返回 guest 路径。它不增加第二个 VCP 工具，也不自动执行 Skill 脚本。
+11. **Skill 是 manifest 中可见的一等 action，不是隐藏 Shell 子命令**。`VCPMobileCLI` 直接提供 `action=list_skills|read_skill`；前者列出校验通过的 Skill，后者按 `skill_id + resource_path` 阅读 `SKILL.md` 或受控资源并返回 `vcp-skill://<id>` 逻辑引用。Skill catalog 不挂载进 PRoot guest；若要执行脚本，必须先经明确动作物化到 `/workspace`。它不增加第二个 VCP 工具，也不自动执行 Skill 脚本。
 12. **iOS 只作为未来可选方向**。同一 VCP 协议可以复用，CLI Runtime 必须另做平台实现；本专项不改变 Android-only 当前产品边界。
 
 ## 为什么不是直接照搬 VChat 或 OpenMinis
@@ -92,8 +110,9 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 允许的准确表述是：
 
-> VCPMobile CLI 的 P0 协议、授权模型、可重建 Android Bash 资产和 API 36 前台 spike 已完成；CLI
-> 尚未接上产品 Runtime，因此当前页面仍只交付 manifest，不可宣称 Agent 或用户已经能执行命令。
+> VCPMobile CLI 的 P0 协议/授权/可重建 Android Bash 资产与 P1 人工前台 Runtime 已完成；用户可以在
+> CLI 页面运行、查询、取消结构化 Bash Job，并在无网时读取受控 Skill。它尚未接入 Agent 本地多轮
+> loop、真实 VCP 插件或 Android 后台前台服务，因此只能称为人工前台 CLI，不是 Agent CLI 已完成。
 
-不得表述为“CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
+不得表述为“Agent CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
 或“iOS 已支持本地 Linux”。

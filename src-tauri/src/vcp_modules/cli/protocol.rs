@@ -4,7 +4,7 @@ use std::path::{Component, Path};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::manifest::VCP_MOBILE_CLI_TOOL_NAME;
 use super::result::VcpCliErrorCode;
@@ -55,32 +55,131 @@ pub struct RawVcpToolRequest {
     pub fields: Vec<RawVcpField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum VcpCliAction {
     Run {
         command: String,
+        #[serde(default)]
         description: Option<String>,
-        cwd: String,
-        timeout_ms: u64,
-        run_in_background: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_in_background: Option<bool>,
     },
     ListSkills,
     ReadSkill {
         skill_id: String,
-        resource_path: String,
-        max_bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<usize>,
     },
     Poll {
         job_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor: Option<String>,
-        max_output_bytes: usize,
-        wait_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_output_bytes: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_ms: Option<u64>,
     },
     Cancel {
         job_id: String,
     },
     List,
+}
+
+/// UI/内部 adapter 的结构化 action 也必须经过与 Human Tool 相同的 validator。
+/// 这里先还原规范字符串字段，再复用唯一 `validate_vcp_mobile_cli_request`；
+/// 不接受 WebView 传入的 marker 文本。
+pub fn validate_structured_vcp_cli_action(
+    action: VcpCliAction,
+) -> Result<VcpCliAction, VcpCliProtocolError> {
+    let mut fields = vec![RawVcpField {
+        key: "tool_name".to_string(),
+        value: VCP_MOBILE_CLI_TOOL_NAME.to_string(),
+    }];
+    match action {
+        VcpCliAction::Run {
+            command,
+            description,
+            cwd,
+            timeout_ms,
+            run_in_background,
+        } => {
+            push_field(&mut fields, "action", "run");
+            push_field(&mut fields, "command", command);
+            if let Some(description) = description {
+                push_field(&mut fields, "description", description);
+            }
+            if let Some(cwd) = cwd {
+                push_field(&mut fields, "cwd", cwd);
+            }
+            if let Some(timeout_ms) = timeout_ms {
+                push_field(&mut fields, "timeout_ms", timeout_ms.to_string());
+            }
+            if let Some(run_in_background) = run_in_background {
+                push_field(
+                    &mut fields,
+                    "run_in_background",
+                    run_in_background.to_string(),
+                );
+            }
+        }
+        VcpCliAction::ListSkills => push_field(&mut fields, "action", "list_skills"),
+        VcpCliAction::ReadSkill {
+            skill_id,
+            resource_path,
+            max_bytes,
+        } => {
+            push_field(&mut fields, "action", "read_skill");
+            push_field(&mut fields, "skill_id", skill_id);
+            if let Some(resource_path) = resource_path {
+                push_field(&mut fields, "resource_path", resource_path);
+            }
+            if let Some(max_bytes) = max_bytes {
+                push_field(&mut fields, "max_bytes", max_bytes.to_string());
+            }
+        }
+        VcpCliAction::Poll {
+            job_id,
+            cursor,
+            max_output_bytes,
+            wait_ms,
+        } => {
+            push_field(&mut fields, "action", "poll");
+            push_field(&mut fields, "job_id", job_id);
+            if let Some(cursor) = cursor {
+                push_field(&mut fields, "cursor", cursor);
+            }
+            if let Some(max_output_bytes) = max_output_bytes {
+                push_field(
+                    &mut fields,
+                    "max_output_bytes",
+                    max_output_bytes.to_string(),
+                );
+            }
+            if let Some(wait_ms) = wait_ms {
+                push_field(&mut fields, "wait_ms", wait_ms.to_string());
+            }
+        }
+        VcpCliAction::Cancel { job_id } => {
+            push_field(&mut fields, "action", "cancel");
+            push_field(&mut fields, "job_id", job_id);
+        }
+        VcpCliAction::List => push_field(&mut fields, "action", "list"),
+    }
+    validate_vcp_mobile_cli_request(&RawVcpToolRequest { fields }).map(|request| request.action)
+}
+
+fn push_field(fields: &mut Vec<RawVcpField>, key: &str, value: impl Into<String>) {
+    fields.push(RawVcpField {
+        key: key.to_string(),
+        value: value.into(),
+    });
 }
 
 impl VcpCliAction {
@@ -731,9 +830,9 @@ fn validate_run(values: &HashMap<&str, &str>) -> Result<VcpCliAction, VcpCliProt
     Ok(VcpCliAction::Run {
         command: command.to_string(),
         description: description.map(str::to_string),
-        cwd: cwd.to_string(),
-        timeout_ms,
-        run_in_background,
+        cwd: Some(cwd.to_string()),
+        timeout_ms: Some(timeout_ms),
+        run_in_background: Some(run_in_background),
     })
 }
 
@@ -752,8 +851,8 @@ fn validate_read_skill(values: &HashMap<&str, &str>) -> Result<VcpCliAction, Vcp
     let max_bytes = parse_bounded_read_size(values, "max_bytes")?;
     Ok(VcpCliAction::ReadSkill {
         skill_id,
-        resource_path: resource_path.to_string(),
-        max_bytes,
+        resource_path: Some(resource_path.to_string()),
+        max_bytes: Some(max_bytes),
     })
 }
 
@@ -782,8 +881,8 @@ fn validate_poll(values: &HashMap<&str, &str>) -> Result<VcpCliAction, VcpCliPro
     Ok(VcpCliAction::Poll {
         job_id,
         cursor,
-        max_output_bytes,
-        wait_ms,
+        max_output_bytes: Some(max_output_bytes),
+        wait_ms: Some(wait_ms),
     })
 }
 

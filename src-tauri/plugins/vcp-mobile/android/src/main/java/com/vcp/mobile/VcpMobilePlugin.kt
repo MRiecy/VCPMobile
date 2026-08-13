@@ -33,6 +33,11 @@ import androidx.core.content.ContextCompat
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.Invoke
+import com.vcp.mobile.cli.CancelCliProcessArgs
+import com.vcp.mobile.cli.CliProcessHost
+import com.vcp.mobile.cli.InspectCliProcessArgs
+import com.vcp.mobile.cli.PrepareCliRuntimeArgs
+import com.vcp.mobile.cli.StartCliProcessArgs
 import com.vcp.mobile.service.StreamKeepaliveService
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -292,6 +297,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
     private val sensorStatusManager = SensorStatusManager(activity)
     private val executorDomains = PluginExecutorDomains()
+    private val cliProcessHost = CliProcessHost(activity.applicationContext)
     private val shareIntentHandler = ShareIntentHandler(this, executorDomains.fileIoExecutor)
     private val isDestroying = AtomicBoolean(false)
     @Volatile private var oomGuardFuture: ScheduledFuture<*>? = null
@@ -1223,8 +1229,65 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         handleNotificationIntent(activity.intent)
     }
 
+    @Command
+    fun prepareCliRuntime(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(PrepareCliRuntimeArgs::class.java)
+            cliProcessHost.prepare(
+                args,
+                success = { result -> invoke.resolve(result) },
+                failure = { reason -> invoke.reject("prepareCliRuntime failed: $reason") },
+            )
+        } catch (error: Exception) {
+            invoke.reject("prepareCliRuntime failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    @Command
+    fun startCliProcess(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(StartCliProcessArgs::class.java)
+            cliProcessHost.start(
+                args,
+                success = { result -> invoke.resolve(result) },
+                failure = { reason -> invoke.reject("startCliProcess failed: $reason") },
+            )
+        } catch (error: Exception) {
+            invoke.reject("startCliProcess failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    @Command
+    fun inspectCliProcess(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(InspectCliProcessArgs::class.java)
+            cliProcessHost.inspect(
+                args,
+                success = { result -> invoke.resolve(result) },
+                failure = { reason -> invoke.reject("inspectCliProcess failed: $reason") },
+            )
+        } catch (error: Exception) {
+            invoke.reject("inspectCliProcess failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
+    @Command
+    fun cancelCliProcess(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(CancelCliProcessArgs::class.java)
+            cliProcessHost.cancel(
+                args,
+                success = { result -> invoke.resolve(result) },
+                failure = { reason -> invoke.reject("cancelCliProcess failed: $reason") },
+            )
+        } catch (error: Exception) {
+            invoke.reject("cancelCliProcess failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+    }
+
     override fun onDestroy(activity: AppCompatActivity) {
         isDestroying.set(true)
+        cliProcessHost.close()
         oomGuardFuture?.cancel(true)
         oomGuardFuture = null
         executorDomains.shutdownNow().forEach { pendingTask ->
