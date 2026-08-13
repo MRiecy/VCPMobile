@@ -174,10 +174,10 @@ App.vue ──▶ layoutStore.toggleRightSidebar() ──▶ RightSidebar.vue �
 |------|------|------|
 | **插件中心** | `overlayStore.openDistributed()` | 打开分布式功能面板 `DistributedView` |
 | **灵视中心** | `overlayStore.openRagObserver()` | 打开 RAG 灵视观察页 `RagObserverView` |
-| 待开发 | — | 占位 |
-| 待开发 | — | 占位 |
+| **日记中心** | `overlayStore.openDiaryCenter()` | 打开远端日记浏览、搜索与编辑页 `DiaryCenterView` |
+| **更多** | 组件本地 `isMoreOpen` | 在按钮上方展开轻量工具浮窗；当前承载同步中心与全局设置，后续工具继续在此登记 |
 
-这两个入口将分布式与 RAG 能力从设置页中抽出，放在通知抽屉这一高频入口，降低功能发现成本。
+四个入口统一使用胶囊按钮。更多浮窗沿用桌面端应用托盘的锚定关系，但使用实体主题面而非 `backdrop-filter`；再次点击“更多”、点击外部、按 Escape 或关闭右侧栏都会收起。
 
 ### 3.2 列表结构
 

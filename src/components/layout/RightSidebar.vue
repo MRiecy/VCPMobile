@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { watch, ref } from 'vue';
-import { X, Trash2, Bug, Sparkles, BookOpenText } from 'lucide-vue-next';
+import { onClickOutside, onKeyStroke } from '@vueuse/core';
+import {
+  X,
+  Trash2,
+  Bug,
+  Sparkles,
+  BookOpenText,
+  Ellipsis,
+  RefreshCw,
+  Settings,
+} from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
 import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
@@ -27,7 +37,40 @@ const openDiaryCenter = () => {
 };
 
 const sidebarRef = ref<HTMLElement | null>(null);
+const moreTrayRef = ref<HTMLElement | null>(null);
+const isMoreOpen = ref(false);
+
+const closeMoreMenu = () => {
+  isMoreOpen.value = false;
+};
+
+const toggleMoreMenu = () => {
+  isMoreOpen.value = !isMoreOpen.value;
+};
+
+const openMoreTool = (open: () => void) => {
+  closeMoreMenu();
+  open();
+};
+
+const moreTools = [
+  {
+    id: 'sync',
+    label: '同步中心',
+    icon: RefreshCw,
+    open: () => overlayStore.openSyncSession(),
+  },
+  {
+    id: 'settings',
+    label: '全局设置',
+    icon: Settings,
+    open: () => overlayStore.openSettings(),
+  },
+] as const;
+
 useSidebarSwipe(sidebarRef, { type: 'right' });
+onClickOutside(moreTrayRef, closeMoreMenu);
+onKeyStroke('Escape', closeMoreMenu);
 
 const triggerDebugNotifications = () => {
   const randomSuffix = () => Math.random().toString(36).substring(2, 5);
@@ -125,6 +168,8 @@ watch(
 
     if (isOpen) {
       store.markAllRead();
+    } else {
+      closeMoreMenu();
     }
   },
   { immediate: true }
@@ -171,13 +216,45 @@ watch(
     
     <NotificationList :items="store.historyList" />
 
-    <!-- 底部：工具按钮 2x2 网格区 -->
-    <div class="p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 pb-[calc(var(--vcp-safe-bottom,48px)+8px)]">
+    <!-- 底部：常用工具与可扩展的更多工具浮窗 -->
+    <div
+      ref="moreTrayRef"
+      class="right-tool-tray p-4 border-t border-black/5 dark:border-white/5 glass-panel shrink-0 pb-[calc(var(--vcp-safe-bottom,48px)+8px)]"
+    >
+      <Transition name="right-tool-popover">
+        <section
+          v-if="isMoreOpen"
+          id="right-sidebar-more-tools"
+          class="right-tool-popover"
+          role="dialog"
+          aria-label="更多工具"
+        >
+          <header class="px-1 pb-3">
+            <span class="block text-[9px] font-black tracking-[0.18em] opacity-45 text-primary-text">TOOL TRAY</span>
+            <strong class="block mt-0.5 text-[13px] text-primary-text">更多功能</strong>
+          </header>
+
+          <div class="grid grid-cols-2 gap-2">
+            <button
+              v-for="tool in moreTools"
+              :key="tool.id"
+              type="button"
+              class="min-w-0 min-h-11 px-3 rounded-full border border-black/10 dark:border-white/10 bg-[var(--secondary-bg)] text-[var(--primary-text)] text-[11px] font-bold flex items-center justify-center gap-2 transition-all hover:border-[var(--highlight-text)] active:opacity-80 active:scale-[0.98]"
+              @click="openMoreTool(tool.open)"
+            >
+              <component :is="tool.icon" :size="15" />
+              <span>{{ tool.label }}</span>
+            </button>
+          </div>
+        </section>
+      </Transition>
+
       <div class="grid grid-cols-2 gap-2">
         <button
-          class="col-span-1 py-3 px-4 rounded-full transition-all text-white flex items-center justify-center gap-2 hover:opacity-90 active:scale-95 shadow-md border border-black/5 dark:border-white/5"
+          type="button"
+          class="col-span-1 min-h-12 px-4 rounded-full transition-all text-white flex items-center justify-center gap-2 hover:opacity-90 active:scale-95 shadow-md border border-black/5 dark:border-white/5"
           style="background-color: var(--highlight-text)"
-          @click="openDistributedView"
+          @click="openMoreTool(openDistributedView)"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
@@ -188,25 +265,35 @@ watch(
         </button>
         
         <button
-          class="col-span-1 py-3 px-4 rounded-full transition-all text-white flex items-center justify-center gap-2 hover:opacity-90 active:scale-95 shadow-md border border-black/5 dark:border-white/5"
+          type="button"
+          class="col-span-1 min-h-12 px-4 rounded-full transition-all text-white flex items-center justify-center gap-2 hover:opacity-90 active:scale-95 shadow-md border border-black/5 dark:border-white/5"
           style="background-color: #2c3e50"
-          @click="overlayStore.openRagObserver()"
+          @click="openMoreTool(() => overlayStore.openRagObserver())"
         >
           <Sparkles :size="14" class="text-blue-400" />
           <span class="font-bold text-[11px] leading-none">灵视中心</span>
         </button>
         <button
           type="button"
-          class="col-span-1 min-h-12 px-4 border border-black/10 dark:border-white/10 rounded flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)]"
+          class="col-span-1 min-h-12 px-4 rounded-full transition-all flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)] hover:opacity-90 active:scale-95 shadow-md border border-black/10 dark:border-white/10"
           aria-label="打开日记中心"
-          @click="openDiaryCenter"
+          @click="openMoreTool(openDiaryCenter)"
         >
           <BookOpenText :size="15" class="text-[var(--highlight-text)]" />
           <span class="font-bold text-[11px] leading-none">日记中心</span>
         </button>
-        <div class="col-span-1 border border-dashed border-black/10 dark:border-white/10 rounded-full flex items-center justify-center text-[10px] opacity-25 text-primary-text py-3">
-          <span>待开发</span>
-        </div>
+        <button
+          type="button"
+          class="col-span-1 min-h-12 px-4 rounded-full transition-all flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)] hover:opacity-90 active:scale-95 shadow-md border border-black/10 dark:border-white/10"
+          aria-label="打开更多工具"
+          aria-controls="right-sidebar-more-tools"
+          aria-haspopup="dialog"
+          :aria-expanded="isMoreOpen"
+          @click="toggleMoreMenu"
+        >
+          <Ellipsis :size="17" class="text-[var(--highlight-text)]" />
+          <span class="font-bold text-[11px] leading-none">更多</span>
+        </button>
       </div>
     </div>
   </aside>
@@ -247,6 +334,48 @@ watch(
 
 .vcp-drawer-header {
   padding-top: calc(var(--vcp-safe-top, 24px) + 1rem);
+}
+
+.right-tool-tray {
+  position: relative;
+}
+
+.right-tool-popover {
+  position: absolute;
+  right: 1rem;
+  bottom: calc(100% + 0.625rem);
+  left: 1rem;
+  z-index: 10;
+  padding: 0.75rem;
+  border: 1px solid var(--vcp-border-subtle, var(--border-color));
+  border-radius: 1rem;
+  background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  transform-origin: 75% 100%;
+}
+
+.right-tool-popover::after {
+  position: absolute;
+  right: calc(25% - 0.3125rem);
+  bottom: -0.35rem;
+  width: 0.625rem;
+  height: 0.625rem;
+  content: '';
+  border-right: 1px solid var(--vcp-border-subtle, var(--border-color));
+  border-bottom: 1px solid var(--vcp-border-subtle, var(--border-color));
+  background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
+  transform: rotate(45deg);
+}
+
+.right-tool-popover-enter-active,
+.right-tool-popover-leave-active {
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.right-tool-popover-enter-from,
+.right-tool-popover-leave-to {
+  opacity: 0;
+  transform: translateY(0.375rem) scale(0.98);
 }
 
 @media (min-width: 1280px) {

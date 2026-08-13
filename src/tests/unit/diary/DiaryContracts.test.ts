@@ -87,6 +87,18 @@ describe("diary cross-layer contracts", () => {
     expect(handler).toContain("overlayStore.openDiaryCenter()");
     expect(handler).not.toContain("emit('close')");
   });
+
+  it("keeps the diary entry capsule-shaped and replaces the placeholder with a real tool tray", () => {
+    expect(rightSidebarSource).toMatch(
+      /<button\s+[\s\S]*?class="[^"]*rounded-full[^"]*"\s+aria-label="打开日记中心"/,
+    );
+    expect(rightSidebarSource).not.toContain("待开发");
+    expect(rightSidebarSource).toContain('aria-label="打开更多工具"');
+    expect(rightSidebarSource).toContain(':aria-expanded="isMoreOpen"');
+    expect(rightSidebarSource).toContain('id="right-sidebar-more-tools"');
+    expect(rightSidebarSource).toContain("overlayStore.openSyncSession()");
+    expect(rightSidebarSource).toContain("overlayStore.openSettings()");
+  });
 });
 
 describe("diary trusted body and text-only metadata boundary", () => {
