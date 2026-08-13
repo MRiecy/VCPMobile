@@ -79,16 +79,6 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
             log::info!(
                 "[Lifecycle] distributedEnabled=true, starting distributed node connection..."
             );
-            let config_status = distributed_state
-                .registry
-                .load_enabled_config(app_handle)
-                .await;
-            if config_status.state != crate::distributed::tool_registry::ToolConfigState::Ready {
-                log::warn!(
-                    "[Lifecycle] Distributed tools started fail-closed after config recovery: {:?}",
-                    config_status
-                );
-            }
             if let Err(e) = client
                 .start(
                     app_handle.clone(),

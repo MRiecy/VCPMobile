@@ -1,14 +1,14 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-NEXT`
+> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING`
 >
 > 研究日期：2026-08-13
 >
 > 当前范围：P0 已冻结工具协议、显式工具授权、Android Bash 资产与 manifest 交付；P1 已实现
 > `MobileCliRuntime`、Android ProcessHost、人工前台 UI、Skills action 与持久 Job/输出边界，并完成 API 36
 > 真机验收；P2 已接入单聊/Group 本地多轮 coordinator、持久恢复、VCP 元字段和 typed route。当前只剩
-> 自动 transport guard 与断网续轮的 API 36 最终复验；真实 Distributed adapter、完整 recall 与后台能力
-> 分别属于 P3/P4/P5。
+> 自动 transport guard 与断网续轮的 API 36 最终复验；P3 已完成 Distributed CLI adapter、离线授权与插件中心收口，
+> 仍需真实 VCPToolBox + API 36 端到端验收。完整 recall 与后台能力分别属于 P4/P5。
 
 ## P0 实施快照（2026-08-13）
 
@@ -65,7 +65,16 @@
   ToolResult 可见、最终历史 marker 存在、命令 marker 恰为一行、中央 VCP 摘要不存在。该轮使用部署端
   sentinel fixture；当前产品自动注入 guard 的重装复验与“命令完成后断网再恢复”故障注入仍待手机解锁。
 
-仍未完成：P2 上述两项最终设备复验、P3 真实 Distributed CLI adapter、P4 完整 recall、P5 后台前台
+## P3 实施快照（2026-08-14）
+
+- `VCPMobileCLI` 已扫描进现有 Distributed catalog，但 fresh install、旧 disabled-name 配置和新增工具均保持未授权。enabled allowlist 在网络调和前离线加载，所以关闭 Distributed 时插件中心也不会丢失持久授权。
+- CLI 只在 Android + `vcpPlugin` route + 显式授权 + Runtime prewarm 成功时发布。`register_tools.tools[]` 通过 `RawValue` 嵌入同一 canonical manifest；route 单独变更只重注册，不重连或自动授权。
+- Distributed adapter 只翻译 transport：严格 JSON 先进入 canonical validator，再调用唯一 `MobileCliRuntimeState`。operation/session 身份稳定；断线只丢回包 waiter，不终止已启动 Job。
+- `_vcpContext` 仅接受 `execute_tool.data` 顶层的受信任值，128 KiB 上限并纳入重放 digest；`toolArgs` 内伪造字段不会被提升。P3 不物化 river/vref/`file://`，对这些请求在 Runtime 前稳定拒绝。
+- 插件中心使用单 mutation owner、view/scan generation 与可访问 `role=switch`。展开未授权行只审阅元数据；只有 Streaming 工具的显式“读取样本”会执行，OneShot/Interactive/CLI 不因浏览产生副作用。
+- 当前静态/回归门已通过；`registered_tools` 只表示 manifest frame 已交给当前本地 WebSocket writer，因协议无服务端注册 ACK，不把它写成远端确认。
+
+仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4 完整 recall、P5 后台前台
 服务与人工 PTY。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称 Doze 后台长稳。
 
 ## 结论

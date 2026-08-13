@@ -5,6 +5,7 @@
 mod clipboard;
 mod device_info;
 mod notification;
+mod vcp_mobile_cli;
 
 mod battery;
 mod cpu_info;
@@ -30,6 +31,7 @@ pub fn build_registry() -> ToolRegistry {
     registry.register_oneshot(device_info::DeviceInfoTool);
     registry.register_oneshot(notification::NotificationTool);
     registry.register_oneshot(clipboard::ClipboardTool);
+    registry.register_oneshot(vcp_mobile_cli::VcpMobileCliTool);
 
     // Streaming tools — hardware monitoring (Phase 1)
     registry.register_streaming(battery::BatteryInfoTool);
@@ -56,4 +58,33 @@ pub fn build_registry() -> ToolRegistry {
     );
 
     registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcp_modules::cli::manifest::VCP_MOBILE_CLI_TOOL_NAME;
+
+    #[test]
+    fn canonical_cli_is_scanned_into_catalog_but_starts_disabled() {
+        let registry = build_registry();
+        let metadata = registry
+            .get_tools_metadata()
+            .into_iter()
+            .find(|tool| {
+                tool.get("name").and_then(serde_json::Value::as_str)
+                    == Some(VCP_MOBILE_CLI_TOOL_NAME)
+            })
+            .expect("VCPMobileCLI catalog metadata");
+        assert_eq!(
+            metadata.get("enabled"),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            metadata
+                .get("display_name")
+                .and_then(serde_json::Value::as_str),
+            Some("VCP Mobile CLI")
+        );
+    }
 }

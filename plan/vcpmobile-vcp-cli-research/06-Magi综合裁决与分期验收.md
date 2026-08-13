@@ -224,6 +224,8 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 - 不做静默 local fallback；
 - 真实 VCPToolBox 端到端短命令、长 Job、错误和取消 fixture 通过。
 
+2026-08-14 实施状态：代码与回归门已完成，真实 VCPToolBox + API 36 端到端仍待验收。当前 adapter 对不可达 `file://`、river 物化与 vref 稳定返回 unsupported，未宣称 requestId 外的远程 cancel wire。已启动 Job 由唯一 Mobile Runtime 拥有，WebSocket session 只持有回包 waiter。
+
 ### P4｜高级 Skill 生命周期与语义元协议
 
 交付：

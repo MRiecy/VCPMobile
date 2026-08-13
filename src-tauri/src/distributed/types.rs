@@ -3,6 +3,7 @@
 // Mirrors the JSON protocol in VCPChat/VCPDistributedServer/VCPDistributedServer.js
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -21,7 +22,7 @@ pub enum OutgoingMessage {
     RegisterTools {
         #[serde(rename = "serverName")]
         server_name: String,
-        tools: Vec<ToolManifest>,
+        tools: Vec<Box<RawValue>>,
     },
 
     /// Report this node's IP addresses.
@@ -88,11 +89,12 @@ pub enum IncomingMessage {
     },
 
     /// Main server requests execution of a tool on this node.
-    /// `{ type: "execute_tool", data: { requestId, toolName, toolArgs } }`
+    /// `{ type: "execute_tool", data: { requestId, toolName, toolArgs, _vcpContext? } }`
     ExecuteTool {
         request_id: String,
         tool_name: String,
         tool_args: Value,
+        vcp_context: Option<Value>,
     },
 
     /// Unknown message type (forward-compatible)
@@ -136,10 +138,12 @@ impl IncomingEnvelope {
                     .get("toolArgs")
                     .cloned()
                     .unwrap_or(Value::Object(Default::default()));
+                let vcp_context = data.get("_vcpContext").cloned();
                 IncomingMessage::ExecuteTool {
                     request_id,
                     tool_name,
                     tool_args,
+                    vcp_context,
                 }
             }
             other => IncomingMessage::Unknown(other.to_string()),
@@ -280,7 +284,60 @@ pub struct DistributedStatus {
     pub connected: bool,
     pub server_id: Option<String>,
     pub client_id: Option<String>,
+    /// Manifests handed to the current local WebSocket writer; the wire has no server ACK.
     pub registered_tools: usize,
     pub last_error: Option<String>,
     pub session_id: u64, // 新增：会话版本识别标识
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execute_tool_keeps_trusted_context_at_envelope_level() {
+        let envelope: IncomingEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "execute_tool",
+            "data": {
+                "requestId": "request-1",
+                "toolName": "VCPMobileCLI",
+                "toolArgs": {
+                    "action": "list",
+                    "_vcpContext": { "forged": true }
+                },
+                "_vcpContext": { "trusted": true }
+            }
+        }))
+        .expect("parse execute_tool envelope");
+
+        match envelope.parse() {
+            IncomingMessage::ExecuteTool {
+                tool_args,
+                vcp_context,
+                ..
+            } => {
+                assert_eq!(vcp_context, Some(serde_json::json!({ "trusted": true })));
+                assert_eq!(
+                    tool_args.get("_vcpContext"),
+                    Some(&serde_json::json!({ "forged": true }))
+                );
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_registration_manifest_is_embedded_as_an_object() {
+        let raw = RawValue::from_string(
+            r#"{"name":"VCPMobileCLI","capabilities":{"invocationCommands":[]}}"#.to_string(),
+        )
+        .expect("raw manifest");
+        let wire = serde_json::to_value(OutgoingMessage::RegisterTools {
+            server_name: "mobile".to_string(),
+            tools: vec![raw],
+        })
+        .expect("registration wire");
+        assert_eq!(wire["data"]["tools"][0]["name"], "VCPMobileCLI");
+        assert!(wire["data"]["tools"][0].is_object());
+    }
 }

@@ -7,9 +7,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
@@ -94,10 +96,41 @@ impl ToolConfigStatus {
 
 /// OneShot: call and return immediately, no frontend UI interaction needed.
 /// Mirrors VCPChat's stdio plugins (child_process.spawn → stdout → result).
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    pub request_id: String,
+    pub remote_identity: String,
+    pub connection_epoch: u64,
+    pub server_id: String,
+    pub client_id: String,
+    pub vcp_context: Option<Value>,
+}
+
 #[async_trait]
 pub trait OneShotTool: Send + Sync {
     fn manifest(&self) -> ToolManifest;
+
+    fn registration_manifest(&self) -> Result<Box<RawValue>, String> {
+        let json = serde_json::to_string(&self.manifest())
+            .map_err(|error| format!("cannot serialize tool registration manifest: {error}"))?;
+        RawValue::from_string(json)
+            .map_err(|error| format!("cannot build raw tool registration manifest: {error}"))
+    }
+
+    async fn is_publishable(&self, _app: &AppHandle) -> Result<bool, String> {
+        Ok(true)
+    }
+
     async fn execute(&self, args: Value, app: &AppHandle) -> Result<Value, String>;
+
+    async fn execute_with_context(
+        &self,
+        args: Value,
+        app: &AppHandle,
+        _context: Option<ToolExecutionContext>,
+    ) -> Result<Value, String> {
+        self.execute(args, app).await
+    }
 }
 
 /// Interactive: requires frontend UI participation (camera, biometric, etc.).
@@ -157,6 +190,7 @@ pub struct ToolRegistry {
     enabled_names: RwLock<HashSet<String>>,
     config_status: RwLock<ToolConfigStatus>,
     config_update_lock: tokio::sync::Mutex<()>,
+    config_loaded: AtomicBool,
 }
 
 impl ToolRegistry {
@@ -166,6 +200,7 @@ impl ToolRegistry {
             enabled_names: RwLock::new(HashSet::new()),
             config_status: RwLock::new(ToolConfigStatus::uninitialized()),
             config_update_lock: tokio::sync::Mutex::new(()),
+            config_loaded: AtomicBool::new(false),
         }
     }
 
@@ -262,6 +297,7 @@ impl ToolRegistry {
         .map_err(|error| format!("分布式工具配置写任务失败: {error}"))??;
         let changed = self.replace_enabled(enabled)?;
         self.set_config_status(ToolConfigStatus::ready());
+        self.config_loaded.store(true, Ordering::Release);
         Ok(changed)
     }
 
@@ -305,16 +341,53 @@ impl ToolRegistry {
             .insert(name, ToolEntry::Streaming(Arc::new(tool)));
     }
 
-    /// Get enabled tool manifests for the register_tools message.
-    /// Mirrors Plugin.js getAllPluginManifests()
-    /// 上报全部已注册工具（OneShot/Interactive/Streaming），
-    /// 服务端通过 pluginType 字段区分可执行与静态占位符类型。
-    pub fn get_all_manifests(&self) -> Vec<ToolManifest> {
-        self.tools
-            .iter()
-            .filter(|(name, _)| self.is_enabled(name))
-            .map(|(_, e)| e.manifest())
-            .collect()
+    /// Build the enabled and currently publishable manifest set for register_tools.
+    /// Catalog metadata remains visible regardless of authorization or availability.
+    pub async fn get_registration_manifests(&self, app: &AppHandle) -> Vec<Box<RawValue>> {
+        let mut names = self.tools.keys().cloned().collect::<Vec<_>>();
+        names.sort_unstable();
+        let mut manifests = Vec::with_capacity(names.len());
+
+        for name in names {
+            if !self.is_enabled(&name) {
+                continue;
+            }
+            let Some(entry) = self.tools.get(&name) else {
+                continue;
+            };
+            let manifest = match entry {
+                ToolEntry::OneShot(tool) => match tool.is_publishable(app).await {
+                    Ok(true) => tool.registration_manifest(),
+                    Ok(false) => {
+                        log::info!(
+                            "[Distributed] Tool '{}' is authorized but not currently publishable.",
+                            name
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[Distributed] Tool '{}' publishability check failed: {}",
+                            name,
+                            error
+                        );
+                        continue;
+                    }
+                },
+                ToolEntry::Interactive(_) | ToolEntry::Streaming(_) => {
+                    generic_registration_manifest(entry)
+                }
+            };
+            match manifest {
+                Ok(manifest) => manifests.push(manifest),
+                Err(error) => log::warn!(
+                    "[Distributed] Tool '{}' registration manifest was skipped: {}",
+                    name,
+                    error
+                ),
+            }
+        }
+        manifests
     }
 
     /// Get all tool metadata with categories and placeholders for the frontend config.
@@ -372,6 +445,16 @@ impl ToolRegistry {
         args: Value,
         app: &AppHandle,
     ) -> Result<Value, String> {
+        self.execute_with_context(tool_name, args, app, None).await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        tool_name: &str,
+        args: Value,
+        app: &AppHandle,
+        context: Option<ToolExecutionContext>,
+    ) -> Result<Value, String> {
         if !self.is_enabled(tool_name) {
             return Err(format!(
                 "Tool '{}' is currently disabled on this mobile node.",
@@ -385,7 +468,7 @@ impl ToolRegistry {
             .ok_or_else(|| format!("Tool '{}' not found in registry.", tool_name))?;
 
         match entry {
-            ToolEntry::OneShot(tool) => tool.execute(args, app).await,
+            ToolEntry::OneShot(tool) => tool.execute_with_context(args, app, context).await,
             ToolEntry::Interactive(tool) => tool.execute(args, app).await,
             ToolEntry::Streaming(tool) => {
                 // For streaming tools, execute_tool returns a current snapshot.
@@ -402,15 +485,39 @@ impl ToolRegistry {
     /// Load the enabled allowlist. A missing file creates an empty v2 policy.
     /// Legacy disabled-name files and malformed policies are explicitly invalidated
     /// and rewritten as an empty allowlist; no complement-based migration is allowed.
-    pub async fn load_enabled_config(&self, app: &AppHandle) -> ToolConfigStatus {
+    pub async fn ensure_enabled_config_loaded(&self, app: &AppHandle) -> ToolConfigStatus {
+        let config_path = app
+            .path()
+            .app_config_dir()
+            .map(|directory| directory.join(TOOL_CONFIG_FILE))
+            .map_err(|error| format!("获取应用配置目录失败: {error}"));
+        self.ensure_enabled_config_loaded_from_path(config_path)
+            .await
+    }
+
+    async fn ensure_enabled_config_loaded_from_path(
+        &self,
+        config_path: Result<std::path::PathBuf, String>,
+    ) -> ToolConfigStatus {
+        if self.config_loaded.load(Ordering::Acquire) {
+            return self.config_status();
+        }
         let _update_guard = self.config_update_lock.lock().await;
-        let config_dir = match app.path().app_config_dir() {
-            Ok(path) => path,
-            Err(error) => {
-                return self.fail_closed(format!("获取应用配置目录失败: {error}"));
-            }
+        if self.config_loaded.load(Ordering::Acquire) {
+            return self.config_status();
+        }
+        let status = match config_path {
+            Ok(config_path) => self.load_enabled_config_locked(config_path).await,
+            Err(error) => self.fail_closed(error),
         };
-        let config_path = config_dir.join(TOOL_CONFIG_FILE);
+        self.config_loaded.store(true, Ordering::Release);
+        status
+    }
+
+    async fn load_enabled_config_locked(
+        &self,
+        config_path: std::path::PathBuf,
+    ) -> ToolConfigStatus {
         let load_path = config_path.clone();
         let load_known = self.all_tool_names();
         let loaded = tauri::async_runtime::spawn_blocking(move || {
@@ -453,6 +560,13 @@ impl ToolRegistry {
             }
         }
     }
+}
+
+fn generic_registration_manifest(entry: &ToolEntry) -> Result<Box<RawValue>, String> {
+    let json = serde_json::to_string(&entry.manifest())
+        .map_err(|error| format!("cannot serialize tool registration manifest: {error}"))?;
+    RawValue::from_string(json)
+        .map_err(|error| format!("cannot build raw tool registration manifest: {error}"))
 }
 
 fn resolve_tool_config(loaded: Result<LoadedToolConfig, String>) -> ResolvedToolConfig {
@@ -678,7 +792,8 @@ mod tests {
         assert_eq!(registry.get_tools_metadata().len(), 2);
         assert!(!enabled_metadata(&registry, "Clipboard"));
         assert!(!enabled_metadata(&registry, "DeviceInfo"));
-        assert!(registry.get_all_manifests().is_empty());
+        assert!(!registry.is_enabled("Clipboard"));
+        assert!(!registry.is_enabled("DeviceInfo"));
     }
 
     #[test]
@@ -768,9 +883,54 @@ mod tests {
         registry.replace_enabled(resolved.enabled).unwrap();
         assert!(enabled_metadata(&registry, "Clipboard"));
         assert!(!enabled_metadata(&registry, "DeviceInfo"));
-        let manifests = registry.get_all_manifests();
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].name, "Clipboard");
+        assert!(registry.is_enabled("Clipboard"));
+        assert!(!registry.is_enabled("DeviceInfo"));
+    }
+
+    #[tokio::test]
+    async fn offline_allowlist_load_is_idempotent_and_restores_persisted_grants() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(TOOL_CONFIG_FILE);
+        persist_enabled_config(&path, &HashSet::from(["Clipboard".to_string()])).unwrap();
+        let registry = test_registry();
+
+        let status = registry
+            .ensure_enabled_config_loaded_from_path(Ok(path.clone()))
+            .await;
+        assert_eq!(status.state, ToolConfigState::Ready);
+        assert!(registry.is_enabled("Clipboard"));
+        assert!(!registry.is_enabled("DeviceInfo"));
+
+        persist_enabled_config(&path, &HashSet::new()).unwrap();
+        let repeated = registry
+            .ensure_enabled_config_loaded_from_path(Ok(path))
+            .await;
+        assert_eq!(repeated, status);
+        assert!(
+            registry.is_enabled("Clipboard"),
+            "a repeated catalog/status read must not overwrite the already loaded policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_legacy_config_is_rewritten_to_empty_v2_allowlist() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(TOOL_CONFIG_FILE);
+        std::fs::write(&path, br#"["Clipboard"]"#).unwrap();
+        let registry = test_registry();
+
+        let status = registry
+            .ensure_enabled_config_loaded_from_path(Ok(path.clone()))
+            .await;
+        assert_eq!(status.state, ToolConfigState::RecoveredDisabled);
+        assert!(!registry.is_enabled("Clipboard"));
+        assert_eq!(
+            load_tool_config_file(&path, &known_names()).unwrap(),
+            LoadedToolConfig::Current {
+                enabled: HashSet::new(),
+                orphaned: vec![],
+            }
+        );
     }
 
     #[test]
@@ -781,22 +941,35 @@ mod tests {
             description: "replacement",
         });
         assert_eq!(registry.tool_count(), 2);
-        assert!(registry.get_all_manifests().is_empty());
+        assert!(!registry.is_enabled("Clipboard"));
 
         registry
             .replace_enabled(HashSet::from(["Clipboard".to_string()]))
             .unwrap();
-        let manifests = registry.get_all_manifests();
-        assert_eq!(manifests.len(), 1);
-        assert_eq!(manifests[0].name, "Clipboard");
-        assert_eq!(manifests[0].description, "replacement");
+        assert!(registry.is_enabled("Clipboard"));
+        assert_eq!(
+            registry.tools["Clipboard"].manifest().description,
+            "replacement"
+        );
 
         assert!(registry
             .validate_enabled_names(vec!["Clipboard".to_string(), "Clipboard".to_string()])
             .is_err());
         registry.replace_enabled(HashSet::new()).unwrap();
-        assert!(registry.get_all_manifests().is_empty());
         assert!(!registry.is_enabled("Clipboard"));
+    }
+
+    #[test]
+    fn default_oneshot_registration_manifest_uses_generic_manifest_wire() {
+        let tool = DummyTool {
+            name: "Clipboard",
+            description: "clipboard",
+        };
+        let raw = tool.registration_manifest().expect("raw manifest");
+        assert_eq!(
+            serde_json::from_str::<Value>(raw.get()).unwrap(),
+            serde_json::to_value(tool.manifest()).unwrap()
+        );
     }
 
     #[test]

@@ -114,6 +114,37 @@ pub struct SettingsState {
     runtime_reconcile_lock: Arc<Mutex<()>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeSettingsChanges {
+    vcp_log_changed: bool,
+    distributed_reconcile_required: bool,
+    mobile_cli_route_changed: bool,
+}
+
+fn classify_runtime_settings_changes(
+    old: Option<&Settings>,
+    settings: &Settings,
+) -> RuntimeSettingsChanges {
+    let vcp_log_changed = old.map_or_else(
+        || !settings.vcp_log_url.is_empty() || !settings.vcp_log_key.is_empty(),
+        |old| old.vcp_log_url != settings.vcp_log_url || old.vcp_log_key != settings.vcp_log_key,
+    );
+    let distributed_reconcile_required = old.map_or(settings.distributed_enabled, |old| {
+        let enabled_changed = old.distributed_enabled != settings.distributed_enabled;
+        let params_changed = old.distributed_ws_url != settings.distributed_ws_url
+            || old.distributed_vcp_key != settings.distributed_vcp_key
+            || old.distributed_device_name != settings.distributed_device_name;
+        enabled_changed || (params_changed && settings.distributed_enabled)
+    });
+    let mobile_cli_route_changed =
+        old.is_some_and(|old| old.mobile_cli_agent_route != settings.mobile_cli_agent_route);
+    RuntimeSettingsChanges {
+        vcp_log_changed,
+        distributed_reconcile_required,
+        mobile_cli_route_changed,
+    }
+}
+
 #[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsRecoveryStatus {
@@ -343,44 +374,40 @@ async fn internal_write_settings<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 判断 VCPLog 连接参数是否实际发生变化，避免无关设置（如排序顺序）更新导致重连
-    let should_reconnect = {
+    let runtime_changes = {
         let old_cache = state.cache.lock().await;
-        if let Some(ref old) = *old_cache {
-            old.vcp_log_url != settings.vcp_log_url || old.vcp_log_key != settings.vcp_log_key
-        } else {
-            !settings.vcp_log_url.is_empty() || !settings.vcp_log_key.is_empty()
-        }
-    };
-
-    // 判断分布式设置是否发生改变
-    let should_reconcile_dist = {
-        let old_cache = state.cache.lock().await;
-        if let Some(ref old) = *old_cache {
-            let enabled_changed = old.distributed_enabled != settings.distributed_enabled;
-            let params_changed = old.distributed_ws_url != settings.distributed_ws_url
-                || old.distributed_vcp_key != settings.distributed_vcp_key
-                || old.distributed_device_name != settings.distributed_device_name;
-
-            enabled_changed || (params_changed && settings.distributed_enabled)
-        } else {
-            settings.distributed_enabled
-        }
+        classify_runtime_settings_changes(old_cache.as_ref(), settings)
     };
 
     *state.cache.lock().await = Some(settings.clone());
 
     // VCPLog/Info 与分布式节点共用一个 generation owner。任务执行时重新读取
     // 最新 Settings；旧 generation 只能退出，不能在新设置之后提交运行时副作用。
-    if should_reconnect || should_reconcile_dist {
+    if runtime_changes.vcp_log_changed || runtime_changes.distributed_reconcile_required {
         let generation = state.reserve_runtime_reconcile();
         let concrete_app = app_handle.state::<tauri::AppHandle>().inner().clone();
         tauri::async_runtime::spawn(async move {
             reconcile_current_runtime_settings(concrete_app, generation).await;
         });
+    } else if runtime_changes.mobile_cli_route_changed {
+        let concrete_app = app_handle.state::<tauri::AppHandle>().inner().clone();
+        tauri::async_runtime::spawn(async move {
+            re_register_distributed_tools_if_connected(concrete_app).await;
+        });
     }
 
     Ok(true)
+}
+
+async fn re_register_distributed_tools_if_connected(app_handle: AppHandle) {
+    let Some(distributed_state) = app_handle.try_state::<crate::distributed::DistributedState>()
+    else {
+        return;
+    };
+    let client = distributed_state.client.read().await;
+    if client.is_connected().await {
+        client.re_register_tools().await;
+    }
 }
 
 async fn reconcile_current_runtime_settings(app_handle: AppHandle, generation: u64) {
@@ -500,6 +527,28 @@ mod tests {
             settings.mobile_cli_agent_route_snapshot(),
             MobileCliAgentRoute::VcpPlugin
         );
+    }
+
+    #[test]
+    fn route_only_change_requests_reregistration_without_network_reconcile() {
+        let old = create_default_settings();
+        let mut changed = old.clone();
+        changed.mobile_cli_agent_route = MobileCliAgentRoute::VcpPlugin;
+
+        let actions = classify_runtime_settings_changes(Some(&old), &changed);
+        assert_eq!(
+            actions,
+            RuntimeSettingsChanges {
+                vcp_log_changed: false,
+                distributed_reconcile_required: false,
+                mobile_cli_route_changed: true,
+            }
+        );
+
+        changed.distributed_enabled = true;
+        let actions = classify_runtime_settings_changes(Some(&old), &changed);
+        assert!(actions.distributed_reconcile_required);
+        assert!(actions.mobile_cli_route_changed);
     }
 
     #[tokio::test]

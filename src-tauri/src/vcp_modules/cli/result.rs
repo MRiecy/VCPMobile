@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub const VCP_TOOL_PAYLOAD_MARKER: &str = "<!-- VCP_TOOL_PAYLOAD -->";
 
@@ -317,6 +318,33 @@ pub fn serialize_distributed_tool_result(
     serde_json::to_string(&result.to_distributed(request_id))
 }
 
+/// Project the canonical Runtime envelope into the value/error shape expected by the existing
+/// Distributed client. Success returns the body directly; an error remains an outer error rather
+/// than being nested below a successful generic tool result.
+pub(crate) fn project_vcp_plugin_outcome(envelope: VcpCliResultEnvelope) -> Result<Value, String> {
+    match envelope {
+        VcpCliResultEnvelope::Success { mut result } => {
+            project_runtime_source(&mut result, VcpCliRuntimeSource::VcpPlugin);
+            serde_json::to_value(result)
+                .map_err(|error| format!("internal_error: cannot serialize CLI result: {error}"))
+        }
+        VcpCliResultEnvelope::Error {
+            error,
+            code,
+            mut result,
+        } => {
+            project_runtime_source(&mut result, VcpCliRuntimeSource::VcpPlugin);
+            Err(distributed_error_text(code, &error, &result))
+        }
+    }
+}
+
+fn project_runtime_source(result: &mut VcpCliResultBody, source: VcpCliRuntimeSource) {
+    if let Some(runtime) = result.runtime.as_mut() {
+        runtime.source = source;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
@@ -390,6 +418,32 @@ mod tests {
         )
         .expect("parse distributed error");
         assert_eq!(distributed, fixture.error_distributed);
+    }
+
+    #[test]
+    fn vcp_plugin_projection_returns_body_or_outer_error_without_nested_status() {
+        let success = project_vcp_plugin_outcome(job_success_fixture())
+            .expect("project successful Runtime envelope");
+        assert!(success.get("status").is_none());
+        assert_eq!(
+            success.pointer("/runtime/source").and_then(Value::as_str),
+            Some("vcp_plugin")
+        );
+        assert_eq!(
+            success.pointer("/job/id").and_then(Value::as_str),
+            Some("job_01")
+        );
+
+        let error = project_vcp_plugin_outcome(VcpCliResultEnvelope::error(
+            VcpCliErrorCode::UnsupportedMode,
+            "vref is unavailable",
+            "Remove vref and retry.",
+        ))
+        .expect_err("Runtime error must remain an outer Distributed error");
+        assert_eq!(
+            error,
+            "unsupported_mode: vref is unavailable\nRemove vref and retry."
+        );
     }
 
     fn job_success_fixture() -> VcpCliResultEnvelope {

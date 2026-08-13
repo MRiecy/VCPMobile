@@ -118,6 +118,21 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         }
     };
 
+    // Tool authorization is an offline policy and must be ready before any catalog read or
+    // network reconciliation. Distributed being disabled must not hide persisted grants or
+    // migration warnings from the plugin center.
+    let distributed_state = handle.state::<crate::distributed::DistributedState>();
+    let tool_config_status = distributed_state
+        .registry
+        .ensure_enabled_config_loaded(&handle)
+        .await;
+    if tool_config_status.state != crate::distributed::tool_registry::ToolConfigState::Ready {
+        log::warn!(
+            "[Lifecycle] Distributed tool authorization loaded fail-closed: {:?}",
+            tool_config_status
+        );
+    }
+
     // 3.6 根据设置决定是否启动分布式节点 (自动重连)
     {
         let enable_dist = settings.distributed_enabled;

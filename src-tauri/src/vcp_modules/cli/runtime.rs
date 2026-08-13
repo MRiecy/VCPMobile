@@ -206,6 +206,21 @@ impl MobileCliRuntimeState {
         Ok(status_from_owner(&owner, &profile))
     }
 
+    /// Distributed registration readiness seam. Registration may trigger the existing single
+    /// provision owner, but it never creates a second Runtime or publishes before the Android
+    /// ProcessHost/assets have been verified for this app process.
+    pub(crate) async fn ensure_ready_for_registration<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+    ) -> Result<(), String> {
+        self.ensure_initialized(app).await?;
+        let operation_id = format!("distributed-registration-prepare-{}", Uuid::new_v4());
+        self.ensure_provisioned(app, &operation_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))
+    }
+
     pub(crate) async fn execute<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -2465,6 +2480,40 @@ mod tests {
         assert!(validate_structured_vcp_cli_action(action).is_ok());
         assert!(validate_operation_id("operation-1").is_ok());
         assert!(validate_operation_id("bad operation").is_err());
+    }
+
+    #[test]
+    fn one_operation_id_cannot_name_changed_distributed_action_args() {
+        let run = |command: &str| VcpCliAction::Run {
+            command: command.to_string(),
+            description: None,
+            cwd: Some(crate::vcp_modules::cli::protocol::DEFAULT_CWD.to_string()),
+            timeout_ms: Some(crate::vcp_modules::cli::protocol::DEFAULT_TIMEOUT_MS),
+            run_in_background: Some(false),
+        };
+        let first_digest = action_digest(&run("printf first"), None, Some("dist-session:a"))
+            .expect("hash first action");
+        let changed_digest = action_digest(&run("printf changed"), None, Some("dist-session:a"))
+            .expect("hash changed action");
+        assert_ne!(first_digest, changed_digest);
+
+        let mut ledger = JobLedger::empty(1);
+        ledger
+            .record_operation(
+                "dist:stable-request".to_string(),
+                first_digest.clone(),
+                serde_json::json!({"accepted": true}),
+                1,
+            )
+            .expect("record first Distributed operation");
+        assert!(matches!(
+            ledger.operation("dist:stable-request", &first_digest),
+            OperationLookup::Replay(_)
+        ));
+        assert_eq!(
+            ledger.operation("dist:stable-request", &changed_digest),
+            OperationLookup::Conflict
+        );
     }
 
     #[test]

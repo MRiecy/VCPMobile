@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { useSettingsStore } from "../../core/stores/settings";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useDistributed } from "./composables/useDistributed";
@@ -43,18 +44,22 @@ interface PluginItem {
   name: string;
   englishName: string;
   description: string;
-  type: "oneshot" | "streaming";
+  type: "oneshot" | "interactive" | "streaming";
   placeholder?: string;
-  icon: string;
-  communication: {
-    mode: "Ipc" | "Mock";
-    payload?: {
-      command: string;
-      args?: any;
-    };
-  };
   enabled: boolean;
   requiresRoot: boolean;
+}
+
+interface RegisteredToolMetadata {
+  name: string;
+  display_name?: string;
+  displayName?: string;
+  description?: string;
+  category?: "oneshot" | "interactive" | "streaming";
+  placeholder?: string;
+  enabled?: boolean;
+  requiresRoot?: boolean;
+  requires_root?: boolean;
 }
 
 interface PlaceholderItem {
@@ -68,169 +73,311 @@ interface PlaceholderItem {
 const pluginsList = ref<PluginItem[]>([]);
 const placeholdersList = ref<PlaceholderItem[]>([]);
 const toolConfigRecoveryNotified = ref(false);
+const catalogLoading = ref(false);
+const catalogError = ref("");
+const toolConfigStatus = ref<ToolConfigStatus | null>(null);
+const toolConfigStatusLoading = ref(false);
+const toolConfigStatusError = ref("");
+const expandedPluginId = ref<string | null>(null);
+const pluginLoading = ref<Record<string, boolean>>({});
+const pluginData = ref<Record<string, string>>({});
 
 interface ToolConfigStatus {
   state: "uninitialized" | "ready" | "recovered_disabled" | "persistence_error";
   message?: string | null;
 }
 
+interface AuthorizationMutationOwner {
+  id: number;
+  toolId: string;
+  viewGeneration: number;
+}
 
+let viewGeneration = 0;
+let scanGeneration = 0;
+let nextAuthorizationMutationId = 0;
+const authorizationMutationOwner = ref<AuthorizationMutationOwner | null>(null);
 
+const authorizationMutationPending = computed(
+  () => authorizationMutationOwner.value !== null,
+);
+const authorizationConfigReady = computed(
+  () =>
+    toolConfigStatus.value !== null &&
+    !toolConfigStatusLoading.value &&
+    toolConfigStatus.value.state !== "uninitialized" &&
+    !toolConfigStatusError.value,
+);
+const authorizationSwitchesDisabled = computed(
+  () =>
+    catalogLoading.value ||
+    Boolean(catalogError.value) ||
+    authorizationMutationPending.value ||
+    !authorizationConfigReady.value,
+);
 
-const toggleToolEnabled = async (plugin: PluginItem, event?: Event) => {
-  if (event) {
-    event.stopPropagation();
-  }
-  
-  const targetState = !plugin.enabled;
+const isCurrentView = (generation: number) =>
+  props.isOpen && generation === viewGeneration;
+const isCurrentScan = (view: number, scan: number) =>
+  isCurrentView(view) && scan === scanGeneration;
+const ownsAuthorizationMutation = (owner: AuthorizationMutationOwner) =>
+  authorizationMutationOwner.value?.id === owner.id;
 
-  // 敏感设备插件的 JNI 动态权限申请防护
-  if (targetState) {
-    let requiredAlias: string | null = null;
-    if (plugin.id === "MobileLocation") {
-      requiredAlias = "location";
-    } else if (plugin.id === "MobileNotification") {
-      requiredAlias = "notification";
+const normalizeToolCatalog = (raw: unknown): PluginItem[] => {
+  if (!Array.isArray(raw)) throw new Error("工具目录格式无效");
+
+  const tools = raw.map((value) => {
+    if (
+      !value ||
+      typeof value !== "object" ||
+      typeof (value as RegisteredToolMetadata).name !== "string" ||
+      !(value as RegisteredToolMetadata).name.trim()
+    ) {
+      throw new Error("工具目录包含无效条目");
     }
+    const tool = value as RegisteredToolMetadata;
+    const category = ["oneshot", "interactive", "streaming"].includes(
+      tool.category || "",
+    )
+      ? tool.category!
+      : "oneshot";
+    return {
+      id: tool.name,
+      name: tool.display_name || tool.displayName || tool.name,
+      englishName: tool.name,
+      description: tool.description || "",
+      type: category,
+      placeholder: tool.placeholder || undefined,
+      enabled: tool.enabled === true,
+      requiresRoot: tool.requiresRoot === true || tool.requires_root === true,
+    } satisfies PluginItem;
+  });
 
-    if (requiredAlias) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        // A. 检测权限状态
-        const perms: any = await invoke("plugin:vcp-mobile|check_all_permissions");
-        if (!perms || typeof perms !== "object") {
-          throw new Error("返回的权限状态格式错误");
-        }
-        if (perms[requiredAlias] === undefined) {
-          throw new Error(`权限对象中缺少 '${requiredAlias}' 字段。可用字段: ${Object.keys(perms).join(", ")}`);
-        }
-        const hasPermission = perms[requiredAlias];
+  return tools.sort((left, right) => left.id.localeCompare(right.id, "en"));
+};
 
-        if (!hasPermission) {
-          notificationStore.addNotification({
-            type: "info",
-            title: "权限请求",
-            message: `${plugin.name} 需要系统定位/通知权限，请在弹出的系统对话框中点击“允许”。`,
-            toastOnly: true
-          });
-          // B. 调用 JNI 申请权限
-          await invoke("plugin:vcp-mobile|request_android_permission", { pType: requiredAlias });
+const normalizeToolConfigStatus = (raw: unknown): ToolConfigStatus => {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("工具授权状态格式无效");
+  }
+  const candidate = raw as Partial<ToolConfigStatus>;
+  if (
+    !candidate.state ||
+    !["uninitialized", "ready", "recovered_disabled", "persistence_error"].includes(
+      candidate.state,
+    )
+  ) {
+    throw new Error("工具授权状态值无效");
+  }
+  return candidate as ToolConfigStatus;
+};
 
-          // C. 再次检查，核实用户是否同意
-          const permsRetry: any = await invoke("plugin:vcp-mobile|check_all_permissions");
-          if (!permsRetry || typeof permsRetry !== "object" || permsRetry[requiredAlias] === undefined) {
-            throw new Error("重新校验权限时返回的数据错误");
-          }
-          if (!permsRetry[requiredAlias]) {
-            notificationStore.addNotification({
-              type: "warning",
-              title: "未获得权限",
-              message: `由于未获得系统 ${requiredAlias} 权限，开启 ${plugin.name} 失败。`,
-              toastOnly: true
-            });
-            return; // 中断开启，开关继续保持为 false
-          }
-        }
-      } catch (err: any) {
-        console.error("[DistributedView] Failed to verify system permissions:", err);
-        notificationStore.addNotification({
-          type: "error",
-          title: "权限校验失败",
-          message: `错误: ${err.toString()}`,
-          toastOnly: true
-        });
-        return; // 出错时也中断开启，避免状态不一致
-      }
+const applyCatalog = (tools: PluginItem[]) => {
+  pluginsList.value = tools;
+  placeholdersList.value = tools
+    .filter((tool) => tool.placeholder)
+    .map((tool) => ({
+      macro: tool.placeholder!,
+      name: `${tool.name}占位宏`,
+      description: `解析并流式替换为 ${tool.name} 的最新物理遥测采样。`,
+      example: "(展开工具详情后，可按需读取实时数据样本)",
+    }));
+};
+
+const notifyRecoveredToolConfig = (status: ToolConfigStatus) => {
+  if (
+    toolConfigRecoveryNotified.value ||
+    (status.state !== "recovered_disabled" && status.state !== "persistence_error")
+  ) {
+    return;
+  }
+  toolConfigRecoveryNotified.value = true;
+  notificationStore.addNotification({
+    type: "warning",
+    title: "分布式工具已安全关闭",
+    message:
+      status.message ||
+      "工具配置不可用，已恢复为全部禁用。可在此页重新启用需要的能力。",
+    toastOnly: true,
+  });
+};
+
+const loadToolCatalog = async (view: number, scan: number) => {
+  try {
+    const rawCatalog = await invoke<unknown[]>("get_registered_tools_metadata");
+    if (!isCurrentScan(view, scan)) return;
+    try {
+      applyCatalog(normalizeToolCatalog(rawCatalog));
+    } catch (error) {
+      catalogError.value = "工具目录格式异常，请重新扫描。";
+      console.error("[DistributedView] Invalid tool catalog:", error);
     }
+  } catch (error) {
+    if (!isCurrentScan(view, scan)) return;
+    catalogError.value = "工具目录扫描失败，请重试。";
+    console.error(
+      "[DistributedView] Failed to load tool metadata from backend:",
+      error,
+    );
+  } finally {
+    if (isCurrentScan(view, scan)) catalogLoading.value = false;
   }
-  
-  plugin.enabled = targetState;
-  
-  if (!targetState && expandedPluginId.value === plugin.id) {
-    expandedPluginId.value = null;
-  }
+};
 
-  // 后端持久化的是显式授权 allowlist。新扫描工具不在列表中，因此默认关闭。
-  const currentEnabled = pluginsList.value
-    .filter(p => p.enabled)
-    .map(p => p.id);
+const loadToolConfigStatus = async (view: number, scan: number) => {
+  try {
+    const rawStatus = await invoke<ToolConfigStatus>(
+      "get_distributed_tool_config_status",
+    );
+    if (!isCurrentScan(view, scan)) return;
+    try {
+      const status = normalizeToolConfigStatus(rawStatus);
+      toolConfigStatus.value = status;
+      notifyRecoveredToolConfig(status);
+    } catch (error) {
+      toolConfigStatus.value = null;
+      toolConfigStatusError.value = "授权状态不可用；当前仅可浏览目录。";
+      console.error("[DistributedView] Invalid tool config status:", error);
+    }
+  } catch (error) {
+    if (!isCurrentScan(view, scan)) return;
+    toolConfigStatus.value = null;
+    toolConfigStatusError.value = "授权状态读取失败；当前仅可浏览目录。";
+    console.error(
+      "[DistributedView] Failed to load tool config status:",
+      error,
+    );
+  } finally {
+    if (isCurrentScan(view, scan)) toolConfigStatusLoading.value = false;
+  }
+};
+
+const loadPluginsMetadata = async (view = viewGeneration) => {
+  const scan = ++scanGeneration;
+  if (!isCurrentView(view)) return;
+  catalogLoading.value = true;
+  catalogError.value = "";
+  toolConfigStatus.value = null;
+  toolConfigStatusLoading.value = true;
+  toolConfigStatusError.value = "";
+
+  await Promise.allSettled([
+    loadToolCatalog(view, scan),
+    loadToolConfigStatus(view, scan),
+  ]);
+};
+
+const retryToolCatalog = () => {
+  if (!props.isOpen || authorizationMutationPending.value) return;
+  void loadPluginsMetadata(viewGeneration);
+};
+
+const ensureToolSystemPermission = async (plugin: PluginItem): Promise<boolean> => {
+  let requiredAlias: "location" | "notification" | null = null;
+  if (plugin.id === "MobileLocation") requiredAlias = "location";
+  else if (plugin.id === "MobileNotification") requiredAlias = "notification";
+  if (!requiredAlias) return true;
 
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("update_enabled_tools", { enabledNames: currentEnabled });
-  } catch (e) {
-    plugin.enabled = !targetState;
-    console.error("[DistributedView] Failed to sync enabled tool allowlist to backend:", e);
+    const permissions = await invoke<Record<string, boolean>>(
+      "plugin:vcp-mobile|check_all_permissions",
+    );
+    if (!permissions || permissions[requiredAlias] === undefined) {
+      throw new Error(`权限状态缺少 ${requiredAlias}`);
+    }
+    if (permissions[requiredAlias]) return true;
+
     notificationStore.addNotification({
-      type: "error",
-      title: "工具配置未保存",
-      message: String(e),
+      type: "info",
+      title: "权限请求",
+      message: `${plugin.name} 需要系统权限，请在系统对话框中确认。`,
       toastOnly: true,
     });
-  }
-  
-  await loadPluginsMetadata();
-};
-
-// Fetch dynamic plugin metadata from Rust backend
-const loadPluginsMetadata = async () => {
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const rawTools = await invoke<any[]>("get_registered_tools_metadata");
-    const configStatus = await invoke<ToolConfigStatus>("get_distributed_tool_config_status");
-
-    if (
-      !toolConfigRecoveryNotified.value
-      && (configStatus.state === "recovered_disabled" || configStatus.state === "persistence_error")
-    ) {
-      toolConfigRecoveryNotified.value = true;
+    await invoke("plugin:vcp-mobile|request_android_permission", {
+      pType: requiredAlias,
+    });
+    const verified = await invoke<Record<string, boolean>>(
+      "plugin:vcp-mobile|check_all_permissions",
+    );
+    if (!verified || verified[requiredAlias] !== true) {
       notificationStore.addNotification({
         type: "warning",
-        title: "分布式工具已安全关闭",
-        message: configStatus.message || "工具配置不可用，已恢复为全部禁用。可在此页重新启用需要的能力。",
+        title: "未获得权限",
+        message: `${plugin.name} 保持未授权。`,
         toastOnly: true,
       });
+      return false;
     }
-
-
-    
-    // Map backend registered tools to frontend list with visual decorator
-    pluginsList.value = rawTools.map(tool => {
-      return {
-        id: tool.name,
-        name: tool.display_name || tool.name,
-        englishName: tool.name,
-        description: tool.description || "",
-        type: tool.category || "oneshot",
-        placeholder: tool.placeholder || undefined,
-        icon: tool.icon || "i-ph:cube-bold",
-        communication: tool.communication,
-        enabled: tool.enabled === true,
-        requiresRoot: !!tool.requiresRoot
-      };
+    return true;
+  } catch (error) {
+    console.error("[DistributedView] Failed to verify system permissions:", error);
+    notificationStore.addNotification({
+      type: "error",
+      title: "权限校验失败",
+      message: `${plugin.name} 保持未授权，请重试。`,
+      toastOnly: true,
     });
-
-    // Derive placeholders list dynamically from streaming plugins
-    placeholdersList.value = rawTools
-      .filter(tool => tool.placeholder)
-      .map(tool => {
-        const macro = tool.placeholder;
-        return {
-          macro,
-          name: `${tool.display_name || tool.name}占位宏`,
-          description: `解析并流式替换为 ${tool.display_name || tool.name} 的最新物理遥测采样。`,
-          example: `(展开插件卡片以读取实时数据样本)`
-        };
-      });
-  } catch (e) {
-    console.error("[DistributedView] Failed to load tool metadata from backend:", e);
+    return false;
   }
 };
 
-// Expanded plugin details
-const expandedPluginId = ref<string | null>(null);
-const pluginLoading = ref<Record<string, boolean>>({});
-const pluginData = ref<Record<string, string>>({});
+const toggleToolEnabled = async (plugin: PluginItem) => {
+  if (authorizationSwitchesDisabled.value) return;
+
+  const owner: AuthorizationMutationOwner = {
+    id: ++nextAuthorizationMutationId,
+    toolId: plugin.id,
+    viewGeneration,
+  };
+  authorizationMutationOwner.value = owner;
+  const targetState = !plugin.enabled;
+  const enabledNames = new Set(
+    pluginsList.value.filter((tool) => tool.enabled).map((tool) => tool.id),
+  );
+  if (targetState) enabledNames.add(plugin.id);
+  else enabledNames.delete(plugin.id);
+
+  let mutationSucceeded = false;
+  try {
+    if (targetState && !(await ensureToolSystemPermission(plugin))) return;
+    if (!ownsAuthorizationMutation(owner) || !isCurrentView(owner.viewGeneration)) return;
+
+    await invoke("update_enabled_tools", {
+      enabledNames: [...enabledNames].sort((left, right) =>
+        left.localeCompare(right, "en"),
+      ),
+    });
+    mutationSucceeded = true;
+
+    if (isCurrentView(owner.viewGeneration)) {
+      pluginsList.value = pluginsList.value.map((tool) => ({
+        ...tool,
+        enabled: enabledNames.has(tool.id),
+      }));
+      if (!targetState) {
+        delete pluginData.value[plugin.id];
+        delete pluginFoldBlocks.value[plugin.id];
+        delete selectedFoldBlockIdx.value[plugin.id];
+      }
+    }
+  } catch (error) {
+    console.error(
+      "[DistributedView] Failed to sync enabled tool allowlist to backend:",
+      error,
+    );
+    notificationStore.addNotification({
+      type: "error",
+      title: "工具授权未保存",
+      message: `${plugin.name} 仍保持原状态，请重试。`,
+      toastOnly: true,
+    });
+  } finally {
+    if (ownsAuthorizationMutation(owner)) authorizationMutationOwner.value = null;
+    if (mutationSucceeded && props.isOpen) {
+      await loadPluginsMetadata(viewGeneration);
+    }
+  }
+};
 
 // Contextual folding block states (Scheme B)
 interface FoldBlock {
@@ -269,16 +416,15 @@ const selectTab = (pluginId: string, index: number) => {
 };
 
 // Loading settings from main settings store
-const loadSettings = async () => {
+const loadSettings = async (view = viewGeneration) => {
   try {
     await settingsStore.fetchSettings();
+    if (!isCurrentView(view)) return;
     if (settingsStore.settings) {
-      wsUrl.value = settingsStore.settings.distributedWsUrl || settingsStore.settings.vcpLogUrl || settingsStore.settings.vcpServerUrl || "";
-      vcpKey.value = settingsStore.settings.distributedVcpKey || settingsStore.settings.vcpLogKey || settingsStore.settings.vcpApiKey || "";
+      wsUrl.value = settingsStore.settings.distributedWsUrl || "";
+      vcpKey.value = settingsStore.settings.distributedVcpKey || "";
       deviceName.value = settingsStore.settings.distributedDeviceName ?? "VCPMobile";
     }
-    // Pull registered tools dynamically
-    await loadPluginsMetadata();
   } catch (e) {
     console.error("[DistributedView] Failed to load settings:", e);
   }
@@ -332,29 +478,30 @@ const copyPlaceholder = (macro: string) => {
   copyText(macro, "占位符宏已复制");
 };
 
-// Toggle plugin fold and load JNI sensor/battery data on-demand (Fully dynamic binding)
-const togglePlugin = async (plugin: PluginItem) => {
-  if (!plugin.enabled) {
-    notificationStore.addNotification({
-      type: "warning",
-      title: "插件已被禁用",
-      message: `${plugin.name} 当前处于关闭状态，无法读取其实时物理遥测。`,
-      toastOnly: true
-    });
-    return;
-  }
-
+const togglePluginDetails = (plugin: PluginItem) => {
   if (expandedPluginId.value === plugin.id) {
     expandedPluginId.value = null;
     return;
   }
-
   expandedPluginId.value = plugin.id;
+};
+
+// Reading a sample is intentionally separate from catalog browsing. Some OneShot tools have
+// external side effects, so expanding a row must never execute a tool.
+const readPluginSample = async (plugin: PluginItem) => {
+  if (
+    plugin.type !== "streaming" ||
+    !plugin.enabled ||
+    pluginLoading.value[plugin.id]
+  ) {
+    return;
+  }
+  const view = viewGeneration;
   pluginLoading.value[plugin.id] = true;
 
   try {
-    const { invoke } = await import("@tauri-apps/api/core");
     const res = await invoke<string>("execute_distributed_tool", { name: plugin.id });
+    if (!isCurrentView(view)) return;
     
     // 解析是否含有折叠块协议
     const blocks = parseFoldBlocks(res);
@@ -378,9 +525,11 @@ const togglePlugin = async (plugin: PluginItem) => {
     }
   } catch (e: any) {
     console.error(`[DistributedView] Failed to pull native sensor telemetry for ${plugin.id}:`, e);
-    pluginData.value[plugin.id] = `遥测读取异常:\n${e.toString()}\n(请检查移动端传感器硬件模块是否正常运行或对应的 JNI 权限是否已授予)`;
+    if (isCurrentView(view)) {
+      pluginData.value[plugin.id] = `遥测读取异常:\n${e.toString()}\n(请检查移动端传感器硬件模块是否正常运行或对应的 JNI 权限是否已授予)`;
+    }
   } finally {
-    pluginLoading.value[plugin.id] = false;
+    if (isCurrentView(view)) pluginLoading.value[plugin.id] = false;
   }
 };
 
@@ -455,34 +604,56 @@ const filteredPlaceholders = computed(() => {
   );
 });
 
-// Initialization
-onMounted(async () => {
-  if (props.isOpen) {
-    activate();
-    loadSettings();
+const openView = () => {
+  const generation = ++viewGeneration;
+  activate();
+  void loadSettings(generation);
+  void loadPluginsMetadata(generation);
+  expandedPluginId.value = null;
+  searchQuery.value = "";
+};
+
+const closeView = () => {
+  viewGeneration += 1;
+  scanGeneration += 1;
+  catalogLoading.value = false;
+  deactivate();
+  if (rootCheckTimer) {
+    clearTimeout(rootCheckTimer);
+    rootCheckTimer = null;
   }
+  pluginsList.value = [];
+  pluginLoading.value = {};
+  pluginData.value = {};
+  pluginFoldBlocks.value = {};
+  placeholdersList.value = [];
+  toolConfigStatus.value = null;
+  toolConfigStatusLoading.value = false;
+  catalogError.value = "";
+  toolConfigStatusError.value = "";
+};
+
+// Initialization
+onMounted(() => {
+  if (props.isOpen) openView();
 });
 
 watch(
   () => props.isOpen,
-  async (val: boolean) => {
+  (val: boolean) => {
     if (val) {
-      activate();
-      loadSettings();
-      expandedPluginId.value = null;
-      searchQuery.value = "";
+      openView();
     } else {
-      deactivate();
-      // 取消未完成的 root 检测定时器
-      if (rootCheckTimer) { clearTimeout(rootCheckTimer); rootCheckTimer = null; }
-      // 释放内存与清理大对象
-      pluginsList.value = [];
-      pluginData.value = {};
-      pluginFoldBlocks.value = {};
-      placeholdersList.value = [];
+      closeView();
     }
   }
 );
+
+onBeforeUnmount(() => {
+  viewGeneration += 1;
+  scanGeneration += 1;
+  if (rootCheckTimer) clearTimeout(rootCheckTimer);
+});
 </script>
 
 <template>
@@ -515,6 +686,7 @@ watch(
           基础连接
         </button>
         <button
+          data-distributed-tab="plugins"
           @click="activeTab = 'plugins'"
           class="flex-1 py-1.5 text-xs font-bold rounded-lg transition-all tracking-wider text-center"
           :class="activeTab === 'plugins' ? 'bg-black/5 dark:bg-white/5 text-[var(--highlight-text)] border border-[var(--highlight-text)]/20' : 'opacity-60 text-primary-text hover:opacity-80'"
@@ -685,7 +857,7 @@ watch(
               </span>
             </div>
             <div class="flex justify-between items-center text-xs">
-              <span class="opacity-50">已注册分布式工具</span>
+              <span class="opacity-50">本次已发布工具</span>
               <span class="font-mono font-bold">{{ status.registered_tools }} / {{ pluginsList.length }}</span>
             </div>
           </div>
@@ -708,41 +880,90 @@ watch(
 
         <!-- 2. Plugins List view -->
         <div v-if="activeTab === 'plugins'" class="flex flex-col h-full">
-          <!-- Search box -->
-          <div class="px-4 py-3 shrink-0 border-b border-black/5 dark:border-white/5">
+          <div class="px-4 py-2.5 shrink-0 border-b border-black/5 dark:border-white/5 space-y-2">
+            <div class="flex items-start justify-between gap-3">
+              <p class="text-[9px] leading-relaxed opacity-55">
+                扫描结果不等于授权；新工具默认关闭，逐项开启后才会注册到分布式节点。
+              </p>
+              <button
+                type="button"
+                data-tool-catalog-retry
+                class="shrink-0 rounded-md border border-black/10 px-2 py-1 text-[9px] font-bold disabled:opacity-35 dark:border-white/10"
+                :disabled="catalogLoading || authorizationMutationPending"
+                @click="retryToolCatalog"
+              >
+                {{ catalogLoading ? '扫描中' : '重新扫描' }}
+              </button>
+            </div>
             <div class="relative">
               <input
                 v-model="searchQuery"
                 type="text"
-                placeholder="搜索分布式插件 (例如 CPU, 定位...)"
-                class="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-xl px-3.5 py-2.5 text-xs text-primary-text placeholder-opacity-40 focus:outline-none focus:border-[var(--highlight-text)]/50 font-sans"
+                placeholder="搜索工具名称或能力"
+                class="w-full bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 rounded-lg px-3 py-2 text-xs text-primary-text placeholder-opacity-40 focus:outline-none focus:border-[var(--highlight-text)]/50 font-sans"
               />
-              <span 
-                v-if="searchQuery" 
-                @click="searchQuery = ''" 
-                class="absolute right-3.5 top-1/2 -translate-y-1/2 opacity-40 text-[10px] uppercase font-bold tracking-wider active:scale-90 p-1 cursor-pointer select-none"
+              <button
+                v-if="searchQuery"
+                type="button"
+                aria-label="清除工具搜索"
+                @click="searchQuery = ''"
+                class="absolute right-3 top-1/2 -translate-y-1/2 opacity-45 text-[9px] uppercase font-bold tracking-wider p-1"
               >
                 Clear
-              </span>
+              </button>
             </div>
           </div>
 
+          <div
+            v-if="catalogError"
+            data-tool-catalog-error
+            role="alert"
+            class="mx-4 mt-2 border-l-2 border-red-500 pl-2 text-[10px] text-red-500"
+          >
+            {{ catalogError }}
+          </div>
+          <div
+            v-if="toolConfigStatusLoading || toolConfigStatusError || toolConfigStatus?.state === 'uninitialized' || toolConfigStatus?.state === 'recovered_disabled' || toolConfigStatus?.state === 'persistence_error'"
+            data-tool-config-status
+            :role="toolConfigStatusLoading ? 'status' : 'alert'"
+            class="mx-4 mt-2 border-l-2 border-amber-500 pl-2 text-[9px] leading-relaxed opacity-75"
+          >
+            {{ toolConfigStatusLoading ? '正在读取授权策略；目录可独立浏览。' : toolConfigStatusError || (toolConfigStatus?.state === 'uninitialized'
+              ? '授权策略仍在加载；当前仅可浏览目录。'
+              : '授权策略已安全恢复为全关，请逐项重新确认。') }}
+          </div>
+
           <!-- Plugins items list -->
-          <div class="flex-1 overflow-y-auto px-4 py-4 space-y-3 no-rubber-band">
+          <div class="flex-1 overflow-y-auto px-4 py-2 space-y-1 no-rubber-band">
+            <p
+              v-if="catalogLoading && pluginsList.length === 0"
+              role="status"
+              class="py-8 text-center text-[10px] font-mono opacity-45"
+            >
+              SCANNING LOCAL CATALOG…
+            </p>
+            <p
+              v-else-if="!catalogError && filteredPlugins.length === 0"
+              class="py-8 text-center text-[10px] opacity-45"
+            >
+              {{ searchQuery ? '没有匹配的工具' : '本机未扫描到分布式工具' }}
+            </p>
             <div
               v-for="plugin in filteredPlugins"
               :key="plugin.id"
-              class="border border-black/5 dark:border-white/5 rounded-2xl overflow-hidden transition-all duration-300"
-              :class="[
-                expandedPluginId === plugin.id ? 'bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 shadow-sm' : 'bg-black/2 dark:bg-white/2 hover:border-black/10 dark:hover:border-white/10',
-                !plugin.enabled ? 'opacity-55' : ''
-              ]"
+              :data-tool-row="plugin.id"
+              class="border-l-2 border-y border-r border-y-black/5 border-r-black/5 dark:border-y-white/5 dark:border-r-white/5 rounded-lg overflow-hidden"
+              :class="plugin.enabled ? 'border-l-blue-500 bg-blue-500/4' : 'border-l-transparent bg-black/2 dark:bg-white/2'"
             >
-              <div
-                @click="togglePlugin(plugin)"
-                class="p-4 flex items-center justify-between cursor-pointer select-none active:bg-black/5 dark:active:bg-white/5"
-              >
-                <div class="flex items-center gap-2.5">
+              <div class="p-2.5 flex items-center justify-between gap-2 select-none">
+                <button
+                  type="button"
+                  :data-tool-details="plugin.id"
+                  :aria-expanded="expandedPluginId === plugin.id"
+                  :aria-controls="`distributed-tool-details-${plugin.id}`"
+                  class="flex min-w-0 flex-1 items-center gap-2.5 text-left active:opacity-60"
+                  @click="togglePluginDetails(plugin)"
+                >
                   <div class="w-5 h-5 shrink-0 flex items-center justify-center text-primary-text opacity-70">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                       <template v-if="plugin.id.includes('CPU')">
@@ -802,26 +1023,36 @@ watch(
                       </template>
                     </svg>
                   </div>
-                  <div class="flex flex-col">
+                  <div class="flex min-w-0 flex-1 flex-col">
                     <div class="flex items-baseline gap-1.5 flex-wrap">
                       <span class="text-xs font-bold shrink-0">{{ plugin.name }}</span>
                       <span class="text-[8px] font-mono opacity-40 uppercase tracking-wider shrink-0">{{ plugin.englishName }}</span>
                     </div>
                     <span class="text-[10px] opacity-50 mt-0.5 line-clamp-1 pr-4">{{ plugin.description }}</span>
                   </div>
-                </div>
-                <div class="flex items-center gap-2">
-                  <!-- Premium Toggle Switch -->
-                  <div 
-                    @click.stop="toggleToolEnabled(plugin, $event)"
-                    class="w-8 h-4.5 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center shrink-0"
-                    :class="plugin.enabled ? 'bg-[var(--highlight-text)]/40 border border-[var(--highlight-text)]/30' : 'bg-black/15 dark:bg-white/15 border border-black/5 dark:border-white/5'"
+                </button>
+                <div class="flex shrink-0 items-center gap-1.5">
+                  <span class="hidden text-[8px] font-mono opacity-45 min-[390px]:inline">
+                    {{ plugin.enabled ? '已授权' : '未授权' }}
+                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    :data-tool-switch="plugin.id"
+                    :aria-label="`${plugin.name} 分布式授权`"
+                    :aria-checked="plugin.enabled"
+                    :aria-busy="authorizationMutationOwner?.toolId === plugin.id"
+                    :disabled="authorizationSwitchesDisabled"
+                    class="w-9 h-5 rounded-full p-0.5 transition-colors duration-200 flex items-center shrink-0 disabled:cursor-not-allowed disabled:opacity-35"
+                    :class="plugin.enabled ? 'bg-blue-500/55 border border-blue-500/30' : 'bg-black/15 dark:bg-white/15 border border-black/5 dark:border-white/5'"
+                    @click.stop="toggleToolEnabled(plugin)"
                   >
-                    <div 
-                      class="w-3.5 h-3.5 rounded-full bg-white dark:bg-black shadow-sm transition-transform duration-300"
-                      :class="plugin.enabled ? 'translate-x-3.5' : 'translate-x-0'"
-                    ></div>
-                  </div>
+                    <span
+                      aria-hidden="true"
+                      class="w-4 h-4 rounded-full bg-white dark:bg-black transition-transform duration-200"
+                      :class="plugin.enabled ? 'translate-x-4' : 'translate-x-0'"
+                    />
+                  </button>
 
                   <span
                     class="text-[7px] font-mono uppercase px-1.5 py-0.5 rounded border border-black/10 dark:border-white/10"
@@ -830,6 +1061,7 @@ watch(
                     {{ plugin.type }}
                   </span>
                   <svg
+                    aria-hidden="true"
                     class="transition-transform duration-300 opacity-30"
                     :class="expandedPluginId === plugin.id ? 'rotate-180' : ''"
                     width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
@@ -840,21 +1072,34 @@ watch(
               </div>
 
               <!-- Collapsible Content -->
-              <div v-if="expandedPluginId === plugin.id" class="border-t border-black/5 dark:border-white/5 p-4 bg-black/10 dark:bg-white/10 space-y-3">
+              <div
+                v-if="expandedPluginId === plugin.id"
+                :id="`distributed-tool-details-${plugin.id}`"
+                class="border-t border-black/5 dark:border-white/5 p-3 bg-black/5 dark:bg-white/5 space-y-3"
+              >
                 <!-- Plugin Description Area -->
                 <div class="text-[10px] opacity-70 leading-relaxed text-primary-text border-b border-black/5 dark:border-white/5 pb-2.5">
                   <span class="font-bold opacity-50 text-[8px] uppercase tracking-wider block mb-1">功能描述 / Description</span>
                   {{ plugin.description }}
                 </div>
 
-                <div class="flex justify-between items-center text-[9px] uppercase font-bold opacity-40 tracking-wider">
-                  <span>实时遥测数据 / Realtime Telemetry</span>
+                <div class="flex justify-between items-center gap-3 text-[9px] uppercase font-bold tracking-wider">
+                  <span class="opacity-45">
+                    {{ plugin.type === 'streaming' ? '流式快照 / Stream Snapshot' : '调用边界 / Invocation Boundary' }}
+                  </span>
                   <button
-                    @click.stop="togglePlugin(plugin)"
-                    class="px-2 py-0.5 bg-black/10 dark:bg-white/10 rounded-md hover:bg-black/20 flex items-center gap-1 active:scale-95 transition-all text-[8px]"
+                    v-if="plugin.type === 'streaming'"
+                    type="button"
+                    :data-tool-read="plugin.id"
+                    :disabled="!plugin.enabled || pluginLoading[plugin.id] || authorizationMutationPending"
+                    @click.stop="readPluginSample(plugin)"
+                    class="px-2 py-1 bg-black/8 dark:bg-white/8 rounded-md flex items-center gap-1 transition-opacity text-[8px] disabled:opacity-35 disabled:cursor-not-allowed"
                   >
-                    刷新读取
+                    {{ pluginLoading[plugin.id] ? '读取中…' : (plugin.enabled ? '读取样本' : '授权后可读取') }}
                   </button>
+                  <span v-else class="normal-case text-right text-[9px] font-normal opacity-55">
+                    需由 VCP 请求明确调用
+                  </span>
                 </div>
 
                 <!-- Root status unchecked banner for system telemetries -->
@@ -924,7 +1169,7 @@ watch(
                   </div>
 
                   <div class="rounded-xl bg-black/3 dark:bg-black/40 border border-black/5 dark:border-white/5 p-3.5">
-                    <pre class="text-[10px] font-mono text-primary-text/90 whitespace-pre-wrap leading-relaxed break-all">{{ pluginData[plugin.id] || '无物理遥测数据' }}</pre>
+                    <pre class="text-[10px] font-mono text-primary-text/90 whitespace-pre-wrap leading-relaxed break-all">{{ pluginData[plugin.id] || (plugin.type === 'streaming' ? (plugin.enabled ? '尚未读取样本' : '授权后可读取样本') : '本地详情页不会执行此工具') }}</pre>
                   </div>
                 </div>
 

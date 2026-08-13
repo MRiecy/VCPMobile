@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::manifest::VCP_MOBILE_CLI_TOOL_NAME;
 use super::result::VcpCliErrorCode;
@@ -303,6 +304,20 @@ impl VcpMetaCapabilities {
         archery_parallel: true,
         archery_no_reply: true,
     };
+
+    /// Distributed VCP owns ink/archery continuation policy before dispatching the concrete
+    /// tool call. Mobile still validates those canonical values, while remote river/vref inputs
+    /// remain fail-closed until a bounded materialization contract exists.
+    pub(crate) const VCP_PLUGIN_DISTRIBUTED: Self = Self {
+        mark_history: true,
+        river_text: false,
+        river_last: false,
+        river_full: false,
+        river_semantic: false,
+        vref: false,
+        archery_parallel: true,
+        archery_no_reply: true,
+    };
 }
 
 impl VcpMetaFields {
@@ -494,6 +509,109 @@ pub fn validate_vcp_mobile_cli_request(
 
     debug_assert_eq!(action.name(), action_name);
     Ok(ValidatedVcpCliRequest { action, meta })
+}
+
+/// Convert Distributed `toolArgs` into the canonical raw-field representation and run the same
+/// validator used by Human Tool markers. This deliberately does not deserialize `VcpCliAction`
+/// directly: doing so would discard unknown/meta fields before the capability gate sees them.
+pub(crate) fn validate_distributed_vcp_cli_args(
+    args: &Value,
+) -> Result<ValidatedVcpCliRequest, VcpCliProtocolError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| VcpCliProtocolError::invalid("toolArgs", "expected a JSON object"))?;
+
+    for unsupported in ["vref_files", "river_context"] {
+        if object.contains_key(unsupported) {
+            return Err(VcpCliProtocolError::unsupported(
+                unsupported,
+                "remote context/file materialization is not available on VCPMobile",
+            ));
+        }
+    }
+
+    let mut fields = Vec::with_capacity(object.len().saturating_add(1));
+    if !object.contains_key("tool_name") {
+        fields.push(RawVcpField {
+            key: "tool_name".to_string(),
+            value: VCP_MOBILE_CLI_TOOL_NAME.to_string(),
+        });
+    }
+    for (key, value) in object {
+        fields.push(RawVcpField {
+            key: key.clone(),
+            value: distributed_scalar_field(key, value)?,
+        });
+    }
+
+    let validated = validate_vcp_mobile_cli_request(&RawVcpToolRequest { fields })?;
+    validated.require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)?;
+    Ok(validated)
+}
+
+/// P3 does not consume VCPToolBox host paths or recall projections. Keeping this separate from
+/// `toolArgs` validation makes the trust boundary explicit after the client strips `_vcpContext`.
+pub(crate) fn validate_distributed_vcp_context(
+    context: Option<&Value>,
+) -> Result<(), VcpCliProtocolError> {
+    if let Some(context) = context {
+        reject_remote_materialization(context)?;
+    }
+    Ok(())
+}
+
+fn reject_remote_materialization(value: &Value) -> Result<(), VcpCliProtocolError> {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let normalized_key = key.to_ascii_lowercase();
+                if matches!(
+                    normalized_key.as_str(),
+                    "vref"
+                        | "vref_files"
+                        | "vreffiles"
+                        | "river"
+                        | "river_context"
+                        | "rivercontext"
+                ) {
+                    return Err(VcpCliProtocolError::unsupported(
+                        key,
+                        "remote context/file materialization is not available on VCPMobile",
+                    ));
+                }
+                reject_remote_materialization(value)?;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                reject_remote_materialization(value)?;
+            }
+        }
+        Value::String(value) if value.to_ascii_lowercase().contains("file://") => {
+            return Err(VcpCliProtocolError::unsupported(
+                "_vcpContext",
+                "remote file:// references are not reachable from VCPMobile",
+            ));
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+    Ok(())
+}
+
+fn distributed_scalar_field(key: &str, value: &Value) -> Result<String, VcpCliProtocolError> {
+    match value {
+        Value::String(value) => Ok(value.clone()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::Null => Err(VcpCliProtocolError::invalid(
+            key,
+            "null is not allowed; omit an optional field instead",
+        )),
+        Value::Array(_) | Value::Object(_) => Err(VcpCliProtocolError::invalid(
+            key,
+            "expected a scalar string, boolean, or number",
+        )),
+    }
 }
 
 fn strip_reasoning_blocks(content: &str) -> String {
@@ -1153,6 +1271,92 @@ mod tests {
         assert!(encoded.get("vref").is_none());
         assert!(encoded.get("archery").is_none());
         assert_eq!(validated.meta.river, Some(VcpRiverMode::Last(5)));
+    }
+
+    #[test]
+    fn distributed_json_args_reuse_canonical_action_and_meta_validation() {
+        let validated = validate_distributed_vcp_cli_args(&serde_json::json!({
+            "action": "run",
+            "command": "printf ok",
+            "timeout_ms": 1200,
+            "run_in_background": true,
+            "ink": "mark_history",
+            "archery": "no_reply"
+        }))
+        .expect("valid Distributed args");
+
+        assert_eq!(validated.meta.ink, Some(VcpInkMode::MarkHistory));
+        assert_eq!(validated.meta.archery, Some(VcpArcheryMode::NoReply));
+        assert_eq!(
+            validated.action,
+            VcpCliAction::Run {
+                command: "printf ok".to_string(),
+                description: None,
+                cwd: Some(DEFAULT_CWD.to_string()),
+                timeout_ms: Some(1200),
+                run_in_background: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn distributed_remote_recall_and_file_context_fail_closed() {
+        for (field, args) in [
+            ("vref", serde_json::json!({"command": "true", "vref": 1})),
+            (
+                "vref_files",
+                serde_json::json!({"command": "true", "vref_files": ["file:///tmp/secret"]}),
+            ),
+            (
+                "river_context",
+                serde_json::json!({"command": "true", "river_context": {"content": "x"}}),
+            ),
+            (
+                "river",
+                serde_json::json!({"command": "true", "river": "text"}),
+            ),
+        ] {
+            let error = validate_distributed_vcp_cli_args(&args)
+                .expect_err("remote recall context must remain unsupported in P3");
+            assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
+            assert_eq!(error.field.as_deref(), Some(field));
+        }
+
+        let error = validate_distributed_vcp_context(Some(&serde_json::json!({
+            "vref_files": ["file:///host/private"]
+        })))
+        .expect_err("trusted remote context is not materialized by P3");
+        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
+        assert_eq!(error.field.as_deref(), Some("vref_files"));
+
+        let error = validate_distributed_vcp_context(Some(&serde_json::json!({
+            "agent": {"attachments": [{"source": "FILE:///host/private"}]}
+        })))
+        .expect_err("recursive file URL must remain unreachable");
+        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
+        assert_eq!(error.field.as_deref(), Some("_vcpContext"));
+
+        validate_distributed_vcp_context(Some(&serde_json::json!({
+            "agentId": "agent-1",
+            "topicId": "topic-1",
+            "request": {"traceId": "trace-1"}
+        })))
+        .expect("ordinary trusted transport context is accepted but not projected");
+    }
+
+    #[test]
+    fn distributed_unknown_or_non_scalar_fields_are_not_silently_dropped() {
+        for args in [
+            serde_json::json!({"command": "true", "unknown_meta": "x"}),
+            serde_json::json!({"command": ["true"]}),
+            serde_json::json!({"command": "true", "description": null}),
+            serde_json::json!({"tool_name": "OtherCLI", "command": "true"}),
+            serde_json::json!({"command": "true", "_vcpContext": {"agentId": "spoof"}}),
+        ] {
+            let error = validate_distributed_vcp_cli_args(&args)
+                .expect_err("invalid Distributed input must fail closed");
+            assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
+        }
     }
 
     fn exactly_one_request(input: &str, name: &str) -> RawVcpToolRequest {

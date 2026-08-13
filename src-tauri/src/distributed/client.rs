@@ -1,9 +1,9 @@
 // distributed/client.rs
 // WebSocket client for VCP Distributed Node
-// Mirrors VCPChat/VCPDistributedServer/VCPDistributedServer.js (class DistributedServer)
-// Self-contained — does NOT import anything from vcp_modules/.
+// Mirrors VCPChat/VCPDistributedServer/VCPDistributedServer.js (class DistributedServer).
+// This transport stays generic: domain-specific execution is delegated through ToolRegistry.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinSet;
@@ -19,17 +20,19 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
-use super::tool_registry::ToolRegistry;
+use super::tool_registry::{ToolExecutionContext, ToolRegistry};
 use super::types::*;
 
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OUTBOUND_CAPACITY: usize = 64;
 const MAX_INCOMING_MESSAGE_BYTES: usize = 512 * 1024;
 const MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+const MAX_VCP_CONTEXT_BYTES: usize = 128 * 1024;
 const MAX_TOOL_REQUEST_ID_BYTES: usize = 128;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_IN_FLIGHT_TOOL_REQUESTS: usize = 8;
 const REMEMBERED_TOOL_REQUEST_IDS: usize = 1024;
+const VCP_MOBILE_CLI_TOOL_NAME: &str = "VCPMobileCLI";
 
 fn inbound_websocket_config() -> WebSocketConfig {
     WebSocketConfig::default()
@@ -96,7 +99,7 @@ impl SessionTaskTracker {
 }
 
 struct ToolRequestGateState {
-    seen: HashSet<String>,
+    seen: HashMap<String, String>,
     order: VecDeque<String>,
 }
 
@@ -114,7 +117,7 @@ impl ToolRequestGate {
         Self {
             permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TOOL_REQUESTS)),
             state: Mutex::new(ToolRequestGateState {
-                seen: HashSet::new(),
+                seen: HashMap::new(),
                 order: VecDeque::new(),
             }),
         }
@@ -125,6 +128,7 @@ impl ToolRequestGate {
         request_id: &str,
         tool_name: &str,
         tool_args: &Value,
+        vcp_context: Option<&Value>,
     ) -> Result<ToolRequestPermit, String> {
         if request_id.is_empty() || request_id.len() > MAX_TOOL_REQUEST_ID_BYTES {
             return Err("requestId is empty or exceeds 128 bytes".to_string());
@@ -137,10 +141,16 @@ impl ToolRequestGate {
         if encoded_args.len() > MAX_TOOL_ARGUMENT_BYTES {
             return Err("toolArgs exceeds 256KB budget".to_string());
         }
+        let request_digest = tool_request_digest(tool_name, &encoded_args, vcp_context)?;
 
         let mut state = self.state.lock().await;
-        if state.seen.contains(request_id) {
-            return Err("duplicate requestId rejected".to_string());
+        if let Some(existing_digest) = state.seen.get(request_id) {
+            if existing_digest != &request_digest {
+                return Err("requestId replay payload/context conflict".to_string());
+            }
+            if tool_name != VCP_MOBILE_CLI_TOOL_NAME {
+                return Err("duplicate requestId rejected".to_string());
+            }
         }
         let permit = self
             .permits
@@ -148,15 +158,104 @@ impl ToolRequestGate {
             .try_acquire_owned()
             .map_err(|_| "too many in-flight tool requests".to_string())?;
 
-        while state.order.len() >= REMEMBERED_TOOL_REQUEST_IDS {
-            if let Some(expired) = state.order.pop_front() {
-                state.seen.remove(&expired);
+        if !state.seen.contains_key(request_id) {
+            while state.order.len() >= REMEMBERED_TOOL_REQUEST_IDS {
+                if let Some(expired) = state.order.pop_front() {
+                    state.seen.remove(&expired);
+                }
             }
+            state.seen.insert(request_id.to_string(), request_digest);
+            state.order.push_back(request_id.to_string());
         }
-        state.seen.insert(request_id.to_string());
-        state.order.push_back(request_id.to_string());
         Ok(ToolRequestPermit { _permit: permit })
     }
+}
+
+fn tool_request_digest(
+    tool_name: &str,
+    encoded_args: &[u8],
+    vcp_context: Option<&Value>,
+) -> Result<String, String> {
+    let encoded_context = vcp_context
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|error| format!("_vcpContext serialization failed: {error}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update((tool_name.len() as u64).to_be_bytes());
+    hasher.update(tool_name.as_bytes());
+    hasher.update((encoded_args.len() as u64).to_be_bytes());
+    hasher.update(encoded_args);
+    if let Some(context) = encoded_context {
+        hasher.update([1]);
+        hasher.update((context.len() as u64).to_be_bytes());
+        hasher.update(context);
+    } else {
+        hasher.update([0]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn validate_vcp_context(vcp_context: Option<&Value>) -> Result<(), String> {
+    if let Some(context) = vcp_context {
+        let encoded = serde_json::to_vec(context)
+            .map_err(|error| format!("_vcpContext serialization failed: {error}"))?;
+        if encoded.len() > MAX_VCP_CONTEXT_BYTES {
+            return Err("_vcpContext exceeds 128KB budget".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn current_tool_execution_context(
+    status: &DistributedStatus,
+    expected_epoch: u64,
+    request_id: &str,
+    remote_identity: &str,
+    vcp_context: Option<Value>,
+) -> Result<ToolExecutionContext, String> {
+    if status.session_id != expected_epoch
+        || status.state != ConnectionState::Connected
+        || !status.connected
+    {
+        return Err(
+            "remote_disconnected: tool request does not belong to the current online epoch"
+                .to_string(),
+        );
+    }
+    let server_id = status
+        .server_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "remote_disconnected: current connection has no server identity".to_string()
+        })?;
+    let client_id = status
+        .client_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "remote_disconnected: current connection has no client identity".to_string()
+        })?;
+    Ok(ToolExecutionContext {
+        request_id: request_id.to_string(),
+        remote_identity: remote_identity.to_string(),
+        connection_epoch: expected_epoch,
+        server_id: server_id.to_string(),
+        client_id: client_id.to_string(),
+        vcp_context,
+    })
+}
+
+fn spawn_durable_tool_execution<F>(future: F) -> oneshot::Receiver<OutgoingMessage>
+where
+    F: Future<Output = OutgoingMessage> + Send + 'static,
+{
+    let (result_tx, result_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = future.await;
+        let _ = result_tx.send(result);
+    });
+    result_rx
 }
 
 struct WakeLockLease {
@@ -188,11 +287,42 @@ where
     future.await
 }
 
+fn normalize_remote_ws_url(raw_url: &str) -> Result<String, String> {
+    let mut url = url::Url::parse(raw_url.trim())
+        .map_err(|error| format!("invalid distributed WebSocket URL: {error}"))?;
+    if !matches!(url.scheme(), "ws" | "wss") {
+        return Err("distributed URL must use ws:// or wss://".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("distributed URL must not contain userinfo".to_string());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("distributed URL must not contain query or fragment".to_string());
+    }
+    let normalized_path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&normalized_path);
+    Ok(url.as_str().trim_end_matches('/').to_string())
+}
+
+fn stable_remote_identity(ws_url: &str, device_name: &str) -> Result<String, String> {
+    let normalized_url = normalize_remote_ws_url(ws_url)?;
+    let normalized_device = device_name.trim();
+    if normalized_device.is_empty() {
+        return Err("distributed device name must not be empty".to_string());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(normalized_url.as_bytes());
+    hasher.update([0]);
+    hasher.update(normalized_device.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// Immutable configuration for a single connection lifecycle.
 struct ConnectionConfig {
     ws_url: String,
     vcp_key: String,
     device_name: String,
+    remote_identity: String,
 }
 
 /// Runtime context for a single connection lifecycle (channel receivers).
@@ -251,6 +381,7 @@ impl DistributedClient {
         registry: Arc<ToolRegistry>,
     ) -> Result<(), String> {
         let _lifecycle_guard = self.lifecycle.lock().await;
+        let remote_identity = stable_remote_identity(&ws_url, &device_name)?;
 
         // Prevent duplicate activation using ConnectionState.
         let next_session_id = {
@@ -300,6 +431,7 @@ impl DistributedClient {
             ws_url,
             vcp_key,
             device_name,
+            remote_identity,
         };
         let ctx = SessionContext {
             status,
@@ -470,6 +602,7 @@ impl DistributedClient {
                         &app,
                         ws_stream,
                         &config.device_name,
+                        &config.remote_identity,
                         &cancel_token,
                         &status,
                         &registry,
@@ -564,6 +697,7 @@ impl DistributedClient {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
         device_name: &str,
+        remote_identity: &str,
         cancel_token: &CancellationToken,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
@@ -639,6 +773,7 @@ impl DistributedClient {
                                 app,
                                 &text,
                                 device_name,
+                                remote_identity,
                                 &ws_tx,
                                 status,
                                 registry,
@@ -675,7 +810,15 @@ impl DistributedClient {
                 opt = re_register_rx.recv() => {
                     if opt.is_some() {
                         log::info!("[Distributed] Re-registering tools due to configuration change.");
-                        Self::register_tools(device_name, &ws_tx, registry, status, session_id).await;
+                        Self::register_tools(
+                            app,
+                            device_name,
+                            &ws_tx,
+                            registry,
+                            status,
+                            session_id,
+                        )
+                        .await;
                         Self::emit_status_with_app(app, status).await;
                     }
                 }
@@ -725,6 +868,7 @@ impl DistributedClient {
         app: &AppHandle,
         text: &str,
         device_name: &str,
+        remote_identity: &str,
         ws_tx: &WsSender,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
@@ -777,7 +921,7 @@ impl DistributedClient {
                 Self::emit_status_with_app(app, status).await;
 
                 // Register tools — mirrors registerTools()
-                Self::register_tools(device_name, ws_tx, registry, status, session_id).await;
+                Self::register_tools(app, device_name, ws_tx, registry, status, session_id).await;
                 Self::emit_status_with_app(app, status).await;
 
                 // Report IP — mirrors reportIPAddress()
@@ -798,26 +942,42 @@ impl DistributedClient {
                 request_id,
                 tool_name,
                 tool_args,
+                vcp_context,
             } => {
+                if let Err(error) = validate_vcp_context(vcp_context.as_ref()) {
+                    Self::send_tool_rejection(ws_tx, &request_id, error).await;
+                    return;
+                }
+                let execution_context = {
+                    let current = status.read().await;
+                    match current_tool_execution_context(
+                        &current,
+                        session_id,
+                        &request_id,
+                        remote_identity,
+                        vcp_context,
+                    ) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            drop(current);
+                            Self::send_tool_rejection(ws_tx, &request_id, error).await;
+                            return;
+                        }
+                    }
+                };
                 let request_permit = match child_tracker
                     .tool_requests
-                    .try_claim(&request_id, &tool_name, &tool_args)
+                    .try_claim(
+                        &request_id,
+                        &tool_name,
+                        &tool_args,
+                        execution_context.vcp_context.as_ref(),
+                    )
                     .await
                 {
                     Ok(permit) => permit,
                     Err(error) => {
-                        let response = OutgoingMessage::ToolResult {
-                            request_id: request_id.chars().take(128).collect(),
-                            status: "error".to_string(),
-                            result: None,
-                            error: Some(error),
-                        };
-                        if let Err(send_error) = Self::send_message(ws_tx, &response).await {
-                            log::warn!(
-                                "[Distributed] Failed to reject tool request: {}",
-                                send_error
-                            );
-                        }
+                        Self::send_tool_rejection(ws_tx, &request_id, error).await;
                         return;
                     }
                 };
@@ -835,6 +995,42 @@ impl DistributedClient {
                 let request_id_clone = request_id.clone();
                 let tool_name_clone = tool_name.clone();
 
+                if tool_name == VCP_MOBILE_CLI_TOOL_NAME {
+                    let result_rx = spawn_durable_tool_execution(async move {
+                        let _request_permit = request_permit;
+                        let tag = format!(
+                            "distributed:tool:{}:{}",
+                            request_id_clone,
+                            uuid::Uuid::new_v4()
+                        );
+                        let _lease = WakeLockLease::acquire(&app_clone, tag);
+                        Self::execute_tool(
+                            &app_clone,
+                            &request_id_clone,
+                            &tool_name_clone,
+                            tool_args,
+                            &registry_clone,
+                            Some(execution_context),
+                        )
+                        .await
+                    });
+                    child_tracker
+                        .spawn(async move {
+                            if let Ok(response) = result_rx.await {
+                                if let Err(error) =
+                                    Self::send_message(&ws_tx_clone, &response).await
+                                {
+                                    log::warn!(
+                                        "[Distributed] Failed to return durable tool result: {}",
+                                        error
+                                    );
+                                }
+                            }
+                        })
+                        .await;
+                    return;
+                }
+
                 child_tracker
                     .spawn(async move {
                         let _request_permit = request_permit;
@@ -850,6 +1046,7 @@ impl DistributedClient {
                             &tool_name_clone,
                             tool_args,
                             &registry_clone,
+                            Some(execution_context),
                         )
                         .await;
                         if let Err(error) = Self::send_message(&ws_tx_clone, &response).await {
@@ -872,13 +1069,24 @@ impl DistributedClient {
     /// Register tools with the main server.
     /// VCPChat ref: registerTools() line 271-308
     async fn register_tools(
+        app: &AppHandle,
         device_name: &str,
         ws_tx: &WsSender,
         registry: &Arc<ToolRegistry>,
         status: &Arc<RwLock<DistributedStatus>>,
         session_id: u64,
     ) {
-        let tools = registry.get_all_manifests();
+        let tools = registry.get_registration_manifests(app).await;
+        Self::publish_tool_registration(device_name, tools, ws_tx, status, session_id).await;
+    }
+
+    async fn publish_tool_registration(
+        device_name: &str,
+        tools: Vec<Box<serde_json::value::RawValue>>,
+        ws_tx: &WsSender,
+        status: &Arc<RwLock<DistributedStatus>>,
+        session_id: u64,
+    ) {
         let count = tools.len();
         let msg = OutgoingMessage::RegisterTools {
             server_name: device_name.to_string(),
@@ -889,7 +1097,8 @@ impl DistributedClient {
             return;
         }
 
-        // Update status with tool count
+        // This count means the current local WebSocket writer accepted the frame. The protocol
+        // has no server-side register acknowledgement, so it must not be presented as such.
         {
             let mut s = status.write().await;
             if s.session_id == session_id {
@@ -900,7 +1109,10 @@ impl DistributedClient {
         if count == 0 {
             log::info!("[Distributed] Published an empty tool manifest set.");
         } else {
-            log::info!("[Distributed] Registered {} tools with main server.", count);
+            log::info!(
+                "[Distributed] Published {} tool manifests to the current WebSocket writer.",
+                count
+            );
         }
     }
 
@@ -986,14 +1198,33 @@ impl DistributedClient {
 
     /// Execute a tool and return the result message.
     /// VCPChat ref: handleToolExecutionRequest() line 428-649
+    async fn send_tool_rejection(ws_tx: &WsSender, request_id: &str, error: String) {
+        let response = OutgoingMessage::ToolResult {
+            request_id: request_id.chars().take(MAX_TOOL_REQUEST_ID_BYTES).collect(),
+            status: "error".to_string(),
+            result: None,
+            error: Some(error),
+        };
+        if let Err(send_error) = Self::send_message(ws_tx, &response).await {
+            log::warn!(
+                "[Distributed] Failed to reject tool request: {}",
+                send_error
+            );
+        }
+    }
+
     async fn execute_tool(
         app: &AppHandle,
         request_id: &str,
         tool_name: &str,
         tool_args: Value,
         registry: &Arc<ToolRegistry>,
+        context: Option<ToolExecutionContext>,
     ) -> OutgoingMessage {
-        match registry.execute(tool_name, tool_args, app).await {
+        match registry
+            .execute_with_context(tool_name, tool_args, app, context)
+            .await
+        {
             Ok(result) => {
                 log::info!("[Distributed] Tool '{}' executed successfully.", tool_name);
                 OutgoingMessage::ToolResult {
@@ -1192,6 +1423,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_shutdown_drops_waiter_but_not_durable_cli_execution() {
+        let tracker = Arc::new(SessionTaskTracker::new(CancellationToken::new()));
+        let (release_tx, release_rx) = oneshot::channel();
+        let (completed_tx, completed_rx) = oneshot::channel();
+        let result_rx = spawn_durable_tool_execution(async move {
+            let _ = release_rx.await;
+            let _ = completed_tx.send(());
+            OutgoingMessage::ToolResult {
+                request_id: "request-1".to_string(),
+                status: "success".to_string(),
+                result: Some(Value::Null),
+                error: None,
+            }
+        });
+        tracker
+            .spawn(async move {
+                let _ = result_rx.await;
+            })
+            .await;
+
+        time::timeout(Duration::from_secs(1), tracker.close_and_wait())
+            .await
+            .expect("session waiter shutdown should be bounded");
+        release_tx
+            .send(())
+            .expect("detached execution should still own its receiver");
+        time::timeout(Duration::from_secs(1), completed_rx)
+            .await
+            .expect("durable execution should outlive session waiter")
+            .expect("durable execution completion signal");
+    }
+
+    #[tokio::test]
     async fn scoped_guard_is_released_when_connect_await_finishes() {
         let (dropped_tx, dropped_rx) = oneshot::channel();
 
@@ -1257,7 +1521,6 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_empty_registration_withdraws_tools_and_keeps_count_zero() {
-        let registry = Arc::new(super::super::tools::build_registry());
         let status = Arc::new(RwLock::new(DistributedStatus {
             registered_tools: 4,
             session_id: 9,
@@ -1276,7 +1539,8 @@ mod tests {
                 value
             });
 
-            DistributedClient::register_tools("mobile", &ws_tx, &registry, &status, 9).await;
+            DistributedClient::publish_tool_registration("mobile", vec![], &ws_tx, &status, 9)
+                .await;
             let value = receiver.await.unwrap();
             assert_eq!(value["data"]["tools"], serde_json::json!([]));
             assert_eq!(status.read().await.registered_tools, 0);
@@ -1301,6 +1565,50 @@ mod tests {
         DistributedClient::clear_registered_tools_for_session(&mut status, 7);
 
         assert_eq!(status.registered_tools, 0);
+    }
+
+    #[test]
+    fn remote_identity_normalizes_endpoint_and_excludes_connection_epoch() {
+        let first =
+            stable_remote_identity("WS://Example.COM:80/vcp/", " Mobile ").expect("first identity");
+        let second =
+            stable_remote_identity("ws://example.com/vcp", "Mobile").expect("second identity");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(normalize_remote_ws_url("https://example.com").is_err());
+        assert!(normalize_remote_ws_url("ws://example.com/path?node=other").is_err());
+    }
+
+    #[test]
+    fn execution_context_requires_current_acknowledged_epoch() {
+        let status = DistributedStatus {
+            state: ConnectionState::Connected,
+            connected: true,
+            server_id: Some("server-1".to_string()),
+            client_id: Some("client-1".to_string()),
+            session_id: 7,
+            ..DistributedStatus::default()
+        };
+        let context = current_tool_execution_context(
+            &status,
+            7,
+            "request-1",
+            "remote-fingerprint",
+            Some(serde_json::json!({"river": "text"})),
+        )
+        .expect("current epoch context");
+        assert_eq!(context.connection_epoch, 7);
+        assert_eq!(context.server_id, "server-1");
+        assert_eq!(context.client_id, "client-1");
+        assert_eq!(context.remote_identity, "remote-fingerprint");
+        assert!(current_tool_execution_context(
+            &status,
+            6,
+            "request-1",
+            "remote-fingerprint",
+            None,
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -1332,11 +1640,21 @@ mod tests {
     async fn tool_request_gate_rejects_duplicates_oversized_args_and_fanout() {
         let gate = ToolRequestGate::new();
         let first = gate
-            .try_claim("request-1", "test_tool", &serde_json::json!({"value": 1}))
+            .try_claim(
+                "request-1",
+                "test_tool",
+                &serde_json::json!({"value": 1}),
+                None,
+            )
             .await
             .expect("first request should be accepted");
         assert!(gate
-            .try_claim("request-1", "test_tool", &serde_json::json!({"value": 2}))
+            .try_claim(
+                "request-1",
+                "test_tool",
+                &serde_json::json!({"value": 2}),
+                None,
+            )
             .await
             .is_err());
 
@@ -1345,7 +1663,8 @@ mod tests {
             .try_claim(
                 "oversized",
                 "test_tool",
-                &serde_json::json!({"value": oversized})
+                &serde_json::json!({"value": oversized}),
+                None,
             )
             .await
             .is_err());
@@ -1354,6 +1673,7 @@ mod tests {
                 "bad-tool-name",
                 &"x".repeat(MAX_TOOL_NAME_BYTES + 1),
                 &serde_json::json!({}),
+                None,
             )
             .await
             .is_err());
@@ -1365,20 +1685,102 @@ mod tests {
                     &format!("request-{index}"),
                     "test_tool",
                     &serde_json::json!({"value": index}),
+                    None,
                 )
                 .await
                 .expect("request within in-flight budget should be accepted"),
             );
         }
         assert!(gate
-            .try_claim("request-overflow", "test_tool", &serde_json::json!({}))
+            .try_claim(
+                "request-overflow",
+                "test_tool",
+                &serde_json::json!({}),
+                None,
+            )
             .await
             .is_err());
 
         drop(permits);
         assert!(gate
-            .try_claim("request-after-release", "test_tool", &serde_json::json!({}))
+            .try_claim(
+                "request-after-release",
+                "test_tool",
+                &serde_json::json!({}),
+                None,
+            )
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn cli_exact_replay_is_admitted_but_changed_args_or_context_conflicts() {
+        let gate = ToolRequestGate::new();
+        let args = serde_json::json!({"action": "list"});
+        let context = serde_json::json!({"river": "text"});
+        let first = gate
+            .try_claim("request-1", VCP_MOBILE_CLI_TOOL_NAME, &args, Some(&context))
+            .await
+            .expect("first CLI request");
+        let replay = gate
+            .try_claim("request-1", VCP_MOBILE_CLI_TOOL_NAME, &args, Some(&context))
+            .await
+            .expect("exact CLI replay reaches Runtime idempotency");
+        assert!(gate
+            .try_claim(
+                "request-1",
+                VCP_MOBILE_CLI_TOOL_NAME,
+                &serde_json::json!({"action": "run", "command": "true"}),
+                Some(&context),
+            )
+            .await
+            .err()
+            .expect("changed arguments must conflict")
+            .contains("conflict"));
+        assert!(gate
+            .try_claim(
+                "request-1",
+                VCP_MOBILE_CLI_TOOL_NAME,
+                &args,
+                Some(&serde_json::json!({"river": "last:5"})),
+            )
+            .await
+            .err()
+            .expect("changed context must conflict")
+            .contains("conflict"));
+        drop((first, replay));
+
+        let ordinary = ToolRequestGate::new();
+        let _first = ordinary
+            .try_claim("ordinary", "MobileClipboard", &args, None)
+            .await
+            .expect("first ordinary request");
+        assert_eq!(
+            ordinary
+                .try_claim("ordinary", "MobileClipboard", &args, None)
+                .await
+                .err()
+                .expect("ordinary duplicate must be rejected"),
+            "duplicate requestId rejected"
+        );
+    }
+
+    #[test]
+    fn top_level_vcp_context_has_a_strict_budget() {
+        assert!(validate_vcp_context(Some(&serde_json::json!({
+            "river": "text"
+        })))
+        .is_ok());
+        let exact_limit = Value::String("x".repeat(MAX_VCP_CONTEXT_BYTES - 2));
+        assert_eq!(
+            serde_json::to_vec(&exact_limit).unwrap().len(),
+            MAX_VCP_CONTEXT_BYTES
+        );
+        assert!(validate_vcp_context(Some(&exact_limit)).is_ok());
+        let oversized = Value::String("x".repeat(MAX_VCP_CONTEXT_BYTES));
+        assert_eq!(
+            validate_vcp_context(Some(&oversized)),
+            Err("_vcpContext exceeds 128KB budget".to_string())
+        );
     }
 }

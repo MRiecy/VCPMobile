@@ -1,7 +1,7 @@
 // distributed/mod.rs
-// Self-contained distributed node module.
-// Does NOT depend on any vcp_modules/ code.
-// To remove: delete this directory + 3 references in lib.rs → cargo check passes.
+// Distributed transport, catalog and authorization owner.
+// Generic device tools remain self-contained; the VCPMobileCLI entry is an explicit thin adapter
+// to the canonical protocol/runtime in vcp_modules::cli and must not duplicate that state.
 
 pub mod client;
 pub mod telemetry_center;
@@ -49,17 +49,20 @@ pub async fn get_distributed_status(
 /// Get the complete scanned tool catalog for frontend display.
 #[tauri::command]
 pub async fn get_registered_tools_metadata(
+    app: tauri::AppHandle,
     state: State<'_, DistributedState>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    state.registry.ensure_enabled_config_loaded(&app).await;
     Ok(state.registry.get_tools_metadata())
 }
 
 /// Expose authorization load, migration and persistence status.
 #[tauri::command]
 pub async fn get_distributed_tool_config_status(
+    app: tauri::AppHandle,
     state: State<'_, DistributedState>,
 ) -> Result<tool_registry::ToolConfigStatus, String> {
-    Ok(state.registry.config_status())
+    Ok(state.registry.ensure_enabled_config_loaded(&app).await)
 }
 
 /// Persist the explicit enabled-tool allowlist and re-register if connected.
@@ -69,6 +72,7 @@ pub async fn update_enabled_tools(
     state: State<'_, DistributedState>,
     enabled_names: Vec<String>,
 ) -> Result<(), String> {
+    state.registry.ensure_enabled_config_loaded(&app).await;
     let changed = state
         .registry
         .persist_and_update_enabled(&app, enabled_names)
