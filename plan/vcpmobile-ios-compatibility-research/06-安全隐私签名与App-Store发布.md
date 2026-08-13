@@ -1,55 +1,51 @@
-# 06. 安全、隐私、签名与 App Store 发布
+# 06. 安全、隐私、未签名产物与未来 App Store 边界
 
 ## 1. 总体判断
 
-iOS 适配不是“编出一个 IPA”就结束。VCPMobile 当前没有 Apple 工程、用途说明、entitlements、PrivacyInfo、签名身份、App Store Connect 记录或 iOS Release workflow。产品能力、隐私声明、签名产物与实际代码必须一致，否则 Simulator 绿色也不能进入 TestFlight。
+iOS 当前定位是**实验性可选兼容**，不是正式 Apple 分发产品。项目只在 GitHub Actions 的 macOS runner 编译可供用户后续自签名的未签名 iPhone/iPad 产物，并把它作为 Android GitHub Release 的非阻塞附属资产；项目不提供官方签名、TestFlight/App Store、自动更新、用户证书托管或第三方续签工具支持。
 
-## 2. App Review 硬边界
+未签名不等于无安全边界：Info.plist、后台声明、Tauri capability、PrivacyInfo、数据保护和产物清单仍必须与实际代码一致。它也不等于可直接安装；用户必须使用自己的 Apple 身份、设备注册和 provisioning profile 重签，安装资格和续签周期由其选择的工具与 Apple 账号决定。
 
-与本项目最相关的 Apple 规则：
+## 2. iOS 平台硬边界
+
+即使不走 App Store，下列操作系统与安全边界仍成立：
 
 - 使用公开 API，遵守平台沙箱；
-- App 应自包含，不下载、安装或执行改变 App 功能的代码；
-- background mode 只能用于声明的用途；
+- App sandbox 与公开 API 不因 sideload 消失；
+- background capability 只能用于声明的真实用途，系统仍可拒绝或终止；
 - 权限、数据收集与用户说明必须真实；
-- 审核人员必须能够访问核心功能和必要后端。
-
-依据：[Apple App Review Guidelines](https://developer.apple.com/app-store/review/guidelines/)。
+- 签名后的 entitlements 必须由实际 provisioning profile 允许，不能靠修改 plist 获得。
 
 直接结论：
 
 - `download_update/install_update` 的 APK 自安装链在 iOS 必须禁用；
-- 不从 GitHub 下载并安装 IPA；
+- 应用内不从 GitHub 下载、重签或安装 IPA；GitHub Release 只公开用户手工自签输入产物；
 - 不使用私有 API 实现 Root、其他 App 通知读取或进程常驻；
 - 不滥用 audio/location/remote notification background mode 保 SSE；
-- Android mock/fake success 不能进入 iOS 审核包。
+- Android mock/fake success 不能进入 iOS artifact。
+
+App Store Review 只在未来另行决定正式 iOS 产品时恢复为发布门禁；当前文档不准备审核账号、商店截图或 App Store Connect 流程。
 
 ## 3. Bundle ID、版本与最低系统
 
-当前 identifier 是 `com.vcp.avatar`。施工前必须确认：
+当前 identifier 是 `com.vcp.avatar`。实验产物构建时必须确认：
 
-1. Apple Developer Team 是否能注册该 Bundle ID；
-2. App Store Connect 是否已有同名/同 ID 记录；
-3. Share Extension 是否使用独立 ID，例如 `com.vcp.avatar.share`；
-4. marketing version 与 `CFBundleVersion` 如何单调递增；
-5. 最低 iOS/iPadOS 版本如何显式固定。
+1. CI 使用的候选 Bundle ID 与 artifact manifest 一致；用户重签工具可能改写 Bundle ID，项目不得把原 ID 当作安装后事实；
+2. marketing version 与 `CFBundleVersion` 能从 Android Release/tag 和 commit SHA 追溯；
+3. 最低 iOS/iPadOS 编译版本显式固定；
+4. continued-processing 以 `if #available(iOS 26.0, *)` 分层，更早受支持系统始终 `foreground_required`；
+5. 不生成 Share Extension/Catalyst/macOS target。
 
-当前锁定的 Tauri CLI schema 给 iOS `minimumSystemVersion` 默认值 14.0，但项目不应依赖隐式默认。最低版本必须根据用户分布、WebKit、Swift API 和测试设备明确写入配置。默认值不是产品决策，也不是兼容证据。
+当前锁定的 Tauri CLI schema 给 iOS `minimumSystemVersion` 默认值 14.0，但项目不应依赖隐式默认。最低版本由当期 Tauri/Xcode/WebKit 编译尖峰冻结；没有必要为了 continued processing 把整个应用最低版本直接抬到 26，availability guard 可保留更早系统的前台模式。默认值不是兼容证据。
 
 ## 4. Info.plist 用途说明
 
-只添加实际使用且能解释的权限。候选清单：
+只添加首个 artifact 实际使用且能解释的权限：
 
 | Key | 何时需要 | 本项目用途 |
 |---|---|---|
-| `NSCameraUsageDescription` | 相机输入 | 拍摄聊天附件 |
-| `NSMicrophoneUsageDescription` | 录音/STT | 语音附件与转写 |
-| `NSPhotoLibraryAddUsageDescription` | 写入照片库 | 保存生成或聊天图片 |
-| `NSPhotoLibraryUsageDescription` | 直接读取照片库时 | 仅在实际采用 PhotoKit 读取路径时添加 |
-| `NSLocationWhenInUseUsageDescription` | location tool | 用户启用且仅前台 |
-| `NSMotionUsageDescription` | Motion/步态/气压等 | 用户启用设备传感器工具 |
-| `NSSpeechRecognitionUsageDescription` | 使用原生 Speech framework 时 | 仅在采用原生识别时添加 |
 | `NSLocalNetworkUsageDescription` | LAN HTTP/WS | 连接用户配置的本地 VCP 服务 |
+| `BGTaskSchedulerPermittedIdentifiers` | iOS 26 continued processing | 只列实际注册、符合当期 Xcode 要求的 wildcard task identifier |
 
 要求：
 
@@ -57,7 +53,7 @@ iOS 适配不是“编出一个 IPA”就结束。VCPMobile 当前没有 Apple �
 - 权限按功能触发，不在首次启动一次索取全部；
 - denied/restricted/notDetermined 分开表达；
 - Local Network 由真实访问触发，不伪造预查询；
-- 未进入产品范围的传感器不要提前声明。
+- 未进入产品范围的相机、麦克风、照片库写入、通知、定位、Motion 和 Speech 不提前声明；PHPicker 用户选择不等于申请整个照片库读取权限。
 
 ## 5. Capabilities、Info.plist 后台模式与运行时 API
 
@@ -67,31 +63,28 @@ iOS 适配不是“编出一个 IPA”就结束。VCPMobile 当前没有 Apple �
 
 | 能力 | 典型签名事实 | 进入时机 |
 |---|---|---|
-| App Groups | host 与 Share Extension 都声明同一 group value | incoming share 获批后 |
-| Push Notifications | profile/签名中包含与环境匹配的 `aps-environment` | APNs slice 获批后 |
-| Associated Domains | target entitlement 与服务端 association 文件匹配 | universal link 正式采用后 |
-| Multicast Networking | 受 Apple 管理的 multicast entitlement | 产品证明必须依赖 multicast 后再申请；当前不默认申请 |
+| Continued-processing GPU entitlement | 当前不启用 | SSE 只需网络/CPU，不请求后台 GPU；不得无故扩大 entitlement |
+| App Groups / Push / Associated Domains / Multicast | 当前不启用 | Share Extension、APNs、universal link 与 multicast 均不在首期范围 |
 
 ### 5.2 Info.plist 声明
 
-`UIBackgroundModes` 是 Info.plist 声明，不是独立 entitlement。`fetch`、`remote-notification`、`processing` 等值只有在代码确有相应公开 API 和真实业务用途时才添加；它们不授予常驻执行权，也不保证 silent push 必达。采用 `BGTaskScheduler` 时，还要维护实际提交 task identifier 对应的 plist allowlist。
+`UIBackgroundModes` 是 Info.plist 声明，不是独立 entitlement。首期只允许为 iOS 26 continued processing 声明当期 Xcode/BackgroundTasks 文档要求的 `processing`，并在 `BGTaskSchedulerPermittedIdentifiers` 配置以最终 Bundle ID 为前缀的静态或 wildcard identifier；不添加 `audio`、`location`、`fetch` 或 `remote-notification`。声明不授予常驻执行权。
 
 ### 5.3 运行时后台机制
 
 - `beginBackgroundTask`：只申请有限收尾时间，必须有 expiration handler 和 exact-once end receipt；
+- `BGContinuedProcessingTask`（iOS/iPadOS 26+）：用户主动发起生成的尽力续跑，必须有真实 `Progress`、取消和 expiration；系统拒绝、最终 Bundle ID 与 task identifier 不匹配或配置不可用时回退前台；
 - `BGTaskScheduler`：由系统决定调度时机，适合可延迟维护，不适合持续 SSE；
 - background `URLSession`：由系统接管符合条件的文件传输和 delegate 恢复，不是 entitlement，也不是任意 Rust socket 的后台许可；
-- APNs：通知/提示结果可用，但 delivery 和执行预算都不能作为业务必达承诺。
+- APNs：当前不实现。
 
-每个 Extension 有独立 target、Bundle ID、App ID 和 provisioning profile。host 与 Extension 必须属于同一 Team，并在需要共享时声明同一个 App Group value；这不意味着二者复用同一 profile。
-
-不要预先开启一堆“将来可能用”的 capability 或 background mode；这会扩大攻击面、审核解释和签名漂移。
+不要预先开启一堆“将来可能用”的 capability 或 background mode；这会扩大攻击面、重签失败面和配置漂移。用户自签若改写 Bundle ID，必须同步满足最终 task identifier/prefix 配置；应用以实际 `register/submit` 结果决定 `continued_task_accepted` 或 `foreground_required`，不能因 plist 中存在声明就返回已启用。
 
 ## 6. Local Network 与 ATS
 
 当前 Android Release 可在显式 `VCP_TRUSTED_LAN_MODE=enabled` 时允许受信 LAN 明文流量。iOS 需要重新定义，而不是把 Android manifest 配置翻译成全局 ATS 关闭。
 
-先按实际传输 owner 拆开：WKWebView/Apple URL Loading System 路径会受到 ATS 配置影响；Rust `reqwest` + `rustls` 路径不应未经验证就假定同一 plist 例外一定生效。Local Network 隐私提示也必须按 WebView、Rust socket、Bonjour/Extension 等真实发起路径分别在真机验证。
+先按实际传输 owner 拆开：WKWebView/Apple URL Loading System 路径会受到 ATS 配置影响；Rust `reqwest` + `rustls` 路径不应未经验证就假定同一 plist 例外一定生效。Local Network 隐私提示应按 WebView 与 Rust socket 的真实发起路径分别记录；项目无真机，相关设备事实保持社区未验证。
 
 建议顺序：
 
@@ -100,15 +93,15 @@ iOS 适配不是“编出一个 IPA”就结束。VCPMobile 当前没有 Apple �
 3. 如必须支持 HTTP/WS，先判断请求究竟由 WebView/Apple URL Loading 还是 Rust 网络栈发出，再使用可证明有效的最窄配置；
 4. UI 标记“受信局域网明文连接”，不允许任意 internet cleartext；
 5. 记录 endpoint scheme/host，但日志不记录 API key；
-6. 真机验证 allowed/denied、IP、`.local`、IPv6-only、VPN/热点；
+6. Simulator 先验证基础错误映射；allowed/denied、IP、`.local`、IPv6-only、VPN/热点保持社区真机未验证；
 7. 动态用户输入的 LAN endpoint 另由应用层 allowlist、scheme/host 校验和显式 trusted-LAN 开关约束，不能假定 ATS domain exception 能表达任意 IP/CIDR；
-8. App Review notes 解释业务场景、用户控制和安全边界。
+8. artifact 说明解释业务场景、用户控制和安全边界。
 
 依据：[TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy) 与 [ATS](https://developer.apple.com/documentation/security/preventing-insecure-network-connections)。
 
 ## 7. PrivacyInfo.xcprivacy 与 Required Reason API
 
-仓库当前没有 `PrivacyInfo.xcprivacy`。Apple 要求 App 和相关 SDK 按规则声明隐私清单与 required-reason API，参见 [Privacy Manifest Files](https://developer.apple.com/documentation/bundleresources/privacy-manifest-files)。
+仓库当前没有 `PrivacyInfo.xcprivacy`。Apple 对正式分发的 App 和相关 SDK 有隐私清单与 required-reason API 规则；虽然当前不提交商店，项目仍应让最终 bundle 的清单与实际调用一致，避免实验分支形成另一套隐私事实。参见 [Privacy Manifest Files](https://developer.apple.com/documentation/bundleresources/privacy-manifest-files)。
 
 不能现在凭 Rust/JS 依赖名编造清单。正确流程：
 
@@ -117,8 +110,8 @@ iOS 适配不是“编出一个 IPA”就结束。VCPMobile 当前没有 Apple �
 3. 从最终 binary/static analysis 与 Apple 报告识别 required-reason APIs；
 4. 为每项选择与真实用途一致的 reason；
 5. 检查第三方 SDK 是否自带有效 privacy manifest；
-6. CI 验证最终 archive 内 manifest 存在且内容不漂移；
-7. App Privacy 营养标签与代码/隐私政策一致。
+6. CI 验证最终 `.app` 内 manifest 存在且内容不漂移；
+7. artifact 隐私说明与代码/隐私政策一致。
 
 应建立数据账本：聊天正文、附件、日记、API key、设备遥测、诊断日志、push token、分享文件、位置/运动数据分别说明是否采集、是否离设备、保存多久、如何删除。
 
@@ -141,117 +134,68 @@ iOS 适配不是“编出一个 IPA”就结束。VCPMobile 当前没有 Apple �
 
 建议：
 
-- 按平台拆 capability；iOS 不授权 Root/helper/autostart/listener/wake lock；
+- 按平台拆 capability；iOS 不授权 Root/helper/autostart/listener；旧 wake-lock facade 只有映射为真实 continued/foreground logical lease 时才可最小授权；
 - 每条高风险命令使用最小参数 scope；
 - Tauri capability 只约束 host 中的 Tauri window/WebView command 可达面；额外 WebView 各自最小权限；
-- 原生 Share Extension 不运行主 App 的 Tauri capability，它受自己的 extension sandbox、entitlements、App Group 与系统 extension API 约束；
+- 首期不生成 Share Extension target，Tauri capability 只覆盖主 App WebView；
 - 继续保护高保真 raw HTML，但收窄 executable danger、跨 frame messaging 和 Tauri invoke 可达性；
 - 复核 `iframe.srcdoc`、sandbox、postMessage origin/source、asset protocol 路径；
 - 在能保持 LAN/富 HTML 功能的前提下设计 CSP，而不是简单关闭 raw HTML；
 - 权限 schema 必须以最终 iOS generated tree 验证。
 
-## 10. 签名资产
+## 10. 未签名与用户自签责任边界
 
-Tauri 官方要求 Apple Developer enrollment、已注册 Bundle ID、签名证书与关联的 provisioning profile。参见 [Tauri iOS Code Signing](https://v2.tauri.app/distribute/sign/ios/)。
+项目 CI 不注入 Apple certificate、provisioning profile、App Store Connect API key 或 APNs key，也不创建临时 keychain。macOS job 以当期 Tauri/Xcode 可验证的 code-sign-disabled 方式构建 device `.app` 和 Simulator artifact；具体命令必须在 Phase 1 尖峰后冻结，不能把“编译了 Rust staticlib”冒充完整 `.app`。
 
-### 自动签名 CI
+公开产物不是可直接安装的软件：
 
-- `APPLE_API_ISSUER`
-- `APPLE_API_KEY`
-- `APPLE_API_KEY_PATH`
+- 用户必须使用自己的 Apple ID/Developer Team、设备注册与 provisioning profile 重签；
+- 免费 Personal Team 的设备/App ID 有数量限制，provisioning profile 通常 7 天到期，用户需要自行重新签名/安装。参见 [Apple membership comparison](https://developer.apple.com/support/compare-memberships/)；
+- AltStore、Sideloadly、TrollStore、企业证书或其他第三方工具均不由项目推荐、集成、测试或支持；它们的合法性、安全性、可用系统版本和撤销风险由用户自行判断；
+- 重签可能改写 Bundle ID、application identifier、Info.plist 或 entitlement。运行时 capability 必须以最终已安装环境与 task register/submit 结果为准；continued processing 不可用时自动回退前台常亮；
+- 用户不得向 Issue/日志上传 Apple ID 密码、证书私钥、完整 provisioning profile 或第三方签名凭证。
 
-### 手动签名
+Apple code signing 的官方入口见 [Tauri iOS Code Signing](https://v2.tauri.app/distribute/sign/ios/)。本文只用它解释为什么 unsigned artifact 仍需后续签名，不把签名步骤纳入项目交付。
 
-- `IOS_CERTIFICATE`
-- `IOS_CERTIFICATE_PASSWORD`
-- `IOS_MOBILE_PROVISION`
+## 11. GitHub Release 附属产物
 
-上述 Tauri 变量只能作为当前 host target 的已知入口。若加入 Share Extension，自动签名必须逐 target 解析正确 identity/profile；手动签名则需要按各 Bundle ID 提供 profile 映射或冻结的 Xcode export 配置，不能把一个 `IOS_MOBILE_PROVISION` 复制给两个 App ID。
-
-### 上传认证
-
-Tauri 当前签名文档中的 `APPLE_API_KEY` 表示自动签名所用的 App Store Connect Key ID；当前 App Store 上传示例则使用 `APPLE_API_KEY_ID`，并要求私钥按上传工具约定放置。CI 设计时必须把“构建/签名认证”和“上传认证”分别按实际 CLI 版本冻结并做 secret presence check，不能仅凭相似变量名复用。共同字段是 `APPLE_API_ISSUER`，私钥文件均不得进入仓库。
-
-APNs provider 认证是第四类独立资产：可能使用 APNs signing key 或 provider certificate，并有自己的 Key ID/Team/environment 与轮换 owner。不得因为文件扩展名同为 `.p8` 就把 APNs provider key、App Store Connect API key 和代码签名资产视为同一个 secret。
-
-签名治理要求：
-
-- secrets 只进入受保护 macOS Release environment；
-- PR/Simulator job 不持有 distribution secrets；
-- profile 的 App ID、Team、entitlements 与 archive 实际值一致；
-- Share Extension 使用独立 profile；
-- CI 结束后安全清理 temporary keychain/profile/private key；
-- 输出验证包括 `codesign`、embedded provisioning、architectures、Info.plist、entitlements、PrivacyInfo；
-- 不在日志中打印 secret、certificate 私钥或完整 profile。
-
-## 11. Release 产物与渠道
-
-当前 [release.yml](../../.github/workflows/release.yml) 只构建并公开上传 arm64 APK。iOS 应使用独立 macOS workflow：
+当前 [release.yml](../../.github/workflows/release.yml) 的 Android 签名 APK 仍是唯一正式产物。iOS 使用独立 macOS job，并复用同一个 `release published` 事件向该 GitHub Release 追加实验资产：
 
 ```text
-protected commit/tag candidate
-  -> require same-commit iOS CI
-  -> restore signing identity/profile/upload API key
-  -> pnpm tauri ios build --export-method app-store-connect
-  -> verify archive/IPA identity and entitlements
-  -> upload App Store Connect
-  -> record uploaded -> processed -> internal beta -> external beta states
-  -> App Review approved / release
-  -> optionally publish matching GitHub Release notes
-  -> cleanup signing material in every path
+GitHub Release published
+  ├─ Android job：既有正式门禁、签名 APK、失败则 Release 工作流失败
+  └─ iOS experimental job：macOS + fixed Xcode
+       -> Apple device compile/link with code signing disabled
+       -> iPhone/iPad Simulator smoke
+       -> package unsigned self-sign input
+       -> generate SHA-256 + manifest + limitations
+       -> attach assets to the existing GitHub Release
+       -> failure is visible but MUST NOT block or delete Android assets
 ```
 
-Tauri 官方 build 路径参见 [App Store Distribution](https://v2.tauri.app/distribute/app-store/)。
+建议产物：
 
-建议：
+- `VCPMobile-iOS-experimental-unsigned.app.zip`；只有当工具链确实生成且结构校验通过时，才可额外提供明确命名的 `*.unsigned.ipa`；
+- 对每个资产提供 `.sha256`；
+- `ios-artifact-manifest.json` 记录 tag、commit SHA、Tauri/Rust/Node/Xcode/runtime 版本、target architectures、Bundle ID、minimum system、iOS 26 availability、requested capabilities、实际 `codesign` 检查结果、测试层级与 `distributionSigned=false`；
+- `IOS-EXPERIMENTAL-LIMITATIONS.md` 明示“不可直接安装、需自行签名、可能 7 天续签、无项目真机/性能保证、无自动更新、后台仅尽力”；
+- Simulator artifact 可作为 CI 调试资产，不包装为设备安装包。
 
-- IPA 不作为公开 GitHub Release 资产；
-- GitHub Release 可保留 release notes，但 iOS CTA 指向 App Store/TestFlight；
-- Android 和 iOS 可以同一 marketing version，但 build number/versionCode 分别治理；
-- 不把当前“GitHub Release published”触发的 Android workflow 原样套给首次 iOS 上传，否则会形成“先发布 tag/release，才知道能否上传”的错误闭环；iOS workflow 的 tag/commit policy 必须单独冻结；
-- Git tag、GitHub Release 与 App Store 发布是三个对象，必须记录映射，但不要求在 Apple 处理完成前公开 GitHub Release；
-- 不让 iOS Release 依赖一个名称模糊、实际只有 Android 的 CI 结果。
+iOS job 可以通过独立 workflow/check 或 job-level `continue-on-error` 实现非阻塞，但必须保留失败日志与状态，不能静默绿色。应用内 updater 不发现、不下载这些资产；用户手工检查 GitHub Release。
 
-## 12. App Store Connect 与审核材料
+## 12. App Store/TestFlight 的未来边界
 
-至少需要：
+当前不创建 Apple Developer 付费团队、App Store Connect record、TestFlight group、商店 metadata、审核账号或正式签名 workflow。若未来产品定位改变，必须重新立项处理签名 secret、隐私标签、截图、审核、出口合规、设备矩阵和更新路线；不能把本实验 artifact 的 E5 构建证据升级为正式分发证据。
 
-- Apple Developer Team owner 和 App Store Connect 管理责任人；
-- App record、Bundle ID、SKU、分类、年龄分级；
-- 隐私政策 URL、支持 URL、App Privacy answers；
-- 截图和 iPhone/iPad metadata；
-- 审核账号、可达的 VCP 测试服务和操作说明；
-- Local Network/LAN、后台恢复、通知、传感器用途说明；
-- 加密出口合规判断；
-- 数据删除/账号删除流程（若存在账号体系）；
-- Share Extension/推送等特殊能力演示；
-- Simulator 可以准备候选截图，但截图必须准确反映提交 build；真机兼容说明、权限/后台/LAN 证据仍只能来自具名设备。是否把某张候选截图作为最终商店资产，应在目标尺寸与提交 build 复核后决定。
+## 13. 实验产物安全退出条件
 
-## 13. 安全与分发退出条件
+- [ ] Apple device target 与 iPhone/iPad Simulator 完整 `.app` 编译/链接成功；
+- [ ] Info.plist、requested capabilities、PrivacyInfo 与 P0 范围一致，不包含麦克风、通知、定位、Motion、Share Extension、APNs 或 iOS updater；
+- [ ] 12 条 `X`、Android Root/helper/OEM/listener/APK updater 和全部 mock fallback 在 iOS fail-closed；
+- [ ] 文档/文本/图片附件 fixture 与 staging contract 通过；
+- [ ] iOS 26 continued task 和旧系统 foreground fallback 都有静态/Simulator 契约证据；系统拒绝、用户取消和 expiration 有明确终态；
+- [ ] 未签名/自签输入资产、SHA-256、manifest 和 limitations 文件来自同一 commit；检查确认 `distributionSigned=false`、记录实际 code-sign 状态且无嵌入项目秘密；
+- [ ] iOS job 失败不会阻断、修改或撤回 Android 签名 APK；
+- [ ] 发布文字只称“实验性未签名 iPhone/iPad 兼容产物”，不称 App Store、正式 iOS Release、真机验证或后台可靠。
 
-### 13.1 可上传候选
-
-- Apple target clean build；
-- Info.plist/entitlements/PrivacyInfo 与该 build 的实际能力一致；
-- 该 Beta manifest 内所有 `X` 能力和 APK updater 不可达；
-- secrets 存储迁移已落实，或由明确 owner 对剩余风险作发布裁决；
-- archive 签名、各 target profile、Bundle ID、Team、architecture 验证通过；
-- App Privacy 数据账本、隐私政策、出口合规与最小商店记录可用于上传；
-- 生成 `UPLOAD-CANDIDATE` 后才执行首次上传；不能要求它预先已有 TestFlight 处理成功。
-
-### 13.2 已处理与内部 Beta
-
-- App Store Connect 分别记录 upload accepted 与 build processed；
-- 内部组在具名设备完成核心旅程；若该 build 声明 LAN、媒体、通知或 Extension，则补齐对应真机门禁；
-- ATS/Local Network 只在该 capability 被选入时阻塞，但不能用 Simulator 代替。
-
-### 13.3 外部 Beta
-
-- 完成外部测试所需的 Beta App Review、测试说明、隐私与出口合规信息；
-- 冻结的外部设备/系统范围有记录，缺陷可追溯到 build SHA。
-
-### 13.4 App Store 发布
-
-- 完整真机功能矩阵与审核材料通过版本审查；
-- `APP-REVIEW-APPROVED` 只在 Apple 审核通过后取得；拒绝或一次审核结果都不能替代批准；
-- 发布/Ready for Sale 后才能标记 `RELEASED`。此前必须使用对应的上传、处理或 Beta 状态，不能写“iOS 发布完成”。
+项目自有真机、iOS 性能基准/soak、TestFlight/App Review 均不在退出条件中；对应证据状态分别保持 `COMMUNITY-DEVICE-UNVERIFIED`、`PERFORMANCE-NOT-EVALUATED` 与 `OUT-OF-SCOPE`。

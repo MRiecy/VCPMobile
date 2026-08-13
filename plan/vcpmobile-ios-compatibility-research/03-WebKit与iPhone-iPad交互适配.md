@@ -2,7 +2,7 @@
 
 ## 1. 总体判断
 
-现有前端不是 iOS 的主要重写对象。窗口宽度响应、单组件树、语义层级、集中 safe-area 变量和强渲染链都有复用价值。真正的 P0 是：**WebKit 尚无构建与运行契约，键盘、导航/手势、活跃的 Android-only UI、音频 MIME 和可访问性仍按 Android 假设工作。**
+现有前端不是 iOS 的主要重写对象。窗口宽度响应、单组件树、语义层级、集中 safe-area 变量和强渲染链都有复用价值。真正的 P0 是：**WebKit 尚无构建契约，键盘、导航/手势、附件入口、活跃的 Android-only UI 和 iPhone/iPad presentation 仍按 Android 假设工作。** 语音功能已从 iOS 范围删除，不再把修复音频 MIME 作为 iOS P0。
 
 UI 适配应延续当前产品宪法：高密度、线性、灰度优先、语义 z-index、内容区不使用 backdrop blur。iOS 适配不是给界面套一层“仿 UIKit 毛玻璃”。
 
@@ -36,7 +36,7 @@ UI 适配应延续当前产品宪法：高密度、线性、灰度优先、语�
 2. 对**实际进入 iOS Tauri artifact** 的最终 JS/CSS 生成物做 WebKit syntax check；
 3. 保留 Android `chrome87` 合同，避免一平台修复抬高另一平台语法下限；
 4. 对 `color-mix()`、`content-visibility`、pointer events、Canvas/WebGL 等继续采用基础 fallback + feature enhancement；
-5. 在真实 WKWebView 上验证，而不是只看 Can I Use 或 macOS Safari。
+5. 在 GitHub Actions 的 Tauri WKWebView Simulator artifact 上验证；社区真机报告只能补充设备事实，macOS Safari 不是产品 target。
 
 Tauri iOS 使用系统 WKWebView/WebKit，因此 WebView 能力随系统版本变化，参见 [Tauri WebView Versions](https://v2.tauri.app/reference/webview-versions/)。
 
@@ -105,20 +105,20 @@ safe area 与 IME 是两个不同事实。建议保持一个语义 Insets owner�
 
 当前 [App.vue](../../src/App.vue) 未挂载该组件，且 Release governance 测试禁止复活它。因此它是保留的 Android 资产，不是当前活跃首启入口；iOS 不移植、不复活，也不应给它增加零散 `v-if="isIOS"`。
 
-当前真正需要 capability 隔离的活跃面包括 UpdatePrompt，以及 Settings 中仍挂载的 BatteryOptimizationGuide。iOS 首启只做能力发现与解释；通知、相机、麦克风、照片、位置、Motion、Local Network 只在用户触发相关功能时请求。
+当前真正需要 capability 隔离的活跃面包括 UpdatePrompt，以及 Settings 中仍挂载的 BatteryOptimizationGuide。iOS 首启只做能力发现与解释；首期不申请通知、麦克风、位置或 Motion。Document Picker 不需要把 Android storage 布尔权限照搬过来；照片/相机/Local Network 只有后续真实功能触发时才按用途请求。
 
 ### 4.5 APK 更新 UI 泄漏
 
-[useAutoUpdate.ts](../../src/core/composables/useAutoUpdate.ts)、[useUpdateDownloader.ts](../../src/core/composables/useUpdateDownloader.ts) 和 UpdatePrompt 都是 APK 下载/安装器语义。iOS 必须在 capability/update route 层替换，不是只隐藏 Android 通知栏进度。
+[useAutoUpdate.ts](../../src/core/composables/useAutoUpdate.ts)、[useUpdateDownloader.ts](../../src/core/composables/useUpdateDownloader.ts) 和 UpdatePrompt 都是 APK 下载/安装器语义。iOS 必须在 capability 层彻底禁用自动检查、下载、通知和安装，且不挂载 UpdatePrompt；不能只隐藏 Android 通知栏进度。
 
-### 4.6 音频 MIME 与文件名不一致
+### 4.6 语音入口退出 iOS 能力面
 
-[useAudioRecorder.ts](../../src/core/composables/useAudioRecorder.ts) 会探测 `audio/mp4`，但：
+[useAudioRecorder.ts](../../src/core/composables/useAudioRecorder.ts) 会探测 `audio/mp4`，但当前跨层契约仍存在已知不一致：
 
 - [InputEnhancer.vue](../../src/features/chat/InputEnhancer.vue) 固定文件名 `.webm`；
 - [useSpeechRecognition.ts](../../src/core/composables/useSpeechRecognition.ts) Whisper 上传也固定 `recording.webm`。
 
-若 WKWebView 实际产生 MP4，这会造成 MIME、扩展名和服务端解析不一致。必须从 recorder result 派生扩展名并以真实 MIME/魔数校验，不能按平台硬编码。
+这同时说明现有录音不能被视为“已有跨平台能力”。由于 Android 版本中的语音录音当前也不可用，冻结决策是：iOS 隐藏录音/语音识别入口、不初始化 recorder、不请求 `NSMicrophoneUsageDescription`，不为 iOS 单独修复该链。若未来全平台重新启用语音，应作为独立项目从真实 MIME/魔数和服务端接受格式重建契约。
 
 ## 5. 可访问性与触控
 
@@ -141,7 +141,7 @@ safe area 与 IME 是两个不同事实。建议保持一个语义 Insets owner�
 
 - 可编辑输入的视觉字号与焦点缩放单独测试；
 - 技术状态、UUID 可保留高密度，但不能把可操作输入压到不可读；
-- 深浅色对比、Bold Text、Larger Text 必须进入真机矩阵。
+- 深浅色对比、Bold Text、Larger Text 先进入 Simulator/Accessibility Inspector；真机状态保持社区未验证，不阻塞实验产物。
 
 ### 5.3 命中区
 
@@ -152,7 +152,7 @@ Chat 输入区存在 36px 语音/附件按钮和 32px 发送按钮。若 D11 决
 - 主要可操作控件有效命中区至少 44 × 44pt；
 - 列表密度可以保留，但行内 icon 要有足够 hit slop；
 - disabled/hidden 控件不得继续截获触摸；
-- 用 Simulator UI test 做基础几何，最终由真机触摸验证。
+- 用 Simulator UI test 做基础几何；社区真机触摸报告用于后续修正，不升级为项目正式验收。
 
 ### 5.4 Modal 与外接输入
 
@@ -180,19 +180,19 @@ iPad 若纳入首发，应至少验证：
 
 ## 7. 强渲染 WebKit 门禁
 
-以下能力必须保留，并分别用静态 fixture、Simulator 和真机验证：
+以下能力必须保留，并用静态 fixture 与 Simulator 做功能回归。项目没有 iOS 设备，因此触控、热压力和真实内存行为只能标记为 `COMMUNITY-DEVICE-UNVERIFIED / PERFORMANCE-NOT-EVALUATED`，不作为实验产物门禁：
 
 | 能力 | 特别风险 |
 |---|---|
 | Markdown/AST diff | 流式 partial → final 不丢节点、不重复提交 |
-| Syntax highlight | 长代码、横向滚动、复制、内存 |
+| Syntax highlight | 长代码、横向滚动、复制；内存未评估 |
 | KaTeX/SVG/MathML | 字体加载、缩放、selection |
 | Mermaid | pointer capture、缩放/平移、SVG/2D Canvas 导出 |
 | raw HTML | `iframe.srcdoc`、sandbox、postMessage、CSP/asset scope |
 | Tool/Thought/Diary | 展开、动画、编辑、键盘避让 |
 | 图片 viewer | pinch/pan/double-tap 与系统边缘手势 |
-| WebGL 背景 | rAF visibility、reduced motion、context loss/restore、热压力 |
-| 长会话 | WebGL/Canvas/DOM/缓存的 memory pressure |
+| WebGL 背景 | rAF visibility、reduced motion、context loss/restore；热压力未评估 |
+| 长会话 | 保留既有上限与收敛逻辑；iOS memory pressure 不认证 |
 
 “通过 happy-dom”只证明 DOM 逻辑，不证明 WebKit CSS、Canvas、触控或内存。
 
@@ -213,6 +213,6 @@ iPad 若纳入首发，应至少验证：
 | Linux/Vitest | capability-driven DOM、导航顺序、MIME 派生、静态 CSS/源码治理 |
 | macOS Safari | JS/CSS/iframe/Canvas 的浏览器预筛，不代表 Tauri |
 | iPhone/iPad Simulator | Tauri IPC、窗口模式、基础 keyboard/safe area、路由、modal、Accessibility Inspector/可访问树初筛 |
-| 真机 | 第三方键盘、系统边缘手势、文本选择、MediaRecorder、相机、WebGL、触控与内存 |
+| 社区真机（非门禁） | 第三方键盘、系统边缘手势、文本选择、WebGL、触控与内存的用户回报；语音不在范围内 |
 
 当前所有 UI 结论最多是 `STATIC-AUDITED`，不能标为 `WEBKIT-VERIFIED`。
