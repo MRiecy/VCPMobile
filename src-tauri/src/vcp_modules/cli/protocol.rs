@@ -301,13 +301,13 @@ impl VcpMetaCapabilities {
         archery_no_reply: false,
     };
 
-    /// 本地 loop 已支持 text/last 以及有界的 full attempt snapshot；semantic/vref 仍关闭。
+    /// 本地 loop 已支持 text/last/full 与离线 semantic；vref 仍需显式知识授权。
     pub const LOCAL_LOOPBACK_INITIAL: Self = Self {
         mark_history: true,
         river_text: true,
         river_last: true,
         river_full: true,
-        river_semantic: false,
+        river_semantic: true,
         vref: false,
         archery_parallel: true,
         archery_no_reply: true,
@@ -1251,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn river_full_is_local_while_semantic_and_vref_remain_explicitly_unsupported() {
+    fn river_full_and_semantic_are_local_while_vref_remains_explicitly_unsupported() {
         let full = exactly_one_request(
             "<<<[TOOL_REQUEST]>>>\n\
              tool_name:「始」VCPMobileCLI「末」,\n\
@@ -1265,21 +1265,32 @@ mod tests {
             .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
             .expect("local loop supports bounded river full projection");
 
-        for field in ["river:「始」semantic:3「末」", "vref:「始」3「末」"] {
-            let input = format!(
-                "<<<[TOOL_REQUEST]>>>\n\
-                 tool_name:「始」VCPMobileCLI「末」,\n\
-                 command:「始」printf ok「末」,\n\
-                 {field}\n\
-                 <<<[END_TOOL_REQUEST]>>>"
-            );
-            let raw = exactly_one_request(&input, field);
-            let validated = validate_vcp_mobile_cli_request(&raw).expect("valid meta syntax");
-            let error = validated
-                .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
-                .expect_err("semantic and vref remain unavailable");
-            assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
-        }
+        let semantic = exactly_one_request(
+            "<<<[TOOL_REQUEST]>>>\n\
+             tool_name:「始」VCPMobileCLI「末」,\n\
+             command:「始」printf ok「末」,\n\
+             river:「始」semantic:3「末」\n\
+             <<<[END_TOOL_REQUEST]>>>",
+            "river semantic",
+        );
+        validate_vcp_mobile_cli_request(&semantic)
+            .expect("valid river semantic")
+            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .expect("local loop supports offline semantic projection");
+
+        let vref = exactly_one_request(
+            "<<<[TOOL_REQUEST]>>>\n\
+             tool_name:「始」VCPMobileCLI「末」,\n\
+             command:「始」printf ok「末」,\n\
+             vref:「始」3「末」\n\
+             <<<[END_TOOL_REQUEST]>>>",
+            "vref",
+        );
+        let validated = validate_vcp_mobile_cli_request(&vref).expect("valid vref syntax");
+        let error = validated
+            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .expect_err("vref remains unavailable without a knowledge grant");
+        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
     }
 
     #[test]

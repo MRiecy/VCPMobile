@@ -427,11 +427,13 @@ mod tests {
         body: &str,
         artifact_grants: Vec<VcpCliArtifactGrantInput>,
     ) -> VcpCliRiverProjectionInput {
+        let expected_artifact_grants = artifact_grants.len();
         VcpCliRiverProjectionInput {
             canonical_json: body.to_string(),
             sha256: format!("{:x}", Sha256::digest(body.as_bytes())),
             size_bytes: body.len() as u64,
             artifact_grants,
+            expected_artifact_grants,
         }
     }
 

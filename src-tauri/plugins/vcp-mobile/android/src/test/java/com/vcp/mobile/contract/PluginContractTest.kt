@@ -248,12 +248,14 @@ class PluginContractTest {
         ).associateWith { File(pluginRoot, it).readText() }
         val internalMethods = listOf(
             "prepareCliRuntime",
+            "prepareCliSemanticAssets",
             "startCliProcess",
             "inspectCliProcess",
             "cancelCliProcess",
         )
         val internalRustFunctions = listOf(
             "prepare_cli_runtime_inner",
+            "prepare_cli_semantic_assets_inner",
             "start_cli_process_inner",
             "inspect_cli_process_inner",
             "cancel_cli_process_inner",
@@ -303,6 +305,10 @@ class PluginContractTest {
         assertTrue("profile 必须固定 APK loader 名", commandProfile.contains("libvcp_proot_loader.so"))
         assertTrue("PRoot 必须在退出时清理全部 tracee", processHost.contains("\"--kill-on-exit\""))
         assertTrue("prepare 必须回显 Rust-owned River projection root", processHost.contains("put(\"projectionRootPath\""))
+        assertTrue("语义模型必须走独立 lazy prepare", processHost.contains("fun prepareSemantic(") && processHost.contains("stageVerifiedSemanticAsset("))
+        assertTrue("语义准备不得阻塞 cancel/inspect 控制队列", processHost.contains("semanticExecutor") && processHost.contains("submitOn(semanticExecutor, \"semantic\""))
+        assertTrue("语义资产必须按完整 identity 做进程内热复用", processHost.contains("it.identity == identity") && processHost.contains("preparedSemantic = it"))
+        assertTrue("语义资产必须 NOFOLLOW 且逐字复核", processHost.contains("semantic asset must be a direct regular file") && processHost.contains("semantic asset identity changed after staging"))
         assertTrue("River projection 必须做 NOFOLLOW 单文件校验", processHost.contains("verifyRiverContextProjection(") && processHost.contains("RIVER_CONTEXT_FILE_NAME"))
         assertTrue("River projection guest 路径必须使用已有 /run parent", processHost.contains("GUEST_RIVER_CONTEXT_PATH = \"/run/vcp-river-context.json\""))
         assertTrue("River projection 必须作为可选单文件 bind", processHost.contains("\"${'$'}riverContextHostPath:${'$'}GUEST_RIVER_CONTEXT_PATH\""))

@@ -1,6 +1,6 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING / P4.1-P4.2-CODE-COMPLETE / P4.2-API36-E2E-PENDING`
+> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING / P4.1-P4.3-CODE-COMPLETE / P4.2-API36-E2E-PENDING / P4.3-API26-API36-APP-E2E-PENDING`
 >
 > 研究日期：2026-08-13
 >
@@ -10,7 +10,8 @@
 > 自动 transport guard 与断网续轮的 API 36 最终复验；P3 已完成 Distributed CLI adapter、离线授权与插件中心收口，
 > 仍需真实 VCPToolBox + API 36 端到端验收。P4.1 已完成 Skill catalog v2 与显式物化，P4.2 已完成
 > 本地 `river=full` 的有界附件 attempt copy；两者仍需 P4.2 API 36 实际 guest 读取/写攻击复验。
-> P4.3/P4.4 尚未施工；后台能力属于 P5。
+> P4.3 已完成本地离线 `river=semantic:N`、确定性 `last:N` 回退和 durable projection；P4.4 尚未施工，
+> 后台能力属于 P5。
 
 ## P0 实施快照（2026-08-13）
 
@@ -55,7 +56,8 @@
   已完成命令不重跑。
 - `ink=mark_history`、`river=text/last:N/full`、`archery=true/no_reply` 已有有界语义；`river` 以单 attempt
   JSON snapshot 暴露到 `/run/vcp-river-context.json`，终态清理。`full` 最多复制 16 个附件、单个 64 MiB、
-  总计 256 MiB，并在 `omissions` 中说明省略原因；`river=semantic:N` 与 `vref:N` 仍明确返回 `unsupported_mode`。
+  总计 256 MiB，并在 `omissions` 中说明省略原因。P2 基线对 `semantic/vref` fail-closed；P4.3 已只为
+  `localLoopback` 打开 `river=semantic:N`，`vref:N` 仍明确返回 `unsupported_mode`。
 - 模型单 step 上限 512 KiB、规范 tool payload 256 KiB、工具调用最多 8 次、turn 最长 30 分钟；越界
   以 typed 终态结束，不执行截断后的调用。累计 ToolResult 以稳定 parser blocks 跨 step 投影，最终历史
   与恢复 finalizer byte-stable、exact-once。
@@ -95,9 +97,23 @@
   通用 Hugging Face tokenizer 路径峰值约 237 MiB，不予采用；相同 token 语义经紧凑 BPE pack + mmap
   后，首次进程峰值 18,748 KiB、总时长约 51.8 ms，热运行峰值约 16.5 MiB、总时长约 16.7 ms。
   该证据只批准进入产品实现与回归，不等于索引、召回质量或 App 进程集成已经验收。
+- P4.3 产品代码已固定模型、上游 config/tokenizer 输入和紧凑 BPE pack 的 size/SHA-256；Rust 以只读 mmap
+  执行 64 维加权池化，SQLite 只保存 `model_id + content hash + unit vector`，不保存 query 或消息正文。
+  候选读取按本次 hash 分块，缓存最多 20,000 行并按 LRU/模型代际清理；有限非单位、零或 NaN 向量均
+  视为损坏并重算。
+- semantic selection 由现有 `LocalEmbeddingOwner` 单 permit 串行拥有，最多工作 60 秒，并贯穿检查 turn
+  cancellation 与 30 分钟绝对 deadline。模型、缓存或资产不可用时，先把精确 `fallback_last` projection
+  持久绑定到 operation，再启动 Bash；ToolResult 稳定显示 `semantic:N → last:N`，恢复不会重新选取或重跑。
+- Android 模型/pack 只在首次有效 semantic 请求时按完整 identity 原子 staging；同进程热路径复用已验证
+  identity，semantic 使用独立有界 executor，不阻塞 ProcessHost 的 start/inspect/cancel 控制队列。
+- `assembleArm64Debug` 已实际成功；Debug APK 为 84,528,816 bytes。包内 model/tokenizer 分别压缩为
+  22,368,109 / 5,666,724 bytes（合计 28,034,833 bytes），解压后的 size 与 profile SHA-256 逐字一致。
+  该数字是 Debug 构建证据，不冒充 Release APK 体积。
 
-仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4.2 真机 guest 读取/写攻击复验、P4.3/P4.4 完整 recall、P5 后台前台
-服务与人工 PTY。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称 Doze 后台长稳。
+仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4.2 真机 guest 读取/写攻击复验、P4.3 产品设备门、P4.4 vref recall、P5 后台前台
+服务与人工 PTY。其中 P4.3 剩余的是 API 26/36 产品 App PSS、低存储、50 次冷/热召回、温升与故障注入
+设备门；P4.4 仍是未实现的 vref recall。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称
+Doze 后台长稳。
 
 ## 结论
 
@@ -130,7 +146,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 7. **人工终端与 Agent Job 分离**。普通任务用 `run/poll/cancel/list`；密码、SSH、vim、TUI 等场景由用户显式打开交互终端，预填命令但不自动执行。
 8. **Android host 坚持非 Root 用户态沙箱**。首发目标 Shell 固定为 PRoot guest 内的 Alpine Linux (musl) + GNU Bash，Agent 命令以 `/bin/bash -lc` 执行；guest 可模拟 root 管理自身 rootfs 和 `apk`，但不能越过 App UID。P0 验证可行性；若不可行必须回到 manifest 重新裁决，不得静默改用 `ash`。Android Root/Shizuku 只能作为未来显式 elevated backend。
 9. **长任务由 job 生命周期拥有，不由聊天 SSE 拥有**。模型续轮断线不能导致命令重跑；超时/取消必须终止目标进程组并阻止迟到输出污染后续任务。
-10. **VCP 通用元字段也属于本地回环契约**。`ink: mark_history`、`river=text/last:N/full`、`archery=true/no_reply` 已在本地 loop 落地；`river=semantic:N` 和 `vref:N` 按实际索引能力继续分期。未具备时返回 `unsupported_mode`，不能静默忽略或伪装等价。
+10. **VCP 通用元字段也属于本地回环契约**。`ink: mark_history`、`river=text/last:N/full/semantic:N`、`archery=true/no_reply` 已在本地 loop 落地；semantic 不可用时明确回退 `last:N`，`vref:N` 继续按知识授权与索引能力分期。未具备的 route/capability 返回 `unsupported_mode`，不能静默忽略或伪装等价。
 11. **Skill 是 manifest 中可见的一等 action，不是隐藏 Shell 子命令**。`VCPMobileCLI` 直接提供 `action=list_skills|read_skill`；前者列出校验通过的 Skill，后者按 `skill_id + resource_path` 阅读 `SKILL.md` 或受控资源并返回 `vcp-skill://<id>` 逻辑引用。Skill catalog 不挂载进 PRoot guest；若要执行脚本，必须先经明确动作物化到 `/workspace`。它不增加第二个 VCP 工具，也不自动执行 Skill 脚本。
 12. **iOS 只作为未来可选方向**。同一 VCP 协议可以复用，CLI Runtime 必须另做平台实现；本专项不改变 Android-only 当前产品边界。
 
@@ -168,9 +184,9 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 允许的准确表述是：
 
-> VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime 与 P2 本地 Agent 多轮 loop 代码已完成；单聊和 Group
-> 共用可恢复、exact-once 的本地 coordinator，并支持首发 VCP 元字段。真实 VCP 插件、完整 recall 和
-> Android 后台前台服务尚未完成；P2 自动 transport guard 与断网恢复仍需最后一次 API 36 设备复验，
+> VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime、P2 本地 Agent 多轮 loop、P3 可选 Distributed adapter
+> 以及 P4.1-P4.3 的 Skill、full/semantic River 产品代码已完成；单聊和 Group 共用可恢复、exact-once 的
+> 本地 coordinator。P2/P3/P4 仍有列明的设备验收，P4.4 vref 与 P5 Android 后台/人工 PTY 尚未完成，
 > 因此当前不能把整个 VCP CLI 专项标记为完成。
 
 不得表述为“Agent CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”

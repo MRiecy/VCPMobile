@@ -14,6 +14,22 @@ import java.security.MessageDigest
 
 class CliProcessHostTest {
     @Test
+    fun invokeArgsDecodeSemanticAssetContract() {
+        val hash = "a".repeat(64)
+        val args = ObjectMapper().readValue(
+            """{
+                "operationId":"op","modelId":"model-r2",
+                "modelBytes":24471328,"modelSha256":"$hash",
+                "tokenizerBytes":10437027,"tokenizerSha256":"$hash"
+            }""".trimIndent(),
+            PrepareCliSemanticAssetsArgs::class.java,
+        )
+        assertEquals("model-r2", args.modelId)
+        assertEquals(24_471_328L, args.modelBytes)
+        assertEquals(10_437_027L, args.tokenizerBytes)
+    }
+
+    @Test
     fun invokeArgsDecodeNestedRiverArtifactArray() {
         val hash = "a".repeat(64)
         val args = ObjectMapper().readValue(
@@ -540,6 +556,89 @@ class CliProcessHostTest {
             )
             assertArrayEquals(replacement, destination.readBytes())
             assertEquals(root.canonicalFile, syncedParent?.canonicalFile)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun semanticAssetStagingIsLazyDirectAndIdentityBound() {
+        val root = Files.createTempDirectory("vcp-cli-semantic-asset-test").toFile()
+        val bytes = "frozen-semantic-model".toByteArray()
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        try {
+            val staged = stageVerifiedSemanticAsset(
+                assets = root,
+                assetName = "vcp-semantic-model-r2.safetensors",
+                expectedBytes = bytes.size.toLong(),
+                expectedHash = digest,
+                openInput = { ByteArrayInputStream(bytes) },
+            )
+            assertEquals(root.canonicalFile, staged.parentFile)
+            assertArrayEquals(bytes, staged.readBytes())
+            var warmAssetOpens = 0
+            val warm = stageVerifiedSemanticAsset(
+                assets = root,
+                assetName = staged.name,
+                expectedBytes = bytes.size.toLong(),
+                expectedHash = digest,
+                openInput = {
+                    warmAssetOpens += 1
+                    ByteArrayInputStream(bytes)
+                },
+            )
+            assertEquals(staged.canonicalFile, warm)
+            assertEquals("verified warm asset must not reopen AssetManager", 0, warmAssetOpens)
+
+            val replacement = "repaired-semantic-model".toByteArray()
+            val replacementDigest = MessageDigest.getInstance("SHA-256").digest(replacement)
+                .joinToString("") { "%02x".format(it) }
+            staged.writeBytes("damaged".toByteArray())
+            val repaired = stageVerifiedSemanticAsset(
+                assets = root,
+                assetName = staged.name,
+                expectedBytes = replacement.size.toLong(),
+                expectedHash = replacementDigest,
+                openInput = { ByteArrayInputStream(replacement) },
+            )
+            assertArrayEquals(replacement, repaired.readBytes())
+
+            assertThrows(IllegalArgumentException::class.java) {
+                stageVerifiedSemanticAsset(
+                    assets = root,
+                    assetName = "../escape.safetensors",
+                    expectedBytes = bytes.size.toLong(),
+                    expectedHash = digest,
+                    openInput = { ByteArrayInputStream(bytes) },
+                )
+            }
+
+            repaired.delete()
+            val sibling = File(root.parentFile, "semantic-sibling").apply { writeBytes(bytes) }
+            Files.createSymbolicLink(repaired.toPath(), sibling.toPath())
+            assertThrows(IllegalArgumentException::class.java) {
+                stageVerifiedSemanticAsset(
+                    assets = root,
+                    assetName = repaired.name,
+                    expectedBytes = bytes.size.toLong(),
+                    expectedHash = digest,
+                    openInput = { ByteArrayInputStream(bytes) },
+                )
+            }
+            repaired.delete()
+            sibling.delete()
+
+            File(root, "vcp-semantic-model-r2.safetensors").mkdir()
+            assertThrows(IllegalArgumentException::class.java) {
+                stageVerifiedSemanticAsset(
+                    assets = root,
+                    assetName = "vcp-semantic-model-r2.safetensors",
+                    expectedBytes = bytes.size.toLong(),
+                    expectedHash = digest,
+                    openInput = { ByteArrayInputStream(bytes) },
+                )
+            }
         } finally {
             root.deleteRecursively()
         }

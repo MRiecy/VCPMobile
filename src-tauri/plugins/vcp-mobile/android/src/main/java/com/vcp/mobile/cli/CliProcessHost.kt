@@ -32,9 +32,13 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 private const val ROOTFS_ASSET_NAME = "vcp-cli-rootfs-3.24.1-aarch64.tar.zst"
+private const val SEMANTIC_MODEL_ASSET_NAME = "vcp-semantic-model-r2.safetensors"
+private const val SEMANTIC_TOKENIZER_ASSET_NAME = "vcp-semantic-tokenizer-r2.vcpbpe"
 private const val PROOT_LIBRARY_NAME = "libvcp_proot.so"
 private const val PROOT_LOADER_LIBRARY_NAME = "libvcp_proot_loader.so"
 private const val MAX_ROOTFS_ARCHIVE_BYTES = 512L * 1024L * 1024L
+private const val MAX_SEMANTIC_MODEL_BYTES = 64L * 1024L * 1024L
+private const val MAX_SEMANTIC_TOKENIZER_BYTES = 32L * 1024L * 1024L
 private const val MAX_PROOT_BYTES = 64L * 1024L * 1024L
 private const val MAX_PROOT_LOADER_BYTES = 4L * 1024L * 1024L
 private const val MAX_ARTIFACT_BYTES = 256L * 1024L * 1024L
@@ -73,6 +77,16 @@ class PrepareCliRuntimeArgs {
     lateinit var prootSha256: String
     var prootLoaderBytes: Long = 0
     lateinit var prootLoaderSha256: String
+}
+
+@InvokeArg
+class PrepareCliSemanticAssetsArgs {
+    lateinit var operationId: String
+    lateinit var modelId: String
+    var modelBytes: Long = 0
+    lateinit var modelSha256: String
+    var tokenizerBytes: Long = 0
+    lateinit var tokenizerSha256: String
 }
 
 @InvokeArg
@@ -166,6 +180,20 @@ private data class PreparedRuntime(
     val handshakeParent: File,
 )
 
+private data class SemanticAssetIdentity(
+    val modelId: String,
+    val modelBytes: Long,
+    val modelSha256: String,
+    val tokenizerBytes: Long,
+    val tokenizerSha256: String,
+)
+
+private data class PreparedSemanticAssets(
+    val identity: SemanticAssetIdentity,
+    val model: File,
+    val tokenizer: File,
+)
+
 private data class PrepareResult(
     val operationId: String,
     val prepared: PreparedRuntime,
@@ -182,6 +210,18 @@ private data class PrepareResult(
         put("projectionRootPath", prepared.projectionRoot.absolutePath)
         put("prootPath", prepared.proot.absolutePath)
         put("prootLoaderPath", prepared.prootLoader.absolutePath)
+    }
+}
+
+private data class PrepareSemanticResult(
+    val operationId: String,
+    val prepared: PreparedSemanticAssets,
+) {
+    fun toJsObject() = JSObject().apply {
+        put("operationId", operationId)
+        put("modelId", prepared.identity.modelId)
+        put("modelPath", prepared.model.absolutePath)
+        put("tokenizerPath", prepared.tokenizer.absolutePath)
     }
 }
 
@@ -851,6 +891,106 @@ private class CliRuntimeInstaller(private val context: Context) {
             handshakeParent = handshakeParent.canonicalFile,
         )
     }
+
+    fun prepareSemantic(args: PrepareCliSemanticAssetsArgs): PreparedSemanticAssets {
+        val identity = validatedSemanticAssetIdentity(args)
+        val privateRoot = File(context.noBackupFilesDir, "vcp-cli").ensureDirectory()
+        val assets = File(privateRoot, "assets").ensureDirectory()
+        val model = stageVerifiedSemanticAsset(
+            assets,
+            SEMANTIC_MODEL_ASSET_NAME,
+            identity.modelBytes,
+            identity.modelSha256,
+            openInput = { context.assets.open(SEMANTIC_MODEL_ASSET_NAME) },
+            syncParent = ::fsyncDirectory,
+        )
+        val tokenizer = stageVerifiedSemanticAsset(
+            assets,
+            SEMANTIC_TOKENIZER_ASSET_NAME,
+            identity.tokenizerBytes,
+            identity.tokenizerSha256,
+            openInput = { context.assets.open(SEMANTIC_TOKENIZER_ASSET_NAME) },
+            syncParent = ::fsyncDirectory,
+        )
+        require(model != tokenizer) { "semantic model and tokenizer must be separate files" }
+        return PreparedSemanticAssets(identity, model, tokenizer)
+    }
+
+}
+
+internal fun stageVerifiedSemanticAsset(
+    assets: File,
+    assetName: String,
+    expectedBytes: Long,
+    expectedHash: String,
+    openInput: () -> InputStream,
+    syncParent: (File) -> Unit = {},
+): File {
+    require(assetName == File(assetName).name && !assetName.contains("..")) {
+        "semantic asset name is invalid"
+    }
+    val destination = File(assets, assetName)
+    val current = if (destination.exists()) {
+        val existingAttributes = java.nio.file.Files.readAttributes(
+            destination.toPath(),
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+        require(existingAttributes.isRegularFile && !existingAttributes.isSymbolicLink) {
+            "semantic asset must be a direct regular file"
+        }
+        require(destination.canonicalFile.parentFile == assets.canonicalFile) {
+            "semantic asset escaped the private asset directory"
+        }
+        runCatching { sha256File(destination, expectedBytes) }.getOrNull()
+    } else {
+        null
+    }
+    val copied = current?.first != expectedBytes || current.secondOrNull() != expectedHash
+    if (copied) {
+        copyVerifiedStreamAtomically(
+            openInput = openInput,
+            destination = destination,
+            expectedBytes = expectedBytes,
+            expectedSha256 = expectedHash,
+            syncParent = syncParent,
+        )
+    }
+    val attributes = java.nio.file.Files.readAttributes(
+        destination.toPath(),
+        BasicFileAttributes::class.java,
+        LinkOption.NOFOLLOW_LINKS,
+    )
+    require(attributes.isRegularFile && !attributes.isSymbolicLink) {
+        "semantic asset must be a direct regular file"
+    }
+    val canonical = destination.canonicalFile
+    require(canonical.parentFile == assets.canonicalFile && canonical.name == assetName) {
+        "semantic asset escaped the private asset directory"
+    }
+    if (copied) {
+        require(sha256File(canonical, expectedBytes) == Pair(expectedBytes, expectedHash)) {
+            "semantic asset identity changed after staging"
+        }
+    }
+    return canonical
+}
+
+private fun validatedSemanticAssetIdentity(args: PrepareCliSemanticAssetsArgs): SemanticAssetIdentity {
+    validateIdentifier(args.modelId, "modelId")
+    require(args.modelBytes in 1..MAX_SEMANTIC_MODEL_BYTES) {
+        "modelBytes is outside the supported range"
+    }
+    require(args.tokenizerBytes in 1..MAX_SEMANTIC_TOKENIZER_BYTES) {
+        "tokenizerBytes is outside the supported range"
+    }
+    return SemanticAssetIdentity(
+        modelId = args.modelId,
+        modelBytes = args.modelBytes,
+        modelSha256 = validateSha256(args.modelSha256, "modelSha256"),
+        tokenizerBytes = args.tokenizerBytes,
+        tokenizerSha256 = validateSha256(args.tokenizerSha256, "tokenizerSha256"),
+    )
 }
 
 private fun fsyncDirectory(directory: File) {
@@ -944,12 +1084,23 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         { runnable -> Thread(runnable, "vcp-cli-control-${threadSequence.incrementAndGet()}") },
         ThreadPoolExecutor.AbortPolicy(),
     )
+    private val semanticExecutor = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(8),
+        { runnable -> Thread(runnable, "vcp-cli-semantic-${threadSequence.incrementAndGet()}") },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
     private val closed = AtomicBoolean(false)
     private val lifecycleLock = Any()
+    private val semanticLock = Any()
     private val handles = ConcurrentHashMap<ProcessKey, CliProcessHandle>()
     private val completedKeys = ConcurrentLinkedQueue<ProcessKey>()
     private val installer = CliRuntimeInstaller(context.applicationContext)
     @Volatile private var preparedRuntime: PreparedRuntime? = null
+    @Volatile private var preparedSemantic: PreparedSemanticAssets? = null
 
     fun prepare(
         args: PrepareCliRuntimeArgs,
@@ -972,6 +1123,22 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             }
             preparedRuntime = prepared
             PrepareResult(args.operationId, prepared).toJsObject()
+        }
+    }
+
+    fun prepareSemantic(
+        args: PrepareCliSemanticAssetsArgs,
+        success: (JSObject) -> Unit,
+        failure: (String) -> Unit,
+    ) = submitOn(semanticExecutor, "semantic", success, failure) {
+        validateIdentifier(args.operationId, "operationId")
+        val identity = validatedSemanticAssetIdentity(args)
+        synchronized(semanticLock) {
+            ensureOpen()
+            val prepared = preparedSemantic
+                ?.takeIf { it.identity == identity }
+                ?: installer.prepareSemantic(args).also { preparedSemantic = it }
+            PrepareSemanticResult(args.operationId, prepared).toJsObject()
         }
     }
 
@@ -1010,13 +1177,21 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         success: (JSObject) -> Unit,
         failure: (String) -> Unit,
         action: () -> JSObject,
+    ) = submitOn(controlExecutor, "control", success, failure, action)
+
+    private fun submitOn(
+        executor: ThreadPoolExecutor,
+        queueName: String,
+        success: (JSObject) -> Unit,
+        failure: (String) -> Unit,
+        action: () -> JSObject,
     ) {
         if (closed.get()) {
             failure("CLI ProcessHost is closed")
             return
         }
         try {
-            controlExecutor.execute {
+            executor.execute {
                 try {
                     success(action())
                 } catch (error: Throwable) {
@@ -1024,7 +1199,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 }
             }
         } catch (_: RejectedExecutionException) {
-            failure("CLI ProcessHost control queue is unavailable")
+            failure("CLI ProcessHost $queueName queue is unavailable")
         }
     }
 
@@ -1536,7 +1711,11 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        semanticExecutor.shutdownNow()
         controlExecutor.shutdownNow()
+        synchronized(semanticLock) {
+            preparedSemantic = null
+        }
         synchronized(lifecycleLock) {
             handles.values.forEach { handle ->
                 try {
@@ -1557,6 +1736,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
         try {
             controlExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
+            semanticExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }

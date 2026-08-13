@@ -21,21 +21,25 @@ use super::protocol::{
 };
 use super::result::{serialize_local_model_payload, VcpCliErrorCode, VcpCliResultEnvelope};
 use super::runtime::{
-    ExecuteVcpMobileCliRequest, MobileCliRuntimeState, VcpCliArtifactGrantInput,
-    VcpCliRiverProjectionInput,
+    ExecuteVcpMobileCliRequest, MobileCliAdmissionError, MobileCliRuntimeState,
+    VcpCliArtifactGrantInput, VcpCliRiverProjectionInput,
 };
 use super::turn_ledger::{
-    claim_finalizer, claim_tool_batch, create_turn, load_live_turn, mark_interrupted,
-    mark_model_continued, mark_model_running, mark_terminal, store_model_retry_pending,
-    store_pending_continuation, store_tool_result, FinalizerClaim, ToolClaim,
+    bind_tool_projection, claim_finalizer, claim_tool_batch, create_turn, load_live_turn,
+    mark_interrupted, mark_model_continued, mark_model_running, mark_terminal,
+    store_model_retry_pending, store_pending_continuation, store_tool_result, FinalizerClaim,
+    ToolClaim,
 };
 use super::turn_meta::{
-    append_marked_history, marked_history_block, plan_local_meta, river_full_candidate_hashes,
-    selected_river_full_artifact_hashes, LocalContinuationPolicy,
+    append_marked_history, build_semantic_projection, fallback_last_semantic_selection,
+    marked_history_block_with_projection, plan_local_meta, plan_local_policy,
+    river_full_candidate_hashes, selected_river_full_artifact_hashes, semantic_candidates,
+    LocalContinuationPolicy, RiverProjection, SemanticProjectionPlan,
 };
 use super::turn_types::{
-    LocalCliTurnOutcome, LocalCliTurnRecord, LocalCliTurnRoute, LocalCliTurnStart,
-    LocalCliTurnState, MAX_ASSISTANT_STEP_BYTES, MAX_LOCAL_CLI_TOOL_STEPS, MAX_TOOL_PAYLOAD_BYTES,
+    DurableRiverArtifact, DurableRiverProjection, LocalCliTurnOutcome, LocalCliTurnRecord,
+    LocalCliTurnRoute, LocalCliTurnStart, LocalCliTurnState, MAX_ASSISTANT_STEP_BYTES,
+    MAX_LOCAL_CLI_TOOL_STEPS, MAX_TOOL_PAYLOAD_BYTES,
 };
 
 pub(crate) async fn run_local_cli_turn<R: Runtime>(
@@ -108,7 +112,7 @@ pub(crate) async fn recover_local_cli_turn<R: Runtime>(
     } else if record.state == LocalCliTurnState::Claimed
         && record.step_records.iter().any(|step| step.result.is_none())
     {
-        match recover_claimed_batch(app, pool, &record).await {
+        match recover_claimed_batch(app, pool, &record, &cancellation_token).await {
             Ok(recovered) => {
                 record = recovered;
                 if record.state == LocalCliTurnState::ResultReady {
@@ -138,6 +142,32 @@ pub(crate) async fn recover_local_cli_turn<R: Runtime>(
                         reason: error,
                     },
                 )));
+            }
+            Err(ClaimedRecoveryError::Cancelled) => {
+                let outcome = finalize_turn(
+                    app,
+                    pool,
+                    &record,
+                    "本地 CLI 工具尚未启动；本轮已取消。".to_string(),
+                    "cancelled_by_user".to_string(),
+                    true,
+                    Some(stream_channel),
+                )
+                .await?;
+                return Ok(Some(outcome_json(outcome)));
+            }
+            Err(ClaimedRecoveryError::Deadline) => {
+                let outcome = finalize_turn(
+                    app,
+                    pool,
+                    &record,
+                    "本地 CLI 工具尚未启动；本轮已达到 30 分钟总时限。".to_string(),
+                    "local_cli_turn_timeout".to_string(),
+                    false,
+                    Some(stream_channel),
+                )
+                .await?;
+                return Ok(Some(outcome_json(outcome)));
             }
             Err(ClaimedRecoveryError::Integrity(error)) => {
                 mark_interrupted(pool, &record.turn_attempt, &error, now_ms()?).await?;
@@ -197,7 +227,19 @@ async fn run_record<R: Runtime>(
         .unwrap_or_else(|| record.frozen_request.messages.clone());
     loop {
         let now = now_ms()?;
-        if now > record.deadline_at_ms {
+        if cancellation_token.is_cancelled() {
+            return finalize_turn(
+                app,
+                pool,
+                &record,
+                "本地 CLI 工具尚未启动；本轮已取消。".to_string(),
+                "cancelled_by_user".to_string(),
+                true,
+                stream_channel.clone(),
+            )
+            .await;
+        }
+        if now >= record.deadline_at_ms {
             return finalize_turn(
                 app,
                 pool,
@@ -402,7 +444,7 @@ async fn run_record<R: Runtime>(
 
         let mut continuation_payloads = Vec::new();
         let mut must_continue = false;
-        for ((raw_request, digest), claim) in raw_requests.iter().zip(&digests).zip(claims) {
+        for ((raw_request, _digest), claim) in raw_requests.iter().zip(&digests).zip(claims) {
             let (operation_id, result, local_payload, continuation_policy) = match claim {
                 ToolClaim::Replay {
                     operation_id,
@@ -434,13 +476,37 @@ async fn run_record<R: Runtime>(
                         &record,
                         raw_request,
                         &operation_id,
-                        digest,
                         &messages,
+                        &cancellation_token,
                     )
                     .await
                     {
                         Ok(result) => result,
-                        Err(error) => {
+                        Err(ClaimedToolError::Cancelled) => {
+                            return finalize_turn(
+                                app,
+                                pool,
+                                &record,
+                                "本地 CLI 工具尚未启动；本轮已取消。".to_string(),
+                                "cancelled_by_user".to_string(),
+                                true,
+                                stream_channel.clone(),
+                            )
+                            .await;
+                        }
+                        Err(ClaimedToolError::Deadline) => {
+                            return finalize_turn(
+                                app,
+                                pool,
+                                &record,
+                                "本地 CLI 工具尚未启动；本轮已达到 30 分钟总时限。".to_string(),
+                                "local_cli_turn_timeout".to_string(),
+                                false,
+                                stream_channel.clone(),
+                            )
+                            .await;
+                        }
+                        Err(ClaimedToolError::RetryPending(error)) => {
                             return Ok(LocalCliTurnOutcome::ContinuationPending {
                                 turn_attempt: record.turn_attempt.clone(),
                                 step_index: record.step_index,
@@ -511,14 +577,54 @@ fn terminal_model_error(error: &str) -> Option<(&'static str, &'static str)> {
     ))
 }
 
+enum ClaimedToolError {
+    RetryPending(String),
+    Cancelled,
+    Deadline,
+}
+
+struct SemanticTurnBudget<'a> {
+    cancellation_token: &'a CancellationToken,
+    deadline_at_ms: u64,
+}
+
+impl From<String> for ClaimedToolError {
+    fn from(error: String) -> Self {
+        Self::RetryPending(error)
+    }
+}
+
+impl From<MobileCliAdmissionError> for ClaimedToolError {
+    fn from(error: MobileCliAdmissionError) -> Self {
+        match error {
+            MobileCliAdmissionError::Cancelled => Self::Cancelled,
+            MobileCliAdmissionError::Deadline => Self::Deadline,
+            MobileCliAdmissionError::Runtime(error) => Self::RetryPending(error),
+        }
+    }
+}
+
+fn ensure_claimed_work_allowed(
+    record: &LocalCliTurnRecord,
+    cancellation_token: &CancellationToken,
+) -> Result<(), ClaimedToolError> {
+    if cancellation_token.is_cancelled() {
+        return Err(ClaimedToolError::Cancelled);
+    }
+    if now_ms()? >= record.deadline_at_ms {
+        return Err(ClaimedToolError::Deadline);
+    }
+    Ok(())
+}
+
 async fn execute_claimed_tool<R: Runtime>(
     app: &AppHandle<R>,
     pool: &Pool<Sqlite>,
     record: &LocalCliTurnRecord,
     raw_request: &super::protocol::RawVcpToolRequest,
     operation_id: &str,
-    _digest: &str,
     messages: &[Value],
+    cancellation_token: &CancellationToken,
 ) -> Result<
     (
         String,
@@ -526,82 +632,140 @@ async fn execute_claimed_tool<R: Runtime>(
         String,
         LocalContinuationPolicy,
     ),
-    String,
+    ClaimedToolError,
 > {
-    let (result, policy, mark_history) = match validate_vcp_mobile_cli_request(raw_request) {
-        Err(error) => (
-            VcpCliResultEnvelope::error(
-                error.code,
-                error.to_string(),
-                "Correct the VCPMobileCLI request fields and retry.",
-            ),
-            LocalContinuationPolicy::Continue,
-            false,
-        ),
-        Ok(mut validated) => {
-            let resolved_artifacts =
-                verified_river_full_artifacts(app, pool, &validated, messages).await;
-            match plan_local_meta(&validated, messages, &resolved_artifacts) {
-                Err(error) => (
-                    VcpCliResultEnvelope::error(
-                        VcpCliErrorCode::UnsupportedMode,
-                        error,
-                        "Remove the unsupported meta field and retry.",
-                    ),
-                    LocalContinuationPolicy::Continue,
-                    validated.meta.ink.is_some(),
+    ensure_claimed_work_allowed(record, cancellation_token)?;
+    let (result, policy, mark_history, durable_projection) =
+        match validate_vcp_mobile_cli_request(raw_request) {
+            Err(error) => (
+                VcpCliResultEnvelope::error(
+                    error.code,
+                    error.to_string(),
+                    "Correct the VCPMobileCLI request fields and retry.",
                 ),
-                Ok(plan) => {
-                    if matches!(
-                        plan.continuation,
-                        LocalContinuationPolicy::Parallel | LocalContinuationPolicy::NoReply
-                    ) {
-                        force_background(&mut validated.action);
+                LocalContinuationPolicy::Continue,
+                false,
+                None,
+            ),
+            Ok(mut validated) => {
+                let existing_projection = record
+                    .step_records
+                    .iter()
+                    .find(|step| step.operation_id == operation_id)
+                    .and_then(|step| step.river_projection.clone());
+                let needs_artifacts = existing_projection
+                    .as_ref()
+                    .is_some_and(|projection| !projection.artifacts.is_empty())
+                    || (existing_projection.is_none()
+                        && validated.meta.river == Some(VcpRiverMode::Full));
+                let resolved_artifacts = if needs_artifacts {
+                    verified_river_full_artifacts(app, pool, &validated, messages).await
+                } else {
+                    HashMap::new()
+                };
+                let planned = if let Some(projection) = existing_projection {
+                    plan_local_policy(&validated).map(|(mark_history, continuation)| {
+                        (Some(projection), continuation, mark_history)
+                    })
+                } else {
+                    let semantic_projection = resolve_semantic_projection(
+                        app,
+                        pool,
+                        &validated,
+                        raw_request,
+                        messages,
+                        operation_id,
+                        SemanticTurnBudget {
+                            cancellation_token,
+                            deadline_at_ms: record.deadline_at_ms,
+                        },
+                    )
+                    .await;
+                    plan_local_meta(
+                        &validated,
+                        messages,
+                        &resolved_artifacts,
+                        semantic_projection,
+                    )
+                    .and_then(|plan| {
+                        let projection = plan
+                            .river_projection
+                            .as_ref()
+                            .map(freeze_river_projection)
+                            .transpose()?;
+                        Ok((projection, plan.continuation, plan.mark_history))
+                    })
+                };
+                match planned {
+                    Err(error) => (
+                        VcpCliResultEnvelope::error(
+                            VcpCliErrorCode::UnsupportedMode,
+                            error,
+                            "Remove the unsupported meta field and retry.",
+                        ),
+                        LocalContinuationPolicy::Continue,
+                        validated.meta.ink.is_some(),
+                        None,
+                    ),
+                    Ok((projection, continuation, mark_history)) => {
+                        ensure_claimed_work_allowed(record, cancellation_token)?;
+                        let projection = match projection {
+                            Some(projection) => Some(
+                                bind_tool_projection(
+                                    pool,
+                                    &record.turn_attempt,
+                                    operation_id,
+                                    &projection,
+                                    now_ms()?,
+                                )
+                                .await?,
+                            ),
+                            None => None,
+                        };
+                        if matches!(
+                            continuation,
+                            LocalContinuationPolicy::Parallel | LocalContinuationPolicy::NoReply
+                        ) {
+                            force_background(&mut validated.action);
+                        }
+                        let runtime_projection = projection.as_ref().map(|projection| {
+                            thaw_river_projection(projection, &resolved_artifacts)
+                        });
+                        ensure_claimed_work_allowed(record, cancellation_token)?;
+                        let runtime = app.state::<MobileCliRuntimeState>();
+                        let response = runtime
+                            .execute_with_turn_admission(
+                                app,
+                                ExecuteVcpMobileCliRequest {
+                                    operation_id: operation_id.to_string(),
+                                    action: validated.action,
+                                    session_id: Some(local_cli_session_id(record)),
+                                    river_projection: runtime_projection,
+                                },
+                                cancellation_token.clone(),
+                                record.deadline_at_ms,
+                            )
+                            .await?;
+                        (response.envelope, continuation, mark_history, projection)
                     }
-                    let projection =
-                        plan.river_projection
-                            .map(|projection| VcpCliRiverProjectionInput {
-                                canonical_json: projection.canonical_json,
-                                sha256: projection.sha256,
-                                size_bytes: projection.size_bytes,
-                                artifact_grants: projection
-                                    .artifact_grants
-                                    .into_iter()
-                                    .map(|grant| VcpCliArtifactGrantInput {
-                                        source_path: grant.source_path,
-                                        file_name: grant.file_name,
-                                        guest_path: grant.guest_path,
-                                        size_bytes: grant.size_bytes,
-                                        sha256: grant.sha256,
-                                    })
-                                    .collect(),
-                            });
-                    let runtime = app.state::<MobileCliRuntimeState>();
-                    let response = runtime
-                        .execute(
-                            app,
-                            ExecuteVcpMobileCliRequest {
-                                operation_id: operation_id.to_string(),
-                                action: validated.action,
-                                session_id: Some(local_cli_session_id(record)),
-                                river_projection: projection,
-                            },
-                        )
-                        .await?;
-                    (response.envelope, plan.continuation, plan.mark_history)
                 }
             }
-        }
-    };
+        };
     let local_payload = serialize_local_model_payload(&result)
         .map_err(|error| format!("cannot serialize local CLI result payload: {error}"))?;
     if local_payload.len() > MAX_TOOL_PAYLOAD_BYTES {
-        return Err("local CLI result payload exceeds its hard byte limit".to_string());
+        return Err(ClaimedToolError::RetryPending(
+            "local CLI result payload exceeds its hard byte limit".to_string(),
+        ));
     }
     // Mobile currently has no ShowVCP toggle, so every local call receives the bounded existing
     // ToolResult projection in final history. `mark_history` remains durable force-persist metadata
     // for a future explicit hide policy.
-    let marked = Some(marked_history_block(operation_id, &result));
+    let marked = Some(marked_history_block_with_projection(
+        operation_id,
+        &result,
+        durable_projection.as_ref(),
+    ));
     store_tool_result(
         pool,
         &record.turn_attempt,
@@ -616,6 +780,155 @@ async fn execute_claimed_tool<R: Runtime>(
     )
     .await?;
     Ok((operation_id.to_string(), result, local_payload, policy))
+}
+
+fn freeze_river_projection(projection: &RiverProjection) -> Result<DurableRiverProjection, String> {
+    let durable = DurableRiverProjection {
+        canonical_json: projection.canonical_json.clone(),
+        sha256: projection.sha256.clone(),
+        size_bytes: projection.size_bytes,
+        artifacts: projection
+            .artifact_grants
+            .iter()
+            .map(|grant| DurableRiverArtifact {
+                file_name: grant.file_name.clone(),
+                guest_path: grant.guest_path.clone(),
+                size_bytes: grant.size_bytes,
+                sha256: grant.sha256.clone(),
+            })
+            .collect(),
+    };
+    let actual = format!("{:x}", Sha256::digest(durable.canonical_json.as_bytes()));
+    if durable.size_bytes != durable.canonical_json.len() as u64 || durable.sha256 != actual {
+        return Err("River projection changed before durable bind".to_string());
+    }
+    Ok(durable)
+}
+
+fn thaw_river_projection(
+    projection: &DurableRiverProjection,
+    resolved_artifacts: &HashMap<String, crate::vcp_modules::file_manager::AttachmentCasFile>,
+) -> VcpCliRiverProjectionInput {
+    let artifact_grants = projection
+        .artifacts
+        .iter()
+        .filter_map(|artifact| {
+            let source = resolved_artifacts.get(&artifact.sha256)?;
+            (source.sha256 == artifact.sha256 && source.size_bytes == artifact.size_bytes).then(
+                || VcpCliArtifactGrantInput {
+                    source_path: source.path.clone(),
+                    file_name: artifact.file_name.clone(),
+                    guest_path: artifact.guest_path.clone(),
+                    size_bytes: artifact.size_bytes,
+                    sha256: artifact.sha256.clone(),
+                },
+            )
+        })
+        .collect();
+    VcpCliRiverProjectionInput {
+        canonical_json: projection.canonical_json.clone(),
+        sha256: projection.sha256.clone(),
+        size_bytes: projection.size_bytes,
+        artifact_grants,
+        expected_artifact_grants: projection.artifacts.len(),
+    }
+}
+
+async fn resolve_semantic_projection<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: &Pool<Sqlite>,
+    request: &super::protocol::ValidatedVcpCliRequest,
+    raw_request: &super::protocol::RawVcpToolRequest,
+    messages: &[Value],
+    operation_id: &str,
+    budget: SemanticTurnBudget<'_>,
+) -> Option<SemanticProjectionPlan> {
+    let Some(VcpRiverMode::Semantic(limit)) = request.meta.river else {
+        return None;
+    };
+    let profile = match super::semantic::embedded_semantic_profile() {
+        Ok(profile) => profile,
+        Err(error) => {
+            log::warn!("[VCPMobileCLI] semantic profile unavailable: {error}");
+            let fallback = fallback_last_semantic_selection(
+                messages,
+                limit,
+                super::semantic::FROZEN_SEMANTIC_MODEL_ID.to_string(),
+            );
+            return build_semantic_projection(
+                messages,
+                &fallback,
+                limit,
+                Some("semantic_unavailable"),
+            )
+            .ok();
+        }
+    };
+    let fields = raw_request
+        .fields
+        .iter()
+        .map(|field| (field.key.clone(), field.value.clone()))
+        .collect::<Vec<_>>();
+    let candidates = semantic_candidates(messages);
+    let query = super::semantic::semantic_query_from_args(&fields);
+    let selection = match (query, candidates) {
+        (Ok(query), Ok(candidates)) if !candidates.is_empty() => {
+            let runtime = app.state::<MobileCliRuntimeState>();
+            let assets = runtime.semantic_asset_paths(app, operation_id).await;
+            match assets {
+                Ok((model, tokenizer)) => {
+                    let owner = app.state::<super::semantic::LocalEmbeddingOwner>();
+                    match now_ms().and_then(|value| {
+                        i64::try_from(value)
+                            .map_err(|_| "semantic timestamp exceeds SQLite range".to_string())
+                    }) {
+                        Ok(timestamp) => {
+                            owner
+                                .select(
+                                    pool,
+                                    super::semantic::SemanticSelectRequest {
+                                        model_path: &model,
+                                        tokenizer_path: &tokenizer,
+                                        query: &query,
+                                        candidates: &candidates,
+                                        limit: usize::from(limit),
+                                        now_ms: timestamp,
+                                        cancellation_token: budget.cancellation_token.clone(),
+                                        deadline_at_ms: budget.deadline_at_ms,
+                                    },
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (_, Ok(_)) => Err("semantic candidates are empty".to_string()),
+    };
+    match selection {
+        Ok(selection) => build_semantic_projection(messages, &selection, limit, None).ok(),
+        Err(error) => {
+            log::warn!(
+                "[VCPMobileCLI] semantic selection unavailable; using last:{limit}: {}",
+                stable_semantic_error(&error)
+            );
+            let fallback = fallback_last_semantic_selection(messages, limit, profile.model_id);
+            build_semantic_projection(messages, &fallback, limit, Some("semantic_unavailable")).ok()
+        }
+    }
+}
+
+fn stable_semantic_error(error: &str) -> &'static str {
+    if error.contains("cache") {
+        "cache_unavailable"
+    } else if error.contains("candidate") || error.contains("query") {
+        "input_unavailable"
+    } else {
+        "model_unavailable"
+    }
 }
 
 async fn verified_river_full_artifacts<R: Runtime>(
@@ -675,12 +988,15 @@ async fn verified_river_full_artifacts<R: Runtime>(
 enum ClaimedRecoveryError {
     RetryPending(String),
     Integrity(String),
+    Cancelled,
+    Deadline,
 }
 
 async fn recover_claimed_batch<R: Runtime>(
     app: &AppHandle<R>,
     pool: &Pool<Sqlite>,
     record: &LocalCliTurnRecord,
+    cancellation_token: &CancellationToken,
 ) -> Result<LocalCliTurnRecord, ClaimedRecoveryError> {
     let (step_records, raw_requests) =
         validate_closed_batch(record).map_err(ClaimedRecoveryError::Integrity)?;
@@ -706,11 +1022,15 @@ async fn recover_claimed_batch<R: Runtime>(
             record,
             raw_request,
             &step.operation_id,
-            &step.tool_digest,
             messages,
+            cancellation_token,
         )
         .await
-        .map_err(ClaimedRecoveryError::RetryPending)?;
+        .map_err(|error| match error {
+            ClaimedToolError::RetryPending(error) => ClaimedRecoveryError::RetryPending(error),
+            ClaimedToolError::Cancelled => ClaimedRecoveryError::Cancelled,
+            ClaimedToolError::Deadline => ClaimedRecoveryError::Deadline,
+        })?;
     }
     load_live_turn(pool, &record.outer_message_id)
         .await
@@ -950,9 +1270,13 @@ fn durable_tool_result_prefix(record: &LocalCliTurnRecord) -> Option<String> {
         .step_records
         .iter()
         .filter_map(|step| {
-            step.result
-                .as_ref()
-                .map(|result| marked_history_block(&step.operation_id, result))
+            step.result.as_ref().map(|result| {
+                marked_history_block_with_projection(
+                    &step.operation_id,
+                    result,
+                    step.river_projection.as_ref(),
+                )
+            })
         })
         .collect::<Vec<_>>();
     (!summaries.is_empty()).then(|| format!("{}\n\n", summaries.join("\n\n")))
@@ -1039,6 +1363,7 @@ mod tests {
                 tool_digest: tool_digest(request).expect("digest"),
                 operation_id: format!("operation-{index}"),
                 assistant_content: assistant_content.to_string(),
+                river_projection: None,
                 local_payload: None,
                 result: None,
                 mark_history: false,
@@ -1189,6 +1514,24 @@ mod tests {
         claimed.step_records[0].should_continue = true;
         let records = claimed.step_records.iter().collect::<Vec<_>>();
         assert!(result_ready_should_continue(&records));
+    }
+
+    #[test]
+    fn claimed_tool_guard_stops_before_runtime_on_cancel_or_deadline() {
+        let mut claimed = record(LocalCliTurnState::Claimed, "tool request");
+        claimed.deadline_at_ms = u64::MAX;
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            ensure_claimed_work_allowed(&claimed, &cancelled),
+            Err(ClaimedToolError::Cancelled)
+        ));
+
+        claimed.deadline_at_ms = 0;
+        assert!(matches!(
+            ensure_claimed_work_allowed(&claimed, &CancellationToken::new()),
+            Err(ClaimedToolError::Deadline)
+        ));
     }
 
     #[test]

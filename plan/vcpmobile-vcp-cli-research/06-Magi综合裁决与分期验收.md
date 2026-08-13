@@ -202,7 +202,7 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 - 工具错误可被 Agent 修正，安全拒绝不可绕过；
 - local 模式中央 VCPToolBox 不抢执行；
 - finalizer exact-once，历史无重复 assistant/result；
-- `river=text/last:N` 只生成 attempt 只读 projection，不泄漏过滤内容；无本机索引时 `river=semantic:N`/`vref:N` 明确 `unsupported_mode`。
+- `river=text/last:N` 只生成 attempt-private、source-unreachable、non-writeback 副本；guest 可改写自己的副本，但 canonical source 不挂载且 host 启动后不再读取，不泄漏过滤内容；P2 基线对尚未进入后续分期的 `river=semantic:N`/`vref:N` 明确 `unsupported_mode`（P4.3 已在此后仅为 local semantic 打开能力）。
 
 ### P3｜可选真实 VCP 插件
 
@@ -242,14 +242,21 @@ P4 按以下顺序施工，任一层未通过不得靠下一层掩盖：
 5. **P4.4｜`vref:N`**：先建立显式 knowledge grant/catalog，再做向量选取、文件去重和 attempt copy。
    VCPToolBox 主机 `file://` 与远端 artifact transport 仍是独立协议。
 
-2026-08-14 实施状态：P4.1 与 P4.2 产品代码及静态/回归门已完成。`river=full` 使用
+2026-08-14 实施状态：P4.1、P4.2 与 P4.3 产品代码及静态/回归门已完成。`river=full` 使用
 `AttemptProjectionBundleV1`，最多 16 个附件、单个 64 MiB、总计 256 MiB；canonical CAS 先经
 数据库关系、direct-file、size 与 SHA-256 复核，再复制到 attempt 目录。Android 只校验并 bind
-这些副本，`omissions` 保留稳定省略原因。API 36 的真实 guest 读取与改写副本/原 CAS 不变仍待验收。
+这些副本，`omissions` 保留稳定省略原因。`river=semantic:N` 使用冻结的 64 维 Model2Vec 静态资产、
+紧凑 BPE、只读 mmap、20,000 行派生向量缓存和 deterministic brute-force cosine；单 selection permit、
+60 秒工作预算、outer cancellation/deadline 在 Runtime 前封住 Bash 启动。semantic 不可用时持久化
+`fallback_last` 并在 ToolResult 显示稳定原因，恢复不重新选取。P4.2 API 36 的真实 guest 读取/改写副本
+与原 CAS 不变、P4.3 API 26/36 App PSS/低存储/50 次冷热召回/温升与故障注入仍待设备验收。
+当前 `assembleArm64Debug` 已成功，Debug APK 为 84,528,816 bytes；两项 semantic asset 的 APK 压缩条目
+合计 28,034,833 bytes，解压字节/hash 与 profile 一致。该门只关闭包接线与 Debug 体积事实，不替代
+Release APK、安装/首用磁盘峰值或上述设备资源验收。
 
 交付：
 
-- Skill 版本/变更失效、二进制 assets artifact 与只读 runtime path 联动；manifest 之外不增加 Mobile Skill 提示词注入；
+- Skill 版本/变更失效、二进制 assets artifact 与经 hash 校验的 non-writeback runtime 副本联动；manifest 之外不增加 Mobile Skill 提示词注入；
 - `river=full` 的多模态权限/大小过滤；
 - `river=semantic:N` 的本机会话向量索引与 `last:N` 回退；
 - `vref:N` 的本机知识向量索引、Top-N 文件去重与 source-unreachable/non-writeback grant；

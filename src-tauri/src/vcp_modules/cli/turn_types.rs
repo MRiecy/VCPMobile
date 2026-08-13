@@ -98,12 +98,33 @@ pub struct LocalCliStepRecord {
     pub tool_digest: String,
     pub operation_id: String,
     pub assistant_content: String,
+    #[serde(default)]
+    pub river_projection: Option<DurableRiverProjection>,
     pub local_payload: Option<String>,
     pub result: Option<VcpCliResultEnvelope>,
     pub mark_history: bool,
     pub should_continue: bool,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DurableRiverProjection {
+    pub canonical_json: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub artifacts: Vec<DurableRiverArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DurableRiverArtifact {
+    pub file_name: String,
+    pub guest_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

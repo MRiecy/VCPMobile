@@ -67,14 +67,17 @@ Mobile 本地回环映射：该字段在 P2 就实现。即使用户关闭普通
 
 | 值 | 上游语义 | Mobile 本地回环裁决 |
 |---|---|---|
-| `full` | 原始多模态上下文 | P4；只暴露 Mobile 已拥有且通过附件/秘密/总大小策略的内容 |
+| `full` | 原始多模态上下文 | P4.2 已实现；只暴露 Mobile 已拥有且通过附件/秘密/总大小策略的内容 |
 | `text` | 纯文本上下文 | P2 首发；保留 role/content，总输出有界 |
 | `last:N` | 最近 N 条纯文本消息 | P2 首发；N 限制 `1..50`，再受总字节预算夹紧 |
-| `semantic:N` | 用工具参数作 query 选 N 条，失败回退 `last:N` | P4；仅在本机会话向量索引存在时宣称语义等价 |
+| `semantic:N` | 用工具参数作 query 选 N 条，失败回退 `last:N` | P4.3 已为 `localLoopback` 实现；固定离线模型失败时显式回退 |
 
-CLI 普通命令默认不需要把整段聊天写进 argv。`LocalVcpMetaProcessor` 在命令启动前选取上下文，将有界 JSON 写入 attempt 临时只读文件，并仅向该 Job 注入 `VCP_RIVER_CONTEXT_FILE`。不把多消息 JSON 塞进 command/argv/env 值，Job 终态后按策略清理。真实 VCP route 仍由 VCPToolBox 以 `args.river_context` 处理；两路的内容选择语义相同，交付形式按 Shell 边界调整。
+CLI 普通命令默认不需要把整段聊天写进 argv。`LocalVcpMetaProcessor` 在命令启动前选取上下文，将有界 JSON 写入 attempt-private、source-unreachable、non-writeback 副本，并仅向该 Job 注入 `VCP_RIVER_CONTEXT_FILE`。guest 可以改写自己的副本，但 canonical source 不挂载、host 在启动后不再读取该副本；Job 终态后按策略清理。不把多消息 JSON 塞进 command/argv/env 值。VCPToolBox 的 `args.river_context` 仅作为上游语义参考；Mobile 当前 `vcpPlugin` route 在 Runtime 前拒绝 river，不物化远端 river。
 
-`semantic:N` 的本地等价 fixture 必须固定上游选取方式：用普通工具 args 中的非空字符串拼接查询（最多 2000 字符），对纯文本长度大于 10 的消息计算相似度，取 Top-N 后恢复原会话顺序；向量不可用或失败时回退 `last:N`。若本机索引尚未启用，不在实际执行时临时请求远端 embedding 并宣称这是离线能力。
+`semantic:N` 的本地实现固定上游选取方式：用普通工具 args 中的非空字符串拼接查询（最多 2000
+UTF-8 bytes），对纯文本长度大于 10 的消息计算相似度，取 Top-N 后恢复原会话顺序；向量、缓存或
+Android 资产不可用时回退 `last:N`。整个路径不请求远端 embedding；`vcpPlugin` route 仍在 Runtime 前
+返回 `unsupported_mode`，不能把本地资产能力冒充为远端物化能力。
 
 ### 3.3 `vref:N`
 
@@ -85,7 +88,7 @@ CLI 普通命令默认不需要把整段聊天写进 argv。`LocalVcpMetaProcess
 分两种显式能力：
 
 - `vcp_plugin`：VCPToolBox 可继续负责语义选择。P3 已冻结为“不物化远程引用”：对 river/vref 与 VCPToolBox 主机 `file://` URL 在 Runtime 前返回 `unsupported_mode`/引用不可达，不得把它当成 guest 文件。带 hash/size/MIME 的受权 artifact 物化协议属于 P4。
-- `local_loopback`：P2 返回 `unsupported_mode`；P4 增加真实本机向量索引和 knowledge grant 后，将 Top-N 文件投影到 attempt 只读目录，通过 `VCP_VREF_DIR` 暴露。不得返回 host `file://` 路径，也不得用关键字搜索冒充语义召回。
+- `local_loopback`：P2 返回 `unsupported_mode`；P4 增加真实本机向量索引和 knowledge grant 后，将 Top-N 文件复制为 attempt-private、source-unreachable、non-writeback 副本，通过 `VCP_VREF_DIR` 暴露。guest 可改写副本但不得回写 canonical source；不得返回 host `file://` 路径，也不得用关键字搜索冒充语义召回。
 
 `river/vref` 上游证据：[`toolExecutor.js@311dc42`](https://github.com/lioensky/VCPToolBox/blob/311dc42e8374afd1867bd1b5c06217baf8b0f463/modules/vcpLoop/toolExecutor.js#L192-L320)。
 
@@ -130,6 +133,11 @@ P4 不复用 FTS5、LightMemo 或 RAG observer 冒充向量召回，也不在 Al
 混入均值，使同一句话受同批最长句影响；Mobile 明确排除 padding，并以单文本、批次重排、重启三组测试
 固定确定性。
 
+构建脚本会先逐字校验上表三个上游输入，再校验 tokenizer 的 Split + ByteLevel pre-tokenizer、
+`<|endoftext|>` AddedToken、padding/decoder 与 BPE flags；任何字段漂移都拒绝重建。Rust 侧已覆盖
+AddedToken 的 `single_word/lstrip/rstrip` 边界、中英/emoji/空白长输入与冻结 token-ID digest；embedding
+使用 float64 权重和累加，归一化后才落为 64 维 f32 派生缓存。
+
 2026-08-14 在 OPPO PHZ110、Android 16/API 36、arm64 上的独立进程 spike：通用 `tokenizers`
 实现首次/热运行峰值均约 237 MiB、总时长约 0.87–0.89 秒，否决；紧凑 pack + mmap 首次峰值
 18,748 KiB、总时长 51.8 ms，热运行峰值 16,376–16,536 KiB、总时长 16.7–27.1 ms，六条中英 fixture
@@ -140,6 +148,12 @@ P4 不复用 FTS5、LightMemo 或 RAG observer 冒充向量召回，也不在 Al
 向量缓存是可丢弃的派生数据，schema migration 不同步回填；首次需要时分批构建，失败时
 `river=semantic:N` 按协议回退 `last:N`。`vref` 只有在显式 knowledge grant/catalog 建立后才可打开，
 不能把附件数据库中的 `internal_path` 本身当作授权。
+
+P4.3 的产品 owner 是单个 `LocalEmbeddingOwner`：所有 selection 共用一个 permit，候选集最多 512 条/
+4 MiB，每次 selection 最多工作 60 秒，并检查 turn cancellation 与绝对 deadline。SQLite 只按本次候选
+hash 分块读取，最多保留 20,000 行；旧 model ID、LRU 超限以及非单位/零/NaN 缓存向量都会被清理或重算。
+选取完成或 fallback 后，canonical River JSON 会先与 operation ID 一起持久化，再允许 Runtime 启动命令；
+恢复只重放这些字节，不因模型可用性变化重新选取。
 
 ## 4. 本地回环元协议 owner
 
@@ -165,9 +179,9 @@ MetaProcessor 拥有 N/字节上限、附件与秘密过滤、临时文件生命
 |---|---|---|---|
 | VCP marker/escape/think 排除 | fixture 冻结 | 必须 | 回归 |
 | `ink=mark_history` | 识别并保留 | 有界历史摘要 | 与全局详情设置联测 |
-| `river=text/last:N` | 识别与值校验 | 只读 JSON projection | 语义与预算回归 |
+| `river=text/last:N` | 识别与值校验 | attempt-private、source-unreachable、non-writeback JSON 副本 | 语义与预算回归 |
 | `river=full` | 识别 | P4.2 已开放：有界 descriptor + attachment attempt copy | API 36 guest 读取/写攻击回归 |
-| `river=semantic:N` | 识别 | 明确 unsupported | 本机会话向量索引；失败回退 `last:N` |
+| `river=semantic:N` | 识别 | P2 基线 unsupported；P4.3 已仅为 local 打开 | 固定离线模型 + 派生缓存；失败显式回退 `last:N`，远端仍 unsupported |
 | `vref:N` | 识别；P4 收紧为 `1..50` | local 明确 unsupported；VCP route 仅主机 `file://` 时也 unsupported | 本机知识索引 + attempt copy grant；远端需引用物化 |
 | `archery=true` | 识别 | 映射异步 Job，成功不阻塞本轮 | 并发与通知完整化 |
 | `archery=no_reply` | 识别 | 成功不回灌/不续轮；失败仍可见 | VCPLog/通知联测 |
@@ -183,4 +197,4 @@ MetaProcessor 拥有 N/字节上限、附件与秘密过滤、临时文件生命
 5. 插件关闭或远端断开时不发布真实 VCP manifest；若用户保留工具说明，调用会收到明确执行错误，不声称成功。
 6. `action=list_skills|read_skill` 可在飞行模式下列出/阅读已安装且校验通过的 Skill，不接受路径穿越，不自动执行脚本，也不因目录变更改写 Agent 提示词或 VCP 记忆。
 7. `ink/river/vref/archery` 每种 fixture 都证明保留字段不会进入 Bash command/argv；只有受控的 projection file 路径可以通过专用 env 名进入目标 Job。
-8. `river=text/last:N` 的 local fixture 与上游选取结果一致；`river=full` 只复制 hash/size 校验通过的附件，省略项带稳定原因且 canonical CAS 无 write-back；`river=semantic:N`/`vref:N` 在索引或引用物化不可用时稳定返回标注 route/capability 的 `unsupported_mode`，不执行命令。
+8. `river=text/last:N` 的 local fixture 与上游选取结果一致；`river=full` 只复制 hash/size 校验通过的附件，省略项带稳定原因且 canonical CAS 无 write-back；`river=semantic:N` 在 local 模型/缓存不可用时把 durable `fallback_last` 与稳定原因写入 projection/ToolResult 后继续命令，取消或 turn deadline 后不得启动命令；`vref:N` 以及远端 river/vref 仍稳定返回标注 route/capability 的 `unsupported_mode`。

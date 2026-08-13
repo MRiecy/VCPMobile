@@ -16,6 +16,7 @@ use super::protocol::{
     ValidatedVcpCliRequest, VcpArcheryMode, VcpMetaCapabilities, VcpMetaFields, VcpRiverMode,
 };
 use super::result::VcpCliResultEnvelope;
+use super::semantic::{MAX_SEMANTIC_CANDIDATES, MAX_SEMANTIC_CANDIDATE_BYTES};
 use super::turn_types::{
     MAX_MARKED_HISTORY_BYTES, MAX_RIVER_ARTIFACTS, MAX_RIVER_ARTIFACT_BYTES,
     MAX_RIVER_ARTIFACT_TOTAL_BYTES, MAX_RIVER_ATTACHMENT_DESCRIPTORS, MAX_RIVER_MESSAGES,
@@ -56,6 +57,13 @@ pub struct LocalMetaPlan {
     pub mark_history: bool,
     pub river_projection: Option<RiverProjection>,
     pub continuation: LocalContinuationPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticProjectionPlan {
+    pub canonical_json: String,
+    pub sha256: String,
+    pub size_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -119,26 +127,150 @@ pub fn plan_local_meta(
     request: &ValidatedVcpCliRequest,
     messages: &[Value],
     resolved_artifacts: &HashMap<String, AttachmentCasFile>,
+    semantic_projection: Option<SemanticProjectionPlan>,
 ) -> Result<LocalMetaPlan, String> {
+    let (mark_history, continuation) = plan_local_policy(request)?;
+
+    let river_projection = match request.meta.river {
+        Some(VcpRiverMode::Semantic(_)) => Some(
+            semantic_projection
+                .map(|projection| RiverProjection {
+                    canonical_json: projection.canonical_json,
+                    sha256: projection.sha256,
+                    size_bytes: projection.size_bytes,
+                    artifact_grants: Vec::new(),
+                })
+                .ok_or_else(|| "semantic projection was not resolved".to_string())?,
+        ),
+        Some(mode) => Some(build_river_projection_with_artifacts(
+            messages,
+            mode,
+            resolved_artifacts,
+        )?),
+        None => None,
+    };
+    Ok(LocalMetaPlan {
+        mark_history,
+        river_projection,
+        continuation,
+    })
+}
+
+pub fn plan_local_policy(
+    request: &ValidatedVcpCliRequest,
+) -> Result<(bool, LocalContinuationPolicy), String> {
     request
         .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
         .map_err(|error| format!("{}: {error}", error.code.as_str()))?;
-
-    let river_projection = request
-        .meta
-        .river
-        .map(|mode| build_river_projection_with_artifacts(messages, mode, resolved_artifacts))
-        .transpose()?;
     let continuation = match request.meta.archery {
         Some(VcpArcheryMode::Parallel) => LocalContinuationPolicy::Parallel,
         Some(VcpArcheryMode::NoReply) => LocalContinuationPolicy::NoReply,
         None => LocalContinuationPolicy::Continue,
     };
-    Ok(LocalMetaPlan {
-        mark_history: request.meta.ink.is_some(),
-        river_projection,
-        continuation,
-    })
+    Ok((request.meta.ink.is_some(), continuation))
+}
+
+pub fn semantic_candidates(
+    messages: &[Value],
+) -> Result<Vec<super::semantic::SemanticCandidate>, String> {
+    let candidates = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(source_index, value)| {
+            let projected = project_river_message(source_index, value, false)?;
+            let (content_sha256, text) =
+                super::semantic::semantic_content(&projected.message.content)?;
+            Some(super::semantic::SemanticCandidate {
+                source_index,
+                content_sha256,
+                text,
+            })
+        })
+        .collect::<Vec<_>>();
+    let total_bytes = candidates
+        .iter()
+        .try_fold(0_usize, |total, candidate| {
+            total.checked_add(candidate.text.len())
+        })
+        .ok_or_else(|| "semantic candidate byte count overflowed".to_string())?;
+    if candidates.len() > MAX_SEMANTIC_CANDIDATES || total_bytes > MAX_SEMANTIC_CANDIDATE_BYTES {
+        return Err("semantic candidate set exceeds its bounded local budget".to_string());
+    }
+    Ok(candidates)
+}
+
+pub fn fallback_last_semantic_selection(
+    messages: &[Value],
+    limit: u8,
+    model_id: String,
+) -> super::semantic::SemanticSelection {
+    let mut source_indices = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, value)| project_river_message(index, value, false).map(|_| index))
+        .take(usize::from(limit).min(MAX_RIVER_MESSAGES))
+        .collect::<Vec<_>>();
+    source_indices.reverse();
+    super::semantic::SemanticSelection {
+        source_indices,
+        model_id,
+    }
+}
+
+pub fn build_semantic_projection(
+    messages: &[Value],
+    selection: &super::semantic::SemanticSelection,
+    requested_limit: u8,
+    fallback_reason: Option<&str>,
+) -> Result<SemanticProjectionPlan, String> {
+    let selected = selection
+        .source_indices
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    let mut projected = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| selected.contains(index))
+        .filter_map(|(index, value)| project_river_message(index, value, false))
+        .collect::<Vec<_>>();
+    let resolved_mode = if fallback_reason.is_some() {
+        "fallback_last"
+    } else {
+        "semantic"
+    };
+    let mut truncated = false;
+    loop {
+        let document = serde_json::json!({
+            "schema": ATTEMPT_PROJECTION_SCHEMA,
+            "river": {
+                "mode": format!("semantic:{requested_limit}"),
+                "resolved_mode": resolved_mode,
+                "model_id": selection.model_id,
+                "fallback_reason": fallback_reason,
+                "messages": projected.iter().map(|entry| &entry.message).collect::<Vec<_>>(),
+                "truncated": truncated
+            },
+            "artifacts": [],
+            "omissions": []
+        });
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|error| format!("cannot serialize semantic projection: {error}"))?;
+        if bytes.len() <= MAX_RIVER_PROJECTION_BYTES {
+            return Ok(SemanticProjectionPlan {
+                canonical_json: String::from_utf8(bytes.clone())
+                    .map_err(|error| format!("semantic projection is not UTF-8: {error}"))?,
+                sha256: format!("{:x}", Sha256::digest(&bytes)),
+                size_bytes: bytes.len() as u64,
+            });
+        }
+        truncated = true;
+        if projected.is_empty() {
+            return Err("semantic projection overhead exceeds its hard limit".to_string());
+        }
+        projected.remove(0);
+    }
 }
 
 pub fn unsupported_meta_envelope(request: &ValidatedVcpCliRequest) -> Option<VcpCliResultEnvelope> {
@@ -562,6 +694,14 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 }
 
 pub fn marked_history_block(operation_id: &str, result: &VcpCliResultEnvelope) -> String {
+    marked_history_block_with_projection(operation_id, result, None)
+}
+
+pub fn marked_history_block_with_projection(
+    operation_id: &str,
+    result: &VcpCliResultEnvelope,
+    projection: Option<&super::turn_types::DurableRiverProjection>,
+) -> String {
     let (status, code) = match result {
         VcpCliResultEnvelope::Success { .. } => ("success", None),
         VcpCliResultEnvelope::Error { code, .. } => ("error", Some(code.as_str())),
@@ -575,6 +715,7 @@ pub fn marked_history_block(operation_id: &str, result: &VcpCliResultEnvelope) -
     if let Some(code) = code {
         details.push(format!("- 错误码: {code}"));
     }
+    details.extend(projection_summary_lines(projection));
     if let Some(job) = &body.job {
         details.push(format!("- Job ID: {}", redact_river_text(&job.id)));
         details.push(format!("- Job状态: {:?}", job.state).to_ascii_lowercase());
@@ -603,6 +744,44 @@ pub fn marked_history_block(operation_id: &str, result: &VcpCliResultEnvelope) -
         block.push_str("\nVCP调用结果结束]]");
     }
     block
+}
+
+fn projection_summary_lines(
+    projection: Option<&super::turn_types::DurableRiverProjection>,
+) -> Vec<String> {
+    let Some(river) = projection
+        .and_then(|projection| serde_json::from_str::<Value>(&projection.canonical_json).ok())
+        .and_then(|document| document.get("river").cloned())
+    else {
+        return Vec::new();
+    };
+    let Some(mode) = river.get("mode").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    if let Some(limit) = mode
+        .strip_prefix("semantic:")
+        .and_then(|value| value.parse::<u8>().ok())
+        .filter(|limit| (1..=50).contains(limit))
+    {
+        if river.get("resolved_mode").and_then(Value::as_str) == Some("fallback_last") {
+            return vec![
+                format!("- 上下文选择: semantic:{limit} → last:{limit}"),
+                "- 回退原因: 本地语义召回暂不可用".to_string(),
+            ];
+        }
+        return vec![format!("- 上下文选择: semantic:{limit}")];
+    }
+    let safe_mode = mode == "text"
+        || mode == "full"
+        || mode
+            .strip_prefix("last:")
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|limit| (1..=50).contains(&limit));
+    if safe_mode {
+        vec![format!("- 上下文选择: {mode}")]
+    } else {
+        Vec::new()
+    }
 }
 
 pub fn append_marked_history(final_content: &str, blocks: &[String]) -> String {
@@ -686,6 +865,58 @@ mod tests {
         assert!(projection.canonical_json.contains("\"truncated\":true"));
         assert!(projection.canonical_json.contains("69:"));
         assert!(!projection.canonical_json.contains("0:"));
+    }
+
+    #[test]
+    fn semantic_projection_preserves_selected_source_order_and_marks_fallback() {
+        let messages = vec![
+            json!({"role":"user", "content":"first eligible semantic message"}),
+            json!({"role":"assistant", "content":"second eligible semantic message"}),
+            json!({"role":"user", "content":"third eligible semantic message"}),
+        ];
+        let candidates = semantic_candidates(&messages).expect("bounded candidates");
+        assert_eq!(candidates.len(), 3);
+        let selection = super::super::semantic::SemanticSelection {
+            source_indices: vec![0, 2],
+            model_id: "model-r2".to_string(),
+        };
+        let projection =
+            build_semantic_projection(&messages, &selection, 2, None).expect("semantic projection");
+        let parsed: Value =
+            serde_json::from_str(&projection.canonical_json).expect("projection JSON");
+        assert_eq!(parsed["river"]["resolved_mode"], "semantic");
+        assert_eq!(parsed["river"]["messages"][0]["source_index"], 0);
+        assert_eq!(parsed["river"]["messages"][1]["source_index"], 2);
+        assert!(parsed["river"]["fallback_reason"].is_null());
+
+        let fallback = fallback_last_semantic_selection(&messages, 2, "model-r2".to_string());
+        let projection =
+            build_semantic_projection(&messages, &fallback, 2, Some("semantic_unavailable"))
+                .expect("fallback projection");
+        let parsed: Value =
+            serde_json::from_str(&projection.canonical_json).expect("fallback JSON");
+        assert_eq!(parsed["river"]["resolved_mode"], "fallback_last");
+        assert_eq!(parsed["river"]["fallback_reason"], "semantic_unavailable");
+        assert_eq!(parsed["river"]["messages"][0]["source_index"], 1);
+        assert_eq!(parsed["river"]["messages"][1]["source_index"], 2);
+        let durable = super::super::turn_types::DurableRiverProjection {
+            canonical_json: projection.canonical_json,
+            sha256: projection.sha256,
+            size_bytes: projection.size_bytes,
+            artifacts: Vec::new(),
+        };
+        let visible = marked_history_block_with_projection(
+            "operation",
+            &VcpCliResultEnvelope::error(
+                VcpCliErrorCode::RuntimeUnavailable,
+                "hidden internal failure",
+                "retry",
+            ),
+            Some(&durable),
+        );
+        assert!(visible.contains("上下文选择: semantic:2 → last:2"));
+        assert!(visible.contains("回退原因: 本地语义召回暂不可用"));
+        assert!(!visible.contains("hidden internal failure"));
     }
 
     #[test]
