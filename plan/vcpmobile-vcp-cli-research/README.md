@@ -1,6 +1,6 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING`
+> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING / P4-DESIGN-FROZEN`
 >
 > 研究日期：2026-08-13
 >
@@ -8,7 +8,8 @@
 > `MobileCliRuntime`、Android ProcessHost、人工前台 UI、Skills action 与持久 Job/输出边界，并完成 API 36
 > 真机验收；P2 已接入单聊/Group 本地多轮 coordinator、持久恢复、VCP 元字段和 typed route。当前只剩
 > 自动 transport guard 与断网续轮的 API 36 最终复验；P3 已完成 Distributed CLI adapter、离线授权与插件中心收口，
-> 仍需真实 VCPToolBox + API 36 端到端验收。完整 recall 与后台能力分别属于 P4/P5。
+> 仍需真实 VCPToolBox + API 36 端到端验收。P4 已完成重新取证、分层裁决和本地语义模型真机
+> feasibility spike，但产品代码尚未施工；后台能力属于 P5。
 
 ## P0 实施快照（2026-08-13）
 
@@ -74,7 +75,22 @@
 - 插件中心使用单 mutation owner、view/scan generation 与可访问 `role=switch`。展开未授权行只审阅元数据；只有 Streaming 工具的显式“读取样本”会执行，OneShot/Interactive/CLI 不因浏览产生副作用。
 - 当前静态/回归门已通过；`registered_tools` 只表示 manifest frame 已交给当前本地 WebSocket writer，因协议无服务端注册 ACK，不把它写成远端确认。
 
-仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4 完整 recall、P5 后台前台
+## P4 施工前快照（2026-08-14）
+
+- P4 不再作为一个同时改 Skill、附件、索引和分布式协议的单块功能施工，而是固定为
+  `P4.0 能力/投影合同 → P4.1 Skill catalog v2 → P4.2 river=full → P4.3 river=semantic → P4.4 vref`。
+  本地与分布式 artifact 物化不是同一批：P4 先闭合本地 attempt copy，远端 hash/size/MIME 传输协议另立验收。
+- 当前仓库只有 SQLite FTS5 词法检索；Diary semantic 依赖远端 LightMemo，RAG observer 只观察远端
+  VCPInfo。三者均不能作为离线 `semantic`/`vref` 的实现或降级宣传。
+- Skill canonical catalog、附件 CAS 和知识源永不挂载进 PRoot。运行时只按稳定 hash 与显式 grant
+  复制到 attempt 私有 snapshot；guest 可以修改自己的副本，但没有 write-back，也看不到 host 路径。
+  这是一条“source unreachable + non-writeback”边界，不冒充内核只读挂载。
+- 本地语义引擎已用固定 revision 的 64 维多语言 Model2Vec 模型完成 API 36/arm64 真机证伪。
+  通用 Hugging Face tokenizer 路径峰值约 237 MiB，不予采用；相同 token 语义经紧凑 BPE pack + mmap
+  后，首次进程峰值 18,748 KiB、总时长约 51.8 ms，热运行峰值约 16.5 MiB、总时长约 16.7 ms。
+  该证据只批准进入产品实现与回归，不等于索引、召回质量或 App 进程集成已经验收。
+
+仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4 产品施工与完整 recall、P5 后台前台
 服务与人工 PTY。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称 Doze 后台长稳。
 
 ## 结论

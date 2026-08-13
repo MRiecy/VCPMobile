@@ -109,6 +109,38 @@ CLI 普通命令默认不需要把整段聊天写进 argv。`LocalVcpMetaProcess
 
 `Lite` 取最低门槛摘要，`Full` 展开全部，`Auto` 做语义选择。它与历史结果、Job 输出、VCP memory 不是一个召回层。上游格式：[`foldProtocol.js@311dc42`](https://github.com/lioensky/VCPToolBox/blob/311dc42e8374afd1867bd1b5c06217baf8b0f463/modules/foldProtocol.js#L1-L69)。
 
+### 3.6 本地语义引擎冻结合同
+
+P4 不复用 FTS5、LightMemo 或 RAG observer 冒充向量召回，也不在 Alpine/PRoot 内安装 Python、ONNX
+或 embedding 服务。首个产品候选固定为：
+
+| 项 | 冻结值 |
+|---|---|
+| 模型 | `Nourh7/granite-embedding-97m-multilingual-r2` |
+| revision | `b77044bfd84eef0b552c5346eeacc851264592b3` |
+| license | MIT；随产品资产保留模型卡与许可归属 |
+| embedding | 64 维、float16 token vectors、float64 token weights、加权 mean 后 L2 normalize |
+| `model.safetensors` | 24,471,328 bytes；SHA-256 `3a416974fe644efa62c0d33970a6403b2a00e0943d376e06dfc1dae85456b10b` |
+| 上游 `tokenizer.json` | 10,614,496 bytes；SHA-256 `ef17d7b13181cf34abaeebaf1c1586eb26aba7affd175d00b1dab9113aad0bdc` |
+| `config.json` | 341 bytes；SHA-256 `f30b0d724a845bf677901851617e816f36686d8719260f2a238fc7ef0e9ae420` |
+
+生产运行时不装载通用 tokenizer JSON。构建期把精确 vocab/merge 合同编译为有版本、hash 和边界校验的
+紧凑只读 pack；运行时 mmap pack 与 safetensors，通过二分查找执行同一 ByteLevel BPE。逐 token fixture
+必须与冻结 tokenizer 一致。上游文件配置了 `BatchLongest` padding，而 Model2Vec 推理库会把 padding ID
+混入均值，使同一句话受同批最长句影响；Mobile 明确排除 padding，并以单文本、批次重排、重启三组测试
+固定确定性。
+
+2026-08-14 在 OPPO PHZ110、Android 16/API 36、arm64 上的独立进程 spike：通用 `tokenizers`
+实现首次/热运行峰值均约 237 MiB、总时长约 0.87–0.89 秒，否决；紧凑 pack + mmap 首次峰值
+18,748 KiB、总时长 51.8 ms，热运行峰值 16,376–16,536 KiB、总时长 16.7–27.1 ms，六条中英 fixture
+的非 padding token ID 逐项一致。该数据是平台 feasibility，不替代真实消息库召回准确率、温升、App PSS
+或 API 26/代表 OEM 验收。
+
+首期消息量有界，向量搜索采用确定性的 brute-force cosine；不先引入 HNSW、sqlite-vec 或平行 daemon。
+向量缓存是可丢弃的派生数据，schema migration 不同步回填；首次需要时分批构建，失败时
+`river=semantic:N` 按协议回退 `last:N`。`vref` 只有在显式 knowledge grant/catalog 建立后才可打开，
+不能把附件数据库中的 `internal_path` 本身当作授权。
+
 ## 4. 本地回环元协议 owner
 
 VCP 通用字段不能由 Bash parser 零散处理。它们在 `VcpCliProtocol` 解析后交给一个 `LocalVcpMetaProcessor`：
@@ -136,7 +168,7 @@ MetaProcessor 拥有 N/字节上限、附件与秘密过滤、临时文件生命
 | `river=text/last:N` | 识别与值校验 | 只读 JSON projection | 语义与预算回归 |
 | `river=full` | 识别 | 明确 unsupported | 多模态权限/大小门后开放 |
 | `river=semantic:N` | 识别 | 明确 unsupported | 本机会话向量索引；失败回退 `last:N` |
-| `vref:N` | 识别 | local 明确 unsupported；VCP route 仅主机 `file://` 时也 unsupported | 本机知识索引 + read-only grant；远端需引用物化 |
+| `vref:N` | 识别；P4 收紧为 `1..50` | local 明确 unsupported；VCP route 仅主机 `file://` 时也 unsupported | 本机知识索引 + attempt copy grant；远端需引用物化 |
 | `archery=true` | 识别 | 映射异步 Job，成功不阻塞本轮 | 并发与通知完整化 |
 | `archery=no_reply` | 识别 | 成功不回灌/不续轮；失败仍可见 | VCPLog/通知联测 |
 | DynamicTools | 记录上游 fixture | 由 VCPToolBox/用户配置 | 不在 Mobile 实现 |

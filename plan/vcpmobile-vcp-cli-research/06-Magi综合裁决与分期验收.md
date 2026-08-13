@@ -228,6 +228,20 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 
 ### P4｜高级 Skill 生命周期与语义元协议
 
+P4 按以下顺序施工，任一层未通过不得靠下一层掩盖：
+
+1. **P4.0｜能力与 artifact bundle 冻结**：统一 `AttemptProjectionBundleV1`/`ArtifactGrantV1`，固定
+   source-unreachable、non-writeback attempt copy、预算、hash、GC 与 `vref=1..50`；远端传输不混入本批。
+2. **P4.1｜Skill catalog v2**：原生 picker → inspect token → 用户确认 → 原子 commit；catalog 记录
+   来源、版本、tree digest、资源清单和 invalid warning。若要给 Bash 使用，只能显式复制到 workspace，
+   canonical Skill 永不 bind、永不自动运行。
+3. **P4.2｜`river=full`**：从消息/附件事实生成有界 descriptor 与 attempt copy；省略项及原因可见，
+   不把 WebView/数据库 host path 当授权。
+4. **P4.3｜`river=semantic:N`**：固定 hash 的 64 维多语言静态模型、紧凑 BPE pack、mmap、派生缓存与
+   brute-force cosine；离线失败按协议回退 `last:N`。
+5. **P4.4｜`vref:N`**：先建立显式 knowledge grant/catalog，再做向量选取、文件去重和 attempt copy。
+   VCPToolBox 主机 `file://` 与远端 artifact transport 仍是独立协议。
+
 交付：
 
 - Skill 版本/变更失效、二进制 assets artifact 与只读 runtime path 联动；manifest 之外不增加 Mobile Skill 提示词注入；
@@ -244,6 +258,15 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 - `river=semantic:N`/`vref:N` 使用真实本机索引且断网可用，不以 LightMemo 远端调用冒充 local；
 - local/VCP schema 和 Agent 工具名不漂移；
 - 各 recall mode 有独立 snapshot/行为测试，不互相冒充。
+
+补充硬门：
+
+- 不使用 PRoot fake-root 的 chmod/bind 宣称只读；验收用 guest 改写副本后 canonical hash 不变且无 write-back；
+- Skill inspect/commit 以 candidate hash、catalog generation、operation ID 防 TOCTOU 与重复导入；失败不替换旧版本；
+- semantic tokenizer 的 token ID 与冻结上游 fixture 一致，排除 padding 后结果不受批次顺序影响；
+- API 36 已测紧凑模型独立进程首次峰值 18,748 KiB、热峰值不超过 16,536 KiB；产品集成后仍须测
+  App PSS、首次索引、50 条查询、温升与 API 26/代表 OEM，不能引用独立 spike 代替；
+- canonical Skill、附件 CAS、知识源和宿主绝对路径不进入 PRoot argv/env、WebView、模型消息或工具结果。
 
 ### P5｜Android best-effort 后台、人工 PTY 与原生命令桥
 
