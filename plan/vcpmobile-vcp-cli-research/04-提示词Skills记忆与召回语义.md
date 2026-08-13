@@ -90,6 +90,13 @@ Android 资产不可用时回退 `last:N`。整个路径不请求远端 embeddin
 - `vcp_plugin`：VCPToolBox 可继续负责语义选择。P3 已冻结为“不物化远程引用”：对 river/vref 与 VCPToolBox 主机 `file://` URL 在 Runtime 前返回 `unsupported_mode`/引用不可达，不得把它当成 guest 文件。带 hash/size/MIME 的受权 artifact 物化协议属于 P4。
 - `local_loopback`：P2 返回 `unsupported_mode`；P4 增加真实本机向量索引和 knowledge grant 后，将 Top-N 文件复制为 attempt-private、source-unreachable、non-writeback 副本，通过 `VCP_VREF_DIR` 暴露。guest 可改写副本但不得回写 canonical source；不得返回 host `file://` 路径，也不得用关键字搜索冒充语义召回。
 
+P4.4 的最小实现已冻结为单一全局 `local_vref` catalog：授权只能由用户在 CLI 页通过 native picker、
+inspect 与二次确认建立；确认即 grant，不给 Agent 增加知识管理 action。知识使用独立 App 私有 CAS，首批
+只收有界 UTF-8 文本/Markdown/代码；最后真实 user 与其前最近 assistant 按 0.7/0.3 合成 query，chunk
+命中按文件去重后取 `1..50`。完整配额、撤权、恢复、`river + vref` 合并预算与 Android 目录 bind 合同见
+[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。在 Runtime/Kotlin/设备门完成前，
+local capability 仍保持关闭。
+
 `river/vref` 上游证据：[`toolExecutor.js@311dc42`](https://github.com/lioensky/VCPToolBox/blob/311dc42e8374afd1867bd1b5c06217baf8b0f463/modules/vcpLoop/toolExecutor.js#L192-L320)。
 
 ### 3.4 `archery`

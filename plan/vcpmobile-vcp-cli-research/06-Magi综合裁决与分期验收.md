@@ -242,6 +242,13 @@ P4 按以下顺序施工，任一层未通过不得靠下一层掩盖：
 5. **P4.4｜`vref:N`**：先建立显式 knowledge grant/catalog，再做向量选取、文件去重和 attempt copy。
    VCPToolBox 主机 `file://` 与远端 artifact transport 仍是独立协议。
 
+P4.4 的 2026-08-14 Magi 复审已完成，施工 ADR 见
+[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。综合裁决选择独立 App 私有知识
+CAS，而不与消息 attachment 共享物理对象；导入确认即单一 `local_vref` grant，首批只接收 bounded UTF-8
+文本/Markdown/代码。Agent 不获得导入、列举、授权或撤权 action，仍只通过 `run + vref:N` 使用；
+capability 只有在 catalog/index、durable selection、Runtime attempt copy、Android `/run/vcp-vref` bind 和
+manifest golden 全部通过后才打开。`vcpPlugin` 保持 unsupported。
+
 2026-08-14 实施状态：P4.1、P4.2 与 P4.3 产品代码及静态/回归门已完成。`river=full` 使用
 `AttemptProjectionBundleV1`，最多 16 个附件、单个 64 MiB、总计 256 MiB；canonical CAS 先经
 数据库关系、direct-file、size 与 SHA-256 复核，再复制到 attempt 目录。Android 只校验并 bind

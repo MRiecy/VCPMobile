@@ -1,6 +1,6 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING / P4.1-P4.3-CODE-COMPLETE / P4.2-API36-E2E-PENDING / P4.3-API26-API36-APP-E2E-PENDING`
+> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING / P4.1-P4.3-CODE-COMPLETE / P4.4-CONTRACT-FROZEN-CODE-PENDING / P4.2-P4.4-DEVICE-GATES-PENDING`
 >
 > 研究日期：2026-08-13
 >
@@ -10,8 +10,8 @@
 > 自动 transport guard 与断网续轮的 API 36 最终复验；P3 已完成 Distributed CLI adapter、离线授权与插件中心收口，
 > 仍需真实 VCPToolBox + API 36 端到端验收。P4.1 已完成 Skill catalog v2 与显式物化，P4.2 已完成
 > 本地 `river=full` 的有界附件 attempt copy；两者仍需 P4.2 API 36 实际 guest 读取/写攻击复验。
-> P4.3 已完成本地离线 `river=semantic:N`、确定性 `last:N` 回退和 durable projection；P4.4 尚未施工，
-> 后台能力属于 P5。
+> P4.3 已完成本地离线 `river=semantic:N`、确定性 `last:N` 回退和 durable projection；P4.4 已冻结独立
+> 本机知识 CAS、显式授权、0.7/0.3 召回、attempt copy 与删除合同，产品代码尚未施工，后台能力属于 P5。
 
 ## P0 实施快照（2026-08-13）
 
@@ -109,6 +109,10 @@
 - `assembleArm64Debug` 已实际成功；Debug APK 为 84,528,816 bytes。包内 model/tokenizer 分别压缩为
   22,368,109 / 5,666,724 bytes（合计 28,034,833 bytes），解压后的 size 与 profile SHA-256 逐字一致。
   该数字是 Debug 构建证据，不冒充 Release APK 体积。
+- P4.4 已通过 Magi 冻结为：用户 UI 以 native picker → inspect → 明确确认建立单一 `local_vref` grant；
+  知识使用独立 512 MiB App 私有 CAS，首批只接收有界 UTF-8 文本/Markdown/代码。Agent 面仍只有
+  `run + vref:N`，不增加知识管理 action；`vcpPlugin` 与远端 `file://` 继续 unsupported。完整施工合同见
+  [07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。
 
 仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4.2 真机 guest 读取/写攻击复验、P4.3 产品设备门、P4.4 vref recall、P5 后台前台
 服务与人工 PTY。其中 P4.3 剩余的是 API 26/36 产品 App PSS、低存储、50 次冷/热召回、温升与故障注入
@@ -166,6 +170,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 | [04-提示词Skills记忆与召回语义.md](./04-提示词Skills记忆与召回语义.md) | manifest 提示词所有权、Skill 文件边界、ink/river/vref | VCPToolBox 提示词治理与高级语义 |
 | [05-iOS未来可选方向.md](./05-iOS未来可选方向.md) | 原生命令、a-Shell/WASI、iSH、后台策略与 App Review 边界 | 后续预研，不进入当前施工 |
 | [06-Magi综合裁决与分期验收.md](./06-Magi综合裁决与分期验收.md) | 三方审查、否决线、P0–P5 路线和硬验收 | 开工与交付门禁 |
+| [07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md) | 独立知识 CAS、显式授权、召回、attempt copy、删除和预算 | P4.4 施工 ADR |
 
 ## 证据快照
 
