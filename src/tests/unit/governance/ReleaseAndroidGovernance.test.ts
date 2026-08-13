@@ -153,6 +153,12 @@ describe('release and Android governance contracts', () => {
     expect(scripts).not.toHaveProperty('memory:refresh');
     expect(scripts).not.toHaveProperty('dev:android');
     expect(scripts).not.toHaveProperty('dev:usb');
+    expect(scripts['android:debug']).toBe(
+      'node tests/e2e-android/scripts/android-debug-agent.cjs',
+    );
+    expect(scripts['android:debug:dev']).toContain('android-debug-agent.cjs dev');
+    expect(scripts['android:debug:logs']).toContain('android-debug-agent.cjs logs');
+    expect(scripts['android:debug:snapshot']).toContain('android-debug-agent.cjs snapshot');
     expect(ciWorkflow).toContain('pnpm audit --audit-level=high');
     expect(ciWorkflow).toContain('pnpm audit:rust');
     expect(ciWorkflow).toContain('cargo test --locked --workspace --lib');

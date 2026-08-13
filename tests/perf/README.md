@@ -39,10 +39,10 @@ approval of thresholds.
 node tests/perf/scripts/measure_apk_size.cjs --apk path/to/app.apk --out tests/perf/reports/apk-size.json
 
 # Cold startup samples
-node tests/perf/scripts/measure_startup_adb.cjs --mode debug --samples 10 --out tests/perf/reports/startup.json
+node tests/perf/scripts/measure_startup_adb.cjs --samples 10 --out tests/perf/reports/startup.json
 
 # Collect dumpsys/logcat snapshots
-node tests/perf/scripts/collect_android_dumpsys.cjs --mode debug --out-dir tests/perf/reports/manual-run
+node tests/perf/scripts/collect_android_dumpsys.cjs --out-dir tests/perf/reports/manual-run
 
 # Compile or run Rust benchmarks
 node tests/perf/scripts/run_rust_bench.cjs --no-run --out-dir tests/perf/reports/rust-bench

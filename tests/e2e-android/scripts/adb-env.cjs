@@ -5,7 +5,7 @@ const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..', '..');
 const DEBUG_PACKAGE = 'com.vcp.avatar.debug';
-const RELEASE_PACKAGE = 'com.vcp.avatar';
+let cachedAdb = null;
 
 function isWindows() {
   return process.platform === 'win32';
@@ -36,17 +36,23 @@ function candidateAdbPaths() {
 }
 
 function findAdb() {
+  if (cachedAdb) {
+    return cachedAdb;
+  }
   if (process.env.ADB) {
-    return process.env.ADB;
+    cachedAdb = process.env.ADB;
+    return cachedAdb;
   }
   for (const candidate of candidateAdbPaths()) {
     if (fs.existsSync(candidate)) {
-      return candidate;
+      cachedAdb = candidate;
+      return cachedAdb;
     }
   }
   const probe = spawnSync(adbName(), ['version'], { encoding: 'utf8' });
   if (probe.status === 0) {
-    return adbName();
+    cachedAdb = adbName();
+    return cachedAdb;
   }
   throw new Error('未找到 adb。请设置 ANDROID_HOME / ANDROID_SDK_ROOT，或将 adb 加入 PATH。');
 }
@@ -69,6 +75,22 @@ function runAdb(args, options = {}) {
     throw new Error(`adb ${finalArgs.join(' ')} failed\n${stdout}\n${stderr}`);
   }
   return result.stdout || '';
+}
+
+function runAdbBuffer(args, options = {}) {
+  const adb = findAdb();
+  const finalArgs = [...adbBaseArgs(), ...args];
+  const result = spawnSync(adb, finalArgs, {
+    encoding: null,
+    stdio: 'pipe',
+    maxBuffer: options.maxBuffer || 32 * 1024 * 1024,
+  });
+  if (result.status !== 0 && !options.allowFailure) {
+    const stderr = result.stderr ? result.stderr.toString('utf8') : '';
+    const stdout = result.stdout ? result.stdout.toString('utf8') : '';
+    throw new Error(`adb ${finalArgs.join(' ')} failed\n${stdout}\n${stderr}`);
+  }
+  return result.stdout || Buffer.alloc(0);
 }
 
 function listDevices() {
@@ -114,15 +136,7 @@ function getDeviceInfo() {
     release: getProp('ro.build.version.release'),
     abi: getProp('ro.product.cpu.abi'),
     packageDebug: DEBUG_PACKAGE,
-    packageRelease: RELEASE_PACKAGE,
   };
-}
-
-function getPackageName(mode) {
-  if (process.env.E2E_PACKAGE) {
-    return process.env.E2E_PACKAGE;
-  }
-  return mode === 'release' ? RELEASE_PACKAGE : DEBUG_PACKAGE;
 }
 
 function timestamp() {
@@ -137,13 +151,12 @@ function ensureDir(dir) {
 module.exports = {
   ROOT,
   DEBUG_PACKAGE,
-  RELEASE_PACKAGE,
   findAdb,
   runAdb,
+  runAdbBuffer,
   listDevices,
   ensureSingleDevice,
   getDeviceInfo,
-  getPackageName,
   timestamp,
   ensureDir,
 };

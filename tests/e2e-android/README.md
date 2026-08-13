@@ -1,40 +1,39 @@
-# Android E2E smoke (adb-only)
+# Android Debug Agent CLI (adb-only)
 
-This directory contains lightweight Android smoke/E2E helpers for VCPMobile.
+This directory contains the tracked, clean-clone-safe Android Debug tool used by
+developers and coding agents. The authoritative contract is
+[`docs/ANDROID_AGENT_DEBUGGING.md`](../../docs/ANDROID_AGENT_DEBUGGING.md).
 
-Current scope:
-
-- adb device discovery
-- APK install / clean install
-- best-effort permission grants
-- launch smoke with logcat/activity/process collection
-
-Maestro is intentionally not introduced in the first implementation batch. The
-current scripts are stable primitives that can later be wrapped by Maestro or
-UIAutomator flows.
-
-## Package names
+The tool has one immutable package boundary:
 
 - Debug: `com.vcp.avatar.debug`
-- Release: `com.vcp.avatar`
+- Release: `com.vcp.avatar` is user-owned and never manipulated
 
-Override with `E2E_PACKAGE` if needed.
+It also has one recommended transport: USB with adb reverse for ports 1420 and
+1421. WiFi/TUN auto-detection is intentionally not part of the Agent contract.
 
-## Common commands
+## Stable commands
 
 ```bash
-# Check adb and connected device
-node tests/e2e-android/scripts/adb-env.cjs
-
-# Install debug APK cleanly
-node tests/e2e-android/scripts/install-apk.cjs --apk src-tauri/gen/android/app/build/outputs/apk/debug/app-debug.apk --mode debug --clean
-
-# Best-effort permission grants
-node tests/e2e-android/scripts/grant-permissions.cjs --mode debug
-
-# Launch smoke and collect trimmed state
-node tests/e2e-android/scripts/adb-smoke.cjs --mode debug
+pnpm android:debug:doctor -- --json
+pnpm android:debug:dev -- --serial <adb-serial>
+pnpm android:debug:status -- --json
+pnpm android:debug:logs -- --lines 80 --level i
+pnpm android:debug:snapshot -- --screenshot
+pnpm android:debug:screenshot -- --name theme-page
+pnpm android:debug:reload
+pnpm android:debug:stop
 ```
+
+`dev` is foreground and low-noise. Complete build output is written under
+`.agent/android-debug/dev-logs/`; stdout contains only milestones, bounded
+diagnostics and 30-second heartbeats. `logs` is PID-scoped and capped at 200
+lines. `snapshot` writes files and prints paths instead of embedding images or
+large diagnostics in the caller response.
+
+The retired `adb-smoke.cjs`, `install-apk.cjs` and `grant-permissions.cjs`
+entrypoints must not be restored. Their safe Debug-only behavior is available
+as `snapshot`, `install` and `grant` commands of the unified CLI.
 
 ## Manual-only / OEM-dependent items
 
@@ -46,4 +45,6 @@ These cannot be reliably automated with plain adb on all devices:
 - recents-task lock
 - legacy overlay variants are not granted; the dormant floating-assistant permission is absent from production manifests
 
-Record these as device preconditions for P1/P2 tests.
+Record these as device preconditions for P1/P2 tests. Maestro/UIAutomator are
+still outside this helper's scope; real UI journeys remain explicit acceptance
+work rather than an inferred smoke result.

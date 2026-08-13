@@ -512,8 +512,9 @@ pnpm install
 # 3. Initialize Android (first time only)
 pnpm tauri android init
 
-# 4. Development server
-pnpm tauri android dev
+# 4. Android USB Debug (Agent-safe, proxy/TUN independent)
+pnpm android:debug:doctor -- --json
+pnpm android:debug:dev
 
 # 5. Static check (TypeScript)
 vue-tsc --noEmit
@@ -539,10 +540,15 @@ pnpm tauri android build --apk --target aarch64 -- --dependency-verification str
 | `pnpm test` | `vitest` | 前端 Vitest（交互式）|
 | `pnpm test:run` | `vitest run` | 前端测试一次性运行 |
 | `pnpm test:integration` | `cargo test --locked --manifest-path src-tauri/Cargo.toml --test file_extractor_integration` | Rust 文件提取集成测试 |
-| `pnpm tauri android dev` | — | Android 开发调试 |
+| `pnpm android:debug:dev` | 统一 Debug CLI | USB + ADB reverse Android 开发调试，控制台限流 |
+| `pnpm android:debug:status -- --json` | 统一 Debug CLI | 有界设备/WebView/包/进程状态 |
+| `pnpm android:debug:logs -- --lines 80` | 统一 Debug CLI | Debug PID 日志，不清空全局 logcat |
+| `pnpm android:debug:snapshot -- --screenshot` | 统一 Debug CLI | 状态、有限日志和可选单张截图落盘 |
 | `pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict` | — | Release APK 构建（需四项签名环境变量）|
 
-当前仓库不提供根 `scripts/` 目录；Android 开发与发布直接使用上表中的 Tauri CLI 命令。
+当前仓库不提供根 `scripts/` 目录。Android Debug 统一使用 tracked
+`tests/e2e-android/scripts/android-debug-agent.cjs`，完整规范见
+`docs/ANDROID_AGENT_DEBUGGING.md`；Release 构建仍直接使用 Tauri CLI。
 
 ### 8.2 Rust Release 优化
 

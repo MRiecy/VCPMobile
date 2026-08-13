@@ -1,10 +1,10 @@
 const fs = require('fs');
 const path = require('path');
-const { runAdb, getDeviceInfo, getPackageName, ROOT, timestamp, ensureDir } = require('../../e2e-android/scripts/adb-env.cjs');
+const { runAdb, getDeviceInfo, DEBUG_PACKAGE, ROOT, timestamp, ensureDir } = require('../../e2e-android/scripts/adb-env.cjs');
 
 function usage() {
   console.log(`Usage:
-  node tests/perf/scripts/measure_startup_adb.cjs [--mode debug|release] [--samples 10] [--out <json>]
+  node tests/perf/scripts/measure_startup_adb.cjs [--samples 10] [--out <json>]
 
 Uses adb am start -W to measure cold launch. Boot-ready metrics require future app
 instrumentation; this script resolves the explicit Launcher activity and records
@@ -13,12 +13,10 @@ Android Activity launch timings now.
 }
 
 function parseArgs(argv) {
-  const args = { mode: 'debug', samples: 10, out: '' };
+  const args = { samples: 10, out: '' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--mode') {
-      args.mode = argv[++i];
-    } else if (arg === '--samples') {
+    if (arg === '--samples') {
       args.samples = Number(argv[++i]);
     } else if (arg === '--out') {
       args.out = argv[++i];
@@ -91,7 +89,7 @@ function stats(values) {
 
 const args = parseArgs(process.argv.slice(2));
 const device = getDeviceInfo();
-const pkg = getPackageName(args.mode);
+const pkg = DEBUG_PACKAGE;
 const component = resolveLauncherComponent(pkg);
 console.log(`[startup] device=${device.serial} ${device.manufacturer} ${device.model} sdk=${device.sdk} package=${pkg} component=${component}`);
 
@@ -106,7 +104,7 @@ for (let i = 0; i < args.samples; i += 1) {
 
 const report = {
   generated_at: new Date().toISOString(),
-  mode: args.mode,
+  mode: 'debug',
   package: pkg,
   component,
   device,

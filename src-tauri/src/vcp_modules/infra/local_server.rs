@@ -337,7 +337,7 @@ async fn serve_asset(state: AppState, path: String, query: String) -> Response<a
                 <p>路径: <b>{}?{}</b></p>
                 <p><b>调试诊断 (USB 模式)：</b></p>
                 <ul>
-                    <li>如果您在使用 <b>pnpm dev:usb</b>，请确保电脑端 Vite 已启动 (1420 端口)。</li>
+                    <li>如果您在使用 <b>pnpm android:debug:dev</b>，请确认该工具仍在运行。</li>
                     <li>检查 <b>adb reverse tcp:1420 tcp:1420</b> 是否在运行。</li>
                 </ul>
                 <button onclick="window.AndroidBridge.closeWindow()" style="padding: 8px 16px;">关闭悬浮窗</button>

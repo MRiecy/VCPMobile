@@ -199,8 +199,9 @@ pnpm install
 # 2. 前端类型检查 + Rust 编译检查
 pnpm check
 
-# 3. Android 开发环境热重载 smoke test
-pnpm tauri android dev
+# 3. Android USB Debug 热重载（Agent 安全入口）
+pnpm android:debug:doctor -- --json
+pnpm android:debug:dev
 ```
 
 **步骤 3：运行 Android 真机/模拟器测试清单**
@@ -236,7 +237,7 @@ Tauri 插件采用**双端版本配对**：
 1. 在 [Tauri 插件仓库](https://github.com/tauri-apps/plugins-workspace) 或 crates.io/npm 确认两端版本对应关系。
 2. 同步修改 `src-tauri/Cargo.toml` 与 `package.json`。
 3. 检查插件的 `README.md` 是否有新的权限配置（`tauri.conf.json` / `capabilities/`）。
-4. 执行 `pnpm check` 与 `pnpm tauri android dev` smoke test。
+4. 执行 `pnpm check` 与 `pnpm android:debug:dev` USB Debug smoke test。
 
 ### 3.4 Android Gradle 依赖更新流程
 
@@ -424,7 +425,7 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 
 1. 修改对应版本号（如 `2.11.1` → `2.11.2`）。
 2. 执行 `pnpm check`。
-3. 执行 `pnpm tauri android dev` 快速 smoke test（5 分钟）。
+3. 执行 `pnpm android:debug:dev` 快速 USB Debug smoke test（5 分钟）。
 4. 直接提交 PR，标题前缀 `[SECURITY]`。
 
 **情况 B：次版本 / 主版本升级（需评审）**
@@ -441,7 +442,7 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 
 - [ ] `pnpm check` 零错误。
 - [ ] `cargo clippy --locked -- -D warnings` 零警告。
-- [ ] `pnpm tauri android dev` 真机/模拟器启动成功。
+- [ ] `pnpm android:debug:dev` USB 真机启动成功。
 - [ ] 核心功能回归：登录/同步/聊天/文件上传/设置。
 - [ ] APK Release 构建成功：`pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict`。
 - [ ] APK 安装后无闪退，签名验证通过。

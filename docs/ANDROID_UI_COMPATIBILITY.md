@@ -110,7 +110,7 @@ interface NativeInsetsSnapshot {
 - Insets 纯函数/事件契约覆盖四边、DPR 转换、IME 净增量、重放和旧字段兼容；
 - 强渲染 fixture 的语义和交互不变量不退化。
 
-Vitest + happy-dom 可以证明状态、DOM 契约和生成物静态约束，但不计算真实 CSS 几何。仓库当前没有 Playwright 桌面 E2E，也没有 Maestro flow；不得把二者写成现有门禁。Android E2E 采用仓库已有的 Node.js + adb smoke 脚本，真机截图与触控可达性仍需具名设备证据。
+Vitest + happy-dom 可以证明状态、DOM 契约和生成物静态约束，但不计算真实 CSS 几何。仓库当前没有 Playwright 桌面 E2E，也没有 Maestro flow；不得把二者写成现有门禁。Android 设备诊断采用仓库已有的 Debug-only Agent CLI，真机截图与触控可达性仍需具名设备证据，不能由 CLI 状态快照替代。
 
 ## 7. 设备验收矩阵
 

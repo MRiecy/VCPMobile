@@ -64,3 +64,6 @@ src-tauri/plugins/**/android/.tauri/
 
 # Device-local performance captures may contain serials, logcat, and system state.
 tests/perf/reports/*/
+
+# Agent-oriented Android Debug captures are local and may contain device state.
+/.agent/android-debug/

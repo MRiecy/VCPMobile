@@ -204,8 +204,9 @@ Tauri v2 要求每个 command 被 capability 显式授权。新增插件命令�
 # 完整静态检查（TypeScript + Rust）
 pnpm check                  # 等价于 vue-tsc --noEmit && cd src-tauri && cargo check --locked
 
-# Android 真机调试 — USB 模式（纯数据线，无需 WiFi/热点）
-pnpm tauri android dev
+# Android 真机调试 — USB 模式（ADB reverse、Agent 限流输出）
+pnpm android:debug:doctor -- --json
+pnpm android:debug:dev
 ```
 
 ### Rust 发布优化
@@ -323,13 +324,18 @@ pnpm tauri android dev
 
 **运行**：`cd src-tauri/gen/android; ./gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest`
 
-### 5.5 Android E2E Smoke 脚本
+### 5.5 Android Debug Agent 与 E2E
 
 目录：`tests/e2e-android/scripts/`
 
 详见目录README.md
 
 仅依赖 Node.js + adb，不引入 Maestro/Appium。
+
+日常 Agent 真机调试必须使用 `pnpm android:debug:*`。统一 CLI 固定
+`com.vcp.avatar.debug`、USB ADB reverse、PID-scoped 有限日志和 opt-in 单张截图；不得
+直接操作用户的 `com.vcp.avatar` Release。完整规范见
+`docs/ANDROID_AGENT_DEBUGGING.md`。
 
 ### 5.6 性能脚本
 
@@ -352,10 +358,14 @@ cargo bench --locked --profile perf  # Rust Criterion 性能基准
 # Android 插件测试（在 src-tauri/gen/android/ 下执行）：
 ./gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest
 # E2E / 性能（需连接 Android 设备）：
-pnpm e2e:android:smoke      # adb 启动并采集状态
+pnpm android:debug:doctor -- --json    # ADB/USB/工具链检查
+pnpm android:debug:dev                 # 低噪声 USB/HMR Debug 会话
+pnpm android:debug:status -- --json    # 有界状态对象
+pnpm android:debug:logs -- --lines 80  # Debug PID 日志，硬上限 200 行
+pnpm android:debug:snapshot            # 状态 + 有限日志；截图需显式 --screenshot
 pnpm perf:apk-size          # APK 体积报告
 pnpm perf:startup           # 冷启动采样
-pnpm perf:collect           # dumpsys/logcat 快照
+pnpm perf:collect:full      # 全量 dumpsys/logcat 人工诊断；Agent 日常禁用
 pnpm perf:rust-bench        # 运行 Rust 基准并归档
 ```
 
@@ -374,7 +384,7 @@ VCPMobile/
 ├── src-tauri/benches/                 # Criterion 基准
 │   └── ast_tail_bench.rs
 ├── src-tauri/plugins/vcp-mobile/android/src/test/  # Kotlin 插件测试
-├── tests/e2e-android/scripts/         # adb smoke 脚本
+├── tests/e2e-android/scripts/         # Android Debug Agent CLI 与 ADB 基础层
 └── tests/perf/scripts/               # 性能采集脚本
 ```
 
@@ -520,7 +530,7 @@ pnpm tauri android build --apk --target aarch64
 | `src-tauri/tests/`                               | Rust 仓库级集成测试（file_extractor）                        |
 | `src-tauri/benches/`                             | Rust Criterion 性能基准（ast_tail_bench）                    |
 | `src-tauri/plugins/vcp-mobile/android/src/test/` | Android 插件单元测试（Kotlin JVM + Robolectric）             |
-| `tests/e2e-android/scripts/`                     | adb smoke 脚本（安装/授权/启动/信息采集）                    |
+| `tests/e2e-android/scripts/`                     | Debug-only Agent CLI（USB Dev/状态/有限日志/单张截图）        |
 | `tests/perf/scripts/`                            | 本地性能脚本（APK体积/启动/bench/快照），不进入 CI Release   |
 | `docs/Test_Architecture_Constraints.md`          | 测试体系架构约束文档（全局约束）                             |
 

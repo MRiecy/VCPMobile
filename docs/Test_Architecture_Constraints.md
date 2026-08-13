@@ -4,7 +4,7 @@
 > 状态：**正式约束文档** — 所有测试 Agent 必须遵循，冲突项需重新报批
 > 范围：Rust 后端 / Tauri 核心 / 自定义插件 / Vue 前端 / Android arm64 E2E / 手工性能诊断
 > 最近校准：2026-08-13
-> 当前实现：单一 `ci.yml` + Vitest/happy-dom + Rust tests + Android 插件 JVM tests + Node.js/adb smoke
+> 当前实现：单一 `ci.yml` + Vitest/happy-dom + Rust tests + Android 插件 JVM tests + Android Debug Agent CLI
 
 ---
 
@@ -36,7 +36,7 @@
 | L4 | 前端组件/Store 测试 | Vue 原子组件、纯状态 Store | L1 组件、无重副作用 Store | 每次 PR/push | Vitest、@vue/test-utils、happy-dom |
 | L5 | 契约测试 | Rust/TS/Kotlin/权限/Release/Android UI 静态契约 | 命令、参数、生成物与治理一致性 | 每次 PR/push | Vitest 文本契约、Kotlin 反射/文本契约 |
 | L6 | Android 集成/设备测试 | Service/Activity/权限生命周期 | 需要模拟器或真机的原生行为 | 手工按需 | AndroidX Test / adb |
-| L7 | 移动端 E2E | 真机关键用户旅程与多窗口 UI | P0/P1 旅程 | release 前具名验收 | 仓库 Node.js + adb smoke、人工触控/截图 |
+| L7 | 移动端 E2E | 真机关键用户旅程与多窗口 UI | P0/P1 旅程 | release 前具名验收 | Android Debug Agent、人工触控/截图 |
 | L8 | 性能与稳定性 | 启动时间、APK 体积、长稳指标 | 诊断报告，不设当前自动阈值 | 手工按需 | Criterion、`tests/perf/` ADB 脚本 |
 
 分层用于表达证据能力，不冻结容易失真的用例数量比例。测试数量以 runner 实际列举结果为准。
@@ -63,7 +63,7 @@ VCPMobile/
 │       ├── setup.ts / mocks/ / utils/
 │       └── unit/                       # Store、组件、跨层文本/治理契约
 ├── tests/                              # 仓库级脚本与 E2E
-│   ├── e2e-android/scripts/            # Node.js + adb smoke
+│   ├── e2e-android/scripts/            # Debug-only Agent CLI 与 ADB 基础层
 │   └── perf/scripts/                   # 手工性能/体积/启动诊断
 └── .github/workflows/
     ├── ci.yml                          # 单一 PR/push 软件门禁
@@ -91,8 +91,9 @@ VCPMobile/
 - `src/tests/mocks/`：统一 mock invoke/listen/Channel、plugin guest-js 与浏览器 API。
 - 手写文本/运行时契约：覆盖 Rust command ↔ TS 调用、权限声明、Release 与 Android UI 治理；当前没有 tauri-specta。
 
-### 4.4 移动端 E2E
-- 当前只使用 `tests/e2e-android/scripts/` 中的 Node.js + adb：设备发现、安装、权限预授权、启动、日志与进程采集。
+### 4.4 移动端 Debug / E2E
+- 当前只使用 `tests/e2e-android/scripts/` 中的 Node.js + adb。Agent 统一入口为 `android-debug-agent.cjs`：固定 Debug 包、USB Dev、设备发现、验证后安装、权限预授权、有限日志、状态与 opt-in 单张截图。
+- 完整契约见 `docs/ANDROID_AGENT_DEBUGGING.md`。日常 Agent 调试不得调用全量性能采集脚本，也不得把 Debug snapshot 描述为自动 UI E2E。
 - Maestro 尚未引入；Playwright 桌面 E2E 不在产品支持范围，也不是 Android WebView 兼容证据。未来引入任何 runner 必须先提交独立提案与真实缺口证据。
 
 ### 4.5 性能/稳定性
@@ -119,7 +120,7 @@ VCPMobile/
 |---|---|---|---|
 | `.github/workflows/ci.yml` | main/master push 与 PR | vue-tsc、Vitest、生产 build、Rust fmt/test/integration/clippy、Android 生成树漂移、插件 JVM tests、benchmark compile、依赖审计 | 证明软件与生成物静态契约；不证明真机 CSS 几何/触控 |
 | `.github/workflows/release.yml` | GitHub Release published | 校验同 commit CI/版本/签名并发布 arm64 APK | 证明发布 artifact 治理；不是发布前设备实验室 |
-| adb smoke | 具名人工执行 | 设备/安装/权限/启动/logcat/activity/process | 证明指定设备启动与诊断状态；不自动遍历 UI |
+| Android Debug Agent | 具名人工执行 | Debug-only 安装/权限/USB Dev/PID 日志/状态/单张截图 | 证明指定设备启动与诊断状态；不自动遍历 UI，不触碰 Release |
 | 多设备 UI 验收 | Release 前具名执行 | 手机/平板/折叠屏窗口、WebView、截图与触控矩阵 | 是 `DEVICE-VERIFIED` 的必要证据，当前 `DEVICE-EVIDENCE-PENDING` |
 | 性能脚本 | 独立性能候选人工执行 | APK size、`am start -W`、dumpsys、Criterion、具名页面帧 A/B | 仅报告；不构成自动 Release SLA |
 
@@ -142,7 +143,7 @@ VCPMobile/
 |---|---|---|
 | 软件测试基础设施 | ✅ 已落地 | 单一 CI、Vitest、Rust tests、Kotlin JVM tests |
 | 跨层与治理契约 | ✅ 已落地并持续维护 | 前端/Android/Release 文本和行为契约 |
-| Android adb smoke | ✅ 已落地 | Node.js + adb 脚本；不冒充完整 UI runner |
+| Android Debug Agent | ✅ 已落地 | Debug-only USB Dev、有限诊断与单张截图；不冒充完整 UI runner |
 | 多设备样式验收 | `DEVICE-EVIDENCE-PENDING` | 按 `ANDROID_UI_COMPATIBILITY.md` 归档具名证据 |
 | 性能 Phase 1 | `ACTIVE / REPORT-ONLY` | D0 因果定位与 D1 packaged Debug A/B 已通过；R1、BootTrace 与固定 SLA 仍 pending |
 

@@ -1,10 +1,10 @@
 const fs = require('fs');
 const path = require('path');
-const { runAdb, getDeviceInfo, getPackageName, ROOT, timestamp, ensureDir } = require('../../e2e-android/scripts/adb-env.cjs');
+const { runAdb, getDeviceInfo, DEBUG_PACKAGE, ROOT, timestamp, ensureDir } = require('../../e2e-android/scripts/adb-env.cjs');
 
 function usage() {
   console.log(`Usage:
-  node tests/perf/scripts/collect_android_dumpsys.cjs [--mode debug|release] [--out-dir <dir>]
+  node tests/perf/scripts/collect_android_dumpsys.cjs [--out-dir <dir>]
 
 Collects meminfo/power/wifi/dropbox/logcat snapshots for Android performance or
 soak-test diagnostics.
@@ -12,12 +12,10 @@ soak-test diagnostics.
 }
 
 function parseArgs(argv) {
-  const args = { mode: 'debug', outDir: '' };
+  const args = { outDir: '' };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--mode') {
-      args.mode = argv[++i];
-    } else if (arg === '--out-dir') {
+    if (arg === '--out-dir') {
       args.outDir = argv[++i];
     } else if (arg === '--help' || arg === '-h') {
       usage();
@@ -31,7 +29,7 @@ function parseArgs(argv) {
 
 const args = parseArgs(process.argv.slice(2));
 const device = getDeviceInfo();
-const pkg = getPackageName(args.mode);
+const pkg = DEBUG_PACKAGE;
 const outDir = ensureDir(path.resolve(ROOT, args.outDir || path.join('tests', 'perf', 'reports', timestamp())));
 
 const files = {
