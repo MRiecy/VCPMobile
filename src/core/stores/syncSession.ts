@@ -21,12 +21,22 @@ interface SyncSummary {
 
 interface SyncTerminalError {
   code: string;
+  category:
+    | "device"
+    | "configuration"
+    | "connection"
+    | "compatibility"
+    | "protocol"
+    | "data"
+    | "internal";
   message: string;
+  guidance: string;
   failedTopicIds: string[];
+  logFile: string | null;
 }
 
 type BufferedSessionEvent = {
-  kind: "status" | "progress" | "completed";
+  kind: "status" | "progress" | "completed" | "log";
   payload: Record<string, unknown>;
 };
 
@@ -34,6 +44,138 @@ const MOBILE_VERSION = "1.1.4";
 const DESKTOP_PLUGIN_VERSION = "1.1.0";
 const WIRE_PROTOCOL_VERSION = "1.1";
 const MAX_BUFFERED_SESSION_EVENTS = 32;
+const ERROR_CATEGORIES = new Set<SyncTerminalError["category"]>([
+  "device",
+  "configuration",
+  "connection",
+  "compatibility",
+  "protocol",
+  "data",
+  "internal",
+]);
+
+const LOCAL_ERROR_COPY: Record<
+  string,
+  Pick<SyncTerminalError, "category" | "message" | "guidance">
+> = {
+  POWER_SAVE_MODE: {
+    category: "device",
+    message: "系统省电模式已阻止本次同步",
+    guidance: "关闭系统省电模式后再试。",
+  },
+  BATTERY_TOO_LOW: {
+    category: "device",
+    message: "当前电量不足，已暂停同步",
+    guidance: "电量达到 30% 后再试。",
+  },
+  LISTENER_SETUP_FAILED: {
+    category: "internal",
+    message: "同步面板未能正常接收进度",
+    guidance: "关闭并重新打开同步面板后再试。",
+  },
+  INVALID_COMPLETION_EVENT: {
+    category: "protocol",
+    message: "电脑端返回的同步响应不符合当前协议，已安全停止",
+    guidance: "重启电脑端同步插件；若再次出现，请保留最新同步日志。",
+  },
+  START_SYNC_FAILED: {
+    category: "internal",
+    message: "同步组件未能正常启动",
+    guidance: "重启应用后再试；若仍失败，请保留最新同步日志。",
+  },
+  STOP_SYNC_FAILED: {
+    category: "internal",
+    message: "上一同步任务未能正常结束",
+    guidance: "重启应用后再试；若仍失败，请保留最新同步日志。",
+  },
+  SYNC_ATTEMPT_FAILED: {
+    category: "internal",
+    message: "同步未能完成",
+    guidance: "可重试一次；若仍失败，请保留最新同步日志。",
+  },
+};
+
+const localTerminalError = (code: string): SyncTerminalError => {
+  const copy = LOCAL_ERROR_COPY[code] ?? LOCAL_ERROR_COPY.SYNC_ATTEMPT_FAILED;
+  return {
+    code,
+    ...copy,
+    failedTopicIds: [],
+    logFile: null,
+  };
+};
+
+const readSyncError = (value: unknown): SyncTerminalError | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  if (
+    typeof source.code !== "string" ||
+    !/^[A-Z][A-Z0-9_]{0,63}$/.test(source.code) ||
+    typeof source.category !== "string" ||
+    !ERROR_CATEGORIES.has(source.category as SyncTerminalError["category"]) ||
+    typeof source.message !== "string" ||
+    source.message.trim().length === 0 ||
+    source.message.length > 200 ||
+    typeof source.guidance !== "string" ||
+    source.guidance.trim().length === 0 ||
+    source.guidance.length > 300
+  ) {
+    return null;
+  }
+  const failedTopicIds = Array.isArray(source.failedTopicIds)
+    ? source.failedTopicIds
+        .filter(
+          (id): id is string =>
+            typeof id === "string" && id.length > 0 && id.length <= 512,
+        )
+        .slice(0, 8)
+    : [];
+  const logFile =
+    typeof source.logFile === "string" &&
+    source.logFile.length > 0 &&
+    source.logFile.length <= 255 &&
+    !source.logFile.includes("/") &&
+    !source.logFile.includes("\\")
+      ? source.logFile
+      : null;
+  return {
+    code: source.code,
+    category: source.category as SyncTerminalError["category"],
+    message: source.message.trim(),
+    guidance: source.guidance.trim(),
+    failedTopicIds,
+    logFile,
+  };
+};
+
+const parseCommandError = (
+  error: unknown,
+  fallbackCode: string,
+): SyncTerminalError => {
+  const raw = error instanceof Error ? error.message : String(error);
+  const marker = "SYNC_ERROR:";
+  const markerIndex = raw.indexOf(marker);
+  if (markerIndex >= 0) {
+    try {
+      const parsed = readSyncError(
+        JSON.parse(raw.slice(markerIndex + marker.length)),
+      );
+      if (parsed) return parsed;
+    } catch {
+      // Invalid command errors stay behind the fixed user-facing fallback.
+    }
+  }
+  return localTerminalError(fallbackCode);
+};
+
+const PHASE_LABELS: Record<string, string> = {
+  initialization: "初始化",
+  owner_metadata: "元数据比对",
+  topic_metadata: "会话主题同步",
+  topic_validation: "会话校验",
+  messages: "历史消息同步",
+  finalize: "数据收尾",
+};
 
 const emptySummary = (): SyncSummary => ({
   successfulTopics: 0,
@@ -58,9 +200,6 @@ const sanitizeDiagnosticText = (value: string) =>
     .replace(/[A-Za-z]:[\\/][^\r\n,;]*/g, "[path]")
     .replace(/file:\/\/\/[^\r\n,;]*/gi, "file:///[path]")
     .replace(/(^|[^/])\/(?!\/)[^\r\n,;]*/g, "$1[path]");
-
-const errorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
 
 export const useSyncSessionStore = defineStore("syncSession", () => {
   // --- 视图状态 ---
@@ -98,6 +237,9 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   let startAttempt = 0;
   let awaitingSessionId = false;
   let bufferedSessionEvents: BufferedSessionEvent[] = [];
+  let lastLoggedPhase = "";
+  let lastCompletedPhase = "";
+  let lastConnectionStatus = "";
 
   const isCurrentView = (generation: number) =>
     isOpen.value && generation === viewGeneration;
@@ -123,6 +265,9 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     retryInFlight.value = false;
     awaitingSessionId = false;
     bufferedSessionEvents = [];
+    lastLoggedPhase = "";
+    lastCompletedPhase = "";
+    lastConnectionStatus = "";
     activeTab.value = "live";
     logs.value = [];
     progressData.value = {
@@ -134,10 +279,14 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     listenerSetup = registerListeners(generation);
   };
 
-  const setLocalError = (code: string, message: string) => {
-    terminalError.value = { code, message, failedTopicIds: [] };
+  const setTerminalError = (error: SyncTerminalError) => {
+    terminalError.value = error;
     status.value = "error";
     canDismiss.value = true;
+  };
+
+  const setLocalError = (code: string) => {
+    setTerminalError(localTerminalError(code));
   };
 
   const beginSync = async (preserveLogs: boolean) => {
@@ -152,6 +301,8 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       completed: 0,
       message: "",
     };
+    lastLoggedPhase = "";
+    lastCompletedPhase = "";
 
     // 启动命令一旦进入异步链路，后端就可能在任意 await 后建立会话。
     // 必须在第一个 await 前锁定页面，避免系统返回卸载视图后留下隐形同步。
@@ -160,10 +311,12 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
 
     try {
       await listenerSetup;
-    } catch (e: any) {
+    } catch (error: unknown) {
       if (isCurrentAttempt(generation, attempt)) {
-        pushLog("error", `同步事件监听注册失败: ${e}`);
-        setLocalError("LISTENER_SETUP_FAILED", errorMessage(e));
+        console.error("[SyncSession] Failed to register sync listeners:", error);
+        const terminal = localTerminalError("LISTENER_SETUP_FAILED");
+        pushLog("error", terminal.message);
+        setTerminalError(terminal);
       }
       return;
     }
@@ -176,42 +329,27 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       );
       if (!isCurrentAttempt(generation, attempt)) return;
       if (battery) {
-        // 绿色日志（success级别）以便排查
-        pushLog(
-          "success",
-          `[设备健康检测] 电量百分比: ${battery.level}%, 省电模式: ${battery.isPowerSaveMode ? "开启" : "关闭"}`,
-        );
+        pushLog("success", "设备状态检查完成");
 
         if (battery.isPowerSaveMode) {
-          pushLog(
-            "error",
-            "当前设备处于系统省电模式，已智能拦截同步，请关闭省电模式或充电后重试。",
-          );
-          setLocalError(
-            "POWER_SAVE_MODE",
-            "当前设备处于系统省电模式，请关闭省电模式或充电后重试。",
-          );
+          const terminal = localTerminalError("POWER_SAVE_MODE");
+          pushLog("error", terminal.message);
+          setTerminalError(terminal);
 
           return;
         }
         if (battery.level > 0 && battery.level < 30) {
-          pushLog(
-            "error",
-            `当前设备电量过低 (${battery.level}%)，低于 30% 限制，已智能拦截同步以保护电池与数据安全。`,
-          );
-          setLocalError(
-            "BATTERY_TOO_LOW",
-            `当前设备电量过低 (${battery.level}%)，低于 30% 限制。`,
-          );
+          const terminal = localTerminalError("BATTERY_TOO_LOW");
+          pushLog("error", terminal.message);
+          setTerminalError(terminal);
 
           return;
         }
       }
-    } catch (e: any) {
+    } catch (error: unknown) {
       if (!isCurrentAttempt(generation, attempt)) return;
-      // 容错：将真实错误打印到日志面板中以便真机排查！
-      pushLog("error", `[电量检测异常] 无法获取设备电量状态: ${e}`);
-      console.warn("Get battery status failed, bypassing security block:", e);
+      pushLog("warning", "无法确认设备状态，将继续同步");
+      console.warn("Get battery status failed, continuing sync:", error);
     }
 
     if (!isCurrentAttempt(generation, attempt)) return;
@@ -236,9 +374,9 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       awaitingSessionId = false;
       bufferedSessionEvents = [];
       if (isCurrentAttempt(generation, attempt)) {
-        const message = errorMessage(e);
-        pushLog("error", `启动失败: ${message}`);
-        setLocalError("START_SYNC_FAILED", message);
+        const terminal = parseCommandError(e, "START_SYNC_FAILED");
+        pushLog("error", terminal.message);
+        setTerminalError(terminal);
       }
     }
   };
@@ -261,6 +399,9 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       status.value = "idle";
       terminalError.value = null;
       summary.value = emptySummary();
+      lastLoggedPhase = "";
+      lastCompletedPhase = "";
+      lastConnectionStatus = "";
       progressData.value = {
         phase: "initialization",
         total: 0,
@@ -270,9 +411,9 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       await beginSync(true);
     } catch (error: unknown) {
       if (isCurrentView(generation)) {
-        const message = errorMessage(error);
-        pushLog("error", `停止旧同步失败: ${message}`);
-        setLocalError("STOP_SYNC_FAILED", message);
+        const terminal = parseCommandError(error, "STOP_SYNC_FAILED");
+        pushLog("error", terminal.message);
+        setTerminalError(terminal);
       }
     } finally {
       if (isCurrentView(generation)) retryInFlight.value = false;
@@ -311,22 +452,15 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         `Failed topics: ${summary.value.failedTopics}`,
         `Legacy attachment warnings: ${summary.value.legacyAttachmentWarnings}`,
         terminalError.value
-          ? `Error: ${sanitizeDiagnosticText(terminalError.value.code)} ${sanitizeDiagnosticText(terminalError.value.message)}`
+          ? `Error code: ${sanitizeDiagnosticText(terminalError.value.code)}`
           : "Error: none",
-        `Failed topic IDs: ${[
-          ...new Set([
-            ...summary.value.failedTopicIds,
-            ...(terminalError.value?.failedTopicIds ?? []),
-          ]),
-        ]
-          .slice(0, 8)
-          .map(sanitizeDiagnosticText)
-          .join(", ") || "none"}`,
+        `Log file: ${terminalError.value?.logFile ?? "unavailable"}`,
       ].join("\n");
       await navigator.clipboard.writeText(diagnostic);
       pushLog("success", "脱敏诊断信息已复制到剪贴板");
     } catch (error: unknown) {
-      pushLog("error", `复制失败: ${errorMessage(error)}`);
+      console.error("[SyncSession] Failed to copy diagnostics:", error);
+      pushLog("error", "复制诊断失败，请稍后再试");
     }
   };
 
@@ -406,53 +540,68 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const readTerminalError = (
     payload: Record<string, unknown>,
   ): SyncTerminalError => {
-    const source =
-      payload.error && typeof payload.error === "object"
-        ? (payload.error as Record<string, unknown>)
-        : {};
-    return {
-      code:
-        typeof source.code === "string" && source.code.length > 0
-          ? source.code
-          : "SYNC_ATTEMPT_FAILED",
-      message:
-        typeof source.message === "string" && source.message.length > 0
-          ? source.message
-          : typeof payload.message === "string"
-            ? payload.message
-            : "同步失败",
-      failedTopicIds: Array.isArray(source.failedTopicIds)
-        ? source.failedTopicIds
-            .filter(
-              (id): id is string => typeof id === "string" && id.length > 0,
-            )
-            .slice(0, 8)
-        : [],
-    };
+    return readSyncError(payload.error) ?? localTerminalError("SYNC_ATTEMPT_FAILED");
   };
 
   const applySessionEvent = (
     kind: BufferedSessionEvent["kind"],
     payload: Record<string, unknown>,
   ) => {
+    if (kind === "log") {
+      if (
+        payload.audience === "operator" &&
+        typeof payload.message === "string" &&
+        payload.message.trim().length > 0
+      ) {
+        pushLog(
+          typeof payload.level === "string" ? payload.level : "info",
+          payload.message.trim().slice(0, 200),
+        );
+      }
+      return;
+    }
+
     if (kind === "progress") {
       if (isTerminal()) return;
+      const reportedPhase =
+        typeof payload.phase === "string"
+          ? payload.phase
+          : progressData.value.phase;
+      if (!Object.prototype.hasOwnProperty.call(PHASE_LABELS, reportedPhase)) {
+        return;
+      }
+      const nextPhase = reportedPhase;
+      const nextTotal =
+        typeof payload.total === "number" &&
+        Number.isSafeInteger(payload.total) &&
+        payload.total >= 0
+          ? payload.total
+          : progressData.value.total;
+      const nextCompleted =
+        typeof payload.completed === "number" &&
+        Number.isSafeInteger(payload.completed) &&
+        payload.completed >= 0
+          ? payload.completed
+          : progressData.value.completed;
       progressData.value = {
-        phase:
-          typeof payload.phase === "string"
-            ? payload.phase
-            : progressData.value.phase,
-        total:
-          typeof payload.total === "number" ? payload.total : progressData.value.total,
-        completed:
-          typeof payload.completed === "number"
-            ? payload.completed
-            : progressData.value.completed,
-        message:
-          typeof payload.message === "string"
-            ? payload.message
-            : progressData.value.message,
+        phase: nextPhase,
+        total: nextTotal,
+        completed: nextCompleted,
+        // 后端阶段消息用于诊断，不进入用户界面；前端只展示稳定阶段文案。
+        message: "",
       };
+      if (nextPhase !== lastLoggedPhase) {
+        pushLog("info", `开始${PHASE_LABELS[nextPhase] ?? "同步处理"}`);
+        lastLoggedPhase = nextPhase;
+      }
+      if (
+        nextTotal > 0 &&
+        nextCompleted >= nextTotal &&
+        nextPhase !== lastCompletedPhase
+      ) {
+        pushLog("success", `${PHASE_LABELS[nextPhase] ?? "当前阶段"}完成`);
+        lastCompletedPhase = nextPhase;
+      }
       const nextSummary = readProgressSummary(payload);
       if (nextSummary) {
         summary.value = { ...summary.value, ...nextSummary };
@@ -470,6 +619,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
           return;
         }
         terminalError.value = readTerminalError(payload);
+        pushLog("error", terminalError.value.message);
         const failedTopics = Math.max(
           summary.value.failedTopics,
           terminalError.value.failedTopicIds.length,
@@ -491,9 +641,17 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       if (nextStatus === "open") {
         status.value = "connected";
         canDismiss.value = false;
+        if (lastConnectionStatus !== "open") {
+          pushLog("success", "已连接电脑端，开始同步");
+          lastConnectionStatus = "open";
+        }
       } else if (nextStatus === "connecting") {
         status.value = "connecting";
         canDismiss.value = false;
+        if (lastConnectionStatus !== "connecting") {
+          pushLog("info", "正在连接电脑端同步服务");
+          lastConnectionStatus = "connecting";
+        }
       } else if (
         nextStatus === "completed" ||
         nextStatus === "completed_with_warnings"
@@ -512,14 +670,14 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       payload.status !== "completed_with_warnings"
     ) {
       pushLog("error", "完成事件协议错误: status 非法");
-      setLocalError("INVALID_COMPLETION_EVENT", "同步完成事件缺少合法终态");
+      setLocalError("INVALID_COMPLETION_EVENT");
       needsReload.value = false;
       return;
     }
     const completedSummary = readSummary(payload.summary);
     if (!completedSummary) {
       pushLog("error", "完成事件协议错误: summary 非法");
-      setLocalError("INVALID_COMPLETION_EVENT", "同步完成事件统计结构非法");
+      setLocalError("INVALID_COMPLETION_EVENT");
       needsReload.value = false;
       return;
     }
@@ -532,10 +690,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         completedSummary.legacyAttachmentWarnings === 0)
     ) {
       pushLog("error", "完成事件协议错误: status 与 summary 不一致");
-      setLocalError(
-        "INVALID_COMPLETION_EVENT",
-        "同步完成事件终态与统计不一致",
-      );
+      setLocalError("INVALID_COMPLETION_EVENT");
       needsReload.value = false;
       return;
     }
@@ -546,7 +701,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     pushLog(
       status.value === "completed_with_warnings" ? "warning" : "success",
       status.value === "completed_with_warnings"
-        ? "同步完成，但存在旧附件警告"
+        ? "同步已完成，但有部分旧版附件未能解析"
         : "同步已全部完成，点击关闭以刷新数据",
     );
   };
@@ -589,8 +744,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const registerListeners = async (generation: number) => {
     await Promise.all([
       registerListener(generation, "vcp-log", (event: any) => {
-        const { level, category, message } = event.payload;
-        if (category === "sync") pushLog(level || "info", message);
+        const { audience, category } = event.payload ?? {};
+        if (category === "sync" && audience === "operator") {
+          routeSessionEvent("log", event.payload);
+        }
       }),
 
       registerListener(generation, "vcp-sync-progress", (event: any) =>

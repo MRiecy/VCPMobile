@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { mount } from "@vue/test-utils";
 import { useSyncSessionStore } from "@/core/stores/syncSession";
 import { useOverlayStore } from "@/core/stores/overlay";
+import { useNotificationStore } from "@/core/stores/notification";
+import SyncSessionView from "@/features/sync/SyncSessionView.vue";
+import SyncLogBrowserCore from "@/features/settings/components/SyncLogBrowserCore.vue";
 import {
   emitTauriEvent,
   invokeMock,
@@ -17,6 +21,22 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function syncError(
+  code: string,
+  message = "同步未完成",
+  failedTopicIds: string[] = [],
+  logFile: string | null = "20260813_120000_000_1_sync.log",
+) {
+  return {
+    code,
+    category: "data",
+    message,
+    guidance: "可重试一次；若仍失败，请保留最新同步日志。",
+    failedTopicIds,
+    logFile,
+  };
+}
+
 describe("sync session ownership", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -26,6 +46,7 @@ describe("sync session ownership", () => {
       isPowerSaveMode: false,
     }));
     mockInvoke("start_manual_sync", () => 1);
+    mockInvoke("list_sync_log_files", () => []);
   });
 
   it("unlistens registrations that resolve after the panel closes", async () => {
@@ -87,7 +108,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 7,
       status: "error",
-      error: { code: "CURRENT", message: "failed", failedTopicIds: [] },
+      error: syncError("CURRENT"),
     });
     expect(store.canDismiss).toBe(true);
     await store.close();
@@ -121,7 +142,7 @@ describe("sync session ownership", () => {
       payload: {
         sessionId: 11,
         status: "error",
-        error: { code: "TEST", message: "done", failedTopicIds: [] },
+        error: syncError("TEST"),
       },
     });
     await overlay.closeSyncSession();
@@ -168,7 +189,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 23,
       status: "error",
-      error: { code: "TEST", message: "failed", failedTopicIds: [] },
+      error: syncError("TEST"),
     });
     await overlay.closeSyncSession();
   });
@@ -186,7 +207,7 @@ describe("sync session ownership", () => {
         emitTauriEvent("vcp-sync-status", {
           sessionId: 31,
           status: "error",
-          error: { code: "TEST", message: "failed", failedTopicIds: [] },
+          error: syncError("TEST"),
         });
       } else if (
         terminalStatus === "completed" ||
@@ -231,11 +252,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 41,
       status: "error",
-      error: {
-        code: "DESKTOP_DB",
-        message: "write failed",
-        failedTopicIds: ["topic-a"],
-      },
+      error: syncError("DESKTOP_DB", "部分数据未能完成处理", ["topic-a"]),
     });
     emitTauriEvent("vcp-sync-completed", {
       sessionId: 41,
@@ -337,11 +354,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 44,
       status: "error",
-      error: {
-        code: "PULL_FAILED",
-        message: "failed",
-        failedTopicIds: ["topic-d"],
-      },
+      error: syncError("PULL_FAILED", "部分数据未能完成处理", ["topic-d"]),
     });
 
     expect(store.summary).toMatchObject({
@@ -362,7 +375,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 1,
       status: "error",
-      error: { code: "RETRYABLE", message: "retry", failedTopicIds: [] },
+      error: syncError("RETRYABLE"),
     });
 
     await store.retrySync();
@@ -383,7 +396,7 @@ describe("sync session ownership", () => {
     );
   });
 
-  it("inserts the retry separator only after the old session has joined", async () => {
+  it("joins the old session before separating attempts and ignores its late logs", async () => {
     let nextSession = 0;
     const stopping = deferred<void>();
     mockInvoke("start_manual_sync", () => ++nextSession);
@@ -393,7 +406,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 1,
       status: "error",
-      error: { code: "RETRYABLE", message: "retry", failedTopicIds: [] },
+      error: syncError("RETRYABLE"),
     });
     mockInvoke("stop_sync", () => stopping.promise);
 
@@ -405,6 +418,8 @@ describe("sync session ownership", () => {
     );
     emitTauriEvent("vcp-log", {
       category: "sync",
+      audience: "operator",
+      sessionId: 1,
       level: "warning",
       message: "旧会话正在退出",
     });
@@ -414,14 +429,267 @@ describe("sync session ownership", () => {
 
     stopping.resolve();
     await retrying;
-    const oldLogIndex = store.logs.findIndex(
-      (log) => log.message === "旧会话正在退出",
-    );
     const separatorIndex = store.logs.findIndex((log) =>
       log.message.includes("新同步尝试"),
     );
-    expect(oldLogIndex).toBeGreaterThanOrEqual(0);
-    expect(separatorIndex).toBeGreaterThan(oldLogIndex);
+    expect(
+      store.logs.some((log) => log.message === "旧会话正在退出"),
+    ).toBe(false);
+    expect(separatorIndex).toBeGreaterThanOrEqual(0);
+  });
+
+  it("parses structured command errors without exposing the transport detail", async () => {
+    const commandError = {
+      code: "TOKEN_MISMATCH",
+      category: "configuration",
+      message: "手机端与电脑端的同步令牌不一致",
+      guidance: "重新核对两端令牌后再试。",
+      failedTopicIds: [],
+      logFile: null,
+    };
+    mockInvoke("start_manual_sync", () =>
+      Promise.reject(`SYNC_ERROR:${JSON.stringify(commandError)}`),
+    );
+
+    const store = useSyncSessionStore();
+    store.open();
+    await store.startSync();
+
+    expect(store.status).toBe("error");
+    expect(store.terminalError).toMatchObject(commandError);
+    expect(store.logs.some((log) => log.message.includes("SYNC_ERROR"))).toBe(
+      false,
+    );
+  });
+
+  it("fails closed when a legacy raw terminal error lacks the safe copy contract", () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 49;
+
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 49,
+      status: "error",
+      error: {
+        code: "TOKEN_MISMATCH",
+        message: "raw token=secret-value from transport",
+        failedTopicIds: [],
+      },
+    });
+
+    expect(store.terminalError?.code).toBe("SYNC_ATTEMPT_FAILED");
+    expect(store.terminalError?.message).toBe("同步未能完成");
+    expect(store.logs.some((log) => log.message.includes("secret-value"))).toBe(
+      false,
+    );
+  });
+
+  it("shows only owned operator notices and deduplicated phase milestones", async () => {
+    const store = useSyncSessionStore();
+    store.open();
+    await store.startSync();
+
+    emitTauriEvent("vcp-log", {
+      category: "sync",
+      level: "error",
+      message: "raw diagnostic token=secret-value",
+    });
+    emitTauriEvent("vcp-log", {
+      category: "sync",
+      audience: "operator",
+      sessionId: 2,
+      level: "warning",
+      message: "其他会话正在重试",
+    });
+    emitTauriEvent("vcp-log", {
+      category: "sync",
+      audience: "operator",
+      sessionId: 1,
+      level: "warning",
+      message: "连接中断，正在进行第 1/3 次自动重试",
+    });
+    for (const completed of [0, 1, 2, 2]) {
+      emitTauriEvent("vcp-sync-progress", {
+        sessionId: 1,
+        phase: "topic_metadata",
+        total: 2,
+        completed,
+        message: `raw progress ${completed}`,
+        successfulTopics: completed,
+        totalTopics: 2,
+        failedTopics: 0,
+        legacyAttachmentWarnings: 0,
+      });
+    }
+    emitTauriEvent("vcp-sync-progress", {
+      sessionId: 1,
+      phase: "internal_secret_phase",
+      total: 2,
+      completed: 2,
+      message: "raw progress token=phase-secret",
+    });
+
+    expect(store.logs.some((log) => log.message.includes("secret-value"))).toBe(
+      false,
+    );
+    expect(store.logs.some((log) => log.message === "其他会话正在重试")).toBe(
+      false,
+    );
+    expect(
+      store.logs.filter((log) => log.message === "开始会话主题同步"),
+    ).toHaveLength(1);
+    expect(
+      store.logs.filter((log) => log.message === "会话主题同步完成"),
+    ).toHaveLength(1);
+    expect(store.progressData.phase).toBe("topic_metadata");
+    expect(store.progressData.message).toBe("");
+    expect(store.logs.some((log) => log.message.includes("phase-secret"))).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    {
+      battery: { level: 80, isPowerSaveMode: true },
+      message: "系统省电模式已阻止本次同步",
+      guidance: "关闭系统省电模式后再试。",
+    },
+    {
+      battery: { level: 29, isPowerSaveMode: false },
+      message: "当前电量不足，已暂停同步",
+      guidance: "电量达到 30% 后再试。",
+    },
+  ])("uses fixed device guidance for $message", async ({ battery, message, guidance }) => {
+    mockInvoke("plugin:vcp-mobile|get_battery_status", () => battery);
+    const store = useSyncSessionStore();
+    store.open();
+    await store.startSync();
+
+    expect(store.terminalError).toMatchObject({ message, guidance });
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "start_manual_sync"),
+    ).toBe(false);
+  });
+
+  it("renders only the user-facing cause and guidance in the main error card", async () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 48;
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 48,
+      status: "error",
+      error: syncError(
+        "DESKTOP_DB_SECRET_CODE",
+        "部分数据未能完成处理，系统未将其标记为成功",
+        ["private-topic-id"],
+      ),
+    });
+
+    const wrapper = mount(SyncSessionView);
+    await Promise.resolve();
+
+    expect(wrapper.text()).toContain("部分数据未能完成处理，系统未将其标记为成功");
+    expect(wrapper.text()).toContain("可重试一次；若仍失败，请保留最新同步日志。");
+    expect(wrapper.text()).toContain("详细记录已保存至历史日志");
+    expect(wrapper.text()).not.toContain("DESKTOP_DB_SECRET_CODE");
+    expect(wrapper.text()).not.toContain("private-topic-id");
+    expect(wrapper.text()).toContain("重新同步");
+  });
+
+  it("uses standard log levels and safe history feedback", async () => {
+    mockInvoke("list_sync_log_files", () => [
+      {
+        filename: "20260813_120000_000_1_sync.log",
+        created_at: 1_786_576_800,
+        size_bytes: 128,
+      },
+    ]);
+    mockInvoke(
+      "read_sync_log_file",
+      () =>
+        "[2026-08-13T12:00:00.000+08:00] [WARN] [network] retrying\n" +
+        "[2026-08-13T12:00:01.000+08:00] [ERROR] [sync] failed",
+    );
+    mockInvoke("clear_old_sync_logs", () => ({ removed: 2, failed: 1 }));
+    const overlay = useOverlayStore();
+    vi.spyOn(overlay, "showConfirm").mockResolvedValue(true);
+    const notifications = useNotificationStore();
+    const wrapper = mount(SyncLogBrowserCore);
+
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("20260813_120000_000_1_sync.log"),
+    );
+    await wrapper.get("button").trigger("click");
+    await vi.waitFor(() =>
+      expect(
+        notifications.activeToasts[notifications.activeToasts.length - 1]
+          ?.message,
+      ).toContain("2 个日志，1 个未能删除"),
+    );
+
+    await wrapper.get('[class*="cursor-pointer"]').trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("[ERROR]"));
+    const errorLine = wrapper
+      .findAll(".whitespace-nowrap")
+      .find((line) => line.text().includes("[ERROR] [sync] failed"));
+    const warningLine = wrapper
+      .findAll(".whitespace-nowrap")
+      .find((line) => line.text().includes("[WARN] [network] retrying"));
+    expect(errorLine?.classes()).toContain("text-red-400");
+    expect(warningLine?.classes()).toContain("text-yellow-400");
+  });
+
+  it("shows a fixed history error instead of the raw command failure", async () => {
+    let attempts = 0;
+    mockInvoke("list_sync_log_files", () => {
+      attempts += 1;
+      return attempts === 1
+        ? Promise.reject("SYNC_ERROR:raw token=history-secret")
+        : [];
+    });
+    const wrapper = mount(SyncLogBrowserCore);
+
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("无法加载同步日志，请稍后再试。"),
+    );
+    expect(wrapper.text()).not.toContain("history-secret");
+    await wrapper.get("button").trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("暂无同步日志"));
+  });
+
+  it("keeps the history list available after a file read failure", async () => {
+    mockInvoke("list_sync_log_files", () => [
+      {
+        filename: "20260813_120000_000_1_sync.log",
+        created_at: 1_786_576_800,
+        size_bytes: 128,
+      },
+    ]);
+    let attempts = 0;
+    mockInvoke("read_sync_log_file", () => {
+      attempts += 1;
+      return attempts === 1
+        ? Promise.reject("SYNC_ERROR:raw token=read-secret")
+        : "[2026-08-13T12:00:00.000+08:00] [INFO] retry succeeded";
+    });
+    const notifications = useNotificationStore();
+    const wrapper = mount(SyncLogBrowserCore);
+
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("20260813_120000_000_1_sync.log"),
+    );
+    await wrapper.get('[class*="cursor-pointer"]').trigger("click");
+    await vi.waitFor(() =>
+      expect(
+        notifications.activeToasts[notifications.activeToasts.length - 1]
+          ?.message,
+      ).toBe("无法打开此同步日志，请稍后再试"),
+    );
+    expect(wrapper.text()).toContain("20260813_120000_000_1_sync.log");
+    expect(wrapper.text()).not.toContain("read-secret");
+
+    await wrapper.get('[class*="cursor-pointer"]').trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("retry succeeded"));
   });
 
   it("copies bounded diagnostics without tokens or absolute paths", async () => {
@@ -432,9 +700,11 @@ describe("sync session ownership", () => {
       sessionId: 51,
       status: "error",
       error: {
-        code: "UPLOAD_token=code-secret_/root/code path/error",
+        code: "UPLOAD_FAILED",
+        category: "data",
         message:
           'Bearer secret-token; Bearer "alpha beta"; token=also-secret; C:\\Users\\me with space\\file.txt; upload failed at /home/me/file.txt; file:///mnt/private/cache.bin',
+        guidance: "可重试一次；若仍失败，请保留最新同步日志。",
         failedTopicIds: [
           "topic-a_sync_token=id-secret",
           "/mnt/private folder/topic-b",
@@ -442,6 +712,7 @@ describe("sync session ownership", () => {
           "ERR(/root/private/file)",
           "topic-/Users/me/secret",
         ],
+        logFile: "20260813_120000_000_51_sync.log",
       },
     });
 
@@ -457,7 +728,6 @@ describe("sync session ownership", () => {
     expect(diagnostic).not.toContain("secret-token");
     expect(diagnostic).not.toContain("also-secret");
     expect(diagnostic).not.toContain("alpha beta");
-    expect(diagnostic).not.toContain("code-secret");
     expect(diagnostic).not.toContain("id-secret");
     expect(diagnostic).not.toContain("C:\\Users");
     expect(diagnostic).not.toContain("/home/me");
@@ -465,5 +735,7 @@ describe("sync session ownership", () => {
     expect(diagnostic).not.toContain("/mnt");
     expect(diagnostic).not.toContain("/Users");
     expect(diagnostic).not.toContain("private/file");
+    expect(diagnostic).toContain("Error code: UPLOAD_FAILED");
+    expect(diagnostic).toContain("20260813_120000_000_51_sync.log");
   });
 });

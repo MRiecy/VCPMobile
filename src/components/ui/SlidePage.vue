@@ -12,7 +12,7 @@ const props = withDefaults(defineProps<Props>(), {
 </script>
 
 <template>
-  <Transition name="slide-page">
+  <Transition name="slide-page" appear>
     <div
       v-show="props.isOpen"
       class="vcp-safe-inline fixed inset-0 pointer-events-auto bg-[var(--primary-bg)]"

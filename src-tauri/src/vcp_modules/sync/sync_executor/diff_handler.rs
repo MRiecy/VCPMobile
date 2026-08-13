@@ -268,6 +268,7 @@ impl DiffHandler {
                                 );
                                 let _ = tx_internal_wd.send(SyncCommand::FailAttempt {
                                     attempt_id: attempt_id_wd,
+                                    code: "SYNC_PHASE_STALLED",
                                     message: format!(
                                         "Sync phase {} timed out with {} unfinished operations",
                                         current_phase_wd, current_pending

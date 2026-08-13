@@ -19,6 +19,18 @@ describe('SlidePage', () => {
     expect(page.attributes('style')).toContain('z-index: 77');
   });
 
+  it('plays the enter transition when first mounted open', () => {
+    const wrapper = mount(SlidePage, {
+      props: {
+        isOpen: true,
+      },
+    });
+
+    const page = wrapper.get('.fixed');
+    expect(page.classes()).toContain('slide-page-enter-from');
+    expect(page.classes()).toContain('slide-page-enter-active');
+  });
+
   it('uses v-show display none when closed', () => {
     const wrapper = mount(SlidePage, {
       props: {

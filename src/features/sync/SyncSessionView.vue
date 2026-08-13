@@ -43,9 +43,11 @@ const phaseLabel = computed(() => {
     'initialization': '初始化',
     'owner_metadata': '元数据比对',
     'topic_metadata': '会话主题同步',
+    'topic_validation': '会话校验',
     'messages': '历史消息同步',
+    'finalize': '数据收尾',
   };
-  return map[store.progressData.phase] || store.progressData.phase;
+  return map[store.progressData.phase] || '同步处理';
 });
 
 const statusLabel = computed(() => {
@@ -298,15 +300,26 @@ const handlePrerenderToggle = async (val: boolean) => {
                 v-if="store.terminalError"
                 class="mt-3 border-l-2 border-red-500 bg-red-500/6 px-3 py-2 text-left"
               >
-                <div class="font-mono text-[10px] text-red-400">{{ store.terminalError.code }}</div>
-                <div class="mt-1 text-[11px] leading-relaxed text-white/70 break-words">
+                <div class="text-[11px] font-semibold leading-relaxed text-red-300 break-words">
                   {{ store.terminalError.message }}
                 </div>
-                <div
-                  v-if="store.terminalError.failedTopicIds.length > 0"
-                  class="mt-1 font-mono text-[9px] text-white/35 break-all"
-                >
-                  topic: {{ store.terminalError.failedTopicIds.join(', ') }}
+                <div class="mt-1 text-[10px] leading-relaxed text-white/55 break-words">
+                  {{ store.terminalError.guidance }}
+                </div>
+                <div class="mt-2 text-[9px] text-white/30">
+                  {{ store.terminalError.logFile ? '详细记录已保存至历史日志。' : '本次未生成诊断日志。' }}
+                </div>
+              </div>
+
+              <div
+                v-else-if="store.status === 'completed_with_warnings'"
+                class="mt-3 border-l-2 border-yellow-500 bg-yellow-500/6 px-3 py-2 text-left"
+              >
+                <div class="text-[11px] font-semibold leading-relaxed text-yellow-300">
+                  同步已完成，但有部分旧版附件未能解析
+                </div>
+                <div class="mt-1 text-[10px] leading-relaxed text-white/55">
+                  请在电脑端重新发送这些附件后再同步。
                 </div>
               </div>
             </div>
@@ -345,8 +358,8 @@ const handlePrerenderToggle = async (val: boolean) => {
           <span v-else-if="store.status === 'connecting'">正在建立神经同步通道...</span>
           <span v-else-if="store.status === 'connected'">同步进行中</span>
           <span v-else-if="store.status === 'completed'">同步已完成</span>
-          <span v-else-if="store.status === 'completed_with_warnings'">同步完成，存在旧附件警告</span>
-          <span v-else-if="store.status === 'error'">同步失败，请检查配置</span>
+          <span v-else-if="store.status === 'completed_with_warnings'">同步完成，部分旧版附件需处理</span>
+          <span v-else-if="store.status === 'error'">同步未完成</span>
         </div>
         <div v-if="store.activeTab === 'live'" class="flex items-center gap-2">
           <button

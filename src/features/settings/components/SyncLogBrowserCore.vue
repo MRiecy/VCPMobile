@@ -11,8 +11,14 @@ interface LogFile {
   size_bytes: number;
 }
 
+interface LogCleanupResult {
+  removed: number;
+  failed: number;
+}
+
 const files = ref<LogFile[]>([]);
 const loading = ref(false);
+const errorText = ref('');
 
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
@@ -36,10 +42,13 @@ const formatTime = (ts: number) => {
 
 const loadFiles = async () => {
   loading.value = true;
+  errorText.value = '';
   try {
     files.value = await invoke<LogFile[]>('list_sync_log_files');
   } catch (e) {
     console.error('[SyncLogBrowser] Failed to list files:', e);
+    files.value = [];
+    errorText.value = '无法加载同步日志，请稍后再试。';
   } finally {
     loading.value = false;
   }
@@ -47,6 +56,7 @@ const loadFiles = async () => {
 
 const openFile = async (filename: string) => {
   loading.value = true;
+  errorText.value = '';
   try {
     const content = await invoke<string>('read_sync_log_file', { filename });
     fileContent.value = content;
@@ -56,6 +66,11 @@ const openFile = async (filename: string) => {
     currentFile.value = filename;
   } catch (e) {
     console.error('[SyncLogBrowser] Failed to read file:', e);
+    notificationStore.addNotification({
+      type: 'error',
+      message: '无法打开此同步日志，请稍后再试',
+      toastOnly: true
+    });
   } finally {
     loading.value = false;
   }
@@ -71,8 +86,18 @@ const copyCurrentFile = async () => {
   if (!currentFile.value) return;
   try {
     await navigator.clipboard.writeText(fileContent.value);
+    notificationStore.addNotification({
+      type: 'success',
+      message: '同步日志已复制',
+      toastOnly: true
+    });
   } catch (e) {
     console.error('[SyncLogBrowser] Copy failed:', e);
+    notificationStore.addNotification({
+      type: 'error',
+      message: '复制同步日志失败，请稍后再试',
+      toastOnly: true
+    });
   }
 };
 
@@ -84,18 +109,20 @@ const clearOldLogs = async () => {
   });
   if (!confirmed) return;
   try {
-    const removed = await invoke<number>('clear_old_sync_logs', { keepDays: 7 });
+    const result = await invoke<LogCleanupResult>('clear_old_sync_logs', { keepDays: 7 });
     await loadFiles();
     notificationStore.addNotification({
-      type: 'success',
-      message: `已清理 ${removed} 个旧日志文件`,
+      type: result.failed > 0 ? 'warning' : 'success',
+      message: result.failed > 0
+        ? `已清理 ${result.removed} 个日志，${result.failed} 个未能删除`
+        : `已清理 ${result.removed} 个旧日志文件`,
       toastOnly: true
     });
   } catch (e) {
     console.error('[SyncLogBrowser] Clear failed:', e);
     notificationStore.addNotification({
       type: 'error',
-      message: `清理日志失败: ${e}`,
+      message: '清理日志失败，请稍后再试',
       toastOnly: true
     });
   }
@@ -114,6 +141,14 @@ const nextPage = () => {
   if (currentPage.value < totalPages.value - 1) currentPage.value++;
 };
 
+const lineClass = (line: string) => {
+  if (line.includes('[ERROR]')) return 'text-red-400';
+  if (line.includes('[WARN]')) return 'text-yellow-400';
+  if (line.includes('[TRACE]') || line.includes('[DEBUG]')) return 'text-white/40';
+  if (line.includes('[INFO]') && /success|completed/i.test(line)) return 'text-green-400';
+  return 'text-white/70';
+};
+
 onMounted(() => {
   loadFiles();
 });
@@ -125,6 +160,15 @@ onMounted(() => {
     <div v-if="!currentFile" class="flex-1 overflow-y-auto no-rubber-band">
       <div v-if="loading" class="flex items-center justify-center h-32 text-white/30 text-xs">
         加载中...
+      </div>
+      <div v-else-if="errorText" class="mx-4 mt-4 flex items-center justify-between gap-3 border-l-2 border-red-500 bg-red-500/6 px-3 py-2 text-[11px] text-red-300">
+        <span>{{ errorText }}</span>
+        <button
+          class="shrink-0 border-l-2 border-blue-400 px-2 py-1 text-[10px] text-blue-300"
+          @click="loadFiles"
+        >
+          重新加载
+        </button>
       </div>
       <div v-else-if="files.length === 0" class="flex flex-col items-center justify-center h-64 text-white/20 text-xs">
         <FileText :size="32" class="mb-3 opacity-30" />
@@ -172,12 +216,8 @@ onMounted(() => {
 
       <div class="flex-1 overflow-y-auto overflow-x-auto px-4 py-3 font-mono text-[10px] leading-relaxed min-w-0 no-rubber-band">
         <div v-for="(line, i) in visibleLines()" :key="i"
-          class="whitespace-nowrap text-white/70"
-          :class="{
-            'text-green-400': line.includes('[INFO]') && line.includes('success'),
-            'text-red-400': line.includes('[Error]') || line.includes('failed') || line.includes('error'),
-            'text-yellow-400': line.includes('WARN'),
-          }">
+          class="whitespace-nowrap"
+          :class="lineClass(line)">
           {{ line }}
         </div>
       </div>

@@ -149,3 +149,24 @@ describe('DailyNote notifications', () => {
     expect(direct.type).toBe('error');
   });
 });
+
+describe('sync notification ownership', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it.each([
+    { type: 'vcp-sync-status', status: 'error', source: 'Sync' },
+    {
+      type: 'vcp-log-message',
+      data: {
+        id: 'vcp_sync_connection_status',
+        status: 'success',
+        source: 'Sync',
+      },
+    },
+  ])('keeps sync status inside the sync panel', (payload) => {
+    const result = useNotificationProcessor().processPayload(payload);
+    expect(result).toEqual({ silent: true });
+  });
+});

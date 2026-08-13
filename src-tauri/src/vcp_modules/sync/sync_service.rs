@@ -2,7 +2,7 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::PullExecutor;
 use crate::vcp_modules::sync_hash::HashInitializer;
-use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
+use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal;
@@ -150,6 +150,15 @@ async fn schedule_sync_retry<R: Runtime>(
             *retry_count
         ),
     );
+    emit_operator_sync_log(
+        app_handle,
+        session_id,
+        "warning",
+        &format!(
+            "连接中断，正在进行第 {}/{} 次自动重试",
+            *retry_count, MAX_SYNC_RETRIES
+        ),
+    );
     !cancel_token.is_cancelled() && !cancelled_during(cancel_token, backoff).await
 }
 
@@ -228,6 +237,7 @@ async fn enforce_final_ack_deadline(
     if expired {
         let _ = tx.send(SyncCommand::FailAttempt {
             attempt_id: expected.attempt_id,
+            code: "FINAL_ACK_TIMEOUT",
             message: format!(
                 "Desktop final sync acknowledgement timed out after {} seconds",
                 deadline.as_secs()
@@ -571,6 +581,7 @@ pub enum SyncCommand {
     },
     FailAttempt {
         attempt_id: u64,
+        code: &'static str,
         message: String,
     },
     FailAttemptDetailed {
@@ -612,16 +623,199 @@ fn parse_unique_nonempty_strings(
     Ok(result)
 }
 
-async fn publish_sync_status<R: Runtime>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SyncErrorCategory {
+    Device,
+    Configuration,
+    Connection,
+    Compatibility,
+    Protocol,
+    Data,
+    Internal,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncErrorPayload {
+    code: String,
+    category: SyncErrorCategory,
+    message: String,
+    guidance: String,
+    failed_topic_ids: Vec<String>,
+    log_file: Option<String>,
+}
+
+fn sync_error_copy(code: &str) -> (SyncErrorCategory, &'static str, &'static str) {
+    match code {
+        "POWER_SAVE_MODE" => (
+            SyncErrorCategory::Device,
+            "系统省电模式已阻止本次同步",
+            "关闭系统省电模式后再试。",
+        ),
+        "BATTERY_TOO_LOW" => (
+            SyncErrorCategory::Device,
+            "当前电量不足，已暂停同步",
+            "电量达到 30% 后再试。",
+        ),
+        "CONFIG_LOOPBACK_ON_MOBILE" => (
+            SyncErrorCategory::Configuration,
+            "服务器地址仍指向本机，手机无法连接电脑",
+            "在同步设置中填写电脑的局域网 IP 和端口。",
+        ),
+        "TOKEN_MISMATCH" => (
+            SyncErrorCategory::Configuration,
+            "手机端与电脑端的同步令牌不一致",
+            "重新核对两端令牌后再试。",
+        ),
+        "SYNC_CONFIG_MISSING" => (
+            SyncErrorCategory::Configuration,
+            "同步服务器地址尚未配置完整",
+            "在同步设置中填写电脑端 WebSocket 和 HTTP 地址后再试。",
+        ),
+        "SYNC_CONFIG_INVALID" => (
+            SyncErrorCategory::Configuration,
+            "同步服务器地址格式不正确",
+            "检查同步设置中的协议、IP 和端口后再试。",
+        ),
+        "WS_PATH_INVALID" => (
+            SyncErrorCategory::Configuration,
+            "电脑端同步服务路径配置不正确",
+            "检查同步设置中的服务地址和路径后再试。",
+        ),
+        "SYNC_VERSION_INCOMPATIBLE" => (
+            SyncErrorCategory::Compatibility,
+            "手机端与电脑端同步版本不兼容",
+            "更新或重启电脑端同步插件后再试。",
+        ),
+        "SYNC_ALREADY_RUNNING" => (
+            SyncErrorCategory::Internal,
+            "已有同步任务正在运行",
+            "请等待当前同步结束后再试。",
+        ),
+        "VCP_LOG_DISCONNECTED" => (
+            SyncErrorCategory::Connection,
+            "尚未连接电脑端服务通道",
+            "确认电脑端服务已启动，并等待连接成功后再试。",
+        ),
+        "REMOTE_SYNC_FAILED" => (
+            SyncErrorCategory::Data,
+            "电脑端未能完成本次同步处理",
+            "可重试一次；若仍失败，请保留最新同步日志。",
+        ),
+        "HTTP_CLIENT_INIT_FAILED" => (
+            SyncErrorCategory::Internal,
+            "同步组件未能正常启动",
+            "重启应用后再试；若仍失败，请保留最新同步日志。",
+        ),
+        _ if code.starts_with("VERSION_") => (
+            SyncErrorCategory::Compatibility,
+            "手机端与电脑端同步版本不兼容",
+            "更新或重启电脑端同步插件后再试。",
+        ),
+        _ if code.contains("PROTOCOL")
+            || code.contains("ACK")
+            || code.contains("RESPONSE_TIMEOUT")
+            || code.contains("OVERLAP")
+            || code.contains("STALLED")
+            || code.ends_with("_INVALID") =>
+        {
+            (
+                SyncErrorCategory::Protocol,
+                "电脑端返回的同步响应不符合当前协议，已安全停止",
+                "重启电脑端同步插件；若再次出现，请保留最新同步日志。",
+            )
+        }
+        _ if code.contains("NETWORK")
+            || code.starts_with("WS_")
+            || code.starts_with("HTTP_")
+            || code == "CONNECTION_REFUSED" =>
+        {
+            (
+                SyncErrorCategory::Connection,
+                "无法连接电脑端同步服务",
+                "确认两端处于同一网络，且电脑端服务、IP、端口和防火墙配置正常。",
+            )
+        }
+        _ if code.contains("DB")
+            || code.contains("DRAIN")
+            || code.contains("HASH")
+            || code.contains("MANIFEST")
+            || code.contains("ENTITY")
+            || code.contains("FINAL")
+            || code.contains("PHASE3")
+            || code.contains("DIFF") =>
+        {
+            (
+                SyncErrorCategory::Data,
+                "部分数据未能完成处理，系统未将其标记为成功",
+                "可重试一次；若仍失败，请保留最新同步日志。",
+            )
+        }
+        _ => (
+            SyncErrorCategory::Internal,
+            "同步组件未能正常启动或结束",
+            "重启应用后再试；若仍失败，请保留最新同步日志。",
+        ),
+    }
+}
+
+fn build_sync_error_payload(
+    code: &str,
+    failed_topic_ids: Vec<String>,
+    log_file: Option<String>,
+) -> SyncErrorPayload {
+    let stable_code = if !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        code
+    } else {
+        "SYNC_ATTEMPT_FAILED"
+    };
+    let (category, message, guidance) = sync_error_copy(stable_code);
+    SyncErrorPayload {
+        code: stable_code.to_string(),
+        category,
+        message: message.to_string(),
+        guidance: guidance.to_string(),
+        failed_topic_ids: failed_topic_ids
+            .into_iter()
+            .filter(|id| !id.is_empty() && id.len() <= 512)
+            .take(8)
+            .collect(),
+        log_file,
+    }
+}
+
+fn encode_sync_command_error(code: &str, detail: &str) -> String {
+    log::error!(
+        "[SyncCommand] [{}] {}",
+        code,
+        redact_sync_diagnostic(detail)
+    );
+    let payload = build_sync_error_payload(code, Vec::new(), None);
+    match serde_json::to_string(&payload) {
+        Ok(json) => format!("SYNC_ERROR:{json}"),
+        Err(_) => "SYNC_ERROR:{\"code\":\"SYNC_COMMAND_FAILED\",\"category\":\"internal\",\"message\":\"同步组件未能正常启动或结束\",\"guidance\":\"重启应用后再试；若仍失败，请保留最新同步日志。\",\"failedTopicIds\":[],\"logFile\":null}".to_string(),
+    }
+}
+
+async fn publish_sync_nonterminal_status<R: Runtime>(
     app_handle: &AppHandle<R>,
     session_id: u64,
     status: &Arc<RwLock<String>>,
     next_status: &str,
     message: &str,
 ) {
-    let error =
-        (next_status == "error").then(|| ("SYNC_ATTEMPT_FAILED", message, Vec::<String>::new()));
-    publish_sync_status_inner(app_handle, session_id, status, next_status, message, error).await;
+    let sync_state = app_handle.state::<SyncState>();
+    let _owner_commit = sync_state.owner_commit.lock().await;
+    if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
+        return;
+    }
+    publish_sync_status_inner(app_handle, session_id, status, next_status, message, None).await;
 }
 
 async fn publish_sync_error<R: Runtime>(
@@ -632,13 +826,28 @@ async fn publish_sync_error<R: Runtime>(
     message: &str,
     failed_topic_ids: Vec<String>,
 ) {
+    let sync_state = app_handle.state::<SyncState>();
+    let _owner_commit = sync_state.owner_commit.lock().await;
+    if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
+        return;
+    }
+    emit_sync_log(app_handle, "error", &format!("[{code}] {message}"));
+    let log_file = sync_state
+        .current_log_path
+        .read()
+        .await
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().into_owned());
+    let error = build_sync_error_payload(code, failed_topic_ids, log_file);
+    let user_message = error.message.clone();
     publish_sync_status_inner(
         app_handle,
         session_id,
         status,
         "error",
-        message,
-        Some((code, message, failed_topic_ids)),
+        &user_message,
+        Some(error),
     )
     .await;
 }
@@ -649,34 +858,20 @@ async fn publish_sync_status_inner<R: Runtime>(
     status: &Arc<RwLock<String>>,
     next_status: &str,
     message: &str,
-    error: Option<(&str, &str, Vec<String>)>,
+    error: Option<SyncErrorPayload>,
 ) {
-    let sync_state = app_handle.state::<SyncState>();
-    let _owner_commit = sync_state.owner_commit.lock().await;
-    if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
-        return;
-    }
-
     {
         let mut guard = status.write().await;
-        let detailed_error_enrichment = guard.as_str() == "error"
-            && next_status == "error"
-            && error
-                .as_ref()
-                .is_some_and(|(code, _, _)| *code != "SYNC_ATTEMPT_FAILED");
-        if guard.as_str() == next_status && !detailed_error_enrichment {
+        if guard.as_str() == next_status {
             return;
         }
         if matches!(
             guard.as_str(),
             "error" | "completed" | "completed_with_warnings"
-        ) && !detailed_error_enrichment
-        {
+        ) {
             return;
         }
-        if !detailed_error_enrichment {
-            *guard = next_status.to_string();
-        }
+        *guard = next_status.to_string();
     }
 
     let mut payload = json!({
@@ -685,38 +880,11 @@ async fn publish_sync_status_inner<R: Runtime>(
         "source": "Sync",
         "sessionId": session_id,
     });
-    if let Some((code, original_message, failed_topic_ids)) = error {
-        payload["error"] = json!({
-            "code": code,
-            "message": original_message,
-            "failedTopicIds": failed_topic_ids,
-        });
+    if let Some(error) = error {
+        payload["error"] = json!(error);
     }
 
-    // 统一使用 vcp-system-event 发射，type 为明确的 vcp-sync-status
-    let _ = app_handle.emit(
-        "vcp-system-event",
-        json!({
-            "type": "vcp-sync-status",
-            "status": next_status,
-            "message": message,
-            "source": "Sync",
-            "sessionId": session_id,
-            "error": payload.get("error").cloned().unwrap_or(Value::Null),
-        }),
-    );
-
-    // 直接发射前端 syncSession 监听的 vcp-sync-status
     let _ = app_handle.emit("vcp-sync-status", payload);
-
-    // 同步发射到 Mini Log Terminal
-    let level = match next_status {
-        "open" => "success",
-        "error" => "error",
-        "connecting" => "info",
-        _ => "info",
-    };
-    emit_sync_log(app_handle, level, message);
 }
 
 async fn publish_sync_completed(
@@ -982,7 +1150,17 @@ async fn run_sync_session(
 
     let db = app_handle.state::<DbState>();
     let mut write_queue = DbWriteQueue::new(db.pool.clone(), db.path.clone());
-    let sync_log_level = LogLevel::Info;
+    let configured_log_level = {
+        let settings_state =
+            app_handle.state::<crate::vcp_modules::settings_manager::SettingsState>();
+        crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
+            .await
+            .ok()
+            .map(|settings| settings.sync_log_level)
+            .unwrap_or_else(|| "INFO".to_string())
+    };
+    let sync_log_level = LogLevel::parse(&configured_log_level).unwrap_or(LogLevel::Info);
+    let invalid_log_level = LogLevel::parse(&configured_log_level).is_none();
     let log_dir = app_handle
         .path()
         .app_log_dir()
@@ -991,24 +1169,52 @@ async fn run_sync_session(
     let sync_logger = Arc::new(std::sync::Mutex::new(SyncLogger::new_session(
         sync_log_level,
         log_dir,
-        Some(app_handle.clone()),
+        session_id,
     )));
+    let (log_path, log_initialization_error) = {
+        let logger = sync_logger.lock();
+        match logger {
+            Ok(logger) => (
+                logger.log_path().cloned(),
+                logger.initialization_error().map(str::to_string),
+            ),
+            Err(_) => (None, Some("Sync logger state lock is poisoned".to_string())),
+        }
+    };
     {
         let sync_state = app_handle.state::<SyncState>();
         let _owner_commit = sync_state.owner_commit.lock().await;
         if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
             return Ok(());
         }
-        let log_path = {
-            let logger = sync_logger.lock();
-            logger.ok().and_then(|l| l.log_path().cloned())
-        };
-        if let Some(path) = log_path {
-            let mut guard = sync_state.current_log_path.write().await;
-            *guard = Some(path.to_string_lossy().to_string());
-        }
+        let mut path_guard = sync_state.current_log_path.write().await;
+        *path_guard = log_path.map(|path| path.to_string_lossy().to_string());
+        drop(path_guard);
         let mut logger_guard = sync_state.current_logger.write().unwrap();
         *logger_guard = Some(sync_logger.clone());
+    }
+    if invalid_log_level {
+        emit_sync_log(
+            &app_handle,
+            "warning",
+            &format!(
+                "Unsupported sync log level '{}'; falling back to INFO",
+                configured_log_level
+            ),
+        );
+    }
+    if let Some(detail) = log_initialization_error {
+        log::warn!(
+            "[SyncLogger] Session {} continues without a diagnostic file: {}",
+            session_id,
+            redact_sync_diagnostic(&detail)
+        );
+        emit_operator_sync_log(
+            &app_handle,
+            session_id,
+            "warning",
+            "本次未生成诊断日志，同步过程仍可继续",
+        );
     }
     write_queue.set_logger(sync_logger.clone());
     let write_queue = Arc::new(write_queue);
@@ -1040,12 +1246,13 @@ async fn run_sync_session(
                 Ok(s) => {
                     if s.sync_server_url.is_empty() || s.sync_http_url.is_empty() {
                         emit_sync_log(&handle_clone, "error", "同步服务 URL 未配置，请检查设置");
-                        publish_sync_status(
+                        publish_sync_error(
                             &handle_clone,
                             session_id,
                             &connection_status_for_task,
-                            "error",
+                            "SYNC_CONFIG_MISSING",
                             "同步服务 URL 未配置",
+                            Vec::new(),
                         )
                         .await;
                         break;
@@ -1061,12 +1268,13 @@ async fn run_sync_session(
                                 "error",
                                 &format!("同步服务 URL 格式非法: {}", e),
                             );
-                            publish_sync_status(
+                            publish_sync_error(
                                 &handle_clone,
                                 session_id,
                                 &connection_status_for_task,
-                                "error",
+                                "SYNC_CONFIG_INVALID",
                                 "同步服务 URL 格式非法",
+                                Vec::new(),
                             )
                             .await;
                             break;
@@ -1074,14 +1282,16 @@ async fn run_sync_session(
                     };
                     (ws_addr, s.sync_http_url.clone())
                 }
-                Err(_) => {
-                    emit_sync_log(&handle_clone, "error", "无法读取同步配置");
-                    publish_sync_status(
+                Err(error) => {
+                    let message = format!("无法读取同步配置: {error}");
+                    emit_sync_log(&handle_clone, "error", &message);
+                    publish_sync_error(
                         &handle_clone,
                         session_id,
                         &connection_status_for_task,
-                        "error",
-                        "无法读取同步配置",
+                        "SYNC_SETTINGS_READ_FAILED",
+                        &message,
+                        Vec::new(),
                     )
                     .await;
                     break;
@@ -1089,7 +1299,7 @@ async fn run_sync_session(
             }
         };
 
-        publish_sync_status(
+        publish_sync_nonterminal_status(
             &handle_clone,
             session_id,
             &connection_status_for_task,
@@ -1207,11 +1417,11 @@ async fn run_sync_session(
                                     ),
                                 );
                             } else {
-                                publish_sync_status(
+                                publish_sync_error(
                                     &handle_clone,
                                     session_id,
                                     &connection_status_for_task,
-                                    "error",
+                                    "SYNC_VERSION_INCOMPATIBLE",
                                     &format!(
                                         "桌面端插件 v{} / 协议 {} 与期望 v{} / 协议 {} 不兼容",
                                         version_ack.plugin_version,
@@ -1219,6 +1429,7 @@ async fn run_sync_session(
                                         EXPECTED_PLUGIN_VERSION,
                                         WIRE_PROTOCOL_VERSION,
                                     ),
+                                    Vec::new(),
                                 )
                                 .await;
                                 emit_sync_log(
@@ -1394,7 +1605,7 @@ async fn run_sync_session(
                     }
                     break 'session;
                 }
-                publish_sync_status(
+                publish_sync_nonterminal_status(
                     &handle_clone,
                     session_id,
                     &connection_status_for_task,
@@ -1403,20 +1614,6 @@ async fn run_sync_session(
                 )
                 .await;
 
-                // 同步连接成功提示
-                let _ = handle_clone.emit(
-                    "vcp-system-event",
-                    json!({
-                        "type": "vcp-log-message",
-                        "data": {
-                            "id": "vcp_sync_connection_status",
-                            "status": "success",
-                            "tool_name": "Sync",
-                            "content": "已连接桌面端",
-                            "source": "Sync"
-                        }
-                    }),
-                );
                 let db = handle_clone.state::<DbState>();
                 if let Err(e) = HashInitializer::ensure_all_agent_hashes(&db.pool).await {
                     if let Ok(mut logger) = sync_logger_task.lock() {
@@ -1426,21 +1623,6 @@ async fn run_sync_session(
                             &format!("Failed to initialize agent hashes: {}", e),
                         );
                     }
-
-                    // 同步初始化失败提示
-                    let _ = handle_clone.emit(
-                        "vcp-system-event",
-                        json!({
-                            "type": "vcp-log-message",
-                            "data": {
-                                "id": "vcp_sync_connection_status",
-                                "status": "error",
-                                "tool_name": "同步初始化失败",
-                                "content": "数据库初始化失败",
-                                "source": "Sync"
-                            }
-                        }),
-                    );
                     publish_sync_error(
                         &handle_clone,
                         session_id,
@@ -1461,21 +1643,6 @@ async fn run_sync_session(
                             &format!("Hash init error: {}", e),
                         );
                     }
-
-                    // 同步初始化失败提示
-                    let _ = handle_clone.emit(
-                        "vcp-system-event",
-                        json!({
-                            "type": "vcp-log-message",
-                            "data": {
-                                "id": "vcp_sync_connection_status",
-                                "status": "error",
-                                "tool_name": "同步初始化失败",
-                                "content": "数据库初始化失败",
-                                "source": "Sync"
-                            }
-                        }),
-                    );
                     publish_sync_error(
                         &handle_clone,
                         session_id,
@@ -1896,6 +2063,7 @@ async fn run_sync_session(
                                                             if stuck_ticks >= PHASE3_WATCHDOG_STUCK_TICKS {
                                                                 let _ = tx_watchdog.send(SyncCommand::FailAttempt {
                                                                     attempt_id,
+                                                                    code: "PHASE3_RESPONSE_TIMEOUT",
                                                                     message: format!(
                                                                         "Phase 3 timed out: completed {}/{} topics",
                                                                         completed, total
@@ -1908,6 +2076,7 @@ async fn run_sync_session(
                                                 } else {
                                                     let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                         attempt_id,
+                                                        code: "PHASE3_DIFF_MISSING",
                                                         message: "Phase 3 produced no request batch for changed topics".to_string(),
                                                     });
                                                 }
@@ -1916,6 +2085,7 @@ async fn run_sync_session(
                                                 log::error!("[SyncService] Failed to get topic message hashes: {}", e);
                                                 let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                     attempt_id,
+                                                    code: "PHASE3_HASH_PREP_FAILED",
                                                     message: format!("Phase 3 hash preparation failed: {}", e),
                                                 });
                                             }
@@ -2053,12 +2223,13 @@ async fn run_sync_session(
                                             let message = format!("Owner metadata write drain failed: {}", error);
                                             fatal_error = true;
                                             emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_status(
+                                            publish_sync_error(
                                                 &handle_clone,
                                                 session_id,
                                                 &connection_status_for_task,
-                                                "error",
+                                                "OWNER_METADATA_DRAIN_FAILED",
                                                 &message,
+                                                Vec::new(),
                                             ).await;
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
@@ -2091,12 +2262,13 @@ async fn run_sync_session(
                                             let message = format!("Topic metadata write drain failed: {}", error);
                                             fatal_error = true;
                                             emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_status(
+                                            publish_sync_error(
                                                 &handle_clone,
                                                 session_id,
                                                 &connection_status_for_task,
-                                                "error",
+                                                "TOPIC_METADATA_DRAIN_FAILED",
                                                 &message,
+                                                Vec::new(),
                                             ).await;
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
@@ -2129,12 +2301,13 @@ async fn run_sync_session(
                                             let message = format!("Topic validation write drain failed: {}", error);
                                             fatal_error = true;
                                             emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_status(
+                                            publish_sync_error(
                                                 &handle_clone,
                                                 session_id,
                                                 &connection_status_for_task,
-                                                "error",
+                                                "TOPIC_VALIDATION_DRAIN_FAILED",
                                                 &message,
+                                                Vec::new(),
                                             ).await;
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
@@ -2170,12 +2343,13 @@ async fn run_sync_session(
                                             fatal_error = true;
                                             log::error!("[SyncService] {}", message);
                                             emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_status(
+                                            publish_sync_error(
                                                 &handle_clone,
                                                 session_id,
                                                 &connection_status_for_task,
-                                                "error",
+                                                "SYNC_FINALIZATION_FAILED",
                                                 &message,
+                                                Vec::new(),
                                             ).await;
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
@@ -2193,6 +2367,7 @@ async fn run_sync_session(
                                                 } else {
                                                     let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                         attempt_id,
+                                                        code: "SYNC_STATE_POISONED",
                                                         message: "Final acknowledgement state lock is poisoned".to_string(),
                                                     });
                                                     continue;
@@ -2211,6 +2386,7 @@ async fn run_sync_session(
                                             Err(error) => {
                                                 let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                     attempt_id,
+                                                    code: "WS_SEND_FAILED",
                                                     message: format!(
                                                         "Failed to send final messages phase completion: {}",
                                                         error
@@ -2413,16 +2589,17 @@ async fn run_sync_session(
                                         break 'attempt;
                                     }
                                 },
-                                SyncCommand::FailAttempt { attempt_id: command_attempt, message } => {
+                                SyncCommand::FailAttempt { attempt_id: command_attempt, code, message } => {
                                     if command_attempt != attempt_id { continue; }
                                     fatal_error = true;
                                     emit_sync_log(&handle_clone, "error", &message);
-                                    publish_sync_status(
+                                    publish_sync_error(
                                         &handle_clone,
                                         session_id,
                                         &connection_status_for_task,
-                                        "error",
+                                        code,
                                         &message,
+                                        Vec::new(),
                                     ).await;
                                     let _ = close_ws_with_deadline(&mut ws_stream).await;
                                     break;
@@ -2459,12 +2636,13 @@ async fn run_sync_session(
                                     Ok(_) => {
                                         let message = "Sync protocol frame must be a JSON object";
                                         fatal_error = true;
-                                        publish_sync_status(
+                                        publish_sync_error(
                                             &handle_clone,
                                             session_id,
                                             &connection_status_for_task,
-                                            "error",
+                                            "PROTOCOL_FRAME_INVALID",
                                             message,
+                                            Vec::new(),
                                         ).await;
                                         let _ = close_ws_with_deadline(&mut ws_stream).await;
                                         break;
@@ -2472,12 +2650,13 @@ async fn run_sync_session(
                                     Err(error) => {
                                         let message = format!("Malformed sync protocol frame: {error}");
                                         fatal_error = true;
-                                        publish_sync_status(
+                                        publish_sync_error(
                                             &handle_clone,
                                             session_id,
                                             &connection_status_for_task,
-                                            "error",
+                                            "PROTOCOL_FRAME_INVALID",
                                             &message,
+                                            Vec::new(),
                                         ).await;
                                         let _ = close_ws_with_deadline(&mut ws_stream).await;
                                         break;
@@ -2513,6 +2692,7 @@ async fn run_sync_session(
                                     Err(error) => {
                                         let _ = tx_internal.send(SyncCommand::FailAttempt {
                                             attempt_id,
+                                            code: "SYNC_SETTINGS_READ_FAILED",
                                             message: format!("Failed to read sync settings: {error}"),
                                         });
                                         continue;
@@ -2790,7 +2970,7 @@ async fn run_sync_session(
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
                                         };
-                                        let code = match payload.get("code") {
+                                        let remote_code = match payload.get("code") {
                                             Some(Value::String(code)) if !code.is_empty() => code.clone(),
                                             Some(Value::Number(code)) if code.is_u64() => code.to_string(),
                                             _ => {
@@ -2807,14 +2987,17 @@ async fn run_sync_session(
                                                 break;
                                             }
                                         };
-                                        let err_msg = format!("Desktop Error ({code}): {message}");
-                                        log::error!("[SyncService] {}", err_msg);
+                                        let err_msg = format!("Desktop Error ({remote_code}): {message}");
+                                        log::error!(
+                                            "[SyncService] {}",
+                                            redact_sync_diagnostic(&err_msg)
+                                        );
                                         emit_sync_log(&handle_clone, "error", &err_msg);
                                         publish_sync_error(
                                             &handle_clone,
                                             session_id,
                                             &connection_status_for_task,
-                                            &code,
+                                            "REMOTE_SYNC_FAILED",
                                             &err_msg,
                                             Vec::new(),
                                         ).await;
@@ -2826,6 +3009,7 @@ async fn run_sync_session(
                                         let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else {
                                             let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                 attempt_id,
+                                                code: "PROTOCOL_FRAME_INVALID",
                                                 message: "SYNC_DIFF_RESULTS.dataType is missing or invalid".to_string(),
                                             });
                                             continue;
@@ -2854,6 +3038,7 @@ async fn run_sync_session(
                                             log::error!("[SyncService] DiffHandler failed: {}", e);
                                             let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                 attempt_id,
+                                                code: "SYNC_DIFF_HANDLER_FAILED",
                                                 message: format!("DiffHandler failed: {e}"),
                                             });
                                         }
@@ -2961,6 +3146,7 @@ async fn run_sync_session(
                                             Err(message) => {
                                                 let _ = tx_internal.send(SyncCommand::FailAttempt {
                                                     attempt_id,
+                                                    code: "TOPIC_HASH_RESULTS_INVALID",
                                                     message,
                                                 });
                                             }
@@ -2980,12 +3166,13 @@ async fn run_sync_session(
                                             let message = format!("Final sync write drain failed: {}", error);
                                             fatal_error = true;
                                             emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_status(
+                                            publish_sync_error(
                                                 &handle_clone,
                                                 session_id,
                                                 &connection_status_for_task,
-                                                "error",
+                                                "FINAL_WRITE_DRAIN_FAILED",
                                                 &message,
+                                                Vec::new(),
                                             ).await;
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
@@ -3004,20 +3191,6 @@ async fn run_sync_session(
                                             }
                                             emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
 
-                                            // 发送同步完成提示
-                                            let _ = handle_clone.emit(
-                                                "vcp-system-event",
-                                                json!({
-                                                    "type": "vcp-log-message",
-                                                    "data": {
-                                                        "id": "vcp_sync_connection_status",
-                                                        "status": "success",
-                                                        "tool_name": "Sync",
-                                                        "content": "同步完成",
-                                                        "source": "Sync"
-                                                    }
-                                                }),
-                                            );
                                         }
                                         let _ = close_ws_with_deadline(&mut ws_stream).await;
                                         break;
@@ -3164,12 +3337,16 @@ async fn run_sync_session(
                         &format!("🔍 调试细节: {}", diagnosis.error_detail),
                     );
 
-                    publish_sync_status(
+                    publish_sync_error(
                         &handle_clone,
                         session_id,
                         &connection_status_for_task,
-                        "error",
-                        &format!("同步连接失败: {}", diagnosis.error_message),
+                        &diagnosis.error_code,
+                        &format!(
+                            "{} | suggestion={} | detail={}",
+                            diagnosis.error_message, diagnosis.solution, diagnosis.error_detail
+                        ),
+                        Vec::new(),
                     )
                     .await;
                     break;
@@ -3220,9 +3397,11 @@ async fn run_sync_session(
     let _owner_commit = sync_state.owner_commit.lock().await;
     if sync_state.current_session_id.load(Ordering::SeqCst) == session_id {
         sync_state.ws_sender.clear_if_owner(session_id);
-        let mut logger_guard = sync_state.current_logger.write().unwrap();
-        *logger_guard = None;
-        drop(logger_guard);
+        {
+            let mut logger_guard = sync_state.current_logger.write().unwrap();
+            *logger_guard = None;
+        }
+        *sync_state.current_log_path.write().await = None;
 
         #[cfg(target_os = "android")]
         let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
@@ -3337,17 +3516,6 @@ fn build_diff_batches(
 }
 
 pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
-    let _ = app_handle.emit(
-        "vcp-log",
-        serde_json::json!({
-            "id": format!("{}_{}", level, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
-            "level": level,
-            "category": "sync",
-            "message": message,
-        }),
-    );
-
-    // 整合：写入 log 文件和控制台！
     let sync_state = app_handle.state::<SyncState>();
     if let Some(logger_arc) = sync_state
         .current_logger
@@ -3357,20 +3525,44 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
     {
         if let Ok(mut logger) = logger_arc.lock() {
             let log_level = match level {
+                "trace" => LogLevel::Trace,
+                "debug" => LogLevel::Debug,
                 "error" => LogLevel::Error,
-                "warn" | "warning" => LogLevel::Info,
+                "warn" | "warning" => LogLevel::Warning,
                 _ => LogLevel::Info,
             };
-            logger.log_direct(log_level, "sync", message);
+            logger.log(log_level, "sync", message);
         }
     } else {
+        let safe_message = redact_sync_diagnostic(message);
         let rust_log_level = match level {
+            "trace" => log::Level::Trace,
+            "debug" => log::Level::Debug,
             "error" => log::Level::Error,
             "warn" | "warning" => log::Level::Warn,
             _ => log::Level::Info,
         };
-        log::log!(rust_log_level, "[Sync] [{}] {}", level, message);
+        log::log!(rust_log_level, "[Sync] [{}] {}", level, safe_message);
     }
+}
+
+fn emit_operator_sync_log<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    session_id: u64,
+    level: &str,
+    message: &str,
+) {
+    let _ = app_handle.emit(
+        "vcp-log",
+        serde_json::json!({
+            "id": format!("{}_{}", level, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)),
+            "level": level,
+            "category": "sync",
+            "audience": "operator",
+            "sessionId": session_id,
+            "message": message,
+        }),
+    );
 }
 
 #[tauri::command]
@@ -3400,10 +3592,17 @@ pub async fn stop_sync(
         let mut guard = state.connection_status.write().await;
         *guard = "disconnected".to_string();
     }
-    {
-        let mut logger_guard = state.current_logger.write().unwrap();
-        *logger_guard = None;
-    }
+    let logger_clear_result = state
+        .current_logger
+        .write()
+        .map(|mut logger_guard| *logger_guard = None)
+        .map_err(|_| {
+            encode_sync_command_error(
+                "SYNC_STATE_POISONED",
+                "Sync logger state lock is poisoned while stopping",
+            )
+        });
+    *state.current_log_path.write().await = None;
 
     #[cfg(target_os = "android")]
     let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
@@ -3411,7 +3610,9 @@ pub async fn stop_sync(
         "[数据同步] VCP Mobile",
     );
 
-    join_result
+    join_result.map_err(|detail| encode_sync_command_error("SYNC_STOP_FAILED", &detail))?;
+    logger_clear_result?;
+    Ok(())
 }
 
 async fn cancel_and_join_session(session: SyncSessionHandle) -> Result<(), String> {
@@ -3440,27 +3641,45 @@ pub async fn start_manual_sync(
         let mut session = state.session.lock().await;
         if let Some(active) = session.as_ref() {
             if !active.join_handle.is_finished() {
-                return Err("同步已在进行中".to_string());
+                return Err(encode_sync_command_error(
+                    "SYNC_ALREADY_RUNNING",
+                    "A sync session is already running",
+                ));
             }
         }
         session.take()
     };
     if let Some(finished_session) = finished_session {
-        finished_session
-            .join_handle
-            .await
-            .map_err(|error| format!("上一同步会话退出失败: {error}"))??;
+        match finished_session.join_handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(detail)) => {
+                return Err(encode_sync_command_error(
+                    "SYNC_PREVIOUS_SESSION_EXIT_FAILED",
+                    &detail,
+                ));
+            }
+            Err(error) => {
+                return Err(encode_sync_command_error(
+                    "SYNC_PREVIOUS_SESSION_EXIT_FAILED",
+                    &error.to_string(),
+                ));
+            }
+        }
     }
 
     // VCPLog 是全局重要通道，未连接时直接拦截同步，避免进入同步主循环后长时间挂起
     let log_status = get_vcp_log_status_internal().await;
     if log_status != "connected" {
-        return Err("VCPLog 未连接，请先建立 VCPLog 连接后再进行同步".to_string());
+        return Err(encode_sync_command_error(
+            "VCP_LOG_DISCONNECTED",
+            &format!("VCPLog status is {log_status}"),
+        ));
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<SyncCommand>();
-    tx.send(SyncCommand::StartManualSync)
-        .map_err(|e| e.to_string())?;
+    tx.send(SyncCommand::StartManualSync).map_err(|error| {
+        encode_sync_command_error("SYNC_START_CHANNEL_FAILED", &error.to_string())
+    })?;
     let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst) + 1;
     let command_tx = tx.clone();
     {
@@ -3468,6 +3687,7 @@ pub async fn start_manual_sync(
         state.current_session_id.store(session_id, Ordering::SeqCst);
         state.ws_sender.install(session_id, command_tx.clone());
         *state.connection_status.write().await = "disconnected".to_string();
+        *state.current_log_path.write().await = None;
     }
     let cancel_token = CancellationToken::new();
 
@@ -3507,7 +3727,7 @@ pub async fn list_sync_log_files(app: AppHandle) -> Result<Vec<SyncLogFileInfo>,
     let log_dir = app
         .path()
         .app_log_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_LIST_FAILED", &error.to_string()))?
         .join("sync_logs");
     if !log_dir.exists() {
         return Ok(Vec::new());
@@ -3516,9 +3736,15 @@ pub async fn list_sync_log_files(app: AppHandle) -> Result<Vec<SyncLogFileInfo>,
     let mut entries = Vec::new();
     let mut read_dir = tokio::fs::read_dir(&log_dir)
         .await
-        .map_err(|e| e.to_string())?;
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let metadata = entry.metadata().await.map_err(|e| e.to_string())?;
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_LIST_FAILED", &error.to_string()))?;
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_LIST_FAILED", &error.to_string()))?
+    {
+        let metadata = entry.metadata().await.map_err(|error| {
+            encode_sync_command_error("SYNC_LOG_LIST_FAILED", &error.to_string())
+        })?;
         if metadata.is_file() {
             let filename = entry.file_name().to_string_lossy().to_string();
             let created_at = metadata
@@ -3553,55 +3779,108 @@ pub async fn read_sync_log_file(app: AppHandle, filename: String) -> Result<Stri
     let log_dir = app
         .path()
         .app_log_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?
         .join("sync_logs");
     let file_path = log_dir.join(&filename);
 
     // 安全检查：确保文件在 sync_logs 目录内
-    let canonical_dir = log_dir.canonicalize().map_err(|e| e.to_string())?;
-    let canonical_file = file_path.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_dir = log_dir
+        .canonicalize()
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?;
+    let canonical_file = file_path
+        .canonicalize()
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?;
     if !canonical_file.starts_with(&canonical_dir) {
-        return Err("Invalid file path".to_string());
+        return Err(encode_sync_command_error(
+            "SYNC_LOG_PATH_INVALID",
+            "Requested sync log is outside the sync log directory",
+        ));
     }
 
     let content = tokio::fs::read_to_string(&canonical_file)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?;
     Ok(content)
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncLogCleanupResult {
+    pub removed: u32,
+    pub failed: u32,
+}
+
+fn count_log_removal(
+    result: std::io::Result<()>,
+    removed: &mut u32,
+    failed: &mut u32,
+) -> Option<std::io::Error> {
+    match result {
+        Ok(()) => {
+            *removed += 1;
+            None
+        }
+        Err(error) => {
+            *failed += 1;
+            Some(error)
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn clear_old_sync_logs(app: AppHandle, keep_days: u32) -> Result<u32, String> {
+pub async fn clear_old_sync_logs(
+    app: AppHandle,
+    keep_days: u32,
+) -> Result<SyncLogCleanupResult, String> {
     let log_dir = app
         .path()
         .app_log_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_CLEAR_FAILED", &error.to_string()))?
         .join("sync_logs");
     if !log_dir.exists() {
-        return Ok(0);
+        return Ok(SyncLogCleanupResult {
+            removed: 0,
+            failed: 0,
+        });
     }
 
-    let cutoff =
-        std::time::SystemTime::now() - std::time::Duration::from_secs(keep_days as u64 * 86400);
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(keep_days as u64 * 86400))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
     let mut removed = 0u32;
+    let mut failed = 0u32;
 
     let mut read_dir = tokio::fs::read_dir(&log_dir)
         .await
-        .map_err(|e| e.to_string())?;
-    while let Ok(Some(entry)) = read_dir.next_entry().await {
-        let metadata = entry.metadata().await.map_err(|e| e.to_string())?;
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_CLEAR_FAILED", &error.to_string()))?;
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_CLEAR_FAILED", &error.to_string()))?
+    {
+        let metadata = entry.metadata().await.map_err(|error| {
+            encode_sync_command_error("SYNC_LOG_CLEAR_FAILED", &error.to_string())
+        })?;
         if metadata.is_file() {
             let modified = metadata
                 .modified()
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             if modified < cutoff {
-                let _ = tokio::fs::remove_file(entry.path()).await;
-                removed += 1;
+                if let Some(error) = count_log_removal(
+                    tokio::fs::remove_file(entry.path()).await,
+                    &mut removed,
+                    &mut failed,
+                ) {
+                    log::warn!(
+                        "[SyncLog] Failed to remove old log: {}",
+                        redact_sync_diagnostic(&error.to_string())
+                    );
+                }
             }
         }
     }
 
-    Ok(removed)
+    Ok(SyncLogCleanupResult { removed, failed })
 }
 
 #[cfg(test)]
@@ -3610,6 +3889,80 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use tokio_tungstenite::tungstenite::error::Error as WsError;
     use tokio_tungstenite::tungstenite::http::{Response, StatusCode};
+
+    #[test]
+    fn sync_error_contract_keeps_raw_detail_out_of_the_user_payload() {
+        let payload = build_sync_error_payload(
+            "TOKEN_MISMATCH",
+            vec!["topic-a".to_string()],
+            Some("20260813_120000_000_7_sync.log".to_string()),
+        );
+        let json = serde_json::to_value(payload).expect("serialize sync error");
+
+        assert_eq!(json["category"], "configuration");
+        assert_eq!(json["message"], "手机端与电脑端的同步令牌不一致");
+        assert_eq!(json["guidance"], "重新核对两端令牌后再试。");
+        assert!(json.get("detail").is_none());
+        assert!(json.get("solution").is_none());
+
+        let fallback = build_sync_error_payload("desktop raw code", Vec::new(), None);
+        assert_eq!(fallback.code, "SYNC_ATTEMPT_FAILED");
+        assert_eq!(fallback.category, SyncErrorCategory::Internal);
+    }
+
+    #[test]
+    fn sync_error_classification_covers_connection_protocol_and_data_failures() {
+        assert_eq!(
+            sync_error_copy("NETWORK_TIMEOUT").0,
+            SyncErrorCategory::Connection
+        );
+        assert_eq!(
+            sync_error_copy("PROTOCOL_FRAME_INVALID").0,
+            SyncErrorCategory::Protocol
+        );
+        assert_eq!(
+            sync_error_copy("SYNC_DB_DRAIN_FAILED").0,
+            SyncErrorCategory::Data
+        );
+        assert_eq!(
+            sync_error_copy("SYNC_VERSION_INCOMPATIBLE").0,
+            SyncErrorCategory::Compatibility
+        );
+    }
+
+    #[test]
+    fn command_errors_use_the_structured_transport_prefix() {
+        let encoded = encode_sync_command_error(
+            "VCP_LOG_DISCONNECTED",
+            "Bearer raw-secret should stay in native logs only",
+        );
+        let json = encoded
+            .strip_prefix("SYNC_ERROR:")
+            .expect("structured sync command prefix");
+        let payload: Value = serde_json::from_str(json).expect("structured sync error JSON");
+
+        assert_eq!(payload["code"], "VCP_LOG_DISCONNECTED");
+        assert_eq!(payload["category"], "connection");
+        assert!(!encoded.contains("raw-secret"));
+    }
+
+    #[test]
+    fn log_cleanup_never_counts_failed_removals_as_removed() {
+        let mut removed = 0;
+        let mut failed = 0;
+        assert!(count_log_removal(Ok(()), &mut removed, &mut failed).is_none());
+        assert!(count_log_removal(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "denied"
+            )),
+            &mut removed,
+            &mut failed,
+        )
+        .is_some());
+        assert_eq!(removed, 1);
+        assert_eq!(failed, 1);
+    }
 
     #[test]
     fn protocol_send_failure_names_frame_and_transport_error() {
@@ -3862,9 +4215,11 @@ mod tests {
         match rx.try_recv() {
             Ok(SyncCommand::FailAttempt {
                 attempt_id,
+                code,
                 message,
             }) => {
                 assert_eq!(attempt_id, 7);
+                assert_eq!(code, "FINAL_ACK_TIMEOUT");
                 assert!(message.contains("acknowledgement timed out"));
             }
             _ => panic!("pending final acknowledgement must fail its attempt"),

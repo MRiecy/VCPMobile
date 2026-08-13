@@ -111,6 +111,16 @@ export function useNotificationProcessor() {
    * 负责将后端原始 JSON 转化为前端 UI 可用的结构
    */
   const processPayload = (payload: any): Partial<VcpNotification> => {
+    const syncNotificationData = payload?.data || payload;
+    if (
+      payload?.type === 'vcp-sync-status' ||
+      (payload?.type === 'vcp-log-message' &&
+        (syncNotificationData?.source === 'Sync' ||
+          syncNotificationData?.id === 'vcp_sync_connection_status'))
+    ) {
+      return { silent: true };
+    }
+
     // 0. P2-7 Gap: 连接底层状态指示器 (VCPLog)
     // 同步状态不再渲染到全局状态栏（同步已改为完全手动触发，避免状态栏干扰）
     if (payload.type === 'vcp-log-status') {
