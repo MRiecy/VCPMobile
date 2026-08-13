@@ -53,6 +53,15 @@
       }
     },
     {
+      "name": "materialize skill is an explicit action",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」materialize_skill「末」,\nskill_id:「始」example-skill「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "materialize_skill",
+        "skill_id": "example-skill",
+        "meta": {}
+      }
+    },
+    {
       "name": "poll typed fields",
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」poll「末」,\njob_id:「始」job_01「末」,\ncursor:「始」c_42「末」,\nmax_output_bytes:「始」65536「末」,\nwait_ms:「始」8000「末」\n<<<[END_TOOL_REQUEST]>>>",
       "expected": {

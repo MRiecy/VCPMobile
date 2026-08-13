@@ -3,6 +3,9 @@ import VcpCliManifestView from "@/features/cli/components/VcpCliManifestView.vue
 import { useModalHistory } from "@/core/composables/useModalHistory";
 import {
   VCP_CLI_ACTION_COMMAND,
+  VCP_CLI_NATIVE_PICK_FILE_COMMAND,
+  VCP_CLI_SKILL_CATALOG_COMMAND,
+  VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND,
   VCP_CLI_STATUS_COMMAND,
   type VcpCliAction,
   type VcpCliActionResponse,
@@ -269,6 +272,67 @@ describe("VCP CLI mobile workbench", () => {
     );
     expect(wrapper.find('[data-vcp-cli-tab="skills"]').exists()).toBe(true);
     expect(wrapper.emitted("close")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("shows catalog warnings and requires a second click after ZIP inspection", async () => {
+    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
+      const request = requestFromArgs(args);
+      if (request.action.action === "list") {
+        return response(request.operation_id, { jobs: [] });
+      }
+      if (request.action.action === "list_skills") {
+        return response(request.operation_id, { skills: [] });
+      }
+      throw new Error(`unexpected action ${request.action.action}`);
+    });
+    mockInvoke(VCP_CLI_SKILL_CATALOG_COMMAND, () => ({
+      schema_version: 2,
+      generation: 7,
+      skills: [],
+      warnings: ["Invalid Skill broken: integrity failed"],
+    }));
+    mockInvoke(VCP_CLI_NATIVE_PICK_FILE_COMMAND, () => ({
+      path: "/cache/uploads/sample.zip",
+      name: "sample.zip",
+      mime: "application/zip",
+      size: 99,
+      hash: "a".repeat(64),
+    }));
+    mockInvoke(VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND, () => ({
+      token: "vcp-skill-import-v1:00000000-0000-4000-8000-000000000002",
+      candidate_sha256: "a".repeat(64),
+      catalog_generation: 7,
+      skill_id: "sample",
+      name: "Sample",
+      description: "Review me",
+      version: null,
+      source_name: "sample.zip",
+      resource_count: 2,
+      total_bytes: 99,
+      tree_sha256: "b".repeat(64),
+      replaces_existing: false,
+      warnings: ["包含 scripts/；导入不会执行脚本。"],
+    }));
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get('[data-vcp-cli-tab="skills"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Invalid Skill broken");
+    await wrapper.get('[data-vcp-cli-action="import-skill"]').trigger("click");
+    await flushPromises();
+    const review = wrapper.get('[data-vcp-cli-role="skill-import-review"]');
+    expect(review.text()).toContain("Sample");
+    expect(review.text()).toContain("导入不会执行脚本");
+    expect(
+      wrapper.find('[data-vcp-cli-action="commit-skill-import"]').exists(),
+    ).toBe(true);
+    expect(
+      invokeMock.mock.calls.some(
+        ([command]) => command === "commit_vcp_mobile_cli_skill_import",
+      ),
+    ).toBe(false);
     wrapper.unmount();
   });
 });

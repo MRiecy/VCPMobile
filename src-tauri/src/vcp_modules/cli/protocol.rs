@@ -78,6 +78,9 @@ pub enum VcpCliAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_bytes: Option<usize>,
     },
+    MaterializeSkill {
+        skill_id: String,
+    },
     Poll {
         job_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +148,10 @@ pub fn validate_structured_vcp_cli_action(
                 push_field(&mut fields, "max_bytes", max_bytes.to_string());
             }
         }
+        VcpCliAction::MaterializeSkill { skill_id } => {
+            push_field(&mut fields, "action", "materialize_skill");
+            push_field(&mut fields, "skill_id", skill_id);
+        }
         VcpCliAction::Poll {
             job_id,
             cursor,
@@ -189,6 +196,7 @@ impl VcpCliAction {
             Self::Run { .. } => "run",
             Self::ListSkills => "list_skills",
             Self::ReadSkill { .. } => "read_skill",
+            Self::MaterializeSkill { .. } => "materialize_skill",
             Self::Poll { .. } => "poll",
             Self::Cancel { .. } => "cancel",
             Self::List => "list",
@@ -476,7 +484,7 @@ pub fn validate_vcp_mobile_cli_request(
     let allowed_fields = allowed_fields(action_name).ok_or_else(|| {
         VcpCliProtocolError::invalid(
             "action",
-            "expected run|list_skills|read_skill|poll|cancel|list",
+            "expected run|list_skills|read_skill|materialize_skill|poll|cancel|list",
         )
     })?;
 
@@ -494,6 +502,9 @@ pub fn validate_vcp_mobile_cli_request(
         "run" => validate_run(&values)?,
         "list_skills" => VcpCliAction::ListSkills,
         "read_skill" => validate_read_skill(&values)?,
+        "materialize_skill" => VcpCliAction::MaterializeSkill {
+            skill_id: validate_skill_id_field(&values)?,
+        },
         "poll" => validate_poll(&values)?,
         "cancel" => VcpCliAction::Cancel {
             job_id: validate_identifier(required_value(&values, "job_id")?, "job_id")?,
@@ -790,6 +801,7 @@ fn allowed_fields(action: &str) -> Option<&'static [&'static str]> {
         "max_bytes",
         "ink",
     ];
+    const MATERIALIZE_SKILL: &[&str] = &["tool_name", "action", "skill_id", "ink"];
     const POLL: &[&str] = &[
         "tool_name",
         "action",
@@ -806,6 +818,7 @@ fn allowed_fields(action: &str) -> Option<&'static [&'static str]> {
         "run" => Some(RUN),
         "list_skills" => Some(LIST_SKILLS),
         "read_skill" => Some(READ_SKILL),
+        "materialize_skill" => Some(MATERIALIZE_SKILL),
         "poll" => Some(POLL),
         "cancel" => Some(CANCEL),
         "list" => Some(LIST),
@@ -955,13 +968,7 @@ fn validate_run(values: &HashMap<&str, &str>) -> Result<VcpCliAction, VcpCliProt
 }
 
 fn validate_read_skill(values: &HashMap<&str, &str>) -> Result<VcpCliAction, VcpCliProtocolError> {
-    let skill_id = validate_identifier(required_value(values, "skill_id")?, "skill_id")?;
-    if skill_id.contains(['/', '\\']) {
-        return Err(VcpCliProtocolError::invalid(
-            "skill_id",
-            "must be a catalog identifier, not a path",
-        ));
-    }
+    let skill_id = validate_skill_id_field(values)?;
 
     let resource_path = values.get("resource_path").copied().unwrap_or("SKILL.md");
     validate_resource_path(resource_path)?;
@@ -972,6 +979,17 @@ fn validate_read_skill(values: &HashMap<&str, &str>) -> Result<VcpCliAction, Vcp
         resource_path: Some(resource_path.to_string()),
         max_bytes: Some(max_bytes),
     })
+}
+
+fn validate_skill_id_field(values: &HashMap<&str, &str>) -> Result<String, VcpCliProtocolError> {
+    let skill_id = validate_identifier(required_value(values, "skill_id")?, "skill_id")?;
+    if skill_id.contains(['/', '\\']) {
+        return Err(VcpCliProtocolError::invalid(
+            "skill_id",
+            "must be a catalog identifier, not a path",
+        ));
+    }
+    Ok(skill_id)
 }
 
 fn validate_poll(values: &HashMap<&str, &str>) -> Result<VcpCliAction, VcpCliProtocolError> {

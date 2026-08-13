@@ -22,6 +22,10 @@ pub mod protocol;
 pub mod result;
 pub mod runtime;
 #[allow(dead_code)]
+mod skill_catalog;
+#[allow(dead_code)]
+mod skill_import;
+#[allow(dead_code)]
 mod skills;
 #[allow(dead_code)]
 pub(crate) mod turn_coordinator;
@@ -34,5 +38,7 @@ pub(crate) mod turn_types;
 
 pub use manifest::get_vcp_mobile_cli_manifest;
 pub use runtime::{
-    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_status, MobileCliRuntimeState,
+    commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,
+    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_skill_catalog, get_vcp_mobile_cli_status,
+    inspect_vcp_mobile_cli_skill_import, MobileCliRuntimeState,
 };

@@ -34,9 +34,17 @@ use super::result::{
     VcpCliArtifactRef, VcpCliContentPart, VcpCliErrorCode, VcpCliJobResult, VcpCliJobState,
     VcpCliJobSummary, VcpCliResultBody, VcpCliResultEnvelope, VcpCliRuntimeInfo,
 };
-use super::skills::{
-    install_builtin_skill, list_skills, read_skill, SkillError, SkillErrorKind, MAX_SKILL_BYTES,
+use super::skill_catalog::{
+    catalog_snapshot, ensure_skill_catalog, list_skills_v2, materialize_skill, read_skill_v2,
+    SkillCatalogSnapshot,
 };
+use super::skill_import::{
+    commit_skill_import, discard_skill_import, inspect_skill_import,
+    replay_skill_import_inspection, validate_picker_source, CommitSkillImportRequest,
+    CommitSkillImportResponse, DiscardSkillImportRequest, InspectSkillImportRequest,
+    SkillImportCandidate,
+};
+use super::skills::{SkillError, SkillErrorKind, MAX_SKILL_BYTES};
 use tauri_plugin_vcp_mobile::cli::{
     cancel_cli_process_inner, inspect_cli_process_inner, prepare_cli_runtime_inner,
     start_cli_process_inner, CancelCliProcessRequest, CancelCliProcessResponse, CliProcessState,
@@ -111,6 +119,7 @@ pub struct MobileCliRuntimeState {
     operation_gate: Mutex<()>,
     provision_gate: Mutex<()>,
     workspace_gate: Mutex<()>,
+    skill_mutation_gate: Mutex<()>,
 }
 
 struct RuntimeOwner {
@@ -161,6 +170,7 @@ impl MobileCliRuntimeState {
             operation_gate: Mutex::new(()),
             provision_gate: Mutex::new(()),
             workspace_gate: Mutex::new(()),
+            skill_mutation_gate: Mutex::new(()),
         }
     }
 
@@ -348,6 +358,18 @@ impl MobileCliRuntimeState {
                 )
                 .await?
             }
+            VcpCliAction::MaterializeSkill { skill_id } => {
+                let _operation_guard = self.operation_gate.lock().await;
+                if let Some(replay) = self
+                    .replay_operation(&request.operation_id, &action_sha256)
+                    .await?
+                {
+                    replay
+                } else {
+                    self.materialize_skill_action(app, &request.operation_id, skill_id)
+                        .await?
+                }
+            }
             VcpCliAction::Poll {
                 job_id,
                 cursor,
@@ -531,10 +553,13 @@ impl MobileCliRuntimeState {
         .map_err(|error| DomainError::internal(format!("provision task failed: {error}")))?
         .map_err(|error| DomainError::internal(error.to_string()))?;
         let skills = runtime.skills.clone();
-        tauri::async_runtime::spawn_blocking(move || install_builtin_skill(&skills))
-            .await
-            .map_err(|error| DomainError::internal(format!("Skill install task failed: {error}")))?
-            .map_err(domain_skill_error)?;
+        let installed_at_ms = now_ms().map_err(DomainError::internal)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            ensure_skill_catalog(&skills, installed_at_ms)
+        })
+        .await
+        .map_err(|error| DomainError::internal(format!("Skill catalog task failed: {error}")))?
+        .map_err(domain_skill_error)?;
 
         let referenced = {
             let owner = self.inner.lock().await;
@@ -1440,7 +1465,7 @@ impl MobileCliRuntimeState {
             Err(error) => return self.domain_response(operation_id, error).await,
         };
         let root = runtime.skills;
-        let listed = tauri::async_runtime::spawn_blocking(move || list_skills(&root))
+        let listed = tauri::async_runtime::spawn_blocking(move || list_skills_v2(&root))
             .await
             .map_err(|error| format!("Skill scan task failed: {error}"))?;
         let listed = match listed {
@@ -1482,7 +1507,7 @@ impl MobileCliRuntimeState {
         };
         let root = runtime.skills;
         let result = tauri::async_runtime::spawn_blocking(move || {
-            read_skill(
+            read_skill_v2(
                 &root,
                 &skill_id,
                 &resource_path,
@@ -1512,6 +1537,187 @@ impl MobileCliRuntimeState {
                 runtime: Some(VcpCliRuntimeInfo::local_loopback()),
             }),
         })
+    }
+
+    async fn materialize_skill_action<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        operation_id: &str,
+        skill_id: String,
+    ) -> Result<ExecuteVcpMobileCliResponse, String> {
+        let runtime = match self.ensure_provisioned(app, operation_id).await {
+            Ok(runtime) => runtime,
+            Err(error) => return self.domain_response(operation_id, error).await,
+        };
+        let _skill_guard = self.skill_mutation_gate.lock().await;
+        let _workspace_guard = self.workspace_gate.lock().await;
+        {
+            let owner = self.inner.lock().await;
+            if owner.ledger.jobs.iter().any(|job| !job.is_terminal()) {
+                return self
+                    .domain_response(
+                        operation_id,
+                        DomainError::new(
+                            VcpCliErrorCode::RuntimeUnavailable,
+                            "Skill materialization requires zero active CLI jobs; wait or cancel them and retry.",
+                        ),
+                    )
+                    .await;
+            }
+        }
+
+        let skills_root = runtime.skills.clone();
+        let workspace = runtime.workspace.clone();
+        let workspace_limit = runtime.profile.budgets.workspace_default_bytes;
+        let storage_paths = vec![
+            runtime.rootfs.clone(),
+            runtime.workspace.clone(),
+            runtime.output.clone(),
+        ];
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let snapshot = catalog_snapshot(&skills_root)?;
+            let selected = snapshot
+                .skills
+                .iter()
+                .find(|skill| skill.id == skill_id)
+                .ok_or_else(|| SkillError::not_found("Skill was not found in the catalog"))?;
+            if selected.integrity_status != "valid" {
+                return Err(SkillError::integrity(
+                    "Skill failed catalog integrity validation",
+                ));
+            }
+            let current_bytes = workspace_usage_bytes(&workspace, workspace_limit)
+                .map_err(SkillError::integrity)?;
+            if current_bytes
+                .checked_add(selected.total_bytes)
+                .is_none_or(|projected| projected > workspace_limit)
+            {
+                return Err(SkillError::integrity(
+                    "workspace budget cannot admit the Skill snapshot",
+                ));
+            }
+            require_filesystem_headroom(&storage_paths, MIN_RUNTIME_STORAGE_HEADROOM_BYTES)
+                .map_err(SkillError::integrity)?;
+            materialize_skill(&skills_root, &workspace, &skill_id)
+        })
+        .await
+        .map_err(|error| format!("Skill materialization task failed: {error}"))?;
+        let (skill, guest_path) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                return self
+                    .domain_response(operation_id, domain_skill_error(error))
+                    .await
+            }
+        };
+        let generation = self.inner.lock().await.ledger.runtime_generation;
+        Ok(ExecuteVcpMobileCliResponse {
+            operation_id: operation_id.to_string(),
+            runtime_generation: generation,
+            envelope: VcpCliResultEnvelope::success(VcpCliResultBody {
+                content: vec![VcpCliContentPart::text(format!(
+                    "Skill snapshot materialized at {guest_path}. This is a non-writeback workspace copy; inspect it before a separate action=run."
+                ))],
+                job: None,
+                jobs: None,
+                skill: Some(skill),
+                skills: None,
+                runtime: Some(VcpCliRuntimeInfo::local_loopback()),
+            }),
+        })
+    }
+
+    async fn skill_catalog_snapshot<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+    ) -> Result<SkillCatalogSnapshot, String> {
+        let operation_id = format!("skill-catalog-{}", Uuid::new_v4());
+        let runtime = self
+            .ensure_provisioned(app, &operation_id)
+            .await
+            .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))?;
+        let root = runtime.skills;
+        tauri::async_runtime::spawn_blocking(move || catalog_snapshot(&root))
+            .await
+            .map_err(|error| format!("Skill catalog task failed: {error}"))?
+            .map_err(|error| error.message)
+    }
+
+    async fn inspect_skill_import<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        request: InspectSkillImportRequest,
+    ) -> Result<SkillImportCandidate, String> {
+        let runtime = self
+            .ensure_provisioned(app, &request.operation_id)
+            .await
+            .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))?;
+        let _mutation_guard = self.skill_mutation_gate.lock().await;
+        let root = runtime.skills;
+        let app_cache_dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|error| format!("cannot resolve native picker staging root: {error}"))?;
+        let source = PathBuf::from(&request.picked.path);
+        let task_source = source.clone();
+        let inspected_task = tauri::async_runtime::spawn_blocking(move || {
+            validate_picker_source(&app_cache_dir, &task_source)?;
+            if let Some(candidate) = replay_skill_import_inspection(&root, &request)? {
+                return Ok(candidate);
+            }
+            inspect_skill_import(
+                &root,
+                &task_source,
+                &request,
+                now_ms().map_err(SkillError::integrity)?,
+            )
+        })
+        .await;
+        if let Err(error) = tokio::fs::remove_file(&source).await {
+            log::warn!(
+                "[VCPMobileCLI] cannot remove consumed native picker Skill candidate: {error}"
+            );
+        }
+        let inspected =
+            inspected_task.map_err(|error| format!("Skill inspection task failed: {error}"))?;
+        inspected.map_err(|error| error.message)
+    }
+
+    async fn commit_skill_import<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        request: CommitSkillImportRequest,
+    ) -> Result<CommitSkillImportResponse, String> {
+        let runtime = self
+            .ensure_provisioned(app, &request.operation_id)
+            .await
+            .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))?;
+        let _mutation_guard = self.skill_mutation_gate.lock().await;
+        let root = runtime.skills;
+        tauri::async_runtime::spawn_blocking(move || {
+            commit_skill_import(&root, &request, now_ms().map_err(SkillError::integrity)?)
+        })
+        .await
+        .map_err(|error| format!("Skill commit task failed: {error}"))?
+        .map_err(|error| error.message)
+    }
+
+    async fn discard_skill_import<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        request: DiscardSkillImportRequest,
+    ) -> Result<(), String> {
+        let operation_id = format!("skill-discard-{}", Uuid::new_v4());
+        let runtime = self
+            .ensure_provisioned(app, &operation_id)
+            .await
+            .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))?;
+        let _mutation_guard = self.skill_mutation_gate.lock().await;
+        let root = runtime.skills;
+        tauri::async_runtime::spawn_blocking(move || discard_skill_import(&root, &request))
+            .await
+            .map_err(|error| format!("Skill discard task failed: {error}"))?
+            .map_err(|error| error.message)
     }
 
     async fn job_response(
@@ -1891,6 +2097,41 @@ pub async fn execute_vcp_mobile_cli_action(
     state.execute(&app, request).await
 }
 
+#[tauri::command]
+pub async fn get_vcp_mobile_cli_skill_catalog(
+    app: AppHandle,
+    state: State<'_, MobileCliRuntimeState>,
+) -> Result<SkillCatalogSnapshot, String> {
+    state.skill_catalog_snapshot(&app).await
+}
+
+#[tauri::command]
+pub async fn inspect_vcp_mobile_cli_skill_import(
+    app: AppHandle,
+    state: State<'_, MobileCliRuntimeState>,
+    request: InspectSkillImportRequest,
+) -> Result<SkillImportCandidate, String> {
+    state.inspect_skill_import(&app, request).await
+}
+
+#[tauri::command]
+pub async fn commit_vcp_mobile_cli_skill_import(
+    app: AppHandle,
+    state: State<'_, MobileCliRuntimeState>,
+    request: CommitSkillImportRequest,
+) -> Result<CommitSkillImportResponse, String> {
+    state.commit_skill_import(&app, request).await
+}
+
+#[tauri::command]
+pub async fn discard_vcp_mobile_cli_skill_import(
+    app: AppHandle,
+    state: State<'_, MobileCliRuntimeState>,
+    request: DiscardSkillImportRequest,
+) -> Result<(), String> {
+    state.discard_skill_import(&app, request).await
+}
+
 fn status_from_owner(owner: &RuntimeOwner, profile: &VcpCliCommandProfile) -> MobileCliStatus {
     let running_jobs = owner
         .ledger
@@ -1960,7 +2201,9 @@ fn render_skill_list(skills: &[super::result::VcpCliSkillSummary]) -> String {
             skill.sha256
         ));
     }
-    text.push_str("\nUse action=read_skill with skill_id and resource_path=SKILL.md.");
+    text.push_str(
+        "\nUse action=read_skill to inspect instructions; use action=materialize_skill only when a separate Bash run needs an audited workspace copy.",
+    );
     text
 }
 

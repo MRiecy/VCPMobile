@@ -103,6 +103,8 @@ pub struct VcpCliSkillResult {
     pub skill_root: String,
     pub sha256: String,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +481,7 @@ mod tests {
                 skill_root: "vcp-skill://example-skill".to_string(),
                 sha256: "abc123".to_string(),
                 truncated: false,
+                materialized_path: None,
             }),
             skills: None,
             runtime: Some(VcpCliRuntimeInfo::local_loopback()),

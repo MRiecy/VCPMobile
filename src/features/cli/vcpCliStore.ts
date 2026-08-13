@@ -4,6 +4,14 @@ import { computed, ref } from "vue";
 
 export const VCP_CLI_STATUS_COMMAND = "get_vcp_mobile_cli_status";
 export const VCP_CLI_ACTION_COMMAND = "execute_vcp_mobile_cli_action";
+export const VCP_CLI_SKILL_CATALOG_COMMAND = "get_vcp_mobile_cli_skill_catalog";
+export const VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND =
+  "inspect_vcp_mobile_cli_skill_import";
+export const VCP_CLI_SKILL_IMPORT_COMMIT_COMMAND =
+  "commit_vcp_mobile_cli_skill_import";
+export const VCP_CLI_SKILL_IMPORT_DISCARD_COMMAND =
+  "discard_vcp_mobile_cli_skill_import";
+export const VCP_CLI_NATIVE_PICK_FILE_COMMAND = "plugin:vcp-mobile|pick_file";
 export const VCP_CLI_WORKSPACE = "/workspace";
 export const VCP_CLI_SHELL = "/bin/bash";
 export const VCP_CLI_DEFAULT_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -86,6 +94,50 @@ export interface VcpCliSkillResult {
   skill_root: string;
   sha256: string;
   truncated: boolean;
+  materialized_path?: string | null;
+}
+
+export interface VcpCliSkillCatalogItem {
+  id: string;
+  name: string;
+  description: string;
+  version?: string | null;
+  source: string;
+  tree_sha256: string;
+  resource_count: number;
+  total_bytes: number;
+  integrity_status: "valid" | "invalid";
+}
+
+export interface VcpCliSkillCatalogSnapshot {
+  schema_version: number;
+  generation: number;
+  skills: VcpCliSkillCatalogItem[];
+  warnings: string[];
+}
+
+export interface VcpCliSkillImportCandidate {
+  token: string;
+  candidate_sha256: string;
+  catalog_generation: number;
+  skill_id: string;
+  name: string;
+  description: string;
+  version?: string | null;
+  source_name: string;
+  resource_count: number;
+  total_bytes: number;
+  tree_sha256: string;
+  replaces_existing: boolean;
+  warnings: string[];
+}
+
+interface NativePickedFile {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  hash: string;
 }
 
 export interface VcpCliContentPart {
@@ -133,7 +185,8 @@ export type VcpCliAction =
       skill_id: string;
       resource_path: "SKILL.md";
       max_bytes: number;
-    };
+    }
+  | { action: "materialize_skill"; skill_id: string };
 
 export interface VcpCliActionRequest {
   operation_id: string;
@@ -275,7 +328,15 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
   const selectedSkillContent = ref("");
   const skillLoading = ref(false);
   const skillError = ref<VcpCliUiError | null>(null);
+  const skillCatalog = ref<VcpCliSkillCatalogSnapshot | null>(null);
+  const skillImportCandidate = ref<VcpCliSkillImportCandidate | null>(null);
+  const skillImportBusy = ref(false);
+  const skillImportError = ref<VcpCliUiError | null>(null);
+  const pendingSkillImportOperationId = ref<string | null>(null);
+  const pendingSkillCommitOperationId = ref<string | null>(null);
   let skillGeneration = 0;
+  let skillCatalogGeneration = 0;
+  let skillMutationGeneration = 0;
 
   const canRun = computed(() => {
     const status = runtimeStatus.value;
@@ -367,6 +428,11 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     resetSkillDetail();
     skills.value = [];
     skillsLoaded.value = false;
+    skillCatalog.value = null;
+    skillImportCandidate.value = null;
+    skillImportError.value = null;
+    pendingSkillImportOperationId.value = null;
+    pendingSkillCommitOperationId.value = null;
     return true;
   }
 
@@ -811,6 +877,7 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
       schedulePreparingStatusRefresh(view);
     }
     const operationId = newOperationId("list-skills");
+    const catalogOwner = ++skillCatalogGeneration;
     try {
       const response = await invokeAction(operationId, {
         action: "list_skills",
@@ -822,6 +889,21 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
       }
       skills.value = response.envelope.result.skills ?? [];
       skillsLoaded.value = true;
+      try {
+        const catalog = await invoke<VcpCliSkillCatalogSnapshot>(
+          VCP_CLI_SKILL_CATALOG_COMMAND,
+        );
+        if (isCurrentView(view) && catalogOwner === skillCatalogGeneration) {
+          skillCatalog.value = catalog;
+        }
+      } catch (error) {
+        if (isCurrentView(view) && catalogOwner === skillCatalogGeneration) {
+          skillsError.value = {
+            code: "catalog_error",
+            message: `Skill 索引可用，但 catalog 诊断加载失败：${describeError(error)}`,
+          };
+        }
+      }
     } catch (error) {
       if (!isCurrentView(view)) return;
       skillsError.value = { code: "ipc_error", message: describeError(error) };
@@ -830,6 +912,178 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
         skillsLoading.value = false;
         void refreshStatus(view);
       }
+    }
+  }
+
+  async function inspectSkillImport(): Promise<void> {
+    if (skillImportBusy.value) return;
+    const mutation = ++skillMutationGeneration;
+    const view = viewGeneration.value;
+    const operationId =
+      pendingSkillImportOperationId.value ?? newOperationId("skill-inspect");
+    pendingSkillImportOperationId.value = operationId;
+    skillImportBusy.value = true;
+    skillImportError.value = null;
+    try {
+      const picked = await invoke<NativePickedFile | null>(
+        VCP_CLI_NATIVE_PICK_FILE_COMMAND,
+        { mode: "file" },
+      );
+      if (!isCurrentView(view) || !picked?.path) {
+        if (isCurrentView(view)) pendingSkillImportOperationId.value = null;
+        return;
+      }
+      const candidate = await invoke<VcpCliSkillImportCandidate>(
+        VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND,
+        {
+          request: {
+            operation_id: operationId,
+            picked: {
+              path: picked.path,
+              name: picked.name,
+              mime: picked.mime,
+              size: picked.size,
+              hash: picked.hash,
+            },
+          },
+        },
+      );
+      if (
+        !isCurrentView(view) ||
+        pendingSkillImportOperationId.value !== operationId
+      )
+        return;
+      skillImportCandidate.value = candidate;
+      pendingSkillImportOperationId.value = null;
+      pendingSkillCommitOperationId.value = null;
+    } catch (error) {
+      if (
+        !isCurrentView(view) ||
+        pendingSkillImportOperationId.value !== operationId
+      )
+        return;
+      skillImportError.value = {
+        code: "skill_import_error",
+        message: describeError(error),
+      };
+      // Preserve the operation id so an ambiguous inspect IPC can replay its owned candidate.
+    } finally {
+      if (mutation === skillMutationGeneration) skillImportBusy.value = false;
+    }
+  }
+
+  async function commitSkillImport(): Promise<void> {
+    const candidate = skillImportCandidate.value;
+    if (!candidate || skillImportBusy.value) return;
+    const mutation = ++skillMutationGeneration;
+    const view = viewGeneration.value;
+    const operationId =
+      pendingSkillCommitOperationId.value ?? newOperationId("skill-commit");
+    pendingSkillCommitOperationId.value = operationId;
+    skillImportBusy.value = true;
+    skillImportError.value = null;
+    try {
+      await invoke(VCP_CLI_SKILL_IMPORT_COMMIT_COMMAND, {
+        request: {
+          operation_id: operationId,
+          token: candidate.token,
+          candidate_sha256: candidate.candidate_sha256,
+          expected_catalog_generation: candidate.catalog_generation,
+        },
+      });
+      if (
+        !isCurrentView(view) ||
+        skillImportCandidate.value?.token !== candidate.token
+      )
+        return;
+      skillImportCandidate.value = null;
+      pendingSkillCommitOperationId.value = null;
+      skillsLoaded.value = false;
+      await loadSkills(true);
+    } catch (error) {
+      if (
+        isCurrentView(view) &&
+        skillImportCandidate.value?.token === candidate.token
+      ) {
+        skillImportError.value = {
+          code: "skill_import_error",
+          message: describeError(error),
+        };
+      }
+    } finally {
+      if (mutation === skillMutationGeneration) skillImportBusy.value = false;
+    }
+  }
+
+  async function discardSkillImport(): Promise<void> {
+    const candidate = skillImportCandidate.value;
+    if (!candidate || skillImportBusy.value) return;
+    const mutation = ++skillMutationGeneration;
+    const view = viewGeneration.value;
+    skillImportBusy.value = true;
+    skillImportError.value = null;
+    try {
+      await invoke(VCP_CLI_SKILL_IMPORT_DISCARD_COMMAND, {
+        request: { token: candidate.token },
+      });
+      if (
+        isCurrentView(view) &&
+        skillImportCandidate.value?.token === candidate.token
+      ) {
+        skillImportCandidate.value = null;
+        pendingSkillCommitOperationId.value = null;
+      }
+    } catch (error) {
+      if (isCurrentView(view)) {
+        skillImportError.value = {
+          code: "skill_import_error",
+          message: describeError(error),
+        };
+      }
+    } finally {
+      if (mutation === skillMutationGeneration) skillImportBusy.value = false;
+    }
+  }
+
+  async function materializeSelectedSkill(): Promise<void> {
+    const skillId = selectedSkillId.value;
+    if (!skillId || skillLoading.value) return;
+    const view = viewGeneration.value;
+    const generation = skillGeneration;
+    skillLoading.value = true;
+    skillError.value = null;
+    try {
+      const response = await invokeAction(newOperationId("materialize-skill"), {
+        action: "materialize_skill",
+        skill_id: skillId,
+      });
+      if (
+        !isCurrentView(view) ||
+        generation !== skillGeneration ||
+        selectedSkillId.value !== skillId ||
+        !acceptActionResponse(response)
+      )
+        return;
+      if (response.envelope.status === "error") {
+        skillError.value = errorFromEnvelope(response.envelope);
+        return;
+      }
+      const metadata = response.envelope.result.skill;
+      if (!metadata?.materialized_path) {
+        skillError.value = {
+          code: "invalid_response",
+          message: "materialize_skill 未返回工作区路径",
+        };
+        return;
+      }
+      selectedSkill.value = metadata;
+    } catch (error) {
+      if (isCurrentView(view) && generation === skillGeneration) {
+        skillError.value = { code: "ipc_error", message: describeError(error) };
+      }
+    } finally {
+      if (isCurrentView(view) && generation === skillGeneration)
+        skillLoading.value = false;
     }
   }
 
@@ -934,6 +1188,10 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     selectedSkillContent,
     skillLoading,
     skillError,
+    skillCatalog,
+    skillImportCandidate,
+    skillImportBusy,
+    skillImportError,
     canRun,
     hasInternalDetail,
     openView,
@@ -950,6 +1208,10 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     loadSkills,
     openSkill,
     closeSkill,
+    inspectSkillImport,
+    commitSkillImport,
+    discardSkillImport,
+    materializeSelectedSkill,
     closeInternalDetail,
   };
 });

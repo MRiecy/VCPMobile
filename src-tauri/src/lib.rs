@@ -18,8 +18,9 @@ use vcp_modules::chat_manager::{
     patch_single_message, truncate_history_after_timestamp,
 };
 use vcp_modules::cli::{
-    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_status,
-    MobileCliRuntimeState,
+    commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,
+    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog,
+    get_vcp_mobile_cli_status, inspect_vcp_mobile_cli_skill_import, MobileCliRuntimeState,
 };
 use vcp_modules::context_injection::{
     delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
@@ -267,6 +268,10 @@ pub fn run() {
             get_vcp_mobile_cli_manifest,
             get_vcp_mobile_cli_status,
             execute_vcp_mobile_cli_action,
+            get_vcp_mobile_cli_skill_catalog,
+            inspect_vcp_mobile_cli_skill_import,
+            commit_vcp_mobile_cli_skill_import,
+            discard_vcp_mobile_cli_skill_import,
             get_settings_recovery_status,
             update_settings,
             diary_list_folders,

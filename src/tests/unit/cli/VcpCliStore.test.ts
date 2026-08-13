@@ -7,6 +7,10 @@ import {
   VCP_CLI_POLL_RETRY_DELAYS_MS,
   VCP_CLI_READ_BYTES,
   VCP_CLI_STATUS_COMMAND,
+  VCP_CLI_NATIVE_PICK_FILE_COMMAND,
+  VCP_CLI_SKILL_CATALOG_COMMAND,
+  VCP_CLI_SKILL_IMPORT_COMMIT_COMMAND,
+  VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND,
   VCP_CLI_TAIL_BYTES,
   VCP_CLI_WORKSPACE,
   appendBoundedCliTail,
@@ -523,6 +527,194 @@ describe("VCP CLI view snapshot ownership", () => {
       max_bytes: VCP_CLI_READ_BYTES,
     });
     expect(actions.some((action) => action.action === "run")).toBe(false);
+  });
+
+  it("materializes an audited Skill through a first-class action without running it", async () => {
+    mockInvoke(VCP_CLI_STATUS_COMMAND, () => status());
+    mockInvoke(VCP_CLI_SKILL_CATALOG_COMMAND, () => ({
+      schema_version: 2,
+      generation: 1,
+      warnings: [],
+      skills: [],
+    }));
+    const actions: VcpCliAction[] = [];
+    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
+      const request = requestFromArgs(args);
+      actions.push(request.action);
+      if (request.action.action === "list") {
+        return success(request.operation_id, { jobs: [] });
+      }
+      if (request.action.action === "list_skills") {
+        return success(request.operation_id, {
+          skills: [
+            {
+              id: "audited",
+              name: "Audited",
+              source: "imported",
+              sha256: "a".repeat(64),
+            },
+          ],
+        });
+      }
+      if (request.action.action === "read_skill") {
+        return success(request.operation_id, {
+          content: [{ type: "text", text: "# Audited" }],
+          skill: {
+            id: "audited",
+            name: "Audited",
+            resource_path: "SKILL.md",
+            skill_root: "vcp-skill://audited",
+            sha256: "a".repeat(64),
+            truncated: false,
+          },
+        });
+      }
+      if (request.action.action === "materialize_skill") {
+        return success(request.operation_id, {
+          skill: {
+            id: "audited",
+            name: "Audited",
+            resource_path: ".",
+            skill_root: "vcp-skill://audited",
+            sha256: "b".repeat(64),
+            truncated: false,
+            materialized_path: "/workspace/.vcp-skills/audited/bbbbbbbb",
+          },
+        });
+      }
+      throw new Error(`unexpected action ${request.action.action}`);
+    });
+    const store = useVcpCliStore();
+    await store.openView();
+    await store.loadSkills();
+    await store.openSkill(store.skills[0]);
+    await store.materializeSelectedSkill();
+
+    expect(store.selectedSkill?.materialized_path).toBe(
+      "/workspace/.vcp-skills/audited/bbbbbbbb",
+    );
+    expect(actions).toContainEqual({
+      action: "materialize_skill",
+      skill_id: "audited",
+    });
+    expect(actions.some((action) => action.action === "run")).toBe(false);
+  });
+
+  it("keeps ZIP import inspect and commit explicit and reuses an ambiguous commit operation id", async () => {
+    mockInvoke(VCP_CLI_STATUS_COMMAND, () => status());
+    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
+      const request = requestFromArgs(args);
+      if (request.action.action === "list") {
+        return success(request.operation_id, { jobs: [] });
+      }
+      if (request.action.action === "list_skills") {
+        return success(request.operation_id, { skills: [] });
+      }
+      throw new Error(`unexpected action ${request.action.action}`);
+    });
+    mockInvoke(VCP_CLI_SKILL_CATALOG_COMMAND, () => ({
+      schema_version: 2,
+      generation: 3,
+      skills: [],
+      warnings: ["Legacy unmanaged Skill directory is not active: old"],
+    }));
+    mockInvoke(VCP_CLI_NATIVE_PICK_FILE_COMMAND, () => ({
+      path: "/private/cache/uploads/pick.zip",
+      name: "sample.zip",
+      mime: "application/zip",
+      size: 42,
+      hash: "c".repeat(64),
+    }));
+    mockInvoke(VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND, () => ({
+      token: "vcp-skill-import-v1:00000000-0000-4000-8000-000000000001",
+      candidate_sha256: "c".repeat(64),
+      catalog_generation: 3,
+      skill_id: "sample",
+      name: "Sample",
+      description: "Sample Skill",
+      version: "1.0.0",
+      source_name: "sample.zip",
+      resource_count: 2,
+      total_bytes: 128,
+      tree_sha256: "d".repeat(64),
+      replaces_existing: false,
+      warnings: ["包含 scripts/；不会自动执行。"],
+    }));
+    const commits: Array<Record<string, unknown>> = [];
+    let commitAttempt = 0;
+    mockInvoke(VCP_CLI_SKILL_IMPORT_COMMIT_COMMAND, (args) => {
+      commits.push(args?.request as Record<string, unknown>);
+      commitAttempt += 1;
+      if (commitAttempt === 1) throw new Error("ambiguous IPC");
+      return {
+        operation_id: (args?.request as { operation_id: string }).operation_id,
+        catalog_generation: 4,
+        replayed: true,
+      };
+    });
+
+    const store = useVcpCliStore();
+    await store.openView();
+    await store.loadSkills();
+    await store.inspectSkillImport();
+    expect(store.skillImportCandidate?.skill_id).toBe("sample");
+    expect(store.skillImportCandidate?.warnings[0]).toContain("不会自动执行");
+
+    await store.commitSkillImport();
+    expect(store.skillImportCandidate?.skill_id).toBe("sample");
+    await store.commitSkillImport();
+    expect(store.skillImportCandidate).toBeNull();
+    expect(commits).toHaveLength(2);
+    expect(commits[0].operation_id).toBe(commits[1].operation_id);
+    expect(commits[0]).toMatchObject({
+      candidate_sha256: "c".repeat(64),
+      expected_catalog_generation: 3,
+    });
+  });
+
+  it("clears the import mutation owner after a closed view without projecting its late candidate", async () => {
+    mockInvoke(VCP_CLI_STATUS_COMMAND, () => status());
+    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
+      const request = requestFromArgs(args);
+      if (request.action.action === "list") {
+        return success(request.operation_id, { jobs: [] });
+      }
+      throw new Error(`unexpected action ${request.action.action}`);
+    });
+    mockInvoke(VCP_CLI_NATIVE_PICK_FILE_COMMAND, () => ({
+      path: "/cache/uploads/late.zip",
+      name: "late.zip",
+      mime: "application/zip",
+      size: 10,
+      hash: "e".repeat(64),
+    }));
+    const inspection = deferred<Record<string, unknown>>();
+    mockInvoke(VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND, () => inspection.promise);
+    const store = useVcpCliStore();
+    await store.openView();
+
+    const pending = store.inspectSkillImport();
+    await flushPromises();
+    expect(store.skillImportBusy).toBe(true);
+    store.closeView();
+    inspection.resolve({
+      token: "vcp-skill-import-v1:00000000-0000-4000-8000-000000000003",
+      candidate_sha256: "e".repeat(64),
+      catalog_generation: 1,
+      skill_id: "late",
+      name: "Late",
+      description: "Late response",
+      source_name: "late.zip",
+      resource_count: 1,
+      total_bytes: 10,
+      tree_sha256: "f".repeat(64),
+      replaces_existing: false,
+      warnings: [],
+    });
+    await pending;
+
+    expect(store.skillImportBusy).toBe(false);
+    expect(store.skillImportCandidate).toBeNull();
   });
 
   it("keeps the combined stdout/stderr tail within the WebView byte budget", () => {

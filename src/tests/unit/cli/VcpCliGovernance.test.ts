@@ -38,6 +38,7 @@ describe("VCP CLI P1 cross-layer governance", () => {
     expect(cliStoreSource).toContain('action: "list"');
     expect(cliStoreSource).toContain('action: "list_skills"');
     expect(cliStoreSource).toContain('action: "read_skill"');
+    expect(cliStoreSource).toContain('action: "materialize_skill"');
     expect(cliStoreSource).toContain('resource_path: "SKILL.md"');
     expect(cliStoreSource).toContain("max_output_bytes: VCP_CLI_READ_BYTES");
     expect(cliStoreSource).toContain("wait_ms: VCP_CLI_POLL_WAIT_MS");
@@ -49,6 +50,7 @@ describe("VCP CLI P1 cross-layer governance", () => {
       "Run",
       "ListSkills",
       "ReadSkill",
+      "MaterializeSkill",
       "Poll",
       "Cancel",
       "List",
@@ -72,16 +74,30 @@ describe("VCP CLI P1 cross-layer governance", () => {
     expect(tauriLibSource).toContain("MobileCliRuntimeState::new()");
     expect(tauriLibSource).toContain("get_vcp_mobile_cli_status,");
     expect(tauriLibSource).toContain("execute_vcp_mobile_cli_action,");
+    for (const command of [
+      "get_vcp_mobile_cli_skill_catalog",
+      "inspect_vcp_mobile_cli_skill_import",
+      "commit_vcp_mobile_cli_skill_import",
+      "discard_vcp_mobile_cli_skill_import",
+    ]) {
+      expect(cliStoreSource).toContain(command);
+      expect(runtimeSource).toContain(`pub async fn ${command}`);
+      expect(tauriLibSource).toContain(`${command},`);
+    }
   });
 
-  it("does not add a prompt, Skill execution, PTY, HTML, or terminal-emulator path", () => {
+  it("does not add a prompt, implicit Skill execution, PTY, HTML, or terminal-emulator path", () => {
     expect(productionSources).not.toMatch(/PromptCatalog/);
     expect(productionSources).not.toMatch(/SkillBridge/);
+    expect(cliStoreSource).toContain('"plugin:vcp-mobile|pick_file"');
+    expect(cliStoreSource).not.toContain("attachmentStore");
     expect(productionSources).not.toMatch(/context_assembler/);
     expect(productionSources).not.toMatch(/\bPTY\b/);
     expect(productionSources).not.toMatch(/xterm|TerminalEmulator/);
     expect(productionSources).not.toContain("v-html");
     expect(productionSources).not.toContain("innerHTML");
+    expect(skillsPanelSource).toContain("materializeSelectedSkill");
+    expect(skillsPanelSource).toContain("另发 run");
   });
 
   it("keeps the workbench flat, opaque, and within the radius policy", () => {
@@ -104,7 +120,7 @@ describe("VCP CLI P1 cross-layer governance", () => {
       "mobileCliAgentRoute: MobileCliAgentRoute",
     );
     expect(settingsViewSource).toContain(
-      "@route-change=\"onMobileCliRouteChange\"",
+      '@route-change="onMobileCliRouteChange"',
     );
     expect(settingsManagerSource).toMatch(
       /enum MobileCliAgentRoute[\s\S]*\bLocalLoopback\b[\s\S]*\bVcpPlugin\b/,
@@ -127,7 +143,9 @@ describe("VCP CLI P1 cross-layer governance", () => {
   });
 
   it("does not couple route selection to capability toggles or a frontend coordinator", () => {
-    expect(aiLogicSettingsSource).not.toContain('invoke("update_enabled_tools"');
+    expect(aiLogicSettingsSource).not.toContain(
+      'invoke("update_enabled_tools"',
+    );
     expect(aiLogicSettingsSource).not.toContain('invoke("update_settings"');
     expect(aiLogicSettingsSource).not.toMatch(/\.distributedEnabled\s*=/);
     expect(aiLogicSettingsSource).not.toMatch(/enableVcpToolInjection\s*=/);
