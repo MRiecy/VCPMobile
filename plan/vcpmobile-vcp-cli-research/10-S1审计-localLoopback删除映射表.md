@@ -18,7 +18,7 @@
 | **合计** | **26** | **17348** | **≈4710** | **≈518** | **≈12030** |
 
 > 行数为"≈"估算（midpoint），精确到行需在 S2 逐条落刀时二次核对；误差 ±3% 以内。
-> 连带清理（不在上表，但删除后必须同步改才能编译/过 CI）：`cli/mod.rs`、`src-tauri/src/lib.rs` 命令注册、`SettingsView.vue` 路由切换宿主、`cli/manifest.ts` 的 `LOCAL_ROUTE_GUIDE_STORAGE_KEY`、**直接删除 SQLite 迁移 0007 文件**（开发期未发布，无需 0010）。
+> 连带清理（不在上表，但删除后必须同步改才能编译/过 CI）：`cli/mod.rs`、`src-tauri/src/lib.rs` 命令注册、`SettingsView.vue` 路由切换宿主、`cli/manifest.ts` 的 `LOCAL_ROUTE_GUIDE_STORAGE_KEY`、**删除 SQLite 迁移 0007/0008/0009 文件**（开发期未发布，最终迁移集 = 0001-0006，无需 0010）。
 
 ## 2. 关键裁决：exact-once 续轮/幂等 → 删，由 VCPToolBox 承担
 
@@ -105,7 +105,7 @@
 1. **`MAX_ASSISTANT_STEP_BYTES` 先迁共享常量**：`turn_types.rs:10` 被 `infra/vcp_client.rs`（210/1949/1969/2864）引用，删 turn_types 前必须先提升到共享位置。
 2. **result.rs 需新增 `VcpCliRuntimeInfo::vcp_plugin()` 构造器**：runtime.rs 的 5 处 `local_loopback()` 打标与 golden 的 `"source"` 字段同步改，否则 golden 双向锁（result.rs 测试逐字段 assert）红。
 3. **后端/前端路由默认值必须同一次提交改**：settings_manager 测试 473-495 断言默认 localLoopback；前端 `VcpCliGovernance.test.ts` 149-180 断言同样默认值。单边改必然红。
-4. **SQLite 迁移：直接删 0007，无需 0010**（开发期，未发布）。`0007_create_local_cli_turn_ledger.sql` 建了 `local_cli_turn_ledger` 表 + 2 索引 + 2 触发器，但它只存在于未合入 main 的 `agent/sync-error-contract-1-2` 分支，从未随任何 release 发布。`sqlx::migrate!()` 的启动路径只调 `run()`（向前套用版本 > 已应用版本），**不校验已应用迁移的 checksum**（那是 `validate()`，仅 CI 用）。因此：直接删除 `0007` 文件即可；开发真机 `pm clear com.vcp.avatar.debug` 重建库（或留着孤立表无害）；迁移版本留 gap(7) 合法。0008/0009 是 semantic cache，与 turn ledger 无关，不动。
+4. **SQLite 迁移：删除 0007/0008/0009 三条 CLI 迁移**（开发期，未发布；最终迁移集 = 0001-0006，与 main 基线一致）。`0007` 建 turn ledger（+2 索引 +2 触发器）、`0008` 建 semantic cache、`0009` 又 drop semantic cache——三者都是未发布分支的 CLI 特性迁移，收敛后全部冗余，整删。**血训纠正（S1 原判断有误）**：`sqlx::migrate!().run()` 不仅向前套用，还会校验「已应用迁移仍在解析集合中」——已应用但文件被删会直接报 `migration N was previously applied but is missing`；这与 `validate()` 的 checksum 校验是两码事。因此删迁移文件时，必须对**已应用过它的库**做精确清理：`DELETE FROM _sqlx_migrations WHERE version IN (7,8,9)` + `DROP TABLE` 相应孤儿表（`local_cli_turn_ledger`、旧遗留 `schema_migrations`），而**不是 `pm clear`**（会连珍贵数据一起清）。开发真机已按此精确清理并复验通过。
 5. **模块连线**：`cli/mod.rs` 删 turn_coordinator/turn_ledger/turn_meta/turn_types 声明；`lib.rs` 若注册了 turn 相关命令一并删；`SettingsView.vue` 的 `onMobileCliRouteChange`/`mobileCliRouteSaving`/`mobileCliRouteError` 一并清。
 
 ## 5. 风险与联动
@@ -123,7 +123,7 @@
 | 改造/迁移（migrate） | **≈ 518 行**（其中 ~180 行是"死代码删"性质） |
 | 保留不动（keep） | **≈ 12030 行** |
 | 主文件 | **26 个** |
-| 连带文件（mod.rs/lib.rs/SettingsView.vue/manifest.ts/删除迁移 0007） | **5 个** |
+| 连带文件（mod.rs/lib.rs/SettingsView.vue/manifest.ts/删除迁移 0007/0008/0009） | **7 个** |
 
 > 对比 08 ADR 的初步预估（3500-4500 行）：落在上沿，原因是被审计坐实——`turn_coordinator/meta/types/ledger` 四个本地多轮 owner 文件合计 ~3084 行近乎整删（而不是"部分迁移续轮语义"），续轮幂等无需迁移（已在 `replay_operation`）。
 
