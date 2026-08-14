@@ -1,26 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  AppSettings,
-  MobileCliAgentRoute,
-} from "../../../core/stores/settings";
+import type { AppSettings } from "../../../core/stores/settings";
 import { useDistributed } from "../../distributed/composables/useDistributed";
 
-const props = withDefaults(
-  defineProps<{
-    settings: AppSettings;
-    saving?: boolean;
-    saveError?: string | null;
-  }>(),
-  {
-    saving: false,
-    saveError: null,
-  },
-);
-
-const emit = defineEmits<{
-  routeChange: [route: MobileCliAgentRoute];
+const props = defineProps<{
+  settings: AppSettings;
 }>();
 
 interface RegisteredToolMetadata {
@@ -41,9 +26,6 @@ const toolAuthorizationDetail = ref("");
 let preflightGeneration = 0;
 let distributedConsumerActive = false;
 
-const isVcpPluginRoute = computed(
-  () => props.settings.mobileCliAgentRoute === "vcpPlugin",
-);
 const hasRemoteEndpoint = computed(() =>
   Boolean(props.settings.distributedWsUrl),
 );
@@ -51,17 +33,12 @@ const hasRemoteKey = computed(() =>
   Boolean(props.settings.distributedVcpKey),
 );
 
-const selectRoute = (route: MobileCliAgentRoute) => {
-  if (props.saving || props.settings.mobileCliAgentRoute === route) return;
-  emit("routeChange", route);
-};
-
 const loadToolAuthorization = async (generation: number) => {
   try {
     const tools = await invoke<RegisteredToolMetadata[]>(
       "get_registered_tools_metadata",
     );
-    if (generation !== preflightGeneration || !isVcpPluginRoute.value) return;
+    if (generation !== preflightGeneration) return;
 
     const mobileCli = tools.find((tool) => tool.name === "VCPMobileCLI");
     if (!mobileCli) {
@@ -75,7 +52,7 @@ const loadToolAuthorization = async (generation: number) => {
       toolAuthorizationDetail.value = "请在插件中心手动授权 VCPMobileCLI";
     }
   } catch (error) {
-    if (generation !== preflightGeneration || !isVcpPluginRoute.value) return;
+    if (generation !== preflightGeneration) return;
     toolAuthorization.value = "unavailable";
     toolAuthorizationDetail.value = `工具清单读取失败：${String(error)}`;
   }
@@ -94,16 +71,15 @@ const runRemotePreflight = async (refreshConnection = false) => {
       await refreshStatus();
     }
 
-    if (generation !== preflightGeneration || !isVcpPluginRoute.value) return;
+    if (generation !== preflightGeneration) return;
     await loadToolAuthorization(generation);
   } catch (error) {
-    if (generation !== preflightGeneration || !isVcpPluginRoute.value) return;
+    if (generation !== preflightGeneration) return;
     toolAuthorization.value = "unavailable";
     toolAuthorizationDetail.value = `预检状态读取失败：${String(error)}`;
   } finally {
     if (
       generation === preflightGeneration &&
-      isVcpPluginRoute.value &&
       toolAuthorization.value === "loading"
     ) {
       toolAuthorization.value = "unavailable";
@@ -112,24 +88,9 @@ const runRemotePreflight = async (refreshConnection = false) => {
   }
 };
 
-watch(
-  isVcpPluginRoute,
-  (enabled) => {
-    if (enabled) {
-      void runRemotePreflight();
-      return;
-    }
-
-    preflightGeneration += 1;
-    toolAuthorization.value = "idle";
-    toolAuthorizationDetail.value = "";
-    if (distributedConsumerActive) {
-      distributedConsumerActive = false;
-      deactivate();
-    }
-  },
-  { immediate: true },
-);
+onMounted(() => {
+  void runRemotePreflight();
+});
 
 onBeforeUnmount(() => {
   preflightGeneration += 1;
@@ -142,60 +103,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="space-y-4 px-1 py-1">
-    <div class="space-y-2" role="radiogroup" aria-label="移动 CLI Agent 路由">
-      <button
-        type="button"
-        role="radio"
-        data-mobile-cli-route="localLoopback"
-        :aria-checked="settings.mobileCliAgentRoute === 'localLoopback'"
-        :disabled="saving"
-        class="w-full border-l-2 rounded-lg px-3 py-2.5 text-left transition-opacity disabled:opacity-45"
-        :class="settings.mobileCliAgentRoute === 'localLoopback'
-          ? 'border-blue-500 bg-blue-500/8'
-          : 'border-transparent bg-black/3 dark:bg-white/3 active:opacity-65'"
-        @click="selectRoute('localLoopback')"
-      >
-        <span class="flex items-center justify-between gap-3">
-          <span class="text-[13px] font-bold">本机闭环</span>
-          <code class="text-[10px] opacity-55">localLoopback</code>
-        </span>
-        <span class="mt-1 block text-[10px] leading-relaxed opacity-55">
-          默认。移动端本地执行工具续轮，不依赖分布式长连接。
-        </span>
-      </button>
-
-      <button
-        type="button"
-        role="radio"
-        data-mobile-cli-route="vcpPlugin"
-        :aria-checked="settings.mobileCliAgentRoute === 'vcpPlugin'"
-        :disabled="saving"
-        class="w-full border-l-2 rounded-lg px-3 py-2.5 text-left transition-opacity disabled:opacity-45"
-        :class="settings.mobileCliAgentRoute === 'vcpPlugin'
-          ? 'border-blue-500 bg-blue-500/8'
-          : 'border-transparent bg-black/3 dark:bg-white/3 active:opacity-65'"
-        @click="selectRoute('vcpPlugin')"
-      >
-        <span class="flex items-center justify-between gap-3">
-          <span class="text-[13px] font-bold">VCP 插件闭环</span>
-          <code class="text-[10px] opacity-55">vcpPlugin</code>
-        </span>
-        <span class="mt-1 block text-[10px] leading-relaxed opacity-55">
-          由 VCPToolBox 负责工具续轮；选择本项只保存路由，不会代你开启或授权任何能力。
-        </span>
-      </button>
-    </div>
-
-    <p
-      v-if="saveError"
-      role="alert"
-      class="border-l-2 border-red-500 pl-2 text-[10px] leading-relaxed text-red-500"
-    >
-      {{ saveError }}
-    </p>
-
     <div
-      v-if="isVcpPluginRoute"
       data-mobile-cli-preflight
       class="border-t border-black/8 pt-3 dark:border-white/8"
     >

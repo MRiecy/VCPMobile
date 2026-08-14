@@ -20,7 +20,6 @@ const baseSettings = (): AppSettings => ({
   syncLogLevel: "INFO",
   agentOrder: ["agent-a"],
   groupOrder: [],
-  mobileCliAgentRoute: "localLoopback",
 });
 
 describe("settings patch ownership", () => {

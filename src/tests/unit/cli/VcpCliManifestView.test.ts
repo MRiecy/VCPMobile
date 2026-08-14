@@ -8,7 +8,6 @@ import manifestViewSource from "@/features/cli/components/VcpCliManifestView.vue
 import cliManifestGoldenSource from "../../../../src-tauri/src/vcp_modules/cli/fixtures/vcp_mobile_cli_manifest.golden.json?raw";
 import tauriLibSource from "../../../../src-tauri/src/lib.rs?raw";
 import {
-  LOCAL_ROUTE_GUIDE_STORAGE_KEY,
   VCP_CLI_MANIFEST_COMMAND,
   parseCanonicalVcpCliManifest,
 } from "@/features/cli/manifest";
@@ -101,7 +100,7 @@ describe("VCP CLI canonical manifest boundary", () => {
     expect(tauriLibSource).toContain(VCP_CLI_MANIFEST_COMMAND);
   });
 
-  it("loads through the canonical command and explains prompt ownership", async () => {
+  it("loads through the canonical command and keeps runtime truth off the manifest", async () => {
     const wrapper = mountView();
     await openManifestTab(wrapper);
     await flushPromises();
@@ -110,8 +109,6 @@ describe("VCP CLI canonical manifest boundary", () => {
     expect(wrapper.get('[data-vcp-cli-role="manifest-json"]').text()).toBe(
       canonicalManifest.trim(),
     );
-    expect(wrapper.text()).toContain("提示词由用户 / VCPToolBox 所有");
-    expect(wrapper.text()).toContain("不会自动注入、追加或改写 Agent 提示词");
     expect(wrapper.text()).toContain("当前可用性与 Job 状态以运行页的 Rust");
   });
 
@@ -137,31 +134,6 @@ describe("VCP CLI canonical manifest boundary", () => {
       "/cache/VCPMobileCLI.manifest.json",
     );
     expect(wrapper.text()).toContain("已生成临时 JSON");
-  });
-
-  it("records only that the one-time guide was read and allows reopening it", async () => {
-    const wrapper = mountView();
-    await openManifestTab(wrapper);
-    await flushPromises();
-
-    const guideToggle = wrapper.get(
-      'button[aria-controls="vcp-cli-local-route-guide"]',
-    );
-    expect(guideToggle.attributes("aria-expanded")).toBe("true");
-
-    const acknowledge = wrapper
-      .findAll("button")
-      .find((button) => button.text().includes("不再自动展开"));
-    expect(acknowledge).toBeDefined();
-    await acknowledge!.trigger("click");
-
-    expect(localStorage.getItem(LOCAL_ROUTE_GUIDE_STORAGE_KEY)).toBe("1");
-    expect(guideToggle.attributes("aria-expanded")).toBe("false");
-    expect(wrapper.text()).toContain("已读");
-
-    await guideToggle.trigger("click");
-    expect(guideToggle.attributes("aria-expanded")).toBe("true");
-    expect(wrapper.text()).toContain("[[VCPToolUse=Forbidden]]");
   });
 
   it("enables system sharing only when the WebView exposes a real share function", async () => {

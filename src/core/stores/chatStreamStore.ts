@@ -23,9 +23,6 @@ export interface ChatStreamEvent {
     agentName?: string;
     [key: string]: unknown;
   };
-  turnAttempt?: string;
-  stepIndex?: number;
-  projectionReset?: boolean;
   aurora?: any;
   blocks?: any[];
   error?: string;
@@ -33,20 +30,9 @@ export interface ChatStreamEvent {
   timestamp?: number;
 }
 
-interface StreamProjectionCursor {
-  activeAttempt: string;
-  highestStep: number;
-  retiredAttempts: Set<string>;
-}
-
 interface StreamTerminalTombstone {
-  attempt: string | null;
-  step: number | null;
   terminalAt: number;
 }
-
-const RECOVERY_CONTINUATION_PENDING_TEXT =
-  "本地任务已保留，等待模型续轮。连接恢复后将自动继续。";
 
 export const useChatStreamStore = defineStore("chatStream", () => {
   const streamingMessageId = ref<string | null>(null);
@@ -58,7 +44,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // 全局活跃流消息池：存储所有正在生成的响应对象 (messageId -> Reactive<ChatMessage>)
   // 无论是在前台还是后台，流式消息都从此池中获取，保证响应式链路不断裂
   const activeStreamMessages = reactive<Map<string, ChatMessage>>(new Map());
-  const streamProjectionCursors = new Map<string, StreamProjectionCursor>();
   const streamTerminalTombstones = new Map<
     string,
     StreamTerminalTombstone
@@ -172,15 +157,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     return true;
   };
 
-  const recordStreamTerminalTombstone = (
-    messageId: string,
-    event: ChatStreamEvent,
-  ) => {
+  const recordStreamTerminalTombstone = (messageId: string) => {
     streamTerminalTombstones.delete(messageId);
     streamTerminalTombstones.set(messageId, {
-      attempt:
-        typeof event.turnAttempt === "string" ? event.turnAttempt : null,
-      step: Number.isInteger(event.stepIndex) ? event.stepIndex! : null,
       terminalAt: Date.now(),
     });
     pruneStreamTerminalTombstones();
@@ -372,7 +351,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       // 只删除已完成的流（不在当前活跃会话中）
       if (!isMessageActive(id)) {
         activeStreamMessages.delete(id);
-        streamProjectionCursors.delete(id);
         remaining -= 1;
       }
     }
@@ -416,7 +394,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       cleanupTimers.delete(cleanupTimer);
       if (!activeStreamingIds.value.has(messageId)) {
         activeStreamMessages.delete(messageId);
-        streamProjectionCursors.delete(messageId);
         clearRAFUpdate(messageId, false); // 漏洞 2 修复：延迟清理时，强制安全注销 rAF 帧，杜绝句柄泄露
       }
     }, 1000);
@@ -438,86 +415,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       cleanupTimers.delete(cleanupTimer);
       if (!isMessageActive(messageId)) {
         activeStreamMessages.delete(messageId);
-        streamProjectionCursors.delete(messageId);
         clearRAFUpdate(messageId, false);
       }
     }, 1000);
     cleanupTimers.add(cleanupTimer);
-  };
-
-  const acceptStreamProjectionEvent = (
-    messageId: string,
-    event: ChatStreamEvent,
-  ): { accepted: boolean; reset: boolean } => {
-    if (hasStreamTerminalTombstone(messageId)) {
-      return { accepted: false, reset: false };
-    }
-
-    const hasAttempt = event.turnAttempt !== undefined;
-    const hasStep = event.stepIndex !== undefined;
-    const cursor = streamProjectionCursors.get(messageId);
-
-    // 一旦流进入带代际协议，后续缺字段或部分字段的帧都不能回写该消息。
-    if (!hasAttempt && !hasStep) {
-      return { accepted: !cursor, reset: false };
-    }
-    if (
-      typeof event.turnAttempt !== "string" ||
-      event.turnAttempt.length === 0 ||
-      !Number.isInteger(event.stepIndex) ||
-      (event.stepIndex as number) < 0 ||
-      (event.projectionReset !== undefined &&
-        typeof event.projectionReset !== "boolean")
-    ) {
-      return { accepted: false, reset: false };
-    }
-
-    const attempt = event.turnAttempt;
-    const step = event.stepIndex as number;
-    if (!cursor) {
-      streamProjectionCursors.set(messageId, {
-        activeAttempt: attempt,
-        highestStep: step,
-        retiredAttempts: new Set(),
-      });
-      return { accepted: true, reset: true };
-    }
-
-    if (attempt === cursor.activeAttempt) {
-      if (step < cursor.highestStep) {
-        return { accepted: false, reset: false };
-      }
-      if (step > cursor.highestStep) {
-        cursor.highestStep = step;
-        return { accepted: true, reset: true };
-      }
-      // projectionReset 可在同一步的每帧重复携带；相同步骤只消费一次。
-      return { accepted: true, reset: false };
-    }
-
-    if (cursor.retiredAttempts.has(attempt)) {
-      return { accepted: false, reset: false };
-    }
-
-    cursor.retiredAttempts.add(cursor.activeAttempt);
-    cursor.activeAttempt = attempt;
-    cursor.highestStep = step;
-    return { accepted: true, reset: true };
-  };
-
-  const resetStreamProjection = (
-    messageId: string,
-    message: ChatMessage,
-  ) => {
-    // 必须先取消旧 rAF；旧 step 的暂存内容绝不能在 reset 后重新刷回。
-    clearRAFUpdate(messageId, false);
-    message.content = "";
-    message.blocks = [];
-    message.tailContent = "";
-    message.tailBlock = undefined;
-    message.tailFrame = undefined;
-    message.tailSnapshot = undefined;
-    message.finishReason = undefined;
   };
 
   /**
@@ -539,13 +440,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
     if (!actualMessageId || !topicId || !itemId) return;
 
-    const projectionDecision = acceptStreamProjectionEvent(
-      actualMessageId,
-      event,
-    );
-    if (!projectionDecision.accepted) return;
+    if (hasStreamTerminalTombstone(actualMessageId)) return;
     if (type === "end" || type === "error") {
-      recordStreamTerminalTombstone(actualMessageId, event);
+      recordStreamTerminalTombstone(actualMessageId);
     }
 
     let msg = activeStreamMessages.get(actualMessageId);
@@ -569,10 +466,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }),
       });
       activeStreamMessages.set(actualMessageId, msg!);
-    }
-
-    if (projectionDecision.reset) {
-      resetStreamProjection(actualMessageId, msg!);
     }
 
     if (isNewStream) {
@@ -838,7 +731,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
     });
     rAFPendingUpdates.clear();
-    streamProjectionCursors.clear();
     streamTerminalTombstones.clear();
   });
 
@@ -1016,25 +908,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             );
             if (res.status === "already_running") {
               if (recoveryMessage) recoveryMessage.isReconnecting = false;
-              return;
-            }
-
-            if (res.status === "continuation_pending") {
-              if (recoveryMessage) {
-                recoveryMessage.isReconnecting = false;
-                recoveryMessage.isThinking = false;
-                recoveryMessage.finishReason = undefined;
-                recoveryMessage.content = RECOVERY_CONTINUATION_PENDING_TEXT;
-                recoveryMessage.blocks = [];
-                recoveryMessage.tailContent = "";
-                recoveryMessage.tailBlock = undefined;
-                recoveryMessage.tailFrame = undefined;
-                recoveryMessage.tailSnapshot = undefined;
-              }
-              // Durable active_generation/turn ledger remains the only retry truth. The next
-              // foreground/online scan will claim the same message; this pass only leaves a
-              // bounded, non-sensitive waiting projection instead of an empty cold skeleton.
-              removeSessionStream(ownerId, topicId, msgId);
               return;
             }
 

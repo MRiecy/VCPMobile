@@ -1,7 +1,5 @@
 export const VCP_CLI_MANIFEST_COMMAND = "get_vcp_mobile_cli_manifest";
 export const VCP_CLI_TOOL_NAME = "VCPMobileCLI";
-export const LOCAL_ROUTE_GUIDE_STORAGE_KEY =
-  "vcp-mobile.cli.local-route-guide.v1";
 
 export interface VcpCliInvocationCommand {
   commandIdentifier: string;

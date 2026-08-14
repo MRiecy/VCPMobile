@@ -3,14 +3,12 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { openFileNative, writeTempFile } from "tauri-plugin-vcp-mobile";
 import {
-  ChevronDown,
   Copy,
   FileOutput,
   RefreshCw,
   Share2,
 } from "lucide-vue-next";
 import {
-  LOCAL_ROUTE_GUIDE_STORAGE_KEY,
   VCP_CLI_MANIFEST_COMMAND,
   manifestExportFileName,
   parseCanonicalVcpCliManifest,
@@ -24,8 +22,6 @@ type FeedbackTone = "success" | "warning" | "error";
 const manifestDocument = ref<VcpCliManifestDocument | null>(null);
 const loading = ref(false);
 const loadError = ref("");
-const guideAcknowledged = ref(false);
-const guideExpanded = ref(false);
 const copyBusy = ref(false);
 const exportBusy = ref(false);
 const shareBusy = ref(false);
@@ -47,26 +43,6 @@ function describeError(error: unknown): string {
 
 function setFeedback(tone: FeedbackTone, message: string): void {
   actionFeedback.value = { tone, message };
-}
-
-function readGuidePreference(): void {
-  try {
-    guideAcknowledged.value =
-      localStorage.getItem(LOCAL_ROUTE_GUIDE_STORAGE_KEY) === "1";
-  } catch {
-    guideAcknowledged.value = false;
-  }
-  guideExpanded.value = !guideAcknowledged.value;
-}
-
-function acknowledgeGuide(): void {
-  try {
-    localStorage.setItem(LOCAL_ROUTE_GUIDE_STORAGE_KEY, "1");
-  } catch {
-    // The guide can still collapse for this session when storage is unavailable.
-  }
-  guideAcknowledged.value = true;
-  guideExpanded.value = false;
 }
 
 async function loadManifest(): Promise<void> {
@@ -148,7 +124,6 @@ watch(
       loadGeneration += 1;
       return;
     }
-    readGuidePreference();
     void loadManifest();
   },
   { immediate: true },
@@ -208,12 +183,6 @@ onBeforeUnmount(() => {
             >
             <code class="font-mono text-[11px]">{{ manifest.version }}</code>
             <span class="font-bold uppercase tracking-[0.12em] opacity-40"
-              >Route</span
-            >
-            <code class="font-mono text-[11px]"
-              >local_loopback / vcp_plugin</code
-            >
-            <span class="font-bold uppercase tracking-[0.12em] opacity-40"
               >Bytes</span
             >
             <code class="font-mono text-[11px]">{{ manifestSizeLabel }}</code>
@@ -224,90 +193,6 @@ onBeforeUnmount(() => {
             规范 JSON 只描述工具协议；当前可用性与 Job 状态以运行页的 Rust
             Runtime 为准。
           </p>
-        </section>
-
-        <section
-          class="mt-3 overflow-hidden rounded-xl border border-black/10 dark:border-white/10"
-        >
-          <button
-            type="button"
-            class="flex min-h-12 w-full items-center gap-3 px-3 text-left active:bg-black/5 dark:active:bg-white/5"
-            :aria-expanded="guideExpanded"
-            aria-controls="vcp-cli-local-route-guide"
-            @click="guideExpanded = !guideExpanded"
-          >
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center gap-2">
-                <span class="text-[12px] font-bold"
-                  >VCPToolBox 本地路由首次配置</span
-                >
-                <span
-                  class="rounded-md bg-black/5 px-1.5 py-0.5 font-mono text-[8px] font-bold uppercase dark:bg-white/10"
-                >
-                  {{ guideAcknowledged ? "已读" : "首次指引" }}
-                </span>
-              </div>
-              <p class="mt-0.5 text-[9px] opacity-45">
-                只提供步骤，不代替用户修改提示词
-              </p>
-            </div>
-            <ChevronDown
-              :size="16"
-              class="shrink-0 opacity-45 transition-transform"
-              :class="guideExpanded ? 'rotate-180' : ''"
-            />
-          </button>
-
-          <div
-            v-if="guideExpanded"
-            id="vcp-cli-local-route-guide"
-            class="border-t border-black/10 px-3 py-3 dark:border-white/10"
-          >
-            <ol class="space-y-2 text-[10px] leading-5 opacity-75">
-              <li>
-                <span class="mr-2 font-mono font-bold">01</span
-                >复制或导出本页的规范 manifest。
-              </li>
-              <li>
-                <span class="mr-2 font-mono font-bold">02</span>在 VCPToolBox 的
-                local-route 预设或工具说明处导入/放置其中的
-                <code class="font-mono">description</code> 与
-                <code class="font-mono">example</code>，并由你按实际部署微调。
-              </li>
-              <li>
-                <span class="mr-2 font-mono font-bold">03</span
-                >确保中央工具循环不执行
-                <code class="font-mono">VCPMobileCLI</code>。候选标记
-                <code class="font-mono">[[VCPToolUse=Forbidden]]</code>
-                需在你的 VCPToolBox 版本中验证。
-              </li>
-              <li>
-                <span class="mr-2 font-mono font-bold">04</span>本地路由使用
-                <code class="font-mono">local_loopback</code>；无需为此开启
-                Distributed 或 WS。
-              </li>
-            </ol>
-
-            <div
-              class="mt-3 border-l-2 border-[var(--highlight-text)] pl-3 text-[10px] leading-5"
-            >
-              <strong class="block text-[11px]"
-                >提示词由用户 / VCPToolBox 所有</strong
-              >
-              <span class="opacity-60">
-                VCPMobile 不会自动注入、追加或改写 Agent
-                提示词，也不会因打开本页建立插件中心连接。
-              </span>
-            </div>
-
-            <button
-              type="button"
-              class="mt-3 min-h-10 rounded-xl border border-black/10 px-3 text-[10px] font-bold active:opacity-70 dark:border-white/10"
-              @click="acknowledgeGuide"
-            >
-              我知道了，不再自动展开
-            </button>
-          </div>
         </section>
 
         <section

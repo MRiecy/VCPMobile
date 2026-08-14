@@ -51,7 +51,6 @@ function installBaseMocks(tools: ToolFixture[]) {
     distributedWsUrl: "wss://distributed.example/ws",
     distributedVcpKey: "distributed-key",
     distributedDeviceName: "Phone",
-    mobileCliAgentRoute: "localLoopback",
   }));
   mockInvoke("get_settings_recovery_status", () => ({
     recoveredCorrupt: false,
@@ -154,7 +153,6 @@ describe("DistributedView explicit tool authorization", () => {
       agentOrder: [],
       groupOrder: [],
       distributedDeviceName: "Phone",
-      mobileCliAgentRoute: "localLoopback",
     }));
 
     const wrapper = mountWithPinia(DistributedView, {

@@ -146,37 +146,21 @@ describe("VCP CLI P1 cross-layer governance", () => {
     expect(productionSources).not.toMatch(/z-\[|\bz-[0-9]+\b/);
   });
 
-  it("keeps the P2 route explicit and the stream-step contract top-level", () => {
-    expect(settingsStoreSource).toContain(
-      'DEFAULT_MOBILE_CLI_AGENT_ROUTE = "localLoopback"',
-    );
-    expect(settingsStoreSource).toMatch(
-      /type MobileCliAgentRoute\s*=\s*[\s\S]*"vcpPlugin"/,
-    );
-    expect(settingsStoreSource).toContain(
-      "mobileCliAgentRoute: MobileCliAgentRoute",
-    );
-    expect(settingsViewSource).toContain(
-      '@route-change="onMobileCliRouteChange"',
-    );
-    expect(settingsManagerSource).toMatch(
-      /enum MobileCliAgentRoute[\s\S]*\bLocalLoopback\b[\s\S]*\bVcpPlugin\b/,
-    );
-    expect(settingsManagerSource).toContain(
-      "pub mobile_cli_agent_route: MobileCliAgentRoute",
-    );
+  it("converges the Agent loop to a single vcpPlugin route with no turn wire", () => {
+    expect(settingsStoreSource).not.toContain("DEFAULT_MOBILE_CLI_AGENT_ROUTE");
+    expect(settingsStoreSource).not.toContain("MobileCliAgentRoute");
+    expect(settingsViewSource).not.toContain("onMobileCliRouteChange");
+    expect(settingsViewSource).not.toContain("@route-change");
+    expect(settingsManagerSource).not.toContain("MobileCliAgentRoute");
+    expect(settingsManagerSource).not.toContain("mobile_cli_agent_route");
 
-    expect(chatStreamSource).toContain("turnAttempt?: string");
-    expect(chatStreamSource).toContain("stepIndex?: number");
-    expect(chatStreamSource).toContain("projectionReset?: boolean");
-    expect(chatStreamSource).not.toContain("localCliTurnAttempt");
-    expect(chatStreamSource).not.toContain("localCliStep");
-    expect(chatStreamSource).not.toContain("localCliProjectionReset");
-    expect(vcpClientSource).toContain('#[serde(rename_all = "camelCase")]');
+    expect(chatStreamSource).not.toContain("turnAttempt");
+    expect(chatStreamSource).not.toContain("stepIndex");
+    expect(chatStreamSource).not.toContain("projectionReset");
     expect(vcpClientSource).toContain("pub struct StreamEvent");
-    expect(vcpClientSource).toContain("pub turn_attempt: Option<String>");
-    expect(vcpClientSource).toContain("pub step_index: Option<u32>");
-    expect(vcpClientSource).toContain("pub projection_reset: Option<bool>");
+    expect(vcpClientSource).not.toContain("turn_attempt");
+    expect(vcpClientSource).not.toContain("step_index");
+    expect(vcpClientSource).not.toContain("projection_reset");
   });
 
   it("does not couple route selection to capability toggles or a frontend coordinator", () => {

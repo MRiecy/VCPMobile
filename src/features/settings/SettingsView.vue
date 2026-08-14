@@ -2,11 +2,9 @@
 import { ref, onMounted, watch, computed, defineAsyncComponent } from "vue";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import {
-  DEFAULT_MOBILE_CLI_AGENT_ROUTE,
   diffSettingsPatch,
   useSettingsStore,
   type AppSettings,
-  type MobileCliAgentRoute,
 } from "../../core/stores/settings";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
@@ -64,14 +62,11 @@ const settings = ref<AppSettings>({
   groupOrder: [],
   topicSummaryModel: "gemini-3.1-flash-lite",
   syncLogLevel: "INFO",
-  mobileCliAgentRoute: DEFAULT_MOBILE_CLI_AGENT_ROUTE,
   // [SUSPENDED BETA] 浮动助手（划词悬浮球）功能当前已暂停使用，默认值保留供后续重启
   enableAssistant: false,
   assistantAgentId: "",
 });
 const settingsBaseline = ref<AppSettings | null>(null);
-const mobileCliRouteSaving = ref(false);
-const mobileCliRouteError = ref<string | null>(null);
 const cloneSettings = (value: AppSettings): AppSettings =>
   JSON.parse(JSON.stringify(value)) as AppSettings;
 
@@ -144,49 +139,6 @@ const saveSettings = async (): Promise<boolean> => {
   } catch (e) {
     console.error("Failed to save settings:", e);
     return false;
-  }
-};
-
-const onMobileCliRouteChange = async (route: MobileCliAgentRoute) => {
-  if (
-    mobileCliRouteSaving.value ||
-    settings.value.mobileCliAgentRoute === route
-  ) {
-    return;
-  }
-
-  const previousRoute = settings.value.mobileCliAgentRoute;
-  const baseline = settingsBaseline.value;
-  const pendingLocalEdits = baseline
-    ? diffSettingsPatch(baseline, settings.value)
-    : {};
-  delete pendingLocalEdits.mobileCliAgentRoute;
-  settings.value.mobileCliAgentRoute = route;
-  mobileCliRouteSaving.value = true;
-  mobileCliRouteError.value = null;
-
-  try {
-    await settingsStore.updateSettings({ mobileCliAgentRoute: route });
-    if (
-      !settingsStore.settings ||
-      settingsStore.settings.mobileCliAgentRoute !== route
-    ) {
-      throw new Error("后端未确认所选 CLI Agent 路由");
-    }
-
-    const persisted = cloneSettings(settingsStore.settings);
-    settingsBaseline.value = cloneSettings(persisted);
-    settings.value = {
-      ...persisted,
-      ...pendingLocalEdits,
-      mobileCliAgentRoute: route,
-    };
-  } catch (error) {
-    console.error("Failed to save mobile CLI Agent route:", error);
-    settings.value.mobileCliAgentRoute = previousRoute;
-    mobileCliRouteError.value = "路由未保存；已恢复此前选择。";
-  } finally {
-    mobileCliRouteSaving.value = false;
   }
 };
 
@@ -369,12 +321,7 @@ watch(currentSubPage, (val) => {
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">移动 CLI Agent</h3>
                     <SettingsCard>
-                      <AiLogicSettingsSection
-                        :settings="settings"
-                        :saving="mobileCliRouteSaving"
-                        :save-error="mobileCliRouteError"
-                        @route-change="onMobileCliRouteChange"
-                      />
+                      <AiLogicSettingsSection :settings="settings" />
                     </SettingsCard>
                   </div>
                   <div>
