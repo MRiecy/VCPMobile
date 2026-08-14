@@ -7,15 +7,25 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use tauri_plugin_vcp_mobile::cli::{CliProjectedArtifact, CliRiverContextProjection};
-
-use super::runtime::{VcpCliArtifactGrantInput, VcpCliRiverProjectionInput};
-use super::turn_types::{
-    MAX_RIVER_ARTIFACTS, MAX_RIVER_ARTIFACT_BYTES, MAX_RIVER_ARTIFACT_TOTAL_BYTES,
-    MAX_RIVER_PROJECTION_BYTES,
+use tauri_plugin_vcp_mobile::cli::{
+    CliProjectedArtifact, CliRiverContextProjection, CliVrefFileProjection, CliVrefProjection,
 };
 
+use super::runtime::{
+    MobileCliAdmissionError, VcpCliArtifactGrantInput, VcpCliRiverProjectionInput,
+    VcpCliVrefProjectionInput, VcpCliVrefSourceGrantInput,
+};
+use super::turn_types::{
+    MAX_RIVER_ARTIFACTS, MAX_RIVER_ARTIFACT_BYTES, MAX_RIVER_ARTIFACT_TOTAL_BYTES,
+    MAX_RIVER_PROJECTION_BYTES, MAX_VREF_PROJECTION_BYTES, MAX_VREF_SOURCES, MAX_VREF_SOURCE_BYTES,
+    MAX_VREF_TOTAL_BYTES,
+};
+use tokio_util::sync::CancellationToken;
+
 const FILE_NAME: &str = "river-context.json";
+const VREF_DIRECTORY: &str = "vref";
+const VREF_MANIFEST_FILE: &str = "vref-projection.json";
+const VREF_SCHEMA: &str = "vcp.mobile.vref-projection.v1";
 const ATTEMPT_PROJECTION_SCHEMA: &str = "vcp.mobile.attempt-projection.v1";
 const MAX_ROOT_ENTRIES: usize = 512;
 
@@ -81,6 +91,79 @@ pub(super) fn remove_river_projection(
     sync_directory(root)
 }
 
+pub(super) fn prepare_vref_projection(
+    root: &Path,
+    generation: u64,
+    job_id: &str,
+    attempt_id: &str,
+    input: &VcpCliVrefProjectionInput,
+    cancellation_token: Option<&CancellationToken>,
+    deadline_at_ms: Option<u64>,
+) -> Result<CliVrefProjection, MobileCliAdmissionError> {
+    validate_vref_input(input).map_err(MobileCliAdmissionError::Runtime)?;
+    require_real_directory(root, "projection root").map_err(MobileCliAdmissionError::Runtime)?;
+    let attempt_directory = root.join(projection_stem(generation, job_id, attempt_id));
+    ensure_attempt_directory(&attempt_directory).map_err(MobileCliAdmissionError::Runtime)?;
+    let directory = attempt_directory.join(VREF_DIRECTORY);
+    match fs::symlink_metadata(&directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(MobileCliAdmissionError::Runtime(
+                "vref attempt projection already exists".to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(MobileCliAdmissionError::Runtime(format!(
+                "cannot inspect vref attempt projection: {error}"
+            )));
+        }
+    }
+    fs::create_dir(&directory).map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot create vref directory: {error}"))
+    })?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot protect vref directory: {error}"))
+    })?;
+    let result = (|| {
+        let manifest = write_vref_manifest(&directory, input)?;
+        let files = input
+            .source_grants
+            .iter()
+            .map(|grant| copy_vref_source(&directory, grant, cancellation_token, deadline_at_ms))
+            .collect::<Result<Vec<_>, _>>()?;
+        sync_directory(&directory)?;
+        sync_directory(&attempt_directory)?;
+        sync_directory(root)?;
+        Ok::<_, MobileCliAdmissionError>((manifest, files))
+    })();
+    let (manifest, files) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = remove_directory(&directory);
+            return Err(error);
+        }
+    };
+    Ok(CliVrefProjection {
+        host_dir: directory.to_string_lossy().into_owned(),
+        manifest_path: manifest.to_string_lossy().into_owned(),
+        manifest_size_bytes: input.size_bytes,
+        manifest_sha256: input.sha256.clone(),
+        files,
+    })
+}
+
+pub(super) fn remove_attempt_projection(
+    root: &Path,
+    generation: u64,
+    job_id: &str,
+    attempt_id: &str,
+) -> Result<(), String> {
+    require_real_directory(root, "projection root")?;
+    let directory = root.join(projection_stem(generation, job_id, attempt_id));
+    remove_directory(&directory)?;
+    sync_directory(root)
+}
+
 pub(super) fn gc_stale_river_projections(root: &Path) -> Result<(), String> {
     require_real_directory(root, "projection root")?;
     for (index, entry) in fs::read_dir(root)
@@ -102,6 +185,231 @@ pub(super) fn gc_stale_river_projections(root: &Path) -> Result<(), String> {
         remove_directory(&entry.path())?;
     }
     sync_directory(root)
+}
+
+fn ensure_attempt_directory(directory: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(directory)
+                .map_err(|error| format!("cannot create attempt projection directory: {error}"))?;
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("cannot protect attempt projection directory: {error}"))
+        }
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err("attempt projection path is not a real directory".to_string()),
+        Err(error) => Err(format!(
+            "cannot inspect attempt projection directory: {error}"
+        )),
+    }
+}
+
+fn validate_vref_input(input: &VcpCliVrefProjectionInput) -> Result<(), String> {
+    if input.canonical_json.len() > MAX_VREF_PROJECTION_BYTES
+        || input.size_bytes != input.canonical_json.len() as u64
+        || input.source_grants.len() != input.expected_source_grants
+        || input.source_grants.len() > MAX_VREF_SOURCES
+    {
+        return Err("vref projection violates its count or byte fence".to_string());
+    }
+    let actual = format!("{:x}", Sha256::digest(input.canonical_json.as_bytes()));
+    if actual != input.sha256 {
+        return Err("vref projection SHA-256 mismatch".to_string());
+    }
+    let document: serde_json::Value = serde_json::from_str(&input.canonical_json)
+        .map_err(|error| format!("vref projection is invalid JSON: {error}"))?;
+    if document.get("schema").and_then(serde_json::Value::as_str) != Some(VREF_SCHEMA)
+        || document
+            .get("catalog_generation")
+            .and_then(serde_json::Value::as_u64)
+            != Some(input.catalog_generation)
+    {
+        return Err("vref projection identity does not match the durable grant".to_string());
+    }
+    let descriptors = document
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "vref projection has no source array".to_string())?;
+    if descriptors.len() != input.source_grants.len() {
+        return Err("vref source grants disagree with the canonical manifest".to_string());
+    }
+    let mut total = 0u64;
+    for (index, (descriptor, grant)) in descriptors.iter().zip(&input.source_grants).enumerate() {
+        validate_vref_grant(grant, index + 1)?;
+        if descriptor
+            .get("guest_relative_path")
+            .and_then(serde_json::Value::as_str)
+            != Some(grant.relative_name.as_str())
+            || descriptor
+                .get("size_bytes")
+                .and_then(serde_json::Value::as_u64)
+                != Some(grant.size_bytes)
+            || descriptor
+                .get("source_sha256")
+                .and_then(serde_json::Value::as_str)
+                != Some(grant.sha256.as_str())
+        {
+            return Err("vref source descriptor disagrees with host grant".to_string());
+        }
+        total = total
+            .checked_add(grant.size_bytes)
+            .ok_or_else(|| "vref source byte total overflowed".to_string())?;
+    }
+    if total > MAX_VREF_TOTAL_BYTES {
+        return Err("vref source grants exceed 256 MiB".to_string());
+    }
+    Ok(())
+}
+
+fn validate_vref_grant(grant: &VcpCliVrefSourceGrantInput, rank: usize) -> Result<(), String> {
+    if grant.size_bytes > MAX_VREF_SOURCE_BYTES
+        || !is_lower_sha256(&grant.sha256)
+        || grant.relative_name.contains(['/', '\\'])
+        || !grant
+            .relative_name
+            .starts_with(&format!("{rank:04}-{}-", &grant.sha256[..12]))
+    {
+        return Err("vref source grant identity is invalid".to_string());
+    }
+    let metadata = fs::symlink_metadata(&grant.source_path)
+        .map_err(|error| format!("cannot inspect vref source: {error}"))?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != grant.size_bytes
+        || grant
+            .source_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            != Some(grant.sha256.as_str())
+    {
+        return Err("vref source is not the expected CAS object".to_string());
+    }
+    Ok(())
+}
+
+fn write_vref_manifest(
+    directory: &Path,
+    input: &VcpCliVrefProjectionInput,
+) -> Result<PathBuf, MobileCliAdmissionError> {
+    let temporary = directory.join(format!(".{VREF_MANIFEST_FILE}.tmp"));
+    let path = directory.join(VREF_MANIFEST_FILE);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .map_err(|error| {
+            MobileCliAdmissionError::Runtime(format!("cannot create vref manifest: {error}"))
+        })?;
+    file.write_all(input.canonical_json.as_bytes())
+        .map_err(|error| {
+            MobileCliAdmissionError::Runtime(format!("cannot write vref manifest: {error}"))
+        })?;
+    file.sync_all().map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot sync vref manifest: {error}"))
+    })?;
+    drop(file);
+    fs::rename(&temporary, &path).map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot publish vref manifest: {error}"))
+    })?;
+    Ok(path)
+}
+
+fn copy_vref_source(
+    directory: &Path,
+    grant: &VcpCliVrefSourceGrantInput,
+    cancellation_token: Option<&CancellationToken>,
+    deadline_at_ms: Option<u64>,
+) -> Result<CliVrefFileProjection, MobileCliAdmissionError> {
+    let temporary = directory.join(format!(".{}.tmp", grant.relative_name));
+    let destination = directory.join(&grant.relative_name);
+    let mut source = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&grant.source_path)
+        .map_err(|error| {
+            MobileCliAdmissionError::Runtime(format!("cannot open vref source: {error}"))
+        })?;
+    let metadata = source.metadata().map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot inspect opened vref source: {error}"))
+    })?;
+    if !metadata.is_file() || metadata.len() != grant.size_bytes {
+        return Err(MobileCliAdmissionError::Runtime(
+            "vref source changed before copy".to_string(),
+        ));
+    }
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .map_err(|error| {
+            MobileCliAdmissionError::Runtime(format!("cannot create vref copy: {error}"))
+        })?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        check_copy_fence(cancellation_token, deadline_at_ms)?;
+        let read = source.read(&mut buffer).map_err(|error| {
+            MobileCliAdmissionError::Runtime(format!("cannot read vref source: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            MobileCliAdmissionError::Runtime("vref copy size overflowed".to_string())
+        })?;
+        if total > grant.size_bytes {
+            return Err(MobileCliAdmissionError::Runtime(
+                "vref source exceeded frozen size".to_string(),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        output.write_all(&buffer[..read]).map_err(|error| {
+            MobileCliAdmissionError::Runtime(format!("cannot write vref copy: {error}"))
+        })?;
+    }
+    check_copy_fence(cancellation_token, deadline_at_ms)?;
+    if total != grant.size_bytes || format!("{:x}", hasher.finalize()) != grant.sha256 {
+        return Err(MobileCliAdmissionError::Runtime(
+            "vref source hash changed during copy".to_string(),
+        ));
+    }
+    output.sync_all().map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot sync vref copy: {error}"))
+    })?;
+    drop(output);
+    fs::rename(&temporary, &destination).map_err(|error| {
+        MobileCliAdmissionError::Runtime(format!("cannot publish vref copy: {error}"))
+    })?;
+    Ok(CliVrefFileProjection {
+        relative_name: grant.relative_name.clone(),
+        size_bytes: grant.size_bytes,
+        sha256: grant.sha256.clone(),
+    })
+}
+
+fn check_copy_fence(
+    cancellation_token: Option<&CancellationToken>,
+    deadline_at_ms: Option<u64>,
+) -> Result<(), MobileCliAdmissionError> {
+    if cancellation_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(MobileCliAdmissionError::Cancelled);
+    }
+    if let Some(deadline) = deadline_at_ms {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                MobileCliAdmissionError::Runtime(format!("vref clock failed: {error}"))
+            })?
+            .as_millis();
+        if now >= u128::from(deadline) {
+            return Err(MobileCliAdmissionError::Deadline);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn projection_stem(generation: u64, job_id: &str, attempt_id: &str) -> String {

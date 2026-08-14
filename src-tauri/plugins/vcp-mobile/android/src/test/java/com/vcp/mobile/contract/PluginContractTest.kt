@@ -329,4 +329,38 @@ class PluginContractTest {
         assertTrue("Exited 前必须等待 stdout/stderr drain", processHost.contains("drainReadersForTerminal(handle)") && processHost.contains("!handle.stdoutReader.isAlive && !handle.stderrReader.isAlive"))
         assertTrue("完成 handle 必须可安全淘汰", processHost.contains("completed.isCompleted()") && processHost.contains("handles.remove(key, completed)"))
     }
+
+    @Test
+    fun boundedPickerAndVrefProjectionStayInsideExistingPrivateBridges() {
+        val rustSystem = File(pluginRoot, "src/system.rs").readText()
+        val rustCli = File(pluginRoot, "src/cli.rs").readText()
+        val kotlinPlugin = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
+        ).readText()
+        val processHost = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/cli/CliProcessHost.kt",
+        ).readText()
+        val rootfsBuild = File(
+            pluginRoot,
+            "../../runtime-assets/vcp-cli/build/build_rootfs.sh",
+        ).canonicalFile.readText()
+
+        assertTrue("现有 picker Rust bridge 必须接收 optional max_bytes", rustSystem.contains("max_bytes: Option<u64>"))
+        assertTrue("picker wire 必须使用 maxBytes", rustSystem.contains("\"maxBytes\": max_bytes"))
+        assertTrue("Kotlin picker 必须按实际 stream byte 计数", kotlinPlugin.contains("copyPickedFileStream(") && kotlinPlugin.contains("picker_file_too_large"))
+        assertTrue("knowledge picker 必须有显式 raw-only mode", kotlinPlugin.contains("pickerModeIsKnowledge(") && kotlinPlugin.contains("!knowledgeMode &&"))
+        assertTrue("knowledge picker 不得向 WebView 派发私有文件结果", kotlinPlugin.contains("val emitWebEvents = !knowledgeMode"))
+        assertTrue("knowledge picker 不得生成缩略图", kotlinPlugin.contains("if (!knowledgeMode && mimeType.startsWith(\"image/\"))"))
+        assertTrue("picker 取消必须有稳定错误码", kotlinPlugin.contains("invoke.reject(\"picker_cancelled\")"))
+
+        assertTrue("Rust start DTO 必须携带 optional vref projection", rustCli.contains("pub vref_projection: Option<CliVrefProjection>"))
+        assertTrue("Kotlin 必须验证 attempt-private vref", processHost.contains("verifyVrefProjection("))
+        assertTrue("vref child 必须 NOFOLLOW 读取", processHost.contains("sha256PathNoFollow("))
+        assertTrue("vref 必须仅做一次目录 bind", processHost.contains("\"${'$'}vrefHostDirectoryPath:${'$'}GUEST_VREF_DIRECTORY\""))
+        assertTrue("vref env 只能来自 host 固定路径", processHost.contains("VCP_VREF_DIR=${'$'}GUEST_VREF_DIRECTORY"))
+        assertTrue("rootfs 必须预建固定 vref target", rootfsBuild.contains("${'$'}rootfs_dir/run/vcp-vref"))
+        assertTrue("canonical knowledge CAS 不得成为 PRoot bind", !processHost.contains("knowledge/objects"))
+    }
 }

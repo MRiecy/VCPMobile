@@ -83,6 +83,24 @@ pub struct CliRiverContextProjection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CliVrefFileProjection {
+    pub relative_name: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CliVrefProjection {
+    pub host_dir: String,
+    pub manifest_path: String,
+    pub manifest_size_bytes: u64,
+    pub manifest_sha256: String,
+    pub files: Vec<CliVrefFileProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartCliProcessRequest {
     pub operation_id: String,
     pub job_id: String,
@@ -94,6 +112,8 @@ pub struct StartCliProcessRequest {
     pub artifact_max_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub river_context_projection: Option<CliRiverContextProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vref_projection: Option<CliVrefProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,9 +290,9 @@ pub async fn cancel_cli_process_inner<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CliProcessState, CliProjectedArtifact, CliRiverContextProjection, PrepareCliRuntimeRequest,
-        PrepareCliRuntimeResponse, PrepareCliSemanticAssetsRequest,
-        PrepareCliSemanticAssetsResponse, StartCliProcessRequest,
+        CliProcessState, CliProjectedArtifact, CliRiverContextProjection, CliVrefFileProjection,
+        CliVrefProjection, PrepareCliRuntimeRequest, PrepareCliRuntimeResponse,
+        PrepareCliSemanticAssetsRequest, PrepareCliSemanticAssetsResponse, StartCliProcessRequest,
     };
 
     #[test]
@@ -376,6 +396,17 @@ mod tests {
                     sha256: "b".repeat(64),
                 }],
             }),
+            vref_projection: Some(CliVrefProjection {
+                host_dir: "/private/projections/attempt/vref".to_string(),
+                manifest_path: "/private/projections/attempt/vref/vref-projection.json".to_string(),
+                manifest_size_bytes: 31,
+                manifest_sha256: "c".repeat(64),
+                files: vec![CliVrefFileProjection {
+                    relative_name: "0001-bbbbbbbbbbbb-notes.md".to_string(),
+                    size_bytes: 29,
+                    sha256: "d".repeat(64),
+                }],
+            }),
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
@@ -392,6 +423,14 @@ mod tests {
         assert_eq!(
             value["riverContextProjection"]["artifacts"][0]["guestPath"],
             "/run/river-artifact-00-aaaaaaaaaaaa.png"
+        );
+        assert_eq!(
+            value["vrefProjection"]["manifestPath"],
+            "/private/projections/attempt/vref/vref-projection.json"
+        );
+        assert_eq!(
+            value["vrefProjection"]["files"][0]["relativeName"],
+            "0001-bbbbbbbbbbbb-notes.md"
         );
         assert!(value.get("operation_id").is_none());
 
@@ -415,10 +454,12 @@ mod tests {
             cwd: "/workspace".to_string(),
             artifact_max_bytes: 0,
             river_context_projection: None,
+            vref_projection: None,
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
         assert!(value.get("riverContextProjection").is_none());
+        assert!(value.get("vrefProjection").is_none());
     }
 
     #[test]

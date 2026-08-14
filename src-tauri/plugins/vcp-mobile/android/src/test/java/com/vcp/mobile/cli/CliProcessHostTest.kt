@@ -57,6 +57,31 @@ class CliProcessHostTest {
     }
 
     @Test
+    fun invokeArgsDecodeAttemptPrivateVrefProjection() {
+        val hash = "a".repeat(64)
+        val args = ObjectMapper().readValue(
+            """{
+                "operationId":"op","jobId":"job","attemptId":"attempt",
+                "runtimeGeneration":1,"command":"true","rootfsPath":"/rootfs",
+                "cwd":"/workspace","artifactMaxBytes":1024,
+                "vrefProjection":{
+                    "hostDir":"/private/projections/attempt/vref",
+                    "manifestPath":"/private/projections/attempt/vref/vref-projection.json",
+                    "manifestSizeBytes":12,"manifestSha256":"$hash",
+                    "files":[{"relativeName":"0001-aaaaaaaaaaaa-notes.md","sizeBytes":7,"sha256":"$hash"}]
+                }
+            }""".trimIndent(),
+            StartCliProcessArgs::class.java,
+        )
+
+        assertEquals("/private/projections/attempt/vref", args.vrefProjection?.hostDir)
+        assertEquals(
+            "0001-aaaaaaaaaaaa-notes.md",
+            args.vrefProjection?.files?.single()?.relativeName,
+        )
+    }
+
+    @Test
     fun handshakePidSnapshotWaitsForNewlineAndRejectsCompleteInvalidIdentity() {
         assertEquals(null, parseHandshakePidSnapshot(byteArrayOf()))
         assertEquals(null, parseHandshakePidSnapshot("4242".toByteArray()))
@@ -171,6 +196,8 @@ class CliProcessHostTest {
         assertTrue(argv.contains("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"))
         assertFalse(argv.any { it.contains("vcp-river-context") })
         assertFalse(argv.any { it.startsWith("VCP_RIVER_CONTEXT_FILE=") })
+        assertFalse(argv.any { it.contains("vcp-vref") })
+        assertFalse(argv.any { it.startsWith("VCP_VREF_DIR=") })
         assertFalse(argv.any { it.startsWith("PROOT_LOADER=") || it.startsWith("PROOT_TMP_DIR=") })
         assertEquals(listOf("/bin/bash", "-lc", userCommand), argv.takeLast(3))
         assertEquals(1, argv.count { it == userCommand })
@@ -211,6 +238,38 @@ class CliProcessHostTest {
         assertFalse(argv.any { it.contains(":/output") || it.contains(":/skills") })
         assertEquals(listOf("/bin/bash", "-lc", userCommand), argv.takeLast(3))
         assertEquals(1, argv.count { it == userCommand })
+    }
+
+    @Test
+    fun vrefProjectionAddsOneDisposableDirectoryBindAndNoCanonicalRoots() {
+        val vrefDirectory =
+            "/private/no-backup/vcp-cli/projections/${"a".repeat(64)}/vref"
+        val canonicalKnowledge = "/private/no-backup/vcp-cli/knowledge/objects/deadbeef"
+        val userCommand = "printf x >> \"${'$'}VCP_VREF_DIR/0001-file.md\""
+        val argv = buildProotArguments(
+            prootPath = "/native/libvcp_proot.so",
+            rootfsPath = "/private/rootfs/profile",
+            workspacePath = "/private/workspace",
+            cwd = "/workspace",
+            command = userCommand,
+            vrefHostDirectoryPath = vrefDirectory,
+        )
+
+        assertEquals(
+            listOf(
+                "/dev",
+                "/proc",
+                "/private/workspace:/workspace",
+                "$vrefDirectory:/run/vcp-vref",
+            ),
+            argv.windowed(2).filter { it.first() == "-b" }.map { it.last() },
+        )
+        assertEquals(1, argv.count { it.endsWith(":/run/vcp-vref") })
+        assertTrue(argv.contains("VCP_VREF_DIR=/run/vcp-vref"))
+        assertFalse(argv.any { it.contains(canonicalKnowledge) })
+        assertFalse(argv.any { it == "/private/no-backup/vcp-cli/projections:/run" })
+        assertFalse(argv.any { it.contains(":/output") || it.contains(":/skills") })
+        assertEquals(listOf("/bin/bash", "-lc", userCommand), argv.takeLast(3))
     }
 
     @Test
@@ -357,6 +416,203 @@ class CliProcessHostTest {
     }
 
     @Test
+    fun vrefVerifierAcceptsOnlyAttemptCopyAndGuestWritesDoNotWriteBackCanonicalBytes() {
+        val root = Files.createTempDirectory("vcp-cli-vref-projection").toFile().canonicalFile
+        val canonicalRoot = Files.createTempDirectory("vcp-cli-vref-canonical").toFile().canonicalFile
+        val stem = "d".repeat(64)
+        val vref = File(root, "$stem/vref").apply { mkdirs() }
+        val manifestBytes = "{\"schema\":\"vcp.mobile.vref-projection.v1\"}".toByteArray()
+        val manifest = File(vref, "vref-projection.json").apply { writeBytes(manifestBytes) }
+        val canonicalBytes = "canonical knowledge bytes".toByteArray()
+        val canonical = File(canonicalRoot, "object").apply { writeBytes(canonicalBytes) }
+        val relativeName = "0001-${sha256Hex(canonicalBytes).take(12)}-notes.md"
+        val attemptCopy = File(vref, relativeName).apply { writeBytes(canonical.readBytes()) }
+        val projection = VrefProjectionArgs().apply {
+            hostDir = vref.absolutePath
+            manifestPath = manifest.absolutePath
+            manifestSizeBytes = manifestBytes.size.toLong()
+            manifestSha256 = sha256Hex(manifestBytes)
+            files = arrayOf(VrefFileProjectionArgs().apply {
+                this.relativeName = relativeName
+                sizeBytes = canonicalBytes.size.toLong()
+                sha256 = sha256Hex(canonicalBytes)
+            })
+        }
+
+        try {
+            val verified = verifyVrefProjection(root, stem, projection)
+            assertEquals(vref.canonicalFile, verified.directory)
+            assertEquals(manifest.canonicalFile, verified.manifest)
+            assertEquals(listOf(attemptCopy.canonicalFile), verified.files)
+
+            attemptCopy.writeText("guest-owned mutation")
+            assertArrayEquals(canonicalBytes, canonical.readBytes())
+            assertEquals(sha256Hex(canonicalBytes), sha256Hex(canonical.readBytes()))
+        } finally {
+            root.deleteRecursively()
+            canonicalRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun vrefVerifierAcceptsEmptyAndFiftyFileSelectionsButRejectsFiftyOne() {
+        val root = Files.createTempDirectory("vcp-cli-vref-counts").toFile().canonicalFile
+        val stem = "c".repeat(64)
+        val vref = File(root, "$stem/vref").apply { mkdirs() }
+        val manifestBytes = "{\"requested\":50,\"resolved\":0}".toByteArray()
+        val manifest = File(vref, "vref-projection.json").apply { writeBytes(manifestBytes) }
+        val projection = VrefProjectionArgs().apply {
+            hostDir = vref.absolutePath
+            manifestPath = manifest.absolutePath
+            manifestSizeBytes = manifestBytes.size.toLong()
+            manifestSha256 = sha256Hex(manifestBytes)
+            files = emptyArray()
+        }
+
+        try {
+            assertTrue(verifyVrefProjection(root, stem, projection).files.isEmpty())
+
+            val maxFiles = (1..50).map { rank ->
+                val bytes = "selected-$rank".toByteArray()
+                val hash = sha256Hex(bytes)
+                val relativeName = "${rank.toString().padStart(4, '0')}-${hash.take(12)}-source-$rank.txt"
+                File(vref, relativeName).writeBytes(bytes)
+                VrefFileProjectionArgs().apply {
+                    this.relativeName = relativeName
+                    sizeBytes = bytes.size.toLong()
+                    sha256 = hash
+                }
+            }.toTypedArray()
+            projection.files = maxFiles
+            assertEquals(50, verifyVrefProjection(root, stem, projection).files.size)
+
+            projection.files = maxFiles + VrefFileProjectionArgs().apply {
+                relativeName = "0051-${"f".repeat(12)}-overflow.txt"
+                sizeBytes = 1
+                sha256 = "f".repeat(64)
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun vrefVerifierRejectsWrongStemExtraChildNestedSymlinkHashAndSizeDrift() {
+        val root = Files.createTempDirectory("vcp-cli-vref-reject").toFile().canonicalFile
+        val sibling = Files.createTempDirectory("vcp-cli-vref-sibling").toFile().canonicalFile
+        val stem = "e".repeat(64)
+        val manifestBytes = "{\"requested\":1,\"resolved\":1}".toByteArray()
+        val fileBytes = "selected bytes".toByteArray()
+        val relativeName = "0001-${sha256Hex(fileBytes).take(12)}-selected.txt"
+
+        fun fixture(): Pair<VrefProjectionArgs, File> {
+            File(root, stem).deleteRecursively()
+            val vref = File(root, "$stem/vref").apply { mkdirs() }
+            val manifest = File(vref, "vref-projection.json").apply { writeBytes(manifestBytes) }
+            val selected = File(vref, relativeName).apply { writeBytes(fileBytes) }
+            return VrefProjectionArgs().apply {
+                hostDir = vref.absolutePath
+                manifestPath = manifest.absolutePath
+                manifestSizeBytes = manifestBytes.size.toLong()
+                manifestSha256 = sha256Hex(manifestBytes)
+                files = arrayOf(VrefFileProjectionArgs().apply {
+                    this.relativeName = relativeName
+                    sizeBytes = fileBytes.size.toLong()
+                    sha256 = sha256Hex(fileBytes)
+                })
+            } to selected
+        }
+
+        try {
+            var projection = fixture().first
+            projection.hostDir = File(root, "${"f".repeat(64)}/vref").absolutePath
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            projection = fixture().first
+            File(projection.hostDir, "undeclared.txt").writeText("extra")
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            val nestedFixture = fixture()
+            projection = nestedFixture.first
+            var selected = nestedFixture.second
+            selected.delete()
+            assertTrue(selected.mkdir())
+            File(selected, "nested.txt").writeText("nested")
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            val symlinkFixture = fixture()
+            projection = symlinkFixture.first
+            selected = symlinkFixture.second
+            selected.delete()
+            val outside = File(sibling, "outside").apply { writeBytes(fileBytes) }
+            Files.createSymbolicLink(selected.toPath(), outside.toPath())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            projection = fixture().first
+            projection.files.single().sha256 = "0".repeat(64)
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            projection = fixture().first
+            projection.files.single().relativeName = "0002-${sha256Hex(fileBytes).take(12)}-selected.txt"
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            projection = fixture().first
+            projection.files.single().relativeName =
+                "0001-${sha256Hex(fileBytes).take(12)}-unsafe name.txt"
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            val sizeFixture = fixture()
+            projection = sizeFixture.first
+            projection.files.single().sizeBytes++
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            val hashFixture = fixture()
+            projection = hashFixture.first
+            hashFixture.second.writeBytes("tampered byte!".toByteArray())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            projection = fixture().first
+            File(projection.manifestPath).writeBytes("{\"requested\":9,\"resolved\":9}".toByteArray())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+
+            projection = fixture().first
+            val manifest = File(projection.manifestPath)
+            manifest.delete()
+            val outsideManifest = File(sibling, "manifest").apply { writeBytes(manifestBytes) }
+            Files.createSymbolicLink(manifest.toPath(), outsideManifest.toPath())
+            assertThrows(IllegalArgumentException::class.java) {
+                verifyVrefProjection(root, stem, projection)
+            }
+        } finally {
+            root.deleteRecursively()
+            sibling.deleteRecursively()
+        }
+    }
+
+    @Test
     fun processFingerprintIncludesOptionalRiverProjectionIdentity() {
         fun request(projection: RiverContextProjectionArgs? = null) = StartCliProcessArgs().apply {
             operationId = "operation-1"
@@ -393,6 +649,40 @@ class CliProcessHostTest {
         assertTrue(withProjection != fingerprint(request(projection)))
         projection.artifacts.single().sizeBytes--
         projection.sizeBytes++
+        assertTrue(withProjection != fingerprint(request(projection)))
+    }
+
+    @Test
+    fun processFingerprintIncludesOptionalVrefProjectionIdentity() {
+        fun request(projection: VrefProjectionArgs? = null) = StartCliProcessArgs().apply {
+            operationId = "operation-1"
+            jobId = "job-1"
+            attemptId = "attempt-1"
+            runtimeGeneration = 7
+            command = "true"
+            rootfsPath = "/private/rootfs/profile"
+            cwd = "/workspace"
+            artifactMaxBytes = 1024
+            vrefProjection = projection
+        }
+        val projection = VrefProjectionArgs().apply {
+            hostDir = "/private/projections/${"a".repeat(64)}/vref"
+            manifestPath = "$hostDir/vref-projection.json"
+            manifestSizeBytes = 17
+            manifestSha256 = "b".repeat(64)
+            files = arrayOf(VrefFileProjectionArgs().apply {
+                relativeName = "0001-cccccccccccc-notes.md"
+                sizeBytes = 23
+                sha256 = "c".repeat(64)
+            })
+        }
+
+        val withoutProjection = fingerprint(request())
+        val withProjection = fingerprint(request(projection))
+        assertTrue(withProjection != withoutProjection)
+        projection.manifestSha256 = projection.manifestSha256.uppercase()
+        assertEquals(withProjection, fingerprint(request(projection)))
+        projection.files.single().sizeBytes++
         assertTrue(withProjection != fingerprint(request(projection)))
     }
 

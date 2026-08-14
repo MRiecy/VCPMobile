@@ -116,6 +116,7 @@ impl OneShotTool for VcpMobileCliTool {
                     action: validated.action,
                     session_id: Some(session_id),
                     river_projection: None,
+                    vref_projection: None,
                 },
             )
             .await

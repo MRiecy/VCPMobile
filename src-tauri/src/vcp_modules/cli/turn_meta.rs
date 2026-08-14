@@ -25,6 +25,7 @@ use super::turn_types::{
 
 const ATTEMPT_PROJECTION_SCHEMA: &str = "vcp.mobile.attempt-projection.v1";
 const TRUNCATION_MARKER: &str = "\n[context truncated]";
+const MAX_VREF_QUERY_MESSAGE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalContinuationPolicy {
@@ -197,6 +198,58 @@ pub fn semantic_candidates(
         return Err("semantic candidate set exceeds its bounded local budget".to_string());
     }
     Ok(candidates)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeQueryMessages {
+    pub user: String,
+    pub assistant: Option<String>,
+}
+
+/// Builds vref query text only from the turn's frozen original request. Callers must not pass
+/// continuation messages because those contain local VCP_TOOL_PAYLOAD user frames.
+pub fn knowledge_query_messages(messages: &[Value]) -> Result<KnowledgeQueryMessages, String> {
+    let mut user_index = None;
+    let mut user = None;
+    for (index, value) in messages.iter().enumerate().rev() {
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        if object.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(content) = object.get("content").and_then(pure_text_content) else {
+            continue;
+        };
+        if content
+            .trim_start()
+            .starts_with("<!-- VCP_TOOL_PAYLOAD -->")
+        {
+            continue;
+        }
+        let projected = bounded_knowledge_query_text(&content);
+        if !projected.is_empty() {
+            user_index = Some(index);
+            user = Some(projected);
+            break;
+        }
+    }
+    let user_index = user_index.ok_or_else(|| "vref query has no true user message".to_string())?;
+    let user = user.ok_or_else(|| "vref query user message is empty".to_string())?;
+    let assistant = messages[..user_index].iter().rev().find_map(|value| {
+        let object = value.as_object()?;
+        (object.get("role").and_then(Value::as_str) == Some("assistant"))
+            .then(|| object.get("content").and_then(pure_text_content))
+            .flatten()
+            .map(|content| bounded_knowledge_query_text(&content))
+            .filter(|content| !content.is_empty())
+    });
+    Ok(KnowledgeQueryMessages { user, assistant })
+}
+
+fn bounded_knowledge_query_text(value: &str) -> String {
+    let clean = redact_river_text(&strip_thought_chains(value));
+    truncate_utf8(clean.trim(), MAX_VREF_QUERY_MESSAGE_BYTES)
 }
 
 pub fn fallback_last_semantic_selection(

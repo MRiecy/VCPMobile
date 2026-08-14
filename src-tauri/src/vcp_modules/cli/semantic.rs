@@ -34,6 +34,7 @@ const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const VECTOR_BYTES_PER_DIMENSION: usize = 4;
 const CACHE_LOOKUP_CHUNK: usize = 128;
 const MAX_SEMANTIC_QUERY_BYTES: usize = 2_000;
+const MAX_KNOWLEDGE_QUERY_BYTES: usize = 16 * 1024;
 const MAX_SEMANTIC_SOURCE_BYTES: usize = 16 * 1024;
 const MAX_SEMANTIC_SELECTION_MS: u64 = 60_000;
 pub(crate) const MAX_SEMANTIC_CANDIDATES: usize = 512;
@@ -112,6 +113,39 @@ pub struct SemanticSelectRequest<'a> {
     pub tokenizer_path: &'a Path,
     pub query: &'a str,
     pub candidates: &'a [SemanticCandidate],
+    pub limit: usize,
+    pub now_ms: i64,
+    pub cancellation_token: CancellationToken,
+    pub deadline_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSemanticSource {
+    pub source_id: String,
+    pub source_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeSemanticHit {
+    pub source_id: String,
+    pub source_sha256: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeSemanticSelection {
+    pub hits: Vec<KnowledgeSemanticHit>,
+    pub model_id: String,
+    pub user_query_sha256: String,
+    pub assistant_query_sha256: Option<String>,
+}
+
+pub struct KnowledgeSemanticSelectRequest<'a> {
+    pub model_path: &'a Path,
+    pub tokenizer_path: &'a Path,
+    pub user_query: &'a str,
+    pub assistant_query: Option<&'a str>,
+    pub sources: &'a [KnowledgeSemanticSource],
     pub limit: usize,
     pub now_ms: i64,
     pub cancellation_token: CancellationToken,
@@ -461,6 +495,221 @@ impl LocalEmbeddingOwner {
         })
     }
 
+    pub async fn select_knowledge_sources(
+        &self,
+        pool: &Pool<Sqlite>,
+        request: KnowledgeSemanticSelectRequest<'_>,
+    ) -> Result<KnowledgeSemanticSelection, String> {
+        let user_query = bounded_knowledge_query(request.user_query, "user")?;
+        let assistant_query = request
+            .assistant_query
+            .map(|value| bounded_knowledge_query(value, "assistant"))
+            .transpose()?;
+        if request.sources.is_empty() {
+            return Err("knowledge semantic sources are empty".to_string());
+        }
+        if request.limit == 0 || request.limit > 50 || request.sources.len() > 64 {
+            return Err("knowledge semantic selection limits are invalid".to_string());
+        }
+        let budget =
+            SemanticWorkBudget::new(request.cancellation_token.clone(), request.deadline_at_ms)?;
+        let permit = tokio::select! {
+            _ = request.cancellation_token.cancelled() => {
+                return Err("semantic selection cancelled".to_string());
+            }
+            result = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(budget.deadline),
+                self.selection_permit.acquire(),
+            ) => result
+                .map_err(|_| "semantic selection exceeded its 60 second work budget".to_string())?
+                .map_err(|_| "semantic selection owner is closed".to_string())?,
+        };
+        budget.check()?;
+        let engine = self
+            .engine(request.model_path, request.tokenizer_path, &budget)
+            .await?;
+        let user_query_owned = user_query.to_string();
+        let assistant_query_owned = assistant_query.map(str::to_string);
+        let query_engine = Arc::clone(&engine);
+        let query_budget = budget.clone();
+        let (query_vector, user_query_sha256, assistant_query_sha256) =
+            tauri::async_runtime::spawn_blocking(move || {
+                let user_vector =
+                    query_engine.embed_with_budget(&user_query_owned, &query_budget)?;
+                let user_sha = format!("{:x}", Sha256::digest(user_query_owned.as_bytes()));
+                match assistant_query_owned {
+                    Some(assistant) => {
+                        query_budget.check()?;
+                        let assistant_vector =
+                            query_engine.embed_with_budget(&assistant, &query_budget)?;
+                        let assistant_sha = format!("{:x}", Sha256::digest(assistant.as_bytes()));
+                        let weighted = weighted_query_vector(&user_vector, &assistant_vector)?;
+                        Ok::<_, String>((weighted, user_sha, Some(assistant_sha)))
+                    }
+                    None => Ok((user_vector, user_sha, None)),
+                }
+            })
+            .await
+            .map_err(|error| format!("knowledge semantic query task failed: {error}"))??;
+        budget.check()?;
+
+        let source_lookup = request
+            .sources
+            .iter()
+            .map(|source| (source.source_id.clone(), source.source_sha256.clone()))
+            .collect::<HashMap<_, _>>();
+        if source_lookup.len() != request.sources.len() {
+            return Err("knowledge semantic source identity is duplicated".to_string());
+        }
+        let source_ids = source_lookup.keys().cloned().collect::<Vec<_>>();
+        let mut best_by_source: HashMap<String, (f32, u32, String)> = HashMap::new();
+        let mut cursor: Option<(String, i64)> = None;
+        let mut seen_chunks = 0usize;
+        loop {
+            budget.check()?;
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "SELECT c.source_id, c.ordinal, c.content_sha256, c.content \
+                 FROM local_knowledge_chunks c JOIN local_knowledge_sources s ON s.source_id = c.source_id \
+                 WHERE s.revoked_at_ms IS NULL AND s.index_status = 'ready' AND c.source_id IN (",
+            );
+            let mut separated = query.separated(", ");
+            for source_id in &source_ids {
+                separated.push_bind(source_id);
+            }
+            separated.push_unseparated(")");
+            if let Some((source_id, ordinal)) = cursor.as_ref() {
+                query
+                    .push(" AND (c.source_id > ")
+                    .push_bind(source_id)
+                    .push(" OR (c.source_id = ")
+                    .push_bind(source_id)
+                    .push(" AND c.ordinal > ")
+                    .push_bind(*ordinal)
+                    .push("))");
+            }
+            query.push(" ORDER BY c.source_id ASC, c.ordinal ASC LIMIT 128");
+            let rows = query
+                .build()
+                .fetch_all(pool)
+                .await
+                .map_err(|error| format!("cannot stream knowledge chunks: {error}"))?;
+            if rows.is_empty() {
+                break;
+            }
+            let mut candidates = Vec::with_capacity(rows.len());
+            for row in &rows {
+                budget.check()?;
+                let source_id: String = row
+                    .try_get("source_id")
+                    .map_err(|error| format!("invalid knowledge chunk source: {error}"))?;
+                let ordinal: i64 = row
+                    .try_get("ordinal")
+                    .map_err(|error| format!("invalid knowledge chunk ordinal: {error}"))?;
+                let content_sha256: String = row
+                    .try_get("content_sha256")
+                    .map_err(|error| format!("invalid knowledge chunk hash: {error}"))?;
+                let content: String = row
+                    .try_get("content")
+                    .map_err(|error| format!("invalid knowledge chunk content: {error}"))?;
+                if content.len() > 4096
+                    || format!("{:x}", Sha256::digest(content.as_bytes())) != content_sha256
+                    || !source_lookup.contains_key(&source_id)
+                {
+                    return Err("knowledge chunk catalog integrity failed".to_string());
+                }
+                candidates.push(SemanticCandidate {
+                    source_index: usize::try_from(ordinal)
+                        .map_err(|_| "knowledge chunk ordinal overflowed".to_string())?,
+                    content_sha256,
+                    text: content,
+                });
+            }
+            seen_chunks = seen_chunks
+                .checked_add(candidates.len())
+                .ok_or_else(|| "knowledge chunk count overflowed".to_string())?;
+            if seen_chunks > 19_200 {
+                return Err("knowledge chunk catalog exceeds its hard limit".to_string());
+            }
+            let vectors = cached_vectors_for_candidates(
+                pool,
+                Arc::clone(&engine),
+                &candidates,
+                request.now_ms,
+                &budget,
+            )
+            .await?;
+            for (row, candidate) in rows.iter().zip(&candidates) {
+                budget.check()?;
+                let source_id: String = row
+                    .try_get("source_id")
+                    .map_err(|error| format!("invalid knowledge chunk source: {error}"))?;
+                let ordinal = u32::try_from(candidate.source_index)
+                    .map_err(|_| "knowledge chunk ordinal overflowed".to_string())?;
+                let vector = vectors
+                    .get(&candidate.content_sha256)
+                    .ok_or_else(|| "semantic cache did not cover knowledge chunk".to_string())?;
+                let score = cosine(&query_vector, vector);
+                let replace = best_by_source.get(&source_id).is_none_or(
+                    |(current_score, current_ordinal, current_hash)| {
+                        score
+                            .partial_cmp(current_score)
+                            .unwrap_or(Ordering::Less)
+                            .is_gt()
+                            || (score == *current_score
+                                && (ordinal, candidate.content_sha256.as_str())
+                                    < (*current_ordinal, current_hash.as_str()))
+                    },
+                );
+                if replace {
+                    best_by_source.insert(
+                        source_id,
+                        (score, ordinal, candidate.content_sha256.clone()),
+                    );
+                }
+            }
+            let last = rows
+                .last()
+                .ok_or_else(|| "knowledge chunk stream lost its cursor".to_string())?;
+            cursor = Some((
+                last.try_get("source_id")
+                    .map_err(|error| format!("invalid knowledge chunk cursor: {error}"))?,
+                last.try_get("ordinal")
+                    .map_err(|error| format!("invalid knowledge chunk cursor: {error}"))?,
+            ));
+        }
+        budget.check()?;
+        let mut hits = best_by_source
+            .into_iter()
+            .filter_map(|(source_id, (score, _, _))| {
+                source_lookup
+                    .get(&source_id)
+                    .map(|source_sha256| KnowledgeSemanticHit {
+                        source_id,
+                        source_sha256: source_sha256.clone(),
+                        score,
+                    })
+            })
+            .collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| left.source_sha256.cmp(&right.source_sha256))
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+        let mut seen_sha = HashSet::new();
+        hits.retain(|hit| seen_sha.insert(hit.source_sha256.clone()));
+        hits.truncate(request.limit);
+        drop(permit);
+        Ok(KnowledgeSemanticSelection {
+            hits,
+            model_id: engine.profile.model_id.clone(),
+            user_query_sha256,
+            assistant_query_sha256,
+        })
+    }
+
     async fn engine(
         &self,
         model_path: &Path,
@@ -494,6 +743,147 @@ impl LocalEmbeddingOwner {
         });
         Ok(engine)
     }
+}
+
+async fn cached_vectors_for_candidates(
+    pool: &Pool<Sqlite>,
+    engine: Arc<SemanticEngine>,
+    candidates: &[SemanticCandidate],
+    now_ms: i64,
+    budget: &SemanticWorkBudget,
+) -> Result<HashMap<String, Vec<f32>>, String> {
+    let expected_bytes = engine
+        .profile
+        .dimension
+        .checked_mul(VECTOR_BYTES_PER_DIMENSION)
+        .ok_or_else(|| "semantic vector byte length overflowed".to_string())?;
+    let hashes = candidates
+        .iter()
+        .map(|candidate| candidate.content_sha256.as_str())
+        .collect::<HashSet<_>>();
+    let mut vectors = HashMap::new();
+    for hash_batch in hashes
+        .iter()
+        .copied()
+        .collect::<Vec<_>>()
+        .chunks(CACHE_LOOKUP_CHUNK)
+    {
+        budget.check()?;
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT content_sha256, vector FROM local_semantic_embedding_cache WHERE model_id = ",
+        );
+        query
+            .push_bind(&engine.profile.model_id)
+            .push(" AND dimension = ")
+            .push_bind(engine.profile.dimension as i64)
+            .push(" AND length(vector) = ")
+            .push_bind(expected_bytes as i64)
+            .push(" AND content_sha256 IN (");
+        let mut separated = query.separated(", ");
+        for hash in hash_batch.iter().copied() {
+            separated.push_bind(hash);
+        }
+        separated.push_unseparated(")");
+        for row in query
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("cannot read semantic cache: {error}"))?
+        {
+            let hash: String = row
+                .try_get("content_sha256")
+                .map_err(|error| format!("invalid semantic cache hash: {error}"))?;
+            let bytes: Vec<u8> = row
+                .try_get("vector")
+                .map_err(|error| format!("invalid semantic cache vector: {error}"))?;
+            if let Ok(vector) = decode_vector(&bytes) {
+                vectors.insert(hash, vector);
+            }
+        }
+    }
+    let mut missing = Vec::new();
+    let mut missing_hashes = HashSet::new();
+    for candidate in candidates {
+        budget.check()?;
+        if !vectors.contains_key(&candidate.content_sha256)
+            && missing_hashes.insert(candidate.content_sha256.clone())
+        {
+            missing.push((candidate.content_sha256.clone(), candidate.text.clone()));
+        }
+    }
+    for batch in missing.chunks(128) {
+        budget.check()?;
+        let batch = batch.to_vec();
+        let batch_engine = Arc::clone(&engine);
+        let batch_budget = budget.clone();
+        let computed = tauri::async_runtime::spawn_blocking(move || {
+            batch
+                .into_iter()
+                .map(|(hash, text)| {
+                    batch_budget.check()?;
+                    let vector = batch_engine.embed_with_budget(&text, &batch_budget)?;
+                    Ok::<_, String>((hash, vector))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .await
+        .map_err(|error| format!("knowledge semantic candidate task failed: {error}"))??;
+        budget.check()?;
+        vectors.extend(computed);
+    }
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| format!("cannot begin knowledge semantic cache transaction: {error}"))?;
+    invalidate_old_model_cache(&mut transaction, &engine.profile.model_id).await?;
+    for candidate in candidates {
+        budget.check()?;
+        let vector = vectors
+            .get(&candidate.content_sha256)
+            .ok_or_else(|| "semantic cache did not cover candidate".to_string())?;
+        sqlx::query(
+            "INSERT INTO local_semantic_embedding_cache \
+             (model_id, content_sha256, dimension, vector, created_at_ms, last_used_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(model_id, content_sha256) DO UPDATE SET \
+             dimension = excluded.dimension, vector = excluded.vector, \
+             last_used_at_ms = excluded.last_used_at_ms",
+        )
+        .bind(&engine.profile.model_id)
+        .bind(&candidate.content_sha256)
+        .bind(engine.profile.dimension as i64)
+        .bind(encode_vector(vector))
+        .bind(now_ms)
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| format!("cannot persist knowledge semantic vector: {error}"))?;
+    }
+    prune_cache(
+        &mut transaction,
+        &engine.profile.model_id,
+        engine.profile.cache.max_rows,
+    )
+    .await?;
+    budget.check()?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("cannot commit knowledge semantic cache: {error}"))?;
+    Ok(vectors)
+}
+
+fn weighted_query_vector(user: &[f32], assistant: &[f32]) -> Result<Vec<f32>, String> {
+    if user.len() != assistant.len() || user.is_empty() {
+        return Err("knowledge semantic query dimensions disagree".to_string());
+    }
+    let mut weighted = user
+        .iter()
+        .zip(assistant)
+        .map(|(user, assistant)| 0.7 * f64::from(*user) + 0.3 * f64::from(*assistant))
+        .collect::<Vec<_>>();
+    normalize_f64(&mut weighted)?;
+    Ok(weighted.into_iter().map(|value| value as f32).collect())
 }
 
 impl SemanticEngine {
@@ -1046,6 +1436,16 @@ fn bounded_query(query: &str) -> Result<&str, String> {
     let trimmed = query.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_SEMANTIC_QUERY_BYTES {
         return Err("semantic query is empty or exceeds 2000 UTF-8 bytes".to_string());
+    }
+    Ok(trimmed)
+}
+
+fn bounded_knowledge_query<'a>(query: &'a str, role: &str) -> Result<&'a str, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_KNOWLEDGE_QUERY_BYTES {
+        return Err(format!(
+            "knowledge semantic {role} query is empty or exceeds 16 KiB"
+        ));
     }
     Ok(trimmed)
 }

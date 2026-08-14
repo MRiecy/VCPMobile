@@ -5,10 +5,86 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.Files
 import java.util.UUID
 
 class ShareIntentBoundaryTest {
+    @Test
+    fun knowledgePickerModeIsExplicitWhileExistingModesRemainOrdinary() {
+        assertTrue(pickerModeIsKnowledge("knowledge"))
+        assertFalse(pickerModeIsKnowledge("file"))
+        assertFalse(pickerModeIsKnowledge("gallery"))
+        assertFalse(pickerModeIsKnowledge("camera"))
+        assertFails { pickerModeIsKnowledge("new-picker") }
+
+        assertEquals(17L, pickedFileResultSize(true, providerReportedSize = 999L, actualSize = 17L))
+        assertEquals(999L, pickedFileResultSize(false, providerReportedSize = 999L, actualSize = 17L))
+        assertEquals(17L, pickedFileResultSize(false, providerReportedSize = 0L, actualSize = 17L))
+    }
+
+    @Test
+    fun boundedPickerCopyUsesActualStreamBytesAndPreservesLegacyUnboundedMode() {
+        val exact = ByteArrayOutputStream()
+        val exactResult = copyPickedFileStream(
+            ByteArrayInputStream("1234".toByteArray()),
+            exact,
+            maxBytes = 4,
+        )
+        assertEquals(4L, exactResult.sizeBytes)
+        assertEquals("1234", exact.toString(Charsets.UTF_8.name()))
+
+        val crossing = ByteArrayOutputStream()
+        assertFails {
+            copyPickedFileStream(
+                ByteArrayInputStream("provider-size-was-zero".toByteArray()),
+                crossing,
+                maxBytes = 4,
+            )
+        }
+        assertTrue(crossing.size() <= 4)
+
+        val legacy = ByteArrayOutputStream()
+        val legacyResult = copyPickedFileStream(
+            ByteArrayInputStream("legacy-unbounded".toByteArray()),
+            legacy,
+            maxBytes = null,
+        )
+        assertEquals("legacy-unbounded".toByteArray().size.toLong(), legacyResult.sizeBytes)
+        assertEquals("legacy-unbounded", legacy.toString(Charsets.UTF_8.name()))
+    }
+
+    @Test
+    fun boundedPickerStreamFailureLeavesOnlyTrackedFragmentsForCleanup() {
+        val root = Files.createTempDirectory("picker-fragment-cleanup").toFile()
+        val fragment = root.resolve("pick-fragment")
+        val failingInput = object : ByteArrayInputStream("partial".toByteArray()) {
+            private var delivered = false
+
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                if (delivered) throw IOException("provider stream failed")
+                delivered = true
+                return super.read(buffer, offset, minOf(3, length))
+            }
+        }
+        try {
+            assertFails {
+                FileOutputStream(fragment).use { output ->
+                    copyPickedFileStream(failingInput, output, maxBytes = 32L * 1024L * 1024L)
+                }
+            }
+            assertTrue(fragment.exists())
+            assertTrue(fragment.length() <= 3L)
+            cleanupPickerFragments(listOf(fragment))
+            assertFalse(fragment.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     @Test
     fun providerDisplayNameIsReducedToSafeUnicodeBasename() {
         assertEquals("报告 2026.pdf", sanitizeSharedFileName("../../报告 2026.pdf"))

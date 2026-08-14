@@ -9,9 +9,9 @@ base_url=https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-min
 base_sha256=f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259
 apk_tools_url=https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/apk-tools-static-3.0.7-r0.apk
 apk_tools_sha256=ed1c5e82177844249b7c4ecc2653b78eed096be20496b7fb860a9e165b2e5ce1
-expected_tar_sha256=19126a747094e5e0e6a762d0542ee34a34b36893e431ba56e8bd90fd6b58df43
-expected_archive_sha256=3bb7949b14b4d926b4080e611375b1eed25d152dbf0439b79d9cf36e186247e7
-expected_archive_bytes=26870045
+expected_tar_sha256=ff151a55c557e76fdc3fa12d3be4e3e679cd599a36cb2be0c68e35edc6111af5
+expected_archive_sha256=b0a0f340275c8e4eb876ba346a0e4782e277c095fbcdfa8c2715f6643f705e95
+expected_archive_bytes=26868503
 
 for required_tool in curl sha256sum tar zstd stat; do
   if ! command -v "$required_tool" >/dev/null 2>&1; then
@@ -87,7 +87,8 @@ fi
   --no-scripts \
   add "${package_files[@]}"
 
-mkdir -p "$rootfs_dir/workspace" "$rootfs_dir/skills"
+mkdir -p "$rootfs_dir/workspace" "$rootfs_dir/skills" "$rootfs_dir/run/vcp-vref"
+chmod 0755 "$rootfs_dir/run/vcp-vref"
 # apk.log embeds the random build directory and wall-clock time. The lock file is
 # the durable package audit record; omit this generated log so the rootfs bytes
 # are reproducible across independent build directories.

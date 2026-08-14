@@ -31,6 +31,11 @@ PRoot 主程序和它的 unbundled loader 必须作为两个 Android 原生资�
 获得独立的固定环境。rootfs archive 通过插件的专用 Android assets source set 打包，由应用首次使用时
 解压到自己的私有数据目录。
 
+rootfs 可复现地预建空目标目录 `/run/vcp-vref`。只有 Runtime 已生成并冻结 attempt 私有 vref
+副本时，ProcessHost 才把该 disposable 目录一次 bind 到这里并设置 `VCP_VREF_DIR`；canonical
+knowledge CAS 永不 bind。PRoot 不提供可信只读 bind，因此 guest 可改写自己的 attempt 副本，host
+启动后不回读这些字节，不能把该边界描述为只读挂载。
+
 离线语义模型同样走专用 Android assets source set，但不会随普通 CLI provision 复制；只有首次
 `river=semantic:N` 才由独立内部 bridge 按 [`semantic-profile.json`](./semantic-profile.json) 的
 size/SHA-256 原子复制到 app-private assets 目录。Rust 随后以 mmap 只读加载模型和紧凑 BPE pack，
@@ -71,11 +76,14 @@ profile 中的 `rootfs.tarContentSha256` 是与 zstd 版本无关的内容身份
 - [`probe-command-profile.sh`](./probe-command-profile.sh) 中全部基线命令存在；
 - `setsid -> PRoot -> Bash -> sleep` 的 PRoot、Bash、子进程处于同一目标 PGID；对负 PGID 发
   `SIGTERM` 后整棵进程树退出，PRoot 回执为 signal 15；
-- rootfs 解包后逻辑大小 107,258,068 bytes，zstd 资产 26,870,045 bytes。
+- 当时解包后的 rootfs 逻辑大小为 107,258,068 bytes。
 
-unbundled W^X 版本的三个原始资产共 27,144,229 bytes；以固定文件名和 `zip -9` 得到的 APK 增量估算
-为 26,937,424 bytes。NDK 29 的独立重建已逐字复现上表两个 ELF；API 36 产品 `ProcessBuilder` 对
+当前 rootfs zstd 资产为 26,868,503 bytes；unbundled W^X 版本的三个原始资产共 27,142,687 bytes；
+以固定文件名和 `zip -9` 得到的 APK 增量估算
+为 26,935,280 bytes。NDK 29 的独立重建已逐字复现上表两个 ELF；API 36 产品 `ProcessBuilder` 对
 unbundled loader、取消以及 detached tracee 的复验仍是发布前真机门，不能由 JVM/构建检查替代。
+当前包含空 `/run/vcp-vref` 的 rootfs 已由固定脚本在两个独立临时目录连续构建出相同 tar 与 zstd
+字节；这仍只是构建证据，API 26/36 产品进程中的 vref 读取、guest 写攻击与 canonical 不回写尚待真机验收。
 
 这只是 P0/P1 前台执行证据，不等于 screen-off、Doze、划卡或 OEM 后台长稳验收。
 

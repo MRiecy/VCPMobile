@@ -296,10 +296,28 @@ pub struct PickedFileInfo {
     pub thumbnail_path: Option<String>,
 }
 
+#[cfg(any(target_os = "android", test))]
+fn pick_file_payload(mode: Option<String>, max_bytes: Option<u64>) -> serde_json::Value {
+    serde_json::json!({
+        "mode": mode.unwrap_or_else(|| "file".to_string()),
+        "maxBytes": max_bytes,
+    })
+}
+
+#[cfg(any(target_os = "android", test))]
+fn normalize_picker_bridge_error(message: &str) -> String {
+    if message.contains("picker_cancelled") {
+        "picker_cancelled".to_string()
+    } else {
+        format!("run_mobile_plugin failed: {message}")
+    }
+}
+
 #[tauri::command]
 pub fn pick_file<R: Runtime>(
     app: AppHandle<R>,
     mode: Option<String>,
+    max_bytes: Option<u64>,
 ) -> Result<PickedFileInfo, String> {
     #[cfg(target_os = "android")]
     {
@@ -307,19 +325,15 @@ pub fn pick_file<R: Runtime>(
         let plugin_handle = state.mobile_plugin_handle()?;
 
         let file_info = plugin_handle
-            .run_mobile_plugin::<PickedFileInfo>(
-                "pickFile",
-                serde_json::json!({
-                    "mode": mode.unwrap_or_else(|| "file".to_string())
-                }),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+            .run_mobile_plugin::<PickedFileInfo>("pickFile", pick_file_payload(mode, max_bytes))
+            .map_err(|error| normalize_picker_bridge_error(&error.to_string()))?;
         Ok(file_info)
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
         let _ = mode;
+        let _ = max_bytes;
         Err("该接口仅在 Android 物理端可用".to_string())
     }
 }
@@ -750,7 +764,9 @@ pub fn register_shared_files<R: Runtime>(
 
 #[cfg(test)]
 mod file_boundary_tests {
-    use super::{canonical_file_in, safe_leaf_name};
+    use super::{
+        canonical_file_in, normalize_picker_bridge_error, pick_file_payload, safe_leaf_name,
+    };
     use std::fs;
 
     #[test]
@@ -760,6 +776,30 @@ mod file_boundary_tests {
         assert!(safe_leaf_name("nested/preview.png").is_err());
         assert!(safe_leaf_name("nested\\preview.png").is_err());
         assert!(safe_leaf_name("/tmp/preview.png").is_err());
+    }
+
+    #[test]
+    fn picker_payload_keeps_legacy_none_and_optional_byte_cap() {
+        assert_eq!(
+            pick_file_payload(None, None),
+            serde_json::json!({"mode": "file", "maxBytes": null})
+        );
+        assert_eq!(
+            pick_file_payload(Some("gallery".to_string()), Some(32 * 1024 * 1024)),
+            serde_json::json!({"mode": "gallery", "maxBytes": 32 * 1024 * 1024_u64})
+        );
+        assert_eq!(
+            pick_file_payload(Some("knowledge".to_string()), Some(32 * 1024 * 1024)),
+            serde_json::json!({"mode": "knowledge", "maxBytes": 32 * 1024 * 1024_u64})
+        );
+        assert_eq!(
+            normalize_picker_bridge_error("native picker_cancelled callback"),
+            "picker_cancelled"
+        );
+        assert_eq!(
+            normalize_picker_bridge_error("provider stream failed"),
+            "run_mobile_plugin failed: provider stream failed"
+        );
     }
 
     #[test]

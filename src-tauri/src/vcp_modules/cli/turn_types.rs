@@ -15,6 +15,11 @@ pub const MAX_RIVER_ATTACHMENT_DESCRIPTORS: usize = 64;
 pub const MAX_RIVER_ARTIFACTS: usize = 16;
 pub const MAX_RIVER_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RIVER_ARTIFACT_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_VREF_SOURCES: usize = 50;
+pub const MAX_VREF_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_VREF_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_ATTEMPT_PROJECTION_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_VREF_PROJECTION_BYTES: usize = 128 * 1024;
 pub const MAX_CONTINUATION_MESSAGES_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_MARKED_HISTORY_BYTES: usize = 32 * 1024;
 
@@ -100,6 +105,8 @@ pub struct LocalCliStepRecord {
     pub assistant_content: String,
     #[serde(default)]
     pub river_projection: Option<DurableRiverProjection>,
+    #[serde(default)]
+    pub vref_projection: Option<DurableVrefProjection>,
     pub local_payload: Option<String>,
     pub result: Option<VcpCliResultEnvelope>,
     pub mark_history: bool,
@@ -125,6 +132,43 @@ pub struct DurableRiverArtifact {
     pub guest_path: String,
     pub size_bytes: u64,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DurableVrefProjection {
+    pub canonical_json: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub catalog_generation: u64,
+    pub requested: u32,
+    pub resolved: u32,
+    pub model_id: String,
+    pub user_query_sha256: String,
+    pub assistant_query_sha256: Option<String>,
+    pub sources: Vec<DurableVrefSource>,
+    pub omissions: Vec<DurableVrefOmission>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DurableVrefSource {
+    pub rank: u32,
+    pub source_id: String,
+    pub source_sha256: String,
+    pub display_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub logical_ref: String,
+    pub guest_relative_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct DurableVrefOmission {
+    pub source_id: Option<String>,
+    pub source_sha256: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

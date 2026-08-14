@@ -22,7 +22,8 @@ use super::output::{
 };
 use super::profile::{embedded_command_profile, VcpCliCommandProfile};
 use super::projection::{
-    gc_stale_river_projections, prepare_river_projection, remove_river_projection,
+    gc_stale_river_projections, prepare_river_projection, prepare_vref_projection,
+    remove_attempt_projection, remove_river_projection,
 };
 use super::protocol::{
     validate_structured_vcp_cli_action, VcpCliAction, DEFAULT_BOUNDED_READ_BYTES, MAX_POLL_WAIT_MS,
@@ -100,6 +101,8 @@ pub struct ExecuteVcpMobileCliRequest {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub river_projection: Option<VcpCliRiverProjectionInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vref_projection: Option<VcpCliVrefProjectionInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +126,27 @@ pub(crate) struct VcpCliArtifactGrantInput {
     pub source_path: PathBuf,
     pub file_name: String,
     pub guest_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VcpCliVrefProjectionInput {
+    pub canonical_json: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub catalog_generation: u64,
+    #[serde(skip)]
+    pub source_grants: Vec<VcpCliVrefSourceGrantInput>,
+    #[serde(skip)]
+    pub expected_source_grants: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VcpCliVrefSourceGrantInput {
+    pub source_path: PathBuf,
+    pub relative_name: String,
     pub size_bytes: u64,
     pub sha256: String,
 }
@@ -159,6 +183,7 @@ struct RunParameters {
     cwd: String,
     timeout_ms: u64,
     river_projection: Option<VcpCliRiverProjectionInput>,
+    vref_projection: Option<VcpCliVrefProjectionInput>,
     session_id: Option<String>,
 }
 
@@ -380,15 +405,17 @@ impl MobileCliRuntimeState {
                 });
             }
         };
-        if request.river_projection.is_some() && !matches!(action, VcpCliAction::Run { .. }) {
+        if (request.river_projection.is_some() || request.vref_projection.is_some())
+            && !matches!(action, VcpCliAction::Run { .. })
+        {
             let generation = self.current_generation(app).await?;
             return Ok(ExecuteVcpMobileCliResponse {
                 operation_id: request.operation_id,
                 runtime_generation: generation,
                 envelope: VcpCliResultEnvelope::error(
                     VcpCliErrorCode::InvalidRequest,
-                    "river is only valid for action=run",
-                    "Remove river from this action and retry.",
+                    "river and vref projections are only valid for action=run",
+                    "Remove the projection from this action and retry.",
                 ),
             });
         }
@@ -396,6 +423,7 @@ impl MobileCliRuntimeState {
         let action_sha256 = action_digest(
             &action,
             request.river_projection.as_ref(),
+            request.vref_projection.as_ref(),
             request.session_id.as_deref(),
         )?;
         self.ensure_initialized(app).await?;
@@ -442,6 +470,7 @@ impl MobileCliRuntimeState {
                                     "validated run timeout is missing".to_string()
                                 })?,
                                 river_projection: request.river_projection.clone(),
+                                vref_projection: request.vref_projection.clone(),
                                 session_id: request.session_id.clone(),
                             },
                             &action_sha256,
@@ -835,6 +864,7 @@ impl MobileCliRuntimeState {
                         stdout_path: None,
                         stderr_path: None,
                         river_projection_path: projection_path.clone(),
+                        vref_projection_path: None,
                         stdout_bytes: 0,
                         stderr_bytes: 0,
                         stdout_truncated: false,
@@ -913,6 +943,7 @@ impl MobileCliRuntimeState {
             cwd: parameters.cwd,
             artifact_max_bytes: profile.budgets.artifact_bytes_per_job,
             river_context_projection,
+            vref_projection: None,
         };
         let job = self
             .job_snapshot(&job_id)
@@ -2510,9 +2541,10 @@ fn admit_run_job(
 fn action_digest(
     action: &VcpCliAction,
     river_projection: Option<&VcpCliRiverProjectionInput>,
+    vref_projection: Option<&VcpCliVrefProjectionInput>,
     session_id: Option<&str>,
 ) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&(action, river_projection, session_id))
+    let bytes = serde_json::to_vec(&(action, river_projection, vref_projection, session_id))
         .map_err(|error| format!("cannot serialize CLI action: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -3045,10 +3077,11 @@ mod tests {
             timeout_ms: Some(crate::vcp_modules::cli::protocol::DEFAULT_TIMEOUT_MS),
             run_in_background: Some(false),
         };
-        let first_digest = action_digest(&run("printf first"), None, Some("dist-session:a"))
+        let first_digest = action_digest(&run("printf first"), None, None, Some("dist-session:a"))
             .expect("hash first action");
-        let changed_digest = action_digest(&run("printf changed"), None, Some("dist-session:a"))
-            .expect("hash changed action");
+        let changed_digest =
+            action_digest(&run("printf changed"), None, None, Some("dist-session:a"))
+                .expect("hash changed action");
         assert_ne!(first_digest, changed_digest);
 
         let mut ledger = JobLedger::empty(1);
