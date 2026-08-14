@@ -222,6 +222,18 @@ impl VcpCliResultEnvelope {
         }
     }
 
+    pub fn prepend_optional_context_notices(&mut self, notices: &[String]) {
+        if notices.is_empty() {
+            return;
+        }
+        let result = match self {
+            Self::Success { result } | Self::Error { result, .. } => result,
+        };
+        result
+            .content
+            .splice(0..0, notices.iter().cloned().map(VcpCliContentPart::text));
+    }
+
     fn to_distributed(&self, request_id: &str) -> VcpDistributedToolResult {
         let data = match self {
             Self::Success { result } => VcpDistributedToolResultData {
@@ -420,6 +432,20 @@ mod tests {
         )
         .expect("parse distributed error");
         assert_eq!(distributed, fixture.error_distributed);
+    }
+
+    #[test]
+    fn optional_context_notice_is_included_in_local_agent_payload() {
+        let mut success = job_success_fixture();
+        success.prepend_optional_context_notices(&[
+            "提示：本次未能应用 vref；命令已在无知识召回上下文下继续执行。".to_string(),
+        ]);
+
+        let payload = serialize_local_model_payload(&success).expect("serialize local payload");
+        assert!(payload.starts_with(VCP_TOOL_PAYLOAD_MARKER));
+        assert!(payload.contains("未能应用 vref"));
+        assert!(payload.contains("ok\\n"));
+        assert!(matches!(success, VcpCliResultEnvelope::Success { .. }));
     }
 
     #[test]

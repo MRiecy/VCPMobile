@@ -1,6 +1,6 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P1-COMPLETE / P2-CODE-COMPLETE / P2-API36-GUARD-RETEST-PENDING / P3-CODE-COMPLETE / P3-VCP-API36-E2E-PENDING / P4.1-P4.3-CODE-COMPLETE / P4.4-CONTRACT-FROZEN-CODE-PENDING / P4.2-P4.4-DEVICE-GATES-PENDING`
+> 状态：`MINIMUM-USABLE-SCOPE / P0-P4.3-CODE-COMPLETE / P4.4-P5-DEFERRED`
 >
 > 研究日期：2026-08-13
 >
@@ -10,8 +10,9 @@
 > 自动 transport guard 与断网续轮的 API 36 最终复验；P3 已完成 Distributed CLI adapter、离线授权与插件中心收口，
 > 仍需真实 VCPToolBox + API 36 端到端验收。P4.1 已完成 Skill catalog v2 与显式物化，P4.2 已完成
 > 本地 `river=full` 的有界附件 attempt copy；两者仍需 P4.2 API 36 实际 guest 读取/写攻击复验。
-> P4.3 已完成本地离线 `river=semantic:N`、确定性 `last:N` 回退和 durable projection；P4.4 已冻结独立
-> 本机知识 CAS、显式授权、0.7/0.3 召回、attempt copy 与删除合同，产品代码尚未施工，后台能力属于 P5。
+> P4.3 已完成本地离线 `river=semantic:N`、确定性 `last:N` 回退和 durable projection。2026-08-14
+> 最小收敛裁决将 P4.4 本机知识库/vref 物化与 P5 后台能力正式延期；本地回环把合法 `river/vref`
+> 视为可选上下文，无法应用时继续执行命令，并通过同一 ToolResult 给 Agent 一句稳定提示。
 
 ## P0 实施快照（2026-08-13）
 
@@ -56,8 +57,8 @@
   已完成命令不重跑。
 - `ink=mark_history`、`river=text/last:N/full`、`archery=true/no_reply` 已有有界语义；`river` 以单 attempt
   JSON snapshot 暴露到 `/run/vcp-river-context.json`，终态清理。`full` 最多复制 16 个附件、单个 64 MiB、
-  总计 256 MiB，并在 `omissions` 中说明省略原因。P2 基线对 `semantic/vref` fail-closed；P4.3 已只为
-  `localLoopback` 打开 `river=semantic:N`，`vref:N` 仍明确返回 `unsupported_mode`。
+  总计 256 MiB，并在 `omissions` 中说明省略原因。P4.3 已为 `localLoopback` 打开
+  `river=semantic:N`；`vref:N` 当前作为 best-effort 提示被剥离，不再阻塞本地命令。
 - 模型单 step 上限 512 KiB、规范 tool payload 256 KiB、工具调用最多 8 次、turn 最长 30 分钟；越界
   以 typed 终态结束，不执行截断后的调用。累计 ToolResult 以稳定 parser blocks 跨 step 投影，最终历史
   与恢复 finalizer byte-stable、exact-once。
@@ -109,14 +110,13 @@
 - `assembleArm64Debug` 已实际成功；Debug APK 为 84,528,816 bytes。包内 model/tokenizer 分别压缩为
   22,368,109 / 5,666,724 bytes（合计 28,034,833 bytes），解压后的 size 与 profile SHA-256 逐字一致。
   该数字是 Debug 构建证据，不冒充 Release APK 体积。
-- P4.4 已通过 Magi 冻结为：用户 UI 以 native picker → inspect → 明确确认建立单一 `local_vref` grant；
-  知识使用独立 512 MiB App 私有 CAS，首批只接收有界 UTF-8 文本/Markdown/代码。Agent 面仍只有
-  `run + vref:N`，不增加知识管理 action；`vcpPlugin` 与远端 `file://` 继续 unsupported。完整施工合同见
-  [07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。
+- P4.4 的知识 catalog/CAS/index/Android bind 与治理 UI 已延期，不进入当前最小可用版本；ADR 仅作为
+  未来重启时的设计参考。`localLoopback` 收到合法 `vref:N` 时不物化文件、不阻塞 Bash，只向 Agent
+  提示本次未应用；`vcpPlugin`、远端 `file://` 与伪造物化字段继续 fail-closed。
 
-仍未完成：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4.2 真机 guest 读取/写攻击复验、P4.3 产品设备门、P4.4 vref recall、P5 后台前台
-服务与人工 PTY。其中 P4.3 剩余的是 API 26/36 产品 App PSS、低存储、50 次冷/热召回、温升与故障注入
-设备门；P4.4 仍是未实现的 vref recall。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称
+非阻塞后续：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4.2 真机 guest 读取/写攻击复验、P4.3 产品设备门。P4.4 vref recall 与 P5 后台前台
+服务与人工 PTY 已延期。其中 P4.3 剩余的是 API 26/36 产品 App PSS、低存储、50 次冷/热召回、温升与故障注入
+设备门。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称
 Doze 后台长稳。
 
 ## 结论
@@ -150,7 +150,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 7. **人工终端与 Agent Job 分离**。普通任务用 `run/poll/cancel/list`；密码、SSH、vim、TUI 等场景由用户显式打开交互终端，预填命令但不自动执行。
 8. **Android host 坚持非 Root 用户态沙箱**。首发目标 Shell 固定为 PRoot guest 内的 Alpine Linux (musl) + GNU Bash，Agent 命令以 `/bin/bash -lc` 执行；guest 可模拟 root 管理自身 rootfs 和 `apk`，但不能越过 App UID。P0 验证可行性；若不可行必须回到 manifest 重新裁决，不得静默改用 `ash`。Android Root/Shizuku 只能作为未来显式 elevated backend。
 9. **长任务由 job 生命周期拥有，不由聊天 SSE 拥有**。模型续轮断线不能导致命令重跑；超时/取消必须终止目标进程组并阻止迟到输出污染后续任务。
-10. **VCP 通用元字段也属于本地回环契约**。`ink: mark_history`、`river=text/last:N/full/semantic:N`、`archery=true/no_reply` 已在本地 loop 落地；semantic 不可用时明确回退 `last:N`，`vref:N` 继续按知识授权与索引能力分期。未具备的 route/capability 返回 `unsupported_mode`，不能静默忽略或伪装等价。
+10. **VCP 通用元字段不支配本地命令可用性**。`ink: mark_history`、`river=text/last:N/full/semantic:N`、`archery=true/no_reply` 已在本地 loop 落地；semantic 不可用时回退 `last:N`。本地合法 `river/vref` 无法应用时剥离该可选上下文、继续执行命令，并在 ToolResult 中提示 Agent；语法错误、伪造物化字段和远端不可达引用仍 fail-closed。
 11. **Skill 是 manifest 中可见的一等 action，不是隐藏 Shell 子命令**。`VCPMobileCLI` 直接提供 `action=list_skills|read_skill`；前者列出校验通过的 Skill，后者按 `skill_id + resource_path` 阅读 `SKILL.md` 或受控资源并返回 `vcp-skill://<id>` 逻辑引用。Skill catalog 不挂载进 PRoot guest；若要执行脚本，必须先经明确动作物化到 `/workspace`。它不增加第二个 VCP 工具，也不自动执行 Skill 脚本。
 12. **iOS 只作为未来可选方向**。同一 VCP 协议可以复用，CLI Runtime 必须另做平台实现；本专项不改变 Android-only 当前产品边界。
 
@@ -170,7 +170,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 | [04-提示词Skills记忆与召回语义.md](./04-提示词Skills记忆与召回语义.md) | manifest 提示词所有权、Skill 文件边界、ink/river/vref | VCPToolBox 提示词治理与高级语义 |
 | [05-iOS未来可选方向.md](./05-iOS未来可选方向.md) | 原生命令、a-Shell/WASI、iSH、后台策略与 App Review 边界 | 后续预研，不进入当前施工 |
 | [06-Magi综合裁决与分期验收.md](./06-Magi综合裁决与分期验收.md) | 三方审查、否决线、P0–P5 路线和硬验收 | 开工与交付门禁 |
-| [07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md) | 独立知识 CAS、显式授权、召回、attempt copy、删除和预算 | P4.4 施工 ADR |
+| [07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md) | 独立知识 CAS、显式授权、召回、attempt copy、删除和预算 | 已延期的未来参考 |
 
 ## 证据快照
 
@@ -191,8 +191,8 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 > VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime、P2 本地 Agent 多轮 loop、P3 可选 Distributed adapter
 > 以及 P4.1-P4.3 的 Skill、full/semantic River 产品代码已完成；单聊和 Group 共用可恢复、exact-once 的
-> 本地 coordinator。P2/P3/P4 仍有列明的设备验收，P4.4 vref 与 P5 Android 后台/人工 PTY 尚未完成，
-> 因此当前不能把整个 VCP CLI 专项标记为完成。
+> 本地 coordinator。当前前台最小可用范围已经收敛；P2/P3/P4 的列明设备复验仍是发布证据，
+> P4.4 vref 物化与 P5 Android 后台/人工 PTY 已延期，不再阻塞当前 CLI 使用。
 
 不得表述为“Agent CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
 或“iOS 已支持本地 Linux”。

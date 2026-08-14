@@ -32,9 +32,9 @@ use super::turn_ledger::{
 };
 use super::turn_meta::{
     append_marked_history, build_semantic_projection, fallback_last_semantic_selection,
-    marked_history_block_with_projection, plan_local_meta, plan_local_policy,
-    river_full_candidate_hashes, selected_river_full_artifact_hashes, semantic_candidates,
-    LocalContinuationPolicy, RiverProjection, SemanticProjectionPlan,
+    local_optional_context_notices, marked_history_block_with_projection, plan_local_meta,
+    plan_local_policy, river_full_candidate_hashes, selected_river_full_artifact_hashes,
+    semantic_candidates, LocalContinuationPolicy, RiverProjection, SemanticProjectionPlan,
 };
 use super::turn_types::{
     DurableRiverArtifact, DurableRiverProjection, LocalCliTurnOutcome, LocalCliTurnRecord,
@@ -665,7 +665,11 @@ async fn execute_claimed_tool<R: Runtime>(
                 };
                 let planned = if let Some(projection) = existing_projection {
                     plan_local_policy(&validated).map(|(mark_history, continuation)| {
-                        (Some(projection), continuation, mark_history)
+                        let notices = local_optional_context_notices(
+                            &validated,
+                            Some(&projection.canonical_json),
+                        );
+                        (Some(projection), continuation, mark_history, notices)
                     })
                 } else {
                     let semantic_projection = resolve_semantic_projection(
@@ -693,7 +697,12 @@ async fn execute_claimed_tool<R: Runtime>(
                             .as_ref()
                             .map(freeze_river_projection)
                             .transpose()?;
-                        Ok((projection, plan.continuation, plan.mark_history))
+                        Ok((
+                            projection,
+                            plan.continuation,
+                            plan.mark_history,
+                            plan.optional_context_notices,
+                        ))
                     })
                 };
                 match planned {
@@ -707,7 +716,7 @@ async fn execute_claimed_tool<R: Runtime>(
                         validated.meta.ink.is_some(),
                         None,
                     ),
-                    Ok((projection, continuation, mark_history)) => {
+                    Ok((projection, continuation, mark_history, notices)) => {
                         ensure_claimed_work_allowed(record, cancellation_token)?;
                         let projection = match projection {
                             Some(projection) => Some(
@@ -733,7 +742,7 @@ async fn execute_claimed_tool<R: Runtime>(
                         });
                         ensure_claimed_work_allowed(record, cancellation_token)?;
                         let runtime = app.state::<MobileCliRuntimeState>();
-                        let response = runtime
+                        let mut response = runtime
                             .execute_with_turn_admission(
                                 app,
                                 ExecuteVcpMobileCliRequest {
@@ -746,6 +755,7 @@ async fn execute_claimed_tool<R: Runtime>(
                                 record.deadline_at_ms,
                             )
                             .await?;
+                        response.envelope.prepend_optional_context_notices(&notices);
                         (response.envelope, continuation, mark_history, projection)
                     }
                 }

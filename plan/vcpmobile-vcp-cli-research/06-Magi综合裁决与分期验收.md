@@ -36,7 +36,7 @@ NOT YET PASS FOR FEATURE CONSTRUCTION
 - 工具完成后断网就重跑命令；
 - timeout 只停止等待、底层进程继续；
 - 把 `requestId` 当唯一信任边界；
-- 未实现的 `river/vref/archery` 被静默忽略或进入 shell argv；
+- 未实现的 `river/vref/archery` 进入 shell argv，或在本地软降级时没有向 Agent 提示；
 - UI 卡片被当成模型结果真源。
 
 ### 2.2 Balthasar｜移动直觉与 iOS
@@ -239,11 +239,11 @@ P4 按以下顺序施工，任一层未通过不得靠下一层掩盖：
    不把 WebView/数据库 host path 当授权。
 4. **P4.3｜`river=semantic:N`**：固定 hash 的 64 维多语言静态模型、紧凑 BPE pack、mmap、派生缓存与
    brute-force cosine；离线失败按协议回退 `last:N`。
-5. **P4.4｜`vref:N`**：先建立显式 knowledge grant/catalog，再做向量选取、文件去重和 attempt copy。
+5. **P4.4｜`vref:N`（已延期）**：当前只保留协议识别和本地 best-effort 提示；未来若重启，再建立显式 knowledge grant/catalog、向量选取、文件去重和 attempt copy。
    VCPToolBox 主机 `file://` 与远端 artifact transport 仍是独立协议。
 
-P4.4 的 2026-08-14 Magi 复审已完成，施工 ADR 见
-[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。综合裁决选择独立 App 私有知识
+P4.4 的 2026-08-14 原始施工 ADR 见
+[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)，现已延期并仅作未来参考。若未来重启，原裁决选择独立 App 私有知识
 CAS，而不与消息 attachment 共享物理对象；导入确认即单一 `local_vref` grant，首批只接收 bounded UTF-8
 文本/Markdown/代码。Agent 不获得导入、列举、授权或撤权 action，仍只通过 `run + vref:N` 使用；
 capability 只有在 catalog/index、durable selection、Runtime attempt copy、Android `/run/vcp-vref` bind 和
@@ -261,12 +261,12 @@ manifest golden 全部通过后才打开。`vcpPlugin` 保持 unsupported。
 合计 28,034,833 bytes，解压字节/hash 与 profile 一致。该门只关闭包接线与 Debug 体积事实，不替代
 Release APK、安装/首用磁盘峰值或上述设备资源验收。
 
-交付：
+当前最小范围交付：
 
 - Skill 版本/变更失效、二进制 assets artifact 与经 hash 校验的 non-writeback runtime 副本联动；manifest 之外不增加 Mobile Skill 提示词注入；
 - `river=full` 的多模态权限/大小过滤；
 - `river=semantic:N` 的本机会话向量索引与 `last:N` 回退；
-- `vref:N` 的本机知识向量索引、Top-N 文件去重与 source-unreachable/non-writeback grant；
+- 本地合法 `vref:N` 的 best-effort 剥离与 Agent 提示；知识向量索引和 attempt copy 延期；
 - DynamicTools/`vcp_fold` 继续由 VCPToolBox 处理，不在 Mobile 重做。
 
 硬验收：

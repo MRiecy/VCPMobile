@@ -88,14 +88,14 @@ Android 资产不可用时回退 `last:N`。整个路径不请求远端 embeddin
 分两种显式能力：
 
 - `vcp_plugin`：VCPToolBox 可继续负责语义选择。P3 已冻结为“不物化远程引用”：对 river/vref 与 VCPToolBox 主机 `file://` URL 在 Runtime 前返回 `unsupported_mode`/引用不可达，不得把它当成 guest 文件。带 hash/size/MIME 的受权 artifact 物化协议属于 P4。
-- `local_loopback`：P2 返回 `unsupported_mode`；P4 增加真实本机向量索引和 knowledge grant 后，将 Top-N 文件复制为 attempt-private、source-unreachable、non-writeback 副本，通过 `VCP_VREF_DIR` 暴露。guest 可改写副本但不得回写 canonical source；不得返回 host `file://` 路径，也不得用关键字搜索冒充语义召回。
+- `local_loopback`：当前不施工本机知识索引和 knowledge grant。合法 `vref:N` 被识别并从 Bash action 剥离，命令在无 vref 文件时继续，ToolResult 简短提示 Agent；不得返回 host `file://` 路径，也不得用关键字搜索冒充语义召回。
 
-P4.4 的最小实现已冻结为单一全局 `local_vref` catalog：授权只能由用户在 CLI 页通过 native picker、
+P4.4 已延期；以下冻结设计仅供未来重启时参考：单一全局 `local_vref` catalog，授权只能由用户在 CLI 页通过 native picker、
 inspect 与二次确认建立；确认即 grant，不给 Agent 增加知识管理 action。知识使用独立 App 私有 CAS，首批
 只收有界 UTF-8 文本/Markdown/代码；最后真实 user 与其前最近 assistant 按 0.7/0.3 合成 query，chunk
 命中按文件去重后取 `1..50`。完整配额、撤权、恢复、`river + vref` 合并预算与 Android 目录 bind 合同见
-[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。在 Runtime/Kotlin/设备门完成前，
-local capability 仍保持关闭。
+[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)。当前不安排这些 Runtime/Kotlin/
+设备门，local capability 保持关闭。
 
 `river/vref` 上游证据：[`toolExecutor.js@311dc42`](https://github.com/lioensky/VCPToolBox/blob/311dc42e8374afd1867bd1b5c06217baf8b0f463/modules/vcpLoop/toolExecutor.js#L192-L320)。
 
@@ -153,7 +153,7 @@ AddedToken 的 `single_word/lstrip/rstrip` 边界、中英/emoji/空白长输入
 
 首期消息量有界，向量搜索采用确定性的 brute-force cosine；不先引入 HNSW、sqlite-vec 或平行 daemon。
 向量缓存是可丢弃的派生数据，schema migration 不同步回填；首次需要时分批构建，失败时
-`river=semantic:N` 按协议回退 `last:N`。`vref` 只有在显式 knowledge grant/catalog 建立后才可打开，
+`river=semantic:N` 按协议回退 `last:N`。`vref` 物化延期；本地合法请求只提示未应用并继续命令，
 不能把附件数据库中的 `internal_path` 本身当作授权。
 
 P4.3 的产品 owner 是单个 `LocalEmbeddingOwner`：所有 selection 共用一个 permit，候选集最多 512 条/
@@ -204,4 +204,4 @@ MetaProcessor 拥有 N/字节上限、附件与秘密过滤、临时文件生命
 5. 插件关闭或远端断开时不发布真实 VCP manifest；若用户保留工具说明，调用会收到明确执行错误，不声称成功。
 6. `action=list_skills|read_skill` 可在飞行模式下列出/阅读已安装且校验通过的 Skill，不接受路径穿越，不自动执行脚本，也不因目录变更改写 Agent 提示词或 VCP 记忆。
 7. `ink/river/vref/archery` 每种 fixture 都证明保留字段不会进入 Bash command/argv；只有受控的 projection file 路径可以通过专用 env 名进入目标 Job。
-8. `river=text/last:N` 的 local fixture 与上游选取结果一致；`river=full` 只复制 hash/size 校验通过的附件，省略项带稳定原因且 canonical CAS 无 write-back；`river=semantic:N` 在 local 模型/缓存不可用时把 durable `fallback_last` 与稳定原因写入 projection/ToolResult 后继续命令，取消或 turn deadline 后不得启动命令；`vref:N` 以及远端 river/vref 仍稳定返回标注 route/capability 的 `unsupported_mode`。
+8. `river=text/last:N` 的 local fixture 与上游选取结果一致；`river=full` 只复制 hash/size 校验通过的附件，省略项带稳定原因且 canonical CAS 无 write-back；`river=semantic:N` 在 local 模型/缓存不可用时把 durable `fallback_last` 与稳定原因写入 projection/ToolResult 后继续命令，取消或 turn deadline 后不得启动命令；本地合法 `vref:N` 不阻塞命令且向 Agent 提示未应用，远端 river/vref 仍稳定返回标注 route/capability 的 `unsupported_mode`。

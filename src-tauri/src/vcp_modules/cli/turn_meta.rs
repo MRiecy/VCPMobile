@@ -57,6 +57,7 @@ pub struct LocalMetaPlan {
     pub mark_history: bool,
     pub river_projection: Option<RiverProjection>,
     pub continuation: LocalContinuationPolicy,
+    pub optional_context_notices: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,34 +133,52 @@ pub fn plan_local_meta(
     let (mark_history, continuation) = plan_local_policy(request)?;
 
     let river_projection = match request.meta.river {
-        Some(VcpRiverMode::Semantic(_)) => Some(
-            semantic_projection
-                .map(|projection| RiverProjection {
-                    canonical_json: projection.canonical_json,
-                    sha256: projection.sha256,
-                    size_bytes: projection.size_bytes,
-                    artifact_grants: Vec::new(),
-                })
-                .ok_or_else(|| "semantic projection was not resolved".to_string())?,
-        ),
-        Some(mode) => Some(build_river_projection_with_artifacts(
-            messages,
-            mode,
-            resolved_artifacts,
-        )?),
+        Some(VcpRiverMode::Semantic(_)) => semantic_projection.map(|projection| RiverProjection {
+            canonical_json: projection.canonical_json,
+            sha256: projection.sha256,
+            size_bytes: projection.size_bytes,
+            artifact_grants: Vec::new(),
+        }),
+        Some(mode) => {
+            match build_river_projection_with_artifacts(messages, mode, resolved_artifacts) {
+                Ok(projection) => Some(projection),
+                Err(error) => {
+                    log::warn!(
+                    "[VCPMobileCLI] optional river projection unavailable; continuing without it: {error}"
+                );
+                    None
+                }
+            }
+        }
         None => None,
     };
+    let optional_context_notices = local_optional_context_notices(
+        request,
+        river_projection
+            .as_ref()
+            .map(|projection| projection.canonical_json.as_str()),
+    );
     Ok(LocalMetaPlan {
         mark_history,
         river_projection,
         continuation,
+        optional_context_notices,
     })
 }
 
 pub fn plan_local_policy(
     request: &ValidatedVcpCliRequest,
 ) -> Result<(bool, LocalContinuationPolicy), String> {
-    request
+    let policy_request = ValidatedVcpCliRequest {
+        action: request.action.clone(),
+        meta: VcpMetaFields {
+            ink: request.meta.ink,
+            river: None,
+            vref: None,
+            archery: request.meta.archery,
+        },
+    };
+    policy_request
         .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
         .map_err(|error| format!("{}: {error}", error.code.as_str()))?;
     let continuation = match request.meta.archery {
@@ -168,6 +187,35 @@ pub fn plan_local_policy(
         None => LocalContinuationPolicy::Continue,
     };
     Ok((request.meta.ink.is_some(), continuation))
+}
+
+pub fn local_optional_context_notices(
+    request: &ValidatedVcpCliRequest,
+    river_projection_json: Option<&str>,
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    if request.meta.vref.is_some() {
+        notices.push("提示：本次未能应用 vref；命令已在无知识召回上下文下继续执行。".to_string());
+    }
+    if request.meta.river.is_some() && river_projection_json.is_none() {
+        notices.push("提示：本次未能应用 river；命令已在无附加上下文下继续执行。".to_string());
+    } else if matches!(request.meta.river, Some(VcpRiverMode::Semantic(_)))
+        && river_projection_json.is_some_and(|json| {
+            serde_json::from_str::<Value>(json)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/river/resolved_mode")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some("fallback_last")
+        })
+    {
+        notices.push("提示：本次 river 语义召回不可用，已回退为最近上下文后继续执行。".to_string());
+    }
+    notices
 }
 
 pub fn semantic_candidates(
@@ -814,6 +862,59 @@ mod tests {
     use crate::vcp_modules::cli::result::{
         VcpCliContentPart, VcpCliErrorCode, VcpCliResultBody, VcpCliRuntimeInfo,
     };
+
+    fn run_request(meta: VcpMetaFields) -> ValidatedVcpCliRequest {
+        ValidatedVcpCliRequest {
+            action: super::super::protocol::VcpCliAction::Run {
+                command: "printf ok".to_string(),
+                description: None,
+                cwd: Some("/workspace".to_string()),
+                timeout_ms: Some(1_000),
+                run_in_background: Some(false),
+            },
+            meta,
+        }
+    }
+
+    #[test]
+    fn unavailable_optional_context_does_not_block_local_command_planning() {
+        let vref = run_request(VcpMetaFields {
+            vref: Some(3),
+            ..VcpMetaFields::default()
+        });
+        let plan = plan_local_meta(&vref, &[], &HashMap::new(), None)
+            .expect("well-formed vref is best-effort on local loopback");
+        assert!(plan.river_projection.is_none());
+        assert_eq!(
+            plan.optional_context_notices,
+            vec!["提示：本次未能应用 vref；命令已在无知识召回上下文下继续执行。"]
+        );
+
+        let river = run_request(VcpMetaFields {
+            river: Some(VcpRiverMode::Semantic(2)),
+            ..VcpMetaFields::default()
+        });
+        let plan = plan_local_meta(&river, &[], &HashMap::new(), None)
+            .expect("unavailable semantic projection is best-effort");
+        assert!(plan.river_projection.is_none());
+        assert_eq!(
+            plan.optional_context_notices,
+            vec!["提示：本次未能应用 river；命令已在无附加上下文下继续执行。"]
+        );
+    }
+
+    #[test]
+    fn semantic_last_fallback_is_visible_to_agent() {
+        let request = run_request(VcpMetaFields {
+            river: Some(VcpRiverMode::Semantic(2)),
+            ..VcpMetaFields::default()
+        });
+        let json = r#"{"schema":"vcp.mobile.attempt-projection.v1","river":{"mode":"semantic:2","resolved_mode":"fallback_last"}}"#;
+        assert_eq!(
+            local_optional_context_notices(&request, Some(json)),
+            vec!["提示：本次 river 语义召回不可用，已回退为最近上下文后继续执行。"]
+        );
+    }
 
     #[test]
     fn river_keeps_only_role_and_redacted_plain_text() {
