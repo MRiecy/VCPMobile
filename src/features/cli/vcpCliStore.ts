@@ -48,6 +48,17 @@ export interface VcpCliJobSummary {
   updated_at_ms: number;
 }
 
+export interface VcpCliNotificationTarget {
+  jobId: string;
+  attemptId: string;
+  runtimeGeneration: number;
+}
+
+export type VcpCliNotificationOpenResult =
+  | "opened"
+  | "stale"
+  | "unavailable";
+
 export interface VcpCliRuntimeStatus {
   available: boolean;
   availability_reason: string | null;
@@ -538,6 +549,27 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     } finally {
       if (isCurrentView(generation)) jobsLoading.value = false;
     }
+  }
+
+  async function openJobFromNotification(
+    target: VcpCliNotificationTarget,
+  ): Promise<VcpCliNotificationOpenResult> {
+    const generation = viewGeneration.value;
+    const ready = await refreshStatus(generation);
+    if (!isCurrentView(generation) || !ready) return "unavailable";
+    if (runtimeStatus.value?.runtime_generation !== target.runtimeGeneration) {
+      return "stale";
+    }
+    await refreshJobs(generation);
+    if (!isCurrentView(generation)) return "unavailable";
+    const job = jobs.value.find(
+      (candidate) =>
+        candidate.id === target.jobId &&
+        candidate.attempt_id === target.attemptId,
+    );
+    if (!job || isTerminal(job.state)) return "stale";
+    openJob(job);
+    return "opened";
   }
 
   async function openView(): Promise<void> {
@@ -1202,6 +1234,7 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     setCommandDraft,
     runDraft,
     openJob,
+    openJobFromNotification,
     closeJob,
     pollSelectedJob,
     cancelSelectedJob,

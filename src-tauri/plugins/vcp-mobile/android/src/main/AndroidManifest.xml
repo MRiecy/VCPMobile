@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
@@ -24,8 +25,12 @@
             android:name=".service.StreamKeepaliveService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="remoteMessaging"
-            android:stopWithTask="true" />
+            android:foregroundServiceType="remoteMessaging|specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="user_visible_local_cli_job_started_by_the_user_or_owned_agent_turn" />
+        </service>
 
         <!-- 隔离进程通用助手：维持坚固的后台 SSE 连接与流式缓存，占用约 15MB 内存 -->
         <service

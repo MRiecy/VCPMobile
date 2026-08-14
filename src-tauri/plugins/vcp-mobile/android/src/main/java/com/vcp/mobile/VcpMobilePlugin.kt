@@ -34,7 +34,7 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.Invoke
 import com.vcp.mobile.cli.CancelCliProcessArgs
-import com.vcp.mobile.cli.CliProcessHost
+import com.vcp.mobile.cli.CliProcessHostOwner
 import com.vcp.mobile.cli.InspectCliProcessArgs
 import com.vcp.mobile.cli.PrepareCliRuntimeArgs
 import com.vcp.mobile.cli.StartCliProcessArgs
@@ -258,6 +258,45 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private var pendingNotificationData: JSObject? = null
 
     private fun handleNotificationIntent(intent: Intent) {
+        val cliKind = intent.getStringExtra(
+            com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_KIND,
+        )
+        val cliAction = intent.getStringExtra(
+            com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_ACTION,
+        )
+        val cliJobId = intent.getStringExtra(
+            com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_JOB_ID,
+        )
+        val cliAttemptId = intent.getStringExtra(
+            com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_ATTEMPT_ID,
+        )
+        val cliGeneration = intent.getLongExtra(
+            com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_RUNTIME_GENERATION,
+            0L,
+        )
+        if (cliKind == "job" &&
+            cliAction in setOf("open", "confirm_stop") &&
+            !cliJobId.isNullOrBlank() && cliJobId.length <= 256 &&
+            !cliAttemptId.isNullOrBlank() && cliAttemptId.length <= 256 &&
+            cliGeneration > 0
+        ) {
+            val data = JSObject().apply {
+                put("kind", "cli_job")
+                put("action", cliAction)
+                put("jobId", cliJobId)
+                put("attemptId", cliAttemptId)
+                put("runtimeGeneration", cliGeneration)
+            }
+            pendingNotificationData = data
+            dispatchNotificationData(data)
+            intent.removeExtra(com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_KIND)
+            intent.removeExtra(com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_ACTION)
+            intent.removeExtra(com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_JOB_ID)
+            intent.removeExtra(com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_ATTEMPT_ID)
+            intent.removeExtra(com.vcp.mobile.service.StreamKeepaliveService.EXTRA_CLI_RUNTIME_GENERATION)
+            return
+        }
+
         val topicId = intent.getStringExtra("topicId")
         val ownerId = intent.getStringExtra("ownerId")
         val requestId = intent.getStringExtra("requestId")
@@ -269,23 +308,26 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 put("requestId", requestId ?: "")
             }
             pendingNotificationData = data
-            
-            val webView = webViewRef
-            if (webView != null) {
-                val dataJson = data.toString()
-                val safeJson = escapeJsonForJsString(dataJson)
-                val script = "window.dispatchEvent(new CustomEvent('vcp-notification-click', { detail: JSON.parse(\"$safeJson\") }))"
-                activity.runOnUiThread {
-                    webView.evaluateJavascript(script, null)
-                }
-            } else {
-                Log.w(TAG, "[handleNotificationIntent] WebView not ready, caching notification data")
-            }
+            dispatchNotificationData(data)
             
             // Consume the intent extras so they don't fire again
             intent.removeExtra("topicId")
             intent.removeExtra("ownerId")
             intent.removeExtra("requestId")
+        }
+    }
+
+    private fun dispatchNotificationData(data: JSObject) {
+        val webView = webViewRef
+        if (webView != null) {
+            val dataJson = data.toString()
+            val safeJson = escapeJsonForJsString(dataJson)
+            val script = "window.dispatchEvent(new CustomEvent('vcp-notification-click', { detail: JSON.parse(\"$safeJson\") }))"
+            activity.runOnUiThread {
+                webView.evaluateJavascript(script, null)
+            }
+        } else {
+            Log.w(TAG, "[handleNotificationIntent] WebView not ready, caching notification data")
         }
     }
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
@@ -297,7 +339,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val floatingWindowManager by lazy { FloatingWindowManager(activity) }
     private val sensorStatusManager = SensorStatusManager(activity)
     private val executorDomains = PluginExecutorDomains()
-    private val cliProcessHost = CliProcessHost(activity.applicationContext)
+    private val cliProcessHost = CliProcessHostOwner.get(activity.applicationContext)
     private val shareIntentHandler = ShareIntentHandler(this, executorDomains.fileIoExecutor)
     private val isDestroying = AtomicBoolean(false)
     @Volatile private var oomGuardFuture: ScheduledFuture<*>? = null
@@ -1099,7 +1141,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     @Command
     fun stopStreamingService(invoke: Invoke) {
         try {
-            com.vcp.mobile.service.ForegroundGuardian.releaseAll(activity)
+            com.vcp.mobile.service.ForegroundGuardian.releaseNonCliConsumers(activity)
             invoke.resolve()
         } catch (e: Exception) {
             Log.e(TAG, "stopStreamingService failed", e)
@@ -1287,7 +1329,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     override fun onDestroy(activity: AppCompatActivity) {
         isDestroying.set(true)
-        cliProcessHost.close()
         oomGuardFuture?.cancel(true)
         oomGuardFuture = null
         executorDomains.shutdownNow().forEach { pendingTask ->

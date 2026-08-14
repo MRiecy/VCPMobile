@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const VCP_MOBILE_CLI_TOOL_NAME: &str = "VCPMobileCLI";
 
 const MANIFEST_DESCRIPTION: &str =
-    "Android host 非 Root、PRoot 隔离的 Alpine Linux Bash CLI，支持后台 Job 与受控 Skill catalog。";
+    "Android host 非 Root、PRoot 隔离的 Alpine Linux Bash CLI，支持异步 Job（仅前台可靠）与受控 Skill catalog。";
 
 const INVOCATION_DESCRIPTION: &str = r#"在 Android 应用私有 PRoot guest 中执行非交互 Bash 命令，也可通过一等 action 发现、读取和显式物化 Mobile Skill。
 
@@ -17,7 +17,7 @@ action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。
 - materialize_skill 必需 skill_id；仅在没有活动 Job 时，把完整性校验通过的 Skill 复制为 /workspace 下的非回写快照并返回 materialized_path。它不会执行任何脚本；审阅后必须另发 run。
 - poll/cancel 必需 job_id；poll 可选 cursor、max_output_bytes、wait_ms；list 返回当前 Runtime 保留的 Job 摘要。
 
-run 是无 PTY、无交互 stdin 的调用；密码、vim/less/htop、交互 SSH 等应请用户打开人工终端。run_in_background 只表示工具异步 Job，不保证 Android 系统杀进程后继续。Job action 返回 state、job_id、stdout、stderr，以及终态 exit_code 或 timeout/cancel 原因；Skill action 返回结构化索引或正文、hash、逻辑 skill_root、可选 materialized_path 和截断状态。"#;
+run 是无 PTY、无交互 stdin 的调用；密码、vim/less/htop、交互 SSH 等当前不受 Agent Job 支持，必须改用非交互命令；独立人工终端属于 P5 能力。run_in_background 只表示工具异步 Job，不保证 Android 系统杀进程后继续。Job action 返回 state、job_id、stdout、stderr，以及终态 exit_code 或 timeout/cancel 原因；Skill action 返回结构化索引或正文、hash、逻辑 skill_root、可选 materialized_path 和截断状态。"#;
 
 const INVOCATION_EXAMPLE: &str = r#"普通执行:
 <<<[TOOL_REQUEST]>>>
@@ -49,7 +49,7 @@ action:「始」materialize_skill「末」,
 skill_id:「始」example-skill「末」
 <<<[END_TOOL_REQUEST]>>>
 
-后台执行:
+异步执行（仅前台可靠）:
 <<<[TOOL_REQUEST]>>>
 tool_name:「始」VCPMobileCLI「末」,
 action:「始」run「末」,

@@ -634,10 +634,15 @@ impl MobileCliRuntimeState {
             .map_err(DomainError::internal)?;
 
         let projection_root = runtime.projection_root.clone();
-        tauri::async_runtime::spawn_blocking(move || gc_stale_river_projections(&projection_root))
-            .await
-            .map_err(|error| DomainError::internal(format!("river projection GC failed: {error}")))?
-            .map_err(DomainError::internal)?;
+        if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+            gc_stale_river_projections(&projection_root)
+        })
+        .await
+        .map_err(|error| format!("legacy river projection GC task failed: {error}"))
+        .and_then(|result| result)
+        {
+            eprintln!("[VCPMobileCLI] optional legacy projection cleanup skipped: {error}");
+        }
 
         let mut owner = self.inner.lock().await;
         if owner.ledger.runtime_generation != generation {
@@ -698,6 +703,11 @@ impl MobileCliRuntimeState {
         let job_id = format!("job-{}", Uuid::new_v4());
         let attempt_id = format!("attempt-{}", Uuid::new_v4());
         let generation = self.inner.lock().await.ledger.runtime_generation;
+        let command_preview = command_preview(&parameters.command);
+        let display_label = parameters
+            .description
+            .clone()
+            .unwrap_or_else(|| command_preview.clone());
         let insertion = async {
             let mut owner = self.inner.lock().await;
             let concurrent_limit = profile
@@ -715,8 +725,8 @@ impl MobileCliRuntimeState {
                         runtime_generation: generation,
                         session_id: parameters.session_id.clone(),
                         state: VcpCliJobState::Starting,
-                        command_preview: command_preview(&parameters.command),
-                        description: parameters.description,
+                        command_preview,
+                        description: parameters.description.clone(),
                         cwd: parameters.cwd.clone(),
                         timeout_ms: parameters.timeout_ms,
                         created_at_ms: now,
@@ -796,6 +806,11 @@ impl MobileCliRuntimeState {
             rootfs_path: runtime.rootfs.to_string_lossy().into_owned(),
             cwd: parameters.cwd,
             artifact_max_bytes: profile.budgets.artifact_bytes_per_job,
+            // Every run is a durable Job and may outlive the foreground yield. The protocol
+            // flag only controls whether the caller waits briefly before receiving job_id.
+            background_lease: true,
+            timeout_ms: parameters.timeout_ms,
+            display_label,
         };
         let job = self
             .job_snapshot(&job_id)
@@ -1005,12 +1020,16 @@ impl MobileCliRuntimeState {
         }
         let mut owner = self.inner.lock().await;
         let mut next = owner.ledger.clone();
-        let observation = match response.state {
-            CliProcessState::Running => ProcessObservation::Running,
-            CliProcessState::Exited => ProcessObservation::Exited {
-                exit_code: response.exit_code,
-            },
-            CliProcessState::Missing => ProcessObservation::Missing,
+        let observation = if response.background_lease_lost {
+            ProcessObservation::Missing
+        } else {
+            match response.state {
+                CliProcessState::Running => ProcessObservation::Running,
+                CliProcessState::Exited => ProcessObservation::Exited {
+                    exit_code: response.exit_code,
+                },
+                CliProcessState::Missing => ProcessObservation::Missing,
+            }
         };
         if !next.apply_process_observation(
             &job.id,

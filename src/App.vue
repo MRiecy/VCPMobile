@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, ref, watch, type WatchStopHandle } from "vue";
+import { onMounted, onUnmounted, computed, nextTick, ref, watch, type WatchStopHandle } from "vue";
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -8,6 +8,7 @@ import { useSidebarSwipe } from "./core/composables/useSidebarSwipe";
 import { useThemeStore } from "./core/stores/theme";
 import { useAppLifecycleStore } from "./core/stores/appLifecycle";
 import { useLayoutStore } from "./core/stores/layout";
+import { useOverlayStore } from "./core/stores/overlay";
 import { useModalHistory } from "./core/composables/useModalHistory";
 import { useNotificationStore } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
@@ -18,6 +19,10 @@ import { useAssistantStore } from "./core/stores/assistant";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
 import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
 import { LatestIntentOwner } from "./core/utils/latestIntentOwner";
+import {
+  useVcpCliStore,
+  type VcpCliNotificationTarget,
+} from "./features/cli/vcpCliStore";
 
 // 初始化应用生命周期监听
 useAppLifecycle();
@@ -62,6 +67,7 @@ const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
+const overlayStore = useOverlayStore();
 const sessionStore = useChatSessionStore();
 const assistantStore = useAssistantStore();
 const { processPayload } = useNotificationProcessor();
@@ -225,12 +231,13 @@ const handleShareSelectorClose = () => {
 // --- Notification Click Routing State & Logic ---
 const handleNotificationClick = (e: Event) => {
   const detail = (e as CustomEvent).detail;
-  processNotificationClick(detail);
+  void processNotificationClick(detail);
 };
 
-const processNotificationClick = (detail: any) => {
+const processNotificationClick = async (detail: any) => {
   console.log("[App] Notification click received:", detail);
-  if (!detail?.ownerId || !detail?.topicId) return;
+  const isCliJob = detail?.kind === "cli_job";
+  if (!isCliJob && (!detail?.ownerId || !detail?.topicId)) return;
 
   if (lifecycleStore.state !== "READY") {
     console.log("[App] Core not ready yet, deferring notification click routing...");
@@ -239,7 +246,7 @@ const processNotificationClick = (detail: any) => {
       (state) => {
         if (state === "READY") {
           unwatch();
-          processNotificationClick(detail);
+          void processNotificationClick(detail);
         }
       }
     );
@@ -258,6 +265,53 @@ const processNotificationClick = (detail: any) => {
   // 2. 关闭侧边栏
   layoutStore.setLeftDrawer(false);
   layoutStore.setRightDrawer(false);
+
+  if (isCliJob) {
+    const target: VcpCliNotificationTarget = {
+      jobId: String(detail.jobId ?? ""),
+      attemptId: String(detail.attemptId ?? ""),
+      runtimeGeneration: Number(detail.runtimeGeneration ?? 0),
+    };
+    if (!target.jobId || !target.attemptId || target.runtimeGeneration <= 0) {
+      return;
+    }
+    overlayStore.openCliManifest();
+    await nextTick();
+    const cliStore = useVcpCliStore();
+    const opened = await cliStore.openJobFromNotification(target);
+    if (opened !== "opened") {
+      notificationStore.addNotification({
+        id: `vcp-cli-notification-stale-${Date.now()}`,
+        title: opened === "stale" ? "任务已结束" : "暂时无法打开 CLI Job",
+        message: opened === "stale" ? "这条通知已过期，没有影响当前任务。" : "请稍后从 Jobs 页面重试。",
+        type: opened === "stale" ? "info" : "error",
+        duration: 3000,
+        toastOnly: true,
+      });
+      return;
+    }
+    if (detail.action !== "confirm_stop") return;
+    const confirmed = await overlayStore.showConfirm({
+      title: "停止这个 CLI Job？",
+      message: `将终止该 Job 的整个进程树，已产生的输出会保留。\nJob ${target.jobId.slice(0, 12)}`,
+      isDanger: true,
+    });
+    if (!confirmed) return;
+    const revalidated = await cliStore.openJobFromNotification(target);
+    if (revalidated === "opened") {
+      await cliStore.cancelSelectedJob();
+    } else {
+      notificationStore.addNotification({
+        id: `vcp-cli-notification-ended-${Date.now()}`,
+        title: "任务已结束",
+        message: "停止请求未作用于其他 Job。",
+        type: "info",
+        duration: 3000,
+        toastOnly: true,
+      });
+    }
+    return;
+  }
 
   // 3. 切换话题
   sessionStore.selectTopicById(detail.ownerId, detail.topicId);
@@ -407,8 +461,8 @@ onMounted(async () => {
   // 3. 处理冷启动的通知栏点击
   try {
     const pending = await invoke<any>("plugin:vcp-mobile|get_pending_notification");
-    if (pending && pending.topicId) {
-      processNotificationClick(pending);
+    if (pending && (pending.topicId || pending.kind === "cli_job")) {
+      void processNotificationClick(pending);
     }
   } catch (err) {
     console.warn("[App] Failed to fetch pending notification click:", err);

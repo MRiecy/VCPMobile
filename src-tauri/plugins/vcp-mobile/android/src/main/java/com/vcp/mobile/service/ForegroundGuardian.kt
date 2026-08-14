@@ -2,6 +2,7 @@ package com.vcp.mobile.service
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -14,7 +15,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 前台守护者 (ForegroundGuardian)
  * 
- * 进程级单例，统一负责双锁 (WakeLock + WifiLock) 与前台服务 (FGS) 的生命周期协同。
+ * 进程级单例，统一负责按消费者声明的 WakeLock / WifiLock 与前台服务 (FGS) 生命周期协同。
  * 采用引用计数机制，支持多模块并发申请锁，按优先级动态校准通知栏文案。
  */
 object ForegroundGuardian {
@@ -22,9 +23,22 @@ object ForegroundGuardian {
 
     // 优先级常量定义
     const val PRIORITY_SYNC = 40
+    const val PRIORITY_CLI = 35
     const val PRIORITY_PRERENDER = 30
     const val PRIORITY_STREAM = 20
     const val PRIORITY_DISTRIBUTED = 10
+
+    enum class ConsumerKind {
+        REMOTE_MESSAGING,
+        CLI_JOB,
+    }
+
+    data class CliNotificationTarget(
+        val jobId: String,
+        val attemptId: String,
+        val runtimeGeneration: Long,
+        val displayLabel: String,
+    )
 
     // 消费者注册表：唯一业务 Tag -> 消费者配置
     private val consumers = ConcurrentHashMap<String, ConsumerEntry>()
@@ -46,12 +60,17 @@ object ForegroundGuardian {
     @Volatile private var desiredGeneration = 0L
     @Volatile private var expectedStopGeneration = 0L
     @Volatile private var screenStateListener: ((Boolean) -> Unit)? = null
+    @Volatile private var cliLeaseLossListener: ((List<CliNotificationTarget>) -> Unit)? = null
 
     data class ConsumerEntry(
         val priority: Int,
         val displayLabel: String,
         val screenKeepOn: Boolean,
         val generation: Long,
+        val needsCpu: Boolean,
+        val needsNetwork: Boolean,
+        val kind: ConsumerKind,
+        val cliTarget: CliNotificationTarget?,
     )
 
     private data class PendingAcquire(
@@ -82,7 +101,18 @@ object ForegroundGuardian {
      * 申请持有前台锁（幂等）
      */
     @Synchronized
-    fun acquire(context: Context, tag: String, priority: Int, label: String, screenKeepOn: Boolean = false, timeoutMs: Long = -1): Long {
+    fun acquire(
+        context: Context,
+        tag: String,
+        priority: Int,
+        label: String,
+        screenKeepOn: Boolean = false,
+        timeoutMs: Long = -1,
+        needsCpu: Boolean = true,
+        needsNetwork: Boolean = true,
+        kind: ConsumerKind = ConsumerKind.REMOTE_MESSAGING,
+        cliTarget: CliNotificationTarget? = null,
+    ): Long {
         Log.i(TAG, "acquire: tag=$tag, priority=$priority, label=$label, screenKeepOn=$screenKeepOn, timeoutMs=$timeoutMs")
         
         // 1. 取消该 tag 已有的超时任务
@@ -99,15 +129,28 @@ object ForegroundGuardian {
         pendingAcquires[generation] = pendingAcquire
         
         // 更新/插入消费者
-        consumers[tag] = ConsumerEntry(priority, label, screenKeepOn, generation)
+        require((kind == ConsumerKind.CLI_JOB) == (cliTarget != null)) {
+            "CLI foreground consumers require an exact notification target"
+        }
+        consumers[tag] = ConsumerEntry(
+            priority,
+            label,
+            screenKeepOn,
+            generation,
+            needsCpu,
+            needsNetwork,
+            kind,
+            cliTarget,
+        )
 
         try {
             if (wasEmpty) {
                 // 首次消费者进入：物理获取系统双锁，并拉起前台服务
-                acquireLocks(context)
+                reconcileLocks(context)
                 startFgs(context, generation)
             } else {
                 // 已有消费者在运行：仅触发 Service 更新通知文案与屏幕状态
+                reconcileLocks(context)
                 updateFgs(context, generation)
             }
         } catch (error: Exception) {
@@ -146,20 +189,31 @@ object ForegroundGuardian {
      * 释放前台锁（幂等）
      */
     @Synchronized
-    fun release(context: Context, tag: String) {
+    fun release(context: Context, tag: String, expectedGeneration: Long? = null) {
         Log.i(TAG, "release: tag=$tag")
         
-        // 取消并移除超时任务
+        val current = consumers[tag]
+        if (current == null) {
+            Log.d(TAG, "release: tag=$tag is not registered, ignore.")
+            return
+        }
+        if (expectedGeneration != null && current.generation != expectedGeneration) {
+            Log.d(
+                TAG,
+                "release: stale generation for tag=$tag expected=$expectedGeneration actual=${current.generation}",
+            )
+            return
+        }
+
+        // 只有通过代次 fence 后才能移除当前 lease 的超时任务。
         timeoutRunnables.remove(tag)?.let {
             handler.removeCallbacks(it)
         }
 
-        if (!consumers.containsKey(tag)) {
-            Log.d(TAG, "release: tag=$tag is not registered, ignore.")
-            return
+        val removedEntry = consumers.remove(tag, current).let { removed ->
+            if (!removed) return
+            current
         }
-
-        val removedEntry = consumers.remove(tag) ?: return
         if (pendingGenerations.remove(removedEntry.generation)) {
             pendingAcquires.remove(removedEntry.generation)
             completeReadiness(
@@ -175,6 +229,7 @@ object ForegroundGuardian {
             releaseLocks()
             stopFgs(context)
         } else {
+            reconcileLocks(context)
             // 仍有消费者在运行：更新通知文案与屏幕状态
             try {
                 updateFgs(context, generationCounter.incrementAndGet())
@@ -192,7 +247,33 @@ object ForegroundGuardian {
             Log.d(TAG, "Ignoring stale timeout for tag=$tag generation=$generation")
             return
         }
-        release(context, tag)
+        release(context, tag, generation)
+    }
+
+    @Synchronized
+    fun activeCliTargets(): List<Pair<String, CliNotificationTarget>> = consumers.entries
+        .mapNotNull { entry -> entry.value.cliTarget?.let { entry.key to it } }
+        .sortedBy { it.first }
+
+    @Synchronized
+    fun foregroundServiceTypeMask(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return 0
+        var mask = 0
+        if (consumers.values.any { it.kind == ConsumerKind.REMOTE_MESSAGING }) {
+            mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+        }
+        if (consumers.values.any { it.kind == ConsumerKind.CLI_JOB }) {
+            mask = mask or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        }
+        return mask
+    }
+
+    @Synchronized
+    fun releaseNonCliConsumers(context: Context) {
+        consumers.entries
+            .filter { it.value.kind != ConsumerKind.CLI_JOB }
+            .map { it.key to it.value.generation }
+            .forEach { (tag, generation) -> release(context, tag, generation) }
     }
 
     /**
@@ -234,6 +315,11 @@ object ForegroundGuardian {
     fun setScreenStateListener(listener: ((Boolean) -> Unit)?) {
         screenStateListener = listener
         notifyScreenState()
+    }
+
+    @Synchronized
+    fun setCliLeaseLossListener(listener: ((List<CliNotificationTarget>) -> Unit)?) {
+        cliLeaseLossListener = listener
     }
 
     @Synchronized
@@ -319,7 +405,11 @@ object ForegroundGuardian {
         }
         if (consumers.isNotEmpty()) {
             Log.e(TAG, "Foreground service destroyed unexpectedly at generation=$generation")
+            val affectedCliTargets = activeCliTargets().map { it.second }
             releaseAllLocks()
+            if (affectedCliTargets.isNotEmpty()) {
+                handler.post { cliLeaseLossListener?.invoke(affectedCliTargets) }
+            }
         }
     }
 
@@ -363,11 +453,14 @@ object ForegroundGuardian {
             if (failedServiceWillStop && isDesiredFailure) {
                 stopFgs(context, generation)
             }
-        } else if (failedServiceWillStop && isDesiredFailure) {
-            val recoveryGeneration = generationCounter.incrementAndGet()
-            desiredGeneration = recoveryGeneration
-            restartAfterDestroy[generation] = recoveryGeneration
-            stopFgs(context, generation)
+        } else {
+            reconcileLocks(context)
+            if (failedServiceWillStop && isDesiredFailure) {
+                val recoveryGeneration = generationCounter.incrementAndGet()
+                desiredGeneration = recoveryGeneration
+                restartAfterDestroy[generation] = recoveryGeneration
+                stopFgs(context, generation)
+            }
         }
         notifyScreenState()
     }
@@ -375,24 +468,30 @@ object ForegroundGuardian {
     /**
      * 物理获取 WakeLock 和 WifiLock
      */
-    private fun acquireLocks(context: Context) {
+    private fun reconcileLocks(context: Context) {
         val appContext = context.applicationContext
 
-        // 1. 获取 WakeLock (保持 CPU 运转)
-        if (wakeLock == null) {
+        val needCpu = consumers.values.any { it.needsCpu }
+        val needNetwork = consumers.values.any { it.needsNetwork }
+
+        if (needCpu && wakeLock == null) {
             val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
             if (powerManager != null) {
                 wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VCP:ForegroundGuardian")
             }
         }
         wakeLock?.let {
+            if (!needCpu && it.isHeld) it.release()
             if (!it.isHeld) {
-                it.acquire()
-                Log.d(TAG, "acquireLocks: WakeLock acquired.")
+                if (needCpu) {
+                    it.acquire()
+                    Log.d(TAG, "reconcileLocks: WakeLock acquired.")
+                }
             }
         }
+        if (!needCpu) wakeLock = null
 
-        if (wifiLock == null) {
+        if (needNetwork && wifiLock == null) {
             val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             if (wifiManager != null) {
                 @Suppress("DEPRECATION")
@@ -404,11 +503,15 @@ object ForegroundGuardian {
             }
         }
         wifiLock?.let {
+            if (!needNetwork && it.isHeld) it.release()
             if (!it.isHeld) {
-                it.acquire()
-                Log.d(TAG, "acquireLocks: WifiLock acquired.")
+                if (needNetwork) {
+                    it.acquire()
+                    Log.d(TAG, "reconcileLocks: WifiLock acquired.")
+                }
             }
         }
+        if (!needNetwork) wifiLock = null
     }
 
     /**

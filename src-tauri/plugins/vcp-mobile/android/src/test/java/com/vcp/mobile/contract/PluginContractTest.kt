@@ -273,9 +273,11 @@ class PluginContractTest {
         }
         assertFalse("Kotlin plugin 不应再注册本地语义资产 bridge", kotlinPlugin.contains("prepareCliSemanticAssets"))
         assertTrue("CLI ProcessHost 不得调用 Root/libsu", !processHost.contains("libsu") && !processHost.contains("Shell.getShell"))
-        assertTrue("CLI ProcessHost 不得接入 Guardian", !processHost.contains("ForegroundGuardian"))
+        assertTrue("CLI ProcessHost 必须以精确 Job lease 接入 Guardian", processHost.contains("CliNotificationTarget"))
+        assertTrue("CLI ProcessHost 必须由应用进程 singleton 持有", processHost.contains("object CliProcessHostOwner"))
         assertTrue("CLI ProcessHost 不得新增 localhost bridge", !processHost.contains("ServerSocket") && !processHost.contains("localhost"))
-        assertTrue("onDestroy 必须先关闭 CLI ProcessHost", kotlinPlugin.indexOf("cliProcessHost.close()") < kotlinPlugin.indexOf("executorDomains.shutdownNow()"))
+        assertTrue("plugin onDestroy 不得终止应用进程所有 CLI Job", !kotlinPlugin.contains("cliProcessHost.close()"))
+        assertTrue("plugin 必须从应用进程 owner 获取 CLI ProcessHost", kotlinPlugin.contains("CliProcessHostOwner.get(activity.applicationContext)"))
     }
 
     @Test

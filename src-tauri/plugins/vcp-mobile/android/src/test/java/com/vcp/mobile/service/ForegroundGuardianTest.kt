@@ -27,6 +27,7 @@ class ForegroundGuardianTest {
     @After
     fun tearDown() {
         ForegroundGuardian.setScreenStateListener(null)
+        ForegroundGuardian.setCliLeaseLossListener(null)
         ForegroundGuardian.releaseAllLocks()
     }
 
@@ -90,6 +91,102 @@ class ForegroundGuardianTest {
         ForegroundGuardian.release(context, "stream:Nova")
         assertFalse(ForegroundGuardian.isActive)
         assertEquals("VCP 正在后台运行", ForegroundGuardian.getNotificationLabel())
+    }
+
+    @Test
+    fun cliLeaseIsGenerationFencedAndSurvivesStoppingStreamingConsumers() {
+        val target = ForegroundGuardian.CliNotificationTarget(
+            jobId = "job-1",
+            attemptId = "attempt-1",
+            runtimeGeneration = 7,
+            displayLabel = "bounded job",
+        )
+        val cliGeneration = ForegroundGuardian.acquire(
+            context = context,
+            tag = "cli:job-1:attempt-1",
+            priority = ForegroundGuardian.PRIORITY_CLI,
+            label = target.displayLabel,
+            screenKeepOn = false,
+            timeoutMs = 60_000,
+            needsCpu = true,
+            needsNetwork = false,
+            kind = ForegroundGuardian.ConsumerKind.CLI_JOB,
+            cliTarget = target,
+        )
+        ForegroundGuardian.acquire(
+            context,
+            "stream:Nova",
+            ForegroundGuardian.PRIORITY_STREAM,
+            "Nova",
+            false,
+            60_000,
+        )
+
+        ForegroundGuardian.release(context, "cli:job-1:attempt-1", cliGeneration + 1)
+        assertEquals(listOf("cli:job-1:attempt-1" to target), ForegroundGuardian.activeCliTargets())
+
+        ForegroundGuardian.releaseNonCliConsumers(context)
+        assertTrue(ForegroundGuardian.isActive)
+        assertEquals(listOf("cli:job-1:attempt-1" to target), ForegroundGuardian.activeCliTargets())
+
+        ForegroundGuardian.release(context, "cli:job-1:attempt-1", cliGeneration)
+        assertFalse(ForegroundGuardian.isActive)
+    }
+
+    @Test
+    fun cliNotificationIdsProbeWithinTheirDedicatedNamespaceOnCollision() {
+        val target = ForegroundGuardian.CliNotificationTarget("job-1", "attempt-1", 7, "job")
+        val base = cliNotificationId(target)
+        val allocated = allocateCliNotificationId(target, setOf(base))
+
+        assertTrue(allocated != base)
+        assertEquals(0x43000000, allocated and 0xff000000.toInt())
+    }
+
+    @Test
+    @Config(sdk = [34])
+    fun activeConsumerKindsSelectOnlyTheirDeclaredForegroundServiceTypes() {
+        val target = ForegroundGuardian.CliNotificationTarget("job-1", "attempt-1", 1, "job")
+        ForegroundGuardian.acquire(
+            context,
+            "cli:job-1:attempt-1",
+            ForegroundGuardian.PRIORITY_CLI,
+            "job",
+            false,
+            60_000,
+            true,
+            false,
+            ForegroundGuardian.ConsumerKind.CLI_JOB,
+            target,
+        )
+
+        val typeMask = ForegroundGuardian.foregroundServiceTypeMask()
+        assertTrue(typeMask != 0)
+    }
+
+    @Test
+    fun unexpectedForegroundServiceLossReportsOnlyExactCliTargets() {
+        val target = ForegroundGuardian.CliNotificationTarget("job-1", "attempt-1", 9, "job")
+        var affected: List<ForegroundGuardian.CliNotificationTarget>? = null
+        ForegroundGuardian.setCliLeaseLossListener { affected = it }
+        val generation = ForegroundGuardian.acquire(
+            context,
+            "cli:job-1:attempt-1",
+            ForegroundGuardian.PRIORITY_CLI,
+            "job",
+            false,
+            60_000,
+            true,
+            false,
+            ForegroundGuardian.ConsumerKind.CLI_JOB,
+            target,
+        )
+
+        ForegroundGuardian.onServiceDestroyed(context, generation)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf(target), affected)
+        assertFalse(ForegroundGuardian.isActive)
     }
 
     @Test

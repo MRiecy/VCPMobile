@@ -846,7 +846,7 @@ fn parse_meta_fields(values: &HashMap<&str, &str>) -> Result<VcpMetaFields, VcpC
 
     let vref = values
         .get("vref")
-        .map(|value| parse_positive_u32(value, "vref"))
+        .map(|value| parse_vref_limit(value))
         .transpose()?;
 
     let archery = values
@@ -903,6 +903,19 @@ fn parse_river_limit(value: &str) -> Result<u8, VcpCliProtocolError> {
     if !(1..=MAX_RIVER_ITEMS).contains(&parsed) {
         return Err(VcpCliProtocolError::invalid(
             "river",
+            format!("expected integer in 1..={MAX_RIVER_ITEMS}"),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_vref_limit(value: &str) -> Result<u32, VcpCliProtocolError> {
+    let parsed = value.parse::<u32>().map_err(|_| {
+        VcpCliProtocolError::invalid("vref", format!("expected integer in 1..={MAX_RIVER_ITEMS}"))
+    })?;
+    if !(1..=u32::from(MAX_RIVER_ITEMS)).contains(&parsed) {
+        return Err(VcpCliProtocolError::invalid(
+            "vref",
             format!("expected integer in 1..={MAX_RIVER_ITEMS}"),
         ));
     }
@@ -1296,6 +1309,53 @@ mod tests {
             .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
             .expect_err("vref remains unavailable without a knowledge grant");
         assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
+    }
+
+    #[test]
+    fn optional_context_limits_are_bounded_to_fifty() {
+        for (field, value) in [
+            ("river", "last:0"),
+            ("river", "last:51"),
+            ("river", "semantic:0"),
+            ("river", "semantic:51"),
+            ("vref", "0"),
+            ("vref", "51"),
+            ("vref", "4294967295"),
+        ] {
+            let raw = exactly_one_request(
+                &format!(
+                    "<<<[TOOL_REQUEST]>>>\n\
+                     tool_name:「始」VCPMobileCLI「末」,\n\
+                     command:「始」printf ok「末」,\n\
+                     {field}:「始」{value}「末」\n\
+                     <<<[END_TOOL_REQUEST]>>>"
+                ),
+                "bounded optional context",
+            );
+            let error = validate_vcp_mobile_cli_request(&raw)
+                .expect_err("out-of-range optional context must be rejected");
+            assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
+            assert_eq!(error.field.as_deref(), Some(field));
+        }
+
+        for (field, value) in [
+            ("river", "last:50"),
+            ("river", "semantic:50"),
+            ("vref", "50"),
+        ] {
+            let raw = exactly_one_request(
+                &format!(
+                    "<<<[TOOL_REQUEST]>>>\n\
+                     tool_name:「始」VCPMobileCLI「末」,\n\
+                     command:「始」printf ok「末」,\n\
+                     {field}:「始」{value}「末」\n\
+                     <<<[END_TOOL_REQUEST]>>>"
+                ),
+                "maximum optional context",
+            );
+            validate_vcp_mobile_cli_request(&raw)
+                .expect("the inclusive optional context maximum must remain valid");
+        }
     }
 
     #[test]

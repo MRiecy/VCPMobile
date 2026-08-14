@@ -54,6 +54,9 @@ pub struct StartCliProcessRequest {
     pub rootfs_path: String,
     pub cwd: String,
     pub artifact_max_bytes: u64,
+    pub background_lease: bool,
+    pub timeout_ms: u64,
+    pub display_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +104,7 @@ pub struct InspectCliProcessResponse {
     pub stderr_bytes: u64,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub background_lease_lost: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,12 +280,18 @@ mod tests {
             rootfs_path: "/private/rootfs".to_string(),
             cwd: "/workspace/topic".to_string(),
             artifact_max_bytes: 1024,
+            background_lease: true,
+            timeout_ms: 30_000,
+            display_label: "run unit test".to_string(),
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
         assert_eq!(value["operationId"], "operation-1");
         assert_eq!(value["runtimeGeneration"], 7);
         assert_eq!(value["artifactMaxBytes"], 1024);
+        assert_eq!(value["backgroundLease"], true);
+        assert_eq!(value["timeoutMs"], 30_000);
+        assert_eq!(value["displayLabel"], "run unit test");
         assert_eq!(value["command"], "printf '%s' '$HOME'");
         assert!(value.get("riverContextProjection").is_none());
         assert!(value.get("operation_id").is_none());

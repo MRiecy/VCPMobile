@@ -725,6 +725,7 @@ async fn recover_claimed_batch<R: Runtime>(
                 "durable CLI batch digest/index mismatch".to_string(),
             ));
         }
+        require_recoverable_step(step).map_err(ClaimedRecoveryError::Integrity)?;
         if step.result.is_some() {
             continue;
         }
@@ -752,6 +753,13 @@ async fn recover_claimed_batch<R: Runtime>(
                 "local CLI turn disappeared during recovery".to_string(),
             )
         })
+}
+
+fn require_recoverable_step(step: &super::turn_types::LocalCliStepRecord) -> Result<(), String> {
+    if step.result.is_none() && step.river_projection.is_some() {
+        return Err("旧版 River 上下文任务无法在当前本地回环中安全恢复；请重试本轮。".to_string());
+    }
+    Ok(())
 }
 
 fn validate_closed_batch(
@@ -1060,7 +1068,7 @@ mod tests {
     use crate::vcp_modules::cli::protocol::{VcpArcheryMode, VcpCliAction};
     use crate::vcp_modules::cli::result::{VcpCliContentPart, VcpCliResultBody, VcpCliRuntimeInfo};
     use crate::vcp_modules::cli::turn_types::{
-        FrozenModelRequest, LocalCliStepRecord, MarkedHistoryEntry,
+        DurableRiverProjection, FrozenModelRequest, LocalCliStepRecord, MarkedHistoryEntry,
     };
     use crate::vcp_modules::stream_block_parser::StreamBlock;
 
@@ -1141,6 +1149,26 @@ mod tests {
             "local_loopback"
         );
         assert_eq!(LocalCliTurnRoute::VcpPlugin.as_db_value(), "vcp_plugin");
+    }
+
+    #[test]
+    fn unfinished_legacy_river_step_is_not_reexecuted_without_its_projection() {
+        let assistant = "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」run「末」,\ncommand:「始」pwd「末」\n<<<[END_TOOL_REQUEST]>>>";
+        let mut claimed = record(LocalCliTurnState::Running, assistant);
+        claimed.step_records[0].river_projection = Some(DurableRiverProjection {
+            canonical_json: "{}".to_string(),
+            sha256: "0".repeat(64),
+            size_bytes: 2,
+            artifacts: Vec::new(),
+        });
+
+        assert!(require_recoverable_step(&claimed.step_records[0])
+            .expect_err("legacy unfinished projection must be interrupted")
+            .contains("请重试本轮"));
+        claimed.step_records[0].result = Some(VcpCliResultEnvelope::success(
+            VcpCliResultBody::content_only(vec![VcpCliContentPart::text("completed legacy")]),
+        ));
+        assert!(require_recoverable_step(&claimed.step_records[0]).is_ok());
     }
 
     #[test]

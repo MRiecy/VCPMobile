@@ -1,12 +1,18 @@
 package com.vcp.mobile.cli
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Process as AndroidProcess
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
+import android.util.Log
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.JSObject
+import com.vcp.mobile.service.ForegroundGuardian
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -32,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 private const val ROOTFS_ASSET_NAME = "vcp-cli-rootfs-3.24.1-aarch64.tar.zst"
+private const val TAG = "CliProcessHost"
 private const val PROOT_LIBRARY_NAME = "libvcp_proot.so"
 private const val PROOT_LOADER_LIBRARY_NAME = "libvcp_proot_loader.so"
 private const val MAX_ROOTFS_ARCHIVE_BYTES = 512L * 1024L * 1024L
@@ -48,6 +55,8 @@ private const val PROOT_TRACEES_QUIT_GRACE_MS = 1_000L
 private const val ORPHAN_GRACE_MS = 250L
 private const val THREAD_JOIN_MS = 2_000L
 private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
+private const val FOREGROUND_READINESS_WAIT_MS = 6_000L
+private const val PROCESS_ADDRESS_SPACE_KIB = 512L * 1024L
 private const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 private val LEGACY_SEMANTIC_ASSET_NAMES = listOf(
     "vcp-semantic-model-r2.safetensors",
@@ -58,7 +67,9 @@ private val LEGACY_SEMANTIC_ASSET_NAMES = listOf(
 // handshake path as an argv element and reaches Bash as the argument following -lc.
 internal const val HOST_HANDSHAKE_SCRIPT =
     "umask 077; printf '%s\\n' \"\$\$\" > \"\$1\"; " +
-        "IFS= read -r ready; [ \"\$ready\" = GO ] || exit 125; shift; exec \"\$@\""
+        "memory_kib=\$2; shift 2; " +
+        "ulimit -v \"\$memory_kib\" || exit 126; " +
+        "IFS= read -r ready; [ \"\$ready\" = GO ] || exit 125; exec \"\$@\""
 
 @InvokeArg
 class PrepareCliRuntimeArgs {
@@ -83,6 +94,9 @@ class StartCliProcessArgs {
     lateinit var rootfsPath: String
     lateinit var cwd: String
     var artifactMaxBytes: Long = 0
+    var backgroundLease: Boolean = false
+    var timeoutMs: Long = 0
+    lateinit var displayLabel: String
 }
 
 @InvokeArg
@@ -112,6 +126,11 @@ private data class GroupTermination(
     val termSent: Boolean,
     val killSent: Boolean,
     val groupGone: Boolean,
+)
+
+private data class CliForegroundLease(
+    val tag: String,
+    val generation: Long,
 )
 
 internal data class ProcIdentity(
@@ -185,10 +204,14 @@ private class CliProcessHandle(
     val stdoutReader: Thread,
     val stderrReader: Thread,
     val prootTmpDir: File,
+    val foregroundLease: CliForegroundLease?,
 ) {
     val exitCode = AtomicReference<Int?>(null)
     val finished = CountDownLatch(1)
     val finalized = AtomicBoolean(false)
+    val backgroundLeaseLossPending = AtomicBoolean(false)
+    val backgroundLeaseLost = AtomicBoolean(false)
+    val terminationLock = Any()
     lateinit var waiter: Thread
 
     fun isCompleted(): Boolean = finished.count == 0L
@@ -415,7 +438,11 @@ internal fun buildHostEnvironment(prootTmpPath: String, prootLoaderPath: String)
     )
 }
 
-internal fun buildHostCommand(handshakePath: String, prootArguments: List<String>): List<String> =
+internal fun buildHostCommand(
+    handshakePath: String,
+    processAddressSpaceKib: Long,
+    prootArguments: List<String>,
+): List<String> =
     listOf(
         "/system/bin/toybox",
         "setsid",
@@ -424,6 +451,7 @@ internal fun buildHostCommand(handshakePath: String, prootArguments: List<String
         HOST_HANDSHAKE_SCRIPT,
         "vcp-cli-host",
         handshakePath,
+        processAddressSpaceKib.toString(),
     ) + prootArguments
 
 internal fun sha256Hex(bytes: ByteArray): String =
@@ -660,6 +688,9 @@ internal fun fingerprint(args: StartCliProcessArgs): String {
         args.rootfsPath,
         args.cwd,
         args.artifactMaxBytes.toString(),
+        args.backgroundLease.toString(),
+        args.timeoutMs.toString(),
+        args.displayLabel,
     )
     fields.forEach { value ->
         val bytes = value.toByteArray(StandardCharsets.UTF_8)
@@ -694,12 +725,34 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         { runnable -> Thread(runnable, "vcp-cli-control-${threadSequence.incrementAndGet()}") },
         ThreadPoolExecutor.AbortPolicy(),
     )
+    private val inspectExecutor = ThreadPoolExecutor(
+        2,
+        2,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(64),
+        { runnable -> Thread(runnable, "vcp-cli-inspect-${threadSequence.incrementAndGet()}") },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
+    private val cancelExecutor = ThreadPoolExecutor(
+        2,
+        2,
+        0L,
+        TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(32),
+        { runnable -> Thread(runnable, "vcp-cli-cancel-${threadSequence.incrementAndGet()}") },
+        ThreadPoolExecutor.AbortPolicy(),
+    )
     private val closed = AtomicBoolean(false)
     private val lifecycleLock = Any()
     private val handles = ConcurrentHashMap<ProcessKey, CliProcessHandle>()
     private val completedKeys = ConcurrentLinkedQueue<ProcessKey>()
     private val installer = CliRuntimeInstaller(context.applicationContext)
     @Volatile private var preparedRuntime: PreparedRuntime? = null
+
+    companion object {
+        fun foregroundTag(jobId: String, attemptId: String): String = "cli:$jobId:$attemptId"
+    }
 
     fun prepare(
         args: PrepareCliRuntimeArgs,
@@ -740,21 +793,13 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         args: InspectCliProcessArgs,
         success: (JSObject) -> Unit,
         failure: (String) -> Unit,
-    ) = submit(success, failure) {
-        synchronized(lifecycleLock) {
-            inspectBlocking(args)
-        }
-    }
+    ) = submitOn(inspectExecutor, "inspect", success, failure) { inspectBlocking(args) }
 
     fun cancel(
         args: CancelCliProcessArgs,
         success: (JSObject) -> Unit,
         failure: (String) -> Unit,
-    ) = submit(success, failure) {
-        synchronized(lifecycleLock) {
-            cancelBlocking(args)
-        }
-    }
+    ) = submitOn(cancelExecutor, "cancel", success, failure) { cancelBlocking(args) }
 
     private fun submit(
         success: (JSObject) -> Unit,
@@ -800,6 +845,12 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         require(args.artifactMaxBytes in 0..MAX_ARTIFACT_BYTES) {
             "artifactMaxBytes is outside the supported range"
         }
+        require(args.timeoutMs > 0) { "timeoutMs must be positive" }
+        require(args.displayLabel.toByteArray(StandardCharsets.UTF_8).size in 1..256 &&
+            !args.displayLabel.contains('\u0000') &&
+            !args.displayLabel.contains('\n') &&
+            !args.displayLabel.contains('\r')
+        ) { "displayLabel must be a bounded single line" }
         val cwd = validateGuestCwd(args.cwd)
         val prepared = preparedRuntime ?: error("CLI runtime has not been prepared")
         require(prepared.runtimeGeneration == args.runtimeGeneration) {
@@ -835,6 +886,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         var stdoutReader: Thread? = null
         var stderrReader: Thread? = null
         var verifiedIdentity: ProcIdentity? = null
+        var foregroundLease: CliForegroundLease? = null
         try {
             require(stdoutFile.createNewFile()) { "stdout artifact identity already exists" }
             require(stderrFile.createNewFile()) { "stderr artifact identity already exists" }
@@ -843,6 +895,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             prootTmpDir = activeProotTmpDir
             val activeBudget = ArtifactBudget(args.artifactMaxBytes, stdoutFile, stderrFile)
             budget = activeBudget
+            foregroundLease = acquireForegroundLease(args)
 
             val prootArguments = buildProotArguments(
                 prootPath = prepared.proot.absolutePath,
@@ -851,7 +904,13 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 cwd = cwd,
                 command = args.command,
             )
-            val processBuilder = ProcessBuilder(buildHostCommand(handshakeFile.absolutePath, prootArguments))
+            val processBuilder = ProcessBuilder(
+                buildHostCommand(
+                    handshakeFile.absolutePath,
+                    PROCESS_ADDRESS_SPACE_KIB,
+                    prootArguments,
+                ),
+            )
             processBuilder.redirectErrorStream(false)
             processBuilder.environment().apply {
                 clear()
@@ -902,11 +961,13 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 stdoutReader = stdoutReader,
                 stderrReader = stderrReader,
                 prootTmpDir = activeProotTmpDir,
+                foregroundLease = foregroundLease,
             )
             handle.waiter = startWaiter(handle)
             handles[key] = handle
             return StartResult(args.operationId, handle)
         } catch (error: Throwable) {
+            foregroundLease?.let(::releaseForegroundLease)
             abortUnregisteredProcess(process, verifiedIdentity, stdoutReader, stderrReader, budget)
             stdoutFile.delete()
             stderrFile.delete()
@@ -914,6 +975,58 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             prootTmpDir?.deleteRecursively()
             throw error
         }
+    }
+
+    private fun acquireForegroundLease(args: StartCliProcessArgs): CliForegroundLease? {
+        if (!args.backgroundLease) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            error("CLI 后台增强需要通知权限；命令尚未启动")
+        }
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+            error("CLI 后台增强通知已被系统关闭；命令尚未启动")
+        }
+        val target = ForegroundGuardian.CliNotificationTarget(
+            jobId = args.jobId,
+            attemptId = args.attemptId,
+            runtimeGeneration = args.runtimeGeneration,
+            displayLabel = args.displayLabel,
+        )
+        val tag = foregroundTag(args.jobId, args.attemptId)
+        val generation = ForegroundGuardian.acquire(
+            context = context,
+            tag = tag,
+            priority = ForegroundGuardian.PRIORITY_CLI,
+            label = "VCP CLI",
+            screenKeepOn = false,
+            timeoutMs = args.timeoutMs,
+            needsCpu = true,
+            needsNetwork = false,
+            kind = ForegroundGuardian.ConsumerKind.CLI_JOB,
+            cliTarget = target,
+        )
+        val readiness = CountDownLatch(1)
+        val accepted = AtomicBoolean(false)
+        val failure = AtomicReference<String?>(null)
+        ForegroundGuardian.awaitServiceReadiness(context, generation) { success, reason ->
+            accepted.set(success)
+            failure.set(reason)
+            readiness.countDown()
+        }
+        val completed = readiness.await(FOREGROUND_READINESS_WAIT_MS, TimeUnit.MILLISECONDS)
+        if (!completed || !accepted.get()) {
+            ForegroundGuardian.release(context, tag, generation)
+            error(failure.get() ?: "CLI foreground service readiness timed out")
+        }
+        return CliForegroundLease(tag, generation)
+    }
+
+    private fun releaseForegroundLease(lease: CliForegroundLease) {
+        ForegroundGuardian.release(context, lease.tag, lease.generation)
     }
 
     private fun inspectBlocking(args: InspectCliProcessArgs): JSObject {
@@ -934,6 +1047,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 put("stderrBytes", 0L)
                 put("stdoutTruncated", false)
                 put("stderrTruncated", false)
+                put("backgroundLeaseLost", false)
             } else {
                 put("state", if (handle.isCompleted()) "exited" else "running")
                 put("exitCode", handle.exitCode.get() ?: org.json.JSONObject.NULL)
@@ -941,6 +1055,37 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 put("stderrBytes", handle.artifactBudget.stderrBytes.get())
                 put("stdoutTruncated", handle.artifactBudget.stdoutTruncated.get())
                 put("stderrTruncated", handle.artifactBudget.stderrTruncated.get())
+                put("backgroundLeaseLost", handle.backgroundLeaseLost.get())
+            }
+        }
+    }
+
+    fun handleForegroundLeaseLoss(targets: List<ForegroundGuardian.CliNotificationTarget>) {
+        targets.forEach { target ->
+            val key = ProcessKey(target.jobId, target.attemptId, target.runtimeGeneration)
+            val handle = handles[key] ?: return@forEach
+            if (!handle.backgroundLeaseLossPending.compareAndSet(false, true)) return@forEach
+            try {
+                cancelExecutor.execute {
+                    synchronized(handle.terminationLock) {
+                        try {
+                            val termination = terminateOwnedGroup(handle, graceMs = 0)
+                            if (!termination.groupGone) {
+                                throw IllegalStateException(
+                                    "CLI process group remained alive after foreground lease loss",
+                                )
+                            }
+                            completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
+                            handle.backgroundLeaseLost.set(true)
+                        } catch (error: Throwable) {
+                            Log.e(TAG, "Failed to contain CLI Job after foreground lease loss", error)
+                            handle.process.destroyForcibly()
+                        }
+                    }
+                }
+            } catch (error: RejectedExecutionException) {
+                Log.e(TAG, "CLI cancel queue rejected foreground lease loss containment", error)
+                handle.process.destroyForcibly()
             }
         }
     }
@@ -966,19 +1111,31 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             )
         }
 
-        val termination = terminateOwnedGroup(handle, args.graceMs)
-        if (!termination.groupGone) {
-            throw IllegalStateException("CLI process group remained alive after SIGKILL")
+        synchronized(handle.terminationLock) {
+            if (handle.isCompleted() && !isGroupAlive(handle.identity.pgid)) {
+                return cancelResponse(
+                    args,
+                    found = true,
+                    termSent = false,
+                    killSent = false,
+                    groupGone = true,
+                    exitCode = handle.exitCode.get(),
+                )
+            }
+            val termination = terminateOwnedGroup(handle, args.graceMs)
+            if (!termination.groupGone) {
+                throw IllegalStateException("CLI process group remained alive after SIGKILL")
+            }
+            completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
+            return cancelResponse(
+                args,
+                found = true,
+                termSent = termination.termSent,
+                killSent = termination.killSent,
+                groupGone = true,
+                exitCode = handle.exitCode.get(),
+            )
         }
-        completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
-        return cancelResponse(
-            args,
-            found = true,
-            termSent = termination.termSent,
-            killSent = termination.killSent,
-            groupGone = true,
-            exitCode = handle.exitCode.get(),
-        )
     }
 
     private fun cancelResponse(
@@ -1161,6 +1318,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         if (!handle.finalized.compareAndSet(false, true)) return
         handle.artifactBudget.closeAll()
         handle.prootTmpDir.deleteRecursively()
+        handle.foregroundLease?.let(::releaseForegroundLease)
         handle.finished.countDown()
         completedKeys.offer(handle.key)
     }
@@ -1282,6 +1440,8 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         controlExecutor.shutdownNow()
+        inspectExecutor.shutdownNow()
+        cancelExecutor.shutdownNow()
         synchronized(lifecycleLock) {
             handles.values.forEach { handle ->
                 try {
@@ -1296,14 +1456,29 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 joinThread(handle.stderrReader, THREAD_JOIN_MS)
                 joinThread(handle.waiter, THREAD_JOIN_MS)
                 handle.artifactBudget.closeAll()
+                handle.foregroundLease?.let(::releaseForegroundLease)
             }
             handles.clear()
             completedKeys.clear()
         }
         try {
             controlExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
+            inspectExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
+            cancelExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+        }
+    }
+}
+
+internal object CliProcessHostOwner {
+    @Volatile
+    private var instance: CliProcessHost? = null
+
+    fun get(context: Context): CliProcessHost = instance ?: synchronized(this) {
+        instance ?: CliProcessHost(context.applicationContext).also { host ->
+            ForegroundGuardian.setCliLeaseLossListener(host::handleForegroundLeaseLoss)
+            instance = host
         }
     }
 }

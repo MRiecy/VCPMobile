@@ -172,7 +172,7 @@ class CliProcessHostTest {
             cwd = "/workspace",
             command = userCommand,
         )
-        val host = buildHostCommand("/private/handshake.pid", proot)
+        val host = buildHostCommand("/private/handshake.pid", 524_288, proot)
 
         assertEquals(
             listOf(
@@ -183,8 +183,9 @@ class CliProcessHostTest {
                 HOST_HANDSHAKE_SCRIPT,
                 "vcp-cli-host",
                 "/private/handshake.pid",
+                "524288",
             ),
-            host.take(7),
+            host.take(8),
         )
         assertFalse(HOST_HANDSHAKE_SCRIPT.contains(userCommand))
         assertEquals(userCommand, host.last())
@@ -203,7 +204,7 @@ class CliProcessHostTest {
                 cwd = "/workspace",
                 command = userCommand,
             )
-            val host = buildHostCommand("/private/handshake.pid", proot)
+            val host = buildHostCommand("/private/handshake.pid", 524_288, proot)
 
             assertTrue(proot.contains("--kill-on-exit"))
             assertTrue(proot.indexOf("--kill-on-exit") < proot.indexOf("-r"))
