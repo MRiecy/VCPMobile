@@ -13,7 +13,10 @@ import java.util.concurrent.atomic.AtomicLong
 private const val PTY_MAX_READ_BYTES = 64 * 1024
 private const val PTY_MAX_WRITE_BYTES = 16 * 1024
 private const val PTY_MAX_WAIT_MS = 1_000
-private const val PTY_ADDRESS_SPACE_KIB = 512L * 1024L
+// Must stay above ~2.1 GiB: bionic's dynamic linker reserves a ~2 GiB CFI shadow
+// (MAP_NORESERVE, no committed RAM) when exec'ing the host PRoot PIE. A smaller
+// RLIMIT_AS makes the linker abort with linker_cfi.cpp "MapShadow" failure (code 134).
+private const val PTY_ADDRESS_SPACE_KIB = 4L * 1024L * 1024L
 private const val PTY_RUNNING_EXIT_CODE = Int.MIN_VALUE
 private const val PTY_REPLAY_BYTES = 128 * 1024
 

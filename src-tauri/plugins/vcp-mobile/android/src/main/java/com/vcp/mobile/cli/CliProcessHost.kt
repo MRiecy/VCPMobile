@@ -56,7 +56,10 @@ private const val ORPHAN_GRACE_MS = 250L
 private const val THREAD_JOIN_MS = 2_000L
 private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
 private const val FOREGROUND_READINESS_WAIT_MS = 6_000L
-private const val PROCESS_ADDRESS_SPACE_KIB = 512L * 1024L
+// Must stay above ~2.1 GiB: bionic's dynamic linker reserves a ~2 GiB CFI shadow
+// (MAP_NORESERVE, no committed RAM) when exec'ing the host PRoot PIE. A smaller
+// RLIMIT_AS makes the linker abort with linker_cfi.cpp "MapShadow" failure (code 134).
+private const val PROCESS_ADDRESS_SPACE_KIB = 4L * 1024L * 1024L
 private const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 private val LEGACY_SEMANTIC_ASSET_NAMES = listOf(
     "vcp-semantic-model-r2.safetensors",

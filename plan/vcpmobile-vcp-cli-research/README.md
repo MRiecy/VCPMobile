@@ -98,7 +98,8 @@
   脱敏短标签，`停止…` 先打开准确 Job 并二次确认。stale generation/attempt 不会取消新任务；通知权限
   不可用时降级为原有前台 Job，而不是禁用 Bash。
 - FGS 意外消失会精确终止受影响进程树，并让 Rust 记录 `interrupted`；inspect/cancel 已从单一控制队列
-  拆出，某个 Job 的 drain 不再阻塞其他 Job 查询/取消。子进程继承 512 MiB `RLIMIT_AS`，输出仍受原有
+  拆出，某个 Job 的 drain 不再阻塞其他 Job 查询/取消。子进程继承 4 GiB `RLIMIT_AS`（bionic linker 的
+  ~2 GiB CFI shadow 使 512 MiB 无法 exec 主机 PRoot，2026-08-14 API 36 复验修正），输出仍受原有
   256 MiB/job 落盘上限约束。
 - CLI 一级导航改为 `终端 | Jobs | Skills`，默认进入独立人工终端；Manifest 移入标题栏 Info 二级页。
   终端由 xterm.js + arm64 `libvcp_pty.so` 实现真实 PTY，包含 session/PGID、login Bash、cursor long-poll、
