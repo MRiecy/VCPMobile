@@ -1,17 +1,14 @@
 //! SQLite owner ledger for one bounded local CLI turn.
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use sqlx::{Pool, Row, Sqlite};
 
 use super::result::VcpCliResultEnvelope;
 use super::turn_types::{
-    DurableRiverProjection, FrozenModelRequest, LocalCliStepRecord, LocalCliTurnRecord,
-    LocalCliTurnRoute, LocalCliTurnStart, LocalCliTurnState, MarkedHistoryEntry,
-    MAX_ASSISTANT_STEP_BYTES, MAX_CONTINUATION_MESSAGES_BYTES, MAX_LOCAL_CLI_TOOL_STEPS,
-    MAX_LOCAL_CLI_TURN_WALL_MS, MAX_MARKED_HISTORY_BYTES, MAX_RIVER_ARTIFACTS,
-    MAX_RIVER_ARTIFACT_BYTES, MAX_RIVER_ARTIFACT_TOTAL_BYTES, MAX_RIVER_PROJECTION_BYTES,
-    MAX_TOOL_PAYLOAD_BYTES,
+    FrozenModelRequest, LocalCliStepRecord, LocalCliTurnRecord, LocalCliTurnRoute,
+    LocalCliTurnStart, LocalCliTurnState, MarkedHistoryEntry, MAX_ASSISTANT_STEP_BYTES,
+    MAX_CONTINUATION_MESSAGES_BYTES, MAX_LOCAL_CLI_TOOL_STEPS, MAX_LOCAL_CLI_TURN_WALL_MS,
+    MAX_MARKED_HISTORY_BYTES, MAX_TOOL_PAYLOAD_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,49 +284,6 @@ pub async fn claim_tool_batch(
     Ok(claims)
 }
 
-/// Freezes the exact River bytes before Runtime may observe this operation. A retry must reuse
-/// these bytes even when semantic availability or attachment availability has changed.
-pub async fn bind_tool_projection(
-    pool: &Pool<Sqlite>,
-    turn_attempt: &str,
-    operation_id: &str,
-    projection: &DurableRiverProjection,
-    now_ms: u64,
-) -> Result<DurableRiverProjection, String> {
-    validate_durable_projection(projection)?;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("cannot begin local CLI projection bind: {error}"))?;
-    let row = sqlx::query("SELECT * FROM local_cli_turn_ledger WHERE turn_attempt = ?")
-        .bind(turn_attempt)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| format!("cannot read local CLI projection owner: {error}"))?
-        .ok_or_else(|| "local CLI turn is missing".to_string())?;
-    let mut record = decode_turn(row)?;
-    let step = record
-        .step_records
-        .iter_mut()
-        .find(|step| step.operation_id == operation_id)
-        .ok_or_else(|| "local CLI projection has no durable tool claim".to_string())?;
-    let frozen = match &step.river_projection {
-        Some(existing) if existing == projection => existing.clone(),
-        Some(_) => return Err("local CLI projection conflicts with durable replay".to_string()),
-        None if step.result.is_none() => {
-            step.river_projection = Some(projection.clone());
-            step.updated_at_ms = now_ms;
-            projection.clone()
-        }
-        None => return Err("completed local CLI operation has no durable projection".to_string()),
-    };
-    update_record_in_transaction(&mut tx, &record, now_ms).await?;
-    tx.commit()
-        .await
-        .map_err(|error| format!("cannot commit local CLI projection bind: {error}"))?;
-    Ok(frozen)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn store_tool_result(
     pool: &Pool<Sqlite>,
@@ -366,6 +320,9 @@ pub async fn store_tool_result(
             return Err("local CLI result replay conflicts with durable result".to_string());
         }
     } else {
+        // Old Debug builds may have frozen a River projection before upgrade. The new execution
+        // deliberately ignores it, so clear the decode-only field before publishing this result.
+        step.river_projection = None;
         step.result = Some(result.clone());
         step.local_payload = Some(local_payload.to_string());
         step.mark_history = mark_history;
@@ -874,63 +831,6 @@ fn validate_digest(value: &str) -> Result<(), String> {
     }
 }
 
-fn validate_durable_projection(projection: &DurableRiverProjection) -> Result<(), String> {
-    if projection.canonical_json.len() > MAX_RIVER_PROJECTION_BYTES
-        || projection.size_bytes != projection.canonical_json.len() as u64
-    {
-        return Err(
-            "durable River projection exceeds or disagrees with its byte fence".to_string(),
-        );
-    }
-    let actual = format!("{:x}", Sha256::digest(projection.canonical_json.as_bytes()));
-    if projection.sha256 != actual {
-        return Err("durable River projection SHA-256 mismatch".to_string());
-    }
-    if projection.artifacts.len() > MAX_RIVER_ARTIFACTS {
-        return Err("durable River projection has too many artifacts".to_string());
-    }
-    let document: Value = serde_json::from_str(&projection.canonical_json)
-        .map_err(|error| format!("durable River projection is invalid JSON: {error}"))?;
-    if document.get("schema").and_then(Value::as_str) != Some("vcp.mobile.attempt-projection.v1") {
-        return Err("durable River projection schema is unsupported".to_string());
-    }
-    let descriptors = document
-        .get("artifacts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "durable River projection has no artifact array".to_string())?;
-    if descriptors.len() != projection.artifacts.len() {
-        return Err("durable River artifact identities disagree with canonical JSON".to_string());
-    }
-    let mut total = 0_u64;
-    for (descriptor, artifact) in descriptors.iter().zip(&projection.artifacts) {
-        if artifact.file_name.is_empty()
-            || artifact.file_name.len() > 160
-            || artifact.file_name.contains(['/', '\\'])
-            || matches!(artifact.file_name.as_str(), "." | "..")
-            || artifact.guest_path != format!("/run/{}", artifact.file_name)
-            || artifact.size_bytes > MAX_RIVER_ARTIFACT_BYTES
-            || artifact.sha256.len() != 64
-            || !artifact
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-            || descriptor.get("guest_path").and_then(Value::as_str)
-                != Some(artifact.guest_path.as_str())
-            || descriptor.get("size_bytes").and_then(Value::as_u64) != Some(artifact.size_bytes)
-            || descriptor.get("sha256").and_then(Value::as_str) != Some(artifact.sha256.as_str())
-        {
-            return Err("durable River artifact identity is invalid".to_string());
-        }
-        total = total
-            .checked_add(artifact.size_bytes)
-            .ok_or_else(|| "durable River artifact budget overflowed".to_string())?;
-    }
-    if total > MAX_RIVER_ARTIFACT_TOTAL_BYTES {
-        return Err("durable River artifacts exceed the attempt byte budget".to_string());
-    }
-    Ok(())
-}
-
 fn operation_id(turn_attempt: &str, step: u32, call: u32, digest: &str) -> String {
     format!("local:{turn_attempt}:{step}:{call}:{}", &digest[..16])
 }
@@ -1134,61 +1034,6 @@ mod tests {
                 ..
             } if operation_id == &operation_ids[1]
         ));
-    }
-
-    #[tokio::test]
-    async fn river_projection_is_frozen_before_runtime_and_cannot_drift_on_retry() {
-        let pool = test_pool().await;
-        let turn = create_turn(&pool, &start(), LocalCliTurnRoute::LocalLoopback, 100)
-            .await
-            .expect("create turn");
-        mark_model_running(&pool, &turn.turn_attempt, 0, 101)
-            .await
-            .expect("mark running");
-        let digest = format!("{:x}", Sha256::digest(b"semantic call"));
-        let operation_id =
-            match claim_tool_batch(&pool, &turn.turn_attempt, 0, &[digest], "assistant", 102)
-                .await
-                .expect("claim")
-                .remove(0)
-            {
-                ToolClaim::Claimed { operation_id } => operation_id,
-                _ => panic!("new tool must be claimed"),
-            };
-        let json = r#"{"schema":"vcp.mobile.attempt-projection.v1","river":{"mode":"semantic:2","resolved_mode":"fallback_last","messages":[]},"artifacts":[],"omissions":[]}"#;
-        let projection = DurableRiverProjection {
-            canonical_json: json.to_string(),
-            sha256: format!("{:x}", Sha256::digest(json.as_bytes())),
-            size_bytes: json.len() as u64,
-            artifacts: Vec::new(),
-        };
-        assert_eq!(
-            bind_tool_projection(&pool, &turn.turn_attempt, &operation_id, &projection, 103)
-                .await
-                .expect("first bind"),
-            projection
-        );
-        assert_eq!(
-            bind_tool_projection(&pool, &turn.turn_attempt, &operation_id, &projection, 104)
-                .await
-                .expect("idempotent bind"),
-            projection
-        );
-        let mut drifted = projection.clone();
-        drifted.canonical_json = drifted.canonical_json.replace("fallback_last", "semantic");
-        drifted.size_bytes = drifted.canonical_json.len() as u64;
-        drifted.sha256 = format!("{:x}", Sha256::digest(drifted.canonical_json.as_bytes()));
-        assert!(
-            bind_tool_projection(&pool, &turn.turn_attempt, &operation_id, &drifted, 105,)
-                .await
-                .expect_err("availability drift must conflict")
-                .contains("conflicts")
-        );
-        let loaded = load_live_turn(&pool, "message")
-            .await
-            .expect("load")
-            .expect("turn");
-        assert_eq!(loaded.step_records[0].river_projection, Some(projection));
     }
 
     #[tokio::test]

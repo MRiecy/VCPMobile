@@ -1,7 +1,5 @@
 //! Single outer owner for the local VCPMobileCLI model/tool continuation loop.
 
-use std::collections::{HashMap, HashSet};
-
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{Pool, Sqlite};
@@ -16,30 +14,21 @@ use crate::vcp_modules::vcp_client::{
     is_typed_assistant_budget_error, perform_vcp_request_registered, StreamEvent, VcpRequestPayload,
 };
 
-use super::protocol::{
-    parse_vcp_tool_requests, validate_vcp_mobile_cli_request, VcpCliAction, VcpRiverMode,
-};
+use super::protocol::{parse_vcp_tool_requests, validate_vcp_mobile_cli_request, VcpCliAction};
 use super::result::{serialize_local_model_payload, VcpCliErrorCode, VcpCliResultEnvelope};
-use super::runtime::{
-    ExecuteVcpMobileCliRequest, MobileCliAdmissionError, MobileCliRuntimeState,
-    VcpCliArtifactGrantInput, VcpCliRiverProjectionInput,
-};
+use super::runtime::{ExecuteVcpMobileCliRequest, MobileCliAdmissionError, MobileCliRuntimeState};
 use super::turn_ledger::{
-    bind_tool_projection, claim_finalizer, claim_tool_batch, create_turn, load_live_turn,
-    mark_interrupted, mark_model_continued, mark_model_running, mark_terminal,
-    store_model_retry_pending, store_pending_continuation, store_tool_result, FinalizerClaim,
-    ToolClaim,
+    claim_finalizer, claim_tool_batch, create_turn, load_live_turn, mark_interrupted,
+    mark_model_continued, mark_model_running, mark_terminal, store_model_retry_pending,
+    store_pending_continuation, store_tool_result, FinalizerClaim, ToolClaim,
 };
 use super::turn_meta::{
-    append_marked_history, build_semantic_projection, fallback_last_semantic_selection,
-    local_optional_context_notices, marked_history_block_with_projection, plan_local_meta,
-    plan_local_policy, river_full_candidate_hashes, selected_river_full_artifact_hashes,
-    semantic_candidates, LocalContinuationPolicy, RiverProjection, SemanticProjectionPlan,
+    append_marked_history, local_optional_context_notices, marked_history_block_with_projection,
+    plan_local_policy, LocalContinuationPolicy,
 };
 use super::turn_types::{
-    DurableRiverArtifact, DurableRiverProjection, LocalCliTurnOutcome, LocalCliTurnRecord,
-    LocalCliTurnRoute, LocalCliTurnStart, LocalCliTurnState, MAX_ASSISTANT_STEP_BYTES,
-    MAX_LOCAL_CLI_TOOL_STEPS, MAX_TOOL_PAYLOAD_BYTES,
+    LocalCliTurnOutcome, LocalCliTurnRecord, LocalCliTurnRoute, LocalCliTurnStart,
+    LocalCliTurnState, MAX_ASSISTANT_STEP_BYTES, MAX_LOCAL_CLI_TOOL_STEPS, MAX_TOOL_PAYLOAD_BYTES,
 };
 
 pub(crate) async fn run_local_cli_turn<R: Runtime>(
@@ -583,11 +572,6 @@ enum ClaimedToolError {
     Deadline,
 }
 
-struct SemanticTurnBudget<'a> {
-    cancellation_token: &'a CancellationToken,
-    deadline_at_ms: u64,
-}
-
 impl From<String> for ClaimedToolError {
     fn from(error: String) -> Self {
         Self::RetryPending(error)
@@ -623,7 +607,7 @@ async fn execute_claimed_tool<R: Runtime>(
     record: &LocalCliTurnRecord,
     raw_request: &super::protocol::RawVcpToolRequest,
     operation_id: &str,
-    messages: &[Value],
+    _messages: &[Value],
     cancellation_token: &CancellationToken,
 ) -> Result<
     (
@@ -635,132 +619,53 @@ async fn execute_claimed_tool<R: Runtime>(
     ClaimedToolError,
 > {
     ensure_claimed_work_allowed(record, cancellation_token)?;
-    let (result, policy, mark_history, durable_projection) =
-        match validate_vcp_mobile_cli_request(raw_request) {
+    let (result, policy, mark_history) = match validate_vcp_mobile_cli_request(raw_request) {
+        Err(error) => (
+            VcpCliResultEnvelope::error(
+                error.code,
+                error.to_string(),
+                "Correct the VCPMobileCLI request fields and retry.",
+            ),
+            LocalContinuationPolicy::Continue,
+            false,
+        ),
+        Ok(mut validated) => match plan_local_policy(&validated) {
             Err(error) => (
                 VcpCliResultEnvelope::error(
-                    error.code,
-                    error.to_string(),
-                    "Correct the VCPMobileCLI request fields and retry.",
+                    VcpCliErrorCode::UnsupportedMode,
+                    error,
+                    "Remove the unsupported meta field and retry.",
                 ),
                 LocalContinuationPolicy::Continue,
-                false,
-                None,
+                validated.meta.ink.is_some(),
             ),
-            Ok(mut validated) => {
-                let existing_projection = record
-                    .step_records
-                    .iter()
-                    .find(|step| step.operation_id == operation_id)
-                    .and_then(|step| step.river_projection.clone());
-                let needs_artifacts = existing_projection
-                    .as_ref()
-                    .is_some_and(|projection| !projection.artifacts.is_empty())
-                    || (existing_projection.is_none()
-                        && validated.meta.river == Some(VcpRiverMode::Full));
-                let resolved_artifacts = if needs_artifacts {
-                    verified_river_full_artifacts(app, pool, &validated, messages).await
-                } else {
-                    HashMap::new()
-                };
-                let planned = if let Some(projection) = existing_projection {
-                    plan_local_policy(&validated).map(|(mark_history, continuation)| {
-                        let notices = local_optional_context_notices(
-                            &validated,
-                            Some(&projection.canonical_json),
-                        );
-                        (Some(projection), continuation, mark_history, notices)
-                    })
-                } else {
-                    let semantic_projection = resolve_semantic_projection(
-                        app,
-                        pool,
-                        &validated,
-                        raw_request,
-                        messages,
-                        operation_id,
-                        SemanticTurnBudget {
-                            cancellation_token,
-                            deadline_at_ms: record.deadline_at_ms,
-                        },
-                    )
-                    .await;
-                    plan_local_meta(
-                        &validated,
-                        messages,
-                        &resolved_artifacts,
-                        semantic_projection,
-                    )
-                    .and_then(|plan| {
-                        let projection = plan
-                            .river_projection
-                            .as_ref()
-                            .map(freeze_river_projection)
-                            .transpose()?;
-                        Ok((
-                            projection,
-                            plan.continuation,
-                            plan.mark_history,
-                            plan.optional_context_notices,
-                        ))
-                    })
-                };
-                match planned {
-                    Err(error) => (
-                        VcpCliResultEnvelope::error(
-                            VcpCliErrorCode::UnsupportedMode,
-                            error,
-                            "Remove the unsupported meta field and retry.",
-                        ),
-                        LocalContinuationPolicy::Continue,
-                        validated.meta.ink.is_some(),
-                        None,
-                    ),
-                    Ok((projection, continuation, mark_history, notices)) => {
-                        ensure_claimed_work_allowed(record, cancellation_token)?;
-                        let projection = match projection {
-                            Some(projection) => Some(
-                                bind_tool_projection(
-                                    pool,
-                                    &record.turn_attempt,
-                                    operation_id,
-                                    &projection,
-                                    now_ms()?,
-                                )
-                                .await?,
-                            ),
-                            None => None,
-                        };
-                        if matches!(
-                            continuation,
-                            LocalContinuationPolicy::Parallel | LocalContinuationPolicy::NoReply
-                        ) {
-                            force_background(&mut validated.action);
-                        }
-                        let runtime_projection = projection.as_ref().map(|projection| {
-                            thaw_river_projection(projection, &resolved_artifacts)
-                        });
-                        ensure_claimed_work_allowed(record, cancellation_token)?;
-                        let runtime = app.state::<MobileCliRuntimeState>();
-                        let mut response = runtime
-                            .execute_with_turn_admission(
-                                app,
-                                ExecuteVcpMobileCliRequest {
-                                    operation_id: operation_id.to_string(),
-                                    action: validated.action,
-                                    session_id: Some(local_cli_session_id(record)),
-                                    river_projection: runtime_projection,
-                                },
-                                cancellation_token.clone(),
-                                record.deadline_at_ms,
-                            )
-                            .await?;
-                        response.envelope.prepend_optional_context_notices(&notices);
-                        (response.envelope, continuation, mark_history, projection)
-                    }
+            Ok((mark_history, continuation)) => {
+                let notices = local_optional_context_notices(&validated);
+                if matches!(
+                    continuation,
+                    LocalContinuationPolicy::Parallel | LocalContinuationPolicy::NoReply
+                ) {
+                    force_background(&mut validated.action);
                 }
+                ensure_claimed_work_allowed(record, cancellation_token)?;
+                let runtime = app.state::<MobileCliRuntimeState>();
+                let mut response = runtime
+                    .execute_with_turn_admission(
+                        app,
+                        ExecuteVcpMobileCliRequest {
+                            operation_id: operation_id.to_string(),
+                            action: validated.action,
+                            session_id: Some(local_cli_session_id(record)),
+                        },
+                        cancellation_token.clone(),
+                        record.deadline_at_ms,
+                    )
+                    .await?;
+                response.envelope.prepend_optional_context_notices(&notices);
+                (response.envelope, continuation, mark_history)
             }
-        };
+        },
+    };
     let local_payload = serialize_local_model_payload(&result)
         .map_err(|error| format!("cannot serialize local CLI result payload: {error}"))?;
     if local_payload.len() > MAX_TOOL_PAYLOAD_BYTES {
@@ -774,7 +679,7 @@ async fn execute_claimed_tool<R: Runtime>(
     let marked = Some(marked_history_block_with_projection(
         operation_id,
         &result,
-        durable_projection.as_ref(),
+        None,
     ));
     store_tool_result(
         pool,
@@ -790,209 +695,6 @@ async fn execute_claimed_tool<R: Runtime>(
     )
     .await?;
     Ok((operation_id.to_string(), result, local_payload, policy))
-}
-
-fn freeze_river_projection(projection: &RiverProjection) -> Result<DurableRiverProjection, String> {
-    let durable = DurableRiverProjection {
-        canonical_json: projection.canonical_json.clone(),
-        sha256: projection.sha256.clone(),
-        size_bytes: projection.size_bytes,
-        artifacts: projection
-            .artifact_grants
-            .iter()
-            .map(|grant| DurableRiverArtifact {
-                file_name: grant.file_name.clone(),
-                guest_path: grant.guest_path.clone(),
-                size_bytes: grant.size_bytes,
-                sha256: grant.sha256.clone(),
-            })
-            .collect(),
-    };
-    let actual = format!("{:x}", Sha256::digest(durable.canonical_json.as_bytes()));
-    if durable.size_bytes != durable.canonical_json.len() as u64 || durable.sha256 != actual {
-        return Err("River projection changed before durable bind".to_string());
-    }
-    Ok(durable)
-}
-
-fn thaw_river_projection(
-    projection: &DurableRiverProjection,
-    resolved_artifacts: &HashMap<String, crate::vcp_modules::file_manager::AttachmentCasFile>,
-) -> VcpCliRiverProjectionInput {
-    let artifact_grants = projection
-        .artifacts
-        .iter()
-        .filter_map(|artifact| {
-            let source = resolved_artifacts.get(&artifact.sha256)?;
-            (source.sha256 == artifact.sha256 && source.size_bytes == artifact.size_bytes).then(
-                || VcpCliArtifactGrantInput {
-                    source_path: source.path.clone(),
-                    file_name: artifact.file_name.clone(),
-                    guest_path: artifact.guest_path.clone(),
-                    size_bytes: artifact.size_bytes,
-                    sha256: artifact.sha256.clone(),
-                },
-            )
-        })
-        .collect();
-    VcpCliRiverProjectionInput {
-        canonical_json: projection.canonical_json.clone(),
-        sha256: projection.sha256.clone(),
-        size_bytes: projection.size_bytes,
-        artifact_grants,
-        expected_artifact_grants: projection.artifacts.len(),
-    }
-}
-
-async fn resolve_semantic_projection<R: Runtime>(
-    app: &AppHandle<R>,
-    pool: &Pool<Sqlite>,
-    request: &super::protocol::ValidatedVcpCliRequest,
-    raw_request: &super::protocol::RawVcpToolRequest,
-    messages: &[Value],
-    operation_id: &str,
-    budget: SemanticTurnBudget<'_>,
-) -> Option<SemanticProjectionPlan> {
-    let Some(VcpRiverMode::Semantic(limit)) = request.meta.river else {
-        return None;
-    };
-    let profile = match super::semantic::embedded_semantic_profile() {
-        Ok(profile) => profile,
-        Err(error) => {
-            log::warn!("[VCPMobileCLI] semantic profile unavailable: {error}");
-            let fallback = fallback_last_semantic_selection(
-                messages,
-                limit,
-                super::semantic::FROZEN_SEMANTIC_MODEL_ID.to_string(),
-            );
-            return build_semantic_projection(
-                messages,
-                &fallback,
-                limit,
-                Some("semantic_unavailable"),
-            )
-            .ok();
-        }
-    };
-    let fields = raw_request
-        .fields
-        .iter()
-        .map(|field| (field.key.clone(), field.value.clone()))
-        .collect::<Vec<_>>();
-    let candidates = semantic_candidates(messages);
-    let query = super::semantic::semantic_query_from_args(&fields);
-    let selection = match (query, candidates) {
-        (Ok(query), Ok(candidates)) if !candidates.is_empty() => {
-            let runtime = app.state::<MobileCliRuntimeState>();
-            let assets = runtime.semantic_asset_paths(app, operation_id).await;
-            match assets {
-                Ok((model, tokenizer)) => {
-                    let owner = app.state::<super::semantic::LocalEmbeddingOwner>();
-                    match now_ms().and_then(|value| {
-                        i64::try_from(value)
-                            .map_err(|_| "semantic timestamp exceeds SQLite range".to_string())
-                    }) {
-                        Ok(timestamp) => {
-                            owner
-                                .select(
-                                    pool,
-                                    super::semantic::SemanticSelectRequest {
-                                        model_path: &model,
-                                        tokenizer_path: &tokenizer,
-                                        query: &query,
-                                        candidates: &candidates,
-                                        limit: usize::from(limit),
-                                        now_ms: timestamp,
-                                        cancellation_token: budget.cancellation_token.clone(),
-                                        deadline_at_ms: budget.deadline_at_ms,
-                                    },
-                                )
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error),
-            }
-        }
-        (Err(error), _) | (_, Err(error)) => Err(error),
-        (_, Ok(_)) => Err("semantic candidates are empty".to_string()),
-    };
-    match selection {
-        Ok(selection) => build_semantic_projection(messages, &selection, limit, None).ok(),
-        Err(error) => {
-            log::warn!(
-                "[VCPMobileCLI] semantic selection unavailable; using last:{limit}: {}",
-                stable_semantic_error(&error)
-            );
-            let fallback = fallback_last_semantic_selection(messages, limit, profile.model_id);
-            build_semantic_projection(messages, &fallback, limit, Some("semantic_unavailable")).ok()
-        }
-    }
-}
-
-fn stable_semantic_error(error: &str) -> &'static str {
-    if error.contains("cache") {
-        "cache_unavailable"
-    } else if error.contains("candidate") || error.contains("query") {
-        "input_unavailable"
-    } else {
-        "model_unavailable"
-    }
-}
-
-async fn verified_river_full_artifacts<R: Runtime>(
-    app: &AppHandle<R>,
-    pool: &Pool<Sqlite>,
-    request: &super::protocol::ValidatedVcpCliRequest,
-    messages: &[Value],
-) -> HashMap<String, crate::vcp_modules::file_manager::AttachmentCasFile> {
-    if request.meta.river != Some(VcpRiverMode::Full) {
-        return HashMap::new();
-    }
-
-    let mut resolved = HashMap::new();
-    for hash in river_full_candidate_hashes(messages) {
-        if let Ok(record) =
-            crate::vcp_modules::file_manager::resolve_attachment_cas_file(app, pool, &hash).await
-        {
-            resolved.insert(hash, record);
-        }
-    }
-
-    let mut verified = HashSet::new();
-    loop {
-        let pending = selected_river_full_artifact_hashes(messages, &resolved)
-            .into_iter()
-            .filter(|hash| !verified.contains(hash))
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            break;
-        }
-        for hash in pending {
-            let Some(record) = resolved.get(&hash) else {
-                continue;
-            };
-            if crate::vcp_modules::file_manager::verify_existing_cas(
-                &record.path,
-                &record.sha256,
-                record.size_bytes,
-            )
-            .await
-            .is_ok()
-            {
-                verified.insert(hash);
-            } else {
-                log::warn!(
-                    "[VCPMobileCLI] river=full omitted corrupt attachment CAS {}",
-                    &hash[..12]
-                );
-                resolved.remove(&hash);
-            }
-        }
-    }
-    resolved.retain(|hash, _| verified.contains(hash));
-    resolved
 }
 
 enum ClaimedRecoveryError {

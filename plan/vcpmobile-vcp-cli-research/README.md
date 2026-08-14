@@ -1,6 +1,6 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`MINIMUM-USABLE-SCOPE / P0-P4.3-CODE-COMPLETE / P4.4-P5-DEFERRED`
+> 状态：`MINIMUM-USABLE-SCOPE / P0-P4.1-CODE-COMPLETE / LOCAL-RIVER-VREF-NOT-SUPPORTED`
 >
 > 研究日期：2026-08-13
 >
@@ -8,11 +8,10 @@
 > `MobileCliRuntime`、Android ProcessHost、人工前台 UI、Skills action 与持久 Job/输出边界，并完成 API 36
 > 真机验收；P2 已接入单聊/Group 本地多轮 coordinator、持久恢复、VCP 元字段和 typed route。当前只剩
 > 自动 transport guard 与断网续轮的 API 36 最终复验；P3 已完成 Distributed CLI adapter、离线授权与插件中心收口，
-> 仍需真实 VCPToolBox + API 36 端到端验收。P4.1 已完成 Skill catalog v2 与显式物化，P4.2 已完成
-> 本地 `river=full` 的有界附件 attempt copy；两者仍需 P4.2 API 36 实际 guest 读取/写攻击复验。
-> P4.3 已完成本地离线 `river=semantic:N`、确定性 `last:N` 回退和 durable projection。2026-08-14
-> 最小收敛裁决将 P4.4 本机知识库/vref 物化与 P5 后台能力正式延期；本地回环把合法 `river/vref`
-> 视为可选上下文，无法应用时继续执行命令，并通过同一 ToolResult 给 Agent 一句稳定提示。
+> 仍需真实 VCPToolBox + API 36 端到端验收。P4.1 已完成 Skill catalog v2 与显式物化。2026-08-14
+> 最小收敛裁决撤回 P4.2/P4.3 的 River 产品路径并延期 P4.4/P5：本地回环只兼容解析合法
+> `river/vref`，不做聊天快照、附件投影、向量召回或文件物化；命令照常执行，并通过同一 ToolResult
+> 给 Agent 一句稳定提示。Distributed route 仍严格拒绝这些字段。
 
 ## P0 实施快照（2026-08-13）
 
@@ -55,10 +54,9 @@
 - SQLite local-turn ledger 在执行前原子 claim 完整闭合 batch，按 stable operation ID 复用 Runtime 幂等；
   工具结果先持久化再续模型。断网/进程回调含糊时保留 `continuation_pending`，恢复入口早于旧 helper，
   已完成命令不重跑。
-- `ink=mark_history`、`river=text/last:N/full`、`archery=true/no_reply` 已有有界语义；`river` 以单 attempt
-  JSON snapshot 暴露到 `/run/vcp-river-context.json`，终态清理。`full` 最多复制 16 个附件、单个 64 MiB、
-  总计 256 MiB，并在 `omissions` 中说明省略原因。P4.3 已为 `localLoopback` 打开
-  `river=semantic:N`；`vref:N` 当前作为 best-effort 提示被剥离，不再阻塞本地命令。
+- `ink=mark_history`、`archery=true/no_reply` 由本地 meta owner 执行。`river/vref` 仅保留协议解析和
+  raw tool digest 兼容，既不进入 Bash，也不生成 snapshot、附件副本或语义选择；同一调用最多向 Agent
+  返回一条“未应用可选上下文”的提示。
 - 模型单 step 上限 512 KiB、规范 tool payload 256 KiB、工具调用最多 8 次、turn 最长 30 分钟；越界
   以 typed 终态结束，不执行截断后的调用。累计 ToolResult 以稳定 parser blocks 跨 step 投影，最终历史
   与恢复 finalizer byte-stable、exact-once。
@@ -66,9 +64,9 @@
   `[[VCPToolUse=Forbidden]]` 会在模型前被服务端剥离并关闭中央 loop。P2 因而只在 typed
   `localLoopback` 的临时 transport 投影自动加入该标记，`vcpPlugin` 不加入；manifest/Agent prompt
   仍完全由 VCPToolBox 和用户管理。
-- API 36 已完成 River 读取/写攻击 truth、projection GC、进程重启恢复和一次真实 Agent 两步 loop：
-  ToolResult 可见、最终历史 marker 存在、命令 marker 恰为一行、中央 VCP 摘要不存在。该轮使用部署端
-  sentinel fixture；当前产品自动注入 guard 的重装复验与“命令完成后断网再恢复”故障注入仍待手机解锁。
+- API 36 已完成一次真实 Agent 两步 loop：ToolResult 可见、最终历史 marker 存在、命令 marker 恰为一行、
+  中央 VCP 摘要不存在。历史 River 投影实验的读取/写攻击证据不再属于当前产品验收；当前仍待自动
+  transport guard 重装复验与“命令完成后断网再恢复”故障注入。
 
 ## P3 实施快照（2026-08-14）
 
@@ -79,44 +77,19 @@
 - 插件中心使用单 mutation owner、view/scan generation 与可访问 `role=switch`。展开未授权行只审阅元数据；只有 Streaming 工具的显式“读取样本”会执行，OneShot/Interactive/CLI 不因浏览产生副作用。
 - 当前静态/回归门已通过；`registered_tools` 只表示 manifest frame 已交给当前本地 WebSocket writer，因协议无服务端注册 ACK，不把它写成远端确认。
 
-## P4 实施快照（2026-08-14）
+## P4 当前裁决（2026-08-14）
 
-- P4 不再作为一个同时改 Skill、附件、索引和分布式协议的单块功能施工，而是固定为
-  `P4.0 能力/投影合同 → P4.1 Skill catalog v2 → P4.2 river=full → P4.3 river=semantic → P4.4 vref`。
-  本地与分布式 artifact 物化不是同一批：P4 先闭合本地 attempt copy，远端 hash/size/MIME 传输协议另立验收。
-- 当前仓库只有 SQLite FTS5 词法检索；Diary semantic 依赖远端 LightMemo，RAG observer 只观察远端
-  VCPInfo。三者均不能作为离线 `semantic`/`vref` 的实现或降级宣传。
-- Skill canonical catalog、附件 CAS 和知识源永不挂载进 PRoot。运行时只按稳定 hash 与显式 grant
-  复制到 attempt 私有 snapshot；guest 可以修改自己的副本，但没有 write-back，也看不到 host 路径。
-  这是一条“source unreachable + non-writeback”边界，不冒充内核只读挂载。
-- P4.1 已实现两阶段 Skill ZIP inspect/commit、catalog generation 与 hash/tree 校验；Bash 只有在
-  `materialize_skill` 后才能看到 `/workspace/.vcp-skills` 中的非回写副本。
-- P4.2 已把消息附件转换为 backend-owned CAS hash descriptor；模型 wire 会移除内部 descriptor，
-  local coordinator 复核数据库关系、路径、size 与 SHA-256 后才生成 `AttemptProjectionBundleV1`。
-  Android 只逐文件 bind attempt copy 到 `/run/river-artifact-*`，canonical CAS path 不进入 PRoot argv/env。
-- 本地语义引擎已用固定 revision 的 64 维多语言 Model2Vec 模型完成 API 36/arm64 真机证伪。
-  通用 Hugging Face tokenizer 路径峰值约 237 MiB，不予采用；相同 token 语义经紧凑 BPE pack + mmap
-  后，首次进程峰值 18,748 KiB、总时长约 51.8 ms，热运行峰值约 16.5 MiB、总时长约 16.7 ms。
-  该证据只批准进入产品实现与回归，不等于索引、召回质量或 App 进程集成已经验收。
-- P4.3 产品代码已固定模型、上游 config/tokenizer 输入和紧凑 BPE pack 的 size/SHA-256；Rust 以只读 mmap
-  执行 64 维加权池化，SQLite 只保存 `model_id + content hash + unit vector`，不保存 query 或消息正文。
-  候选读取按本次 hash 分块，缓存最多 20,000 行并按 LRU/模型代际清理；有限非单位、零或 NaN 向量均
-  视为损坏并重算。
-- semantic selection 由现有 `LocalEmbeddingOwner` 单 permit 串行拥有，最多工作 60 秒，并贯穿检查 turn
-  cancellation 与 30 分钟绝对 deadline。模型、缓存或资产不可用时，先把精确 `fallback_last` projection
-  持久绑定到 operation，再启动 Bash；ToolResult 稳定显示 `semantic:N → last:N`，恢复不会重新选取或重跑。
-- Android 模型/pack 只在首次有效 semantic 请求时按完整 identity 原子 staging；同进程热路径复用已验证
-  identity，semantic 使用独立有界 executor，不阻塞 ProcessHost 的 start/inspect/cancel 控制队列。
-- `assembleArm64Debug` 已实际成功；Debug APK 为 84,528,816 bytes。包内 model/tokenizer 分别压缩为
-  22,368,109 / 5,666,724 bytes（合计 28,034,833 bytes），解压后的 size 与 profile SHA-256 逐字一致。
-  该数字是 Debug 构建证据，不冒充 Release APK 体积。
-- P4.4 的知识 catalog/CAS/index/Android bind 与治理 UI 已延期，不进入当前最小可用版本；ADR 仅作为
-  未来重启时的设计参考。`localLoopback` 收到合法 `vref:N` 时不物化文件、不阻塞 Bash，只向 Agent
-  提示本次未应用；`vcpPlugin`、远端 `file://` 与伪造物化字段继续 fail-closed。
+- P4.1 Skill catalog v2 与显式物化保留；它直接服务 CLI 任务，且不把 canonical catalog 挂载进 Bash。
+- P4.2 River text/last/full 与 P4.3 semantic 的实验实现已从产品路径回退：聊天记录、附件和本地向量
+  不会投影给 Bash，Android 不再打包语义模型，Runtime/ProcessHost 不再接受 River projection。
+- P4.4 vref 知识物化不进入当前产品。协议仍严格解析 river/vref，便于接收旧请求并保持 tool digest；
+  localLoopback 始终忽略并提示，vcpPlugin 始终 fail-closed。
+- 旧 turn/job ledger 的 River DTO、路径字段与有界 GC 暂留一个兼容周期，只用于读取和清理由旧 Debug
+  构建产生的数据，不构成新能力。`0008_create_local_semantic_cache.sql` 保持原字节以维护 SQLx checksum；
+  新代码不再读写该派生缓存。
 
-非阻塞后续：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收、P4.2 真机 guest 读取/写攻击复验、P4.3 产品设备门。P4.4 vref recall 与 P5 后台前台
-服务与人工 PTY 已延期。其中 P4.3 剩余的是 API 26/36 产品 App PSS、低存储、50 次冷/热召回、温升与故障注入
-设备门。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称
+非阻塞后续：P2 上述两项最终设备复验、P3 真实 VCPToolBox/API 36 短命令、长 Job、错误、取消与断网 replay 验收。River/vref 本地召回与 P5 后台前台
+服务、人工 PTY 均不进入当前最小版本。P1/P2 当前准确能力等级仍是 `foreground_only`，不能据此宣称
 Doze 后台长稳。
 
 ## 结论
@@ -150,7 +123,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 7. **人工终端与 Agent Job 分离**。普通任务用 `run/poll/cancel/list`；密码、SSH、vim、TUI 等场景由用户显式打开交互终端，预填命令但不自动执行。
 8. **Android host 坚持非 Root 用户态沙箱**。首发目标 Shell 固定为 PRoot guest 内的 Alpine Linux (musl) + GNU Bash，Agent 命令以 `/bin/bash -lc` 执行；guest 可模拟 root 管理自身 rootfs 和 `apk`，但不能越过 App UID。P0 验证可行性；若不可行必须回到 manifest 重新裁决，不得静默改用 `ash`。Android Root/Shizuku 只能作为未来显式 elevated backend。
 9. **长任务由 job 生命周期拥有，不由聊天 SSE 拥有**。模型续轮断线不能导致命令重跑；超时/取消必须终止目标进程组并阻止迟到输出污染后续任务。
-10. **VCP 通用元字段不支配本地命令可用性**。`ink: mark_history`、`river=text/last:N/full/semantic:N`、`archery=true/no_reply` 已在本地 loop 落地；semantic 不可用时回退 `last:N`。本地合法 `river/vref` 无法应用时剥离该可选上下文、继续执行命令，并在 ToolResult 中提示 Agent；语法错误、伪造物化字段和远端不可达引用仍 fail-closed。
+10. **VCP 通用元字段不支配本地命令可用性**。本地只执行 `ink: mark_history` 与 `archery=true/no_reply`；合法 `river/vref` 始终剥离、继续命令并在 ToolResult 中提示 Agent，不建立本地召回能力。语法错误、伪造物化字段和远端不可达引用仍 fail-closed。
 11. **Skill 是 manifest 中可见的一等 action，不是隐藏 Shell 子命令**。`VCPMobileCLI` 直接提供 `action=list_skills|read_skill`；前者列出校验通过的 Skill，后者按 `skill_id + resource_path` 阅读 `SKILL.md` 或受控资源并返回 `vcp-skill://<id>` 逻辑引用。Skill catalog 不挂载进 PRoot guest；若要执行脚本，必须先经明确动作物化到 `/workspace`。它不增加第二个 VCP 工具，也不自动执行 Skill 脚本。
 12. **iOS 只作为未来可选方向**。同一 VCP 协议可以复用，CLI Runtime 必须另做平台实现；本专项不改变 Android-only 当前产品边界。
 
@@ -190,9 +163,9 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 允许的准确表述是：
 
 > VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime、P2 本地 Agent 多轮 loop、P3 可选 Distributed adapter
-> 以及 P4.1-P4.3 的 Skill、full/semantic River 产品代码已完成；单聊和 Group 共用可恢复、exact-once 的
-> 本地 coordinator。当前前台最小可用范围已经收敛；P2/P3/P4 的列明设备复验仍是发布证据，
-> P4.4 vref 物化与 P5 Android 后台/人工 PTY 已延期，不再阻塞当前 CLI 使用。
+> 以及 P4.1 Skill 产品代码已完成；单聊和 Group 共用可恢复、exact-once 的本地 coordinator。
+> River/vref 仅作协议兼容解析，不是本地 CLI capability；本地向量模型、投影和知识物化均不随产品交付。
+> 当前前台最小可用范围已经收敛；P2/P3 的列明设备复验仍是发布证据，P5 Android 后台/人工 PTY 已延期。
 
 不得表述为“Agent CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
 或“iOS 已支持本地 Linux”。

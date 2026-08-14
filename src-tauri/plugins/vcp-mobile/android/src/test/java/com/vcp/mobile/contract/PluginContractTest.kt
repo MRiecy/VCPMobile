@@ -1,5 +1,6 @@
 package com.vcp.mobile.contract
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -248,14 +249,12 @@ class PluginContractTest {
         ).associateWith { File(pluginRoot, it).readText() }
         val internalMethods = listOf(
             "prepareCliRuntime",
-            "prepareCliSemanticAssets",
             "startCliProcess",
             "inspectCliProcess",
             "cancelCliProcess",
         )
         val internalRustFunctions = listOf(
             "prepare_cli_runtime_inner",
-            "prepare_cli_semantic_assets_inner",
             "start_cli_process_inner",
             "inspect_cli_process_inner",
             "cancel_cli_process_inner",
@@ -272,6 +271,7 @@ class PluginContractTest {
             assertTrue("Rust CLI bridge 缺少 $function", rustCli.contains("pub async fn $function"))
             assertTrue("内部 bridge 不得成为 #[tauri::command]", !rustCli.contains("#[tauri::command]\npub async fn $function"))
         }
+        assertFalse("Kotlin plugin 不应再注册本地语义资产 bridge", kotlinPlugin.contains("prepareCliSemanticAssets"))
         assertTrue("CLI ProcessHost 不得调用 Root/libsu", !processHost.contains("libsu") && !processHost.contains("Shell.getShell"))
         assertTrue("CLI ProcessHost 不得接入 Guardian", !processHost.contains("ForegroundGuardian"))
         assertTrue("CLI ProcessHost 不得新增 localhost bridge", !processHost.contains("ServerSocket") && !processHost.contains("localhost"))
@@ -304,20 +304,11 @@ class PluginContractTest {
         assertTrue("profile 必须声明 unbundled loader", commandProfile.contains("\"loaderMode\": \"unbundled_required\""))
         assertTrue("profile 必须固定 APK loader 名", commandProfile.contains("libvcp_proot_loader.so"))
         assertTrue("PRoot 必须在退出时清理全部 tracee", processHost.contains("\"--kill-on-exit\""))
-        assertTrue("prepare 必须回显 Rust-owned River projection root", processHost.contains("put(\"projectionRootPath\""))
-        assertTrue("语义模型必须走独立 lazy prepare", processHost.contains("fun prepareSemantic(") && processHost.contains("stageVerifiedSemanticAsset("))
-        assertTrue("语义准备不得阻塞 cancel/inspect 控制队列", processHost.contains("semanticExecutor") && processHost.contains("submitOn(semanticExecutor, \"semantic\""))
-        assertTrue("语义资产必须按完整 identity 做进程内热复用", processHost.contains("it.identity == identity") && processHost.contains("preparedSemantic = it"))
-        assertTrue("语义资产必须 NOFOLLOW 且逐字复核", processHost.contains("semantic asset must be a direct regular file") && processHost.contains("semantic asset identity changed after staging"))
-        assertTrue("River projection 必须做 NOFOLLOW 单文件校验", processHost.contains("verifyRiverContextProjection(") && processHost.contains("RIVER_CONTEXT_FILE_NAME"))
-        assertTrue("River projection guest 路径必须使用已有 /run parent", processHost.contains("GUEST_RIVER_CONTEXT_PATH = \"/run/vcp-river-context.json\""))
-        assertTrue("River projection 必须作为可选单文件 bind", processHost.contains("\"${'$'}riverContextHostPath:${'$'}GUEST_RIVER_CONTEXT_PATH\""))
-        assertTrue("River projection env 必须由 host 固定", processHost.contains("VCP_RIVER_CONTEXT_FILE=${'$'}GUEST_RIVER_CONTEXT_PATH"))
-        assertTrue("River full 必须有独立 artifact DTO", processHost.contains("class RiverArtifactProjectionArgs"))
-        assertTrue("River artifact 必须做 NOFOLLOW 校验", processHost.contains("finalArtifactAttributes.isRegularFile") && processHost.contains("!finalArtifactAttributes.isSymbolicLink"))
-        assertTrue("River artifact 只能逐文件 bind", processHost.contains("add(\"${'$'}hostPath:${'$'}guestPath\")"))
-        assertTrue("River artifact 必须固定 item/total 预算", processHost.contains("MAX_RIVER_ARTIFACTS = 16") && processHost.contains("MAX_RIVER_ARTIFACT_TOTAL_BYTES = 256L * 1024L * 1024L"))
-        assertTrue("用户命令必须保持 Bash -lc 独立 argv", processHost.contains("add(\"/bin/bash\")\n        add(\"-lc\")\n        add(command)"))
+        assertTrue("prepare 必须回显旧投影清理 root", processHost.contains("put(\"projectionRootPath\""))
+        assertFalse("ProcessHost 不应再准备本地语义资产", processHost.contains("prepareSemantic"))
+        assertFalse("ProcessHost 不应再注入 River 环境变量", processHost.contains("VCP_RIVER_CONTEXT_FILE"))
+        assertFalse("ProcessHost 不应再接受 River projection", processHost.contains("riverContextProjection"))
+        assertTrue("用户命令必须保持 Bash -lc 独立 argv", processHost.contains("add(\"/bin/bash\")\n    add(\"-lc\")\n    add(command)"))
         assertTrue("不允许向 guest 暴露 /sys", !processHost.contains("\"/sys\""))
         assertTrue("host-managed output 不得 bind 到 guest", !processHost.contains("outputPath:/output") && !processHost.contains("prepared.output.absolutePath:/output"))
         assertTrue("不得把完整 projection root 暴露给 guest", !processHost.contains("prepared.projectionRoot.absolutePath:/"))

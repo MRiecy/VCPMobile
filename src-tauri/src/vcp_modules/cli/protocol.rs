@@ -301,13 +301,14 @@ impl VcpMetaCapabilities {
         archery_no_reply: false,
     };
 
-    /// 本地 loop 已支持 text/last/full 与离线 semantic；vref 仍需显式知识授权。
+    /// localLoopback 仅拥有 ink/archery。river/vref 只做协议兼容解析，由本地 meta owner
+    /// 剥离并提示，不构成可执行 capability。
     pub const LOCAL_LOOPBACK_INITIAL: Self = Self {
         mark_history: true,
-        river_text: true,
-        river_last: true,
-        river_full: true,
-        river_semantic: true,
+        river_text: false,
+        river_last: false,
+        river_full: false,
+        river_semantic: false,
         vref: false,
         archery_parallel: true,
         archery_no_reply: true,
@@ -1245,13 +1246,15 @@ mod tests {
         assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
         assert_eq!(error.field.as_deref(), Some("ink"));
 
-        validated
+        let local_error = validated
             .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
-            .expect("initial local loop supports mark_history and river=text");
+            .expect_err("local capability does not advertise ignored river hints");
+        assert_eq!(local_error.code, VcpCliErrorCode::UnsupportedMode);
+        assert_eq!(local_error.field.as_deref(), Some("river"));
     }
 
     #[test]
-    fn river_full_and_semantic_are_local_while_vref_remains_explicitly_unsupported() {
+    fn river_and_vref_are_parsed_but_not_local_capabilities() {
         let full = exactly_one_request(
             "<<<[TOOL_REQUEST]>>>\n\
              tool_name:「始」VCPMobileCLI「末」,\n\
@@ -1260,10 +1263,11 @@ mod tests {
              <<<[END_TOOL_REQUEST]>>>",
             "river full",
         );
-        validate_vcp_mobile_cli_request(&full)
-            .expect("valid river full")
+        let full_error = validate_vcp_mobile_cli_request(&full)
+            .expect("valid river full syntax")
             .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
-            .expect("local loop supports bounded river full projection");
+            .expect_err("local loop ignores rather than advertises river full");
+        assert_eq!(full_error.field.as_deref(), Some("river"));
 
         let semantic = exactly_one_request(
             "<<<[TOOL_REQUEST]>>>\n\
@@ -1273,10 +1277,11 @@ mod tests {
              <<<[END_TOOL_REQUEST]>>>",
             "river semantic",
         );
-        validate_vcp_mobile_cli_request(&semantic)
-            .expect("valid river semantic")
+        let semantic_error = validate_vcp_mobile_cli_request(&semantic)
+            .expect("valid river semantic syntax")
             .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
-            .expect("local loop supports offline semantic projection");
+            .expect_err("local loop ignores rather than advertises semantic recall");
+        assert_eq!(semantic_error.field.as_deref(), Some("river"));
 
         let vref = exactly_one_request(
             "<<<[TOOL_REQUEST]>>>\n\

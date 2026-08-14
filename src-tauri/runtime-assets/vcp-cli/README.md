@@ -31,21 +31,6 @@ PRoot 主程序和它的 unbundled loader 必须作为两个 Android 原生资�
 获得独立的固定环境。rootfs archive 通过插件的专用 Android assets source set 打包，由应用首次使用时
 解压到自己的私有数据目录。
 
-离线语义模型同样走专用 Android assets source set，但不会随普通 CLI provision 复制；只有首次
-`river=semantic:N` 才由独立内部 bridge 按 [`semantic-profile.json`](./semantic-profile.json) 的
-size/SHA-256 原子复制到 app-private assets 目录。Rust 随后以 mmap 只读加载模型和紧凑 BPE pack，
-不启动 Python/ONNX/daemon，也不访问网络。构建期复现入口为
-[`build/build_semantic_assets.py`](./build/build_semantic_assets.py)；脚本逐字校验上游 `model.safetensors`、
-`tokenizer.json`、`config.json`，并拒绝 pre-tokenizer、AddedToken、padding/decoder 或 BPE flags 漂移。
-同一 App 进程内，完整 asset identity 验证成功后复用缓存；进程重启会重新校验，损坏文件会原子修复。
-
-冻结的离线语义资产身份：
-
-| Asset | Bytes | SHA-256 |
-|---|---:|---|
-| `vcp-semantic-model-r2.safetensors` | 24,471,328 | `3a416974fe644efa62c0d33970a6403b2a00e0943d376e06dfc1dae85456b10b` |
-| `vcp-semantic-tokenizer-r2.vcpbpe` | 10,437,027 | `4590cc5f76646fc2ebb5d6983ff445215b5f4ed5e5c9e81b171963f8b9a59e26` |
-
 冻结的 Android arm64 ELF 身份：
 
 | Asset | Bytes | SHA-256 |
@@ -78,14 +63,6 @@ unbundled W^X 版本的三个原始资产共 27,144,229 bytes；以固定文件�
 unbundled loader、取消以及 detached tracee 的复验仍是发布前真机门，不能由 JVM/构建检查替代。
 
 这只是 P0/P1 前台执行证据，不等于 screen-off、Doze、划卡或 OEM 后台长稳验收。
-
-2026-08-14 的 API 36/arm64 独立进程 feasibility 中，紧凑 pack + mmap 首次峰值 18,748 KiB、
-总时长 51.8 ms，热运行峰值 16,376–16,536 KiB、总时长 16.7–27.1 ms；它只证明模型路径可行，
-不替代产品 App PSS、首次索引、连续 50 次召回、低存储/损坏回退、温升、API 26 或代表 OEM 验收。
-
-同日 `assembleArm64Debug` 的实际 Debug APK 为 84,528,816 bytes；ZIP 中 model/tokenizer 条目分别为
-22,368,109 和 5,666,724 bytes，合计 28,034,833 bytes。解包后两文件的 size/SHA-256 与上表一致。
-这是 Debug 包接线/体积证据，不代表 Release 包大小、安装后磁盘峰值或设备资源验收。
 
 ## 许可证边界
 

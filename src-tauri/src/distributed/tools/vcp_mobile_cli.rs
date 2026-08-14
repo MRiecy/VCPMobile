@@ -115,7 +115,6 @@ impl OneShotTool for VcpMobileCliTool {
                     operation_id: operation_id.clone(),
                     action: validated.action,
                     session_id: Some(session_id),
-                    river_projection: None,
                 },
             )
             .await

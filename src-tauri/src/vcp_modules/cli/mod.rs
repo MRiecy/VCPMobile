@@ -21,7 +21,6 @@ pub mod protocol;
 #[allow(dead_code)]
 pub mod result;
 pub mod runtime;
-pub(crate) mod semantic;
 #[allow(dead_code)]
 mod skill_catalog;
 #[allow(dead_code)]

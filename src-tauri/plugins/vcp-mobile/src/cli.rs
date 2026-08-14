@@ -45,44 +45,6 @@ pub struct PrepareCliRuntimeResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PrepareCliSemanticAssetsRequest {
-    pub operation_id: String,
-    pub model_id: String,
-    pub model_bytes: u64,
-    pub model_sha256: String,
-    pub tokenizer_bytes: u64,
-    pub tokenizer_sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PrepareCliSemanticAssetsResponse {
-    pub operation_id: String,
-    pub model_id: String,
-    pub model_path: String,
-    pub tokenizer_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CliProjectedArtifact {
-    pub host_path: String,
-    pub guest_path: String,
-    pub size_bytes: u64,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CliRiverContextProjection {
-    pub host_path: String,
-    pub size_bytes: u64,
-    pub sha256: String,
-    pub artifacts: Vec<CliProjectedArtifact>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartCliProcessRequest {
     pub operation_id: String,
     pub job_id: String,
@@ -92,8 +54,6 @@ pub struct StartCliProcessRequest {
     pub rootfs_path: String,
     pub cwd: String,
     pub artifact_max_bytes: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub river_context_projection: Option<CliRiverContextProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,26 +147,6 @@ pub async fn prepare_cli_runtime_inner<R: Runtime>(
     }
 }
 
-pub async fn prepare_cli_semantic_assets_inner<R: Runtime>(
-    app: &AppHandle<R>,
-    request: &PrepareCliSemanticAssetsRequest,
-) -> Result<PrepareCliSemanticAssetsResponse, String> {
-    #[cfg(target_os = "android")]
-    {
-        let handle = app.state::<VcpMobileState<R>>().mobile_plugin_handle()?;
-        return handle
-            .run_mobile_plugin_async("prepareCliSemanticAssets", request)
-            .await
-            .map_err(|error| format!("prepareCliSemanticAssets failed: {error}"));
-    }
-
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = (app, request);
-        Err(PROCESS_HOST_UNAVAILABLE.to_string())
-    }
-}
-
 pub async fn start_cli_process_inner<R: Runtime>(
     app: &AppHandle<R>,
     request: &StartCliProcessRequest,
@@ -270,9 +210,8 @@ pub async fn cancel_cli_process_inner<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CliProcessState, CliProjectedArtifact, CliRiverContextProjection, PrepareCliRuntimeRequest,
-        PrepareCliRuntimeResponse, PrepareCliSemanticAssetsRequest,
-        PrepareCliSemanticAssetsResponse, StartCliProcessRequest,
+        CliProcessState, PrepareCliRuntimeRequest, PrepareCliRuntimeResponse,
+        StartCliProcessRequest,
     };
 
     #[test]
@@ -327,33 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn semantic_asset_prepare_contract_is_camel_case_and_requires_both_paths() {
-        let request = PrepareCliSemanticAssetsRequest {
-            operation_id: "operation-1".to_string(),
-            model_id: "model-r2".to_string(),
-            model_bytes: 24_471_328,
-            model_sha256: "4".repeat(64),
-            tokenizer_bytes: 10_437_027,
-            tokenizer_sha256: "5".repeat(64),
-        };
-        let value = serde_json::to_value(request).expect("serialize semantic prepare request");
-        assert_eq!(value["modelBytes"], 24_471_328);
-        assert_eq!(value["tokenizerSha256"], "5".repeat(64));
-        assert!(value.get("model_bytes").is_none());
-
-        let response: PrepareCliSemanticAssetsResponse =
-            serde_json::from_value(serde_json::json!({
-                "operationId": "operation-1",
-                "modelId": "model-r2",
-                "modelPath": "/private/assets/model.safetensors",
-                "tokenizerPath": "/private/assets/tokenizer.vcpbpe"
-            }))
-            .expect("deserialize semantic prepare response");
-        assert_eq!(response.model_id, "model-r2");
-        assert!(response.model_path.ends_with("model.safetensors"));
-    }
-
-    #[test]
     fn start_request_uses_camel_case_and_keeps_command_as_data() {
         let request = StartCliProcessRequest {
             operation_id: "operation-1".to_string(),
@@ -364,18 +276,6 @@ mod tests {
             rootfs_path: "/private/rootfs".to_string(),
             cwd: "/workspace/topic".to_string(),
             artifact_max_bytes: 1024,
-            river_context_projection: Some(CliRiverContextProjection {
-                host_path: "/private/projections/attempt/river-context.json".to_string(),
-                size_bytes: 17,
-                sha256: "a".repeat(64),
-                artifacts: vec![CliProjectedArtifact {
-                    host_path: "/private/projections/attempt/river-artifact-00-aaaaaaaaaaaa.png"
-                        .to_string(),
-                    guest_path: "/run/river-artifact-00-aaaaaaaaaaaa.png".to_string(),
-                    size_bytes: 23,
-                    sha256: "b".repeat(64),
-                }],
-            }),
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
@@ -383,42 +283,8 @@ mod tests {
         assert_eq!(value["runtimeGeneration"], 7);
         assert_eq!(value["artifactMaxBytes"], 1024);
         assert_eq!(value["command"], "printf '%s' '$HOME'");
-        assert_eq!(
-            value["riverContextProjection"]["hostPath"],
-            "/private/projections/attempt/river-context.json"
-        );
-        assert_eq!(value["riverContextProjection"]["sizeBytes"], 17);
-        assert_eq!(value["riverContextProjection"]["sha256"], "a".repeat(64));
-        assert_eq!(
-            value["riverContextProjection"]["artifacts"][0]["guestPath"],
-            "/run/river-artifact-00-aaaaaaaaaaaa.png"
-        );
-        assert!(value.get("operation_id").is_none());
-
-        let mut missing_artifacts = value;
-        missing_artifacts["riverContextProjection"]
-            .as_object_mut()
-            .expect("river projection object")
-            .remove("artifacts");
-        assert!(serde_json::from_value::<StartCliProcessRequest>(missing_artifacts).is_err());
-    }
-
-    #[test]
-    fn start_request_omits_absent_river_projection() {
-        let request = StartCliProcessRequest {
-            operation_id: "operation-2".to_string(),
-            job_id: "job-2".to_string(),
-            attempt_id: "attempt-2".to_string(),
-            runtime_generation: 8,
-            command: "true".to_string(),
-            rootfs_path: "/private/rootfs".to_string(),
-            cwd: "/workspace".to_string(),
-            artifact_max_bytes: 0,
-            river_context_projection: None,
-        };
-
-        let value = serde_json::to_value(request).expect("serialize request");
         assert!(value.get("riverContextProjection").is_none());
+        assert!(value.get("operation_id").is_none());
     }
 
     #[test]

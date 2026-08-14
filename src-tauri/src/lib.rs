@@ -17,7 +17,6 @@ use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
 };
-use vcp_modules::cli::semantic::LocalEmbeddingOwner;
 use vcp_modules::cli::{
     commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,
     execute_vcp_mobile_cli_action, get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog,
@@ -113,7 +112,6 @@ pub fn run() {
             app.manage(vcp_modules::model_manager::ModelManagerState::new());
             app.manage(vcp_modules::emoticon_manager::EmoticonManagerState::default());
             app.manage(MobileCliRuntimeState::new());
-            app.manage(LocalEmbeddingOwner::new());
 
             let handle = app.handle().clone();
 

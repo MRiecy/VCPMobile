@@ -21,18 +21,6 @@ patch; it prevents PRoot from materializing an executable loader into an app-wri
   GPL-3.0-or-later, Git/BusyBox/apk-tools under GPL-2.0-family terms, Python under PSF-2.0, OpenSSL under
   Apache-2.0, and musl under MIT.
 
-## Offline semantic model
-
-| Component | Pinned source | License evidence | Distribution note |
-|---|---|---|---|
-| `Nourh7/granite-embedding-97m-multilingual-r2` | revision `b77044bfd84eef0b552c5346eeacc851264592b3` | frozen model card declares MIT | ship the exact safetensors bytes, compact tokenizer pack, [`semantic/MODEL_CARD.md`](./semantic/MODEL_CARD.md), [`semantic/LICENSE-MIT.txt`](./semantic/LICENSE-MIT.txt), and [`semantic-profile.json`](./semantic-profile.json) |
-
-The tokenizer pack is a deterministic build artifact from the pinned upstream `tokenizer.json` and
-does not contain executable code. `semantic-profile.json` also freezes the exact upstream
-`config.json` byte size and SHA-256; the build rejects pre-tokenizer, AddedToken, padding/decoder and
-BPE contract drift. VCP Mobile excludes padding from pooling and does not bundle the Python Model2Vec
-or Hugging Face tokenizer runtimes.
-
 ## Release gate
 
 Before public distribution, release automation must attach or otherwise provide:
@@ -41,6 +29,5 @@ Before public distribution, release automation must attach or otherwise provide:
 2. talloc source plus whatever relinkable object/source offer the selected legal review requires;
 3. Alpine package notices/license texts and corresponding source availability;
 4. a notice that Android guest `root` is simulated and grants no Android Root privilege.
-5. the pinned semantic model notice, MIT text, source revision and exact asset hashes.
 
 This inventory records engineering facts; it is not a substitute for a legal review.

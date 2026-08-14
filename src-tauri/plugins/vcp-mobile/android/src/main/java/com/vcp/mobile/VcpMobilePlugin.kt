@@ -37,7 +37,6 @@ import com.vcp.mobile.cli.CancelCliProcessArgs
 import com.vcp.mobile.cli.CliProcessHost
 import com.vcp.mobile.cli.InspectCliProcessArgs
 import com.vcp.mobile.cli.PrepareCliRuntimeArgs
-import com.vcp.mobile.cli.PrepareCliSemanticAssetsArgs
 import com.vcp.mobile.cli.StartCliProcessArgs
 import com.vcp.mobile.service.StreamKeepaliveService
 import android.graphics.Bitmap
@@ -1241,22 +1240,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             )
         } catch (error: Exception) {
             invoke.reject("prepareCliRuntime failed: ${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    @Command
-    fun prepareCliSemanticAssets(invoke: Invoke) {
-        try {
-            val args = invoke.parseArgs(PrepareCliSemanticAssetsArgs::class.java)
-            cliProcessHost.prepareSemantic(
-                args,
-                success = { result -> invoke.resolve(result) },
-                failure = { reason -> invoke.reject("prepareCliSemanticAssets failed: $reason") },
-            )
-        } catch (error: Exception) {
-            invoke.reject(
-                "prepareCliSemanticAssets failed: ${error.message ?: error.javaClass.simpleName}",
-            )
         }
     }
 

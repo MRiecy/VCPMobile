@@ -7,11 +7,11 @@ const MANIFEST_DESCRIPTION: &str =
 
 const INVOCATION_DESCRIPTION: &str = r#"在 Android 应用私有 PRoot guest 中执行非交互 Bash 命令，也可通过一等 action 发现、读取和显式物化 Mobile Skill。
 
-环境：Shell 固定为 Alpine Linux(musl) 的 /bin/bash -lc；默认 cwd=/workspace；guest 模拟 root 仅用于隔离 rootfs 和 apk，不拥有 Android root；不支持 sudo/apt/systemctl/GUI/adb。基线包含 GNU 常用文件命令、grep/sed/awk/find/diff/patch、tar/zip、curl/wget、git/ssh、jq、python3/pip/apk；其他命令先用 command -v 检查。支持管道、重定向、&& 和多行 Bash。每次 action=run 启动独立 Bash Job。工作区文件和 apk 安装结果持久；cd/export/alias 不跨 run 保留。canonical Skill catalog 永不挂载进 Bash；list_skills/read_skill 只发现和阅读，materialize_skill 才把经 hash 校验的副本放入 /workspace/.vcp-skills。该副本可被 guest 修改但不会写回 catalog。仅在 Agent 路由为 localLoopback 时，river=text、river=last:N、river=full 与 river=semantic:N 会把已过滤上下文写为本次 attempt 的 JSON 快照，路径在 VCP_RIVER_CONTEXT_FILE；full 的 artifacts[].guest_path 指向有界附件副本（最多16个、单个64MiB、总计256MiB），omissions 说明未物化原因；semantic 查询取自本次工具请求中除 tool_name/action/ink/river/vref/archery 外的非空参数值（合计最多2000 UTF-8字节），使用设备内离线多语言向量选择 N 条，模型或缓存不可用时在 JSON 与 ToolResult 中明确回退最近 N 条。guest 对上下文或附件副本的修改不会写回聊天记录或 canonical CAS。localLoopback 将 river/vref 视为可选上下文：合法请求无法物化时仍执行命令，并在 ToolResult 中简短提示 Agent；vcpPlugin 的 river/vref、远端 file:// 和伪造物化字段仍保持 fail-closed。
+环境：Shell 固定为 Alpine Linux(musl) 的 /bin/bash -lc；默认 cwd=/workspace；guest 模拟 root 仅用于隔离 rootfs 和 apk，不拥有 Android root；不支持 sudo/apt/systemctl/GUI/adb。基线包含 GNU 常用文件命令、grep/sed/awk/find/diff/patch、tar/zip、curl/wget、git/ssh、jq、python3/pip/apk；其他命令先用 command -v 检查。支持管道、重定向、&& 和多行 Bash。每次 action=run 启动独立 Bash Job。工作区文件和 apk 安装结果持久；cd/export/alias 不跨 run 保留。canonical Skill catalog 永不挂载进 Bash；list_skills/read_skill 只发现和阅读，materialize_skill 才把经 hash 校验的副本放入 /workspace/.vcp-skills。该副本可被 guest 修改但不会写回 catalog。协议兼容识别 river/vref，但 localLoopback 不应用这两个可选上下文字段，Agent 不应主动发送或依赖它们；若旧请求携带，字段不会进入 Bash，命令继续执行并返回一条短提示。vcpPlugin 的 river/vref、远端 file:// 和伪造物化字段仍保持 fail-closed。
 
 action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。
 - run 必需 command；可选 description、cwd、timeout_ms、run_in_background。普通 run 最多等待 8000ms，未完成也返回 job_id；run_in_background=true 立即返回 job_id。不要在 command 中用 nohup、setsid 或尾随 & 脱离任务，长任务使用 run_in_background。
-- run 可附加 VCP 元字段 ink=mark_history、river=text|last:N|full|semantic:N、archery=true|no_reply；这些字段由工具层处理，不会拼入 Bash command。
+- run 可附加 VCP 元字段 ink=mark_history、archery=true|no_reply；这些字段由工具层处理，不会拼入 Bash command。river/vref 仅作旧协议兼容，不是本地 CLI 能力。
 - list_skills 返回已安装且校验通过的 Skill 索引。
 - read_skill 必需 skill_id；resource_path 默认 SKILL.md，可选 max_bytes。返回有界正文与不可作为 shell 路径的逻辑 skill_root。
 - materialize_skill 必需 skill_id；仅在没有活动 Job 时，把完整性校验通过的 Skill 复制为 /workspace 下的非回写快照并返回 materialized_path。它不会执行任何脚本；审阅后必须另发 run。
@@ -185,8 +185,9 @@ mod tests {
         ));
         assert!(command
             .description
-            .contains("river=text|last:N|full|semantic:N、archery=true|no_reply"));
-        assert!(command.description.contains("artifacts[].guest_path"));
+            .contains("ink=mark_history、archery=true|no_reply"));
+        assert!(command.description.contains("river/vref 仅作旧协议兼容"));
+        assert!(!command.description.contains("VCP_RIVER_CONTEXT_FILE"));
         for action in [
             "action:「始」run「末」",
             "action:「始」list_skills「末」",

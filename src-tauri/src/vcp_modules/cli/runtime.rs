@@ -21,9 +21,7 @@ use super::output::{
     remove_job_outputs, require_filesystem_headroom, workspace_usage_bytes, OutputReadRequest,
 };
 use super::profile::{embedded_command_profile, VcpCliCommandProfile};
-use super::projection::{
-    gc_stale_river_projections, prepare_river_projection, remove_river_projection,
-};
+use super::projection::{gc_stale_river_projections, remove_river_projection};
 use super::protocol::{
     validate_structured_vcp_cli_action, VcpCliAction, DEFAULT_BOUNDED_READ_BYTES, MAX_POLL_WAIT_MS,
 };
@@ -35,7 +33,6 @@ use super::result::{
     VcpCliArtifactRef, VcpCliContentPart, VcpCliErrorCode, VcpCliJobResult, VcpCliJobState,
     VcpCliJobSummary, VcpCliResultBody, VcpCliResultEnvelope, VcpCliRuntimeInfo,
 };
-use super::semantic::embedded_semantic_profile;
 use super::skill_catalog::{
     catalog_snapshot, ensure_skill_catalog, list_skills_v2, materialize_skill, read_skill_v2,
     SkillCatalogSnapshot,
@@ -49,10 +46,9 @@ use super::skill_import::{
 use super::skills::{SkillError, SkillErrorKind, MAX_SKILL_BYTES};
 use tauri_plugin_vcp_mobile::cli::{
     cancel_cli_process_inner, inspect_cli_process_inner, prepare_cli_runtime_inner,
-    prepare_cli_semantic_assets_inner, start_cli_process_inner, CancelCliProcessRequest,
-    CancelCliProcessResponse, CliProcessState, InspectCliProcessRequest, InspectCliProcessResponse,
-    PrepareCliRuntimeRequest, PrepareCliSemanticAssetsRequest, StartCliProcessRequest,
-    StartCliProcessResponse,
+    start_cli_process_inner, CancelCliProcessRequest, CancelCliProcessResponse, CliProcessState,
+    InspectCliProcessRequest, InspectCliProcessResponse, PrepareCliRuntimeRequest,
+    StartCliProcessRequest, StartCliProcessResponse,
 };
 
 const LEDGER_RELATIVE_PATH: &str = "vcp-cli/job-ledger.json";
@@ -98,33 +94,6 @@ pub struct ExecuteVcpMobileCliRequest {
     pub action: VcpCliAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub river_projection: Option<VcpCliRiverProjectionInput>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VcpCliRiverProjectionInput {
-    pub canonical_json: String,
-    pub sha256: String,
-    pub size_bytes: u64,
-    /// Host-only grants produced by the local coordinator. They are never accepted from or
-    /// serialized back to WebView callers; the canonical JSON carries only opaque descriptors.
-    #[serde(skip)]
-    pub artifact_grants: Vec<VcpCliArtifactGrantInput>,
-    /// Descriptor count frozen by the turn owner. Runtime replay happens before this is checked;
-    /// a genuinely new run must still possess every host-only source grant.
-    #[serde(skip)]
-    pub expected_artifact_grants: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VcpCliArtifactGrantInput {
-    pub source_path: PathBuf,
-    pub file_name: String,
-    pub guest_path: String,
-    pub size_bytes: u64,
-    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,7 +127,6 @@ struct RunParameters {
     description: Option<String>,
     cwd: String,
     timeout_ms: u64,
-    river_projection: Option<VcpCliRiverProjectionInput>,
     session_id: Option<String>,
 }
 
@@ -303,37 +271,6 @@ impl MobileCliRuntimeState {
             .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))
     }
 
-    pub(crate) async fn semantic_asset_paths<R: Runtime>(
-        &self,
-        app: &AppHandle<R>,
-        operation_id: &str,
-    ) -> Result<(PathBuf, PathBuf), String> {
-        let _runtime = self
-            .ensure_provisioned(app, operation_id)
-            .await
-            .map_err(|error| error.message)?;
-        let profile = embedded_semantic_profile()?;
-        let response = prepare_cli_semantic_assets_inner(
-            app,
-            &PrepareCliSemanticAssetsRequest {
-                operation_id: operation_id.to_string(),
-                model_id: profile.model_id.clone(),
-                model_bytes: profile.model.bytes,
-                model_sha256: profile.model.sha256,
-                tokenizer_bytes: profile.tokenizer_pack.bytes,
-                tokenizer_sha256: profile.tokenizer_pack.sha256,
-            },
-        )
-        .await?;
-        if response.operation_id != operation_id || response.model_id != profile.model_id {
-            return Err("semantic asset prepare response identity mismatch".to_string());
-        }
-        Ok((
-            PathBuf::from(response.model_path),
-            PathBuf::from(response.tokenizer_path),
-        ))
-    }
-
     pub(crate) async fn execute<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -380,24 +317,8 @@ impl MobileCliRuntimeState {
                 });
             }
         };
-        if request.river_projection.is_some() && !matches!(action, VcpCliAction::Run { .. }) {
-            let generation = self.current_generation(app).await?;
-            return Ok(ExecuteVcpMobileCliResponse {
-                operation_id: request.operation_id,
-                runtime_generation: generation,
-                envelope: VcpCliResultEnvelope::error(
-                    VcpCliErrorCode::InvalidRequest,
-                    "river is only valid for action=run",
-                    "Remove river from this action and retry.",
-                ),
-            });
-        }
         validate_session_id(request.session_id.as_deref())?;
-        let action_sha256 = action_digest(
-            &action,
-            request.river_projection.as_ref(),
-            request.session_id.as_deref(),
-        )?;
+        let action_sha256 = action_digest(&action, request.session_id.as_deref())?;
         self.ensure_initialized(app).await?;
 
         if let Some(response) = self
@@ -441,7 +362,6 @@ impl MobileCliRuntimeState {
                                 timeout_ms: timeout_ms.ok_or_else(|| {
                                     "validated run timeout is missing".to_string()
                                 })?,
-                                river_projection: request.river_projection.clone(),
                                 session_id: request.session_id.clone(),
                             },
                             &action_sha256,
@@ -753,11 +673,6 @@ impl MobileCliRuntimeState {
         let profile = runtime.profile.clone();
         let workspace = runtime.workspace.clone();
         let workspace_limit = profile.budgets.workspace_default_bytes;
-        let projection_artifact_bytes =
-            projection_artifact_bytes(parameters.river_projection.as_ref())?;
-        let required_headroom = MIN_RUNTIME_STORAGE_HEADROOM_BYTES
-            .checked_add(projection_artifact_bytes)
-            .ok_or_else(|| "river artifact storage headroom overflowed".to_string())?;
         let storage_paths = vec![
             runtime.rootfs.clone(),
             runtime.workspace.clone(),
@@ -765,7 +680,7 @@ impl MobileCliRuntimeState {
         ];
         let usage = tauri::async_runtime::spawn_blocking(move || {
             workspace_usage_bytes(&workspace, workspace_limit)?;
-            require_filesystem_headroom(&storage_paths, required_headroom)
+            require_filesystem_headroom(&storage_paths, MIN_RUNTIME_STORAGE_HEADROOM_BYTES)
         })
         .await
         .map_err(|error| format!("workspace scan task failed: {error}"))?;
@@ -783,31 +698,6 @@ impl MobileCliRuntimeState {
         let job_id = format!("job-{}", Uuid::new_v4());
         let attempt_id = format!("attempt-{}", Uuid::new_v4());
         let generation = self.inner.lock().await.ledger.runtime_generation;
-        let river_context_projection = if let Some(input) = parameters.river_projection {
-            let root = runtime.projection_root.clone();
-            let attachments_root = crate::vcp_modules::file_manager::get_attachments_root_dir(app)?;
-            let job = job_id.clone();
-            let attempt = attempt_id.clone();
-            Some(
-                tauri::async_runtime::spawn_blocking(move || {
-                    prepare_river_projection(
-                        &root,
-                        &attachments_root,
-                        generation,
-                        &job,
-                        &attempt,
-                        &input,
-                    )
-                })
-                .await
-                .map_err(|error| format!("river projection task failed: {error}"))??,
-            )
-        } else {
-            None
-        };
-        let projection_path = river_context_projection
-            .as_ref()
-            .map(|projection| PathBuf::from(&projection.host_path));
         let insertion = async {
             let mut owner = self.inner.lock().await;
             let concurrent_limit = profile
@@ -834,7 +724,8 @@ impl MobileCliRuntimeState {
                         deadline_at_ms: now.saturating_add(parameters.timeout_ms),
                         stdout_path: None,
                         stderr_path: None,
-                        river_projection_path: projection_path.clone(),
+                        // Decode/cleanup compatibility for old ledgers; new Jobs never create River.
+                        river_projection_path: None,
                         stdout_bytes: 0,
                         stderr_bytes: 0,
                         stdout_truncated: false,
@@ -882,13 +773,6 @@ impl MobileCliRuntimeState {
         }
         .await;
         if let Err(error) = insertion {
-            if let Some(path) = projection_path {
-                let root = runtime.projection_root.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || {
-                    remove_river_projection(&root, generation, &job_id, &attempt_id, &path)
-                })
-                .await;
-            }
             return match error {
                 MobileCliAdmissionError::Cancelled | MobileCliAdmissionError::Deadline => {
                     Err(error)
@@ -912,7 +796,6 @@ impl MobileCliRuntimeState {
             rootfs_path: runtime.rootfs.to_string_lossy().into_owned(),
             cwd: parameters.cwd,
             artifact_max_bytes: profile.budgets.artifact_bytes_per_job,
-            river_context_projection,
         };
         let job = self
             .job_snapshot(&job_id)
@@ -2507,32 +2390,10 @@ fn admit_run_job(
         .map_err(MobileCliAdmissionError::Runtime)
 }
 
-fn action_digest(
-    action: &VcpCliAction,
-    river_projection: Option<&VcpCliRiverProjectionInput>,
-    session_id: Option<&str>,
-) -> Result<String, String> {
-    let bytes = serde_json::to_vec(&(action, river_projection, session_id))
+fn action_digest(action: &VcpCliAction, session_id: Option<&str>) -> Result<String, String> {
+    let bytes = serde_json::to_vec(&(action, session_id))
         .map_err(|error| format!("cannot serialize CLI action: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
-}
-
-fn projection_artifact_bytes(
-    projection: Option<&VcpCliRiverProjectionInput>,
-) -> Result<u64, String> {
-    let Some(projection) = projection else {
-        return Ok(0);
-    };
-    if projection.artifact_grants.len() != projection.expected_artifact_grants {
-        return Err(
-            "durable river artifacts are no longer available for a new CLI attempt".to_string(),
-        );
-    }
-    projection
-        .artifact_grants
-        .iter()
-        .try_fold(0_u64, |total, grant| total.checked_add(grant.size_bytes))
-        .ok_or_else(|| "river artifact byte budget overflowed".to_string())
 }
 
 fn output_artifact_id(job: &JobRecord) -> String {
@@ -3006,37 +2867,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_source_grants_are_never_part_of_the_public_request_wire() {
-        let projection = VcpCliRiverProjectionInput {
-            canonical_json: "{}".to_string(),
-            sha256: "a".repeat(64),
-            size_bytes: 2,
-            artifact_grants: vec![VcpCliArtifactGrantInput {
-                source_path: PathBuf::from("/private/canonical/secret.bin"),
-                file_name: "river-artifact-00-aaaaaaaaaaaa.bin".to_string(),
-                guest_path: "/run/river-artifact-00-aaaaaaaaaaaa.bin".to_string(),
-                size_bytes: 7,
-                sha256: "b".repeat(64),
-            }],
-            expected_artifact_grants: 1,
-        };
-        let wire = serde_json::to_value(&projection).expect("serialize projection request");
-        assert_eq!(projection_artifact_bytes(Some(&projection)), Ok(7));
-        let encoded = wire.to_string();
-        assert!(wire.get("artifact_grants").is_none());
-        assert!(!encoded.contains("/private/canonical"));
-        let decoded: VcpCliRiverProjectionInput =
-            serde_json::from_value(wire).expect("decode public projection request");
-        assert!(decoded.artifact_grants.is_empty());
-        assert_eq!(decoded.expected_artifact_grants, 0);
-        let mut missing_durable_grant = decoded;
-        missing_durable_grant.expected_artifact_grants = 1;
-        assert!(projection_artifact_bytes(Some(&missing_durable_grant))
-            .expect_err("new attempts require every frozen artifact grant")
-            .contains("no longer available"));
-    }
-
-    #[test]
     fn one_operation_id_cannot_name_changed_distributed_action_args() {
         let run = |command: &str| VcpCliAction::Run {
             command: command.to_string(),
@@ -3045,9 +2875,9 @@ mod tests {
             timeout_ms: Some(crate::vcp_modules::cli::protocol::DEFAULT_TIMEOUT_MS),
             run_in_background: Some(false),
         };
-        let first_digest = action_digest(&run("printf first"), None, Some("dist-session:a"))
-            .expect("hash first action");
-        let changed_digest = action_digest(&run("printf changed"), None, Some("dist-session:a"))
+        let first_digest =
+            action_digest(&run("printf first"), Some("dist-session:a")).expect("hash first action");
+        let changed_digest = action_digest(&run("printf changed"), Some("dist-session:a"))
             .expect("hash changed action");
         assert_ne!(first_digest, changed_digest);
 

@@ -5,6 +5,9 @@
 > 方法：Melchior、Balthasar、Casper 分别只读检查 VCP/VChat 协议、移动交互/iOS、当前 VCPMobile 交付边界，再由主审综合。三方未修改参考工程或产品代码。
 >
 > 追加裁决：用户随后明确以 VCPToolBox/manifest 为提示词真源、删除 Mobile PromptCatalog，并要求独立工具语义、明确 Bash 命令集和更宽松预算；Skill 读取进一步提升为 manifest 一等 action，桌面端 Skill 注入方案完全排除。下文将“原审建议”和“用户最终裁决”分开记录；用户裁决优先。
+>
+> 2026-08-14 覆盖裁决：本地 CLI 不支持 River/vref 投影或向量召回；合法字段只作协议兼容解析并
+> 提示忽略。此前 P4.2/P4.3 的实现与设备证据属于已撤回实验，不再构成产品能力或验收路线。
 
 ## 1. 综合裁决
 
@@ -179,9 +182,8 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 ### P2｜默认本地 Agent 工具循环
 
 实施状态（2026-08-14）：`CODE COMPLETE / API36 FINAL GUARD-AND-RECOVERY RETEST PENDING`。typed route、
-单聊/Group coordinator、SQLite turn ledger、step projection、累计 ToolResult、元字段、River 单文件投影、
-恢复/finalizer 与预算门均已实现；Rust、Vue、Android plugin/JVM 静态与回归门已通过。API 36 已完成真实
-两步 Agent loop、exact-once marker、River truth 和进程重启恢复；产品自动 transport guard 与命令完成后
+单聊/Group coordinator、SQLite turn ledger、累计 ToolResult、元字段、恢复/finalizer 与预算门均已实现。
+API 36 已完成真实两步 Agent loop、exact-once marker 和进程重启恢复；产品自动 transport guard 与命令完成后
 断网续轮的最后两项故障注入因设备锁屏暂停，不能用 host/JVM 结果冒充真机完成。
 
 交付：
@@ -189,7 +191,7 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 - VCPToolBox 从 golden manifest 提取工具说明，用户在 VCPToolBox 侧完成 local-route 提示词配置；
 - typed route 默认 `local_loopback`；
 - LocalVcpTurnOwner 多 step 模型续轮；
-- LocalVcpMetaProcessor：`ink=mark_history`、`river=text/last:N`、`archery=true/no_reply` 的有界本地语义；
+- LocalVcpMetaProcessor：执行 `ink=mark_history`、`archery=true/no_reply`，并剥离/提示 river/vref；
 - assistant request + `VCP_TOOL_PAYLOAD` 回灌；
 - step/digest ledger、pending continuation、max-step；
 - 单聊与 Group 同时接入，或 Group 显式 capability off。
@@ -202,7 +204,7 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 - 工具错误可被 Agent 修正，安全拒绝不可绕过；
 - local 模式中央 VCPToolBox 不抢执行；
 - finalizer exact-once，历史无重复 assistant/result；
-- `river=text/last:N` 只生成 attempt-private、source-unreachable、non-writeback 副本；guest 可改写自己的副本，但 canonical source 不挂载且 host 启动后不再读取，不泄漏过滤内容；P2 基线对尚未进入后续分期的 `river=semantic:N`/`vref:N` 明确 `unsupported_mode`（P4.3 已在此后仅为 local semantic 打开能力）。
+- 合法 river/vref 不生成 projection、不进入 Bash，local 命令继续且最多一条提示；remote 仍明确 `unsupported_mode`。
 
 ### P3｜可选真实 VCP 插件
 
@@ -226,66 +228,20 @@ opaque artifact、无网 Bash/Skill、进程死亡后 `interrupted + no-rerun` �
 
 2026-08-14 实施状态：代码与回归门已完成，真实 VCPToolBox + API 36 端到端仍待验收。当前 adapter 对不可达 `file://`、river 物化与 vref 稳定返回 unsupported，未宣称 requestId 外的远程 cancel wire。已启动 Job 由唯一 Mobile Runtime 拥有，WebSocket session 只持有回包 waiter。
 
-### P4｜高级 Skill 生命周期与语义元协议
+### P4｜Skill 保留，River/vref 本地能力撤回
 
-P4 按以下顺序施工，任一层未通过不得靠下一层掩盖：
+2026-08-14 的覆盖裁决优先于此前 P4.2/P4.3 施工记录：
 
-1. **P4.0｜能力与 artifact bundle 冻结**：统一 `AttemptProjectionBundleV1`/`ArtifactGrantV1`，固定
-   source-unreachable、non-writeback attempt copy、预算、hash、GC 与 `vref=1..50`；远端传输不混入本批。
-2. **P4.1｜Skill catalog v2**：原生 picker → inspect token → 用户确认 → 原子 commit；catalog 记录
-   来源、版本、tree digest、资源清单和 invalid warning。若要给 Bash 使用，只能显式复制到 workspace，
-   canonical Skill 永不 bind、永不自动运行。
-3. **P4.2｜`river=full`**：从消息/附件事实生成有界 descriptor 与 attempt copy；省略项及原因可见，
-   不把 WebView/数据库 host path 当授权。
-4. **P4.3｜`river=semantic:N`**：固定 hash 的 64 维多语言静态模型、紧凑 BPE pack、mmap、派生缓存与
-   brute-force cosine；离线失败按协议回退 `last:N`。
-5. **P4.4｜`vref:N`（已延期）**：当前只保留协议识别和本地 best-effort 提示；未来若重启，再建立显式 knowledge grant/catalog、向量选取、文件去重和 attempt copy。
-   VCPToolBox 主机 `file://` 与远端 artifact transport 仍是独立协议。
+- P4.1 Skill catalog v2、显式 inspect/commit/materialize 与 non-writeback workspace 副本保留；
+- River `text/last/full/semantic` 与 vref 只保留 protocol parser、严格范围校验和 raw digest；
+- localLoopback 始终忽略并合并提示，Runtime/ProcessHost 不接收 projection，Bash 无专用 env/bind；
+- vcpPlugin 的 river/vref、远端 `file://`、伪造 `river_context/vref_files` 继续 fail-closed；
+- 本地 embedding 模型、tokenizer、缓存执行、Android staging 和约 35 MiB 原始资产全部移除；
+- 旧 turn/job ledger DTO、projection path 与有界 GC 暂留一个兼容周期，仅负责解码和清理旧数据；
+- P4.4 ADR 降为历史参考，不代表未来承诺，也不在 CLI UI 增加“本地知识”入口。
 
-P4.4 的 2026-08-14 原始施工 ADR 见
-[07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md)，现已延期并仅作未来参考。若未来重启，原裁决选择独立 App 私有知识
-CAS，而不与消息 attachment 共享物理对象；导入确认即单一 `local_vref` grant，首批只接收 bounded UTF-8
-文本/Markdown/代码。Agent 不获得导入、列举、授权或撤权 action，仍只通过 `run + vref:N` 使用；
-capability 只有在 catalog/index、durable selection、Runtime attempt copy、Android `/run/vcp-vref` bind 和
-manifest golden 全部通过后才打开。`vcpPlugin` 保持 unsupported。
-
-2026-08-14 实施状态：P4.1、P4.2 与 P4.3 产品代码及静态/回归门已完成。`river=full` 使用
-`AttemptProjectionBundleV1`，最多 16 个附件、单个 64 MiB、总计 256 MiB；canonical CAS 先经
-数据库关系、direct-file、size 与 SHA-256 复核，再复制到 attempt 目录。Android 只校验并 bind
-这些副本，`omissions` 保留稳定省略原因。`river=semantic:N` 使用冻结的 64 维 Model2Vec 静态资产、
-紧凑 BPE、只读 mmap、20,000 行派生向量缓存和 deterministic brute-force cosine；单 selection permit、
-60 秒工作预算、outer cancellation/deadline 在 Runtime 前封住 Bash 启动。semantic 不可用时持久化
-`fallback_last` 并在 ToolResult 显示稳定原因，恢复不重新选取。P4.2 API 36 的真实 guest 读取/改写副本
-与原 CAS 不变、P4.3 API 26/36 App PSS/低存储/50 次冷热召回/温升与故障注入仍待设备验收。
-当前 `assembleArm64Debug` 已成功，Debug APK 为 84,528,816 bytes；两项 semantic asset 的 APK 压缩条目
-合计 28,034,833 bytes，解压字节/hash 与 profile 一致。该门只关闭包接线与 Debug 体积事实，不替代
-Release APK、安装/首用磁盘峰值或上述设备资源验收。
-
-当前最小范围交付：
-
-- Skill 版本/变更失效、二进制 assets artifact 与经 hash 校验的 non-writeback runtime 副本联动；manifest 之外不增加 Mobile Skill 提示词注入；
-- `river=full` 的多模态权限/大小过滤；
-- `river=semantic:N` 的本机会话向量索引与 `last:N` 回退；
-- 本地合法 `vref:N` 的 best-effort 剥离与 Agent 提示；知识向量索引和 attempt copy 延期；
-- DynamicTools/`vcp_fold` 继续由 VCPToolBox 处理，不在 Mobile 重做。
-
-硬验收：
-
-- Skill 导入不会自动执行脚本、授予 Root/SAF/密钥或改写 Agent prompt；
-- Skill 文件增删后，`list_skills/read_skill` action 的索引、hash、路径与失效行为有真实联调 fixture；
-- 保留字段不进入 shell；
-- `river=semantic:N`/`vref:N` 使用真实本机索引且断网可用，不以 LightMemo 远端调用冒充 local；
-- local/VCP schema 和 Agent 工具名不漂移；
-- 各 recall mode 有独立 snapshot/行为测试，不互相冒充。
-
-补充硬门：
-
-- 不使用 PRoot fake-root 的 chmod/bind 宣称只读；验收用 guest 改写副本后 canonical hash 不变且无 write-back；
-- Skill inspect/commit 以 candidate hash、catalog generation、operation ID 防 TOCTOU 与重复导入；失败不替换旧版本；
-- semantic tokenizer 的 token ID 与冻结上游 fixture 一致，排除 padding 后结果不受批次顺序影响；
-- API 36 已测紧凑模型独立进程首次峰值 18,748 KiB、热峰值不超过 16,536 KiB；产品集成后仍须测
-  App PSS、首次索引、50 条查询、温升与 API 26/代表 OEM，不能引用独立 spike 代替；
-- canonical Skill、附件 CAS、知识源和宿主绝对路径不进入 PRoot argv/env、WebView、模型消息或工具结果。
+当前 P4 硬验收只剩：合法 river/vref 不阻塞 local 命令且最多一条 notice，字段不进入 action/argv/env；
+非法字段继续拒绝；remote 保持 unsupported；APK 不含 semantic 资产；旧 ledger 仍可解码和清理。
 
 ### P5｜Android best-effort 后台、人工 PTY 与原生命令桥
 

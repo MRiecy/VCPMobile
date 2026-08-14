@@ -156,7 +156,6 @@ pub fn assemble_history_for_vcp(
         combined_text.push_str(&msg.content);
 
         let mut content_parts = Vec::new();
-        let mut local_attachment_descriptors = Vec::new();
 
         if let Some(attachments) = &msg.attachments {
             for att in attachments {
@@ -168,14 +167,6 @@ pub fn assemble_history_for_vcp(
                     .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash));
                 let is_local_ready =
                     matches!(att.status.as_deref(), Some("ready" | "done")) && valid_hash.is_some();
-                local_attachment_descriptors.push(json!({
-                    "name": attachment_name,
-                    "mime": att.r#type,
-                    "size_bytes": att.size,
-                    "sha256": valid_hash,
-                    "availability": att.status.as_deref().unwrap_or("unknown")
-                }));
-
                 // 1. 处理提取的文本内容 (文档类)
                 if let Some(text) = &att.extracted_text {
                     if !text.is_empty() {
@@ -279,10 +270,6 @@ pub fn assemble_history_for_vcp(
                 "contentHash": msg.content_hash
             });
         }
-        if !local_attachment_descriptors.is_empty() {
-            val["__vcpLocalAttachments"] = json!(local_attachment_descriptors);
-        }
-
         // 将当前消息推入结果列表
         result.push(val);
 
@@ -367,7 +354,6 @@ mod desktop_only_tests {
         assert!(!empty_json.contains("local_file"));
         assert!(ready_json.contains("local_file"));
         assert!(ready_json.contains(&"b".repeat(64)));
-        assert!(ready_json.contains("__vcpLocalAttachments"));
         assert!(!ready_json.contains("/private/attachments"));
         assert!(!ready_json.contains("file://"));
     }

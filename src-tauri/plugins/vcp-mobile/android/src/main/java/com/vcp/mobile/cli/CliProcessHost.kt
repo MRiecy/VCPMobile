@@ -32,20 +32,12 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
 
 private const val ROOTFS_ASSET_NAME = "vcp-cli-rootfs-3.24.1-aarch64.tar.zst"
-private const val SEMANTIC_MODEL_ASSET_NAME = "vcp-semantic-model-r2.safetensors"
-private const val SEMANTIC_TOKENIZER_ASSET_NAME = "vcp-semantic-tokenizer-r2.vcpbpe"
 private const val PROOT_LIBRARY_NAME = "libvcp_proot.so"
 private const val PROOT_LOADER_LIBRARY_NAME = "libvcp_proot_loader.so"
 private const val MAX_ROOTFS_ARCHIVE_BYTES = 512L * 1024L * 1024L
-private const val MAX_SEMANTIC_MODEL_BYTES = 64L * 1024L * 1024L
-private const val MAX_SEMANTIC_TOKENIZER_BYTES = 32L * 1024L * 1024L
 private const val MAX_PROOT_BYTES = 64L * 1024L * 1024L
 private const val MAX_PROOT_LOADER_BYTES = 4L * 1024L * 1024L
 private const val MAX_ARTIFACT_BYTES = 256L * 1024L * 1024L
-private const val MAX_RIVER_CONTEXT_BYTES = 128L * 1024L
-private const val MAX_RIVER_ARTIFACTS = 16
-private const val MAX_RIVER_ARTIFACT_BYTES = 64L * 1024L * 1024L
-private const val MAX_RIVER_ARTIFACT_TOTAL_BYTES = 256L * 1024L * 1024L
 private const val MAX_COMMAND_BYTES = 64 * 1024
 private const val MAX_ACTIVE_PROCESSES = 4
 private const val MAX_REMEMBERED_PROCESSES = 1024
@@ -57,8 +49,10 @@ private const val ORPHAN_GRACE_MS = 250L
 private const val THREAD_JOIN_MS = 2_000L
 private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
 private const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-private const val GUEST_RIVER_CONTEXT_PATH = "/run/vcp-river-context.json"
-private const val RIVER_CONTEXT_FILE_NAME = "river-context.json"
+private val LEGACY_SEMANTIC_ASSET_NAMES = listOf(
+    "vcp-semantic-model-r2.safetensors",
+    "vcp-semantic-tokenizer-r2.vcpbpe",
+)
 
 // The command is never interpolated into this host script. It is passed after the
 // handshake path as an argv element and reaches Bash as the argument following -lc.
@@ -80,32 +74,6 @@ class PrepareCliRuntimeArgs {
 }
 
 @InvokeArg
-class PrepareCliSemanticAssetsArgs {
-    lateinit var operationId: String
-    lateinit var modelId: String
-    var modelBytes: Long = 0
-    lateinit var modelSha256: String
-    var tokenizerBytes: Long = 0
-    lateinit var tokenizerSha256: String
-}
-
-@InvokeArg
-class RiverArtifactProjectionArgs {
-    lateinit var hostPath: String
-    lateinit var guestPath: String
-    var sizeBytes: Long = 0
-    lateinit var sha256: String
-}
-
-@InvokeArg
-class RiverContextProjectionArgs {
-    lateinit var hostPath: String
-    var sizeBytes: Long = 0
-    lateinit var sha256: String
-    lateinit var artifacts: Array<RiverArtifactProjectionArgs>
-}
-
-@InvokeArg
 class StartCliProcessArgs {
     lateinit var operationId: String
     lateinit var jobId: String
@@ -115,7 +83,6 @@ class StartCliProcessArgs {
     lateinit var rootfsPath: String
     lateinit var cwd: String
     var artifactMaxBytes: Long = 0
-    var riverContextProjection: RiverContextProjectionArgs? = null
 }
 
 @InvokeArg
@@ -139,16 +106,6 @@ private data class ProcessKey(
     val jobId: String,
     val attemptId: String,
     val runtimeGeneration: Long,
-)
-
-internal data class VerifiedRiverArtifact(
-    val hostFile: File,
-    val guestPath: String,
-)
-
-internal data class VerifiedRiverProjection(
-    val contextFile: File,
-    val artifacts: List<VerifiedRiverArtifact>,
 )
 
 private data class GroupTermination(
@@ -180,20 +137,6 @@ private data class PreparedRuntime(
     val handshakeParent: File,
 )
 
-private data class SemanticAssetIdentity(
-    val modelId: String,
-    val modelBytes: Long,
-    val modelSha256: String,
-    val tokenizerBytes: Long,
-    val tokenizerSha256: String,
-)
-
-private data class PreparedSemanticAssets(
-    val identity: SemanticAssetIdentity,
-    val model: File,
-    val tokenizer: File,
-)
-
 private data class PrepareResult(
     val operationId: String,
     val prepared: PreparedRuntime,
@@ -210,18 +153,6 @@ private data class PrepareResult(
         put("projectionRootPath", prepared.projectionRoot.absolutePath)
         put("prootPath", prepared.proot.absolutePath)
         put("prootLoaderPath", prepared.prootLoader.absolutePath)
-    }
-}
-
-private data class PrepareSemanticResult(
-    val operationId: String,
-    val prepared: PreparedSemanticAssets,
-) {
-    fun toJsObject() = JSObject().apply {
-        put("operationId", operationId)
-        put("modelId", prepared.identity.modelId)
-        put("modelPath", prepared.model.absolutePath)
-        put("tokenizerPath", prepared.tokenizer.absolutePath)
     }
 }
 
@@ -440,58 +371,33 @@ internal fun buildProotArguments(
     workspacePath: String,
     cwd: String,
     command: String,
-    riverContextHostPath: String? = null,
-    riverArtifactBinds: List<Pair<String, String>> = emptyList(),
-): List<String> {
-    require(riverArtifactBinds.size <= MAX_RIVER_ARTIFACTS) {
-        "river artifact bind count exceeds the item limit"
-    }
-    require(riverArtifactBinds.isEmpty() || riverContextHostPath != null) {
-        "river artifact binds require a context descriptor"
-    }
-    require(
-        riverArtifactBinds.map { it.first }.toSet().size == riverArtifactBinds.size &&
-            riverArtifactBinds.map { it.second }.toSet().size == riverArtifactBinds.size,
-    ) { "river artifact bind identities must be unique" }
-    return buildList {
-        add(prootPath)
-        add("-0")
-        add("--kill-on-exit")
-        add("--link2symlink")
-        add("-r")
-        add(rootfsPath)
-        add("-b")
-        add("/dev")
-        add("-b")
-        add("/proc")
-        add("-b")
-        add("$workspacePath:/workspace")
-        if (riverContextHostPath != null) {
-            add("-b")
-            add("$riverContextHostPath:$GUEST_RIVER_CONTEXT_PATH")
-        }
-        riverArtifactBinds.forEach { (hostPath, guestPath) ->
-            add("-b")
-            add("$hostPath:$guestPath")
-        }
-        add("-w")
-        add(validateGuestCwd(cwd))
-        add("/usr/bin/env")
-        add("-i")
-        add("HOME=/root")
-        add("USER=root")
-        add("LOGNAME=root")
-        add("SHELL=/bin/bash")
-        add("PATH=$GUEST_PATH")
-        add("TMPDIR=/tmp")
-        add("TERM=dumb")
-        if (riverContextHostPath != null) {
-            add("VCP_RIVER_CONTEXT_FILE=$GUEST_RIVER_CONTEXT_PATH")
-        }
-        add("/bin/bash")
-        add("-lc")
-        add(command)
-    }
+): List<String> = buildList {
+    add(prootPath)
+    add("-0")
+    add("--kill-on-exit")
+    add("--link2symlink")
+    add("-r")
+    add(rootfsPath)
+    add("-b")
+    add("/dev")
+    add("-b")
+    add("/proc")
+    add("-b")
+    add("$workspacePath:/workspace")
+    add("-w")
+    add(validateGuestCwd(cwd))
+    add("/usr/bin/env")
+    add("-i")
+    add("HOME=/root")
+    add("USER=root")
+    add("LOGNAME=root")
+    add("SHELL=/bin/bash")
+    add("PATH=$GUEST_PATH")
+    add("TMPDIR=/tmp")
+    add("TERM=dumb")
+    add("/bin/bash")
+    add("-lc")
+    add(command)
 }
 
 internal fun buildHostEnvironment(prootTmpPath: String, prootLoaderPath: String): Map<String, String> {
@@ -583,197 +489,6 @@ internal fun verifyNativeExecutable(
     return candidate
 }
 
-/**
- * Freezes the one-file River projection immediately before launch. The guest
- * receives this file only; neither the projection root nor the output root is
- * exposed. PRoot does not provide a trustworthy read-only bind, so the host
- * never reads this projection again after the process starts.
- */
-internal fun verifyRiverContextProjection(
-    projectionRoot: File,
-    expectedDirectoryName: String,
-    projection: RiverContextProjectionArgs,
-): VerifiedRiverProjection {
-    require(expectedDirectoryName.length == 64 && expectedDirectoryName.all { it in '0'..'9' || it in 'a'..'f' }) {
-        "river projection directory identity is invalid"
-    }
-    val expectedHash = validateRiverContextProjectionFields(projection)
-
-    val rootPath = projectionRoot.toPath()
-    val candidatePath = File(projection.hostPath).toPath()
-    require(rootPath.isAbsolute && rootPath == rootPath.normalize()) {
-        "river projection root is invalid"
-    }
-    require(candidatePath.isAbsolute && candidatePath == candidatePath.normalize()) {
-        "riverContextProjection.hostPath must be a normalized absolute path"
-    }
-    val parentPath = candidatePath.parent ?: error("river projection has no parent")
-    require(candidatePath.fileName.toString() == RIVER_CONTEXT_FILE_NAME) {
-        "river projection must use the fixed file name"
-    }
-    require(parentPath.fileName?.toString() == expectedDirectoryName && parentPath.parent == rootPath) {
-        "river projection is outside its prepared attempt directory"
-    }
-
-    val rootAttributes = java.nio.file.Files.readAttributes(
-        rootPath,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    val parentAttributes = java.nio.file.Files.readAttributes(
-        parentPath,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    val sourceAttributes = java.nio.file.Files.readAttributes(
-        candidatePath,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    require(rootAttributes.isDirectory && !rootAttributes.isSymbolicLink) {
-        "river projection root must be a real directory"
-    }
-    require(parentAttributes.isDirectory && !parentAttributes.isSymbolicLink) {
-        "river projection parent must be a real directory"
-    }
-    require(sourceAttributes.isRegularFile && !sourceAttributes.isSymbolicLink) {
-        "river projection must be a real regular file"
-    }
-    require(sourceAttributes.size() == projection.sizeBytes) {
-        "river projection size does not match the frozen request"
-    }
-
-    val canonicalRoot = projectionRoot.canonicalFile
-    val canonicalParent = parentPath.toFile().canonicalFile
-    val canonicalSource = candidatePath.toFile().canonicalFile
-    require(canonicalParent.parentFile == canonicalRoot && canonicalParent.name == expectedDirectoryName) {
-        "river projection parent escaped the prepared root"
-    }
-    require(canonicalSource.parentFile == canonicalParent && canonicalSource.name == RIVER_CONTEXT_FILE_NAME) {
-        "river projection escaped its prepared attempt directory"
-    }
-    val (actualBytes, actualHash) = sha256File(canonicalSource, MAX_RIVER_CONTEXT_BYTES)
-    require(actualBytes == projection.sizeBytes && actualHash == expectedHash) {
-        "river projection SHA-256 does not match the frozen request"
-    }
-
-    val finalParentAttributes = java.nio.file.Files.readAttributes(
-        parentPath,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    val finalSourceAttributes = java.nio.file.Files.readAttributes(
-        candidatePath,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    require(finalParentAttributes.isDirectory && !finalParentAttributes.isSymbolicLink) {
-        "river projection parent changed during verification"
-    }
-    require(
-        finalSourceAttributes.isRegularFile &&
-            !finalSourceAttributes.isSymbolicLink &&
-            finalSourceAttributes.size() == projection.sizeBytes,
-    ) { "river projection changed during verification" }
-    val artifactHostPaths = mutableSetOf<String>()
-    val artifactGuestPaths = mutableSetOf<String>()
-    val artifactHashes = mutableSetOf<String>()
-    var artifactTotalBytes = 0L
-    val artifacts = projection.artifacts.map { artifact ->
-        val expectedArtifactHash = validateRiverArtifactProjectionFields(artifact)
-        val artifactPath = File(artifact.hostPath).toPath()
-        require(artifactPath.isAbsolute && artifactPath == artifactPath.normalize()) {
-            "river artifact hostPath must be a normalized absolute path"
-        }
-        val artifactParent = artifactPath.parent ?: error("river artifact has no parent")
-        val artifactLeaf = artifactPath.fileName.toString()
-        require(isRiverArtifactLeaf(artifactLeaf) && artifact.guestPath == "/run/$artifactLeaf") {
-            "river artifact guest identity is invalid"
-        }
-        require(artifactParent == parentPath) {
-            "river artifact is outside its prepared attempt directory"
-        }
-        val artifactAttributes = java.nio.file.Files.readAttributes(
-            artifactPath,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        require(
-            artifactAttributes.isRegularFile &&
-                !artifactAttributes.isSymbolicLink &&
-                artifactAttributes.size() == artifact.sizeBytes,
-        ) { "river artifact must be the expected real regular file" }
-        val canonicalArtifact = artifactPath.toFile().canonicalFile
-        require(canonicalArtifact.parentFile == canonicalParent && canonicalArtifact.name == artifactLeaf) {
-            "river artifact escaped its prepared attempt directory"
-        }
-        val (actualArtifactBytes, actualArtifactHash) =
-            sha256File(canonicalArtifact, MAX_RIVER_ARTIFACT_BYTES)
-        require(actualArtifactBytes == artifact.sizeBytes && actualArtifactHash == expectedArtifactHash) {
-            "river artifact SHA-256 does not match the frozen request"
-        }
-        val finalArtifactAttributes = java.nio.file.Files.readAttributes(
-            artifactPath,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        require(
-            finalArtifactAttributes.isRegularFile &&
-                !finalArtifactAttributes.isSymbolicLink &&
-                finalArtifactAttributes.size() == artifact.sizeBytes,
-        ) { "river artifact changed during verification" }
-        artifactTotalBytes = Math.addExact(artifactTotalBytes, artifact.sizeBytes)
-        require(artifactTotalBytes <= MAX_RIVER_ARTIFACT_TOTAL_BYTES) {
-            "river artifacts exceed the attempt byte budget"
-        }
-        require(
-            artifactHostPaths.add(canonicalArtifact.absolutePath) &&
-                artifactGuestPaths.add(artifact.guestPath) &&
-                artifactHashes.add(expectedArtifactHash),
-        ) { "river artifact identities must be unique" }
-        VerifiedRiverArtifact(canonicalArtifact, artifact.guestPath)
-    }
-    return VerifiedRiverProjection(canonicalSource, artifacts)
-}
-
-private fun validateRiverContextProjectionFields(projection: RiverContextProjectionArgs): String {
-    require(
-        projection.hostPath.toByteArray(StandardCharsets.UTF_8).size in 1..4096 &&
-            !projection.hostPath.contains('\u0000'),
-    ) { "riverContextProjection.hostPath is invalid" }
-    require(projection.sizeBytes in 1..MAX_RIVER_CONTEXT_BYTES) {
-        "riverContextProjection.sizeBytes is outside the supported range"
-    }
-    require(projection.artifacts.size <= MAX_RIVER_ARTIFACTS) {
-        "riverContextProjection.artifacts exceeds the item limit"
-    }
-    projection.artifacts.forEach(::validateRiverArtifactProjectionFields)
-    return validateSha256(projection.sha256, "riverContextProjection.sha256")
-}
-
-private fun validateRiverArtifactProjectionFields(artifact: RiverArtifactProjectionArgs): String {
-    require(
-        artifact.hostPath.toByteArray(StandardCharsets.UTF_8).size in 1..4096 &&
-            !artifact.hostPath.contains('\u0000'),
-    ) { "river artifact hostPath is invalid" }
-    require(
-        artifact.guestPath.toByteArray(StandardCharsets.UTF_8).size in 1..128 &&
-            !artifact.guestPath.contains('\u0000'),
-    ) { "river artifact guestPath is invalid" }
-    require(artifact.sizeBytes in 0..MAX_RIVER_ARTIFACT_BYTES) {
-        "river artifact sizeBytes is outside the supported range"
-    }
-    return validateSha256(artifact.sha256, "river artifact sha256")
-}
-
-private fun isRiverArtifactLeaf(value: String): Boolean =
-    value.length <= 96 &&
-        value.startsWith("river-artifact-") &&
-        value.none { !(it.isLowerCase() || it.isDigit() || it == '-' || it == '.') } &&
-        !value.contains("..") &&
-        File(value).name == value
-
-/** Copies to a sibling staging file and exposes the new bytes with one atomic rename. */
 internal fun copyVerifiedStreamAtomically(
     openInput: () -> InputStream,
     destination: File,
@@ -837,6 +552,7 @@ private class CliRuntimeInstaller(private val context: Context) {
 
         val privateRoot = File(context.noBackupFilesDir, "vcp-cli").ensureDirectory()
         val archiveDirectory = File(privateRoot, "assets").ensureDirectory()
+        cleanupLegacySemanticAssets(archiveDirectory)
         val archive = File(archiveDirectory, ROOTFS_ASSET_NAME)
         val currentArchive = if (archive.exists()) {
             runCatching { sha256File(archive, args.rootfsArchiveBytes) }.getOrNull()
@@ -892,105 +608,6 @@ private class CliRuntimeInstaller(private val context: Context) {
         )
     }
 
-    fun prepareSemantic(args: PrepareCliSemanticAssetsArgs): PreparedSemanticAssets {
-        val identity = validatedSemanticAssetIdentity(args)
-        val privateRoot = File(context.noBackupFilesDir, "vcp-cli").ensureDirectory()
-        val assets = File(privateRoot, "assets").ensureDirectory()
-        val model = stageVerifiedSemanticAsset(
-            assets,
-            SEMANTIC_MODEL_ASSET_NAME,
-            identity.modelBytes,
-            identity.modelSha256,
-            openInput = { context.assets.open(SEMANTIC_MODEL_ASSET_NAME) },
-            syncParent = ::fsyncDirectory,
-        )
-        val tokenizer = stageVerifiedSemanticAsset(
-            assets,
-            SEMANTIC_TOKENIZER_ASSET_NAME,
-            identity.tokenizerBytes,
-            identity.tokenizerSha256,
-            openInput = { context.assets.open(SEMANTIC_TOKENIZER_ASSET_NAME) },
-            syncParent = ::fsyncDirectory,
-        )
-        require(model != tokenizer) { "semantic model and tokenizer must be separate files" }
-        return PreparedSemanticAssets(identity, model, tokenizer)
-    }
-
-}
-
-internal fun stageVerifiedSemanticAsset(
-    assets: File,
-    assetName: String,
-    expectedBytes: Long,
-    expectedHash: String,
-    openInput: () -> InputStream,
-    syncParent: (File) -> Unit = {},
-): File {
-    require(assetName == File(assetName).name && !assetName.contains("..")) {
-        "semantic asset name is invalid"
-    }
-    val destination = File(assets, assetName)
-    val current = if (destination.exists()) {
-        val existingAttributes = java.nio.file.Files.readAttributes(
-            destination.toPath(),
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        require(existingAttributes.isRegularFile && !existingAttributes.isSymbolicLink) {
-            "semantic asset must be a direct regular file"
-        }
-        require(destination.canonicalFile.parentFile == assets.canonicalFile) {
-            "semantic asset escaped the private asset directory"
-        }
-        runCatching { sha256File(destination, expectedBytes) }.getOrNull()
-    } else {
-        null
-    }
-    val copied = current?.first != expectedBytes || current.secondOrNull() != expectedHash
-    if (copied) {
-        copyVerifiedStreamAtomically(
-            openInput = openInput,
-            destination = destination,
-            expectedBytes = expectedBytes,
-            expectedSha256 = expectedHash,
-            syncParent = syncParent,
-        )
-    }
-    val attributes = java.nio.file.Files.readAttributes(
-        destination.toPath(),
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    require(attributes.isRegularFile && !attributes.isSymbolicLink) {
-        "semantic asset must be a direct regular file"
-    }
-    val canonical = destination.canonicalFile
-    require(canonical.parentFile == assets.canonicalFile && canonical.name == assetName) {
-        "semantic asset escaped the private asset directory"
-    }
-    if (copied) {
-        require(sha256File(canonical, expectedBytes) == Pair(expectedBytes, expectedHash)) {
-            "semantic asset identity changed after staging"
-        }
-    }
-    return canonical
-}
-
-private fun validatedSemanticAssetIdentity(args: PrepareCliSemanticAssetsArgs): SemanticAssetIdentity {
-    validateIdentifier(args.modelId, "modelId")
-    require(args.modelBytes in 1..MAX_SEMANTIC_MODEL_BYTES) {
-        "modelBytes is outside the supported range"
-    }
-    require(args.tokenizerBytes in 1..MAX_SEMANTIC_TOKENIZER_BYTES) {
-        "tokenizerBytes is outside the supported range"
-    }
-    return SemanticAssetIdentity(
-        modelId = args.modelId,
-        modelBytes = args.modelBytes,
-        modelSha256 = validateSha256(args.modelSha256, "modelSha256"),
-        tokenizerBytes = args.tokenizerBytes,
-        tokenizerSha256 = validateSha256(args.tokenizerSha256, "tokenizerSha256"),
-    )
 }
 
 private fun fsyncDirectory(directory: File) {
@@ -1017,6 +634,15 @@ private fun File.ensureDirectory(mode: Int? = null): File {
     return this
 }
 
+private fun cleanupLegacySemanticAssets(assets: File) {
+    runCatching {
+        if (!assets.isDirectory || java.nio.file.Files.isSymbolicLink(assets.toPath())) return
+        LEGACY_SEMANTIC_ASSET_NAMES.forEach { name ->
+            java.nio.file.Files.deleteIfExists(File(assets, name).toPath())
+        }
+    }
+}
+
 private fun validateIdentifier(value: String, field: String) {
     require(value.isNotBlank() && value.toByteArray(StandardCharsets.UTF_8).size <= 256) {
         "$field must be a non-empty bounded identifier"
@@ -1026,7 +652,6 @@ private fun validateIdentifier(value: String, field: String) {
 
 internal fun fingerprint(args: StartCliProcessArgs): String {
     val digest = MessageDigest.getInstance("SHA-256")
-    val projection = args.riverContextProjection
     val fields = mutableListOf(
         args.jobId,
         args.attemptId,
@@ -1036,21 +661,6 @@ internal fun fingerprint(args: StartCliProcessArgs): String {
         args.cwd,
         args.artifactMaxBytes.toString(),
     )
-    if (projection == null) {
-        fields.add("river:none")
-    } else {
-        fields.add("river:present")
-        fields.add(projection.hostPath)
-        fields.add(projection.sizeBytes.toString())
-        fields.add(projection.sha256.lowercase())
-        fields.add(projection.artifacts.size.toString())
-        projection.artifacts.forEach { artifact ->
-            fields.add(artifact.hostPath)
-            fields.add(artifact.guestPath)
-            fields.add(artifact.sizeBytes.toString())
-            fields.add(artifact.sha256.lowercase())
-        }
-    }
     fields.forEach { value ->
         val bytes = value.toByteArray(StandardCharsets.UTF_8)
         digest.update(byteArrayOf(
@@ -1084,23 +694,12 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         { runnable -> Thread(runnable, "vcp-cli-control-${threadSequence.incrementAndGet()}") },
         ThreadPoolExecutor.AbortPolicy(),
     )
-    private val semanticExecutor = ThreadPoolExecutor(
-        1,
-        1,
-        0L,
-        TimeUnit.MILLISECONDS,
-        ArrayBlockingQueue(8),
-        { runnable -> Thread(runnable, "vcp-cli-semantic-${threadSequence.incrementAndGet()}") },
-        ThreadPoolExecutor.AbortPolicy(),
-    )
     private val closed = AtomicBoolean(false)
     private val lifecycleLock = Any()
-    private val semanticLock = Any()
     private val handles = ConcurrentHashMap<ProcessKey, CliProcessHandle>()
     private val completedKeys = ConcurrentLinkedQueue<ProcessKey>()
     private val installer = CliRuntimeInstaller(context.applicationContext)
     @Volatile private var preparedRuntime: PreparedRuntime? = null
-    @Volatile private var preparedSemantic: PreparedSemanticAssets? = null
 
     fun prepare(
         args: PrepareCliRuntimeArgs,
@@ -1123,22 +722,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             }
             preparedRuntime = prepared
             PrepareResult(args.operationId, prepared).toJsObject()
-        }
-    }
-
-    fun prepareSemantic(
-        args: PrepareCliSemanticAssetsArgs,
-        success: (JSObject) -> Unit,
-        failure: (String) -> Unit,
-    ) = submitOn(semanticExecutor, "semantic", success, failure) {
-        validateIdentifier(args.operationId, "operationId")
-        val identity = validatedSemanticAssetIdentity(args)
-        synchronized(semanticLock) {
-            ensureOpen()
-            val prepared = preparedSemantic
-                ?.takeIf { it.identity == identity }
-                ?: installer.prepareSemantic(args).also { preparedSemantic = it }
-            PrepareSemanticResult(args.operationId, prepared).toJsObject()
         }
     }
 
@@ -1228,8 +811,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             rootfs != prepared.rootfsParent
         ) { "rootfsPath is outside the prepared private root" }
 
-        args.riverContextProjection?.let(::validateRiverContextProjectionFields)
-
         val key = ProcessKey(args.jobId, args.attemptId, args.runtimeGeneration)
         val requestFingerprint = fingerprint(args)
         handles[key]?.let { existing ->
@@ -1245,13 +826,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
 
         val stem = safeFileStem(key)
-        val riverContext = args.riverContextProjection?.let { projection ->
-            verifyRiverContextProjection(
-                projectionRoot = prepared.projectionRoot,
-                expectedDirectoryName = stem,
-                projection = projection,
-            )
-        }
         val stdoutFile = File(prepared.output, "$stem.stdout")
         val stderrFile = File(prepared.output, "$stem.stderr")
         val handshakeFile = File(prepared.handshakeParent, "$stem.pid")
@@ -1276,10 +850,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 workspacePath = prepared.workspace.absolutePath,
                 cwd = cwd,
                 command = args.command,
-                riverContextHostPath = riverContext?.contextFile?.absolutePath,
-                riverArtifactBinds = riverContext?.artifacts
-                    ?.map { artifact -> artifact.hostFile.absolutePath to artifact.guestPath }
-                    .orEmpty(),
             )
             val processBuilder = ProcessBuilder(buildHostCommand(handshakeFile.absolutePath, prootArguments))
             processBuilder.redirectErrorStream(false)
@@ -1711,11 +1281,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        semanticExecutor.shutdownNow()
         controlExecutor.shutdownNow()
-        synchronized(semanticLock) {
-            preparedSemantic = null
-        }
         synchronized(lifecycleLock) {
             handles.values.forEach { handle ->
                 try {
@@ -1736,7 +1302,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
         try {
             controlExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
-            semanticExecutor.awaitTermination(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
