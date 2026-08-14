@@ -13,8 +13,7 @@ use super::result::VcpCliJobState;
 const LEGACY_LEDGER_SCHEMA_VERSION: u32 = 1;
 const PRE_PROJECTION_LEDGER_SCHEMA_VERSION: u32 = 2;
 const PRE_SESSION_LEDGER_SCHEMA_VERSION: u32 = 3;
-const PRE_VREF_LEDGER_SCHEMA_VERSION: u32 = 4;
-const LEDGER_SCHEMA_VERSION: u32 = 5;
+const LEDGER_SCHEMA_VERSION: u32 = 4;
 const MAX_LEDGER_BYTES: u64 = 40 * 1024 * 1024;
 const MAX_RETAINED_JOBS: usize = 256;
 const MAX_RETAINED_OPERATIONS: usize = 32;
@@ -41,8 +40,6 @@ pub(super) struct JobRecord {
     pub stderr_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub river_projection_path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vref_projection_path: Option<PathBuf>,
     pub stdout_bytes: u64,
     pub stderr_bytes: u64,
     pub stdout_truncated: bool,
@@ -190,9 +187,6 @@ impl JobLedger {
                 ledger.schema_version = LEDGER_SCHEMA_VERSION;
             }
             PRE_SESSION_LEDGER_SCHEMA_VERSION => {
-                ledger.schema_version = LEDGER_SCHEMA_VERSION;
-            }
-            PRE_VREF_LEDGER_SCHEMA_VERSION => {
                 ledger.schema_version = LEDGER_SCHEMA_VERSION;
             }
             LEDGER_SCHEMA_VERSION => {}

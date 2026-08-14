@@ -193,77 +193,6 @@ internal fun pickerUploadStagingName(
     fileExtension: String,
 ): String = "${pickerUploadStagingStem(stagingTicket, hash)}$fileExtension"
 
-internal data class PickedFileCopyResult(
-    val sizeBytes: Long,
-    val sha256: String,
-)
-
-internal fun validatePickerMaxBytes(maxBytes: Long?): Long? {
-    require(maxBytes == null || maxBytes > 0L) { "maxBytes must be positive when provided" }
-    return maxBytes
-}
-
-internal fun pickerModeIsKnowledge(mode: String): Boolean {
-    require(mode in setOf("camera", "gallery", "file", "knowledge")) {
-        "unsupported picker mode"
-    }
-    return mode == "knowledge"
-}
-
-internal fun pickedFileResultSize(
-    knowledgeMode: Boolean,
-    providerReportedSize: Long,
-    actualSize: Long,
-): Long = if (knowledgeMode || providerReportedSize <= 0L) {
-    actualSize
-} else {
-    providerReportedSize
-}
-
-/**
- * Copies provider bytes without trusting OpenableColumns.SIZE. A crossing chunk
- * is rejected before it is written, so the caller only has to delete one
- * bounded fragment on failure.
- */
-internal fun copyPickedFileStream(
-    input: InputStream,
-    output: java.io.OutputStream,
-    maxBytes: Long?,
-    onProgress: (Long) -> Unit = {},
-): PickedFileCopyResult {
-    val limit = validatePickerMaxBytes(maxBytes)
-    val digest = java.security.MessageDigest.getInstance("SHA-256")
-    val buffer = ByteArray(64 * 1024)
-    var total = 0L
-    while (true) {
-        val read = input.read(buffer)
-        if (read < 0) break
-        if (read == 0) continue
-        if (limit != null && read.toLong() > limit - total) {
-            throw IllegalArgumentException("picker_file_too_large")
-        }
-        output.write(buffer, 0, read)
-        digest.update(buffer, 0, read)
-        total += read
-        onProgress(total)
-    }
-    output.flush()
-    return PickedFileCopyResult(
-        sizeBytes = total,
-        sha256 = digest.digest().joinToString("") { "%02x".format(it) },
-    )
-}
-
-internal fun cleanupPickerFragments(fragments: Iterable<java.io.File>) {
-    fragments.forEach { fragment ->
-        try {
-            fragment.delete()
-        } catch (_: Throwable) {
-            // Best effort is sufficient here; the owner also expires cacheDir.
-        }
-    }
-}
-
 @TauriPlugin(permissions = [
     Permission(strings = ["android.permission.POST_NOTIFICATIONS"], alias = "notification"),
     Permission(strings = ["android.permission.READ_MEDIA_IMAGES"], alias = "storage"),
@@ -1454,15 +1383,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         try {
             val args = invoke.parseArgs(PickFileArgs::class.java)
             val mode = args.mode
-            validatePickerMaxBytes(args.maxBytes)
-            val knowledgeMode = pickerModeIsKnowledge(mode)
-            require(!knowledgeMode || args.maxBytes != null) {
-                "knowledge picker mode requires maxBytes"
-            }
-            require(args.maxBytes == null || mode != "camera") {
-                "maxBytes is supported by file, gallery and knowledge picker modes only"
-            }
-            Log.i(TAG, "[pickFile] Invoked with mode: $mode, bounded=${args.maxBytes != null}")
+            Log.i(TAG, "[pickFile] Invoked with mode: $mode")
 
             when (mode) {
                 "camera" -> {
@@ -1479,7 +1400,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     }
                     startActivityForResult(invoke, intent, "onPickFileResult")
                 }
-                "file", "knowledge" -> {
+                else -> {
                     val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
                         type = "*/*"
                         addCategory(Intent.CATEGORY_OPENABLE)
@@ -1598,7 +1519,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun onPickFileResult(invoke: Invoke, result: ActivityResult) {
         if (result.resultCode != Activity.RESULT_OK) {
             Log.w(TAG, "[onPickFileResult] Pick cancelled or failed")
-            invoke.reject("picker_cancelled")
+            invoke.reject("Cancelled")
             return
         }
 
@@ -1609,20 +1530,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        val maxBytes = try {
-            validatePickerMaxBytes(invoke.parseArgs(PickFileArgs::class.java).maxBytes)
-        } catch (error: Throwable) {
-            invoke.reject("Invalid maxBytes: ${error.message}")
-            return
-        }
-        val pickerMode = invoke.parseArgs(PickFileArgs::class.java).mode
-        val knowledgeMode = pickerModeIsKnowledge(pickerMode)
-        val emitWebEvents = !knowledgeMode
-
         executePluginTask(executorDomains.fileIoExecutor, invoke, "processPickedFile", fileTask@{
             var currentTempFile: java.io.File? = null
             var currentThumbnailFile: java.io.File? = null
-            val stagingFragments = linkedSetOf<java.io.File>()
             try {
                 val context = activity
                 val contentResolver = context.contentResolver
@@ -1650,31 +1560,38 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     put("size", size)
                     put("mime", mimeType)
                 }
-                if (emitWebEvents) {
-                    val safeStartDetail = escapeJsonForJsString(startDetail.toString())
-                    activity.runOnUiThread {
-                        webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: JSON.parse(\"$safeStartDetail\") }))", null)
-                    }
+                val safeStartDetail = escapeJsonForJsString(startDetail.toString())
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript("window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: JSON.parse(\"$safeStartDetail\") }))", null)
                 }
 
                 // 4. 流式安全拷贝至 cacheDir 并同步计算 SHA-256 (64KB buffer)
                 val uploadsDir = java.io.File(context.cacheDir, "uploads").apply { mkdirs() }
                 var tempFile = java.io.File(uploadsDir, "pick_${stagingTicket}_temp")
                 currentTempFile = tempFile
-                stagingFragments.add(tempFile)
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
                 
-                val copied = contentResolver.openInputStream(uri)?.use { inputStream ->
+                contentResolver.openInputStream(uri).use { inputStream ->
+                    if (inputStream == null) {
+                        Log.e(TAG, "[onPickFileResult] openInputStream returned null")
+                        invoke.reject("Could not open input stream")
+                        return@fileTask
+                    }
                     java.io.FileOutputStream(tempFile).use { outputStream ->
+                        val buffer = ByteArray(65536)
+                        var bytesRead: Int
+                        var totalRead = 0L
                         var lastReportTime = System.currentTimeMillis()
-                        copyPickedFileStream(inputStream, outputStream, maxBytes) { totalRead ->
+                        
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            digest.update(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            
                             val now = System.currentTimeMillis()
-                            if (emitWebEvents && now - lastReportTime > 200) {
+                            if (now - lastReportTime > 200) {
                                 lastReportTime = now
-                                val progress = if (size > 0) {
-                                    ((totalRead.toDouble() / size) * 100).toInt().coerceIn(0, 100)
-                                } else {
-                                    0
-                                }
+                                val progress = if (size > 0) ((totalRead.toDouble() / size) * 100).toInt() else 0
                                 val progressDetail = JSObject().apply {
                                     put("loaded", totalRead)
                                     put("total", size)
@@ -1690,8 +1607,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                             }
                         }
                     }
-                } ?: throw IllegalStateException("Could not open input stream")
-                var hash = copied.sha256
+                }
+
+                val hashBytes = digest.digest()
+                var hash = hashBytes.joinToString("") { "%02x".format(it) }
 
                 // ⚡ 多媒体硬件预转码与 API 动态门槛拦截预处理层
                 val ext = originalName.substringAfterLast(".").lowercase()
@@ -1702,8 +1621,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 val isUnsupportedAvif = ext == "avif" && sdkInt < 31
                 val isUnsupportedOpus = ext == "opus" && sdkInt < 29
 
-                val needTranscode = !knowledgeMode &&
-                    (isUnsupportedVideo || isUnsupportedAudio || isUnsupportedHeic || isUnsupportedAvif || isUnsupportedOpus)
+                val needTranscode = isUnsupportedVideo || isUnsupportedAudio || isUnsupportedHeic || isUnsupportedAvif || isUnsupportedOpus
 
                 var fileExtension = java.io.File(originalName).extension.let { 
                     if (it.isEmpty()) "" else ".$it" 
@@ -1716,7 +1634,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     val outputSuffix = if (isAudioOnly) "m4a" else if (isImageOnly) "jpg" else "mp4"
                     val transcodedFile = java.io.File(uploadsDir, "transcoded_${stagingTicket}.$outputSuffix")
                     currentTempFile = transcodedFile
-                    stagingFragments.add(transcodedFile)
 
                     val latch = CountDownLatch(1)
                     var transcodeError: Throwable? = null
@@ -1765,14 +1682,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     }
 
                     // 转码成功，物理删除原格式的临时文件以释放空间
-                    if (tempFile.exists() && !tempFile.delete()) {
-                        throw IllegalStateException("无法清理 picker source staging")
-                    }
-                    stagingFragments.remove(tempFile)
-
-                    if (maxBytes != null && transcodedFile.length() > maxBytes) {
-                        throw IllegalArgumentException("picker_file_too_large")
-                    }
+                    try { tempFile.delete() } catch (_: Exception) {}
 
                     // 重新计算转码后文件的 CAS SHA-256 哈希
                     val newDigest = java.security.MessageDigest.getInstance("SHA-256")
@@ -1803,7 +1713,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     throw IllegalStateException("picker upload staging ticket 已存在")
                 }
                 if (!tempFile.renameTo(finalTempFile)) {
-                    stagingFragments.add(finalTempFile)
                     try {
                         tempFile.copyTo(finalTempFile, overwrite = false)
                     } catch (error: Throwable) {
@@ -1814,23 +1723,15 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                         finalTempFile.delete()
                         throw IllegalStateException("无法清理已复制的 picker source staging")
                     }
-                    stagingFragments.remove(tempFile)
-                } else {
-                    stagingFragments.remove(tempFile)
-                    stagingFragments.add(finalTempFile)
                 }
                 currentTempFile = finalTempFile
                 val ownedFinalTempFile = currentTempFile
 
-                val actualFinalSize = ownedFinalTempFile.length()
-                if (maxBytes != null && actualFinalSize > maxBytes) {
-                    throw IllegalArgumentException("picker_file_too_large")
-                }
-                val finalSize = pickedFileResultSize(knowledgeMode, size, actualFinalSize)
+                val finalSize = if (size > 0) size else ownedFinalTempFile.length()
 
                 // 4. 图片资源触发 Native 硬件加速缩略图硬解
                 var thumbnailPath: String? = null
-                if (!knowledgeMode && mimeType.startsWith("image/")) {
+                if (mimeType.startsWith("image/")) {
                     thumbnailPath = generateNativeThumbnail(context, ownedFinalTempFile, stagingStem)
                     currentThumbnailFile = thumbnailPath?.let { java.io.File(it) }
                     thumbnailPath = currentThumbnailFile?.absolutePath
@@ -1850,34 +1751,30 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 Log.i(TAG, "[onPickFileResult] File copy & process complete: path=${ownedFinalTempFile.absolutePath}, hash=$hash")
                 
                 // 双轨通信：主动推送最终结果给前端，穿透 JNI 断裂层
-                if (emitWebEvents) {
-                    val pickedDetail = JSObject().apply {
-                        put("path", ownedFinalTempFile.absolutePath)
-                        put("name", originalName)
-                        put("mime", mimeType)
-                        put("size", finalSize)
-                        put("hash", hash)
-                        if (thumbnailPath != null) {
-                            put("thumbnailPath", thumbnailPath)
-                        } else {
-                            put("thumbnailPath", org.json.JSONObject.NULL)
-                        }
+                val pickedDetail = JSObject().apply {
+                    put("path", ownedFinalTempFile.absolutePath)
+                    put("name", originalName)
+                    put("mime", mimeType)
+                    put("size", finalSize)
+                    put("hash", hash)
+                    if (thumbnailPath != null) {
+                        put("thumbnailPath", thumbnailPath)
+                    } else {
+                        put("thumbnailPath", org.json.JSONObject.NULL)
                     }
-                    val safePickedDetail = escapeJsonForJsString(pickedDetail.toString())
-                    val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: JSON.parse(\"$safePickedDetail\") }))"
-                    activity.runOnUiThread {
-                        webViewRef?.evaluateJavascript(pickedScript, null)
-                    }
+                }
+                val safePickedDetail = escapeJsonForJsString(pickedDetail.toString())
+                val pickedScript = "window.dispatchEvent(new CustomEvent('vcp-mobile-file-picked', { detail: JSON.parse(\"$safePickedDetail\") }))"
+                activity.runOnUiThread {
+                    webViewRef?.evaluateJavascript(pickedScript, null)
                 }
                 
                 invoke.resolve(resultObject)
-                stagingFragments.clear()
                 currentTempFile = null
                 currentThumbnailFile = null
             } catch (e: Throwable) {
                 Log.e(TAG, "[onPickFileResult] File pick handling failed", e)
                 try {
-                    cleanupPickerFragments(stagingFragments)
                     currentTempFile?.delete()
                     currentThumbnailFile?.delete()
                 } catch (_: Exception) {}
@@ -2744,7 +2641,6 @@ class OpenFileArgs {
 @InvokeArg
 class PickFileArgs {
     var mode: String = "file"
-    var maxBytes: Long? = null
 }
 
 @InvokeArg

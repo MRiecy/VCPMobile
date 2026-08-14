@@ -53,9 +53,9 @@
     "baseSource": "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
     "baseSha256": "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
     "archive": "android-assets/vcp-cli-rootfs-3.24.1-aarch64.tar.zst",
-    "archiveSha256": "b0a0f340275c8e4eb876ba346a0e4782e277c095fbcdfa8c2715f6643f705e95",
-    "archiveBytes": 26868503,
-    "tarContentSha256": "ff151a55c557e76fdc3fa12d3be4e3e679cd599a36cb2be0c68e35edc6111af5",
+    "archiveSha256": "3bb7949b14b4d926b4080e611375b1eed25d152dbf0439b79d9cf36e186247e7",
+    "archiveBytes": 26870045,
+    "tarContentSha256": "19126a747094e5e0e6a762d0542ee34a34b36893e431ba56e8bd90fd6b58df43",
     "logicalBytes": 107258068,
     "installedPackageCount": 80,
     "lockedIncrementalPackageCount": 72,
@@ -136,8 +136,8 @@
     "maxConcurrentJobs": 4
   },
   "apkBudget": {
-    "rawAssetBytes": 27142687,
-    "estimatedCompressedIncrementBytes": 26935280
+    "rawAssetBytes": 27144229,
+    "estimatedCompressedIncrementBytes": 26937424
   },
   "probe": {
     "script": "probe-command-profile.sh",

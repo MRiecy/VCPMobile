@@ -6,12 +6,12 @@ use sqlx::{Pool, Row, Sqlite};
 
 use super::result::VcpCliResultEnvelope;
 use super::turn_types::{
-    DurableRiverProjection, DurableVrefProjection, FrozenModelRequest, LocalCliStepRecord,
-    LocalCliTurnRecord, LocalCliTurnRoute, LocalCliTurnStart, LocalCliTurnState,
-    MarkedHistoryEntry, MAX_ASSISTANT_STEP_BYTES, MAX_CONTINUATION_MESSAGES_BYTES,
-    MAX_LOCAL_CLI_TOOL_STEPS, MAX_LOCAL_CLI_TURN_WALL_MS, MAX_MARKED_HISTORY_BYTES,
-    MAX_RIVER_ARTIFACTS, MAX_RIVER_ARTIFACT_BYTES, MAX_RIVER_ARTIFACT_TOTAL_BYTES,
-    MAX_RIVER_PROJECTION_BYTES, MAX_TOOL_PAYLOAD_BYTES,
+    DurableRiverProjection, FrozenModelRequest, LocalCliStepRecord, LocalCliTurnRecord,
+    LocalCliTurnRoute, LocalCliTurnStart, LocalCliTurnState, MarkedHistoryEntry,
+    MAX_ASSISTANT_STEP_BYTES, MAX_CONTINUATION_MESSAGES_BYTES, MAX_LOCAL_CLI_TOOL_STEPS,
+    MAX_LOCAL_CLI_TURN_WALL_MS, MAX_MARKED_HISTORY_BYTES, MAX_RIVER_ARTIFACTS,
+    MAX_RIVER_ARTIFACT_BYTES, MAX_RIVER_ARTIFACT_TOTAL_BYTES, MAX_RIVER_PROJECTION_BYTES,
+    MAX_TOOL_PAYLOAD_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,7 +256,6 @@ pub async fn claim_tool_batch(
             operation_id: operation_id.clone(),
             assistant_content: assistant_content.to_string(),
             river_projection: None,
-            vref_projection: None,
             local_payload: None,
             result: None,
             mark_history: false,
@@ -329,104 +328,6 @@ pub async fn bind_tool_projection(
         .await
         .map_err(|error| format!("cannot commit local CLI projection bind: {error}"))?;
     Ok(frozen)
-}
-
-/// Freezes the vref selection and its source holds in the same SQLite transaction. Recovery must
-/// reuse these bytes and operation identity rather than performing another semantic search.
-pub async fn bind_tool_vref_projection(
-    pool: &Pool<Sqlite>,
-    turn_attempt: &str,
-    operation_id: &str,
-    projection: &DurableVrefProjection,
-    now_ms: u64,
-) -> Result<DurableVrefProjection, String> {
-    super::knowledge_projection::validate_durable_vref_projection(projection)?;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("cannot begin local CLI vref bind: {error}"))?;
-    let row = sqlx::query("SELECT * FROM local_cli_turn_ledger WHERE turn_attempt = ?")
-        .bind(turn_attempt)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|error| format!("cannot read local CLI vref owner: {error}"))?
-        .ok_or_else(|| "local CLI turn is missing".to_string())?;
-    let mut record = decode_turn(row)?;
-    let step = record
-        .step_records
-        .iter_mut()
-        .find(|step| step.operation_id == operation_id)
-        .ok_or_else(|| "local CLI vref has no durable tool claim".to_string())?;
-    let frozen = match &step.vref_projection {
-        Some(existing) if existing == projection => existing.clone(),
-        Some(_) => return Err("local CLI vref conflicts with durable replay".to_string()),
-        None if step.result.is_none() => {
-            for source in &projection.sources {
-                let inserted = sqlx::query(
-                    "INSERT INTO local_knowledge_attempt_holds(
-                       turn_attempt, operation_id, source_id, source_sha256, created_at_ms
-                     )
-                     SELECT ?, ?, source_id, source_sha256, ?
-                     FROM local_knowledge_sources
-                     WHERE source_id = ? AND source_sha256 = ? AND revoked_at_ms IS NULL
-                     ON CONFLICT(turn_attempt, operation_id, source_id) DO NOTHING",
-                )
-                .bind(turn_attempt)
-                .bind(operation_id)
-                .bind(i64_from_u64(now_ms, "vref_hold_created_at")?)
-                .bind(&source.source_id)
-                .bind(&source.source_sha256)
-                .execute(&mut *tx)
-                .await
-                .map_err(|error| format!("cannot persist vref source hold: {error}"))?;
-                if inserted.rows_affected() == 0 {
-                    let exists: i64 = sqlx::query_scalar(
-                        "SELECT EXISTS(
-                           SELECT 1 FROM local_knowledge_attempt_holds
-                           WHERE turn_attempt = ? AND operation_id = ? AND source_id = ?
-                             AND source_sha256 = ?
-                         )",
-                    )
-                    .bind(turn_attempt)
-                    .bind(operation_id)
-                    .bind(&source.source_id)
-                    .bind(&source.source_sha256)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(|error| format!("cannot verify durable vref hold: {error}"))?;
-                    if exists == 0 {
-                        return Err("vref grant changed before durable bind".to_string());
-                    }
-                }
-            }
-            step.vref_projection = Some(projection.clone());
-            step.updated_at_ms = now_ms;
-            projection.clone()
-        }
-        None => return Err("completed local CLI operation has no durable vref".to_string()),
-    };
-    update_record_in_transaction(&mut tx, &record, now_ms).await?;
-    tx.commit()
-        .await
-        .map_err(|error| format!("cannot commit local CLI vref bind: {error}"))?;
-    Ok(frozen)
-}
-
-pub async fn release_tool_vref_holds(
-    pool: &Pool<Sqlite>,
-    turn_attempt: &str,
-    operation_id: &str,
-) -> Result<(), String> {
-    sqlx::query(
-        "DELETE FROM local_knowledge_attempt_holds
-         WHERE turn_attempt = ? AND operation_id = ?",
-    )
-    .bind(turn_attempt)
-    .bind(operation_id)
-    .execute(pool)
-    .await
-    .map(|_| ())
-    .map_err(|error| format!("cannot release durable vref holds: {error}"))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -19,12 +19,9 @@ use vcp_modules::chat_manager::{
 };
 use vcp_modules::cli::semantic::LocalEmbeddingOwner;
 use vcp_modules::cli::{
-    commit_vcp_mobile_cli_knowledge_import, commit_vcp_mobile_cli_skill_import,
-    discard_vcp_mobile_cli_knowledge_import, discard_vcp_mobile_cli_skill_import,
-    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_knowledge_catalog,
-    get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog, get_vcp_mobile_cli_status,
-    inspect_vcp_mobile_cli_knowledge_import, inspect_vcp_mobile_cli_skill_import,
-    revoke_vcp_mobile_cli_knowledge_grant, KnowledgeCatalogOwner, MobileCliRuntimeState,
+    commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,
+    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog,
+    get_vcp_mobile_cli_status, inspect_vcp_mobile_cli_skill_import, MobileCliRuntimeState,
 };
 use vcp_modules::context_injection::{
     delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
@@ -117,7 +114,6 @@ pub fn run() {
             app.manage(vcp_modules::emoticon_manager::EmoticonManagerState::default());
             app.manage(MobileCliRuntimeState::new());
             app.manage(LocalEmbeddingOwner::new());
-            app.manage(KnowledgeCatalogOwner::new());
 
             let handle = app.handle().clone();
 
@@ -278,11 +274,6 @@ pub fn run() {
             inspect_vcp_mobile_cli_skill_import,
             commit_vcp_mobile_cli_skill_import,
             discard_vcp_mobile_cli_skill_import,
-            get_vcp_mobile_cli_knowledge_catalog,
-            inspect_vcp_mobile_cli_knowledge_import,
-            commit_vcp_mobile_cli_knowledge_import,
-            discard_vcp_mobile_cli_knowledge_import,
-            revoke_vcp_mobile_cli_knowledge_grant,
             get_settings_recovery_status,
             update_settings,
             diary_list_folders,

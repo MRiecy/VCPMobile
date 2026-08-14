@@ -3,8 +3,6 @@
 //! 本模块只拥有工具身份、Human Tool 请求解析/校验和结果投影合同；
 //! Android 运行时、Distributed registry 与本地多轮 owner 均不在 P0 范围内。
 
-pub(crate) mod knowledge;
-pub(crate) mod knowledge_projection;
 #[allow(dead_code)]
 mod ledger;
 pub mod manifest;
@@ -39,11 +37,6 @@ pub(crate) mod turn_meta;
 #[allow(dead_code)]
 pub(crate) mod turn_types;
 
-pub use knowledge::{
-    commit_vcp_mobile_cli_knowledge_import, discard_vcp_mobile_cli_knowledge_import,
-    get_vcp_mobile_cli_knowledge_catalog, inspect_vcp_mobile_cli_knowledge_import,
-    revoke_vcp_mobile_cli_knowledge_grant, KnowledgeCatalogOwner,
-};
 pub use manifest::get_vcp_mobile_cli_manifest;
 pub use runtime::{
     commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,

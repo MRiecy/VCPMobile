@@ -6,7 +6,6 @@ import SlidePage from "../../../components/ui/SlidePage.vue";
 import { useKeyboardInsets } from "../../../core/composables/useKeyboardInsets";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
 import { useVcpCliStore } from "../vcpCliStore";
-import VcpCliKnowledgePanel from "./VcpCliKnowledgePanel.vue";
 import VcpCliManifestPanel from "./VcpCliManifestPanel.vue";
 import VcpCliRunPanel from "./VcpCliRunPanel.vue";
 import VcpCliSkillsPanel from "./VcpCliSkillsPanel.vue";
@@ -20,7 +19,7 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-type CliTab = "run" | "skills" | "knowledge" | "manifest";
+type CliTab = "run" | "skills" | "manifest";
 
 const store = useVcpCliStore();
 const {
@@ -80,7 +79,6 @@ function handleNavigation(): void {
 function selectTab(tab: CliTab): void {
   activeTab.value = tab;
   if (tab === "skills") void store.loadSkills();
-  if (tab === "knowledge") void store.loadKnowledgeCatalog();
 }
 
 watch(
@@ -146,14 +144,13 @@ onBeforeUnmount(() => {
         </div>
         <nav
           v-if="!hasInternalDetail"
-          class="grid grid-cols-4 border-t border-black/5 px-2 dark:border-white/5"
+          class="grid grid-cols-3 border-t border-black/5 px-2 dark:border-white/5"
           aria-label="VCP CLI 页面"
         >
           <button
             v-for="tab in [
               { id: 'run', label: '运行' },
               { id: 'skills', label: 'Skills' },
-              { id: 'knowledge', label: '本地知识' },
               { id: 'manifest', label: 'Manifest' },
             ] as const"
             :key="tab.id"
@@ -204,7 +201,6 @@ onBeforeUnmount(() => {
       <VcpCliSkillsPanel
         v-else-if="selectedSkillId || activeTab === 'skills'"
       />
-      <VcpCliKnowledgePanel v-else-if="activeTab === 'knowledge'" />
       <VcpCliManifestPanel
         v-else
         :is-open="props.isOpen && activeTab === 'manifest'"

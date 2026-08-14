@@ -46,10 +46,6 @@ private const val MAX_RIVER_CONTEXT_BYTES = 128L * 1024L
 private const val MAX_RIVER_ARTIFACTS = 16
 private const val MAX_RIVER_ARTIFACT_BYTES = 64L * 1024L * 1024L
 private const val MAX_RIVER_ARTIFACT_TOTAL_BYTES = 256L * 1024L * 1024L
-private const val MAX_VREF_FILES = 50
-private const val MAX_VREF_FILE_BYTES = 32L * 1024L * 1024L
-private const val MAX_VREF_TOTAL_BYTES = 256L * 1024L * 1024L
-private const val MAX_VREF_MANIFEST_BYTES = 128L * 1024L
 private const val MAX_COMMAND_BYTES = 64 * 1024
 private const val MAX_ACTIVE_PROCESSES = 4
 private const val MAX_REMEMBERED_PROCESSES = 1024
@@ -62,10 +58,7 @@ private const val THREAD_JOIN_MS = 2_000L
 private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
 private const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 private const val GUEST_RIVER_CONTEXT_PATH = "/run/vcp-river-context.json"
-private const val GUEST_VREF_DIRECTORY = "/run/vcp-vref"
 private const val RIVER_CONTEXT_FILE_NAME = "river-context.json"
-private const val VREF_DIRECTORY_NAME = "vref"
-private const val VREF_MANIFEST_FILE_NAME = "vref-projection.json"
 
 // The command is never interpolated into this host script. It is passed after the
 // handshake path as an argv element and reaches Bash as the argument following -lc.
@@ -113,22 +106,6 @@ class RiverContextProjectionArgs {
 }
 
 @InvokeArg
-class VrefFileProjectionArgs {
-    lateinit var relativeName: String
-    var sizeBytes: Long = 0
-    lateinit var sha256: String
-}
-
-@InvokeArg
-class VrefProjectionArgs {
-    lateinit var hostDir: String
-    lateinit var manifestPath: String
-    var manifestSizeBytes: Long = 0
-    lateinit var manifestSha256: String
-    lateinit var files: Array<VrefFileProjectionArgs>
-}
-
-@InvokeArg
 class StartCliProcessArgs {
     lateinit var operationId: String
     lateinit var jobId: String
@@ -139,7 +116,6 @@ class StartCliProcessArgs {
     lateinit var cwd: String
     var artifactMaxBytes: Long = 0
     var riverContextProjection: RiverContextProjectionArgs? = null
-    var vrefProjection: VrefProjectionArgs? = null
 }
 
 @InvokeArg
@@ -173,12 +149,6 @@ internal data class VerifiedRiverArtifact(
 internal data class VerifiedRiverProjection(
     val contextFile: File,
     val artifacts: List<VerifiedRiverArtifact>,
-)
-
-internal data class VerifiedVrefProjection(
-    val directory: File,
-    val manifest: File,
-    val files: List<File>,
 )
 
 private data class GroupTermination(
@@ -472,7 +442,6 @@ internal fun buildProotArguments(
     command: String,
     riverContextHostPath: String? = null,
     riverArtifactBinds: List<Pair<String, String>> = emptyList(),
-    vrefHostDirectoryPath: String? = null,
 ): List<String> {
     require(riverArtifactBinds.size <= MAX_RIVER_ARTIFACTS) {
         "river artifact bind count exceeds the item limit"
@@ -505,10 +474,6 @@ internal fun buildProotArguments(
             add("-b")
             add("$hostPath:$guestPath")
         }
-        if (vrefHostDirectoryPath != null) {
-            add("-b")
-            add("$vrefHostDirectoryPath:$GUEST_VREF_DIRECTORY")
-        }
         add("-w")
         add(validateGuestCwd(cwd))
         add("/usr/bin/env")
@@ -522,9 +487,6 @@ internal fun buildProotArguments(
         add("TERM=dumb")
         if (riverContextHostPath != null) {
             add("VCP_RIVER_CONTEXT_FILE=$GUEST_RIVER_CONTEXT_PATH")
-        }
-        if (vrefHostDirectoryPath != null) {
-            add("VCP_VREF_DIR=$GUEST_VREF_DIRECTORY")
         }
         add("/bin/bash")
         add("-lc")
@@ -811,224 +773,6 @@ private fun isRiverArtifactLeaf(value: String): Boolean =
         !value.contains("..") &&
         File(value).name == value
 
-/**
- * Verifies the disposable vref copy immediately before launch. The canonical
- * knowledge CAS is never accepted here: only the fixed vref child of this
- * attempt's prepared projection directory can cross into the guest.
- */
-internal fun verifyVrefProjection(
-    projectionRoot: File,
-    expectedDirectoryName: String,
-    projection: VrefProjectionArgs,
-): VerifiedVrefProjection {
-    require(expectedDirectoryName.length == 64 && expectedDirectoryName.all { it in '0'..'9' || it in 'a'..'f' }) {
-        "vref projection directory identity is invalid"
-    }
-    val expectedManifestHash = validateVrefProjectionFields(projection)
-
-    val rootPath = projectionRoot.toPath()
-    val attemptPath = rootPath.resolve(expectedDirectoryName)
-    val vrefPath = File(projection.hostDir).toPath()
-    val manifestPath = File(projection.manifestPath).toPath()
-    require(rootPath.isAbsolute && rootPath == rootPath.normalize()) {
-        "vref projection root is invalid"
-    }
-    require(vrefPath.isAbsolute && vrefPath == vrefPath.normalize()) {
-        "vrefProjection.hostDir must be a normalized absolute path"
-    }
-    require(manifestPath.isAbsolute && manifestPath == manifestPath.normalize()) {
-        "vrefProjection.manifestPath must be a normalized absolute path"
-    }
-    require(vrefPath == attemptPath.resolve(VREF_DIRECTORY_NAME)) {
-        "vref projection is outside its prepared attempt directory"
-    }
-    require(manifestPath == vrefPath.resolve(VREF_MANIFEST_FILE_NAME)) {
-        "vref projection must use the fixed manifest path"
-    }
-
-    listOf(
-        rootPath to "vref projection root",
-        attemptPath to "vref attempt directory",
-        vrefPath to "vref directory",
-    ).forEach { (path, label) ->
-        val attributes = java.nio.file.Files.readAttributes(
-            path,
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
-        )
-        require(attributes.isDirectory && !attributes.isSymbolicLink) {
-            "$label must be a real directory"
-        }
-    }
-
-    val canonicalRoot = projectionRoot.canonicalFile
-    val canonicalAttempt = attemptPath.toFile().canonicalFile
-    val canonicalVref = vrefPath.toFile().canonicalFile
-    require(canonicalAttempt.parentFile == canonicalRoot && canonicalAttempt.name == expectedDirectoryName) {
-        "vref attempt directory escaped the prepared root"
-    }
-    require(canonicalVref.parentFile == canonicalAttempt && canonicalVref.name == VREF_DIRECTORY_NAME) {
-        "vref directory escaped its prepared attempt directory"
-    }
-    val expectedNames = linkedSetOf(VREF_MANIFEST_FILE_NAME)
-    projection.files.forEach { file ->
-        require(expectedNames.add(file.relativeName)) { "vref file names must be unique" }
-    }
-    require(listDirectChildren(vrefPath) == expectedNames) {
-        "vref directory contains an undeclared or missing child"
-    }
-
-    val canonicalManifest = verifyVrefFile(
-        path = manifestPath,
-        expectedBytes = projection.manifestSizeBytes,
-        expectedHash = expectedManifestHash,
-        maxBytes = MAX_VREF_MANIFEST_BYTES,
-        canonicalParent = canonicalVref,
-        label = "vref manifest",
-    )
-
-    var totalBytes = 0L
-    val verifiedFiles = projection.files.mapIndexed { index, file ->
-        val expectedHash = validateVrefFileProjectionFields(file, index + 1)
-        totalBytes = Math.addExact(totalBytes, file.sizeBytes)
-        require(totalBytes <= MAX_VREF_TOTAL_BYTES) { "vref files exceed the attempt byte budget" }
-        val path = vrefPath.resolve(file.relativeName)
-        verifyVrefFile(
-            path = path,
-            expectedBytes = file.sizeBytes,
-            expectedHash = expectedHash,
-            maxBytes = MAX_VREF_FILE_BYTES,
-            canonicalParent = canonicalVref,
-            label = "vref file",
-        )
-    }
-
-    require(listDirectChildren(vrefPath) == expectedNames) {
-        "vref directory changed during verification"
-    }
-    return VerifiedVrefProjection(canonicalVref, canonicalManifest, verifiedFiles)
-}
-
-private fun validateVrefProjectionFields(projection: VrefProjectionArgs): String {
-    require(
-        projection.hostDir.toByteArray(StandardCharsets.UTF_8).size in 1..4096 &&
-            !projection.hostDir.contains('\u0000'),
-    ) { "vrefProjection.hostDir is invalid" }
-    require(
-        projection.manifestPath.toByteArray(StandardCharsets.UTF_8).size in 1..4096 &&
-            !projection.manifestPath.contains('\u0000'),
-    ) { "vrefProjection.manifestPath is invalid" }
-    require(projection.manifestSizeBytes in 1..MAX_VREF_MANIFEST_BYTES) {
-        "vrefProjection.manifestSizeBytes is outside the supported range"
-    }
-    require(projection.files.size <= MAX_VREF_FILES) {
-        "vrefProjection.files exceeds the item limit"
-    }
-    projection.files.forEachIndexed { index, file ->
-        validateVrefFileProjectionFields(file, index + 1)
-    }
-    return validateSha256(projection.manifestSha256, "vrefProjection.manifestSha256")
-}
-
-private fun validateVrefFileProjectionFields(file: VrefFileProjectionArgs, expectedRank: Int): String {
-    val nameBytes = file.relativeName.toByteArray(StandardCharsets.UTF_8)
-    val expectedHash = validateSha256(file.sha256, "vref file sha256")
-    val expectedPrefix = expectedRank.toString().padStart(4, '0') + "-${expectedHash.take(12)}-"
-    val basename = file.relativeName.removePrefix(expectedPrefix)
-    require(
-        nameBytes.size in 1..(expectedPrefix.length + 96) &&
-            file.relativeName.startsWith(expectedPrefix) &&
-            basename.isNotEmpty() &&
-            basename.length <= 96 &&
-            basename.all { character ->
-                character.isAsciiLetterOrDigit() || character == '.' || character == '_' || character == '-'
-            } &&
-            basename.first() !in setOf('.', '_', '-') &&
-            basename.last() !in setOf('.', '_', '-') &&
-            !file.relativeName.contains('\u0000') &&
-            !file.relativeName.contains('/') &&
-            !file.relativeName.contains('\\') &&
-            basename != "." &&
-            basename != ".." &&
-            file.relativeName != VREF_MANIFEST_FILE_NAME &&
-            File(file.relativeName).name == file.relativeName,
-    ) { "vref file relativeName must match its stable rank, hash and bounded basename" }
-    require(file.sizeBytes in 0..MAX_VREF_FILE_BYTES) {
-        "vref file sizeBytes is outside the supported range"
-    }
-    return expectedHash
-}
-
-private fun Char.isAsciiLetterOrDigit(): Boolean =
-    this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9'
-
-private fun listDirectChildren(directory: java.nio.file.Path): Set<String> =
-    java.nio.file.Files.newDirectoryStream(directory).use { stream ->
-        stream.mapTo(linkedSetOf()) { it.fileName.toString() }
-    }
-
-private fun verifyVrefFile(
-    path: java.nio.file.Path,
-    expectedBytes: Long,
-    expectedHash: String,
-    maxBytes: Long,
-    canonicalParent: File,
-    label: String,
-): File {
-    val attributes = java.nio.file.Files.readAttributes(
-        path,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    require(
-        attributes.isRegularFile &&
-            !attributes.isSymbolicLink &&
-            attributes.size() == expectedBytes,
-    ) { "$label must be the expected real regular file" }
-    val canonical = path.toFile().canonicalFile
-    require(canonical.parentFile == canonicalParent && canonical.name == path.fileName.toString()) {
-        "$label escaped its disposable projection directory"
-    }
-    val (actualBytes, actualHash) = sha256PathNoFollow(path, maxBytes)
-    require(actualBytes == expectedBytes && actualHash == expectedHash) {
-        "$label SHA-256 does not match the frozen request"
-    }
-    val finalAttributes = java.nio.file.Files.readAttributes(
-        path,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    require(
-        finalAttributes.isRegularFile &&
-            !finalAttributes.isSymbolicLink &&
-            finalAttributes.size() == expectedBytes,
-    ) { "$label changed during verification" }
-    return canonical
-}
-
-private fun sha256PathNoFollow(path: java.nio.file.Path, maxBytes: Long): Pair<Long, String> {
-    val digest = MessageDigest.getInstance("SHA-256")
-    var total = 0L
-    java.nio.file.Files.newByteChannel(
-        path,
-        java.nio.file.StandardOpenOption.READ,
-        LinkOption.NOFOLLOW_LINKS,
-    ).use { channel ->
-        val buffer = java.nio.ByteBuffer.allocate(64 * 1024)
-        while (true) {
-            val read = channel.read(buffer)
-            if (read < 0) break
-            if (read == 0) continue
-            total = Math.addExact(total, read.toLong())
-            require(total <= maxBytes) { "vref projection file exceeds its size budget" }
-            buffer.flip()
-            digest.update(buffer)
-            buffer.clear()
-        }
-    }
-    return total to digest.digest().toHex()
-}
-
 /** Copies to a sibling staging file and exposes the new bytes with one atomic rename. */
 internal fun copyVerifiedStreamAtomically(
     openInput: () -> InputStream,
@@ -1282,8 +1026,7 @@ private fun validateIdentifier(value: String, field: String) {
 
 internal fun fingerprint(args: StartCliProcessArgs): String {
     val digest = MessageDigest.getInstance("SHA-256")
-    val riverProjection = args.riverContextProjection
-    val vrefProjection = args.vrefProjection
+    val projection = args.riverContextProjection
     val fields = mutableListOf(
         args.jobId,
         args.attemptId,
@@ -1293,34 +1036,19 @@ internal fun fingerprint(args: StartCliProcessArgs): String {
         args.cwd,
         args.artifactMaxBytes.toString(),
     )
-    if (riverProjection == null) {
+    if (projection == null) {
         fields.add("river:none")
     } else {
         fields.add("river:present")
-        fields.add(riverProjection.hostPath)
-        fields.add(riverProjection.sizeBytes.toString())
-        fields.add(riverProjection.sha256.lowercase())
-        fields.add(riverProjection.artifacts.size.toString())
-        riverProjection.artifacts.forEach { artifact ->
+        fields.add(projection.hostPath)
+        fields.add(projection.sizeBytes.toString())
+        fields.add(projection.sha256.lowercase())
+        fields.add(projection.artifacts.size.toString())
+        projection.artifacts.forEach { artifact ->
             fields.add(artifact.hostPath)
             fields.add(artifact.guestPath)
             fields.add(artifact.sizeBytes.toString())
             fields.add(artifact.sha256.lowercase())
-        }
-    }
-    if (vrefProjection == null) {
-        fields.add("vref:none")
-    } else {
-        fields.add("vref:present")
-        fields.add(vrefProjection.hostDir)
-        fields.add(vrefProjection.manifestPath)
-        fields.add(vrefProjection.manifestSizeBytes.toString())
-        fields.add(vrefProjection.manifestSha256.lowercase())
-        fields.add(vrefProjection.files.size.toString())
-        vrefProjection.files.forEach { file ->
-            fields.add(file.relativeName)
-            fields.add(file.sizeBytes.toString())
-            fields.add(file.sha256.lowercase())
         }
     }
     fields.forEach { value ->
@@ -1501,7 +1229,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         ) { "rootfsPath is outside the prepared private root" }
 
         args.riverContextProjection?.let(::validateRiverContextProjectionFields)
-        args.vrefProjection?.let(::validateVrefProjectionFields)
 
         val key = ProcessKey(args.jobId, args.attemptId, args.runtimeGeneration)
         val requestFingerprint = fingerprint(args)
@@ -1520,13 +1247,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         val stem = safeFileStem(key)
         val riverContext = args.riverContextProjection?.let { projection ->
             verifyRiverContextProjection(
-                projectionRoot = prepared.projectionRoot,
-                expectedDirectoryName = stem,
-                projection = projection,
-            )
-        }
-        val vref = args.vrefProjection?.let { projection ->
-            verifyVrefProjection(
                 projectionRoot = prepared.projectionRoot,
                 expectedDirectoryName = stem,
                 projection = projection,
@@ -1560,7 +1280,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 riverArtifactBinds = riverContext?.artifacts
                     ?.map { artifact -> artifact.hostFile.absolutePath to artifact.guestPath }
                     .orEmpty(),
-                vrefHostDirectoryPath = vref?.directory?.absolutePath,
             )
             val processBuilder = ProcessBuilder(buildHostCommand(handshakeFile.absolutePath, prootArguments))
             processBuilder.redirectErrorStream(false)
