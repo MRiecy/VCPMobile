@@ -14,7 +14,8 @@
 | C 本地 turn 存储 + 结果 | 2（turn_ledger/result） | 1753 | ~1290 | ~125 | ~280 |
 | D runtime/设置/服务/分布式工具 | 6 | 5324 | ~390 | ~110 | ~4820 |
 | E 前端/测试/golden | 11 | 3370 | ~324 | ~179 | ~2867 |
-| **合计** | **23** | **15456** | **≈4380** | **≈468** | **≈10520** |
+| F 前端 turn-wire 消费者（补充） | 3 | 1892 | ~330 | ~50 | ~1512 |
+| **合计** | **26** | **17348** | **≈4710** | **≈518** | **≈12030** |
 
 > 行数为"≈"估算（midpoint），精确到行需在 S2 逐条落刀时二次核对；误差 ±3% 以内。
 > 连带清理（不在上表，但删除后必须同步改才能编译/过 CI）：`cli/mod.rs`、`src-tauri/src/lib.rs` 命令注册、`SettingsView.vue` 路由切换宿主、`cli/manifest.ts` 的 `LOCAL_ROUTE_GUIDE_STORAGE_KEY`、SQLite 迁移 0007（turn ledger 表）+ 新增 0010 删表。
@@ -75,6 +76,14 @@
 | `infra/model_manager.rs`（579） | migrate ~55（route 作为 endpoint 参数贯穿，删 local 分支恒 `/v1/chatvcp`）；delete 0 |
 | `distributed/tools/vcp_mobile_cli.rs`（264） | 删 ~39（`current_mobile_cli_route` 129-133、`require_vcp_plugin_route` 135-142、`publication_route_enabled` 144-146、测试 219-233）；migrate ~11（`is_publishable` 去路由判定、`execute_with_context` 94 行删 `require_vcp_plugin_route`）；`execute_with_context`(82-126) 与分布式身份 keep |
 
+### F. 前端 turn-wire 消费者（补充，审计子代理覆盖外，本轮 grep 坐实）
+
+| 文件 | 行数 | 分类 | 要点 |
+|---|---:|---|---|
+| `src/core/stores/chatStreamStore.ts` | 1119 | migrate ~45 / keep ~1074 | `turnAttempt/stepIndex/projectionReset` 类型 26-28、turn 帧追踪 456-494、`continuation_pending` 处理 1022——收敛后删 turn 元数据、保留流式主体 |
+| `src/tests/unit/chat/StreamStepProjection.test.ts` | 279 | delete ~279 | 整文件测 `project_model_step_event`/`with_turn_projection`（已被删除的 local 投影） |
+| `src/tests/unit/chat/ChatConcurrencyGuards.test.ts` | 494 | migrate ~6 | 仅 `continuation_pending` 断言（约 422 行）受影响，其余并发守卫 keep |
+
 ### E. 前端 / 测试 / golden（11 文件，3370 行）
 
 | 文件 | delete | migrate | 要点 |
@@ -96,13 +105,13 @@
 1. **`MAX_ASSISTANT_STEP_BYTES` 先迁共享常量**：`turn_types.rs:10` 被 `infra/vcp_client.rs`（210/1949/1969/2864）引用，删 turn_types 前必须先提升到共享位置。
 2. **result.rs 需新增 `VcpCliRuntimeInfo::vcp_plugin()` 构造器**：runtime.rs 的 5 处 `local_loopback()` 打标与 golden 的 `"source"` 字段同步改，否则 golden 双向锁（result.rs 测试逐字段 assert）红。
 3. **后端/前端路由默认值必须同一次提交改**：settings_manager 测试 473-495 断言默认 localLoopback；前端 `VcpCliGovernance.test.ts` 149-180 断言同样默认值。单边改必然红。
-4. **SQLite 迁移**：删 turn_ledger 表需新增迁移 0010（drop 本地 turn/step 表）；0008/0009 是 semantic cache 与 turn ledger 无关，不动。
+4. **SQLite 迁移**：`0007_create_local_cli_turn_ledger.sql` 建了 `local_cli_turn_ledger` 表 + 2 索引（`idx_local_cli_turn_pending`/`idx_local_cli_turn_topic`）+ 2 触发器（`trg_local_cli_turn_message_tombstone`/`trg_local_cli_turn_topic_tombstone`）。收敛需新增 **0010**：`DROP TRIGGER`×2 + `DROP TABLE`（索引随表删）；0007 保留在迁移历史不删。0008/0009 是 semantic cache，与 turn ledger 无关，不动。
 5. **模块连线**：`cli/mod.rs` 删 turn_coordinator/turn_ledger/turn_meta/turn_types 声明；`lib.rs` 若注册了 turn 相关命令一并删；`SettingsView.vue` 的 `onMobileCliRouteChange`/`mobileCliRouteSaving`/`mobileCliRouteError` 一并清。
 
 ## 5. 风险与联动
 
 - **`replay_operation` 幂等需在 distributed adapter 层补回放测试**：删了本地 coordinator 后，vcpPlugin 的"同一操作不重跑"改由 `dist:` operation_id + `replay_operation` 保证，S2 需补一条 L1 用例。
-- **删 `with_turn_projection`/`StreamTurnMetadata` 会波及前端**：这些 wire 字段的 Vue 消费者（`turnAttempt/stepIndex/projectionReset`）在 `src/features/chat/` 相关组件，删除前 grep 确认无残留引用。
+- **删 `with_turn_projection`/`StreamTurnMetadata` 会波及前端**：消费者已定位为 `chatStreamStore.ts`（26-28/456-494/1022）与其测试（StreamStepProjection.test.ts、ChatConcurrencyGuards.test.ts:422）；`vcp_client.rs` 的 `turn_attempt/step_index/projection_reset` wire 字段删除前 grep 确认无残留引用。
 - **测试数量下降不触发门禁**，但 P2 契约测试（VcpCliGovernance 149-180）会拦截——必须同步改写，不能只删测试。
 - **`turn_ledger` 的 `LocalCliTurnRoute::VcpPlugin` 变体当前是死代码**（ledger 只写 LocalLoopback），删整文件时无额外处理。
 
@@ -110,14 +119,14 @@
 
 | 指标 | 数值 |
 |---|---|
-| 净删除（delete） | **≈ 4380 行** |
-| 改造/迁移（migrate） | **≈ 468 行**（其中 ~180 行是"死代码删"性质） |
-| 保留不动（keep） | **≈ 10520 行** |
-| 主文件 | **23 个** |
+| 净删除（delete） | **≈ 4710 行** |
+| 改造/迁移（migrate） | **≈ 518 行**（其中 ~180 行是"死代码删"性质） |
+| 保留不动（keep） | **≈ 12030 行** |
+| 主文件 | **26 个** |
 | 连带文件（mod.rs/lib.rs/SettingsView.vue/manifest.ts/迁移 0007+0010） | **5-6 个** |
 
 > 对比 08 ADR 的初步预估（3500-4500 行）：落在上沿，原因是被审计坐实——`turn_coordinator/meta/types/ledger` 四个本地多轮 owner 文件合计 ~3084 行近乎整删（而不是"部分迁移续轮语义"），续轮幂等无需迁移（已在 `replay_operation`）。
 
 ## 7. 一句话
 
-> 收敛的本质是**整删 ~4400 行本地多轮 owner + 传输层 local 投影 + Forbidden**，保留 ~10500 行共享基础设施（runtime/job/output/skill/manifest/PTY/distributed adapter）；exact-once 幂等由 `replay_operation` 承载、多轮 loop 交还 VCPToolBox，零迁移成本。
+> 收敛的本质是**整删 ~4700 行本地多轮 owner + 传输层 local 投影 + Forbidden + 前端 turn-wire 消费者**，保留 ~12000 行共享基础设施（runtime/job/output/skill/manifest/PTY/distributed adapter + 流式主体）；exact-once 幂等由 `replay_operation` 承载、多轮 loop 交还 VCPToolBox，零迁移成本。
