@@ -23,40 +23,7 @@
         "shell": "/bin/bash",
         "distribution": "alpine",
         "libc": "musl",
-        "source": "local_loopback"
-      }
-    }
-  },
-  "successLocalPayload": "<!-- VCP_TOOL_PAYLOAD -->\n[{\"type\":\"text\",\"text\":\"ok\\n\"}]",
-  "successDistributed": {
-    "type": "tool_result",
-    "data": {
-      "requestId": "request_01",
-      "status": "success",
-      "result": {
-        "content": [
-          {
-            "type": "text",
-            "text": "ok\n"
-          }
-        ],
-        "job": {
-          "id": "job_01",
-          "state": "completed",
-          "stdout": "ok\n",
-          "stderr": "",
-          "exit_code": 0,
-          "cursor": "c_3",
-          "truncated": false,
-          "artifact": null
-        },
-        "runtime": {
-          "platform": "android",
-          "shell": "/bin/bash",
-          "distribution": "alpine",
-          "libc": "musl",
-          "source": "local_loopback"
-        }
+        "source": "vcp_plugin"
       }
     }
   },
@@ -79,7 +46,7 @@
       },
       "runtime": {
         "platform": "android",
-        "source": "local_loopback"
+        "source": "vcp_plugin"
       }
     }
   },
@@ -94,15 +61,6 @@
           "text": "Use river=text or remove river and retry."
         }
       ]
-    }
-  },
-  "errorLocalPayload": "<!-- VCP_TOOL_PAYLOAD -->\n[{\"type\":\"text\",\"text\":\"Use river=text or remove river and retry.\"}]",
-  "errorDistributed": {
-    "type": "tool_result",
-    "data": {
-      "requestId": "request_02",
-      "status": "error",
-      "error": "unsupported_mode: river=full is unavailable\nUse river=text or remove river and retry."
     }
   }
 }

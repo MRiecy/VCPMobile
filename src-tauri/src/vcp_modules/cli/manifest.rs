@@ -7,7 +7,7 @@ const MANIFEST_DESCRIPTION: &str =
 
 const INVOCATION_DESCRIPTION: &str = r#"在 Android 应用私有 PRoot guest 中执行非交互 Bash 命令，也可通过一等 action 发现、读取和显式物化 Mobile Skill。
 
-环境：Shell 固定为 Alpine Linux(musl) 的 /bin/bash -lc；默认 cwd=/workspace；guest 模拟 root 仅用于隔离 rootfs 和 apk，不拥有 Android root；不支持 sudo/apt/systemctl/GUI/adb。基线包含 GNU 常用文件命令、grep/sed/awk/find/diff/patch、tar/zip、curl/wget、git/ssh、jq、python3/pip/apk；其他命令先用 command -v 检查。支持管道、重定向、&& 和多行 Bash。每次 action=run 启动独立 Bash Job。工作区文件和 apk 安装结果持久；cd/export/alias 不跨 run 保留。canonical Skill catalog 永不挂载进 Bash；list_skills/read_skill 只发现和阅读，materialize_skill 才把经 hash 校验的副本放入 /workspace/.vcp-skills。该副本可被 guest 修改但不会写回 catalog。协议兼容识别 river/vref，但 localLoopback 不应用这两个可选上下文字段，Agent 不应主动发送或依赖它们；若旧请求携带，字段不会进入 Bash，命令继续执行并返回一条短提示。vcpPlugin 的 river/vref、远端 file:// 和伪造物化字段仍保持 fail-closed。
+环境：Shell 固定为 Alpine Linux(musl) 的 /bin/bash -lc；默认 cwd=/workspace；guest 模拟 root 仅用于隔离 rootfs 和 apk，不拥有 Android root；不支持 sudo/apt/systemctl/GUI/adb。基线包含 GNU 常用文件命令、grep/sed/awk/find/diff/patch、tar/zip、curl/wget、git/ssh、jq、python3/pip/apk；其他命令先用 command -v 检查。支持管道、重定向、&& 和多行 Bash。每次 action=run 启动独立 Bash Job。工作区文件和 apk 安装结果持久；cd/export/alias 不跨 run 保留。canonical Skill catalog 永不挂载进 Bash；list_skills/read_skill 只发现和阅读，materialize_skill 才把经 hash 校验的副本放入 /workspace/.vcp-skills。该副本可被 guest 修改但不会写回 catalog。协议兼容识别 river/vref，但不应用这两个可选上下文字段，Agent 不应主动发送或依赖它们；若旧请求携带，字段不会进入 Bash，命令继续执行并返回一条短提示。river/vref、远端 file:// 和伪造物化字段仍保持 fail-closed。
 
 action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。
 - run 必需 command；可选 description、cwd、timeout_ms、run_in_background。普通 run 最多等待 8000ms，未完成也返回 job_id；run_in_background=true 立即返回 job_id。不要在 command 中用 nohup、setsid 或尾随 & 脱离任务，长任务使用 run_in_background。

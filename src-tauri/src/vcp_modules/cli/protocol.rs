@@ -301,19 +301,6 @@ impl VcpMetaCapabilities {
         archery_no_reply: false,
     };
 
-    /// localLoopback 仅拥有 ink/archery。river/vref 只做协议兼容解析，由本地 meta owner
-    /// 剥离并提示，不构成可执行 capability。
-    pub const LOCAL_LOOPBACK_INITIAL: Self = Self {
-        mark_history: true,
-        river_text: false,
-        river_last: false,
-        river_full: false,
-        river_semantic: false,
-        vref: false,
-        archery_parallel: true,
-        archery_no_reply: true,
-    };
-
     /// Distributed VCP owns ink/archery continuation policy before dispatching the concrete
     /// tool call. Mobile still validates those canonical values, while remote river/vref inputs
     /// remain fail-closed until a bounded materialization contract exists.
@@ -1260,7 +1247,7 @@ mod tests {
         assert_eq!(error.field.as_deref(), Some("ink"));
 
         let local_error = validated
-            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
             .expect_err("local capability does not advertise ignored river hints");
         assert_eq!(local_error.code, VcpCliErrorCode::UnsupportedMode);
         assert_eq!(local_error.field.as_deref(), Some("river"));
@@ -1278,7 +1265,7 @@ mod tests {
         );
         let full_error = validate_vcp_mobile_cli_request(&full)
             .expect("valid river full syntax")
-            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
             .expect_err("local loop ignores rather than advertises river full");
         assert_eq!(full_error.field.as_deref(), Some("river"));
 
@@ -1292,7 +1279,7 @@ mod tests {
         );
         let semantic_error = validate_vcp_mobile_cli_request(&semantic)
             .expect("valid river semantic syntax")
-            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
             .expect_err("local loop ignores rather than advertises semantic recall");
         assert_eq!(semantic_error.field.as_deref(), Some("river"));
 
@@ -1306,7 +1293,7 @@ mod tests {
         );
         let validated = validate_vcp_mobile_cli_request(&vref).expect("valid vref syntax");
         let error = validated
-            .require_meta_support(VcpMetaCapabilities::LOCAL_LOOPBACK_INITIAL)
+            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
             .expect_err("vref remains unavailable without a knowledge grant");
         assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
     }

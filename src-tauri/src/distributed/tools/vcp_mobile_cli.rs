@@ -19,7 +19,6 @@ use crate::vcp_modules::cli::protocol::{
 };
 use crate::vcp_modules::cli::result::project_vcp_plugin_outcome;
 use crate::vcp_modules::cli::runtime::{ExecuteVcpMobileCliRequest, MobileCliRuntimeState};
-use crate::vcp_modules::settings_manager::{freeze_mobile_cli_agent_route, MobileCliAgentRoute};
 
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_REMOTE_IDENTITY_BYTES: usize = 256;
@@ -60,19 +59,11 @@ impl OneShotTool for VcpMobileCliTool {
         if !cfg!(target_os = "android") {
             return Ok(false);
         }
-        if !publication_route_enabled(true, current_mobile_cli_route(app).await?) {
-            return Ok(false);
-        }
         let runtime = app.try_state::<MobileCliRuntimeState>().ok_or_else(|| {
             "runtime_unavailable: managed VCPMobileCLI Runtime is missing".to_string()
         })?;
         runtime.ensure_ready_for_registration(app).await?;
-        // Provision can take longer than a settings update. Re-read the sole route owner before
-        // handing the manifest to the registry so a queued localLoopback switch withdraws it.
-        Ok(publication_route_enabled(
-            true,
-            current_mobile_cli_route(app).await?,
-        ))
+        Ok(true)
     }
 
     async fn execute(&self, _args: Value, _app: &AppHandle) -> Result<Value, String> {
@@ -91,7 +82,6 @@ impl OneShotTool for VcpMobileCliTool {
                     .to_string(),
             );
         }
-        require_vcp_plugin_route(app).await?;
 
         let context = context.ok_or_else(|| {
             "invalid_request: authenticated Distributed execution context is required".to_string()
@@ -124,25 +114,6 @@ impl OneShotTool for VcpMobileCliTool {
         }
         project_vcp_plugin_outcome(response.envelope)
     }
-}
-
-async fn current_mobile_cli_route(app: &AppHandle) -> Result<MobileCliAgentRoute, String> {
-    freeze_mobile_cli_agent_route(app)
-        .await
-        .map_err(|error| format!("runtime_unavailable: cannot read Mobile CLI route: {error}"))
-}
-
-async fn require_vcp_plugin_route(app: &AppHandle) -> Result<(), String> {
-    match current_mobile_cli_route(app).await? {
-        MobileCliAgentRoute::VcpPlugin => Ok(()),
-        MobileCliAgentRoute::LocalLoopback => {
-            Err("user_disabled: VCPMobileCLI Distributed route is not selected".to_string())
-        }
-    }
-}
-
-fn publication_route_enabled(is_android: bool, route: MobileCliAgentRoute) -> bool {
-    is_android && route == MobileCliAgentRoute::VcpPlugin
 }
 
 fn validate_execution_context(context: &ToolExecutionContext) -> Result<(), String> {
@@ -214,22 +185,6 @@ mod tests {
             metadata.invocation_commands[0].command_identifier,
             VCP_MOBILE_CLI_TOOL_NAME
         );
-    }
-
-    #[test]
-    fn publication_requires_android_and_the_vcp_plugin_route() {
-        assert!(!publication_route_enabled(
-            false,
-            MobileCliAgentRoute::VcpPlugin
-        ));
-        assert!(!publication_route_enabled(
-            true,
-            MobileCliAgentRoute::LocalLoopback
-        ));
-        assert!(publication_route_enabled(
-            true,
-            MobileCliAgentRoute::VcpPlugin
-        ));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::settings_manager::{read_settings, MobileCliAgentRoute, SettingsState};
+use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -291,14 +291,13 @@ pub async fn perform_single_test_internal(
     client: &Client,
     vcp_url: &str,
     vcp_api_key: &str,
-    mobile_cli_agent_route: MobileCliAgentRoute,
     model_id: &str,
 ) -> Result<(), String> {
     if vcp_url.is_empty() {
         return Err("VCP Server URL is not configured.".to_string());
     }
 
-    let final_url = model_test_endpoint(vcp_url, mobile_cli_agent_route)?;
+    let final_url = model_test_endpoint(vcp_url)?;
 
     let payload = serde_json::json!({
         "model": model_id,
@@ -334,21 +333,9 @@ pub async fn perform_single_test_internal(
     }
 }
 
-fn model_test_endpoint(
-    vcp_url: &str,
-    mobile_cli_agent_route: MobileCliAgentRoute,
-) -> Result<String, String> {
+fn model_test_endpoint(vcp_url: &str) -> Result<String, String> {
     let mut url = Url::parse(vcp_url).map_err(|e| format!("URL 解析失败: {}", e))?;
-    if mobile_cli_agent_route == MobileCliAgentRoute::VcpPlugin {
-        url.set_path("/v1/chatvcp/completions");
-    } else if !url.path().ends_with("/chat/completions") {
-        let new_path = if url.path().ends_with('/') {
-            format!("{}v1/chat/completions", url.path())
-        } else {
-            format!("{}/v1/chat/completions", url.path())
-        };
-        url.set_path(&new_path);
-    }
+    url.set_path("/v1/chatvcp/completions");
     Ok(url.to_string())
 }
 
@@ -362,17 +349,9 @@ pub async fn test_model_connectivity<R: Runtime>(
     let settings = read_settings(app, settings_state).await?;
     let vcp_url = settings.vcp_server_url;
     let vcp_api_key = settings.vcp_api_key;
-    let mobile_cli_agent_route = settings.mobile_cli_agent_route;
 
     let start = std::time::Instant::now();
-    perform_single_test_internal(
-        &state.http_client,
-        &vcp_url,
-        &vcp_api_key,
-        mobile_cli_agent_route,
-        &model_id,
-    )
-    .await?;
+    perform_single_test_internal(&state.http_client, &vcp_url, &vcp_api_key, &model_id).await?;
     let duration = start.elapsed().as_millis() as u64;
     Ok(duration)
 }
@@ -403,7 +382,6 @@ pub async fn start_batch_model_test<R: Runtime>(
     let settings = read_settings(app, settings_state).await?;
     let vcp_url = settings.vcp_server_url;
     let vcp_api_key = settings.vcp_api_key;
-    let mobile_cli_agent_route = settings.mobile_cli_agent_route;
 
     // 2. 物理级硬性中止上一次的批量测试任务，从源头防止网络泄漏
     {
@@ -461,7 +439,6 @@ pub async fn start_batch_model_test<R: Runtime>(
                         &client_inner,
                         &vcp_url_inner,
                         &vcp_api_key_inner,
-                        mobile_cli_agent_route,
                         &model_id,
                     )
                     .await;
@@ -545,8 +522,6 @@ pub async fn init_model_manager<R: Runtime>(_app: &AppHandle<R>, _state: &ModelM
 #[cfg(test)]
 mod task_owner_tests {
     use super::{is_current_batch_owner, model_test_endpoint};
-    use crate::vcp_modules::settings_manager::{create_default_settings, MobileCliAgentRoute};
-    use serde_json::json;
 
     #[test]
     fn old_batch_finalizer_cannot_clear_new_owner() {
@@ -556,23 +531,10 @@ mod task_owner_tests {
     }
 
     #[test]
-    fn model_tests_follow_typed_route_and_ignore_legacy_extra_flag() {
-        let mut settings = create_default_settings();
-        settings.extra = json!({ "enableVcpToolInjection": true });
+    fn model_tests_use_vcp_plugin_endpoint() {
         let base = "https://example.invalid/proxy";
-
         assert_eq!(
-            settings.mobile_cli_agent_route,
-            MobileCliAgentRoute::LocalLoopback
-        );
-        assert_eq!(
-            model_test_endpoint(base, settings.mobile_cli_agent_route)
-                .expect("local model endpoint"),
-            "https://example.invalid/proxy/v1/chat/completions"
-        );
-        assert_eq!(
-            model_test_endpoint(base, MobileCliAgentRoute::VcpPlugin)
-                .expect("plugin model endpoint"),
+            model_test_endpoint(base).expect("plugin model endpoint"),
             "https://example.invalid/v1/chatvcp/completions"
         );
     }

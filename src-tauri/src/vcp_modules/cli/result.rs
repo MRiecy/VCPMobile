@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const VCP_TOOL_PAYLOAD_MARKER: &str = "<!-- VCP_TOOL_PAYLOAD -->";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum VcpCliContentPart {
@@ -120,7 +118,6 @@ pub struct VcpCliSkillSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VcpCliRuntimeSource {
-    LocalLoopback,
     VcpPlugin,
 }
 
@@ -137,23 +134,23 @@ pub struct VcpCliRuntimeInfo {
 }
 
 impl VcpCliRuntimeInfo {
-    pub fn local_loopback_shell() -> Self {
+    pub fn vcp_plugin_shell() -> Self {
         Self {
             platform: "android".to_string(),
             shell: Some("/bin/bash".to_string()),
             distribution: Some("alpine".to_string()),
             libc: Some("musl".to_string()),
-            source: VcpCliRuntimeSource::LocalLoopback,
+            source: VcpCliRuntimeSource::VcpPlugin,
         }
     }
 
-    pub fn local_loopback() -> Self {
+    pub fn vcp_plugin() -> Self {
         Self {
             platform: "android".to_string(),
             shell: None,
             distribution: None,
             libc: None,
-            source: VcpCliRuntimeSource::LocalLoopback,
+            source: VcpCliRuntimeSource::VcpPlugin,
         }
     }
 }
@@ -221,46 +218,6 @@ impl VcpCliResultEnvelope {
             Self::Success { result } | Self::Error { result, .. } => result,
         }
     }
-
-    pub fn prepend_optional_context_notices(&mut self, notices: &[String]) {
-        if notices.is_empty() {
-            return;
-        }
-        let result = match self {
-            Self::Success { result } | Self::Error { result, .. } => result,
-        };
-        result
-            .content
-            .splice(0..0, notices.iter().cloned().map(VcpCliContentPart::text));
-    }
-
-    fn to_distributed(&self, request_id: &str) -> VcpDistributedToolResult {
-        let data = match self {
-            Self::Success { result } => VcpDistributedToolResultData {
-                request_id: request_id.to_string(),
-                status: VcpDistributedToolResultStatus::Success,
-                result: Some(result.clone()),
-                error: None,
-            },
-            Self::Error {
-                error,
-                code,
-                result,
-            } => VcpDistributedToolResultData {
-                request_id: request_id.to_string(),
-                status: VcpDistributedToolResultStatus::Error,
-                result: None,
-                // 当前 Distributed wire 只有 string error；稳定前缀保留规范 code，
-                // 并携带规范 content，避免远端 route 丢失 Agent 可修正诊断。
-                error: Some(distributed_error_text(*code, error, result)),
-            },
-        };
-
-        VcpDistributedToolResult {
-            message_type: VcpDistributedMessageType::ToolResult,
-            data,
-        }
-    }
 }
 
 fn distributed_error_text(
@@ -282,54 +239,6 @@ fn distributed_error_text(
     } else {
         format!("{}: {summary}\n{diagnostics}", code.as_str())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum VcpDistributedMessageType {
-    ToolResult,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum VcpDistributedToolResultStatus {
-    Success,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VcpDistributedToolResult {
-    #[serde(rename = "type")]
-    message_type: VcpDistributedMessageType,
-    data: VcpDistributedToolResultData,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct VcpDistributedToolResultData {
-    #[serde(rename = "requestId")]
-    request_id: String,
-    status: VcpDistributedToolResultStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<VcpCliResultBody>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-/// 生成本地续轮 user message 的正文。调用方仍须保留上一轮 assistant 原始请求。
-pub fn serialize_local_model_payload(
-    result: &VcpCliResultEnvelope,
-) -> Result<String, serde_json::Error> {
-    let content = serde_json::to_string(&result.result().content)?;
-    Ok(format!("{VCP_TOOL_PAYLOAD_MARKER}\n{content}"))
-}
-
-/// 将同一规范 Runtime 结果投影为现有 Distributed `tool_result` wire。
-/// 错误 wire 仅允许 string error，因此编码为 `<code>: <summary>\n<diagnostic>`。
-pub fn serialize_distributed_tool_result(
-    request_id: &str,
-    result: &VcpCliResultEnvelope,
-) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&result.to_distributed(request_id))
 }
 
 /// Project the canonical Runtime envelope into the value/error shape expected by the existing
@@ -370,16 +279,12 @@ mod tests {
     #[serde(rename_all = "camelCase")]
     struct ResultGolden {
         success_envelope: Value,
-        success_local_payload: String,
-        success_distributed: Value,
         skill_envelope: Value,
         error_envelope: Value,
-        error_local_payload: String,
-        error_distributed: Value,
     }
 
     #[test]
-    fn canonical_result_projects_to_local_and_distributed_golden() {
+    fn canonical_result_projects_to_golden_envelopes() {
         let fixture: ResultGolden =
             serde_json::from_str(include_str!("fixtures/vcp_cli_result.golden.json"))
                 .expect("parse result golden fixture");
@@ -389,16 +294,6 @@ mod tests {
             serde_json::to_value(&success).expect("serialize success envelope"),
             fixture.success_envelope
         );
-        assert_eq!(
-            serialize_local_model_payload(&success).expect("serialize local payload"),
-            fixture.success_local_payload
-        );
-        let distributed: Value = serde_json::from_str(
-            &serialize_distributed_tool_result("request_01", &success)
-                .expect("serialize distributed success"),
-        )
-        .expect("parse distributed success");
-        assert_eq!(distributed, fixture.success_distributed);
 
         let skill = skill_success_fixture();
         assert_eq!(
@@ -408,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_error_remains_agent_readable_on_both_routes() {
+    fn canonical_error_remains_agent_readable() {
         let fixture: ResultGolden =
             serde_json::from_str(include_str!("fixtures/vcp_cli_result.golden.json"))
                 .expect("parse result golden fixture");
@@ -422,30 +317,6 @@ mod tests {
             serde_json::to_value(&error).expect("serialize error envelope"),
             fixture.error_envelope
         );
-        assert_eq!(
-            serialize_local_model_payload(&error).expect("serialize local error payload"),
-            fixture.error_local_payload
-        );
-        let distributed: Value = serde_json::from_str(
-            &serialize_distributed_tool_result("request_02", &error)
-                .expect("serialize distributed error"),
-        )
-        .expect("parse distributed error");
-        assert_eq!(distributed, fixture.error_distributed);
-    }
-
-    #[test]
-    fn optional_context_notice_is_included_in_local_agent_payload() {
-        let mut success = job_success_fixture();
-        success.prepend_optional_context_notices(&[
-            "提示：本次未能应用 vref；命令已在无知识召回上下文下继续执行。".to_string(),
-        ]);
-
-        let payload = serialize_local_model_payload(&success).expect("serialize local payload");
-        assert!(payload.starts_with(VCP_TOOL_PAYLOAD_MARKER));
-        assert!(payload.contains("未能应用 vref"));
-        assert!(payload.contains("ok\\n"));
-        assert!(matches!(success, VcpCliResultEnvelope::Success { .. }));
     }
 
     #[test]
@@ -491,7 +362,7 @@ mod tests {
             jobs: None,
             skill: None,
             skills: None,
-            runtime: Some(VcpCliRuntimeInfo::local_loopback_shell()),
+            runtime: Some(VcpCliRuntimeInfo::vcp_plugin_shell()),
         })
     }
 
@@ -510,7 +381,7 @@ mod tests {
                 materialized_path: None,
             }),
             skills: None,
-            runtime: Some(VcpCliRuntimeInfo::local_loopback()),
+            runtime: Some(VcpCliRuntimeInfo::vcp_plugin()),
         })
     }
 }

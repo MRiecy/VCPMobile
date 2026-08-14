@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::ledger::{
@@ -130,51 +129,6 @@ struct RunParameters {
     session_id: Option<String>,
 }
 
-#[derive(Clone)]
-struct MobileCliAdmissionFence {
-    cancellation_token: CancellationToken,
-    deadline_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MobileCliAdmissionError {
-    Cancelled,
-    Deadline,
-    Runtime(String),
-}
-
-impl MobileCliAdmissionError {
-    fn into_runtime_error(self) -> String {
-        match self {
-            Self::Cancelled => {
-                "CLI admission was cancelled before the Job was accepted".to_string()
-            }
-            Self::Deadline => {
-                "CLI admission reached the turn deadline before the Job was accepted".to_string()
-            }
-            Self::Runtime(error) => error,
-        }
-    }
-}
-
-impl From<String> for MobileCliAdmissionError {
-    fn from(error: String) -> Self {
-        Self::Runtime(error)
-    }
-}
-
-impl MobileCliAdmissionFence {
-    fn check(&self) -> Result<(), MobileCliAdmissionError> {
-        if self.cancellation_token.is_cancelled() {
-            return Err(MobileCliAdmissionError::Cancelled);
-        }
-        if now_ms().map_err(MobileCliAdmissionError::Runtime)? >= self.deadline_at_ms {
-            return Err(MobileCliAdmissionError::Deadline);
-        }
-        Ok(())
-    }
-}
-
 struct RunJobAdmission {
     job: JobRecord,
     concurrent_limit: usize,
@@ -291,35 +245,14 @@ impl MobileCliRuntimeState {
         app: &AppHandle<R>,
         request: ExecuteVcpMobileCliRequest,
     ) -> Result<ExecuteVcpMobileCliResponse, String> {
-        self.execute_inner(app, request, None)
-            .await
-            .map_err(MobileCliAdmissionError::into_runtime_error)
-    }
-
-    pub(crate) async fn execute_with_turn_admission<R: Runtime>(
-        &self,
-        app: &AppHandle<R>,
-        request: ExecuteVcpMobileCliRequest,
-        cancellation_token: CancellationToken,
-        deadline_at_ms: u64,
-    ) -> Result<ExecuteVcpMobileCliResponse, MobileCliAdmissionError> {
-        self.execute_inner(
-            app,
-            request,
-            Some(MobileCliAdmissionFence {
-                cancellation_token,
-                deadline_at_ms,
-            }),
-        )
-        .await
+        self.execute_inner(app, request).await
     }
 
     async fn execute_inner<R: Runtime>(
         &self,
         app: &AppHandle<R>,
         request: ExecuteVcpMobileCliRequest,
-        admission_fence: Option<MobileCliAdmissionFence>,
-    ) -> Result<ExecuteVcpMobileCliResponse, MobileCliAdmissionError> {
+    ) -> Result<ExecuteVcpMobileCliResponse, String> {
         validate_operation_id(&request.operation_id)?;
         let action = match validate_structured_vcp_cli_action(request.action.clone()) {
             Ok(action) => action,
@@ -363,9 +296,6 @@ impl MobileCliRuntimeState {
                     {
                         replay
                     } else {
-                        if let Some(fence) = admission_fence.as_ref() {
-                            fence.check()?;
-                        }
                         self.run_action(
                             app,
                             &request.operation_id,
@@ -380,7 +310,6 @@ impl MobileCliRuntimeState {
                                 session_id: request.session_id.clone(),
                             },
                             &action_sha256,
-                            admission_fence.as_ref(),
                         )
                         .await?
                     }
@@ -679,16 +608,10 @@ impl MobileCliRuntimeState {
         operation_id: &str,
         parameters: RunParameters,
         action_sha256: &str,
-        admission_fence: Option<&MobileCliAdmissionFence>,
-    ) -> Result<ExecuteVcpMobileCliResponse, MobileCliAdmissionError> {
+    ) -> Result<ExecuteVcpMobileCliResponse, String> {
         let runtime = match self.ensure_provisioned(app, operation_id).await {
             Ok(runtime) => runtime,
-            Err(error) => {
-                return self
-                    .domain_response(operation_id, error)
-                    .await
-                    .map_err(MobileCliAdmissionError::Runtime)
-            }
+            Err(error) => return self.domain_response(operation_id, error).await,
         };
         let profile = runtime.profile.clone();
         let workspace = runtime.workspace.clone();
@@ -710,8 +633,7 @@ impl MobileCliRuntimeState {
                     operation_id,
                     DomainError::new(VcpCliErrorCode::RuntimeUnavailable, error),
                 )
-                .await
-                .map_err(MobileCliAdmissionError::Runtime);
+                .await;
         }
 
         let now = now_ms()?;
@@ -766,7 +688,6 @@ impl MobileCliRuntimeState {
                         }],
                     },
                 },
-                admission_fence,
             )?;
             let stale_paths = evicted
                 .iter()
@@ -794,23 +715,10 @@ impl MobileCliRuntimeState {
                 }
             }
             persist_owner(&owner).await?;
-            Ok::<(), MobileCliAdmissionError>(())
+            Ok::<(), String>(())
         }
         .await;
-        if let Err(error) = insertion {
-            return match error {
-                MobileCliAdmissionError::Cancelled | MobileCliAdmissionError::Deadline => {
-                    Err(error)
-                }
-                MobileCliAdmissionError::Runtime(error) => self
-                    .domain_response(
-                        operation_id,
-                        DomainError::new(VcpCliErrorCode::RuntimeUnavailable, error),
-                    )
-                    .await
-                    .map_err(MobileCliAdmissionError::Runtime),
-            };
-        }
+        insertion?;
 
         let start = StartCliProcessRequest {
             operation_id: operation_id.to_string(),
@@ -861,7 +769,6 @@ impl MobileCliRuntimeState {
         spawn_job_monitor(app.clone(), job_id.clone(), attempt_id, generation);
         self.job_response(operation_id, &job_id, None, DEFAULT_BOUNDED_READ_BYTES)
             .await
-            .map_err(MobileCliAdmissionError::Runtime)
     }
 
     async fn start_or_adopt<R: Runtime>(
@@ -1509,7 +1416,7 @@ impl MobileCliRuntimeState {
                 jobs: Some(summaries),
                 skill: None,
                 skills: None,
-                runtime: Some(VcpCliRuntimeInfo::local_loopback()),
+                runtime: Some(VcpCliRuntimeInfo::vcp_plugin()),
             }),
         })
     }
@@ -1547,7 +1454,7 @@ impl MobileCliRuntimeState {
                 jobs: None,
                 skill: None,
                 skills: Some(listed.skills),
-                runtime: Some(VcpCliRuntimeInfo::local_loopback()),
+                runtime: Some(VcpCliRuntimeInfo::vcp_plugin()),
             }),
         })
     }
@@ -1593,7 +1500,7 @@ impl MobileCliRuntimeState {
                 jobs: None,
                 skill: Some(skill),
                 skills: None,
-                runtime: Some(VcpCliRuntimeInfo::local_loopback()),
+                runtime: Some(VcpCliRuntimeInfo::vcp_plugin()),
             }),
         })
     }
@@ -1681,7 +1588,7 @@ impl MobileCliRuntimeState {
                 jobs: None,
                 skill: Some(skill),
                 skills: None,
-                runtime: Some(VcpCliRuntimeInfo::local_loopback()),
+                runtime: Some(VcpCliRuntimeInfo::vcp_plugin()),
             }),
         })
     }
@@ -1899,7 +1806,7 @@ impl MobileCliRuntimeState {
                 jobs: None,
                 skill: None,
                 skills: None,
-                runtime: Some(VcpCliRuntimeInfo::local_loopback_shell()),
+                runtime: Some(VcpCliRuntimeInfo::vcp_plugin_shell()),
             }),
         })
     }
@@ -2377,19 +2284,15 @@ fn session_concurrency_reached(jobs: &[JobRecord], session_id: &str, limit: usiz
         >= limit
 }
 
-/// The cancellation/deadline check and durable Job insertion are one Runtime-owned admission
-/// decision. There is deliberately no await between the fence check and `insert_job`: a fence
-/// observed here wins without a ProcessHost start; once the check succeeds, admission wins and
-/// the durable Job lifecycle owns all later cancellation.
+/// Durable Job insertion is the single Runtime-owned admission decision. There is deliberately no
+/// await before `insert_job`: once admission wins, the durable Job lifecycle owns all later
+/// cancellation.
 fn admit_run_job(
     owner: &mut RuntimeOwner,
     admission: RunJobAdmission,
-    fence: Option<&MobileCliAdmissionFence>,
-) -> Result<Vec<JobRecord>, MobileCliAdmissionError> {
+) -> Result<Vec<JobRecord>, String> {
     if owner.ledger.runtime_generation != admission.job.runtime_generation {
-        return Err(MobileCliAdmissionError::Runtime(
-            "runtime generation changed before CLI job admission".to_string(),
-        ));
+        return Err("runtime generation changed before CLI job admission".to_string());
     }
     let running = owner
         .ledger
@@ -2398,10 +2301,10 @@ fn admit_run_job(
         .filter(|job| !job.is_terminal())
         .count();
     if running >= admission.concurrent_limit {
-        return Err(MobileCliAdmissionError::Runtime(format!(
+        return Err(format!(
             "CLI concurrency limit reached; at most {} jobs may run",
             admission.concurrent_limit
-        )));
+        ));
     }
     if let Some(session_id) = admission.job.session_id.as_deref() {
         if session_concurrency_reached(
@@ -2409,19 +2312,16 @@ fn admit_run_job(
             session_id,
             admission.concurrent_limit.min(2),
         ) {
-            return Err(MobileCliAdmissionError::Runtime(
+            return Err(
                 "CLI session concurrency limit reached; at most 2 jobs may run in one chat session"
                     .to_string(),
-            ));
+            );
         }
-    }
-    if let Some(fence) = fence {
-        fence.check()?;
     }
     owner
         .ledger
         .insert_job(admission.job)
-        .map_err(MobileCliAdmissionError::Runtime)
+        .map_err(|error| error)
 }
 
 fn action_digest(action: &VcpCliAction, session_id: Option<&str>) -> Result<String, String> {
@@ -2525,11 +2425,7 @@ fn spawn_job_monitor<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use std::sync::Arc;
-
     use super::*;
-    use tokio::sync::Barrier;
 
     fn running_test_job(generation: u64) -> JobRecord {
         JobRecord {
@@ -2559,75 +2455,6 @@ mod tests {
             terminal_intent: None,
             mutation_operations: Vec::new(),
         }
-    }
-
-    async fn fenced_admission_after_owner_barrier(
-        cancel_before_release: bool,
-    ) -> (MobileCliAdmissionError, usize) {
-        let state = Arc::new(MobileCliRuntimeState::new());
-        let worker_state = Arc::clone(&state);
-        let barrier = Arc::new(Barrier::new(2));
-        let worker_barrier = Arc::clone(&barrier);
-        let process_start_counter = Arc::new(AtomicUsize::new(0));
-        let worker_start_counter = Arc::clone(&process_start_counter);
-        let cancellation_token = CancellationToken::new();
-        let worker_token = cancellation_token.clone();
-        let deadline_at_ms = if cancel_before_release {
-            u64::MAX
-        } else {
-            now_ms().expect("current time").saturating_add(5)
-        };
-
-        let mut owner_guard = state.inner.lock().await;
-        owner_guard.ledger = JobLedger::empty(9);
-        let worker = tokio::spawn(async move {
-            worker_barrier.wait().await;
-            let mut owner = worker_state.inner.lock().await;
-            let mut job = running_test_job(9);
-            job.state = VcpCliJobState::Starting;
-            let result = admit_run_job(
-                &mut owner,
-                RunJobAdmission {
-                    job,
-                    concurrent_limit: 2,
-                },
-                Some(&MobileCliAdmissionFence {
-                    cancellation_token: worker_token,
-                    deadline_at_ms,
-                }),
-            );
-            if result.is_ok() {
-                // `run_action` may call ProcessHost only after this same helper succeeds.
-                worker_start_counter.fetch_add(1, AtomicOrdering::SeqCst);
-            }
-            result
-        });
-
-        barrier.wait().await;
-        if cancel_before_release {
-            cancellation_token.cancel();
-        } else {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        drop(owner_guard);
-
-        let error = worker
-            .await
-            .expect("admission worker")
-            .expect_err("cancel/deadline must win before durable admission");
-        assert!(state.inner.lock().await.ledger.jobs.is_empty());
-        (error, process_start_counter.load(AtomicOrdering::SeqCst))
-    }
-
-    #[tokio::test]
-    async fn cancel_or_deadline_while_waiting_for_runtime_owner_never_reaches_process_start() {
-        let (cancelled, cancel_starts) = fenced_admission_after_owner_barrier(true).await;
-        assert_eq!(cancelled, MobileCliAdmissionError::Cancelled);
-        assert_eq!(cancel_starts, 0);
-
-        let (deadline, deadline_starts) = fenced_admission_after_owner_barrier(false).await;
-        assert_eq!(deadline, MobileCliAdmissionError::Deadline);
-        assert_eq!(deadline_starts, 0);
     }
 
     #[tokio::test]

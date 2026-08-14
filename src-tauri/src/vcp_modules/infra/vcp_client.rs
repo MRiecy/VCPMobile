@@ -1,4 +1,3 @@
-use crate::vcp_modules::infra::utils::normalize_vcp_url;
 use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use dashmap::mapref::entry::Entry;
 use dashmap::{DashMap, DashSet};
@@ -22,10 +21,6 @@ use url::Url;
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::settings_manager::{
-    read_settings, MobileCliAgentRoute, Settings, SettingsState,
-};
-use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 
 #[cfg(target_os = "android")]
 const HELPER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -76,206 +71,6 @@ pub struct VcpRequestPayload {
     /// 每个模型 step 的内部网络/helper 身份；不进入 StreamEvent 或 DB 可见身份。
     #[serde(default)]
     pub transport_request_id: Option<String>,
-    /// 本地多 step turn 的事件投影；旧调用省略时保持现有 wire。
-    #[serde(default)]
-    pub turn_attempt: Option<String>,
-    #[serde(default)]
-    pub step_index: Option<u32>,
-    #[serde(default)]
-    pub projection_reset: Option<bool>,
-    /// Coordinator 在 turn 开始时冻结；`None` 仅保留旧调用的设置兼容路径。
-    #[serde(default)]
-    pub mobile_cli_agent_route: Option<MobileCliAgentRoute>,
-    /// 仅供 Rust coordinator 投影已持久化的工具结果；不接受 IPC/wire 输入，也不进入模型请求。
-    #[serde(skip)]
-    pub local_cli_projection_prefix: Option<String>,
-}
-
-const TYPED_NON_STREAM_BODY_OVERHEAD_BYTES: usize = 64 * 1024;
-pub(crate) const TYPED_ASSISTANT_BUDGET_ERROR: &str = "模型单步输出超过 512 KiB 安全上限";
-const VCP_TOOL_USE_FORBIDDEN_SENTINEL: &str = "[[VCPToolUse=Forbidden]]";
-
-pub(crate) fn is_typed_assistant_budget_error(error: &str) -> bool {
-    error.starts_with(TYPED_ASSISTANT_BUDGET_ERROR)
-}
-
-fn inject_local_loopback_transport_guard(messages: &mut Vec<Value>) {
-    if messages
-        .first()
-        .and_then(|message| message["role"].as_str())
-        != Some("system")
-    {
-        messages.insert(
-            0,
-            json!({
-                "role": "system",
-                "content": VCP_TOOL_USE_FORBIDDEN_SENTINEL,
-            }),
-        );
-        return;
-    }
-
-    let Some(content) = messages[0].get_mut("content") else {
-        messages[0]["content"] = json!(VCP_TOOL_USE_FORBIDDEN_SENTINEL);
-        return;
-    };
-    match content {
-        Value::String(text) => {
-            if !text.contains(VCP_TOOL_USE_FORBIDDEN_SENTINEL) {
-                if text.is_empty() {
-                    *text = VCP_TOOL_USE_FORBIDDEN_SENTINEL.to_string();
-                } else {
-                    *text = format!("{VCP_TOOL_USE_FORBIDDEN_SENTINEL}\n{text}");
-                }
-            }
-        }
-        Value::Array(parts) => {
-            let already_present = parts.iter().any(|part| {
-                part.get("type").and_then(Value::as_str) == Some("text")
-                    && part
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| text.contains(VCP_TOOL_USE_FORBIDDEN_SENTINEL))
-            });
-            if !already_present {
-                parts.insert(
-                    0,
-                    json!({"type": "text", "text": VCP_TOOL_USE_FORBIDDEN_SENTINEL}),
-                );
-            }
-        }
-        _ => *content = json!(VCP_TOOL_USE_FORBIDDEN_SENTINEL),
-    }
-}
-
-fn should_inject_local_loopback_transport_guard(
-    route: MobileCliAgentRoute,
-    metadata: &StreamTurnMetadata,
-) -> bool {
-    route == MobileCliAgentRoute::LocalLoopback && metadata.turn_attempt.is_some()
-}
-
-#[derive(Debug, Clone, Default)]
-struct LocalCliAuroraProjection {
-    prefix: String,
-    stable_blocks: Vec<StreamBlock>,
-}
-
-impl LocalCliAuroraProjection {
-    fn from_prefix(prefix: Option<String>) -> Self {
-        let prefix = prefix.filter(|value| !value.is_empty()).unwrap_or_default();
-        let stable_blocks = if prefix.is_empty() {
-            Vec::new()
-        } else {
-            StreamBlockParser::new().finalize(&prefix)
-        };
-        Self {
-            prefix,
-            stable_blocks,
-        }
-    }
-
-    fn apply(&self, update: &mut AuroraUpdate) {
-        if self.prefix.is_empty() {
-            return;
-        }
-        if let Some(content) = update.content.take() {
-            update.content = Some(self.full_content(&content));
-        }
-        if let Some(model_blocks) = update.stable_blocks.take() {
-            let mut projected = self.stable_blocks.clone();
-            projected.extend(model_blocks);
-            update.stable_blocks = Some(projected);
-        }
-    }
-
-    fn full_content(&self, model_content: &str) -> String {
-        format!("{}{}", self.prefix, model_content)
-    }
-}
-
-fn enforce_typed_assistant_budget(
-    metadata: &StreamTurnMetadata,
-    buffered_bytes: usize,
-    pending_bytes: usize,
-    incoming_bytes: usize,
-) -> Result<(), String> {
-    if metadata.turn_attempt.is_none() {
-        return Ok(());
-    }
-    let projected = buffered_bytes
-        .checked_add(pending_bytes)
-        .and_then(|value| value.checked_add(incoming_bytes));
-    if projected
-        .is_none_or(|value| value > crate::vcp_modules::cli::turn_types::MAX_ASSISTANT_STEP_BYTES)
-    {
-        return Err(TYPED_ASSISTANT_BUDGET_ERROR.to_string());
-    }
-    Ok(())
-}
-
-fn append_bounded_response_chunk(
-    body: &mut Vec<u8>,
-    chunk: &[u8],
-    max_bytes: usize,
-) -> Result<(), String> {
-    if body
-        .len()
-        .checked_add(chunk.len())
-        .is_none_or(|value| value > max_bytes)
-    {
-        return Err(format!("模型响应体超过 {} 字节安全上限", max_bytes));
-    }
-    body.extend_from_slice(chunk);
-    Ok(())
-}
-
-async fn read_response_body_bounded(
-    response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("读取模型响应失败: {error}"))?;
-        append_bounded_response_chunk(&mut body, &chunk, max_bytes)?;
-    }
-    Ok(body)
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct StreamTurnMetadata {
-    turn_attempt: Option<String>,
-    step_index: Option<u32>,
-    projection_reset: Option<bool>,
-}
-
-fn project_aurora_finish_reason(
-    metadata: &StreamTurnMetadata,
-    finish_reason: Option<String>,
-) -> Option<String> {
-    if metadata.turn_attempt.is_some() {
-        None
-    } else {
-        finish_reason
-    }
-}
-
-fn apply_stream_turn_metadata(event: StreamEvent, metadata: &StreamTurnMetadata) -> StreamEvent {
-    event.with_turn_metadata(metadata)
-}
-
-fn project_model_step_event(
-    event: StreamEvent,
-    metadata: &StreamTurnMetadata,
-) -> Option<StreamEvent> {
-    // Inner model-step failures return through Result to the coordinator. Emitting an `error`
-    // frame here would create a false outer terminal in the UI before continuation policy runs.
-    if metadata.turn_attempt.is_some() && event.r#type == "error" {
-        None
-    } else {
-        Some(apply_stream_turn_metadata(event, metadata))
-    }
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -305,36 +100,15 @@ impl VcpRequestPayload {
             .filter(|request_id| !request_id.trim().is_empty())
             .unwrap_or(&self.message_id)
     }
-
-    fn stream_turn_metadata(&self) -> StreamTurnMetadata {
-        StreamTurnMetadata {
-            turn_attempt: self.turn_attempt.clone(),
-            step_index: self.step_index,
-            projection_reset: self.projection_reset,
-        }
-    }
 }
 
-fn resolve_vcp_endpoint(raw_url: &str, frozen_route: MobileCliAgentRoute) -> String {
-    if frozen_route == MobileCliAgentRoute::VcpPlugin {
-        let mut final_url = raw_url.to_string();
-        if let Ok(mut url) = Url::parse(raw_url) {
-            url.set_path("/v1/chatvcp/completions");
-            final_url = url.to_string();
-        }
-        final_url
-    } else {
-        normalize_vcp_url(raw_url)
+fn resolve_vcp_endpoint(raw_url: &str) -> String {
+    let mut final_url = raw_url.to_string();
+    if let Ok(mut url) = Url::parse(raw_url) {
+        url.set_path("/v1/chatvcp/completions");
+        final_url = url.to_string();
     }
-}
-
-fn resolve_request_route(
-    explicit_route: Option<MobileCliAgentRoute>,
-    settings: Option<&Settings>,
-) -> MobileCliAgentRoute {
-    explicit_route
-        .or_else(|| settings.map(|settings| settings.mobile_cli_agent_route))
-        .unwrap_or_default()
+    final_url
 }
 
 /// 流式事件结构体，用于向前端发送数据
@@ -345,12 +119,6 @@ pub struct StreamEvent {
     pub chunk: Option<Value>, // 数据块 (仅 type="data" 时有效)
     pub message_id: String, // 消息ID
     pub context: Option<Value>, // 透传的上下文信息
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_attempt: Option<String>, // 本地工具回环 attempt；旧请求不发送
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step_index: Option<u32>, // attempt 内模型 step
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projection_reset: Option<bool>, // 当前帧是否重置上一 step 的 UI 投影
     pub finish_reason: Option<String>, // 结束原因
     pub error: Option<String>, // 错误信息 (仅 type="error" 时有效)
     pub aurora: Option<AuroraUpdate>, // Aurora 语义沉淀更新 (type="aurora" 时有效)
@@ -359,27 +127,6 @@ pub struct StreamEvent {
 }
 
 impl StreamEvent {
-    fn with_turn_metadata(mut self, metadata: &StreamTurnMetadata) -> Self {
-        self.turn_attempt = metadata.turn_attempt.clone();
-        self.step_index = metadata.step_index;
-        self.projection_reset = metadata.projection_reset;
-        self
-    }
-
-    /// Coordinator 的唯一 outer terminal 也必须保留最后一个 step 的 typed wire 身份。
-    pub fn with_turn_projection(
-        self,
-        turn_attempt: String,
-        step_index: u32,
-        projection_reset: bool,
-    ) -> Self {
-        self.with_turn_metadata(&StreamTurnMetadata {
-            turn_attempt: Some(turn_attempt),
-            step_index: Some(step_index),
-            projection_reset: Some(projection_reset),
-        })
-    }
-
     pub fn thinking(message_id: String, context: Option<Value>) -> Self {
         Self {
             r#type: "thinking".into(),
@@ -679,33 +426,17 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     let message_id = payload.message_id.clone();
     let context = payload.context.clone();
     let transport_request_id = payload.effective_transport_request_id().to_string();
-    let stream_turn_metadata = payload.stream_turn_metadata();
-    let local_cli_projection =
-        LocalCliAuroraProjection::from_prefix(payload.local_cli_projection_prefix);
 
     // === 1. 数据验证和多模态资产转换 ===
     let mut messages = preprocess_multimodal_messages(app, payload.messages).await?;
 
-    // === 2. 读取设置与动态路由切换 ===
-    let settings_snapshot = if payload.mobile_cli_agent_route.is_none() {
-        load_app_settings(app).await.ok()
-    } else {
-        None
-    };
-    let frozen_route =
-        resolve_request_route(payload.mobile_cli_agent_route, settings_snapshot.as_ref());
-    let final_url = resolve_vcp_endpoint(&payload.vcp_url, frozen_route);
+    // === 2. 固定走 VCPToolBox 插件端点 ===
+    let final_url = resolve_vcp_endpoint(&payload.vcp_url);
 
     // === 3. 补充 System 提示词首部 ===
     let has_system = messages.iter().any(|m| m["role"] == "system");
     if !has_system {
         messages.insert(0, json!({"role": "system", "content": ""}));
-    }
-    // VCPToolBox 的普通 `/v1/chat/completions` 仍会解析并执行显式 TOOL_REQUEST。
-    // 本地 coordinator 必须成为唯一工具 owner；该请求级 sentinel 会被 VCPToolBox
-    // 在转发给模型前剥离，不写回 Agent prompt，也不用于 vcpPlugin 路由。
-    if should_inject_local_loopback_transport_guard(frozen_route, &stream_turn_metadata) {
-        inject_local_loopback_transport_guard(&mut messages);
     }
 
     // === 4. 剥离并生成元数据时间戳绑定 ===
@@ -748,8 +479,6 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
             transport_request_id,
             context,
             cancellation_token,
-            stream_turn_metadata,
-            local_cli_projection,
             stream_channel,
             false,
             None,
@@ -765,8 +494,6 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
             message_id,
             context,
             cancellation_token,
-            stream_turn_metadata,
-            local_cli_projection,
             stream_channel,
         )
         .await
@@ -1257,8 +984,6 @@ async fn handle_streaming_request<R: Runtime>(
     transport_request_id: String,
     context: Option<Value>,
     cancellation_token: CancellationToken,
-    stream_turn_metadata: StreamTurnMetadata,
-    local_cli_projection: LocalCliAuroraProjection,
     stream_channel: Option<Channel<StreamEvent>>,
     is_resume: bool,
     last_event_index: Option<i64>,
@@ -1266,16 +991,12 @@ async fn handle_streaming_request<R: Runtime>(
 ) -> Result<(Value, bool), String> {
     let send_stream_event = |event: StreamEvent| {
         if let Some(ref ch) = stream_channel {
-            if let Some(event) = project_model_step_event(event, &stream_turn_metadata) {
-                let _ = ch.send(event);
-            }
+            let _ = ch.send(event);
         }
     };
 
     let message_id_inner = message_id.clone();
     let context_inner = context.clone();
-    // Coordinator 的每个模型 step 都只是 outer turn 的中间帧；唯一终态由 outer
-    // finalizer 发出。旧单 step 路径没有 turnAttempt，保留既有 Aurora finishReason。
 
     let mut last_finish_reason: Option<String> = None;
     #[allow(unused_mut)]
@@ -1312,7 +1033,7 @@ async fn handle_streaming_request<R: Runtime>(
         let chunk = buffer.take_chunk();
         let tail_frame = buffer.take_tail_frame();
         let tail_snapshot = tail_frame.as_ref().and_then(|frame| frame.snapshot.clone());
-        let mut update = AuroraUpdate {
+        let update = AuroraUpdate {
             stable_blocks: if stable_changed {
                 Some(buffer.stable_blocks.clone())
             } else {
@@ -1339,10 +1060,9 @@ async fn handle_streaming_request<R: Runtime>(
             },
             chunk,
         };
-        local_cli_projection.apply(&mut update);
         let mut event =
             StreamEvent::aurora(message_id_inner.clone(), update, context_inner.clone());
-        event.finish_reason = project_aurora_finish_reason(&stream_turn_metadata, finish_reason);
+        event.finish_reason = finish_reason;
         event.error = error;
         send_stream_event(event);
     };
@@ -1403,7 +1123,6 @@ async fn handle_streaming_request<R: Runtime>(
         match state {
             State::Init => {
                 if let Some(ref content) = initial_content {
-                    enforce_typed_assistant_budget(&stream_turn_metadata, 0, 0, content.len())?;
                     aurora_buffer.append_chunk(content);
                     let _ = aurora_buffer.process_queue();
                     aurora_buffer.pushed_len = content.len();
@@ -1610,25 +1329,6 @@ async fn handle_streaming_request<R: Runtime>(
                                                             last_finish_reason = Some(reason.to_string());
                                                         }
                                                         if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                            if let Err(limit_error) = enforce_typed_assistant_budget(
-                                                                &stream_turn_metadata,
-                                                                aurora_buffer.full_text.len(),
-                                                                pending_aurora_chunk.len(),
-                                                                delta.len(),
-                                                            ) {
-                                                                if let Err(stop_error) = send_stop_to_helper(
-                                                                    _app,
-                                                                    &transport_request_id,
-                                                                    helper_generation,
-                                                                )
-                                                                .await
-                                                                {
-                                                                    return Err(format!(
-                                                                        "{limit_error}; helper cleanup failed: {stop_error}"
-                                                                    ));
-                                                                }
-                                                                return Err(limit_error);
-                                                            }
                                                             pending_aurora_chunk.push_str(delta);
                                                             let (stable_changed, tail_changed) = flush_aurora_parse(
                                                                 &mut aurora_buffer,
@@ -1744,12 +1444,6 @@ async fn handle_streaming_request<R: Runtime>(
                                                         last_finish_reason = Some(reason.to_string());
                                                     }
                                                     if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
-                                                        enforce_typed_assistant_budget(
-                                                            &stream_turn_metadata,
-                                                            aurora_buffer.full_text.len(),
-                                                            pending_aurora_chunk.len(),
-                                                            delta.len(),
-                                                        )?;
                                                         pending_aurora_chunk.push_str(delta);
                                                         let (stable_changed, tail_changed) = flush_aurora_parse(
                                                             &mut aurora_buffer,
@@ -1887,16 +1581,11 @@ async fn handle_non_streaming_request(
     message_id: String,
     context: Option<Value>,
     cancellation_token: CancellationToken,
-    stream_turn_metadata: StreamTurnMetadata,
-    local_cli_projection: LocalCliAuroraProjection,
     stream_channel: Option<Channel<StreamEvent>>,
 ) -> Result<(Value, bool), String> {
-    let is_typed_local_step = stream_turn_metadata.turn_attempt.is_some();
     let send_stream_event = |event: StreamEvent| {
         if let Some(ref ch) = stream_channel {
-            if let Some(event) = project_model_step_event(event, &stream_turn_metadata) {
-                let _ = ch.send(event);
-            }
+            let _ = ch.send(event);
         }
     };
 
@@ -1943,17 +1632,7 @@ async fn handle_non_streaming_request(
 
     if !response.status().is_success() {
         let status = response.status();
-        let text = if is_typed_local_step {
-            let bytes = read_response_body_bounded(
-                response,
-                crate::vcp_modules::cli::turn_types::MAX_ASSISTANT_STEP_BYTES
-                    + TYPED_NON_STREAM_BODY_OVERHEAD_BYTES,
-            )
-            .await?;
-            String::from_utf8_lossy(&bytes).into_owned()
-        } else {
-            response.text().await.unwrap_or_default()
-        };
+        let text = response.text().await.unwrap_or_default();
         let err_msg = format!("VCP服务器错误: {} - {}", status, text);
         send_stream_event(StreamEvent::error(
             message_id.clone(),
@@ -1963,34 +1642,10 @@ async fn handle_non_streaming_request(
         return Err(err_msg);
     }
 
-    let vcp_response_result = if is_typed_local_step {
-        let bytes = read_response_body_bounded(
-            response,
-            crate::vcp_modules::cli::turn_types::MAX_ASSISTANT_STEP_BYTES
-                + TYPED_NON_STREAM_BODY_OVERHEAD_BYTES,
-        )
-        .await;
-        bytes.and_then(|bytes| {
-            serde_json::from_slice::<Value>(&bytes)
-                .map_err(|error| format!("JSON解析失败: {error}"))
-        })
-    } else {
-        response
-            .json::<Value>()
-            .await
-            .map_err(|error| format!("JSON解析失败: {error}"))
-    };
-    let vcp_response = match vcp_response_result {
-        Ok(value) => value,
-        Err(err_msg) => {
-            send_stream_event(StreamEvent::error(
-                message_id.clone(),
-                context.clone(),
-                err_msg.clone(),
-            ));
-            return Err(err_msg);
-        }
-    };
+    let vcp_response = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("JSON解析失败: {error}"))?;
 
     // 从标准的 OpenAI 格式中提取文本和结束原因
     let choices = vcp_response["choices"].as_array();
@@ -1999,7 +1654,6 @@ async fn handle_non_streaming_request(
         .and_then(|choice| choice["message"]["content"].as_str())
         .unwrap_or("")
         .to_string();
-    enforce_typed_assistant_budget(&stream_turn_metadata, 0, 0, full_content.len())?;
     let finish_reason = first_choice
         .and_then(|choice| choice["finish_reason"].as_str())
         .map(|r| {
@@ -2011,13 +1665,9 @@ async fn handle_non_streaming_request(
         });
 
     // 发送单次 aurora 事件以将文本呈现在 UI 中
-    let mut update = AuroraUpdate {
-        stable_blocks: if local_cli_projection.prefix.is_empty() {
-            None
-        } else {
-            Some(StreamBlockParser::new().finalize(&full_content))
-        },
-        stable_changed: !local_cli_projection.prefix.is_empty(),
+    let update = AuroraUpdate {
+        stable_blocks: None,
+        stable_changed: false,
         tail_block: None,
         tail: None,
         tail_changed: false,
@@ -2026,7 +1676,6 @@ async fn handle_non_streaming_request(
         content: Some(full_content.clone()),
         chunk: None,
     };
-    local_cli_projection.apply(&mut update);
     send_stream_event(StreamEvent::aurora(
         message_id.clone(),
         update,
@@ -2042,11 +1691,6 @@ async fn handle_non_streaming_request(
         }),
         false,
     ))
-}
-
-async fn load_app_settings<R: Runtime>(app: &AppHandle<R>) -> Result<Settings, String> {
-    let settings_state = app.state::<SettingsState>();
-    read_settings(app.clone(), settings_state).await
 }
 
 /// 中止请求 Command: interruptRequest
@@ -2329,7 +1973,7 @@ pub async fn recover_active_generation<R: Runtime>(
 
     // Recovery owns one atomic attempt from inspection through terminal commit.
     // This removes the old recover -> resume two-IPC claim gap.
-    let (_recovery_lease, recovery_cancellation_token) =
+    let (_recovery_lease, _recovery_cancellation_token) =
         match ActiveRequestLease::try_acquire(active_requests.0.clone(), msg_id.clone()) {
             Ok(claim) => claim,
             Err(_) => {
@@ -2370,20 +2014,6 @@ pub async fn recover_active_generation<R: Runtime>(
             None => json!({ "status": "not_found", "content": "" }),
         });
     };
-
-    // A durable local-loop turn owns recovery before any legacy disk/SSE-helper probe.
-    // The outer lease remains live across this await; `None` alone authorizes the old path.
-    if let Some(recovered) = crate::vcp_modules::cli::turn_coordinator::recover_local_cli_turn(
-        &app,
-        &db.pool,
-        &msg_id,
-        stream_channel.clone(),
-        recovery_cancellation_token.clone(),
-    )
-    .await?
-    {
-        return Ok(recovered);
-    }
 
     #[cfg(not(target_os = "android"))]
     let _ = is_warm;
@@ -2543,7 +2173,7 @@ pub async fn recover_active_generation<R: Runtime>(
                         stream_channel.clone(),
                         initial_content,
                         last_event_index,
-                        recovery_cancellation_token,
+                        _recovery_cancellation_token,
                     )
                     .await?;
                     return Ok(json!({
@@ -2639,8 +2269,6 @@ async fn resume_claimed_generation<R: Runtime>(
         msg_id.clone(),
         Some(context.clone()),
         cancellation_token,
-        StreamTurnMetadata::default(),
-        LocalCliAuroraProjection::default(),
         Some(stream_channel.clone()),
         true,
         last_event_index,
@@ -2764,308 +2392,6 @@ mod active_request_tests {
         );
     }
 
-    #[test]
-    fn transport_identity_and_turn_event_wire_keep_visible_message_id_stable() {
-        let payload: VcpRequestPayload = serde_json::from_value(json!({
-            "vcpUrl": "https://example.invalid/v1/chat/completions",
-            "vcpApiKey": "secret",
-            "messages": [],
-            "modelConfig": {"stream": true},
-            "messageId": "outer-message",
-            "context": null,
-            "transportRequestId": "outer-message:step:2:attempt-a",
-            "turnAttempt": "attempt-a",
-            "stepIndex": 2,
-            "projectionReset": true,
-            "mobileCliAgentRoute": "localLoopback"
-        }))
-        .expect("typed request payload");
-
-        assert_eq!(
-            payload.effective_transport_request_id(),
-            "outer-message:step:2:attempt-a"
-        );
-        let event = StreamEvent::thinking(payload.message_id.clone(), None)
-            .with_turn_metadata(&payload.stream_turn_metadata());
-        let wire = serde_json::to_value(event).expect("serialize stream event");
-        assert_eq!(wire["messageId"], "outer-message");
-        assert_eq!(wire["turnAttempt"], "attempt-a");
-        assert_eq!(wire["stepIndex"], 2);
-        assert_eq!(wire["projectionReset"], true);
-        assert!(wire.get("transportRequestId").is_none());
-        assert_eq!(
-            payload.mobile_cli_agent_route,
-            Some(MobileCliAgentRoute::LocalLoopback)
-        );
-        assert_eq!(
-            project_aurora_finish_reason(
-                &payload.stream_turn_metadata(),
-                Some("completed".to_string())
-            ),
-            None
-        );
-        assert!(payload.local_cli_projection_prefix.is_none());
-    }
-
-    #[test]
-    fn durable_prefix_is_internal_and_survives_every_stable_block_replacement() {
-        let payload: VcpRequestPayload = serde_json::from_value(json!({
-            "vcpUrl": "https://example.invalid/v1/chat/completions",
-            "vcpApiKey": "secret",
-            "messages": [],
-            "modelConfig": {"stream": true},
-            "messageId": "outer-message",
-            "context": null,
-            "localCliProjectionPrefix": "untrusted wire prefix"
-        }))
-        .expect("request payload");
-        assert!(payload.local_cli_projection_prefix.is_none());
-
-        let prefix = "[[VCP调用结果信息汇总:\n- 工具名称: VCPMobileCLI\n- 执行状态: success\nVCP调用结果结束]]\n\n";
-        let projection = LocalCliAuroraProjection::from_prefix(Some(prefix.to_string()));
-
-        for model_content in ["first model step", "next model step"] {
-            let mut update = AuroraUpdate {
-                stable_blocks: Some(StreamBlockParser::new().finalize(model_content)),
-                stable_changed: true,
-                tail_block: None,
-                tail: None,
-                tail_changed: false,
-                tail_frame: None,
-                tail_snapshot: None,
-                content: Some(model_content.to_string()),
-                chunk: None,
-            };
-            projection.apply(&mut update);
-
-            assert_eq!(
-                update.content.as_deref(),
-                Some(format!("{prefix}{model_content}").as_str())
-            );
-            let blocks = serde_json::to_value(
-                update
-                    .stable_blocks
-                    .as_ref()
-                    .expect("blocks-first projection must be present"),
-            )
-            .expect("serialize projected blocks");
-            assert_eq!(blocks[0]["type"], "tool-result");
-            assert_eq!(blocks[1]["type"], "markdown");
-        }
-    }
-
-    #[test]
-    fn typed_assistant_and_raw_response_budgets_accept_exact_limit_only() {
-        let typed = StreamTurnMetadata {
-            turn_attempt: Some("attempt-budget".to_string()),
-            step_index: Some(1),
-            projection_reset: Some(false),
-        };
-        let max = crate::vcp_modules::cli::turn_types::MAX_ASSISTANT_STEP_BYTES;
-        assert!(enforce_typed_assistant_budget(&typed, max - 1, 0, 1).is_ok());
-        assert!(enforce_typed_assistant_budget(&typed, max, 0, 1).is_err());
-        assert!(enforce_typed_assistant_budget(
-            &StreamTurnMetadata::default(),
-            usize::MAX,
-            usize::MAX,
-            usize::MAX,
-        )
-        .is_ok());
-
-        let mut body = Vec::new();
-        assert!(append_bounded_response_chunk(&mut body, b"1234", 4).is_ok());
-        assert!(append_bounded_response_chunk(&mut body, b"5", 4).is_err());
-        assert_eq!(body, b"1234");
-        assert!(is_typed_assistant_budget_error(
-            TYPED_ASSISTANT_BUDGET_ERROR
-        ));
-        assert!(is_typed_assistant_budget_error(&format!(
-            "{TYPED_ASSISTANT_BUDGET_ERROR}; helper cleanup failed: timeout"
-        )));
-        assert!(!is_typed_assistant_budget_error("network unavailable"));
-    }
-
-    #[test]
-    fn nonterminal_step_events_use_metadata_and_inner_error_is_suppressed() {
-        let metadata = StreamTurnMetadata {
-            turn_attempt: Some("attempt-b".to_string()),
-            step_index: Some(4),
-            projection_reset: Some(false),
-        };
-        let events = [
-            StreamEvent::thinking("visible".to_string(), None),
-            StreamEvent::aurora(
-                "visible".to_string(),
-                AuroraUpdate {
-                    stable_blocks: None,
-                    stable_changed: false,
-                    tail_block: None,
-                    tail: None,
-                    tail_changed: false,
-                    tail_frame: None,
-                    tail_snapshot: None,
-                    content: None,
-                    chunk: None,
-                },
-                None,
-            ),
-            StreamEvent {
-                r#type: "reconnecting".to_string(),
-                message_id: "visible".to_string(),
-                ..Default::default()
-            },
-        ];
-
-        for event in events {
-            let projected = project_model_step_event(event, &metadata)
-                .expect("nonterminal step event remains visible");
-            let wire = serde_json::to_value(projected).expect("serialize projected event");
-            assert_eq!(wire["messageId"], "visible");
-            assert_eq!(wire["turnAttempt"], "attempt-b");
-            assert_eq!(wire["stepIndex"], 4);
-            assert_eq!(wire["projectionReset"], false);
-        }
-
-        assert!(project_model_step_event(
-            StreamEvent::error("visible".to_string(), None, "failed".to_string()),
-            &metadata,
-        )
-        .is_none());
-        assert!(project_model_step_event(
-            StreamEvent::error("legacy".to_string(), None, "failed".to_string()),
-            &StreamTurnMetadata::default(),
-        )
-        .is_some());
-
-        let terminal = StreamEvent::end(
-            "visible".to_string(),
-            None,
-            Some("completed".to_string()),
-            None,
-            None,
-        )
-        .with_turn_projection("attempt-b".to_string(), 4, false);
-        let wire = serde_json::to_value(terminal).expect("serialize terminal projection");
-        assert_eq!(wire["messageId"], "visible");
-        assert_eq!(wire["turnAttempt"], "attempt-b");
-        assert_eq!(wire["stepIndex"], 4);
-        assert_eq!(wire["projectionReset"], false);
-        assert_eq!(wire["finishReason"], "completed");
-    }
-
-    #[test]
-    fn legacy_request_falls_back_to_visible_transport_and_omits_turn_wire() {
-        let payload: VcpRequestPayload = serde_json::from_value(json!({
-            "vcpUrl": "https://example.invalid/v1/chat/completions",
-            "vcpApiKey": "secret",
-            "messages": [],
-            "modelConfig": {"stream": true},
-            "messageId": "legacy-message",
-            "context": null
-        }))
-        .expect("legacy request payload");
-
-        assert_eq!(payload.effective_transport_request_id(), "legacy-message");
-        let wire = serde_json::to_value(
-            StreamEvent::thinking(payload.message_id.clone(), None)
-                .with_turn_metadata(&payload.stream_turn_metadata()),
-        )
-        .expect("serialize legacy stream event");
-        assert!(wire.get("turnAttempt").is_none());
-        assert!(wire.get("stepIndex").is_none());
-        assert!(wire.get("projectionReset").is_none());
-        assert_eq!(
-            project_aurora_finish_reason(
-                &payload.stream_turn_metadata(),
-                Some("completed".to_string())
-            ),
-            Some("completed".to_string())
-        );
-    }
-
-    #[test]
-    fn frozen_route_overrides_legacy_endpoint_flag_for_every_step() {
-        let raw = "https://example.invalid/proxy/v1/chat/completions";
-        let settings = crate::vcp_modules::settings_manager::create_default_settings();
-        assert_eq!(
-            resolve_vcp_endpoint(raw, MobileCliAgentRoute::LocalLoopback),
-            "https://example.invalid/proxy/v1/chat/completions"
-        );
-        let frozen_remote =
-            resolve_request_route(Some(MobileCliAgentRoute::VcpPlugin), Some(&settings));
-        assert_eq!(
-            resolve_vcp_endpoint(raw, frozen_remote),
-            "https://example.invalid/v1/chatvcp/completions"
-        );
-    }
-
-    #[test]
-    fn local_loopback_transport_guard_is_first_system_only_and_idempotent() {
-        let mut messages = vec![
-            json!({"role":"system", "content":"user-owned prompt"}),
-            json!({"role":"user", "content":"hello"}),
-        ];
-        inject_local_loopback_transport_guard(&mut messages);
-        inject_local_loopback_transport_guard(&mut messages);
-        assert_eq!(messages[0]["role"], "system");
-        let content = messages[0]["content"].as_str().expect("system text");
-        assert!(content.starts_with(VCP_TOOL_USE_FORBIDDEN_SENTINEL));
-        assert_eq!(content.matches(VCP_TOOL_USE_FORBIDDEN_SENTINEL).count(), 1);
-        assert!(content.ends_with("user-owned prompt"));
-
-        let mut user_first = vec![json!({"role":"user", "content":"hello"})];
-        inject_local_loopback_transport_guard(&mut user_first);
-        assert_eq!(user_first[0]["role"], "system");
-        assert_eq!(user_first[0]["content"], VCP_TOOL_USE_FORBIDDEN_SENTINEL);
-        assert_eq!(user_first[1]["role"], "user");
-    }
-
-    #[test]
-    fn local_loopback_transport_guard_preserves_multimodal_system_content() {
-        let mut messages = vec![json!({
-            "role":"system",
-            "content":[{"type":"text", "text":"prompt"}]
-        })];
-        inject_local_loopback_transport_guard(&mut messages);
-        let parts = messages[0]["content"].as_array().expect("system parts");
-        assert_eq!(parts[0]["type"], "text");
-        assert_eq!(parts[0]["text"], VCP_TOOL_USE_FORBIDDEN_SENTINEL);
-        assert_eq!(parts[1]["text"], "prompt");
-    }
-
-    #[test]
-    fn transport_guard_is_scoped_to_typed_local_loopback_steps() {
-        let typed = StreamTurnMetadata {
-            turn_attempt: Some("attempt-1".to_string()),
-            ..StreamTurnMetadata::default()
-        };
-        assert!(should_inject_local_loopback_transport_guard(
-            MobileCliAgentRoute::LocalLoopback,
-            &typed
-        ));
-        assert!(!should_inject_local_loopback_transport_guard(
-            MobileCliAgentRoute::VcpPlugin,
-            &typed
-        ));
-        assert!(!should_inject_local_loopback_transport_guard(
-            MobileCliAgentRoute::LocalLoopback,
-            &StreamTurnMetadata::default()
-        ));
-    }
-
-    #[test]
-    fn legacy_extra_flag_never_selects_vcp_plugin_endpoint() {
-        let mut settings = crate::vcp_modules::settings_manager::create_default_settings();
-        settings.extra = json!({ "enableVcpToolInjection": true });
-        let raw = "https://example.invalid/proxy/v1/chat/completions";
-        let route = resolve_request_route(None, Some(&settings));
-
-        assert_eq!(route, MobileCliAgentRoute::LocalLoopback);
-        assert_eq!(
-            resolve_vcp_endpoint(raw, route),
-            "https://example.invalid/proxy/v1/chat/completions"
-        );
-    }
 
     #[test]
     fn helper_stop_ack_requires_stopped_and_exact_generation() {
@@ -3137,26 +2463,4 @@ mod active_request_tests {
         assert!(!aligning.contains("break 'main_loop"));
     }
 
-    #[test]
-    fn local_turn_recovery_claim_precedes_every_legacy_cache_or_helper_branch() {
-        let source = include_str!("vcp_client.rs");
-        let function_start = source
-            .find("pub async fn recover_active_generation")
-            .expect("recovery entrypoint");
-        let function_end = source[function_start..]
-            .find("async fn resume_claimed_generation")
-            .map(|offset| function_start + offset)
-            .expect("recovery function boundary");
-        let recovery = &source[function_start..function_end];
-
-        let local_probe = recovery
-            .find("turn_coordinator::recover_local_cli_turn")
-            .expect("local ledger probe");
-        let legacy_cache = recovery
-            .find("app.path().app_cache_dir()")
-            .expect("legacy cache branch");
-        assert!(local_probe < legacy_cache);
-        assert!(recovery.contains("recovery_cancellation_token.clone()"));
-        assert!(recovery.contains("return Ok(recovered);"));
-    }
 }
