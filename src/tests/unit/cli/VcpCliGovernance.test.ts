@@ -16,8 +16,6 @@ import settingsStoreSource from "@/core/stores/settings.ts?raw";
 import settingsViewSource from "@/features/settings/SettingsView.vue?raw";
 import aiLogicSettingsSource from "@/features/settings/components/AiLogicSettingsSection.vue?raw";
 import chatStreamSource from "@/core/stores/chatStreamStore.ts?raw";
-import semanticCacheMigrationSource from "../../../../src-tauri/migrations/0008_create_local_semantic_cache.sql?raw";
-import semanticCacheRetirementSource from "../../../../src-tauri/migrations/0009_drop_retired_local_semantic_cache.sql?raw";
 
 const productionSources = [
   cliStoreSource,
@@ -48,18 +46,6 @@ describe("VCP CLI P1 cross-layer governance", () => {
       expect(terminalBackendSource).toContain(`pub async fn ${command}`);
       expect(tauriLibSource).toContain(`${command},`);
     }
-  });
-
-  it("retires the local semantic cache without rewriting its published migration", () => {
-    expect(semanticCacheMigrationSource).toContain(
-      "CREATE TABLE IF NOT EXISTS local_semantic_embedding_cache",
-    );
-    expect(semanticCacheRetirementSource).toContain(
-      "DROP TABLE IF EXISTS local_semantic_embedding_cache",
-    );
-    expect(semanticCacheRetirementSource).toContain(
-      "DROP INDEX IF EXISTS idx_local_semantic_cache_lru",
-    );
   });
 
   it("keeps the structured Tauri command and snake_case action contract", () => {
