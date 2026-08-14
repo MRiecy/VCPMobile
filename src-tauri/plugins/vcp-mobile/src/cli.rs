@@ -131,6 +131,112 @@ pub struct CancelCliProcessResponse {
     pub exit_code: Option<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenCliPtyRequest {
+    pub operation_id: String,
+    pub runtime_generation: u64,
+    pub rootfs_path: String,
+    pub cwd: String,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OpenCliPtyResponse {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub runtime_generation: u64,
+    pub pid: i32,
+    pub cwd: String,
+    pub shell: String,
+    pub state: String,
+    pub exit_code: Option<i32>,
+    pub cursor: u64,
+    pub replay_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadCliPtyRequest {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub cursor: u64,
+    pub max_bytes: u32,
+    pub wait_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadCliPtyResponse {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub cursor: u64,
+    pub data_base64: String,
+    pub timed_out: bool,
+    pub eof: bool,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WriteCliPtyRequest {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WriteCliPtyResponse {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub written_bytes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResizeCliPtyRequest {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResizeCliPtyResponse {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseCliPtyRequest {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseCliPtyResponse {
+    pub operation_id: String,
+    pub session_id: String,
+    pub session_generation: u64,
+    pub closed: bool,
+}
+
 pub async fn prepare_cli_runtime_inner<R: Runtime>(
     app: &AppHandle<R>,
     request: &PrepareCliRuntimeRequest,
@@ -210,6 +316,60 @@ pub async fn cancel_cli_process_inner<R: Runtime>(
         Err(PROCESS_HOST_UNAVAILABLE.to_string())
     }
 }
+
+macro_rules! pty_bridge {
+    ($name:ident, $method:literal, $request:ty, $response:ty) => {
+        pub async fn $name<R: Runtime>(
+            app: &AppHandle<R>,
+            request: &$request,
+        ) -> Result<$response, String> {
+            #[cfg(target_os = "android")]
+            {
+                let handle = app.state::<VcpMobileState<R>>().mobile_plugin_handle()?;
+                return handle
+                    .run_mobile_plugin_async($method, request)
+                    .await
+                    .map_err(|error| format!(concat!($method, " failed: {}"), error));
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                let _ = (app, request);
+                Err(PROCESS_HOST_UNAVAILABLE.to_string())
+            }
+        }
+    };
+}
+
+pty_bridge!(
+    open_cli_pty_inner,
+    "openCliPty",
+    OpenCliPtyRequest,
+    OpenCliPtyResponse
+);
+pty_bridge!(
+    read_cli_pty_inner,
+    "readCliPty",
+    ReadCliPtyRequest,
+    ReadCliPtyResponse
+);
+pty_bridge!(
+    write_cli_pty_inner,
+    "writeCliPty",
+    WriteCliPtyRequest,
+    WriteCliPtyResponse
+);
+pty_bridge!(
+    resize_cli_pty_inner,
+    "resizeCliPty",
+    ResizeCliPtyRequest,
+    ResizeCliPtyResponse
+);
+pty_bridge!(
+    close_cli_pty_inner,
+    "closeCliPty",
+    CloseCliPtyRequest,
+    CloseCliPtyResponse
+);
 
 #[cfg(test)]
 mod tests {

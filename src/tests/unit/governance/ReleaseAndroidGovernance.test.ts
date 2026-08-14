@@ -71,6 +71,9 @@ describe('release and Android governance contracts', () => {
 
     expect(releaseWorkflow).toContain('APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK")');
     expect(releaseWorkflow).not.toMatch(/unzip -Z1[^\n]*\|[^\n]*grep -q/);
+    expect(releaseWorkflow).toContain('lib/arm64-v8a/libvcp_pty\\.so');
+    expect(releaseWorkflow).toContain('forbidden non-arm64 ABI');
+    expect(releaseWorkflow).toContain('vcp-semantic-(tokenizer|model)');
 
     const cleanupIndex = releaseWorkflow.indexOf('- name: Remove Android keystore');
     const uploadIndex = releaseWorkflow.indexOf('- name: Update GitHub Release assets');

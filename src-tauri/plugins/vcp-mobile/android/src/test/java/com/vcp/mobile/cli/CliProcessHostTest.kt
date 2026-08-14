@@ -192,6 +192,22 @@ class CliProcessHostTest {
     }
 
     @Test
+    fun terminalLaunchUsesLoginBashAndNeverInjectsAnAutomaticCommand() {
+        val arguments = buildProotTerminalArguments(
+            prootPath = "/native/libvcp_proot.so",
+            rootfsPath = "/private/rootfs/profile",
+            workspacePath = "/private/workspace",
+            cwd = "/workspace",
+        )
+
+        assertEquals(listOf("/bin/bash", "-l"), arguments.takeLast(2))
+        assertTrue(arguments.contains("TERM=xterm-256color"))
+        assertTrue(arguments.contains("COLORTERM=truecolor"))
+        assertFalse(arguments.contains("-c"))
+        assertFalse(arguments.contains("-lc"))
+    }
+
+    @Test
     fun detachedTraceeAttackKeepsKillOnExitAndCommandBoundary() {
         listOf(
             "setsid /bin/sleep 300 >/dev/null 2>&1 & exit 0",

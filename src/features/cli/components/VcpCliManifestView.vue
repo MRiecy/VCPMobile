@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ChevronLeft, SquareTerminal, X } from "lucide-vue-next";
+import { ChevronLeft, Info, SquareTerminal, X } from "lucide-vue-next";
 import SlidePage from "../../../components/ui/SlidePage.vue";
 import { useKeyboardInsets } from "../../../core/composables/useKeyboardInsets";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
@@ -9,6 +9,7 @@ import { useVcpCliStore } from "../vcpCliStore";
 import VcpCliManifestPanel from "./VcpCliManifestPanel.vue";
 import VcpCliRunPanel from "./VcpCliRunPanel.vue";
 import VcpCliSkillsPanel from "./VcpCliSkillsPanel.vue";
+import VcpCliTerminalPanel from "./VcpCliTerminalPanel.vue";
 
 const props = defineProps<{
   isOpen: boolean;
@@ -19,7 +20,7 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-type CliTab = "run" | "skills" | "manifest";
+type CliTab = "terminal" | "jobs" | "skills";
 
 const store = useVcpCliStore();
 const {
@@ -31,28 +32,36 @@ const {
 } = storeToRefs(store);
 const { keyboardHeight } = useKeyboardInsets();
 const { registerModal, unregisterModal } = useModalHistory();
-const activeTab = ref<CliTab>("run");
+const activeTab = ref<CliTab>("terminal");
+const showInfo = ref(false);
 const internalRegistered = ref(false);
+const hasPageDetail = computed(
+  () => hasInternalDetail.value || showInfo.value,
+);
 
 const pageTitle = computed(() => {
   if (selectedJobId.value) return "Job 输出";
   if (selectedSkillId.value) return "Skill 阅读";
+  if (showInfo.value) return "工具说明";
   return "VCP CLI";
 });
 
 const pageEyebrow = computed(() => {
   if (selectedJobId.value) return "LOCAL JOB · BOUNDED TAIL";
   if (selectedSkillId.value) return "CONTROLLED CATALOG · READ ONLY";
-  return "LOCAL WORKBENCH · FOREGROUND ONLY";
+  if (showInfo.value) return "MANIFEST · AGENT CONTRACT";
+  if (activeTab.value === "terminal") return "LOCAL PTY · FOREGROUND SESSION";
+  return "LOCAL WORKBENCH · JOBS FOREGROUND ONLY";
 });
 
 function registerInternalDetail(): void {
-  if (!props.isOpen || !hasInternalDetail.value || internalRegistered.value)
+  if (!props.isOpen || !hasPageDetail.value || internalRegistered.value)
     return;
   internalRegistered.value = true;
   registerModal("VcpCli:Internal", () => {
     internalRegistered.value = false;
-    store.closeInternalDetail();
+    if (hasInternalDetail.value) store.closeInternalDetail();
+    else showInfo.value = false;
     return true;
   });
 }
@@ -63,20 +72,22 @@ function releaseInternalDetail(): void {
   unregisterModal("VcpCli:Internal");
 }
 
-function closeInternalDetail(): void {
-  store.closeInternalDetail();
+function closeCurrentDetail(): void {
+  if (hasInternalDetail.value) store.closeInternalDetail();
+  else showInfo.value = false;
   releaseInternalDetail();
 }
 
 function handleNavigation(): void {
-  if (hasInternalDetail.value) {
-    closeInternalDetail();
+  if (hasPageDetail.value) {
+    closeCurrentDetail();
     return;
   }
   emit("close");
 }
 
 function selectTab(tab: CliTab): void {
+  showInfo.value = false;
   activeTab.value = tab;
   if (tab === "skills") void store.loadSkills();
 }
@@ -85,7 +96,8 @@ watch(
   () => props.isOpen,
   (isOpen) => {
     if (isOpen) {
-      activeTab.value = "run";
+      activeTab.value = "terminal";
+      showInfo.value = false;
       void store.openView();
       return;
     }
@@ -95,7 +107,7 @@ watch(
   { immediate: true },
 );
 
-watch(hasInternalDetail, (hasDetail) => {
+watch(hasPageDetail, (hasDetail) => {
   if (hasDetail) registerInternalDetail();
   else releaseInternalDetail();
 });
@@ -119,11 +131,11 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl opacity-60 active:bg-black/5 active:opacity-100 dark:active:bg-white/5"
-            :aria-label="hasInternalDetail ? '返回 CLI 列表' : '关闭 VCP CLI'"
+            :aria-label="hasPageDetail ? '返回 VCP CLI' : '关闭 VCP CLI'"
             data-vcp-cli-action="navigate-back"
             @click="handleNavigation"
           >
-            <ChevronLeft v-if="hasInternalDetail" :size="21" />
+            <ChevronLeft v-if="hasPageDetail" :size="21" />
             <X v-else :size="20" />
           </button>
           <SquareTerminal
@@ -141,17 +153,27 @@ onBeforeUnmount(() => {
               {{ pageTitle }}
             </h1>
           </div>
+          <button
+            v-if="!hasInternalDetail && !showInfo"
+            type="button"
+            class="flex h-11 w-11 shrink-0 items-center justify-center opacity-55 active:opacity-100"
+            aria-label="打开 VCP CLI 工具说明"
+            data-vcp-cli-action="open-info"
+            @click="showInfo = !showInfo"
+          >
+            <Info :size="18" />
+          </button>
         </div>
         <nav
-          v-if="!hasInternalDetail"
+          v-if="!hasInternalDetail && !showInfo"
           class="grid grid-cols-3 border-t border-black/5 px-2 dark:border-white/5"
           aria-label="VCP CLI 页面"
         >
           <button
             v-for="tab in [
-              { id: 'run', label: '运行' },
+              { id: 'terminal', label: '终端' },
+              { id: 'jobs', label: 'Jobs' },
               { id: 'skills', label: 'Skills' },
-              { id: 'manifest', label: 'Manifest' },
             ] as const"
             :key="tab.id"
             type="button"
@@ -171,14 +193,14 @@ onBeforeUnmount(() => {
       </header>
 
       <div
-        v-if="activeTab !== 'run' && runtimeLoading"
+        v-if="activeTab !== 'jobs' && runtimeLoading"
         class="shrink-0 border-b border-blue-500/15 px-3 py-1.5 font-mono text-[9px] text-blue-600 dark:text-blue-400"
         role="status"
       >
         正在重新同步 Rust Runtime 代际…
       </div>
       <div
-        v-else-if="activeTab !== 'run' && runtimeError"
+        v-else-if="activeTab !== 'jobs' && runtimeError"
         class="flex shrink-0 items-center gap-2 border-b border-red-500/20 px-3 py-1.5 text-[9px] text-red-500"
         role="alert"
       >
@@ -195,15 +217,19 @@ onBeforeUnmount(() => {
       </div>
 
       <VcpCliRunPanel
-        v-if="selectedJobId || (!selectedSkillId && activeTab === 'run')"
+        v-if="selectedJobId || (!selectedSkillId && activeTab === 'jobs')"
         :keyboard-height="keyboardHeight"
       />
       <VcpCliSkillsPanel
         v-else-if="selectedSkillId || activeTab === 'skills'"
       />
+      <VcpCliTerminalPanel
+        v-else-if="activeTab === 'terminal' && !showInfo"
+        :keyboard-height="keyboardHeight"
+      />
       <VcpCliManifestPanel
-        v-else
-        :is-open="props.isOpen && activeTab === 'manifest'"
+        v-else-if="showInfo"
+        :is-open="props.isOpen && showInfo"
       />
     </main>
   </SlidePage>

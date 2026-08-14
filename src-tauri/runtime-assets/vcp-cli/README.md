@@ -62,6 +62,10 @@ unbundled W^X 版本的三个原始资产共 27,144,229 bytes；以固定文件�
 为 26,937,424 bytes。NDK 29 的独立重建已逐字复现上表两个 ELF；API 36 产品 `ProcessBuilder` 对
 unbundled loader、取消以及 detached tracee 的复验仍是发布前真机门，不能由 JVM/构建检查替代。
 
+2026-08-14 的 P5 host 构建中，arm64、stripped 的 `libvcp_pty.so` 为 452,368 bytes；包含 xterm.js
+与终端面板的懒加载 Web chunk 为 338.65 kB（gzip 88.52 kB）。后者是整个 CLI 页面 chunk，不是纯
+xterm 增量；最终 APK 压缩增量仍以发布前 `perf:apk-size` 为准，不能用中间产物相加冒充 APK 结果。
+
 这只是 P0/P1 前台执行证据，不等于 screen-off、Doze、划卡或 OEM 后台长稳验收。
 
 ## 许可证边界

@@ -36,6 +36,8 @@
     "@tauri-apps/api": "2.11.1",
     "@tauri-apps/plugin-opener": "2.5.4",
     "@vueuse/core": "^14.2.1",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
     "date-fns": "^4.1.0",
     "dompurify": "^3.4.13",
     "katex": "^0.16.45",

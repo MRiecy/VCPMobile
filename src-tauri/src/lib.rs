@@ -18,9 +18,12 @@ use vcp_modules::chat_manager::{
     patch_single_message, truncate_history_after_timestamp,
 };
 use vcp_modules::cli::{
-    commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,
-    execute_vcp_mobile_cli_action, get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog,
-    get_vcp_mobile_cli_status, inspect_vcp_mobile_cli_skill_import, MobileCliRuntimeState,
+    close_vcp_mobile_cli_terminal, commit_vcp_mobile_cli_skill_import,
+    discard_vcp_mobile_cli_skill_import, execute_vcp_mobile_cli_action,
+    get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog, get_vcp_mobile_cli_status,
+    inspect_vcp_mobile_cli_skill_import, open_vcp_mobile_cli_terminal,
+    read_vcp_mobile_cli_terminal, resize_vcp_mobile_cli_terminal, write_vcp_mobile_cli_terminal,
+    MobileCliRuntimeState,
 };
 use vcp_modules::context_injection::{
     delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
@@ -272,6 +275,11 @@ pub fn run() {
             inspect_vcp_mobile_cli_skill_import,
             commit_vcp_mobile_cli_skill_import,
             discard_vcp_mobile_cli_skill_import,
+            open_vcp_mobile_cli_terminal,
+            read_vcp_mobile_cli_terminal,
+            write_vcp_mobile_cli_terminal,
+            resize_vcp_mobile_cli_terminal,
+            close_vcp_mobile_cli_terminal,
             get_settings_recovery_status,
             update_settings,
             diary_list_folders,

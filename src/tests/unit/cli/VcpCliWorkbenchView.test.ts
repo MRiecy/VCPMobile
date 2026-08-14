@@ -16,6 +16,9 @@ import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import { flushPromises } from "@/tests/utils/flush";
 import { mountWithPinia } from "@/tests/utils/mount";
 
+const CHECK_PERMISSIONS_COMMAND = "plugin:vcp-mobile|check_all_permissions";
+const REQUEST_PERMISSION_COMMAND = "plugin:vcp-mobile|request_android_permission";
+
 function runtimeStatus(
   patch: Partial<VcpCliRuntimeStatus> = {},
 ): VcpCliRuntimeStatus {
@@ -51,14 +54,18 @@ function requestFromArgs(args?: Record<string, unknown>) {
   return args?.request as { operation_id: string; action: VcpCliAction };
 }
 
-function mountView() {
-  return mountWithPinia(VcpCliManifestView, {
+async function mountView() {
+  const wrapper = mountWithPinia(VcpCliManifestView, {
     props: { isOpen: true, zIndex: 44 },
+    global: { stubs: { VcpCliTerminalPanel: true } },
   });
+  await wrapper.get('[data-vcp-cli-tab="jobs"]').trigger("click");
+  return wrapper;
 }
 
 describe("VCP CLI mobile workbench", () => {
   beforeEach(() => {
+    mockInvoke(CHECK_PERMISSIONS_COMMAND, () => ({ notification: true }));
     mockInvoke(VCP_CLI_STATUS_COMMAND, () => runtimeStatus());
     mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
       const request = requestFromArgs(args);
@@ -69,6 +76,25 @@ describe("VCP CLI mobile workbench", () => {
     });
   });
 
+  it("offers one explicit notification action when background enhancement is unavailable", async () => {
+    let granted = false;
+    mockInvoke(CHECK_PERMISSIONS_COMMAND, () => ({ notification: granted }));
+    mockInvoke(REQUEST_PERMISSION_COMMAND, (args) => {
+      expect(args).toEqual({ pType: "notification" });
+      granted = true;
+    });
+
+    const wrapper = await mountView();
+    await flushPromises();
+    const permission = wrapper.get('[data-vcp-cli-role="background-permission"]');
+    expect(permission.text()).toContain("后台增强将自动降级为前台 Job");
+    await permission.get("button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-vcp-cli-role="background-permission"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("shows the first-install reason without deadlocking command execution", async () => {
     mockInvoke(VCP_CLI_STATUS_COMMAND, () =>
       runtimeStatus({
@@ -77,7 +103,7 @@ describe("VCP CLI mobile workbench", () => {
         phase: "unprovisioned",
       }),
     );
-    const wrapper = mountView();
+    const wrapper = await mountView();
     await flushPromises();
 
     await wrapper
@@ -105,7 +131,7 @@ describe("VCP CLI mobile workbench", () => {
         phase: "preparing",
       }),
     );
-    const wrapper = mountView();
+    const wrapper = await mountView();
     await flushPromises();
     await wrapper
       .get('[data-vcp-cli-role="command-input"]')
@@ -132,7 +158,7 @@ describe("VCP CLI mobile workbench", () => {
         phase: "error",
       }),
     );
-    const wrapper = mountView();
+    const wrapper = await mountView();
     await flushPromises();
     await wrapper
       .get('[data-vcp-cli-role="command-input"]')
@@ -170,7 +196,7 @@ describe("VCP CLI mobile workbench", () => {
       }
       throw new Error(`unexpected action ${request.action.action}`);
     });
-    const wrapper = mountView();
+    const wrapper = await mountView();
     await flushPromises();
     const input = wrapper.get('[data-vcp-cli-role="command-input"]');
     await input.setValue("printf 'first\\n'\nprintf 'second\\n'");
@@ -246,7 +272,7 @@ describe("VCP CLI mobile workbench", () => {
       }
       throw new Error(`unexpected action ${request.action.action}`);
     });
-    const wrapper = mountView();
+    const wrapper = await mountView();
     await flushPromises();
 
     await wrapper.get('[data-vcp-cli-tab="skills"]').trigger("click");
@@ -314,7 +340,7 @@ describe("VCP CLI mobile workbench", () => {
       replaces_existing: false,
       warnings: ["包含 scripts/；导入不会执行脚本。"],
     }));
-    const wrapper = mountView();
+    const wrapper = await mountView();
     await flushPromises();
     await wrapper.get('[data-vcp-cli-tab="skills"]').trigger("click");
     await flushPromises();

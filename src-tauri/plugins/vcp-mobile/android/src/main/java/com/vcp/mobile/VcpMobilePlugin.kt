@@ -34,10 +34,16 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.Invoke
 import com.vcp.mobile.cli.CancelCliProcessArgs
+import com.vcp.mobile.cli.CloseCliPtyArgs
+import com.vcp.mobile.cli.CliPtyHostOwner
 import com.vcp.mobile.cli.CliProcessHostOwner
 import com.vcp.mobile.cli.InspectCliProcessArgs
+import com.vcp.mobile.cli.OpenCliPtyArgs
 import com.vcp.mobile.cli.PrepareCliRuntimeArgs
+import com.vcp.mobile.cli.ReadCliPtyArgs
+import com.vcp.mobile.cli.ResizeCliPtyArgs
 import com.vcp.mobile.cli.StartCliProcessArgs
+import com.vcp.mobile.cli.WriteCliPtyArgs
 import com.vcp.mobile.service.StreamKeepaliveService
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -340,6 +346,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val sensorStatusManager = SensorStatusManager(activity)
     private val executorDomains = PluginExecutorDomains()
     private val cliProcessHost = CliProcessHostOwner.get(activity.applicationContext)
+    private val cliPtyHost = CliPtyHostOwner.get(cliProcessHost)
     private val shareIntentHandler = ShareIntentHandler(this, executorDomains.fileIoExecutor)
     private val isDestroying = AtomicBoolean(false)
     @Volatile private var oomGuardFuture: ScheduledFuture<*>? = null
@@ -1325,6 +1332,36 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         } catch (error: Exception) {
             invoke.reject("cancelCliProcess failed: ${error.message ?: error.javaClass.simpleName}")
         }
+    }
+
+    @Command
+    fun openCliPty(invoke: Invoke) {
+        val args = invoke.parseArgs(OpenCliPtyArgs::class.java)
+        cliPtyHost.open(args, invoke::resolve) { invoke.reject("openCliPty failed: $it") }
+    }
+
+    @Command
+    fun readCliPty(invoke: Invoke) {
+        val args = invoke.parseArgs(ReadCliPtyArgs::class.java)
+        cliPtyHost.read(args, invoke::resolve) { invoke.reject("readCliPty failed: $it") }
+    }
+
+    @Command
+    fun writeCliPty(invoke: Invoke) {
+        val args = invoke.parseArgs(WriteCliPtyArgs::class.java)
+        cliPtyHost.write(args, invoke::resolve) { invoke.reject("writeCliPty failed: $it") }
+    }
+
+    @Command
+    fun resizeCliPty(invoke: Invoke) {
+        val args = invoke.parseArgs(ResizeCliPtyArgs::class.java)
+        cliPtyHost.resize(args, invoke::resolve) { invoke.reject("resizeCliPty failed: $it") }
+    }
+
+    @Command
+    fun closeCliPty(invoke: Invoke) {
+        val args = invoke.parseArgs(CloseCliPtyArgs::class.java)
+        cliPtyHost.close(args, invoke::resolve) { invoke.reject("closeCliPty failed: $it") }
     }
 
     override fun onDestroy(activity: AppCompatActivity) {

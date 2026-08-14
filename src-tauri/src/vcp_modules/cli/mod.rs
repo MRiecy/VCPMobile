@@ -27,6 +27,7 @@ mod skill_catalog;
 mod skill_import;
 #[allow(dead_code)]
 mod skills;
+pub mod terminal;
 #[allow(dead_code)]
 pub(crate) mod turn_coordinator;
 #[allow(dead_code)]
@@ -41,4 +42,8 @@ pub use runtime::{
     commit_vcp_mobile_cli_skill_import, discard_vcp_mobile_cli_skill_import,
     execute_vcp_mobile_cli_action, get_vcp_mobile_cli_skill_catalog, get_vcp_mobile_cli_status,
     inspect_vcp_mobile_cli_skill_import, MobileCliRuntimeState,
+};
+pub use terminal::{
+    close_vcp_mobile_cli_terminal, open_vcp_mobile_cli_terminal, read_vcp_mobile_cli_terminal,
+    resize_vcp_mobile_cli_terminal, write_vcp_mobile_cli_terminal,
 };

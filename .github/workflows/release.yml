@@ -263,6 +263,18 @@ jobs:
             echo "APK does not contain arm64-v8a native libraries" >&2
             exit 1
           fi
+          if grep -Eq '^lib/(armeabi-v7a|x86|x86_64)/' <<< "$APK_ENTRIES"; then
+            echo "APK contains a forbidden non-arm64 ABI" >&2
+            exit 1
+          fi
+          if ! grep -q '^lib/arm64-v8a/libvcp_pty\.so$' <<< "$APK_ENTRIES"; then
+            echo "APK does not contain the manual PTY native helper" >&2
+            exit 1
+          fi
+          if grep -Eq 'vcp-semantic-(tokenizer|model)' <<< "$APK_ENTRIES"; then
+            echo "APK contains retired local semantic model assets" >&2
+            exit 1
+          fi
 
           echo "SOURCE_APK=$SOURCE_APK" >> "$GITHUB_ENV"
 

@@ -32,6 +32,7 @@ const manifestFixture = JSON.parse(canonicalManifest) as Record<
 function mountView() {
   return mountWithPinia(VcpCliManifestView, {
     props: { isOpen: true, zIndex: 44 },
+    global: { stubs: { VcpCliTerminalPanel: true } },
   });
 }
 
@@ -61,7 +62,7 @@ function successResponse(
 async function openManifestTab(
   wrapper: ReturnType<typeof mountView>,
 ): Promise<void> {
-  await wrapper.get('[data-vcp-cli-tab="manifest"]').trigger("click");
+  await wrapper.get('[data-vcp-cli-action="open-info"]').trigger("click");
   await flushPromises();
 }
 

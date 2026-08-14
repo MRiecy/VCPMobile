@@ -21,6 +21,13 @@ patch; it prevents PRoot from materializing an executable loader into an app-wri
   GPL-3.0-or-later, Git/BusyBox/apk-tools under GPL-2.0-family terms, Python under PSF-2.0, OpenSSL under
   Apache-2.0, and musl under MIT.
 
+## Manual terminal UI and PTY host
+
+- `@xterm/xterm 5.5.0` and `@xterm/addon-fit 0.10.0` are distributed under the MIT license; their
+  notices must remain in the web dependency license inventory.
+- `libvcp_pty.so` is VCPMobile-owned JNI code built from this repository with NDK 29 for arm64-v8a.
+  It uses Android/Bionic PTY APIs and does not contain OpenMinis native-offload code.
+
 ## Release gate
 
 Before public distribution, release automation must attach or otherwise provide:
@@ -29,5 +36,6 @@ Before public distribution, release automation must attach or otherwise provide:
 2. talloc source plus whatever relinkable object/source offer the selected legal review requires;
 3. Alpine package notices/license texts and corresponding source availability;
 4. a notice that Android guest `root` is simulated and grants no Android Root privilege.
+5. the xterm.js MIT notices used by the manual terminal renderer.
 
 This inventory records engineering facts; it is not a substitute for a legal review.

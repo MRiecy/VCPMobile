@@ -156,6 +156,13 @@ private data class PreparedRuntime(
     val handshakeParent: File,
 )
 
+internal data class CliPtyLaunchSpec(
+    val runtimeGeneration: Long,
+    val argv: List<String>,
+    val environment: Map<String, String>,
+    val prootTmpDir: File,
+)
+
 private data class PrepareResult(
     val operationId: String,
     val prepared: PreparedRuntime,
@@ -423,6 +430,40 @@ internal fun buildProotArguments(
     add(command)
 }
 
+internal fun buildProotTerminalArguments(
+    prootPath: String,
+    rootfsPath: String,
+    workspacePath: String,
+    cwd: String,
+): List<String> = buildList {
+    add(prootPath)
+    add("-0")
+    add("--kill-on-exit")
+    add("--link2symlink")
+    add("-r")
+    add(rootfsPath)
+    add("-b")
+    add("/dev")
+    add("-b")
+    add("/proc")
+    add("-b")
+    add("$workspacePath:/workspace")
+    add("-w")
+    add(validateGuestCwd(cwd))
+    add("/usr/bin/env")
+    add("-i")
+    add("HOME=/root")
+    add("USER=root")
+    add("LOGNAME=root")
+    add("SHELL=/bin/bash")
+    add("PATH=$GUEST_PATH")
+    add("TMPDIR=/tmp")
+    add("TERM=xterm-256color")
+    add("COLORTERM=truecolor")
+    add("/bin/bash")
+    add("-l")
+}
+
 internal fun buildHostEnvironment(prootTmpPath: String, prootLoaderPath: String): Map<String, String> {
     require(prootTmpPath.startsWith('/') && !prootTmpPath.contains('\u0000')) {
         "PROOT_TMP_DIR must be an absolute private path"
@@ -671,7 +712,7 @@ private fun cleanupLegacySemanticAssets(assets: File) {
     }
 }
 
-private fun validateIdentifier(value: String, field: String) {
+internal fun validateIdentifier(value: String, field: String) {
     require(value.isNotBlank() && value.toByteArray(StandardCharsets.UTF_8).size <= 256) {
         "$field must be a non-empty bounded identifier"
     }
@@ -752,6 +793,39 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
 
     companion object {
         fun foregroundTag(jobId: String, attemptId: String): String = "cli:$jobId:$attemptId"
+    }
+
+    fun terminalLaunchSpec(
+        runtimeGeneration: Long,
+        rootfsPath: String,
+        cwd: String,
+        sessionStem: String,
+    ): CliPtyLaunchSpec = synchronized(lifecycleLock) {
+        ensureOpen()
+        val prepared = preparedRuntime ?: error("CLI runtime has not been prepared")
+        require(prepared.runtimeGeneration == runtimeGeneration) {
+            "runtimeGeneration does not match the prepared runtime"
+        }
+        validateIdentifier(sessionStem, "sessionStem")
+        val rootfs = File(rootfsPath).canonicalFile
+        require(rootfs.isDirectory && rootfs.toPath().startsWith(prepared.rootfsParent.toPath()) &&
+            rootfs != prepared.rootfsParent
+        ) { "rootfsPath is outside the prepared private root" }
+        val prootTmpDir = File(prepared.prootTmpParent, "pty-$sessionStem").ensureDirectory(mode = 0x1c0)
+        CliPtyLaunchSpec(
+            runtimeGeneration = runtimeGeneration,
+            argv = buildProotTerminalArguments(
+                prootPath = prepared.proot.absolutePath,
+                rootfsPath = rootfs.absolutePath,
+                workspacePath = prepared.workspace.absolutePath,
+                cwd = cwd,
+            ),
+            environment = buildHostEnvironment(
+                prootTmpPath = prootTmpDir.absolutePath,
+                prootLoaderPath = prepared.prootLoader.absolutePath,
+            ),
+            prootTmpDir = prootTmpDir,
+        )
     }
 
     fun prepare(
@@ -985,10 +1059,12 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 android.Manifest.permission.POST_NOTIFICATIONS,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            error("CLI 后台增强需要通知权限；命令尚未启动")
+            Log.w(TAG, "CLI background lease skipped because notification permission is denied")
+            return null
         }
         if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
-            error("CLI 后台增强通知已被系统关闭；命令尚未启动")
+            Log.w(TAG, "CLI background lease skipped because notifications are disabled")
+            return null
         }
         val target = ForegroundGuardian.CliNotificationTarget(
             jobId = args.jobId,

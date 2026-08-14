@@ -271,6 +271,21 @@ impl MobileCliRuntimeState {
             .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))
     }
 
+    pub(crate) async fn terminal_runtime<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        operation_id: &str,
+    ) -> Result<(u64, String), String> {
+        validate_operation_id(operation_id)?;
+        self.ensure_initialized(app).await?;
+        let runtime = self
+            .ensure_provisioned(app, operation_id)
+            .await
+            .map_err(|error| format!("{}: {}", error.code.as_str(), error.message))?;
+        let generation = self.inner.lock().await.ledger.runtime_generation;
+        Ok((generation, runtime.rootfs.to_string_lossy().into_owned()))
+    }
+
     pub(crate) async fn execute<R: Runtime>(
         &self,
         app: &AppHandle<R>,

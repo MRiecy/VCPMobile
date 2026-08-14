@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
   Ban,
@@ -36,6 +37,8 @@ const {
 } = storeToRefs(store);
 
 const outputChannel = ref<"stdout" | "stderr">("stdout");
+const notificationPermission = ref<boolean | null>(null);
+const notificationPermissionBusy = ref(false);
 
 const terminalStates = new Set<VcpCliJobState>([
   "completed",
@@ -184,9 +187,37 @@ function updateDraft(event: Event): void {
   store.setCommandDraft((event.target as HTMLTextAreaElement).value);
 }
 
+async function refreshNotificationPermission(): Promise<void> {
+  try {
+    const permissions = await invoke<{ notification: boolean }>(
+      "plugin:vcp-mobile|check_all_permissions",
+    );
+    notificationPermission.value = permissions.notification;
+  } catch {
+    notificationPermission.value = null;
+  }
+}
+
+async function requestNotificationPermission(): Promise<void> {
+  if (notificationPermissionBusy.value) return;
+  notificationPermissionBusy.value = true;
+  try {
+    await invoke("plugin:vcp-mobile|request_android_permission", {
+      pType: "notification",
+    });
+    await refreshNotificationPermission();
+  } catch {
+    notificationPermission.value = false;
+  } finally {
+    notificationPermissionBusy.value = false;
+  }
+}
+
 watch(selectedJobId, () => {
   outputChannel.value = "stdout";
 });
+
+onMounted(() => void refreshNotificationPermission());
 </script>
 
 <template>
@@ -363,6 +394,21 @@ watch(selectedJobId, () => {
         >
           仅承诺前台运行；切入后台或系统回收后，Job 可能被标记为 interrupted。
         </p>
+        <div
+          v-if="notificationPermission === false"
+          class="mt-2 flex items-center gap-2 border-l-2 border-amber-500/70 pl-2 text-[9px] leading-4"
+          data-vcp-cli-role="background-permission"
+        >
+          <span class="min-w-0 flex-1 opacity-65">通知权限未允许，后台增强将自动降级为前台 Job。</span>
+          <button
+            type="button"
+            class="min-h-8 shrink-0 px-2 font-bold text-[var(--highlight-text)] disabled:opacity-35"
+            :disabled="notificationPermissionBusy"
+            @click="requestNotificationPermission"
+          >
+            {{ notificationPermissionBusy ? "请求中…" : "允许通知" }}
+          </button>
+        </div>
       </div>
 
       <div

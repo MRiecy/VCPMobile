@@ -240,8 +240,9 @@ API 36 已完成真实两步 Agent loop、exact-once marker 和进程重启恢�
 - 旧 turn/job ledger DTO、projection path 与有界 GC 暂留一个兼容周期，仅负责解码和清理旧数据；
 - P4.4 ADR 降为历史参考，不代表未来承诺，也不在 CLI UI 增加“本地知识”入口。
 
-当前 P4 硬验收只剩：合法 river/vref 不阻塞 local 命令且最多一条 notice，字段不进入 action/argv/env；
-非法字段继续拒绝；remote 保持 unsupported；APK 不含 semantic 资产；旧 ledger 仍可解码和清理。
+当前 P4 代码门已闭合：合法 river/vref 不阻塞 local 命令且最多一条 notice，字段不进入 action/argv/env；
+非法字段继续拒绝；remote 保持 unsupported；Release APK 门明确拒绝 semantic 资产；旧 ledger 仍可解码和
+清理。`0008` 保持既有 checksum，`0009` 只删除已退休的派生缓存表。
 
 ### P5｜Android best-effort 后台、人工 PTY 与原生命令桥
 
@@ -292,7 +293,7 @@ src-tauri/plugins/vcp-mobile/
 | 层 | 必测内容 |
 |---|---|
 | Rust L1 | parser/meta fixtures、typed validation、result normalize、Job state、digest/idempotency、output budget、Skill ID/path policy |
-| Rust L2 | local turn 多 step、river projection、vref capability/materialization、断网 pending continuation、进程事件 generation、SQLite ledger |
+| Rust L2 | local turn 多 step、river/vref 忽略 notice、旧投影 ledger 解码/清理、断网 pending continuation、进程事件 generation、SQLite ledger |
 | Vue L4 | route/blocked reason、工具块、Job tail/cancel、人工终端返回顺序 |
 | 契约 L5 | manifest 三名一致、local/distributed schema、插件四重注册、catalog/allowlist 默认全关升级 |
 | Kotlin L3/L6 | ProcessHost、进程组 kill、PTY resize、Guardian lease、通知 target |
@@ -301,14 +302,14 @@ src-tauri/plugins/vcp-mobile/
 
 Host/CI 绿灯只能证明软件合同，不能替代 Android 后台与 OEM 接受。
 
-## 7. 开放项
+## 7. 已裁决项与剩余实测
 
-P0 只剩以下事实型问题，不再重新讨论产品方向：
+截至 2026-08-14，四个产品/施工选择均已关闭：ProcessHost 使用 Kotlin 应用进程 owner，PTY 的最小
+fd/进程操作由仓库自有 arm64 JNI helper 承担；用户接受 PRoot/rootfs/PTY 的许可义务与 APK 增量；真实
+VCPToolBox 的中央 loop 禁用合同已有 fixture；人工 PTY 进入 P5，且与 Agent Job 完全分离。OpenMinis
+native-offload 未被复制，未来 `vcp-*` bridge 仍需逐命令审计。
 
-1. Android ProcessHost 选 Rust 还是 Kotlin/JNI；
-2. PRoot/rootfs/PTY/offload 的许可与 APK 增量是否接受；
-3. 用户实际 VCPToolBox 部署的禁用中央 loop、prompt 变量和结果 fixture；
-4. 首个版本是否把人工 PTY 放 P1 末，还是在 P2 Agent loop 后交付。
+剩余项不是架构开放问题，而是用户启动后的 API 26/34/36、Doze、OEM、通知与 PTY 触控真机验收。
 
 命令基线与时间/输出/磁盘/并发预算已在 02/03 冻结为首发默认值和硬上限；P0 只负责实机验证它们是否可承受，不再回退到“几十秒/几 MiB”的保守占位。
 

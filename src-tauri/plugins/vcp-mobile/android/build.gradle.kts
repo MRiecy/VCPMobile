@@ -6,9 +6,24 @@ plugins {
 android {
     namespace = "com.vcp.mobile"
     compileSdk = 36
+    ndkVersion = "29.0.13846066"
 
     defaultConfig {
         minSdk = 26
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            ndkBuild {
+                cppFlags += listOf("-std=c++17", "-Wall", "-Wextra", "-Werror")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        ndkBuild {
+            path = file("src/main/cpp/Android.mk")
+        }
     }
 
     compileOptions {

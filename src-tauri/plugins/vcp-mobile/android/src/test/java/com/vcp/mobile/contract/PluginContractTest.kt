@@ -252,12 +252,22 @@ class PluginContractTest {
             "startCliProcess",
             "inspectCliProcess",
             "cancelCliProcess",
+            "openCliPty",
+            "readCliPty",
+            "writeCliPty",
+            "resizeCliPty",
+            "closeCliPty",
         )
         val internalRustFunctions = listOf(
             "prepare_cli_runtime_inner",
             "start_cli_process_inner",
             "inspect_cli_process_inner",
             "cancel_cli_process_inner",
+            "open_cli_pty_inner",
+            "read_cli_pty_inner",
+            "write_cli_pty_inner",
+            "resize_cli_pty_inner",
+            "close_cli_pty_inner",
         )
 
         internalMethods.forEach { method ->
@@ -268,7 +278,10 @@ class PluginContractTest {
             }
         }
         internalRustFunctions.forEach { function ->
-            assertTrue("Rust CLI bridge 缺少 $function", rustCli.contains("pub async fn $function"))
+            assertTrue(
+                "Rust CLI bridge 缺少 $function",
+                rustCli.contains("pub async fn $function") || rustCli.contains("    $function,"),
+            )
             assertTrue("内部 bridge 不得成为 #[tauri::command]", !rustCli.contains("#[tauri::command]\npub async fn $function"))
         }
         assertFalse("Kotlin plugin 不应再注册本地语义资产 bridge", kotlinPlugin.contains("prepareCliSemanticAssets"))
@@ -278,6 +291,32 @@ class PluginContractTest {
         assertTrue("CLI ProcessHost 不得新增 localhost bridge", !processHost.contains("ServerSocket") && !processHost.contains("localhost"))
         assertTrue("plugin onDestroy 不得终止应用进程所有 CLI Job", !kotlinPlugin.contains("cliProcessHost.close()"))
         assertTrue("plugin 必须从应用进程 owner 获取 CLI ProcessHost", kotlinPlugin.contains("CliProcessHostOwner.get(activity.applicationContext)"))
+        assertTrue("人工 PTY 必须由独立 owner 持有", kotlinPlugin.contains("CliPtyHostOwner.get(cliProcessHost)"))
+    }
+
+    @Test
+    fun manualPtyUsesArm64NativeSessionAndBoundedJniContracts() {
+        val ptyHost = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/cli/CliPtyHost.kt",
+        ).readText()
+        val nativeSource = File(
+            pluginRoot,
+            "android/src/main/cpp/vcp_pty.cpp",
+        ).readText()
+        val androidMk = File(pluginRoot, "android/src/main/cpp/Android.mk").readText()
+        val applicationMk = File(pluginRoot, "android/src/main/cpp/Application.mk").readText()
+
+        assertTrue("PTY 必须使用独立 native library", ptyHost.contains("System.loadLibrary(\"vcp_pty\")"))
+        assertTrue("PTY read 必须有界", ptyHost.contains("PTY_MAX_READ_BYTES = 64 * 1024"))
+        assertTrue("PTY write 必须有界", ptyHost.contains("PTY_MAX_WRITE_BYTES = 16 * 1024"))
+        assertTrue("PTY detach replay 必须有界", ptyHost.contains("PTY_REPLAY_BYTES = 128 * 1024"))
+        assertTrue("PTY child 必须建立独立 session", nativeSource.contains("setsid()"))
+        assertTrue("PTY slave 必须成为 controlling terminal", nativeSource.contains("TIOCSCTTY"))
+        assertTrue("PTY resize 必须发送 SIGWINCH", nativeSource.contains("TIOCSWINSZ") && nativeSource.contains("SIGWINCH"))
+        assertTrue("PTY close 必须按进程组终止", nativeSource.contains("kill(-session->pid"))
+        assertTrue("JNI helper 必须独立成库", androidMk.contains("LOCAL_MODULE := vcp_pty"))
+        assertTrue("JNI helper 只能构建 arm64", applicationMk.contains("APP_ABI := arm64-v8a"))
     }
 
     @Test
