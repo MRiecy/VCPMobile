@@ -25,7 +25,6 @@ pub const DEFAULT_BOUNDED_READ_BYTES: usize = 65_536;
 pub const MAX_BOUNDED_READ_BYTES: usize = 262_144;
 pub const MAX_POLL_WAIT_MS: u64 = 8_000;
 pub const MAX_COMMAND_BYTES: usize = 65_536;
-pub const MAX_RIVER_ITEMS: u8 = 50;
 
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_CURSOR_BYTES: usize = 512;
@@ -204,170 +203,12 @@ impl VcpCliAction {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VcpInkMode {
-    MarkHistory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VcpRiverMode {
-    Full,
-    Text,
-    Last(u8),
-    Semantic(u8),
-}
-
-impl VcpRiverMode {
-    pub fn as_wire_value(self) -> String {
-        match self {
-            Self::Full => "full".to_string(),
-            Self::Text => "text".to_string(),
-            Self::Last(limit) => format!("last:{limit}"),
-            Self::Semantic(limit) => format!("semantic:{limit}"),
-        }
-    }
-}
-
-impl Serialize for VcpRiverMode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.as_wire_value())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum VcpArcheryMode {
-    #[serde(rename = "true")]
-    Parallel,
-    #[serde(rename = "no_reply")]
-    NoReply,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct VcpMetaFields {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ink: Option<VcpInkMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub river: Option<VcpRiverMode>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub vref: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub archery: Option<VcpArcheryMode>,
-}
-
+/// 唯一 validator 输出：只有类型化 action 到达 Runtime。上游 VCP 专属字段
+/// （ink/archery/river/vref/签名等）不属于 mobile CLI 认知范围，在 validator 内静默丢弃。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ValidatedVcpCliRequest {
     #[serde(flatten)]
     pub action: VcpCliAction,
-    pub meta: VcpMetaFields,
-}
-
-impl ValidatedVcpCliRequest {
-    /// 由 route 的 meta owner 在执行前调用；well-formed 但当前能力未开放时，
-    /// 稳定返回 `unsupported_mode`，而不是静默丢弃元字段。
-    pub fn require_meta_support(
-        &self,
-        capabilities: VcpMetaCapabilities,
-    ) -> Result<(), VcpCliProtocolError> {
-        self.meta.require_support(capabilities)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VcpMetaCapabilities {
-    pub mark_history: bool,
-    pub river_text: bool,
-    pub river_last: bool,
-    pub river_full: bool,
-    pub river_semantic: bool,
-    pub vref: bool,
-    pub archery_parallel: bool,
-    pub archery_no_reply: bool,
-}
-
-impl VcpMetaCapabilities {
-    /// P0 只冻结协议，不宣称已具备任何 meta 执行语义。
-    pub const P0_PROTOCOL_ONLY: Self = Self {
-        mark_history: false,
-        river_text: false,
-        river_last: false,
-        river_full: false,
-        river_semantic: false,
-        vref: false,
-        archery_parallel: false,
-        archery_no_reply: false,
-    };
-
-    /// Distributed VCP owns ink/archery continuation policy before dispatching the concrete
-    /// tool call. Mobile still validates those canonical values, while remote river/vref inputs
-    /// remain fail-closed until a bounded materialization contract exists.
-    pub(crate) const VCP_PLUGIN_DISTRIBUTED: Self = Self {
-        mark_history: true,
-        river_text: false,
-        river_last: false,
-        river_full: false,
-        river_semantic: false,
-        vref: false,
-        archery_parallel: true,
-        archery_no_reply: true,
-    };
-}
-
-impl VcpMetaFields {
-    fn require_support(
-        &self,
-        capabilities: VcpMetaCapabilities,
-    ) -> Result<(), VcpCliProtocolError> {
-        if self.ink.is_some() && !capabilities.mark_history {
-            return Err(VcpCliProtocolError::unsupported(
-                "ink",
-                "ink=mark_history is not available on this route",
-            ));
-        }
-
-        if let Some(river) = self.river {
-            let supported = match river {
-                VcpRiverMode::Text => capabilities.river_text,
-                VcpRiverMode::Last(_) => capabilities.river_last,
-                VcpRiverMode::Full => capabilities.river_full,
-                VcpRiverMode::Semantic(_) => capabilities.river_semantic,
-            };
-            if !supported {
-                return Err(VcpCliProtocolError::unsupported(
-                    "river",
-                    format!(
-                        "river={} is not available on this route",
-                        river.as_wire_value()
-                    ),
-                ));
-            }
-        }
-
-        if self.vref.is_some() && !capabilities.vref {
-            return Err(VcpCliProtocolError::unsupported(
-                "vref",
-                "vref materialization is not available on this route",
-            ));
-        }
-
-        if let Some(archery) = self.archery {
-            let supported = match archery {
-                VcpArcheryMode::Parallel => capabilities.archery_parallel,
-                VcpArcheryMode::NoReply => capabilities.archery_no_reply,
-            };
-            if !supported {
-                return Err(VcpCliProtocolError::unsupported(
-                    "archery",
-                    "the requested archery mode is not available on this route",
-                ));
-            }
-        }
-
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -382,14 +223,6 @@ impl VcpCliProtocolError {
     fn invalid(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: VcpCliErrorCode::InvalidRequest,
-            message: message.into(),
-            field: Some(field.into()),
-        }
-    }
-
-    fn unsupported(field: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: VcpCliErrorCode::UnsupportedMode,
             message: message.into(),
             field: Some(field.into()),
         }
@@ -443,9 +276,27 @@ pub fn parse_vcp_tool_requests(content: &str) -> Vec<RawVcpToolRequest> {
 pub fn validate_vcp_mobile_cli_request(
     request: &RawVcpToolRequest,
 ) -> Result<ValidatedVcpCliRequest, VcpCliProtocolError> {
+    // 先解析 action 以选择字段集：未知 action 仍然严厉拒绝；其余未知字段（如 maid/viad 等
+    // VCP 专属签名字段）静默丢弃，而不是报错。这与 Distributed 入口的预过滤保持一致。
+    let action_name = request
+        .fields
+        .iter()
+        .find(|field| field.key == "action")
+        .map(|field| field.value.trim())
+        .unwrap_or("run");
+    let allowed_fields = allowed_fields(action_name).ok_or_else(|| {
+        VcpCliProtocolError::invalid(
+            "action",
+            "expected run|list_skills|read_skill|materialize_skill|poll|cancel|list",
+        )
+    })?;
+
     let mut values = HashMap::<&str, &str>::new();
     let mut duplicates = HashSet::<&str>::new();
     for field in &request.fields {
+        if !allowed_fields.contains(&field.key.as_str()) {
+            continue;
+        }
         if values
             .insert(field.key.as_str(), field.value.trim())
             .is_some()
@@ -468,24 +319,6 @@ pub fn validate_vcp_mobile_cli_request(
         ));
     }
 
-    let action_name = values.get("action").copied().unwrap_or("run");
-    let allowed_fields = allowed_fields(action_name).ok_or_else(|| {
-        VcpCliProtocolError::invalid(
-            "action",
-            "expected run|list_skills|read_skill|materialize_skill|poll|cancel|list",
-        )
-    })?;
-
-    for field in &request.fields {
-        if !allowed_fields.contains(&field.key.as_str()) {
-            return Err(VcpCliProtocolError::invalid(
-                &field.key,
-                format!("field is not valid for action={action_name}"),
-            ));
-        }
-    }
-
-    let meta = parse_meta_fields(&values)?;
     let action = match action_name {
         "run" => validate_run(&values)?,
         "list_skills" => VcpCliAction::ListSkills,
@@ -507,12 +340,13 @@ pub fn validate_vcp_mobile_cli_request(
     };
 
     debug_assert_eq!(action.name(), action_name);
-    Ok(ValidatedVcpCliRequest { action, meta })
+    Ok(ValidatedVcpCliRequest { action })
 }
 
 /// Convert Distributed `toolArgs` into the canonical raw-field representation and run the same
 /// validator used by Human Tool markers. This deliberately does not deserialize `VcpCliAction`
-/// directly: doing so would discard unknown/meta fields before the capability gate sees them.
+/// directly: unknown fields are filtered by key here (before scalar coercion), so a foreign
+/// signature field of any JSON shape is silently dropped instead of failing validation.
 pub(crate) fn validate_distributed_vcp_cli_args(
     args: &Value,
 ) -> Result<ValidatedVcpCliRequest, VcpCliProtocolError> {
@@ -520,14 +354,24 @@ pub(crate) fn validate_distributed_vcp_cli_args(
         .as_object()
         .ok_or_else(|| VcpCliProtocolError::invalid("toolArgs", "expected a JSON object"))?;
 
-    for unsupported in ["vref_files", "river_context"] {
-        if object.contains_key(unsupported) {
-            return Err(VcpCliProtocolError::unsupported(
-                unsupported,
-                "remote context/file materialization is not available on VCPMobile",
+    // 先解析 action 选择字段集：未知 action 严厉拒绝；未知字段（含非标量 VCP 签名字段）
+    // 在标量化之前静默丢弃，避免对象/数组形态的签名信息触发 "expected a scalar" 误拒。
+    let action_name = match object.get("action") {
+        None => "run".to_string(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(_) => {
+            return Err(VcpCliProtocolError::invalid(
+                "action",
+                "expected run|list_skills|read_skill|materialize_skill|poll|cancel|list",
             ));
         }
-    }
+    };
+    let allowed = allowed_fields(&action_name).ok_or_else(|| {
+        VcpCliProtocolError::invalid(
+            "action",
+            "expected run|list_skills|read_skill|materialize_skill|poll|cancel|list",
+        )
+    })?;
 
     let mut fields = Vec::with_capacity(object.len().saturating_add(1));
     if !object.contains_key("tool_name") {
@@ -537,6 +381,9 @@ pub(crate) fn validate_distributed_vcp_cli_args(
         });
     }
     for (key, value) in object {
+        if !allowed.contains(&key.as_str()) {
+            continue;
+        }
         fields.push(RawVcpField {
             key: key.clone(),
             value: distributed_scalar_field(key, value)?,
@@ -544,57 +391,7 @@ pub(crate) fn validate_distributed_vcp_cli_args(
     }
 
     let validated = validate_vcp_mobile_cli_request(&RawVcpToolRequest { fields })?;
-    validated.require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)?;
     Ok(validated)
-}
-
-/// P3 does not consume VCPToolBox host paths or recall projections. Keeping this separate from
-/// `toolArgs` validation makes the trust boundary explicit after the client strips `_vcpContext`.
-pub(crate) fn validate_distributed_vcp_context(
-    context: Option<&Value>,
-) -> Result<(), VcpCliProtocolError> {
-    if let Some(context) = context {
-        reject_remote_materialization(context)?;
-    }
-    Ok(())
-}
-
-fn reject_remote_materialization(value: &Value) -> Result<(), VcpCliProtocolError> {
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                let normalized_key = key.to_ascii_lowercase();
-                if matches!(
-                    normalized_key.as_str(),
-                    "vref"
-                        | "vref_files"
-                        | "vreffiles"
-                        | "river"
-                        | "river_context"
-                        | "rivercontext"
-                ) {
-                    return Err(VcpCliProtocolError::unsupported(
-                        key,
-                        "remote context/file materialization is not available on VCPMobile",
-                    ));
-                }
-                reject_remote_materialization(value)?;
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                reject_remote_materialization(value)?;
-            }
-        }
-        Value::String(value) if value.to_ascii_lowercase().contains("file://") => {
-            return Err(VcpCliProtocolError::unsupported(
-                "_vcpContext",
-                "remote file:// references are not reachable from VCPMobile",
-            ));
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
-    Ok(())
 }
 
 fn distributed_scalar_field(key: &str, value: &Value) -> Result<String, VcpCliProtocolError> {
@@ -775,21 +572,16 @@ fn allowed_fields(action: &str) -> Option<&'static [&'static str]> {
         "cwd",
         "timeout_ms",
         "run_in_background",
-        "ink",
-        "river",
-        "vref",
-        "archery",
     ];
-    const LIST_SKILLS: &[&str] = &["tool_name", "action", "ink"];
+    const LIST_SKILLS: &[&str] = &["tool_name", "action"];
     const READ_SKILL: &[&str] = &[
         "tool_name",
         "action",
         "skill_id",
         "resource_path",
         "max_bytes",
-        "ink",
     ];
-    const MATERIALIZE_SKILL: &[&str] = &["tool_name", "action", "skill_id", "ink"];
+    const MATERIALIZE_SKILL: &[&str] = &["tool_name", "action", "skill_id"];
     const POLL: &[&str] = &[
         "tool_name",
         "action",
@@ -797,10 +589,9 @@ fn allowed_fields(action: &str) -> Option<&'static [&'static str]> {
         "cursor",
         "max_output_bytes",
         "wait_ms",
-        "ink",
     ];
-    const CANCEL: &[&str] = &["tool_name", "action", "job_id", "ink"];
-    const LIST: &[&str] = &["tool_name", "action", "ink"];
+    const CANCEL: &[&str] = &["tool_name", "action", "job_id"];
+    const LIST: &[&str] = &["tool_name", "action"];
 
     match action {
         "run" => Some(RUN),
@@ -812,101 +603,6 @@ fn allowed_fields(action: &str) -> Option<&'static [&'static str]> {
         "list" => Some(LIST),
         _ => None,
     }
-}
-
-fn parse_meta_fields(values: &HashMap<&str, &str>) -> Result<VcpMetaFields, VcpCliProtocolError> {
-    let ink = values
-        .get("ink")
-        .map(|value| match *value {
-            "mark_history" => Ok(VcpInkMode::MarkHistory),
-            _ => Err(VcpCliProtocolError::unsupported(
-                "ink",
-                "only ink=mark_history is defined",
-            )),
-        })
-        .transpose()?;
-
-    let river = values
-        .get("river")
-        .map(|value| parse_river(value))
-        .transpose()?;
-
-    let vref = values
-        .get("vref")
-        .map(|value| parse_vref_limit(value))
-        .transpose()?;
-
-    let archery = values
-        .get("archery")
-        .map(|value| match *value {
-            "true" => Ok(VcpArcheryMode::Parallel),
-            "no_reply" => Ok(VcpArcheryMode::NoReply),
-            _ => Err(VcpCliProtocolError::invalid(
-                "archery",
-                "expected true|no_reply",
-            )),
-        })
-        .transpose()?;
-
-    Ok(VcpMetaFields {
-        ink,
-        river,
-        vref,
-        archery,
-    })
-}
-
-fn parse_river(value: &str) -> Result<VcpRiverMode, VcpCliProtocolError> {
-    match value {
-        "full" => Ok(VcpRiverMode::Full),
-        "text" => Ok(VcpRiverMode::Text),
-        _ => {
-            let Some((mode, limit)) = value.split_once(':') else {
-                return Err(VcpCliProtocolError::invalid(
-                    "river",
-                    "expected full|text|last:N|semantic:N",
-                ));
-            };
-            let limit = parse_river_limit(limit)?;
-            match mode {
-                "last" => Ok(VcpRiverMode::Last(limit)),
-                "semantic" => Ok(VcpRiverMode::Semantic(limit)),
-                _ => Err(VcpCliProtocolError::invalid(
-                    "river",
-                    "expected full|text|last:N|semantic:N",
-                )),
-            }
-        }
-    }
-}
-
-fn parse_river_limit(value: &str) -> Result<u8, VcpCliProtocolError> {
-    let parsed = value.parse::<u8>().map_err(|_| {
-        VcpCliProtocolError::invalid(
-            "river",
-            format!("expected integer in 1..={MAX_RIVER_ITEMS}"),
-        )
-    })?;
-    if !(1..=MAX_RIVER_ITEMS).contains(&parsed) {
-        return Err(VcpCliProtocolError::invalid(
-            "river",
-            format!("expected integer in 1..={MAX_RIVER_ITEMS}"),
-        ));
-    }
-    Ok(parsed)
-}
-
-fn parse_vref_limit(value: &str) -> Result<u32, VcpCliProtocolError> {
-    let parsed = value.parse::<u32>().map_err(|_| {
-        VcpCliProtocolError::invalid("vref", format!("expected integer in 1..={MAX_RIVER_ITEMS}"))
-    })?;
-    if !(1..=u32::from(MAX_RIVER_ITEMS)).contains(&parsed) {
-        return Err(VcpCliProtocolError::invalid(
-            "vref",
-            format!("expected integer in 1..={MAX_RIVER_ITEMS}"),
-        ));
-    }
-    Ok(parsed)
 }
 
 fn parse_positive_u32(value: &str, field: &str) -> Result<u32, VcpCliProtocolError> {
@@ -1228,159 +924,63 @@ mod tests {
     }
 
     #[test]
-    fn route_capability_decision_distinguishes_unsupported_from_invalid() {
-        let raw = exactly_one_request(
-            "<<<[TOOL_REQUEST]>>>\n\
-             tool_name:「始」VCPMobileCLI「末」,\n\
-             command:「始」printf ok「末」,\n\
-             ink:「始」mark_history「末」,\n\
-             river:「始」text「末」\n\
-             <<<[END_TOOL_REQUEST]>>>",
-            "meta capability",
+    fn foreign_meta_and_signature_fields_are_silently_dropped() {
+        let validated = validate_distributed_vcp_cli_args(&serde_json::json!({
+            "command": "printf ok",
+            "ink": "mark_history",
+            "archery": "no_reply",
+            "river": "text",
+            "vref": 3,
+            "maid": "Sakura",
+            "unknown_meta": "x",
+            "_vcpContext": {"agentId": "spoof"},
+            "vref_files": ["file:///tmp/secret"],
+            "river_context": {"content": "x"}
+        }))
+        .expect("upstream VCP fields must be dropped, not rejected");
+        assert_eq!(
+            validated.action,
+            VcpCliAction::Run {
+                command: "printf ok".to_string(),
+                description: None,
+                cwd: Some(DEFAULT_CWD.to_string()),
+                timeout_ms: Some(DEFAULT_TIMEOUT_MS),
+                run_in_background: Some(false),
+            }
         );
-        let validated = validate_vcp_mobile_cli_request(&raw).expect("valid meta syntax");
-
-        let error = validated
-            .require_meta_support(VcpMetaCapabilities::P0_PROTOCOL_ONLY)
-            .expect_err("P0 does not claim runtime meta support");
-        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
-        assert_eq!(error.field.as_deref(), Some("ink"));
-
-        let local_error = validated
-            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
-            .expect_err("local capability does not advertise ignored river hints");
-        assert_eq!(local_error.code, VcpCliErrorCode::UnsupportedMode);
-        assert_eq!(local_error.field.as_deref(), Some("river"));
+        let encoded = serde_json::to_value(&validated).expect("serialize validated request");
+        assert!(encoded.get("meta").is_none());
     }
 
     #[test]
-    fn river_and_vref_are_parsed_but_not_local_capabilities() {
-        let full = exactly_one_request(
-            "<<<[TOOL_REQUEST]>>>\n\
-             tool_name:「始」VCPMobileCLI「末」,\n\
-             command:「始」printf ok「末」,\n\
-             river:「始」full「末」\n\
-             <<<[END_TOOL_REQUEST]>>>",
-            "river full",
-        );
-        let full_error = validate_vcp_mobile_cli_request(&full)
-            .expect("valid river full syntax")
-            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
-            .expect_err("local loop ignores rather than advertises river full");
-        assert_eq!(full_error.field.as_deref(), Some("river"));
+    fn unknown_action_is_still_strictly_rejected() {
+        let error = validate_distributed_vcp_cli_args(&serde_json::json!({
+            "action": "execute",
+            "command": "true"
+        }))
+        .expect_err("unknown action must stay fatal");
+        assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
+        assert_eq!(error.field.as_deref(), Some("action"));
 
-        let semantic = exactly_one_request(
-            "<<<[TOOL_REQUEST]>>>\n\
-             tool_name:「始」VCPMobileCLI「末」,\n\
-             command:「始」printf ok「末」,\n\
-             river:「始」semantic:3「末」\n\
-             <<<[END_TOOL_REQUEST]>>>",
-            "river semantic",
-        );
-        let semantic_error = validate_vcp_mobile_cli_request(&semantic)
-            .expect("valid river semantic syntax")
-            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
-            .expect_err("local loop ignores rather than advertises semantic recall");
-        assert_eq!(semantic_error.field.as_deref(), Some("river"));
-
-        let vref = exactly_one_request(
-            "<<<[TOOL_REQUEST]>>>\n\
-             tool_name:「始」VCPMobileCLI「末」,\n\
-             command:「始」printf ok「末」,\n\
-             vref:「始」3「末」\n\
-             <<<[END_TOOL_REQUEST]>>>",
-            "vref",
-        );
-        let validated = validate_vcp_mobile_cli_request(&vref).expect("valid vref syntax");
-        let error = validated
-            .require_meta_support(VcpMetaCapabilities::VCP_PLUGIN_DISTRIBUTED)
-            .expect_err("vref remains unavailable without a knowledge grant");
-        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
+        let error = validate_distributed_vcp_cli_args(&serde_json::json!({
+            "action": {"nested": true},
+            "command": "true"
+        }))
+        .expect_err("non-scalar action must stay fatal");
+        assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
+        assert_eq!(error.field.as_deref(), Some("action"));
     }
 
     #[test]
-    fn optional_context_limits_are_bounded_to_fifty() {
-        for (field, value) in [
-            ("river", "last:0"),
-            ("river", "last:51"),
-            ("river", "semantic:0"),
-            ("river", "semantic:51"),
-            ("vref", "0"),
-            ("vref", "51"),
-            ("vref", "4294967295"),
-        ] {
-            let raw = exactly_one_request(
-                &format!(
-                    "<<<[TOOL_REQUEST]>>>\n\
-                     tool_name:「始」VCPMobileCLI「末」,\n\
-                     command:「始」printf ok「末」,\n\
-                     {field}:「始」{value}「末」\n\
-                     <<<[END_TOOL_REQUEST]>>>"
-                ),
-                "bounded optional context",
-            );
-            let error = validate_vcp_mobile_cli_request(&raw)
-                .expect_err("out-of-range optional context must be rejected");
-            assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
-            assert_eq!(error.field.as_deref(), Some(field));
-        }
-
-        for (field, value) in [
-            ("river", "last:50"),
-            ("river", "semantic:50"),
-            ("vref", "50"),
-        ] {
-            let raw = exactly_one_request(
-                &format!(
-                    "<<<[TOOL_REQUEST]>>>\n\
-                     tool_name:「始」VCPMobileCLI「末」,\n\
-                     command:「始」printf ok「末」,\n\
-                     {field}:「始」{value}「末」\n\
-                     <<<[END_TOOL_REQUEST]>>>"
-                ),
-                "maximum optional context",
-            );
-            validate_vcp_mobile_cli_request(&raw)
-                .expect("the inclusive optional context maximum must remain valid");
-        }
-    }
-
-    #[test]
-    fn meta_fields_never_enter_typed_shell_action() {
-        let raw = exactly_one_request(
-            "<<<[TOOL_REQUEST]>>>\n\
-             tool_name:「始」VCPMobileCLI「末」,\n\
-             command:「始」env「末」,\n\
-             ink:「始」mark_history「末」,\n\
-             river:「始」last:5「末」,\n\
-             vref:「始」2「末」,\n\
-             archery:「始」no_reply「末」\n\
-             <<<[END_TOOL_REQUEST]>>>",
-            "meta stripping",
-        );
-        let validated = validate_vcp_mobile_cli_request(&raw).expect("valid request");
-        let encoded = serde_json::to_value(&validated.action).expect("serialize action");
-        assert!(encoded.get("ink").is_none());
-        assert!(encoded.get("river").is_none());
-        assert!(encoded.get("vref").is_none());
-        assert!(encoded.get("archery").is_none());
-        assert_eq!(validated.meta.river, Some(VcpRiverMode::Last(5)));
-    }
-
-    #[test]
-    fn distributed_json_args_reuse_canonical_action_and_meta_validation() {
+    fn distributed_json_args_reuse_canonical_action_validation() {
         let validated = validate_distributed_vcp_cli_args(&serde_json::json!({
             "action": "run",
             "command": "printf ok",
             "timeout_ms": 1200,
-            "run_in_background": true,
-            "ink": "mark_history",
-            "archery": "no_reply"
+            "run_in_background": true
         }))
         .expect("valid Distributed args");
 
-        assert_eq!(validated.meta.ink, Some(VcpInkMode::MarkHistory));
-        assert_eq!(validated.meta.archery, Some(VcpArcheryMode::NoReply));
         assert_eq!(
             validated.action,
             VcpCliAction::Run {
@@ -1394,62 +994,26 @@ mod tests {
     }
 
     #[test]
-    fn distributed_remote_recall_and_file_context_fail_closed() {
-        for (field, args) in [
-            ("vref", serde_json::json!({"command": "true", "vref": 1})),
+    fn known_field_invalid_values_still_fail_closed() {
+        for (args, field) in [
+            (serde_json::json!({"command": ["true"]}), "command"),
             (
-                "vref_files",
-                serde_json::json!({"command": "true", "vref_files": ["file:///tmp/secret"]}),
+                serde_json::json!({"command": "true", "description": null}),
+                "description",
             ),
             (
-                "river_context",
-                serde_json::json!({"command": "true", "river_context": {"content": "x"}}),
+                serde_json::json!({"tool_name": "OtherCLI", "command": "true"}),
+                "tool_name",
             ),
             (
-                "river",
-                serde_json::json!({"command": "true", "river": "text"}),
+                serde_json::json!({"command": "true", "timeout_ms": 999}),
+                "timeout_ms",
             ),
         ] {
             let error = validate_distributed_vcp_cli_args(&args)
-                .expect_err("remote recall context must remain unsupported in P3");
-            assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
-            assert_eq!(error.field.as_deref(), Some(field));
-        }
-
-        let error = validate_distributed_vcp_context(Some(&serde_json::json!({
-            "vref_files": ["file:///host/private"]
-        })))
-        .expect_err("trusted remote context is not materialized by P3");
-        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
-        assert_eq!(error.field.as_deref(), Some("vref_files"));
-
-        let error = validate_distributed_vcp_context(Some(&serde_json::json!({
-            "agent": {"attachments": [{"source": "FILE:///host/private"}]}
-        })))
-        .expect_err("recursive file URL must remain unreachable");
-        assert_eq!(error.code, VcpCliErrorCode::UnsupportedMode);
-        assert_eq!(error.field.as_deref(), Some("_vcpContext"));
-
-        validate_distributed_vcp_context(Some(&serde_json::json!({
-            "agentId": "agent-1",
-            "topicId": "topic-1",
-            "request": {"traceId": "trace-1"}
-        })))
-        .expect("ordinary trusted transport context is accepted but not projected");
-    }
-
-    #[test]
-    fn distributed_unknown_or_non_scalar_fields_are_not_silently_dropped() {
-        for args in [
-            serde_json::json!({"command": "true", "unknown_meta": "x"}),
-            serde_json::json!({"command": ["true"]}),
-            serde_json::json!({"command": "true", "description": null}),
-            serde_json::json!({"tool_name": "OtherCLI", "command": "true"}),
-            serde_json::json!({"command": "true", "_vcpContext": {"agentId": "spoof"}}),
-        ] {
-            let error = validate_distributed_vcp_cli_args(&args)
-                .expect_err("invalid Distributed input must fail closed");
+                .expect_err("invalid values of known fields must fail closed");
             assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
+            assert_eq!(error.field.as_deref(), Some(field));
         }
     }
 

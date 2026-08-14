@@ -15,7 +15,7 @@ use crate::vcp_modules::cli::manifest::{
     serialize_vcp_mobile_cli_manifest, vcp_mobile_cli_manifest,
 };
 use crate::vcp_modules::cli::protocol::{
-    validate_distributed_vcp_cli_args, validate_distributed_vcp_context, VcpCliProtocolError,
+    validate_distributed_vcp_cli_args, VcpCliProtocolError,
 };
 use crate::vcp_modules::cli::result::project_vcp_plugin_outcome;
 use crate::vcp_modules::cli::runtime::{ExecuteVcpMobileCliRequest, MobileCliRuntimeState};
@@ -87,12 +87,10 @@ impl OneShotTool for VcpMobileCliTool {
             "invalid_request: authenticated Distributed execution context is required".to_string()
         })?;
         validate_execution_context(&context)?;
-        validate_distributed_vcp_context(context.vcp_context.as_ref())
-            .map_err(format_protocol_error)?;
         let validated = validate_distributed_vcp_cli_args(&args).map_err(format_protocol_error)?;
 
-        // ink/archery are already owned by the upstream VCP turn. The canonical capability gate
-        // above validates their frozen values; only the typed shell/job action reaches Runtime.
+        // 上游 VCP 专属字段（ink/archery/river/vref/签名等）由 canonical 门静默丢弃，
+        // 只有类型化的 shell/job action 到达 Runtime。
         let operation_id = distributed_operation_id(&context.remote_identity, &context.request_id);
         let session_id = distributed_session_id(&context.remote_identity);
         let runtime = app.try_state::<MobileCliRuntimeState>().ok_or_else(|| {

@@ -18,8 +18,6 @@ action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。
 - read_skill：skill_id 必填；resource_path 默认 SKILL.md，可选 max_bytes；返回有界正文与逻辑 skill_root（不是可用的 shell 路径）。
 - materialize_skill：skill_id 必填，仅在没有活动 Job 时可用；把校验通过的 Skill 复制为 /workspace/.vcp-skills 下的快照并返回 materialized_path；它不执行任何脚本，审阅后用 run 执行。Skill 使用流程：list_skills → read_skill → materialize_skill → run。
 
-run 专属 meta 字段（由上层循环处理，不会进入 Bash）：ink=mark_history 把本次结果标记进对话历史；archery=true 并行续轮、archery=no_reply 免回复。不要发送 river/vref（会被忽略）。
-
 结果解读：Job 返回 state（终态 completed|failed|timed_out|cancelled|interrupted，中间态 queued|starting|running）、stdout/stderr、exit_code 或超时/取消原因。exit_code≠0 或 state=failed 时，先读 stderr 定位原因，再决定重试或换命令；输出有界，截断时用 cursor 继续 poll。App 进程被系统杀死后后台 Job 不存活，重要结果尽快 poll 取回。
 
 调用格式（每个 action 一条独立 TOOL_REQUEST 消息）：
@@ -192,9 +190,14 @@ mod tests {
         assert!(command.description.contains(
             "action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。"
         ));
-        assert!(command.description.contains("ink=mark_history"));
-        assert!(command.description.contains("archery=no_reply"));
-        assert!(command.description.contains("不要发送 river/vref"));
+        for banned in [
+            "ink=", "archery", "river", "vref", "maid", "viad", "签名字段", "静默忽略", "不要发送",
+        ] {
+            assert!(
+                !command.description.contains(banned),
+                "manifest 不得提及上游 VCP 专属字段/机制: {banned}"
+            );
+        }
         assert!(!command.description.contains("VCP_RIVER_CONTEXT_FILE"));
         assert!(!command.description.contains("P5"));
         assert!(!command.description.contains("仅前台可靠"));

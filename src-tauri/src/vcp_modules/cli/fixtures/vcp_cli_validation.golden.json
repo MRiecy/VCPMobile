@@ -9,12 +9,11 @@
         "description": null,
         "cwd": "/workspace",
         "timeout_ms": 1800000,
-        "run_in_background": false,
-        "meta": {}
+        "run_in_background": false
       }
     },
     {
-      "name": "run typed fields and all recognized meta",
+      "name": "run typed fields with foreign meta dropped",
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」run「末」,\ncommand:「始」python3 train.py「末」,\ndescription:「始」run training「末」,\ncwd:「始」/workspace/model「末」,\ntimeout_ms:「始」21600000「末」,\nrun_in_background:「始」true「末」,\nink:「始」mark_history「末」,\nriver:「始」last:5「末」,\nvref:「始」3「末」,\narchery:「始」no_reply「末」\n<<<[END_TOOL_REQUEST]>>>",
       "expected": {
         "action": "run",
@@ -22,23 +21,14 @@
         "description": "run training",
         "cwd": "/workspace/model",
         "timeout_ms": 21600000,
-        "run_in_background": true,
-        "meta": {
-          "ink": "mark_history",
-          "river": "last:5",
-          "vref": 3,
-          "archery": "no_reply"
-        }
+        "run_in_background": true
       }
     },
     {
-      "name": "list skills with history mark",
+      "name": "list skills with foreign meta dropped",
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」,\nink:「始」mark_history「末」\n<<<[END_TOOL_REQUEST]>>>",
       "expected": {
-        "action": "list_skills",
-        "meta": {
-          "ink": "mark_history"
-        }
+        "action": "list_skills"
       }
     },
     {
@@ -48,8 +38,7 @@
         "action": "read_skill",
         "skill_id": "example-skill",
         "resource_path": "references/guide.md",
-        "max_bytes": 262144,
-        "meta": {}
+        "max_bytes": 262144
       }
     },
     {
@@ -57,8 +46,7 @@
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」materialize_skill「末」,\nskill_id:「始」example-skill「末」\n<<<[END_TOOL_REQUEST]>>>",
       "expected": {
         "action": "materialize_skill",
-        "skill_id": "example-skill",
-        "meta": {}
+        "skill_id": "example-skill"
       }
     },
     {
@@ -69,8 +57,7 @@
         "job_id": "job_01",
         "cursor": "c_42",
         "max_output_bytes": 65536,
-        "wait_ms": 8000,
-        "meta": {}
+        "wait_ms": 8000
       }
     },
     {
@@ -78,16 +65,67 @@
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」cancel「末」,\njob_id:「始」job_01「末」\n<<<[END_TOOL_REQUEST]>>>",
       "expected": {
         "action": "cancel",
-        "job_id": "job_01",
-        "meta": {}
+        "job_id": "job_01"
       }
     },
     {
       "name": "list jobs",
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list「末」\n<<<[END_TOOL_REQUEST]>>>",
       "expected": {
-        "action": "list",
-        "meta": {}
+        "action": "list"
+      }
+    },
+    {
+      "name": "unknown field is silently dropped",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nenvironment:「始」TOKEN=x「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "run",
+        "command": "true",
+        "description": null,
+        "cwd": "/workspace",
+        "timeout_ms": 1800000,
+        "run_in_background": false
+      }
+    },
+    {
+      "name": "river on non-run action is silently dropped",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」poll「末」,\njob_id:「始」job_01「末」,\nriver:「始」text「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "poll",
+        "job_id": "job_01",
+        "max_output_bytes": 65536,
+        "wait_ms": 0
+      }
+    },
+    {
+      "name": "vref on skill action is silently dropped",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」,\nvref:「始」2「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "list_skills"
+      }
+    },
+    {
+      "name": "malformed river value is silently dropped",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nriver:「始」last:0「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "run",
+        "command": "true",
+        "description": null,
+        "cwd": "/workspace",
+        "timeout_ms": 1800000,
+        "run_in_background": false
+      }
+    },
+    {
+      "name": "unknown ink value is silently dropped",
+      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nink:「始」semantic_memory「末」\n<<<[END_TOOL_REQUEST]>>>",
+      "expected": {
+        "action": "run",
+        "command": "true",
+        "description": null,
+        "cwd": "/workspace",
+        "timeout_ms": 1800000,
+        "run_in_background": false
       }
     }
   ],
@@ -103,36 +141,6 @@
       "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」execute「末」,\ncommand:「始」true「末」\n<<<[END_TOOL_REQUEST]>>>",
       "code": "invalid_request",
       "field": "action"
-    },
-    {
-      "name": "unknown field cannot reach shell",
-      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nenvironment:「始」TOKEN=x「末」\n<<<[END_TOOL_REQUEST]>>>",
-      "code": "invalid_request",
-      "field": "environment"
-    },
-    {
-      "name": "river is invalid on non run action",
-      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」poll「末」,\njob_id:「始」job_01「末」,\nriver:「始」text「末」\n<<<[END_TOOL_REQUEST]>>>",
-      "code": "invalid_request",
-      "field": "river"
-    },
-    {
-      "name": "vref is invalid on skill action",
-      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\naction:「始」list_skills「末」,\nvref:「始」2「末」\n<<<[END_TOOL_REQUEST]>>>",
-      "code": "invalid_request",
-      "field": "vref"
-    },
-    {
-      "name": "malformed river",
-      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nriver:「始」last:0「末」\n<<<[END_TOOL_REQUEST]>>>",
-      "code": "invalid_request",
-      "field": "river"
-    },
-    {
-      "name": "unknown ink mode is unsupported",
-      "input": "<<<[TOOL_REQUEST]>>>\ntool_name:「始」VCPMobileCLI「末」,\ncommand:「始」true「末」,\nink:「始」semantic_memory「末」\n<<<[END_TOOL_REQUEST]>>>",
-      "code": "unsupported_mode",
-      "field": "ink"
     },
     {
       "name": "duplicate command is ambiguous",
