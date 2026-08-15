@@ -35,6 +35,19 @@ function mountView() {
   });
 }
 
+function mountViewWithAllPanelsStubbed() {
+  return mountWithPinia(VcpCliManifestView, {
+    props: { isOpen: true, zIndex: 44 },
+    global: {
+      stubs: {
+        VcpCliTerminalPanel: true,
+        VcpCliRunPanel: true,
+        VcpCliSkillsPanel: true,
+      },
+    },
+  });
+}
+
 const readyStatus: VcpCliRuntimeStatus = {
   available: true,
   availability_reason: null,
@@ -98,6 +111,26 @@ describe("VCP CLI canonical manifest boundary", () => {
       "无法保证复制与注册内容逐字一致",
     );
     expect(tauriLibSource).toContain(VCP_CLI_MANIFEST_COMMAND);
+  });
+
+  it("shows the manifest help on Jobs and Skills tabs instead of the tab panels", async () => {
+    for (const tab of ["jobs", "skills"] as const) {
+      const wrapper = mountViewWithAllPanelsStubbed();
+      await wrapper.get(`[data-vcp-cli-tab="${tab}"]`).trigger("click");
+      await flushPromises();
+      // 打开工具说明前：对应页签面板在渲染
+      const tabStub =
+        tab === "jobs" ? "vcp-cli-run-panel-stub" : "vcp-cli-skills-panel-stub";
+      expect(wrapper.findAll(tabStub).length).toBe(1);
+
+      await openManifestTab(wrapper);
+      expect(wrapper.findAll('[data-vcp-cli-role="manifest-json"]').length).toBe(1);
+      expect(wrapper.text()).toContain("规范 JSON");
+      // 工具说明优先于页签面板，正文不再停留在 jobs/skills
+      expect(wrapper.findAll("vcp-cli-run-panel-stub").length).toBe(0);
+      expect(wrapper.findAll("vcp-cli-skills-panel-stub").length).toBe(0);
+      wrapper.unmount();
+    }
   });
 
   it("loads through the canonical command and keeps runtime truth off the manifest", async () => {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ChevronLeft, Info, SquareTerminal, X } from "lucide-vue-next";
+import { ChevronLeft, Info, SquareTerminal } from "lucide-vue-next";
 import SlidePage from "../../../components/ui/SlidePage.vue";
 import { useKeyboardInsets } from "../../../core/composables/useKeyboardInsets";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
@@ -135,8 +135,7 @@ onBeforeUnmount(() => {
             data-vcp-cli-action="navigate-back"
             @click="handleNavigation"
           >
-            <ChevronLeft v-if="hasPageDetail" :size="21" />
-            <X v-else :size="20" />
+            <ChevronLeft :size="21" />
           </button>
           <SquareTerminal
             :size="18"
@@ -217,19 +216,19 @@ onBeforeUnmount(() => {
       </div>
 
       <VcpCliRunPanel
-        v-if="selectedJobId || (!selectedSkillId && activeTab === 'jobs')"
+        v-if="selectedJobId || (!selectedSkillId && !showInfo && activeTab === 'jobs')"
         :keyboard-height="keyboardHeight"
       />
       <VcpCliSkillsPanel
-        v-else-if="selectedSkillId || activeTab === 'skills'"
-      />
-      <VcpCliTerminalPanel
-        v-else-if="activeTab === 'terminal' && !showInfo"
-        :keyboard-height="keyboardHeight"
+        v-else-if="selectedSkillId || (!showInfo && activeTab === 'skills')"
       />
       <VcpCliManifestPanel
         v-else-if="showInfo"
         :is-open="props.isOpen && showInfo"
+      />
+      <VcpCliTerminalPanel
+        v-else
+        :keyboard-height="keyboardHeight"
       />
     </main>
   </SlidePage>
