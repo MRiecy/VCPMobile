@@ -2392,7 +2392,6 @@ mod active_request_tests {
         );
     }
 
-
     #[test]
     fn helper_stop_ack_requires_stopped_and_exact_generation() {
         let valid = json!({
@@ -2462,5 +2461,4 @@ mod active_request_tests {
         assert!(aligning.contains("return Err(error);"));
         assert!(!aligning.contains("break 'main_loop"));
     }
-
 }

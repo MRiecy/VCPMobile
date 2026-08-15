@@ -13,9 +13,9 @@ pub mod profile;
 #[allow(dead_code)]
 mod projection;
 #[allow(dead_code)]
-pub mod provision;
-#[allow(dead_code)]
 pub mod protocol;
+#[allow(dead_code)]
+pub mod provision;
 #[allow(dead_code)]
 pub mod result;
 pub mod runtime;

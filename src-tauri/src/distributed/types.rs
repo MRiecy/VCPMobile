@@ -111,9 +111,7 @@ pub enum IncomingMessage {
     /// Main server asks this node to cancel a request that timed out or lost its connection.
     /// Fire-and-forget: the server does not await a reply.
     /// `{ type: "cancel_tool", data: { requestId } }`
-    CancelTool {
-        request_id: String,
-    },
+    CancelTool { request_id: String },
 
     /// Unknown message type (forward-compatible)
     Unknown(String),

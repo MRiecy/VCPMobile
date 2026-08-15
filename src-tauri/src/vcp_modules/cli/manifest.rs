@@ -191,7 +191,15 @@ mod tests {
             "action: run | list_skills | read_skill | materialize_skill | poll | cancel | list"
         ));
         for banned in [
-            "ink=", "archery", "river", "vref", "maid", "viad", "签名字段", "静默忽略", "不要发送",
+            "ink=",
+            "archery",
+            "river",
+            "vref",
+            "maid",
+            "viad",
+            "签名字段",
+            "静默忽略",
+            "不要发送",
         ] {
             assert!(
                 !command.description.contains(banned),

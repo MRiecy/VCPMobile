@@ -437,12 +437,12 @@ impl MobileCliRuntimeState {
                 {
                     CancelBindingOutcome::Bound => {}
                     CancelBindingOutcome::Replay | CancelBindingOutcome::Conflict => {
-                        return Ok(self
+                        return self
                             .replay_operation(&request.operation_id, &action_sha256)
                             .await?
                             .ok_or_else(|| {
                                 "cancel operation binding vanished during replay".to_string()
-                            })?);
+                            });
                     }
                 }
                 self.cancel_action(app, &request.operation_id, &job_id, false)
@@ -2345,10 +2345,7 @@ fn admit_run_job(
             );
         }
     }
-    owner
-        .ledger
-        .insert_job(admission.job)
-        .map_err(|error| error)
+    owner.ledger.insert_job(admission.job)
 }
 
 fn action_digest(action: &VcpCliAction, session_id: Option<&str>) -> Result<String, String> {

@@ -14,9 +14,7 @@ use crate::distributed::types::{InvocationCommand, ToolManifest};
 use crate::vcp_modules::cli::manifest::{
     serialize_vcp_mobile_cli_manifest, vcp_mobile_cli_manifest,
 };
-use crate::vcp_modules::cli::protocol::{
-    validate_distributed_vcp_cli_args, VcpCliProtocolError,
-};
+use crate::vcp_modules::cli::protocol::{validate_distributed_vcp_cli_args, VcpCliProtocolError};
 use crate::vcp_modules::cli::result::project_vcp_plugin_outcome;
 use crate::vcp_modules::cli::runtime::{ExecuteVcpMobileCliRequest, MobileCliRuntimeState};
 
