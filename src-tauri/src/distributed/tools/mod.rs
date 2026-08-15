@@ -7,6 +7,8 @@ mod device_info;
 mod notification;
 mod vcp_mobile_cli;
 
+pub(crate) use vcp_mobile_cli::distributed_operation_id;
+
 mod battery;
 mod cpu_info;
 mod gpu_info;

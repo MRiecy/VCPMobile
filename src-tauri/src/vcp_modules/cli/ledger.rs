@@ -365,6 +365,17 @@ impl JobLedger {
         self.jobs.iter().find(|job| job.id == job_id)
     }
 
+    /// Find the Run job created by a given operation id, regardless of that operation's
+    /// action digest. Used by the Distributed `cancel_tool` path, which only carries the
+    /// requestId (reduced to an operation id) and cannot reproduce the original digest.
+    pub(super) fn job_for_operation(&self, operation_id: &str) -> Option<&JobRecord> {
+        self.jobs.iter().find(|job| {
+            job.mutation_operations
+                .iter()
+                .any(|binding| binding.operation_id == operation_id)
+        })
+    }
+
     pub(super) fn find_job_mut(&mut self, job_id: &str) -> Option<&mut JobRecord> {
         self.jobs.iter_mut().find(|job| job.id == job_id)
     }
@@ -629,6 +640,22 @@ mod tests {
             OperationLookup::ReplayJob("job-1".to_string())
         );
         assert_eq!(ledger.jobs.len(), 1);
+    }
+
+    #[test]
+    fn job_for_operation_finds_run_by_operation_without_digest() {
+        let mut ledger = JobLedger::empty(1);
+        let mut job = running_job(1);
+        job.mutation_operations.push(MutationOperationBinding {
+            operation_id: "dist:abc123".to_string(),
+            action_sha256: "run-digest".to_string(),
+        });
+        ledger.insert_job(job).expect("insert job");
+        let found = ledger
+            .job_for_operation("dist:abc123")
+            .expect("run job found by operation id");
+        assert_eq!(found.id, "job-1");
+        assert!(ledger.job_for_operation("dist:missing").is_none());
     }
 
     #[test]

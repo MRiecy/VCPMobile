@@ -23,6 +23,7 @@ pub enum OutgoingMessage {
         #[serde(rename = "serverName")]
         server_name: String,
         tools: Vec<Box<RawValue>>,
+        capabilities: ServerCapabilities,
     },
 
     /// Report this node's IP addresses.
@@ -60,6 +61,16 @@ pub enum OutgoingMessage {
     },
 }
 
+/// Node capabilities advertised during tool registration.
+/// The main server reads `data.capabilities` and, when `cancelTool` is true, may send a
+/// `cancel_tool { requestId }` message to abort a request that timed out or disconnected.
+/// VCPChat ref: WebSocketServer.js register_tools handler + sendCancelToolIfSupported().
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerCapabilities {
+    pub cancel_tool: bool,
+}
+
 // ============================================================
 // Incoming messages (VCPToolBox main server → VCPMobile)
 // ============================================================
@@ -95,6 +106,13 @@ pub enum IncomingMessage {
         tool_name: String,
         tool_args: Value,
         vcp_context: Option<Value>,
+    },
+
+    /// Main server asks this node to cancel a request that timed out or lost its connection.
+    /// Fire-and-forget: the server does not await a reply.
+    /// `{ type: "cancel_tool", data: { requestId } }`
+    CancelTool {
+        request_id: String,
     },
 
     /// Unknown message type (forward-compatible)
@@ -145,6 +163,15 @@ impl IncomingEnvelope {
                     tool_args,
                     vcp_context,
                 }
+            }
+            "cancel_tool" => {
+                let data = self.data.unwrap_or_default();
+                let request_id = data
+                    .get("requestId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                IncomingMessage::CancelTool { request_id }
             }
             other => IncomingMessage::Unknown(other.to_string()),
         }
@@ -335,9 +362,35 @@ mod tests {
         let wire = serde_json::to_value(OutgoingMessage::RegisterTools {
             server_name: "mobile".to_string(),
             tools: vec![raw],
+            capabilities: ServerCapabilities { cancel_tool: true },
         })
         .expect("registration wire");
         assert_eq!(wire["data"]["tools"][0]["name"], "VCPMobileCLI");
         assert!(wire["data"]["tools"][0].is_object());
+    }
+
+    #[test]
+    fn register_tools_advertises_cancel_tool_capability() {
+        let wire = serde_json::to_value(OutgoingMessage::RegisterTools {
+            server_name: "mobile".to_string(),
+            tools: vec![],
+            capabilities: ServerCapabilities { cancel_tool: true },
+        })
+        .expect("registration wire");
+        assert_eq!(wire["data"]["capabilities"]["cancelTool"], true);
+    }
+
+    #[test]
+    fn cancel_tool_parses_request_id() {
+        let envelope: IncomingEnvelope = serde_json::from_value(serde_json::json!({
+            "type": "cancel_tool",
+            "data": { "requestId": "request-9" }
+        }))
+        .expect("parse cancel_tool envelope");
+
+        match envelope.parse() {
+            IncomingMessage::CancelTool { request_id } => assert_eq!(request_id, "request-9"),
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 }

@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{mpsc, oneshot, Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time;
@@ -21,7 +21,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
 use super::tool_registry::{ToolExecutionContext, ToolRegistry};
+use super::tools::distributed_operation_id;
 use super::types::*;
+use crate::vcp_modules::cli::runtime::MobileCliRuntimeState;
 
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OUTBOUND_CAPACITY: usize = 64;
@@ -1056,6 +1058,23 @@ impl DistributedClient {
                     .await;
             }
 
+            IncomingMessage::CancelTool { request_id } => {
+                log::info!(
+                    "[Distributed] Cancel tool request: (requestId={})",
+                    request_id
+                );
+                if let Some(runtime) = app.try_state::<MobileCliRuntimeState>() {
+                    let operation_id = distributed_operation_id(remote_identity, &request_id);
+                    if let Err(error) = runtime.cancel_operation(app, &operation_id).await {
+                        log::warn!(
+                            "[VCPMobileCLI] cancel_tool failed for {}: {}",
+                            request_id,
+                            error
+                        );
+                    }
+                }
+            }
+
             IncomingMessage::Unknown(msg_type) => {
                 log::debug!("[Distributed] Unknown message type: {}", msg_type);
             }
@@ -1091,6 +1110,7 @@ impl DistributedClient {
         let msg = OutgoingMessage::RegisterTools {
             server_name: device_name.to_string(),
             tools,
+            capabilities: ServerCapabilities { cancel_tool: true },
         };
         if let Err(error) = Self::send_message(ws_tx, &msg).await {
             log::warn!("[Distributed] Failed to register tools: {}", error);
@@ -1506,6 +1526,7 @@ mod tests {
         let message = OutgoingMessage::RegisterTools {
             server_name: "mobile".to_string(),
             tools: vec![],
+            capabilities: ServerCapabilities { cancel_tool: true },
         };
         assert_eq!(
             serde_json::to_value(message).unwrap(),
@@ -1513,7 +1534,8 @@ mod tests {
                 "type": "register_tools",
                 "data": {
                     "serverName": "mobile",
-                    "tools": []
+                    "tools": [],
+                    "capabilities": { "cancelTool": true }
                 }
             })
         );

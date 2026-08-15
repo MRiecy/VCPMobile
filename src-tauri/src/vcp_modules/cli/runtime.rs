@@ -248,6 +248,33 @@ impl MobileCliRuntimeState {
         self.execute_inner(app, request).await
     }
 
+    /// Fire-and-forget cancellation for a Distributed request that the main server timed out
+    /// (its `cancel_tool` wire). The adapter reduces requestId to an operation id; this maps it
+    /// back to the Run job it created and terminates the owned process tree. A completed job or
+    /// an unknown operation id is a no-op.
+    pub(crate) async fn cancel_operation<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        validate_operation_id(operation_id)?;
+        self.ensure_initialized(app).await?;
+        let job_id = {
+            let owner = self.inner.lock().await;
+            owner
+                .ledger
+                .job_for_operation(operation_id)
+                .map(|job| job.id.clone())
+        };
+        let Some(job_id) = job_id else {
+            return Ok(());
+        };
+        let cancel_operation_id = format!("{operation_id}:cancel_tool");
+        self.cancel_action(app, &cancel_operation_id, &job_id, false)
+            .await
+            .map(|_| ())
+    }
+
     async fn execute_inner<R: Runtime>(
         &self,
         app: &AppHandle<R>,

@@ -131,7 +131,7 @@ fn validate_execution_context(context: &ToolExecutionContext) -> Result<(), Stri
     Ok(())
 }
 
-fn distributed_operation_id(remote_identity: &str, request_id: &str) -> String {
+pub(crate) fn distributed_operation_id(remote_identity: &str, request_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(remote_identity.as_bytes());
     hasher.update([0]);
@@ -153,7 +153,7 @@ fn format_protocol_error(error: VcpCliProtocolError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::distributed::types::OutgoingMessage;
+    use crate::distributed::types::{OutgoingMessage, ServerCapabilities};
     use crate::vcp_modules::cli::manifest::VCP_MOBILE_CLI_TOOL_NAME;
 
     #[test]
@@ -169,6 +169,7 @@ mod tests {
         let outer = serde_json::to_string(&OutgoingMessage::RegisterTools {
             server_name: "mobile".to_string(),
             tools: vec![raw],
+            capabilities: ServerCapabilities { cancel_tool: true },
         })
         .expect("serialize register_tools wire");
         let canonical = serialize_vcp_mobile_cli_manifest().expect("serialize canonical manifest");
