@@ -35,6 +35,7 @@ plans_back.zip
 /*.md
 !/README.md
 !/CLAUDE.md
+!/RELEASE_NOTES_1.1.4.md
 VCPMobile.code-workspace
 
 # Large Assets & Scripts
