@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import {
   ChevronDown,
+  ChevronLeft,
   FolderCog,
   Plus,
   RefreshCw,
@@ -620,7 +621,7 @@ onBeforeUnmount(() => {
         <header class="diary-list-header shrink-0" data-diary-role="list-header">
           <div class="diary-topbar">
             <button type="button" class="diary-icon-button" aria-label="关闭日记中心" @click="requestClose">
-              <X :size="20" />
+              <ChevronLeft :size="20" />
             </button>
 
             <template v-if="diaryStore.selectionMode">

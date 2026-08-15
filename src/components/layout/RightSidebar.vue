@@ -282,7 +282,7 @@ watch(
         </button>
         <button
           type="button"
-          class="col-span-1 min-h-12 px-4 rounded-full transition-all flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)] hover:opacity-90 active:scale-95 shadow-md border border-black/10 dark:border-white/10"
+          class="col-span-1 min-h-12 px-4 rounded-full transition-all flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)] hover:opacity-90 active:scale-95 shadow-sm border border-black/10 dark:border-white/10"
           aria-label="打开日记中心"
           @click="openMoreTool(openDiaryCenter)"
         >
@@ -291,7 +291,7 @@ watch(
         </button>
         <button
           type="button"
-          class="col-span-1 min-h-12 px-4 rounded-full transition-all flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)] hover:opacity-90 active:scale-95 shadow-md border border-black/10 dark:border-white/10"
+          class="col-span-1 min-h-12 px-4 rounded-full transition-all flex items-center justify-center gap-2 text-[var(--primary-text)] bg-[var(--secondary-bg)] hover:opacity-90 active:scale-95 shadow-sm border border-black/10 dark:border-white/10"
           aria-label="打开更多工具"
           aria-controls="right-sidebar-more-tools"
           aria-haspopup="dialog"

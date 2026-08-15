@@ -3,6 +3,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import Sortable from "sortablejs";
 import {
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Eye,
   EyeOff,
@@ -10,7 +11,6 @@ import {
   GripVertical,
   Search,
   Trash2,
-  X,
 } from "lucide-vue-next";
 import type { DiaryFolderCategory } from "../types";
 import { diaryFolderCategory } from "../types";
@@ -131,7 +131,7 @@ function activateFolder(folder: string): void {
             <h2>{{ title }}</h2>
           </div>
           <button type="button" class="diary-sheet-icon" aria-label="关闭" @click="emit('close')">
-            <X :size="19" />
+            <ChevronLeft :size="19" />
           </button>
         </header>
 

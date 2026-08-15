@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronRight, FilePenLine, FolderInput, Trash2, X } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, FilePenLine, FolderInput, Trash2 } from "lucide-vue-next";
 
 export interface DiarySheetAction {
   id: string;
@@ -39,7 +39,7 @@ const emit = defineEmits<{
             <h2>{{ title }}</h2>
           </div>
           <button type="button" class="diary-action-close" aria-label="关闭" @click="emit('close')">
-            <X :size="19" />
+            <ChevronLeft :size="19" />
           </button>
         </header>
         <div class="diary-action-list">
