@@ -1,5 +1,7 @@
 # 06｜Magi 综合裁决与分期验收
 
+> ⚠️ **收敛状态（2026-08-15）**：本文 P2「默认本地 Agent 工具循环」整项已随 08 ADR 收敛删除；Agent 唯一路由为 vcpPlugin，P0-P5 代码完成，S1-S3 已实施、S4 文档收尾中。下文的「localLoopback 默认 / Forbidden 注入 / 本地 meta owner」等属于收敛前的历史裁决，施工真相以 [08](./08-本地回环收敛与保活分层ADR.md)、[10](./10-S1审计-localLoopback删除映射表.md) 与本仓库当前代码为准。
+>
 > 审查日期：2026-08-13
 >
 > 方法：Melchior、Balthasar、Casper 分别只读检查 VCP/VChat 协议、移动交互/iOS、当前 VCPMobile 交付边界，再由主审综合。三方未修改参考工程或产品代码。

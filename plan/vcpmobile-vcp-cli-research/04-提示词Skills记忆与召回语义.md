@@ -1,5 +1,7 @@
 # 04｜VCPToolBox 提示词所有权、Skills 与召回语义
 
+> ⚠️ **已被 08 ADR 收敛取代（S1-S3 已实施，2026-08-15）**：本文的 `ink/archery/river/vref` 语义（本地 meta owner、local 忽略提示、remote fail-closed）已作废——收敛后 mobile CLI 对工具自身字段之外的任何字段（含上述元字段与 maid/viad 等签名）一律静默丢弃，不再解析/校验/提示。上游语义以 [08-本地回环收敛与保活分层ADR.md](./08-本地回环收敛与保活分层ADR.md) 与本仓库当前代码为准。
+>
 > 2026-08-14 覆盖裁决：River/vref 不属于本地 CLI 产品能力。本文保留它们的上游语义用于协议兼容，
 > 但当前实现只做严格解析、local 忽略提示与 remote fail-closed，不再规划本地投影或向量化。
 

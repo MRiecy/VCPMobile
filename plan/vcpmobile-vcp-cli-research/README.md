@@ -1,6 +1,6 @@
 # VCPMobile VCP CLI 本地回环与生态兼容专项
 
-> 状态：`P0-P4-CODE-COMPLETE / P5-CODE-COMPLETE-DEVICE-ACCEPTANCE-PENDING / LOCAL-RIVER-VREF-NOT-SUPPORTED`
+> 状态：`S1-S3 已实施（localLoopback 收敛为 vcpPlugin 单路由）/ S4 文档收尾 / P0-P5 代码完成，真机端到端已过短命令与 maid 回归`
 >
 > 研究日期：2026-08-13
 >
@@ -114,36 +114,33 @@
 
 ## 结论
 
-VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存条件。推荐建立一个由移动端自己拥有的 `VCPMobileCLI` 能力，默认走**进程内本地回环**；只有用户明确开启时，才把同一能力作为分布式 VCP 插件注册给 VCPToolBox。
+VCPMobile 的 CLI 的 Agent 路径只有一条：**vcpPlugin 单路由**——同一 `VCPMobileCLI` 经 Distributed WS 注册给 VCPToolBox，由它拥有工具循环。localLoopback 与 `[[VCPToolUse=Forbidden]]` 已按 08 ADR 整删，离线/无网由手动终端承担。
 
 ```text
-同一份 VCPMobileCLI manifest、请求语法和结果语义
-                         │
-                  Agent route
-             ┌───────────┴───────────┐
-             │                       │
- localLoopback（默认）        vcpPlugin（显式开启）
- Mobile 本地工具循环          VCPToolBox 工具循环
- 进程内直调 Runtime           既有 Distributed WS
-             │                       │
-             └──── 同一 MobileCliRuntime ────┘
+同一份 VCPMobileCLI manifest / 请求语法 / 结果语义
+                        │
+                 Agent route（唯一）
+                        │
+               vcpPlugin（Distributed WS）
+                  VCPToolBox 工具循环
+                        │
+                 MobileCliRuntime
 ```
 
-这不是“在手机里伪造一个 VCP 服务器”。本地回环不启动 localhost HTTP、SSE 或 WebSocket，而是让本地执行结果经过与 VCP 一致的规范化器，再以 `<!-- VCP_TOOL_PAYLOAD -->` 回灌模型续轮，同时向 UI 发送可渲染的工具状态。这样让 Agent 只需理解 manifest 中自洽的移动 CLI 合同，也避开插件中心的连接、注册和多次网络往返。
+这不是“在手机里伪造一个 VCP 服务器”。Mobile 只做 transport 翻译 + Runtime 执行，不再截获 VCP block、不注入 `[[VCPToolUse=Forbidden]]`；上游 VCP 专属字段（ink/archery/river/vref/签名等）在 canonical 校验时静默丢弃，未知 `action` 与已知字段非法取值仍严厉拒绝。
 
 ## 已冻结决策
 
-1. **默认路由是 `localLoopback`**。它不依赖 Distributed WebSocket，飞行模式下也能运行不需要网络的本地命令。
+1. **Agent 唯一路由是 `vcpPlugin`**。`VCPMobileCLI` 只在 Android + Runtime prewarm 成功时经 Distributed WS 注册给 VCPToolBox；localLoopback 已整删，离线/无网由手动终端承担。
 2. **分布式工具采用“显式扫描 + 显式授权”，默认全部关闭**。Registry 扫描得到完整工具清单，UI 对每个工具单独展示和授权；后端只持久化 `enabled_tools` allowlist，未在 allowlist 的工具一律不发布、不执行。干净安装、旧配置升级和新扫描出的工具都保持关闭。
-3. **一个工具身份、一个 manifest、一个 Runtime**。本地和远端只替换 transport/turn adapter，不复制 shell、job、工具说明或结果状态机。
+3. **一个工具身份、一个 manifest、一个 Runtime**。Distributed 只替换 transport，不复制 shell、job、工具说明或结果状态机。
 4. **manifest 是主要提示词源**。`invocationCommands[].description/example` 完整说明 Shell、参数、限制和示例，由 VCPToolBox 提取并允许用户手动微调；Mobile 不另建 `CliPromptCatalog`，也不改写 Agent 提示词。
-5. **本地回环不等于绕过 VCPToolBox 的提示词治理**。本地 route 只改变工具执行 owner；用户仍在 VCPToolBox 侧决定如何通过 `{{VCPVCPMobileCLI}}`、DynamicTools 或自定义提示词让 Agent 看见能力。
-   因真实插件默认关闭，本地 route 首次使用前需要用户把 Mobile 导出的规范 manifest/说明导入或放置到 VCPToolBox 提示词配置中；本专项不再宣称 Agent CLI 是零配置提示词能力。
-6. **本地模式与 VCP 模式只有一个工具循环 owner**。本地模式由 Mobile 截获 VCP block；VCP 模式由 VCPToolBox 截获。禁止双重执行和断线时静默换路由。
+5. **提示词治理只在 VCPToolBox 侧**。用户通过 `{{VCPVCPMobileCLI}}`、DynamicTools 或自定义提示词让 Agent 看见能力；Mobile 只提供 manifest 查看/复制/导出，不改写 Agent 提示词，也不注入 `[[VCPToolUse=Forbidden]]`。
+6. **工具循环 owner 只有 VCPToolBox**。Mobile 只做 transport 翻译 + Runtime 执行，不截获 VCP block、不注入 `[[VCPToolUse=Forbidden]]`，杜绝双重执行与断线换路由。
 7. **人工终端与 Agent Job 分离**。普通任务用 `run/poll/cancel/list`；密码、SSH、vim、TUI 等场景由用户显式打开交互终端，预填命令但不自动执行。
 8. **Android host 坚持非 Root 用户态沙箱**。首发目标 Shell 固定为 PRoot guest 内的 Alpine Linux (musl) + GNU Bash，Agent 命令以 `/bin/bash -lc` 执行；guest 可模拟 root 管理自身 rootfs 和 `apk`，但不能越过 App UID。P0 验证可行性；若不可行必须回到 manifest 重新裁决，不得静默改用 `ash`。Android Root/Shizuku 只能作为未来显式 elevated backend。
 9. **长任务由 job 生命周期拥有，不由聊天 SSE 拥有**。模型续轮断线不能导致命令重跑；超时/取消必须终止目标进程组并阻止迟到输出污染后续任务。
-10. **VCP 通用元字段不支配本地命令可用性**。本地只执行 `ink: mark_history` 与 `archery=true/no_reply`；合法 `river/vref` 始终剥离、继续命令并在 ToolResult 中提示 Agent，不建立本地召回能力。语法错误、伪造物化字段和远端不可达引用仍 fail-closed。
+10. **上游 VCP 专属字段不进入 mobile CLI 认知**。canonical 校验把工具自身字段之外的任何字段（ink/archery/river/vref/签名等）静默丢弃；唯一严厉拒绝的是未知 `action` 与已知字段的非法取值。
 11. **Skill 是 manifest 中可见的一等 action，不是隐藏 Shell 子命令**。`VCPMobileCLI` 直接提供 `action=list_skills|read_skill`；前者列出校验通过的 Skill，后者按 `skill_id + resource_path` 阅读 `SKILL.md` 或受控资源并返回 `vcp-skill://<id>` 逻辑引用。Skill catalog 不挂载进 PRoot guest；若要执行脚本，必须先经明确动作物化到 `/workspace`。它不增加第二个 VCP 工具，也不自动执行 Skill 脚本。
 12. **iOS 只作为未来可选方向**。同一 VCP 协议可以复用，CLI Runtime 必须另做平台实现；本专项不改变 Android-only 当前产品边界。
 
@@ -164,7 +161,7 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 | [05-iOS未来可选方向.md](./05-iOS未来可选方向.md) | 原生命令、a-Shell/WASI、iSH、后台策略与 App Review 边界 | 后续预研，不进入当前施工 |
 | [06-Magi综合裁决与分期验收.md](./06-Magi综合裁决与分期验收.md) | 三方审查、否决线、P0–P5 路线和硬验收 | 开工与交付门禁 |
 | [07-P4.4本机知识授权与vref合同.md](./07-P4.4本机知识授权与vref合同.md) | 独立知识 CAS、显式授权、召回、attempt copy、删除和预算 | 已延期的未来参考 |
-| [08-本地回环收敛与保活分层ADR.md](./08-本地回环收敛与保活分层ADR.md) | localLoopback 前提证伪、保活三层、收敛为 vcpPlugin 单路由的提案 | 待核准的架构收敛（**提案**） |
+| [08-本地回环收敛与保活分层ADR.md](./08-本地回环收敛与保活分层ADR.md) | localLoopback 前提证伪、保活三层、收敛为 vcpPlugin 单路由的提案 | **已实施（S1-S3 完成，S4 收尾）** |
 | [09-真机验收与回归修复存档-2026-08-14.md](./09-真机验收与回归修复存档-2026-08-14.md) | RLIMIT_AS 回归修复 + API 36 自动化验收 + VCPToolBox 源码核证 | 本轮实测证据存档 |
 | [10-S1审计-localLoopback删除映射表.md](./10-S1审计-localLoopback删除映射表.md) | 23 文件逐符号 删/迁/留 行级映射 + 硬性前置 + 风险 | S2 落刀的精确施工图 |
 
@@ -185,10 +182,11 @@ VCPMobile 的 CLI 不应把“始终连接 VCP 插件中心”作为默认生存
 
 允许的准确表述是：
 
-> VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime、P2 本地 Agent 多轮 loop、P3 可选 Distributed adapter
-> 以及 P4.1 Skill 产品代码已完成；单聊和 Group 共用可恢复、exact-once 的本地 coordinator。
-> River/vref 仅作协议兼容解析，不是本地 CLI capability；本地向量模型、投影和知识物化均不随产品交付。
-> 当前代码范围已经收敛到 P5；P2/P3/P5 的列明设备复验仍是发布证据，后台能力声明保持 `foreground_only`。
+> VCPMobile CLI 的 P0 协议、P1 人工前台 Runtime、P3 Distributed adapter、P4.1 Skill 与 P5 人工终端
+> 代码已完成；localLoopback 双路由与 `[[VCPToolUse=Forbidden]]` 注入已按 08 ADR 收敛删除，Agent 唯一走
+> vcpPlugin 单路由。上游 VCP 专属字段（ink/archery/river/vref/签名）被 canonical 校验静默丢弃，未知
+> `action` 与已知字段非法取值仍严厉拒绝。真实 VCPToolBox + API 36 端到端已通过短命令与 maid 回归。
+> 后台能力声明保持 `foreground_only`。
 
-不得表述为“Agent CLI 已可用”“后台长任务已稳定”“真实 VCP route 已验收”“OpenMinis 代码可直接合并”
+不得表述为“Agent CLI 已可用”“后台长任务已稳定”“localLoopback 仍可选用”“OpenMinis 代码可直接合并”
 或“iOS 已支持本地 Linux”。

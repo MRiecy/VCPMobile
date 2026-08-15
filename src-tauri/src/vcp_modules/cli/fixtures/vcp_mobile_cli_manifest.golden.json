@@ -12,7 +12,7 @@
   },
   "communication": {
     "protocol": "mobile",
-    "timeout": 10000
+    "timeout": 30000
   },
   "capabilities": {
     "invocationCommands": [

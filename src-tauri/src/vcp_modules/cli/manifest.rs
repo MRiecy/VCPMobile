@@ -141,7 +141,7 @@ pub fn vcp_mobile_cli_manifest() -> VcpMobileCliManifest {
         },
         communication: VcpMobileCliCommunication {
             protocol: "mobile".to_string(),
-            timeout: 10_000,
+            timeout: 30_000,
         },
         capabilities: VcpMobileCliCapabilities {
             invocation_commands: vec![VcpMobileCliInvocationCommand {
