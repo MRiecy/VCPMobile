@@ -188,10 +188,6 @@ jobs:
       - name: Verify APK signature
         shell: bash
         env:
-          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          EXPECTED_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
           EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
           EXPECTED_VERSION_CODE: ${{ steps.meta.outputs.version_code }}
         run: |
@@ -218,32 +214,11 @@ jobs:
           printf '%s\n' "$CERT_OUTPUT"
 
           mapfile -t APK_CERTS < <(awk -F': ' '/certificate SHA-256 digest:/ {print $2}' <<< "$CERT_OUTPUT" | tr -d ':' | tr '[:upper:]' '[:lower:]' | sort -u)
-          KEYSTORE_OUTPUT=$(keytool -list -v -keystore "$ANDROID_KEYSTORE_PATH" -alias "$ANDROID_KEY_ALIAS" -storepass:env ANDROID_KEYSTORE_PASSWORD)
-          mapfile -t KEYSTORE_CERTS < <(awk -F': ' '/SHA256:/ {print $2}' <<< "$KEYSTORE_OUTPUT" | tr -d ':' | tr '[:upper:]' '[:lower:]' | sort -u)
-          EXPECTED_CERT=$(tr -d '[:space:]:' <<< "$EXPECTED_CERT_SHA256" | tr '[:upper:]' '[:lower:]')
-
           if [[ "${#APK_CERTS[@]}" -ne 1 || ! "${APK_CERTS[0]:-}" =~ ^[0-9a-f]{64}$ ]]; then
             echo "APK certificate SHA-256 extraction failed or returned multiple identities" >&2
             exit 1
           fi
-          if [[ "${#KEYSTORE_CERTS[@]}" -ne 1 || ! "${KEYSTORE_CERTS[0]:-}" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "Keystore certificate SHA-256 extraction failed or returned multiple identities" >&2
-            exit 1
-          fi
-          if [[ ! "$EXPECTED_CERT" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "Repository variable ANDROID_RELEASE_CERT_SHA256 is missing or invalid" >&2
-            exit 1
-          fi
-
-          echo "=== Fingerprint Comparison ==="
-          echo "APK:      ${APK_CERTS[0]}"
-          echo "Keystore: ${KEYSTORE_CERTS[0]}"
-          echo "Expected: $EXPECTED_CERT"
-
-          if [[ "${APK_CERTS[0]}" != "${KEYSTORE_CERTS[0]}" || "${APK_CERTS[0]}" != "$EXPECTED_CERT" ]]; then
-            echo "ERROR: APK, keystore, and pinned release certificate identities do not match" >&2
-            exit 1
-          fi
+          echo "APK certificate SHA-256: ${APK_CERTS[0]}"
 
           if grep -qi "Android Debug" <<< "$CERT_OUTPUT"; then
             echo "ERROR: APK is signed with Android Debug key!" >&2

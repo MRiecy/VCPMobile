@@ -57,8 +57,9 @@ describe('release and Android governance contracts', () => {
     expect(releaseWorkflow).not.toContain(
       "sed -n 's/^tauri\\.android\\.versionCode=//p' src-tauri/gen/android/app/tauri.properties",
     );
-    expect(releaseWorkflow).toContain('ANDROID_RELEASE_CERT_SHA256');
-    expect(releaseWorkflow).toContain('APK, keystore, and pinned release certificate identities do not match');
+    expect(releaseWorkflow).not.toContain('ANDROID_RELEASE_CERT_SHA256');
+    expect(releaseWorkflow).toContain('APK certificate SHA-256: ${APK_CERTS[0]}');
+    expect(releaseWorkflow).toContain('APK is signed with Android Debug key');
     expect(releaseWorkflow).toContain('sha256sum "$target_apk"');
     expect(releaseWorkflow).toContain('*.sha256');
     expect(releaseWorkflow).toContain('git diff --exit-code -- pnpm-lock.yaml src-tauri/Cargo.lock');

@@ -443,7 +443,7 @@ VCPMobile/
   - 触发条件：GitHub Release 被 `published`。
   - 环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。
   - Release tag、checkout HEAD 与 event SHA 必须一致，并要求同 commit 的 CI Check 已成功；四处版本源与 Android versionCode 必须一致。
-  - 从 step 级 secrets 恢复密钥库；APK 证书、keystore 证书与公开固定的 `ANDROID_RELEASE_CERT_SHA256` 必须三方一致。
+  - 从 step 级 secrets 恢复密钥库；验签步骤要求 APK 单一签名者且拒绝调试证书。
   - 构建启用 strict Gradle dependency verification 与显式受信 LAN 模式；只上传签名 arm64 APK 及其 SHA-256 文件，不发布独立前端 ZIP。
 
 ### 本地发布
