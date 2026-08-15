@@ -8,15 +8,16 @@ import {
 } from "../../core/stores/settings";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
-// 原子组件与高频子页面：静态 import，无需等待
-import UserProfileSection from "./components/UserProfileSection.vue";
-import SyncSettingsSection from "./components/SyncSettingsSection.vue";
-import VcpCoreSettingsSection from "./components/VcpCoreSettingsSection.vue";
-import ThemePicker from "./ThemePicker.vue";
-import ModelSelector from "../../components/ModelSelector.vue";
+// 轻量原语保持静态；全部区块组件改为懒加载——设置主页只渲染分类列表，
+// 首次打开不再解析 UserProfile/Theme/ModelSelector/About 等与主页无关的代码
 import SettingsCard from "../../components/settings/SettingsCard.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
-import AboutSection from "./components/AboutSection.vue"; // 实测解析延迟明显，保持静态
+const UserProfileSection = defineAsyncComponent(() => import("./components/UserProfileSection.vue"));
+const SyncSettingsSection = defineAsyncComponent(() => import("./components/SyncSettingsSection.vue"));
+const VcpCoreSettingsSection = defineAsyncComponent(() => import("./components/VcpCoreSettingsSection.vue"));
+const ThemePicker = defineAsyncComponent(() => import("./ThemePicker.vue"));
+const ModelSelector = defineAsyncComponent(() => import("../../components/ModelSelector.vue"));
+const AboutSection = defineAsyncComponent(() => import("./components/AboutSection.vue"));
 
 // 低频子页面（advanced / power）：懒加载，用户点进子页面时才解析
 // const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
@@ -72,6 +73,11 @@ const cloneSettings = (value: AppSettings): AppSettings =>
 
 const loading = ref(true);
 const showSummaryModelSelector = ref(false);
+// ModelSelector 常驻挂载会随设置页首开解析；首开闩锁：第一次真正需要选择模型时才挂载
+const summarySelectorMounted = ref(false);
+watch(showSummaryModelSelector, (open) => {
+  if (open) summarySelectorMounted.value = true;
+});
 const currentSubPage = ref<string | null>(null);
 const visibleSubPage = ref<string | null>(null);
 
@@ -366,6 +372,7 @@ watch(currentSubPage, (val) => {
         </Transition>
 
         <ModelSelector
+          v-if="summarySelectorMounted"
           :model-value="showSummaryModelSelector"
           @update:model-value="showSummaryModelSelector = $event"
           :current-model="settings.topicSummaryModel"

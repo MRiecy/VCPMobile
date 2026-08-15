@@ -4,6 +4,7 @@ import featureOverlaysSource from "@/components/FeatureOverlays.vue?raw";
 import rightSidebarSource from "@/components/layout/RightSidebar.vue?raw";
 import ragObserverSource from "@/features/rag/RagObserver.vue?raw";
 import toolBlockSource from "@/features/chat/blocks/ToolBlock.vue?raw";
+import settingsViewSource from "@/features/settings/SettingsView.vue?raw";
 
 describe("mobile performance governance", () => {
   it("keeps the steady Core-ready indicator free of perpetual animation", () => {
@@ -35,6 +36,26 @@ describe("mobile performance governance", () => {
     expect(featureOverlaysSource).toContain(
       "defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'))",
     );
+  });
+
+  it("lazy-loads settings sections so first open does not parse the whole feature", () => {
+    for (const sectionPath of [
+      "./components/UserProfileSection.vue",
+      "./components/SyncSettingsSection.vue",
+      "./components/VcpCoreSettingsSection.vue",
+      "./ThemePicker.vue",
+      "./components/AboutSection.vue",
+      "../../components/ModelSelector.vue",
+    ]) {
+      expect(settingsViewSource).toContain(
+        `defineAsyncComponent(() => import("${sectionPath}"))`,
+      );
+    }
+    expect(settingsViewSource).not.toContain("import UserProfileSection from");
+    expect(settingsViewSource).not.toContain("import ThemePicker from");
+    expect(settingsViewSource).not.toContain("import ModelSelector from");
+    expect(settingsViewSource).not.toContain("import AboutSection from");
+    expect(settingsViewSource).toContain("summarySelectorMounted");
   });
 
   it("allows only the explicit loading spinner to animate inside ToolBlock", () => {
