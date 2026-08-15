@@ -5,22 +5,22 @@ pub const VCP_MOBILE_CLI_TOOL_NAME: &str = "VCPMobileCLI";
 const MANIFEST_DESCRIPTION: &str =
     "手机端私有 Alpine Linux 沙箱中的非交互 Bash 执行器：后台 Job、游标分页输出与 Skill 资产，覆盖文件、构建、数据处理与网络类任务。";
 
-const INVOCATION_DESCRIPTION: &str = r#"在用户 Android 手机的应用私有 Alpine Linux 沙箱中执行非交互 Bash 命令，并管理后台 Job 与 Skill 资产。适合文件操作、数据处理、构建、脚本运行、网络请求等 shell 能完成的任务；不适合交互式程序（密码输入、vim/less、交互式 SSH）、系统管理（sudo/apt/systemctl）与 GUI/adb 操作。
+const INVOCATION_DESCRIPTION: &str = r#"VCPMobileCLI — 在手机 Alpine 沙箱执行非交互 bash 命令，管理后台 Job 与 Skill。
 
-环境（可直接依赖，不必先探测）：/bin/bash -lc；默认 cwd=/workspace，文件跨 run 持久，但 cd/export/alias 不保留；coreutils、grep/sed/awk/find/diff、tar/zip、curl/wget、git/ssh、jq、python3/pip 已预装，其他命令先用 command -v 确认；沙箱 root 仅用于隔离，不是 Android root。
+action: run | list_skills | read_skill | materialize_skill | poll | cancel | list（未知 action 拒绝）
 
-action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。
-- run：command 必填，支持管道、重定向、&& 与多行脚本；可选 description（一句话目的，便于在 Job 列表辨认）、cwd、timeout_ms（默认 30 分钟，范围 1s–12h，超时任务被终止为 timed_out）、run_in_background（默认 false）。同步 run 最多等约 8 秒即返回（含 job_id），未完成时任务继续运行，用 poll 跟踪；run_in_background=true 立即返回 job_id。长任务必须用 run_in_background；禁止 nohup/setsid/尾随 &（脱离的任务会被清理）。
-- poll：job_id 必填；可选 cursor（上次返回的游标，增量读取）、max_output_bytes（默认 64 KiB）、wait_ms（≤8 秒）。
-- cancel：job_id 必填；终止 Job 的整个进程树。
-- list：返回当前 Runtime 保留的 Job 摘要，用于找回 job_id。
-- list_skills：返回已安装且校验通过的 Skill 索引。
-- read_skill：skill_id 必填；resource_path 默认 SKILL.md，可选 max_bytes；返回有界正文与逻辑 skill_root（不是可用的 shell 路径）。
-- materialize_skill：skill_id 必填，仅在没有活动 Job 时可用；把校验通过的 Skill 复制为 /workspace/.vcp-skills 下的快照并返回 materialized_path；它不执行任何脚本，审阅后用 run 执行。Skill 使用流程：list_skills → read_skill → materialize_skill → run。
+- run：command(必填) + description / cwd(默认 /workspace) / timeout_ms(默认30min,范围1s–12h) / run_in_background(默认false)
+  长任务必须 run_in_background=true；前台最多等8s返回 job_id，state=running 时用 poll 跟踪
+- poll：job_id(必填) + cursor / max_output_bytes(默认64KiB) / wait_ms(≤8s)
+- cancel：job_id(必填)
+- list：无参 → 当前 Job 摘要（找回 job_id）
+- list_skills：无参
+- read_skill：skill_id(必填) + resource_path(默认SKILL.md) / max_bytes
+- materialize_skill：skill_id(必填)；流程 list_skills → read_skill → materialize_skill → run
 
-结果解读：Job 返回 state（终态 completed|failed|timed_out|cancelled|interrupted，中间态 queued|starting|running）、stdout/stderr、exit_code 或超时/取消原因。exit_code≠0 或 state=failed 时，先读 stderr 定位原因，再决定重试或换命令；输出有界，截断时用 cursor 继续 poll。App 进程被系统杀死后后台 Job 不存活，重要结果尽快 poll 取回。
+输出：job.state / stdout / stderr / exit_code；exit_code≠0 或 state=failed 时先读 stderr
 
-调用格式（每个 action 一条独立 TOOL_REQUEST 消息）：
+调用格式：
 <<<[TOOL_REQUEST]>>>
 tool_name:「始」VCPMobileCLI「末」,
 action:「始」run「末」,
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(manifest.name, VCP_MOBILE_CLI_TOOL_NAME);
         assert_eq!(command.command_identifier, VCP_MOBILE_CLI_TOOL_NAME);
         assert!(command.description.contains(
-            "action: run(默认)|list_skills|read_skill|materialize_skill|poll|cancel|list。"
+            "action: run | list_skills | read_skill | materialize_skill | poll | cancel | list"
         ));
         for banned in [
             "ink=", "archery", "river", "vref", "maid", "viad", "签名字段", "静默忽略", "不要发送",
