@@ -2,7 +2,7 @@
 
 > 专项文件夹：`plan/vcpmobile-guide-tour-research/`
 > 目标：为「点击/长按」等隐蔽交互建立零空间成本的可视化教学（Coachmark）机制，并支持未来新功能上线时的版本化指引。
-> 当前状态：**讨论存档完结**。技术方案与全部决策点（Q1–Q5 用户裁决、D1/D2 用户确认）均已归档；教学文案为第 1 版（用户已优化，仍可继续打磨）；实施按 `07-实施清单与验收.md` 执行。
+> 当前状态：**已实施**（引擎 + 四场指引 + 回放入口 + L4 测试，`pnpm check` / `pnpm test:run` / `pnpm build` 全绿）。真机 L7 三宽度验收待用户设备执行（见文末「实施状态」）。
 
 ## 文档索引
 
@@ -23,6 +23,17 @@
 2. 教学文案本期只占位、不定稿（用户第 3 点要求）。
 3. 技术实现不引入任何新依赖，遵循 `docs/UI_LAYER_ARCHITECTURE.md` 层级规范与 UI 美学宪法。
 4. 本文件夹仅做讨论存档；正式实施需按 `AGENTS.md` 规范执行（`pnpm check`、L4 测试、真机 L7 验收）。
+
+## 实施状态（2026-08-16）
+
+实施提交：`70fe573`（层级 guide=95 六处对齐 + 治理测试）、`84c465e`（引擎/四场指引/回放/L4 测试）。
+
+- 新增 `src/features/guide/`：types / registry / stores/guideStore / directives/vGuide / components/{GuideOverlay, GuideDemoAnimation, GuideCenterSection} / guides/×4；语义层 `z-guide=95`。
+- 锚点埋设：`ChatView`（chat-theme-button）、`InputEnhancer`（chat-plus-button）、`AgentList`（agent-row-\<id\>）、`DiaryNoteList`（diary-note-row）；共享排序抽取至 `features/agent/agentOrder.ts`。
+- 回放入口：设置 → 帮助与指引；版本门控为引擎能力（v1 四场均无 introducedIn）。
+- 实施期修正（与原研究文档的差异）：治理测试锁 `CLAUDE.md`（AGENTS.md 同步）；日记列表为虚拟列表（锚点靠注册表多元素解析）；GuideOverlay 条件兄弟节点加 `:key` 防函数 ref 递归更新。
+- L4：`src/tests/unit/guide/` 32 项；全仓 `pnpm test:run` 263 项、`pnpm check`、`pnpm build` 全绿。
+- **待办：L7 真机验收**（07 文档阶段 6 清单，`pnpm android:debug:dev`，手机/平板/折叠三宽度）。
 
 ## 跨文档一致性约定（整理后定稿）
 
