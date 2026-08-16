@@ -170,7 +170,6 @@ body {
 .chat-view-container[data-presentation-mode="panel"] .messages-inner-container,
 .chat-view-container[data-presentation-mode="immersive"] .messages-inner-container {
   gap: 0;
-  padding: 0.5rem;
   background-color: var(--vcp-panel-bg-90);
 }
 
@@ -186,7 +185,7 @@ body {
 }
 
 .chat-view-container[data-presentation-mode="panel"] .vcp-message-item {
-  padding: 1rem 0.75rem !important;
+  padding: 1rem 0.5rem !important;
 }
 
 .chat-view-container[data-presentation-mode="panel"] .vcp-message-header,
@@ -241,7 +240,7 @@ body {
 }
 
 .chat-view-container[data-presentation-mode="immersive"] .vcp-message-item {
-  padding: 1.5rem 1rem !important;
+  padding: 1.5rem 0.75rem !important;
 }
 
 .chat-view-container[data-presentation-mode="immersive"] .vcp-message-avatar {

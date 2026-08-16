@@ -47,6 +47,15 @@ let startX = 0;
 let startY = 0;
 const isDragging = ref(false);
 
+// 拖动排序开始时的轻触觉反馈（可选增强，不支持震动的设备静默降级）
+const triggerDragHaptic = () => {
+  try {
+    navigator.vibrate?.(20);
+  } catch {
+    // Haptics are an optional enhancement; unsupported devices stay silent.
+  }
+};
+
 const initSortable = () => {
   if (groupListRef.value) {
     Sortable.create(groupListRef.value, {
@@ -70,6 +79,7 @@ const initSortable = () => {
       },
       onStart: () => {
         isSorting.value = true;
+        triggerDragHaptic();
       },
       onEnd: (evt) => {
         isSorting.value = false;
@@ -103,6 +113,7 @@ const initSortable = () => {
       },
       onStart: () => {
         isSorting.value = true;
+        triggerDragHaptic();
       },
       onEnd: (evt) => {
         isSorting.value = false;
