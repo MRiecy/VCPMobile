@@ -32,6 +32,7 @@
 - 锚点埋设：`ChatView`（chat-theme-button）、`InputEnhancer`（chat-plus-button）、`AgentList`（agent-row-\<id\>）、`DiaryNoteList`（diary-note-row）；共享排序抽取至 `features/agent/agentOrder.ts`。
 - 回放入口：设置 → 帮助与指引；版本门控为引擎能力（v1 四场均无 introducedIn）。
 - 实施期修正（与原研究文档的差异）：治理测试锁 `CLAUDE.md`（AGENTS.md 同步）；日记列表为虚拟列表（锚点靠注册表多元素解析）；GuideOverlay 条件兄弟节点加 `:key` 防函数 ref 递归更新。
+- 实施期补强（2026-08-16 第 2 轮）：① `workspace-not-occluded` 谓词加入 sidebar/theme/plus 三场（研究 03 只编码了抽屉关闭，未覆盖 SlidePage 页面栈遮挡工作区导致「指引在设置/日记中心页后面播放」的误触发）；② 队列严格 FIFO（修复 finish 后 250ms 恢复间隙内的插队竞态，队头延迟到恢复定时器内再 shift）；③ `diary-longpress` 两步 `waitTimeoutMs` 放宽至 6000 + `waitFor` 门控，兼容首开目录加载与虚拟行挂载慢于默认 3s 的场景。
 - L4：`src/tests/unit/guide/` 32 项；全仓 `pnpm test:run` 263 项、`pnpm check`、`pnpm build` 全绿。
 - **待办：L7 真机验收**（07 文档阶段 6 清单，`pnpm android:debug:dev`，手机/平板/折叠三宽度）。
 

@@ -39,6 +39,7 @@ describe('guide anchor / definition contract', () => {
     expect(sidebar.steps[1].demo).toBe('drag-vertical');
     expect(sidebar.trigger?.requires).toBeUndefined();
     expect(sidebar.trigger?.predicates?.map((p) => p.name)).toEqual([
+      'workspace-not-occluded',
       'left-sidebar-visible',
       'agents-count-ge-2',
       'first-agent-row-mounted',
@@ -49,6 +50,7 @@ describe('guide anchor / definition contract', () => {
     const theme = guideById('theme-longpress');
     expect(theme.trigger?.requires).toEqual(['sidebar-gestures']);
     expect(theme.trigger?.predicates?.map((p) => p.name)).toEqual([
+      'workspace-not-occluded',
       'topic-loaded',
       'non-system-messages-ge-4',
       'title-not-default',
@@ -60,7 +62,11 @@ describe('guide anchor / definition contract', () => {
 
     const plus = guideById('plus-longpress');
     expect(plus.trigger?.requires).toBeUndefined();
-    expect(plus.trigger?.predicates?.map((p) => p.name)).toEqual(['input-unlocked', 'drawers-closed']);
+    expect(plus.trigger?.predicates?.map((p) => p.name)).toEqual([
+      'workspace-not-occluded',
+      'input-unlocked',
+      'drawers-closed',
+    ]);
 
     const diary = guideById('diary-longpress');
     expect(diary.trigger?.requires).toBeUndefined();
@@ -68,6 +74,14 @@ describe('guide anchor / definition contract', () => {
       'diary-center-open',
       'displayed-notes-ge-1',
     ]);
+  });
+
+  it('hardens the diary guide for slow first-open (load + virtual rows + entrance)', () => {
+    const diary = guideById('diary-longpress');
+    for (const step of diary.steps) {
+      expect(step.waitTimeoutMs).toBe(6000);
+      expect(typeof step.waitFor).toBe('function');
+    }
   });
 
   it('keeps every guide at 1–2 steps with the two-button model reachable', () => {

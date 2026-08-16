@@ -33,11 +33,17 @@ defineGuide({
       placement: 'bottom',
       demo: 'press-hold',
       demoHint: ['批量选择'],
+      // 首次打开日记中心：目录加载 + 虚拟列表行挂载 + 页面滑入动画
+      // 可能超过默认 3s，放宽到 6s；行未就绪前继续轮询而非越过。
+      waitFor: () => useDiaryStore().displayedNotes.length >= 1,
+      waitTimeoutMs: 6000,
     },
     {
       target: 'diary-note-row',
       title: '真实效果',
       content: '进入多选后，底部出现「移动 / 删除」，可批量整理日记。',
+      waitFor: () => useDiaryStore().displayedNotes.length >= 1,
+      waitTimeoutMs: 6000,
     },
   ],
 });

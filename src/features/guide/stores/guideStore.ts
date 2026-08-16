@@ -71,13 +71,13 @@ export const useGuideStore = defineStore('guide', () => {
 
   // ---------- 播放状态机 ----------
 
-  const start = (id: string) => {
+  /** 直接开播（仅供队列恢复内部使用，绕过 FIFO 守卫）。 */
+  const startImmediately = (id: string) => {
     const def = getGuide(id);
     if (!def) {
-      console.warn(`[Guide] start() with unknown guide id: ${id}`);
+      console.warn(`[Guide] startImmediately() with unknown guide id: ${id}`);
       return;
     }
-    if (activeGuideId.value === id) return;
     if (activeGuideId.value) {
       if (!pendingQueue.value.includes(id)) pendingQueue.value.push(id);
       return;
@@ -87,6 +87,24 @@ export const useGuideStore = defineStore('guide', () => {
     // 返回键在指引激活期间完全禁止：close 返回 false 时 useModalHistory
     // 自动补回 history entry（唯一退出出口是末步「我知道了」）。
     registerModal(`Guide:${id}`, () => false);
+  };
+
+  /**
+   * 严格 FIFO：有指引在播或排队时一律入队，保证播放顺序 =
+   * 进入队列的顺序（进入队列的顺序 = settle 计时器触发顺序 =
+   * 注册表顺序，settleMs 不同则以先到者先入）。
+   */
+  const start = (id: string) => {
+    if (!getGuide(id)) {
+      console.warn(`[Guide] start() with unknown guide id: ${id}`);
+      return;
+    }
+    if (activeGuideId.value === id) return;
+    if (activeGuideId.value !== null || pendingQueue.value.length > 0) {
+      if (!pendingQueue.value.includes(id)) pendingQueue.value.push(id);
+      return;
+    }
+    startImmediately(id);
   };
 
   const next = () => {
@@ -109,10 +127,12 @@ export const useGuideStore = defineStore('guide', () => {
     activeStepIndex.value = 0;
 
     if (pendingQueue.value.length > 0) {
-      const nextId = pendingQueue.value.shift();
-      if (nextId) {
-        setTimeout(() => start(nextId), QUEUE_RESUME_DELAY_MS);
-      }
+      // 队头保留在队列中直到恢复定时器触发（不在 finish 时提前 shift），
+      // 保证恢复间隙（250ms）内 FIFO 守卫仍能看到队列非空，防止插队。
+      setTimeout(() => {
+        const nextId = pendingQueue.value.shift();
+        if (nextId) startImmediately(nextId);
+      }, QUEUE_RESUME_DELAY_MS);
     }
   };
 

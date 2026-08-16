@@ -274,6 +274,63 @@ describe('guideStore trigger evaluation', () => {
     vi.advanceTimersByTime(QUEUE_RESUME_DELAY_MS + 50);
     expect(store.activeGuideId).toBe('tr-queue-b');
   });
+
+  it('keeps the queue strictly FIFO: a late-settling guide queues behind instead of jumping the resume gap', async () => {
+    vi.useFakeTimers();
+    const flagA = trackedFlag();
+    const flagB = trackedFlag();
+    const flagC = trackedFlag();
+    defineGuide({
+      id: 'tr-fifo-a',
+      title: 'a',
+      description: 'a',
+      trigger: {
+        predicates: [{ name: 'a', check: () => flagA.value }],
+      },
+      steps: [{ target: 't1', title: '一', content: 'c1' }],
+    });
+    defineGuide({
+      id: 'tr-fifo-b',
+      title: 'b',
+      description: 'b',
+      trigger: {
+        predicates: [{ name: 'b', check: () => flagB.value }],
+      },
+      steps: [{ target: 't1', title: '一', content: 'c1' }],
+    });
+    defineGuide({
+      id: 'tr-fifo-c',
+      title: 'c',
+      description: 'c',
+      trigger: {
+        // 短稳定期：恰好在 A 收尾后、B 恢复前的 250ms 间隙内到点
+        settleMs: 100,
+        predicates: [{ name: 'c', check: () => flagC.value }],
+      },
+      steps: [{ target: 't1', title: '一', content: 'c1' }],
+    });
+    const store = createStore();
+    store.init();
+    await nextTick();
+
+    flagA.value = true;
+    flagB.value = true;
+    await nextTick();
+    vi.advanceTimersByTime(DEFAULT_SETTLE_MS + 100);
+    expect(store.activeGuideId).toBe('tr-fifo-a');
+    expect(store.pendingQueue).toEqual(['tr-fifo-b']);
+
+    store.finish(); // B 在 250ms 后恢复
+    await nextTick();
+    flagC.value = true; // C 在间隙内到点（settleMs=100 < 250）
+    await nextTick();
+    vi.advanceTimersByTime(120);
+    expect(store.activeGuideId).toBeNull(); // 未插队
+    expect(store.pendingQueue).toEqual(['tr-fifo-b', 'tr-fifo-c']);
+
+    vi.advanceTimersByTime(QUEUE_RESUME_DELAY_MS + 50);
+    expect(store.activeGuideId).toBe('tr-fifo-b');
+  });
 });
 
 describe('guideStore replay', () => {

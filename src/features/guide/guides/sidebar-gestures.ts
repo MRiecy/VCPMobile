@@ -11,6 +11,7 @@ import { sortByOrder } from '../../agent/agentOrder';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { useLayoutStore } from '../../../core/stores/layout';
+import { useOverlayStore } from '../../../core/stores/overlay';
 
 /** 平板断点常驻栏（与 useSidebarSwipe / AgentSidebar 的 1024px 断点一致）。 */
 const isTabletMin1024 = useMediaQuery('(min-width: 1024px)');
@@ -41,6 +42,12 @@ defineGuide({
   },
   trigger: {
     predicates: [
+      {
+        name: 'workspace-not-occluded',
+        // 设置/日记中心等 SlidePage 页面栈会盖住左边栏与聊天主界面；
+        // 目标被遮挡时不触发（触发规格见研究 02/03，本谓词为可达性兜底）。
+        check: () => useOverlayStore().pageStack.length === 0,
+      },
       {
         name: 'left-sidebar-visible',
         check: () => {

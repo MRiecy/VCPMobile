@@ -7,6 +7,7 @@
 import { defineGuide } from '../registry';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useLayoutStore } from '../../../core/stores/layout';
+import { useOverlayStore } from '../../../core/stores/overlay';
 
 defineGuide({
   id: 'plus-longpress',
@@ -14,6 +15,11 @@ defineGuide({
   description: '单击附件菜单，长按上下文注入管理器',
   trigger: {
     predicates: [
+      {
+        name: 'workspace-not-occluded',
+        // 页面栈（设置/日记中心等）盖住聊天主界面时，+ 按钮不可见。
+        check: () => useOverlayStore().pageStack.length === 0,
+      },
       {
         name: 'input-unlocked',
         check: () => {

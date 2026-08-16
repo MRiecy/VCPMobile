@@ -10,6 +10,7 @@ import { defineGuide } from '../registry';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
 import { useLayoutStore } from '../../../core/stores/layout';
+import { useOverlayStore } from '../../../core/stores/overlay';
 
 const DEFAULT_TITLE_RE = /^(新话题|新会话) \d{2}:\d{2}:\d{2}$/;
 
@@ -20,6 +21,11 @@ defineGuide({
   trigger: {
     requires: ['sidebar-gestures'],
     predicates: [
+      {
+        name: 'workspace-not-occluded',
+        // 页面栈（设置/日记中心等）盖住聊天主界面时，主题按钮不可见。
+        check: () => useOverlayStore().pageStack.length === 0,
+      },
       {
         name: 'topic-loaded',
         check: () => {
