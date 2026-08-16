@@ -53,9 +53,8 @@ defineGuide({
       content: '单击 + 按钮，展开附件面板。',
       placement: 'top',
       demo: 'tap',
-      // 真实业务：tap 动画落定（约 0.8s）后真实展开附件面板。
+      // 用户点「下一步」时执行：真实展开附件面板。
       perform: () => setAttachMenu(true),
-      performDelayMs: 800,
       undo: () => setAttachMenu(false),
     },
     {
@@ -63,9 +62,8 @@ defineGuide({
       title: '附件面板',
       content: '三种附件入口：拍摄、相册、文件。',
       placement: 'top',
-      // 用户提前推进时面板稍后展开，等待就绪再聚光。
+      // 面板展开有过渡动画，等待就绪再聚光。
       waitFor: () => attachMenuOpen.value,
-      undo: () => setAttachMenu(false),
     },
     {
       target: 'chat-plus-button',
@@ -73,12 +71,11 @@ defineGuide({
       content: '长按 + 约 0.6 秒，打开 VCP 上下文注入规则仓。',
       placement: 'top',
       demo: 'press-hold',
-      // 真实业务：进度环走满 600ms 时收起附件、弹出真实规则仓抽屉。
+      // 用户点「下一步」时执行：收起附件面板，弹出真实规则仓抽屉。
       perform: () => {
         setAttachMenu(false);
         useTarvenStore().isSelectorOpen = true;
       },
-      performDelayMs: 600,
       undo: () => {
         setAttachMenu(false);
         useTarvenStore().isSelectorOpen = false;
@@ -91,9 +88,6 @@ defineGuide({
       placement: 'top',
       waitFor: () => useTarvenStore().isSelectorOpen,
       waitTimeoutMs: 6000,
-      undo: () => {
-        useTarvenStore().isSelectorOpen = false;
-      },
     },
   ],
 });

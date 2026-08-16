@@ -178,7 +178,7 @@ describe('GuideOverlay', () => {
     wrapper.unmount();
   });
 
-  it('runs step perform on entry and runs the undo stack in reverse on finish', async () => {
+  it('runs the current step perform only when the user clicks 下一步, and undoes at finish', async () => {
     vi.useFakeTimers();
     const performed: string[] = [];
     const undone: string[] = [];
@@ -194,13 +194,7 @@ describe('GuideOverlay', () => {
           perform: () => performed.push('s1'),
           undo: () => undone.push('s1'),
         },
-        {
-          target: 'overlay-target',
-          title: '第二步',
-          content: '内容二',
-          perform: () => performed.push('s2'),
-          undo: () => undone.push('s2'),
-        },
+        { target: 'overlay-target', title: '第二步', content: '内容二' },
       ],
     });
     const store = useGuideStore();
@@ -212,20 +206,54 @@ describe('GuideOverlay', () => {
     await nextTick();
     vi.advanceTimersByTime(140);
     await nextTick();
-    // 步骤进入时执行一次 perform（稳定性重采样不重复执行）
-    expect(performed).toEqual(['s1']);
+    // 教学不自己跑：进入步骤不执行真实业务
+    expect(performed).toEqual([]);
 
-    await wrapper.find('.guide-btn').trigger('click');
+    await wrapper.find('.guide-btn').trigger('click'); // 下一步
     await nextTick();
-    expect(performed).toEqual(['s1', 's2']);
-    // 步间推进不执行 undo（真实业务状态跨步保留，由下一步 perform 自理）
+    // 点击「下一步」时才执行一次并推进
+    expect(performed).toEqual(['s1']);
+    expect(wrapper.find('.guide-card').text()).toContain('[2/2]');
     expect(undone).toEqual([]);
 
     vi.advanceTimersByTime(140);
     await nextTick();
     await wrapper.find('.guide-btn').trigger('click'); // 我知道了 → 整场结束
     await nextTick();
-    expect(undone).toEqual(['s2', 's1']); // 逆序清理
+    expect(undone).toEqual(['s1']); // 已执行的 perform 配对 undo 被清理
+
+    wrapper.unmount();
+  });
+
+  it('does not run perform when a step is skipped on timeout', async () => {
+    vi.useFakeTimers();
+    const performSpy = vi.fn();
+    defineGuide({
+      id: 'ov-skip-perform',
+      title: 'skip-perform',
+      description: 'skip-perform',
+      steps: [
+        {
+          target: 'never-mounted',
+          title: '缺失',
+          content: '将被越过',
+          waitTimeoutMs: 500,
+          perform: performSpy,
+        },
+        { target: 'overlay-target', title: '到达', content: '第二步可见' },
+      ],
+    });
+    const store = useGuideStore();
+    const target = createTarget('overlay-target');
+    target.setAttribute('data-target', 'overlay');
+
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-skip-perform');
+    await nextTick();
+    vi.advanceTimersByTime(520);
+    await nextTick();
+    expect(performSpy).not.toHaveBeenCalled(); // 静默越过不触发真实业务
+    expect(wrapper.find('.guide-card').text()).toContain('[2/2]');
 
     wrapper.unmount();
   });
@@ -260,89 +288,6 @@ describe('GuideOverlay', () => {
     await nextTick();
     expect(wrapper.find('.guide-veil').exists()).toBe(false);
     expect(wrapper.find('.guide-spot').exists()).toBe(true);
-
-    wrapper.unmount();
-  });
-
-  it('fires a delayed perform on schedule, even after advancing steps', async () => {
-    vi.useFakeTimers();
-    const performed: string[] = [];
-    defineGuide({
-      id: 'ov-delay',
-      title: 'delay',
-      description: 'delay',
-      steps: [
-        {
-          target: 'overlay-target',
-          title: '第一步',
-          content: '内容一',
-          perform: () => performed.push('s1'),
-          performDelayMs: 800,
-        },
-        {
-          target: 'overlay-target',
-          title: '第二步',
-          content: '内容二',
-          // 提前推进时延迟 perform 尚未弹出真实业务，由 waitFor 接住。
-          waitFor: () => performed.includes('s1'),
-        },
-      ],
-    });
-    const store = useGuideStore();
-    createTarget('overlay-target').setAttribute('data-target', 'overlay');
-
-    const wrapper = mount(GuideOverlay);
-    store.start('ov-delay');
-    await nextTick();
-    expect(performed).toEqual([]);
-
-    vi.advanceTimersByTime(140);
-    await nextTick();
-    // 提前推进（累计 300ms，未到 800ms）
-    vi.advanceTimersByTime(160);
-    await wrapper.find('.guide-btn').trigger('click');
-    await nextTick();
-    expect(performed).toEqual([]);
-
-    // 到点后跨步触发（会话级定时器不随步骤切换取消）
-    vi.advanceTimersByTime(500);
-    await nextTick();
-    expect(performed).toEqual(['s1']);
-
-    wrapper.unmount();
-  });
-
-  it('cancels a pending delayed perform when the guide ends', async () => {
-    vi.useFakeTimers();
-    const performSpy = vi.fn();
-    defineGuide({
-      id: 'ov-delay-cancel',
-      title: 'cancel',
-      description: 'cancel',
-      steps: [
-        {
-          target: 'overlay-target',
-          title: '唯一',
-          content: '内容',
-          perform: performSpy,
-          performDelayMs: 5000,
-        },
-      ],
-    });
-    const store = useGuideStore();
-    createTarget('overlay-target').setAttribute('data-target', 'overlay');
-
-    const wrapper = mount(GuideOverlay);
-    store.start('ov-delay-cancel');
-    await nextTick();
-    vi.advanceTimersByTime(140);
-    await nextTick();
-    expect(performSpy).not.toHaveBeenCalled();
-
-    await wrapper.find('.guide-btn').trigger('click'); // 我知道了 → 整场结束
-    await nextTick();
-    vi.advanceTimersByTime(5000);
-    expect(performSpy).not.toHaveBeenCalled(); // 会话结束清除延迟定时器
 
     wrapper.unmount();
   });

@@ -84,7 +84,7 @@ defineGuide({
       content: '在第一个 Agent 上向右滑动，露出背后的设置入口。',
       placement: 'right',
       demo: 'swipe-right',
-      // 真实业务：驱动真实行滑开（swipeController 即 AgentList 手势同源状态）。
+      // 用户点「下一步」时执行：真实行滑开（swipeController 即手势同源状态）。
       perform: () => {
         const id = firstAgentId();
         if (id) swipeOpen(id);
@@ -96,6 +96,8 @@ defineGuide({
       title: '设置入口',
       content: '滑动后露出的齿轮按钮，点击即可进入该 Agent 的设置页。',
       placement: 'right',
+      // 用户点「下一步」时执行：收行，让下一步的拖动演示回到合拢的行上。
+      perform: swipeClose,
     },
     {
       target: firstAgentRowTarget,
@@ -103,7 +105,6 @@ defineGuide({
       content: '按住 Agent 约 0.2 秒后上下拖动，可调整排列顺序，松手落位。',
       placement: 'right',
       demo: 'drag-vertical',
-      undo: swipeClose,
     },
   ],
 });

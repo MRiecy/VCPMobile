@@ -35,8 +35,9 @@
 - 实施期补强（2026-08-16 第 2 轮）：① `workspace-not-occluded` 谓词加入 sidebar/theme/plus 三场（研究 03 只编码了抽屉关闭，未覆盖 SlidePage 页面栈遮挡工作区导致「指引在设置/日记中心页后面播放」的误触发）；② 队列严格 FIFO（修复 finish 后 250ms 恢复间隙内的插队竞态，队头延迟到恢复定时器内再 shift）；③ `diary-longpress` 两步 `waitTimeoutMs` 放宽至 6000 + `waitFor` 门控，兼容首开目录加载与虚拟行挂载慢于默认 3s 的场景。
 - 实施期补强（第 3 轮）：帮助与指引页新增「重置全部指引进度」入口（`guideStore.resetProgress` + 红色确认框 + Toast），供反复测试与用户重温；完成后返回对应界面即按前置条件重新自动触发。
 - 实施期补强（第 4 轮，真机反馈迭代）：① 安全类交互改为唤起真实业务——sidebar 右滑由 `swipeController` 驱动真实行滑开并新增「设置入口」步；plus 单击真实展开附件面板、长按真实弹出 Tarven 规则仓（新增 `attachMenuController`）；theme 长按真实弹出「消息呈现」菜单（`presentationMenu` 共享入口）——步骤级 `perform`/`undo` 钩子 + 整场逆序清理；② 手势演示图标化（`i-ph-hand-tap/hand-swipe-right/hand-fist` 构建期内联），删除假示意卡/假行/手绘手指；③ 聚光拆分 veil/frame 双层：入场 scale(8)→1 阴影自四周聚焦收敛，步间 top/left/width/height 过渡平滑滑移，兜底暗纱淡入淡出让位消除步间黑屏闪烁；④ 新锚点 `agent-row-settings-<id>` / `context-menu-sheet` / `chat-attach-menu` / `tarven-selector`。
-- 实施期补强（第 5 轮，真机复测修正）：① 回放环境准备——sidebar `prepare` 清页面栈 + 切助理 Tab（新增 `sidebarTab` 控制器，话题页下 Agent 行不挂载会静默越过）+ 开抽屉；theme/plus `prepare` 清页面栈 + 双关抽屉（防 82vw 抽屉盖住 header）；diary `prepare` 打开日记中心（否则目标永不挂载）；② 重置流程改为「重置即回到可触发环境」（清页面栈 + 开抽屉 + 助理 Tab + Toast），返回主界面后 sidebar 自动开播；③ 延迟 perform 机制（`performDelayMs`，会话级定时器跨步触发、整场清除）：theme 600ms 对齐长按阈值、plus 单击 800ms/长按 600ms，配合后续步骤 `waitFor` 门控，消除"再点一遍附件消失 / 规则菜单提前弹出遮挡按钮"的时序问题。
-- L4：`src/tests/unit/guide/` 49 项；全仓 `pnpm test:run` 280 项、`pnpm check`、`pnpm build` 全绿。
+- 实施期补强（第 5 轮，真机复测修正）：① 回放环境准备——sidebar `prepare` 清页面栈 + 切助理 Tab（新增 `sidebarTab` 控制器，话题页下 Agent 行不挂载会静默越过）+ 开抽屉；theme/plus `prepare` 清页面栈 + 双关抽屉（防 82vw 抽屉盖住 header）；diary `prepare` 打开日记中心（否则目标永不挂载）；② 重置流程改为「重置即回到可触发环境」（清页面栈 + 开抽屉 + 助理 Tab + Toast），返回主界面后 sidebar 自动开播；③ 引入延迟 perform（`performDelayMs`）修正时序——第 6 轮被否决并废除，见下。
+- 实施期补强（第 6 轮，设计裁决）：**废除定时自跑**。真实业务统一改为**用户点击「下一步」离开当前步骤时执行**（教学节奏由用户掌控：步骤只演示手势 → 点击后真实效果发生 → 聚光滑移到结果）；目标超时静默越过不执行；undo 与 perform 同步骤配对、整场结束逆序清理；全局不变量「末步不配置 perform」由契约测试锁定。sidebar 增「收行」过渡（step2 出口 swipeClose，拖动演示回到合拢行）。
+- L4：`src/tests/unit/guide/` 48 项；全仓 `pnpm test:run` 279 项、`pnpm check`、`pnpm build` 全绿。
 - **待办：L7 真机验收**（07 文档阶段 6 清单，`pnpm android:debug:dev`，手机/平板/折叠三宽度）。
 
 ## 跨文档一致性约定（整理后定稿）

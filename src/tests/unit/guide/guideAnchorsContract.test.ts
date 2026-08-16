@@ -82,7 +82,7 @@ describe('guide anchor / definition contract', () => {
     expect(theme.steps[0].perform).toBeDefined();
     expect(theme.steps[0].undo).toBeDefined();
     expect(theme.steps[1].demo).toBeUndefined();
-    expect(theme.steps[1].undo).toBeDefined();
+    expect(theme.steps[1].undo).toBeUndefined(); // undo 与 perform 同步骤配对
 
     const plus = guideById('plus-longpress');
     expect(plus.trigger?.requires).toBeUndefined();
@@ -108,17 +108,31 @@ describe('guide anchor / definition contract', () => {
     }
   });
 
-  it('keeps the real-business timing specs (performDelayMs / waitFor)', () => {
+  it('keeps perform on gesture steps, waitFor on result steps, and no perform on last steps', () => {
     const theme = guideById('theme-longpress');
-    expect(theme.steps[0].performDelayMs).toBe(600);
+    expect(theme.steps[0].perform).toBeDefined();
+    expect(theme.steps[1].perform).toBeUndefined();
     expect(theme.steps[1].waitFor).toBeDefined();
 
     const plus = guideById('plus-longpress');
-    expect(plus.steps[0].performDelayMs).toBe(800);
+    expect(plus.steps[0].perform).toBeDefined();
+    expect(plus.steps[1].perform).toBeUndefined();
     expect(plus.steps[1].waitFor).toBeDefined();
-    expect(plus.steps[2].performDelayMs).toBe(600);
+    expect(plus.steps[2].perform).toBeDefined();
+    expect(plus.steps[3].perform).toBeUndefined();
     expect(plus.steps[3].waitFor).toBeDefined();
     expect(plus.steps[3].waitTimeoutMs).toBe(6000);
+
+    const sidebar = guideById('sidebar-gestures');
+    expect(sidebar.steps[0].perform).toBeDefined();
+    expect(sidebar.steps[1].perform).toBeDefined(); // 收行，为拖动演示复位场景
+    expect(sidebar.steps[2].perform).toBeUndefined();
+
+    // 全局不变量：末步不配置 perform（「我知道了」无触发时机）
+    for (const guide of allGuides()) {
+      const last = guide.steps[guide.steps.length - 1];
+      expect(last.perform, `${guide.id} last step`).toBeUndefined();
+    }
   });
 
   it('prepares the right environment for manual replay', () => {

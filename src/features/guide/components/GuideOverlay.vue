@@ -10,7 +10,8 @@
  *   生命周期 resume 均触发重算；
  * - 目标不可解析：waitFor 轮询 100ms / waitTimeoutMs 超时静默越过该步；
  * - 全屏拦截指针事件（touch-action: none），教学期间用户手势零副作用；
- *   步骤可配置 perform（真实安全业务：打开菜单/面板）与 undo（整场收尾清理）。
+ *   真实业务（perform）仅在用户点击「下一步」时执行（教学由用户掌控），
+ *   undo 在整场结束时逆序清理。
  *
  * 由 App.vue 在 lifecycle READY 后挂载；mounted 时调用 guideStore.init()。
  */
@@ -80,30 +81,23 @@ let lifecycleUnlisten: UnlistenFn | null = null;
 let roInitialCallback = false;
 /** 本场指引已执行 perform 的步骤 undo 栈（整场结束时逆序执行）。 */
 let undoStack: Array<() => void> = [];
-/** 本场指引的延迟 perform 定时器（会话级：跨步仍触发，整场结束时清除）。 */
-let performTimers: Array<ReturnType<typeof setTimeout>> = [];
 
-const clearPerformTimers = () => {
-  for (const timer of performTimers) clearTimeout(timer);
-  performTimers = [];
-};
-
-/** 调度步骤真实业务：delay<=0 立即执行；否则延迟触发（跨步不取消）。 */
-const schedulePerform = (s: GuideStep) => {
-  if (!s.perform) return;
-  const fire = () => {
+/**
+ * 用户点击「下一步」的推进入口：教学节奏由用户掌控——
+ * 先执行当前步的真实业务（perform），其 undo 入栈，然后才推进。
+ * 目标超时静默越过的 skip 路径不经过此处，不触发真实业务。
+ */
+const advance = () => {
+  const s = step.value;
+  if (s?.perform) {
     try {
-      s.perform?.();
+      s.perform();
     } catch (e) {
       console.warn('[Guide] perform() failed:', e);
     }
-  };
-  const delay = s.performDelayMs ?? 0;
-  if (delay <= 0) {
-    fire();
-    return;
+    if (s.undo) undoStack.push(s.undo);
   }
-  performTimers.push(setTimeout(fire, delay));
+  guideStore.next();
 };
 
 const runUndoStack = () => {
@@ -373,10 +367,6 @@ const beginStep = () => {
     skipStep(token);
     return;
   }
-  // 步骤级真实业务（安全类：打开菜单/面板），先于目标轮询调度；
-  // 异常吞掉不阻塞教学；undo 入栈，整场结束时统一逆序清理。
-  schedulePerform(s);
-  if (s.undo) undoStack.push(s.undo);
 
   const id = targetIdOf();
   if (!id) {
@@ -433,7 +423,6 @@ watch(isActive, (active) => {
   if (active) return;
   stepToken += 1;
   clearTimers();
-  clearPerformTimers();
   targetEl = null;
   lastSample = null;
   spotRect.value = null;
@@ -527,7 +516,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="guide-card-content">{{ step.content }}</p>
         <div class="guide-card-actions">
-          <button v-if="!isLastStep" class="guide-btn" @click="guideStore.next()">下一步</button>
+          <button v-if="!isLastStep" class="guide-btn" @click="advance()">下一步</button>
           <button v-else class="guide-btn guide-btn--primary" @click="guideStore.finish()">我知道了</button>
         </div>
       </div>

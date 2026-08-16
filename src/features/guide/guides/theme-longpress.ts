@@ -71,9 +71,8 @@ defineGuide({
       content: '长按约 0.6 秒，弹出「消息呈现」菜单。',
       placement: 'bottom',
       demo: 'press-hold',
-      // 真实业务：进度环走满 600ms（对齐 v-longpress 阈值）时弹出真实菜单。
+      // 用户点「下一步」时执行：真实弹出「消息呈现」菜单（ContextMenuSheet）。
       perform: openPresentationMenu,
-      performDelayMs: 600,
       undo: () => useOverlayStore().closeContextMenu(),
     },
     {
@@ -82,7 +81,6 @@ defineGuide({
       content: '在「气泡 / 统一 / 杂志」中选择一种排版样式。',
       placement: 'top',
       waitFor: () => useOverlayStore().contextMenuConfig !== null,
-      undo: () => useOverlayStore().closeContextMenu(),
     },
   ],
 });
