@@ -129,4 +129,25 @@ describe('shipped guide trigger wiring', () => {
     vi.advanceTimersByTime(QUEUE_RESUME_DELAY_MS + 50);
     expect(store.activeGuideId).toBe('plus-longpress');
   });
+
+  it('re-triggers sidebar-gestures after resetProgress for repeat testing', async () => {
+    vi.useFakeTimers();
+    const store = createStore();
+    seedAgentsAndRow();
+    useLayoutStore().setLeftDrawer(true);
+    useOverlayStore().pageStack = [] as never;
+
+    store.init();
+    await nextTick();
+    vi.advanceTimersByTime(DEFAULT_SETTLE_MS + 100);
+    expect(store.activeGuideId).toBe('sidebar-gestures');
+
+    store.finish();
+    expect(store.isCompleted('sidebar-gestures')).toBe(true);
+
+    store.resetProgress();
+    await nextTick();
+    vi.advanceTimersByTime(DEFAULT_SETTLE_MS + 100);
+    expect(store.activeGuideId).toBe('sidebar-gestures'); // 条件仍在 → 重新自动触发
+  });
 });

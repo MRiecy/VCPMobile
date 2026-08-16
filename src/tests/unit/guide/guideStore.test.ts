@@ -355,6 +355,48 @@ describe('guideStore replay', () => {
   });
 });
 
+describe('guideStore resetProgress', () => {
+  it('restores first-run state and persists the reset', async () => {
+    defineGuide({
+      id: 'rs-a',
+      title: 'a',
+      description: 'a',
+      steps: [{ target: 't1', title: '一', content: 'c1' }],
+    });
+    const store = createStore();
+    store.completed = ['rs-a'];
+    store.lastSeenAppVersion = '1.2.3';
+    store.pendingQueue = ['rs-a'];
+
+    store.resetProgress();
+    expect(store.completed).toEqual([]);
+    expect(store.lastSeenAppVersion).toBeNull();
+    expect(store.pendingQueue).toEqual([]);
+
+    await flushPromises(); // persist 插件微任务落盘
+    const parsed = JSON.parse(localStorage.getItem('guide') as string);
+    expect(parsed.completed).toEqual([]);
+    expect(parsed.lastSeenAppVersion).toBeNull();
+  });
+
+  it('finishes the active guide before clearing completion', () => {
+    defineGuide({
+      id: 'rs-active',
+      title: 'active',
+      description: 'active',
+      steps: [{ target: 't1', title: '一', content: 'c1' }],
+    });
+    const store = createStore();
+    store.start('rs-active');
+    expect(store.activeGuideId).toBe('rs-active');
+
+    store.resetProgress();
+    expect(store.activeGuideId).toBeNull();
+    // finish 会把当前 id 写回 completed，随后被整体清空
+    expect(store.completed).toEqual([]);
+  });
+});
+
 describe('guideStore version gating', () => {
   it('queues introduced guides and toasts once when the app version moved past them', async () => {
     vi.mocked(getVersion).mockResolvedValue('1.2.0');

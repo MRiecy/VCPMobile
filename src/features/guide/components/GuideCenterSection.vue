@@ -2,13 +2,16 @@
 /**
  * GuideCenterSection — 设置内「帮助与指引」子页
  *
- * 列出全部注册指引：标题 / 描述 / 完成状态 / 重播按钮。
+ * 列出全部注册指引：标题 / 描述 / 完成状态 / 重播按钮；
+ * 底部提供「重置全部指引进度」入口，供反复测试与重温。
  * 视觉沿用 BatteryOptimizationGuide 的线性列表风格。
  */
 import { computed } from 'vue';
-import { CircleCheck, Circle, Play } from 'lucide-vue-next';
+import { CircleCheck, Circle, Play, RotateCcw } from 'lucide-vue-next';
 import { allGuides } from '../registry';
 import { useGuideStore } from '../stores/guideStore';
+import { useOverlayStore } from '../../../core/stores/overlay';
+import { useNotificationStore } from '../../../core/stores/notification';
 
 const guideStore = useGuideStore();
 
@@ -22,6 +25,24 @@ const entries = computed(() =>
 
 const replay = (id: string) => {
   guideStore.replay(id);
+};
+
+const resetAll = async () => {
+  const confirmed = await useOverlayStore().showConfirm({
+    title: '重置指引进度',
+    message: '所有教学指引将恢复为未完成状态，可重新体验。',
+    isDanger: true,
+  });
+  if (!confirmed) return;
+  guideStore.resetProgress();
+  useNotificationStore().addNotification({
+    id: 'guide-reset-done',
+    toastOnly: true,
+    title: '已重置全部指引进度',
+    message: '返回对应界面即可重新体验教学。',
+    type: 'success',
+    duration: 3000,
+  });
 };
 </script>
 
@@ -43,7 +64,7 @@ const replay = (id: string) => {
       <div
         v-for="entry in entries"
         :key="entry.def.id"
-        class="flex items-center gap-3 p-3 rounded-xl border"
+        class="guide-entry flex items-center gap-3 p-3 rounded-xl border"
         :class="entry.done
           ? 'border-black/5 dark:border-white/5 bg-black/5 dark:bg-white/5'
           : 'border-black/10 dark:border-white/10'"
@@ -78,5 +99,17 @@ const replay = (id: string) => {
         </button>
       </div>
     </div>
+
+    <!-- 重置入口：恢复首次状态，供反复测试与重温 -->
+    <button
+      class="guide-reset w-full flex items-center justify-between p-3 rounded-xl border border-[var(--border-color)] hover:bg-black/5 dark:hover:bg-white/5 active:opacity-70 transition-opacity"
+      @click="resetAll"
+    >
+      <span class="flex items-center gap-2 text-[11px] font-semibold text-[var(--primary-text)]">
+        <RotateCcw class="w-3.5 h-3.5 opacity-70" />
+        重置全部指引进度
+      </span>
+      <span class="text-[9px] opacity-50 font-mono uppercase tracking-wider">RESET</span>
+    </button>
   </div>
 </template>

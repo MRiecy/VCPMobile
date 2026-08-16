@@ -157,6 +157,18 @@ export const useGuideStore = defineStore('guide', () => {
     finish();
   };
 
+  /**
+   * 重置全部指引进度（反复测试 / 用户重温）：恢复首次状态。
+   * 完成态与版本门控一并清空；persist.pick 自动落盘。
+   */
+  const resetProgress = () => {
+    // 若有指引在播先清场（finish 会把当前 id 写回 completed，随后整体清空）。
+    if (activeGuideId.value) finish();
+    pendingQueue.value = [];
+    completed.value = [];
+    lastSeenAppVersion.value = null;
+  };
+
   // ---------- 前置条件评估 ----------
 
   const isTriggerSatisfied = (def: GuideDefinition): boolean => {
@@ -262,6 +274,7 @@ export const useGuideStore = defineStore('guide', () => {
     finish,
     finishUnresolvable,
     replay,
+    resetProgress,
     isCompleted,
     isPlaying,
   };
