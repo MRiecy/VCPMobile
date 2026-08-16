@@ -31,6 +31,7 @@ export type VcpCliJobState =
   | "queued"
   | "starting"
   | "running"
+  | "stopping"
   | "completed"
   | "failed"
   | "timed_out"

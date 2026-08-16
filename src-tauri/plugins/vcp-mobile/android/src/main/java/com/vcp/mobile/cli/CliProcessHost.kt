@@ -100,6 +100,7 @@ class StartCliProcessArgs {
     var backgroundLease: Boolean = false
     var timeoutMs: Long = 0
     lateinit var displayLabel: String
+    var sessionId: String? = null
 }
 
 @InvokeArg
@@ -219,7 +220,6 @@ private class CliProcessHandle(
     val exitCode = AtomicReference<Int?>(null)
     val finished = CountDownLatch(1)
     val finalized = AtomicBoolean(false)
-    val backgroundLeaseLossPending = AtomicBoolean(false)
     val backgroundLeaseLost = AtomicBoolean(false)
     val terminationLock = Any()
     lateinit var waiter: Thread
@@ -404,6 +404,7 @@ internal fun buildProotArguments(
     workspacePath: String,
     cwd: String,
     command: String,
+    sessionId: String? = null,
 ): List<String> = buildList {
     add(prootPath)
     add("-0")
@@ -427,6 +428,8 @@ internal fun buildProotArguments(
     add("SHELL=/bin/bash")
     add("PATH=$GUEST_PATH")
     add("TMPDIR=/tmp")
+    add("VCP_CLI_WORKSPACE=/workspace")
+    if (sessionId != null) add("VCP_CLI_SESSION_ID=$sessionId")
     add("TERM=dumb")
     add("/bin/bash")
     add("-lc")
@@ -461,6 +464,7 @@ internal fun buildProotTerminalArguments(
     add("SHELL=/bin/bash")
     add("PATH=$GUEST_PATH")
     add("TMPDIR=/tmp")
+    add("VCP_CLI_WORKSPACE=/workspace")
     add("TERM=xterm-256color")
     add("COLORTERM=truecolor")
     add("/bin/bash")
@@ -928,6 +932,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             !args.displayLabel.contains('\n') &&
             !args.displayLabel.contains('\r')
         ) { "displayLabel must be a bounded single line" }
+        args.sessionId?.let { validateIdentifier(it, "sessionId") }
         val cwd = validateGuestCwd(args.cwd)
         val prepared = preparedRuntime ?: error("CLI runtime has not been prepared")
         require(prepared.runtimeGeneration == args.runtimeGeneration) {
@@ -980,6 +985,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 workspacePath = prepared.workspace.absolutePath,
                 cwd = cwd,
                 command = args.command,
+                sessionId = args.sessionId,
             )
             val processBuilder = ProcessBuilder(
                 buildHostCommand(
@@ -1140,32 +1146,12 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
     }
 
     fun handleForegroundLeaseLoss(targets: List<ForegroundGuardian.CliNotificationTarget>) {
+        // Termination decisions belong to the Rust Runtime. Lease loss is published as a
+        // process fact through inspectCliProcess; the Runtime drives containment via cancel.
         targets.forEach { target ->
             val key = ProcessKey(target.jobId, target.attemptId, target.runtimeGeneration)
             val handle = handles[key] ?: return@forEach
-            if (!handle.backgroundLeaseLossPending.compareAndSet(false, true)) return@forEach
-            try {
-                cancelExecutor.execute {
-                    synchronized(handle.terminationLock) {
-                        try {
-                            val termination = terminateOwnedGroup(handle, graceMs = 0)
-                            if (!termination.groupGone) {
-                                throw IllegalStateException(
-                                    "CLI process group remained alive after foreground lease loss",
-                                )
-                            }
-                            completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
-                            handle.backgroundLeaseLost.set(true)
-                        } catch (error: Throwable) {
-                            Log.e(TAG, "Failed to contain CLI Job after foreground lease loss", error)
-                            handle.process.destroyForcibly()
-                        }
-                    }
-                }
-            } catch (error: RejectedExecutionException) {
-                Log.e(TAG, "CLI cancel queue rejected foreground lease loss containment", error)
-                handle.process.destroyForcibly()
-            }
+            handle.backgroundLeaseLost.set(true)
         }
     }
 

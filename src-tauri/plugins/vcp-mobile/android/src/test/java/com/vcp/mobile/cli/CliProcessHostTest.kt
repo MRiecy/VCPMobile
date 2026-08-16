@@ -135,6 +135,40 @@ class CliProcessHostTest {
     }
 
     @Test
+    fun managedGuestEnvironmentCarriesVcpCliFacts() {
+        val withSession = buildProotArguments(
+            prootPath = "/native/libvcp_proot.so",
+            rootfsPath = "/private/rootfs/profile",
+            workspacePath = "/private/workspace",
+            cwd = "/workspace",
+            command = "true",
+            sessionId = "dist-session:abc",
+        )
+        assertTrue(withSession.contains("VCP_CLI_WORKSPACE=/workspace"))
+        assertTrue(withSession.contains("VCP_CLI_SESSION_ID=dist-session:abc"))
+        assertEquals(1, withSession.count { it.startsWith("VCP_CLI_SESSION_ID=") })
+
+        val withoutSession = buildProotArguments(
+            prootPath = "/native/libvcp_proot.so",
+            rootfsPath = "/private/rootfs/profile",
+            workspacePath = "/private/workspace",
+            cwd = "/workspace",
+            command = "true",
+        )
+        assertTrue(withoutSession.contains("VCP_CLI_WORKSPACE=/workspace"))
+        assertFalse(withoutSession.any { it.startsWith("VCP_CLI_SESSION_ID=") })
+
+        val terminal = buildProotTerminalArguments(
+            prootPath = "/native/libvcp_proot.so",
+            rootfsPath = "/private/rootfs/profile",
+            workspacePath = "/private/workspace",
+            cwd = "/workspace",
+        )
+        assertTrue(terminal.contains("VCP_CLI_WORKSPACE=/workspace"))
+        assertFalse(terminal.any { it.startsWith("VCP_CLI_SESSION_ID=") })
+    }
+
+    @Test
     fun hostEnvironmentIsClearedToFixedPathsAndApkNativeUnbundledLoader() {
         val environment = buildHostEnvironment(
             prootTmpPath = "/private/no-backup/proot-tmp/attempt",

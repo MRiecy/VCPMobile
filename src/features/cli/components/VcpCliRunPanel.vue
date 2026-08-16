@@ -152,6 +152,7 @@ function stateLabel(state: VcpCliJobState): string {
     queued: "QUEUED",
     starting: "STARTING",
     running: "RUNNING",
+    stopping: "STOPPING",
     waiting_user: "WAITING USER",
     completed: "COMPLETED",
     failed: "FAILED",
@@ -170,6 +171,7 @@ function stateTone(state: VcpCliJobState): string {
   if (state === "running" || state === "starting") {
     return "text-blue-500 border-blue-500";
   }
+  if (state === "stopping") return "text-amber-500 border-amber-500";
   if (state === "completed") return "text-emerald-600 border-emerald-500";
   return "text-[var(--primary-text)] border-black/25 dark:border-white/25";
 }

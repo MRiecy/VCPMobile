@@ -51,6 +51,7 @@ pub enum VcpCliJobState {
     Queued,
     Starting,
     Running,
+    Stopping,
     Completed,
     Failed,
     TimedOut,

@@ -62,6 +62,7 @@ pub(super) enum TerminalIntentTarget {
     Cancelled,
     TimedOut,
     Failed,
+    Interrupted,
 }
 
 impl TerminalIntentTarget {
@@ -70,6 +71,7 @@ impl TerminalIntentTarget {
             Self::Cancelled => VcpCliJobState::Cancelled,
             Self::TimedOut => VcpCliJobState::TimedOut,
             Self::Failed => VcpCliJobState::Failed,
+            Self::Interrupted => VcpCliJobState::Interrupted,
         }
     }
 }
@@ -484,7 +486,9 @@ impl JobLedger {
         // the owned group is gone and both output readers reached terminal drain.
         if let Some(intent) = job.terminal_intent.as_ref() {
             match observation {
-                ProcessObservation::Running => job.state = VcpCliJobState::Running,
+                // A durable intent pins the job out of Running: requested-but-unconfirmed
+                // termination stays visible as Stopping and never returns to Running.
+                ProcessObservation::Running => job.state = VcpCliJobState::Stopping,
                 ProcessObservation::Exited { exit_code } => {
                     job.exit_code = exit_code;
                     job.state = intent.target.job_state();
@@ -773,6 +777,7 @@ mod tests {
             (TerminalIntentTarget::Cancelled, VcpCliJobState::Cancelled),
             (TerminalIntentTarget::TimedOut, VcpCliJobState::TimedOut),
             (TerminalIntentTarget::Failed, VcpCliJobState::Failed),
+            (TerminalIntentTarget::Interrupted, VcpCliJobState::Interrupted),
         ] {
             let mut ledger = JobLedger::empty(8);
             ledger.insert_job(running_job(8)).expect("insert job");
@@ -809,6 +814,72 @@ mod tests {
                 .is_none());
             assert_eq!(ledger.jobs[0].state, expected);
         }
+    }
+
+    #[test]
+    fn durable_intent_pins_live_process_to_stopping_and_never_back_to_running() {
+        let mut ledger = JobLedger::empty(8);
+        ledger.insert_job(running_job(8)).expect("insert job");
+        let intent = TerminalIntent {
+            target: TerminalIntentTarget::Cancelled,
+            operation_id: "cancel-operation".to_string(),
+            requested_at_ms: 2,
+            reason: "requested".to_string(),
+        };
+        ledger.request_terminal_intent("job-1", "attempt-1", 8, intent.clone(), 2);
+        assert_eq!(ledger.jobs[0].terminal_intent, Some(intent));
+
+        assert!(ledger.apply_process_observation(
+            "job-1",
+            "attempt-1",
+            8,
+            ProcessObservation::Running,
+            ProcessOutputFacts {
+                stdout_bytes: 1,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            3,
+        ));
+        assert_eq!(ledger.jobs[0].state, VcpCliJobState::Stopping);
+        assert!(!ledger.jobs[0].is_terminal());
+        assert!(!is_terminal_state(VcpCliJobState::Stopping));
+
+        // A later Running observation must not regress Stopping back to Running.
+        assert!(ledger.apply_process_observation(
+            "job-1",
+            "attempt-1",
+            8,
+            ProcessObservation::Running,
+            ProcessOutputFacts {
+                stdout_bytes: 2,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            4,
+        ));
+        assert_eq!(ledger.jobs[0].state, VcpCliJobState::Stopping);
+
+        // Confirmed containment publishes the intended terminal state.
+        assert!(ledger.apply_process_observation(
+            "job-1",
+            "attempt-1",
+            8,
+            ProcessObservation::Exited {
+                exit_code: Some(143),
+            },
+            ProcessOutputFacts {
+                stdout_bytes: 2,
+                stderr_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            5,
+        ));
+        assert_eq!(ledger.jobs[0].state, VcpCliJobState::Cancelled);
+        assert_eq!(ledger.jobs[0].reason.as_deref(), Some("requested"));
     }
 
     #[test]

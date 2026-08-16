@@ -448,7 +448,9 @@ impl MobileCliRuntimeState {
                 self.cancel_action(app, &request.operation_id, &job_id, false)
                     .await?
             }
-            VcpCliAction::List => self.list_action(app, &request.operation_id).await?,
+            VcpCliAction::List => self
+                .list_action(app, &request.operation_id, request.session_id.as_deref())
+                .await?,
         };
 
         let mut owner = self.inner.lock().await;
@@ -761,6 +763,7 @@ impl MobileCliRuntimeState {
             background_lease: true,
             timeout_ms: parameters.timeout_ms,
             display_label,
+            session_id: parameters.session_id.clone(),
         };
         let job = self
             .job_snapshot(&job_id)
@@ -969,17 +972,12 @@ impl MobileCliRuntimeState {
         }
         let mut owner = self.inner.lock().await;
         let mut next = owner.ledger.clone();
-        let observation = if response.background_lease_lost {
-            ProcessObservation::Missing
-        } else {
-            match response.state {
-                CliProcessState::Running => ProcessObservation::Running,
-                CliProcessState::Exited => ProcessObservation::Exited {
-                    exit_code: response.exit_code,
-                },
-                CliProcessState::Missing => ProcessObservation::Missing,
-            }
-        };
+        let (observation, request_interrupted) = inspect_lease_facts(
+            response.state,
+            response.exit_code,
+            response.background_lease_lost,
+            job.terminal_intent.is_none(),
+        );
         if !next.apply_process_observation(
             &job.id,
             &job.attempt_id,
@@ -994,6 +992,30 @@ impl MobileCliRuntimeState {
             now_ms()?,
         ) {
             return Ok(());
+        }
+        // Kotlin no longer contains on lease loss; the runtime owns the decision. A lease-loss
+        // fact on a live process records a durable Interrupted intent (with the visible Stopping
+        // state) so the monitor/cancel path contains the tree; a gone process keeps the
+        // plain-Missing outcome.
+        if request_interrupted {
+            next.request_terminal_intent(
+                &job.id,
+                &job.attempt_id,
+                job.runtime_generation,
+                TerminalIntent {
+                    target: TerminalIntentTarget::Interrupted,
+                    operation_id: format!("lease-loss-{}", Uuid::new_v4()),
+                    requested_at_ms: now_ms()?,
+                    reason: "CLI foreground lease was lost; the runtime will contain the process tree."
+                        .to_string(),
+                },
+                now_ms()?,
+            );
+            if let Some(current) = next.find_job_mut(&job.id) {
+                if !current.is_terminal() {
+                    current.state = VcpCliJobState::Stopping;
+                }
+            }
         }
         let terminal = next
             .find_job(&job.id)
@@ -1304,7 +1326,13 @@ impl MobileCliRuntimeState {
             now_ms()?,
         );
         if existing.is_none() && intent.is_some() {
+            // Durable visibility: a requested-but-unconfirmed termination shows as Stopping.
             // This fsync completes before any signal crosses the Android bridge.
+            if let Some(current) = next.find_job_mut(&job.id) {
+                if !current.is_terminal() {
+                    current.state = VcpCliJobState::Stopping;
+                }
+            }
             replace_ledger_atomically(&mut owner, next).await?;
         }
         Ok(intent)
@@ -1425,13 +1453,17 @@ impl MobileCliRuntimeState {
         &self,
         _app: &AppHandle<R>,
         operation_id: &str,
+        caller_session: Option<&str>,
     ) -> Result<ExecuteVcpMobileCliResponse, String> {
         let owner = self.inner.lock().await;
+        // Owner-relative visibility: a session caller sees its own jobs plus unowned ones;
+        // a session-less caller (local UI) sees only unowned jobs.
         let summaries = owner
             .ledger
             .jobs
             .iter()
             .rev()
+            .filter(|job| job_visible_to(job, caller_session))
             .map(job_summary)
             .collect::<Vec<_>>();
         Ok(ExecuteVcpMobileCliResponse {
@@ -2234,6 +2266,7 @@ const fn job_state_name(state: VcpCliJobState) -> &'static str {
         VcpCliJobState::Queued => "queued",
         VcpCliJobState::Starting => "starting",
         VcpCliJobState::Running => "running",
+        VcpCliJobState::Stopping => "stopping",
         VcpCliJobState::Completed => "completed",
         VcpCliJobState::Failed => "failed",
         VcpCliJobState::TimedOut => "timed_out",
@@ -2417,6 +2450,39 @@ enum MonitorDecision {
     Inspect { sleep_ms: u64 },
 }
 
+/// Maps a ProcessHost inspect snapshot into the durable observation plus whether the runtime
+/// must record a fresh Interrupted intent. Kotlin only reports facts, so lease loss alone never
+/// terminates: a live process gets an Interrupted intent (contained through the cancel path)
+/// while a gone process keeps the plain-Missing outcome and an exited one keeps its natural
+/// completion.
+fn inspect_lease_facts(
+    state: CliProcessState,
+    exit_code: Option<i32>,
+    lease_lost: bool,
+    has_intent: bool,
+) -> (ProcessObservation, bool) {
+    let observation = match state {
+        CliProcessState::Running => ProcessObservation::Running,
+        CliProcessState::Exited => ProcessObservation::Exited { exit_code },
+        CliProcessState::Missing => ProcessObservation::Missing,
+    };
+    let request_interrupted =
+        lease_lost && matches!(observation, ProcessObservation::Running) && !has_intent;
+    (observation, request_interrupted)
+}
+
+/// Owner-relative job visibility for `list`: a session caller sees its own jobs plus unowned
+/// ones; a session-less caller sees only unowned jobs.
+fn job_visible_to(job: &JobRecord, caller_session: Option<&str>) -> bool {
+    match caller_session {
+        Some(session) => match job.session_id.as_deref() {
+            None => true,
+            Some(owned) => owned == session,
+        },
+        None => job.session_id.is_none(),
+    }
+}
+
 fn monitor_decision(job: &JobRecord, now_ms: u64) -> MonitorDecision {
     if now_ms >= job.deadline_at_ms {
         MonitorDecision::Timeout
@@ -2479,6 +2545,57 @@ mod tests {
             terminal_intent: None,
             mutation_operations: Vec::new(),
         }
+    }
+
+    #[test]
+    fn lease_loss_facts_request_interrupted_intent_only_for_live_processes() {
+        use tauri_plugin_vcp_mobile::cli::CliProcessState;
+
+        // Live + lost + no intent -> record Interrupted intent, keep Running facts flowing.
+        assert_eq!(
+            inspect_lease_facts(CliProcessState::Running, None, true, false),
+            (ProcessObservation::Running, true)
+        );
+        // Live + lost but an intent already exists -> first intent wins.
+        assert_eq!(
+            inspect_lease_facts(CliProcessState::Running, None, true, true),
+            (ProcessObservation::Running, false)
+        );
+        // Live + not lost -> no intent.
+        assert_eq!(
+            inspect_lease_facts(CliProcessState::Running, None, false, false),
+            (ProcessObservation::Running, false)
+        );
+        // Exited + lost -> natural completion, no intent.
+        assert_eq!(
+            inspect_lease_facts(CliProcessState::Exited, Some(0), true, false),
+            (ProcessObservation::Exited { exit_code: Some(0) }, false)
+        );
+        // Missing + lost -> plain-Missing outcome, no intent.
+        assert_eq!(
+            inspect_lease_facts(CliProcessState::Missing, None, true, false),
+            (ProcessObservation::Missing, false)
+        );
+    }
+
+    #[test]
+    fn list_visibility_is_owner_relative() {
+        let mut owned = running_test_job(8);
+        owned.session_id = Some("dist-session:abc".to_string());
+        let mut other = running_test_job(8);
+        other.id = "job-other".to_string();
+        other.attempt_id = "attempt-other".to_string();
+        other.session_id = Some("dist-session:def".to_string());
+        let unowned = running_test_job(8);
+
+        assert!(job_visible_to(&owned, Some("dist-session:abc")));
+        assert!(!job_visible_to(&owned, Some("dist-session:def")));
+        assert!(job_visible_to(&other, Some("dist-session:def")));
+        assert!(job_visible_to(&unowned, Some("dist-session:abc")));
+        assert!(job_visible_to(&unowned, Some("dist-session:def")));
+        assert!(job_visible_to(&unowned, None));
+        assert!(!job_visible_to(&owned, None));
+        assert!(!job_visible_to(&other, None));
     }
 
     #[tokio::test]

@@ -57,6 +57,8 @@ pub struct StartCliProcessRequest {
     pub background_lease: bool,
     pub timeout_ms: u64,
     pub display_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -443,6 +445,7 @@ mod tests {
             background_lease: true,
             timeout_ms: 30_000,
             display_label: "run unit test".to_string(),
+            session_id: Some("dist-session:abc".to_string()),
         };
 
         let value = serde_json::to_value(request).expect("serialize request");
@@ -452,9 +455,30 @@ mod tests {
         assert_eq!(value["backgroundLease"], true);
         assert_eq!(value["timeoutMs"], 30_000);
         assert_eq!(value["displayLabel"], "run unit test");
+        assert_eq!(value["sessionId"], "dist-session:abc");
         assert_eq!(value["command"], "printf '%s' '$HOME'");
         assert!(value.get("riverContextProjection").is_none());
         assert!(value.get("operation_id").is_none());
+    }
+
+    #[test]
+    fn start_request_accepts_absent_session_id() {
+        let value = serde_json::json!({
+            "operationId": "operation-1",
+            "jobId": "job-1",
+            "attemptId": "attempt-1",
+            "runtimeGeneration": 7,
+            "command": "true",
+            "rootfsPath": "/private/rootfs",
+            "cwd": "/workspace",
+            "artifactMaxBytes": 1024,
+            "backgroundLease": true,
+            "timeoutMs": 30_000,
+            "displayLabel": "no session"
+        });
+        let request: StartCliProcessRequest =
+            serde_json::from_value(value).expect("deserialize without sessionId");
+        assert_eq!(request.session_id, None);
     }
 
     #[test]
