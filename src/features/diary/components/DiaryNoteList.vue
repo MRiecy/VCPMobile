@@ -132,6 +132,7 @@ defineExpose({ getScrollTop, restoreScrollTop });
         v-for="item in list"
         :key="item.data.id"
         v-longpress="() => handleLongPress(item.data.note)"
+        v-guide="'diary-note-row'"
         type="button"
         class="diary-note-slot"
         :class="selectedIds.includes(item.data.id) ? 'diary-row-selected' : ''"

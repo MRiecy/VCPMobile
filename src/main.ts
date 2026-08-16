@@ -5,6 +5,7 @@ import App from "./App.vue";
 import { router } from "./core/router";
 import { vIntersectionObserver } from "./core/directives/intersectionObserver";
 import { vLongpress } from "./core/directives/longpress";
+import { vGuide } from "./features/guide/directives/vGuide";
 
 import "./appStyles";
 import "./assets/message-blocks.css"
@@ -63,4 +64,5 @@ app.use(pinia);
 app.use(router);
 app.directive('intersection-observer', vIntersectionObserver);
 app.directive('longpress', vLongpress);
+app.directive('guide', vGuide);
 app.mount("#app");

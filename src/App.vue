@@ -35,6 +35,7 @@ import AgentSidebar from "./components/layout/AgentSidebar.vue";
 import RightSidebar from "./components/layout/RightSidebar.vue";
 import GlobalOverlayManager from "./components/GlobalOverlayManager.vue";
 import FeatureOverlays from "./components/FeatureOverlays.vue";
+import GuideOverlay from "./features/guide/components/GuideOverlay.vue";
 import UpdatePrompt from "./components/ui/UpdatePrompt.vue";
 import ShareAgentSelector from "./features/chat/components/ShareAgentSelector.vue";
 
@@ -537,6 +538,9 @@ onUnmounted(() => {
 
     <!-- 6. 业务 Feature 视图挂载点 -->
     <FeatureOverlays v-if="lifecycleStore.state === 'READY'" />
+
+    <!-- 6.5 教学引导覆盖层（z-guide，高于一切业务 UI，低于 Boot 启动屏与权限门禁层） -->
+    <GuideOverlay v-if="lifecycleStore.state === 'READY'" />
 
     <!-- 7. 分享意图 Agent 选择器 -->
     <ShareAgentSelector v-if="lifecycleStore.state === 'READY'"

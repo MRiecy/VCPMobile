@@ -7,6 +7,7 @@ import { useLayoutStore } from "../../core/stores/layout";
 import { useSettingsStore } from "../../core/stores/settings";
 import { useOverlayStore } from "../../core/stores/overlay";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
+import { sortByOrder } from "./agentOrder";
 
 const props = defineProps<{
   searchQuery: string;
@@ -30,33 +31,13 @@ const agentListRef = ref<HTMLElement | null>(null);
 const orderedGroups = computed(() => {
   const groups = assistantStore.groups;
   const order = settingsStore.settings?.groupOrder || [];
-  if (order.length === 0) return groups;
-
-  const sorted = [...groups].sort((a, b) => {
-    const indexA = order.indexOf(a.id);
-    const indexB = order.indexOf(b.id);
-    if (indexA === -1 && indexB === -1) return 0;
-    if (indexA === -1) return 1;
-    if (indexB === -1) return -1;
-    return indexA - indexB;
-  });
-  return sorted;
+  return sortByOrder(groups, order);
 });
 
 const orderedAgents = computed(() => {
   const agents = assistantStore.agents;
   const order = settingsStore.settings?.agentOrder || [];
-  if (order.length === 0) return agents;
-
-  const sorted = [...agents].sort((a, b) => {
-    const indexA = order.indexOf(a.id);
-    const indexB = order.indexOf(b.id);
-    if (indexA === -1 && indexB === -1) return 0;
-    if (indexA === -1) return 1;
-    if (indexB === -1) return -1;
-    return indexA - indexB;
-  });
-  return sorted;
+  return sortByOrder(agents, order);
 });
 
 // --- Shared Swipe State ---
@@ -375,7 +356,7 @@ const filteredCombinedItems = computed(() => {
             agent.name
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
-        )" :key="agent.id" class="relative w-full drag-handle mb-2">
+        )" :key="agent.id" v-guide="'agent-row-' + agent.id" class="relative w-full drag-handle mb-2">
           
           <!-- 背景设置按钮 -->
           <div class="absolute inset-0 rounded-xl overflow-hidden z-0 pointer-events-none">

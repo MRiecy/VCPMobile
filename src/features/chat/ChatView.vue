@@ -299,6 +299,7 @@ onUnmounted(() => {
 <div class="flex items-center gap-2 shrink-0">
         <!-- 黑白模式切换 (内联 SVG) -->
         <button @click="themeStore.toggleTheme()" v-longpress.suppress-click="openPresentationMenu"
+          v-guide="'chat-theme-button'"
           class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:scale-90 transition-all border border-black/5 dark:border-white/5"
           :class="themeStore.isDarkResolved ? 'text-blue-300/80' : 'text-yellow-500'
             " aria-label="切换深浅模式，长按切换消息呈现" aria-haspopup="dialog"

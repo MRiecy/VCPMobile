@@ -26,6 +26,7 @@ const TopicSummarySection = defineAsyncComponent(() => import("./components/Topi
 const DistributedSettingsSection = defineAsyncComponent(() => import("../distributed/DistributedSettingsSection.vue"));
 const MaintenanceSection = defineAsyncComponent(() => import("./components/MaintenanceSection.vue"));
 const BatteryOptimizationGuide = defineAsyncComponent(() => import("./components/BatteryOptimizationGuide.vue"));
+const GuideCenterSection = defineAsyncComponent(() => import("../guide/components/GuideCenterSection.vue"));
 
 
 const props = withDefaults(
@@ -87,6 +88,7 @@ const categories = [
   { id: "theme", title: "主题切换", description: "主题预览与消息呈现" },
   { id: "advanced", title: "高级功能", description: "话题总结、分布式节点与数据维护" },
   { id: "power", title: "电池优化", description: "电池白名单与进程锁定设置" },
+  { id: "guide", title: "帮助与指引", description: "交互教学与功能指引回放" },
   { id: "about", title: "关于", description: "版本与更新" },
 ];
 
@@ -361,6 +363,11 @@ watch(currentSubPage, (val) => {
               <!-- 后台保活 -->
               <template v-if="visibleSubPage === 'power'">
                 <BatteryOptimizationGuide />
+              </template>
+
+              <!-- 帮助与指引 -->
+              <template v-if="visibleSubPage === 'guide'">
+                <GuideCenterSection />
               </template>
 
               <!-- 关于 -->

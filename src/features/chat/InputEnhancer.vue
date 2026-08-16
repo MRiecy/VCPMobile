@@ -547,6 +547,7 @@ onUnmounted(() => {
           <!-- 展开附件按钮 -->
           <button
             v-longpress="openTarvenSelector"
+            v-guide="'chat-plus-button'"
             @click="showAttachMenu = !showAttachMenu"
             class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all relative"
           >
