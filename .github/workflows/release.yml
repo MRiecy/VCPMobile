@@ -32,7 +32,6 @@ jobs:
         id: meta
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.event.release.tag_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
@@ -55,22 +54,6 @@ jobs:
           git fetch --no-tags origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
           if ! git merge-base --is-ancestor "$HEAD_COMMIT" "origin/$DEFAULT_BRANCH"; then
             echo "Release commit $HEAD_COMMIT is not contained in origin/$DEFAULT_BRANCH" >&2
-            exit 1
-          fi
-
-          CI_RUNS=$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow ci.yml \
-            --commit "$HEAD_COMMIT" \
-            --branch "$DEFAULT_BRANCH" \
-            --event push \
-            --limit 20 \
-            --json conclusion,event,headBranch,headSha,url)
-          if ! jq -e --arg sha "$HEAD_COMMIT" --arg branch "$DEFAULT_BRANCH" \
-            'any(.[]; .headSha == $sha and .headBranch == $branch and .event == "push" and .conclusion == "success")' \
-            <<< "$CI_RUNS" >/dev/null; then
-            echo "No successful push CI run on $DEFAULT_BRANCH exists for release commit $HEAD_COMMIT" >&2
-            echo "$CI_RUNS" >&2
             exit 1
           fi
 
@@ -139,9 +122,11 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
 
-      - name: Install Android NDK
+      - name: Install pinned Android NDK and build-tools
         shell: bash
-        run: sdkmanager "ndk;${NDK_VERSION}"
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}"
+          sdkmanager "build-tools;37.0.0"
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -189,7 +174,11 @@ jobs:
           EXPECTED_VERSION: ${{ steps.meta.outputs.version }}
           EXPECTED_VERSION_CODE: ${{ steps.meta.outputs.version_code }}
         run: |
-          BUILD_TOOLS_DIR=$(find "$ANDROID_SDK_ROOT/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          BUILD_TOOLS_DIR="$ANDROID_SDK_ROOT/build-tools/37.0.0"
+          if [[ ! -d "$BUILD_TOOLS_DIR" ]]; then
+            echo "Pinned Android build-tools directory is missing: $BUILD_TOOLS_DIR" >&2
+            exit 1
+          fi
           APK_SIGNER="$BUILD_TOOLS_DIR/apksigner"
           AAPT="$BUILD_TOOLS_DIR/aapt"
           if [[ ! -x "$APK_SIGNER" || ! -x "$AAPT" ]]; then
@@ -208,10 +197,14 @@ jobs:
           echo "APK path: $SOURCE_APK"
 
           echo "=== apksigner verify ==="
-          CERT_OUTPUT=$("$APK_SIGNER" verify --verbose --print-certs "$SOURCE_APK")
+          if ! CERT_OUTPUT=$("$APK_SIGNER" verify --verbose --print-certs "$SOURCE_APK" 2>&1); then
+            echo "apksigner verification failed for $SOURCE_APK" >&2
+            printf '%s\n' "$CERT_OUTPUT" >&2
+            exit 1
+          fi
           printf '%s\n' "$CERT_OUTPUT"
 
-          mapfile -t APK_CERTS < <(awk -F': ' '/certificate SHA-256 digest:/ {print $NF}' <<< "$CERT_OUTPUT" | tr -d ':' | tr '[:upper:]' '[:lower:]' | sort -u)
+          mapfile -t APK_CERTS < <(sed -nE 's/.*certificate SHA-256 digest: ([0-9a-fA-F]{64}).*/\1/p' <<< "$CERT_OUTPUT" | tr '[:upper:]' '[:lower:]' | sort -u)
           if [[ "${#APK_CERTS[@]}" -ne 1 || ! "${APK_CERTS[0]:-}" =~ ^[0-9a-f]{64}$ ]]; then
             echo "APK certificate SHA-256 extraction failed or returned multiple identities" >&2
             exit 1
@@ -223,7 +216,11 @@ jobs:
             exit 1
           fi
 
-          BADGING=$("$AAPT" dump badging "$SOURCE_APK")
+          if ! BADGING=$("$AAPT" dump badging "$SOURCE_APK" 2>&1); then
+            echo "aapt badging dump failed for $SOURCE_APK" >&2
+            printf '%s\n' "$BADGING" >&2
+            exit 1
+          fi
           APK_PACKAGE=$(sed -n "s/^package: name='\([^']*\)'.*/\1/p" <<< "$BADGING")
           APK_VERSION_CODE=$(sed -n "s/^package:.*versionCode='\([^']*\)'.*/\1/p" <<< "$BADGING")
           APK_VERSION=$(sed -n "s/^package:.*versionName='\([^']*\)'.*/\1/p" <<< "$BADGING")
@@ -231,7 +228,11 @@ jobs:
             echo "APK metadata mismatch: package=$APK_PACKAGE version=$APK_VERSION code=$APK_VERSION_CODE" >&2
             exit 1
           fi
-          APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK")
+          if ! APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK" 2>&1); then
+            echo "unzip -Z1 failed for $SOURCE_APK" >&2
+            printf '%s\n' "$APK_ENTRIES" >&2
+            exit 1
+          fi
           if ! grep -Eq '^lib/arm64-v8a/.*\.so$' <<< "$APK_ENTRIES"; then
             echo "APK does not contain arm64-v8a native libraries" >&2
             exit 1

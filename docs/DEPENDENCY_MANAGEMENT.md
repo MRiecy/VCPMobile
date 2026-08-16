@@ -398,9 +398,9 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 
 ### 6.5 发布供应链门禁
 
-- `gradle-wrapper.properties` 固定官方 Gradle 8.14.3 分发与官方 SHA-256；wrapper JAR/脚本由该版本官方 Wrapper 任务生成，CI/Release 另行核对官方 wrapper JAR SHA-256。
+- `gradle-wrapper.properties` 固定官方 Gradle 8.14.3 分发与官方 SHA-256；wrapper JAR/脚本由该版本官方 Wrapper 任务生成，Release 构建前核对官方 wrapper JAR SHA-256。
 - CI 在 `tauri android init --ci` 后检查 Android 生成树与插件权限生成树无漂移，并运行 Gradle JVM 测试。
-- Release 仅接受同 commit 已成功的 CI，核对 tag/HEAD/event SHA、四处版本源和 Android versionCode。
+- Release 核对 tag/HEAD/event SHA、四处版本源和 Android versionCode；构建产物经固定版本（37.0.0）build-tools 验签。
 - 签名 secrets 只进入恢复、构建与验证步骤；缺任一输入即失败。验签步骤要求 APK 单一签名者且拒绝调试证书。
 - Release 只上传 arm64 签名 APK 与其 `.sha256`；不发布可被主 WebView 独立加载的前端 ZIP。
 

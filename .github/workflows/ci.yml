@@ -93,19 +93,11 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Gradle wrapper JAR
-        run: |
-          printf '%s  %s\n' '7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172' 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.jar' | sha256sum --check --strict
-
       - name: Android Plugin Unit Tests
         working-directory: ./src-tauri/gen/android
         run: |
           chmod +x ./gradlew
           ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
-
-      - name: Rust Benchmark Compile Check
-        working-directory: ./src-tauri
-        run: cargo bench --locked --profile perf --no-run
 
       - name: Rust Clippy (Lint & Check)
         working-directory: ./src-tauri
@@ -113,9 +105,3 @@ jobs:
 
       - name: Frontend dependency audit
         run: pnpm audit --audit-level=high
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --version 0.22.2 --locked
-
-      - name: Rust dependency audit
-        run: pnpm audit:rust

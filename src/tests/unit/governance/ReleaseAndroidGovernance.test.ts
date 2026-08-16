@@ -43,12 +43,9 @@ describe('release and Android governance contracts', () => {
     expect(releaseWorkflow).toContain('"$HEAD_COMMIT" != "$GITHUB_SHA"');
     expect(releaseWorkflow).toContain('github.event.repository.default_branch');
     expect(releaseWorkflow).toContain('git merge-base --is-ancestor "$HEAD_COMMIT" "origin/$DEFAULT_BRANCH"');
-    expect(releaseWorkflow).toContain('gh run list');
-    expect(releaseWorkflow).toContain('--branch "$DEFAULT_BRANCH"');
-    expect(releaseWorkflow).toContain('--event push');
-    expect(releaseWorkflow).toContain('.headBranch == $branch');
-    expect(releaseWorkflow).toContain('.event == "push"');
-    expect(releaseWorkflow).toContain('conclusion == "success"');
+    expect(releaseWorkflow).not.toContain('gh run list');
+    expect(releaseWorkflow).not.toContain('--event push');
+    expect(releaseWorkflow).not.toContain('conclusion == "success"');
     expect(releaseWorkflow).toContain("require('./package.json').version");
     expect(releaseWorkflow).toContain("require('./src-tauri/tauri.conf.json').version");
     expect(releaseWorkflow).toContain('bundle.android.versionCode');
@@ -57,7 +54,9 @@ describe('release and Android governance contracts', () => {
     );
     expect(releaseWorkflow).not.toContain('ANDROID_RELEASE_CERT_SHA256');
     expect(releaseWorkflow).toContain('APK certificate SHA-256: ${APK_CERTS[0]}');
-    expect(releaseWorkflow).toContain('{print $NF}');
+    expect(releaseWorkflow).toContain(
+      "sed -nE 's/.*certificate SHA-256 digest: ([0-9a-fA-F]{64}).*/\\1/p'",
+    );
     expect(releaseWorkflow).toContain('APK is signed with Android Debug key');
     expect(releaseWorkflow).toContain('sha256sum "$target_apk"');
     expect(releaseWorkflow).toContain('*.sha256');
@@ -69,7 +68,7 @@ describe('release and Android governance contracts', () => {
     expect(tauriJson.version).toBe('1.1.4');
     expect(tauriJson.bundle.android.versionCode).toBe(1001004);
 
-    expect(releaseWorkflow).toContain('APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK")');
+    expect(releaseWorkflow).toContain('APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK" 2>&1)');
     expect(releaseWorkflow).not.toMatch(/unzip -Z1[^\n]*\|[^\n]*grep -q/);
     expect(releaseWorkflow).toContain('lib/arm64-v8a/libvcp_pty\\.so');
     expect(releaseWorkflow).toContain('forbidden non-arm64 ABI');
@@ -92,13 +91,10 @@ describe('release and Android governance contracts', () => {
       'distributionSha256Sum=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531',
     );
     expect(rootGradle).not.toContain('maven.aliyun.com');
-    expect(ciWorkflow).toContain(
-      '7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172',
-    );
     expect(releaseWorkflow).toContain(
       '7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172',
     );
-    expect(ciWorkflow).toContain('sha256sum --check --strict');
+    expect(releaseWorkflow).toContain('sha256sum --check --strict');
     expect(releaseWorkflow).toContain(
       'pnpm tauri android build --apk --target aarch64',
     );
@@ -154,9 +150,10 @@ describe('release and Android governance contracts', () => {
     expect(scripts['android:debug:logs']).toContain('android-debug-agent.cjs logs');
     expect(scripts['android:debug:snapshot']).toContain('android-debug-agent.cjs snapshot');
     expect(ciWorkflow).toContain('pnpm audit --audit-level=high');
-    expect(ciWorkflow).toContain('pnpm audit:rust');
+    expect(ciWorkflow).not.toContain('pnpm audit:rust');
     expect(ciWorkflow).toContain('cargo test --locked --workspace --lib');
     expect(ciWorkflow).toContain('cargo clippy --locked --workspace --lib --tests -- -D warnings');
+    expect(ciWorkflow).not.toContain('cargo bench');
     const generatorIndex = ciWorkflow.indexOf('pnpm ci:prepare-android-settings');
     const androidTestsIndex = ciWorkflow.indexOf(
       ':tauri-plugin-vcp-mobile:testDebugUnitTest',

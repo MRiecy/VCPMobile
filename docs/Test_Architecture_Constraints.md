@@ -118,8 +118,8 @@ VCPMobile/
 
 | 证据面 | 触发条件 | 当前内容 | 能证明 / 不能证明 |
 |---|---|---|---|
-| `.github/workflows/ci.yml` | main/master push 与 PR | vue-tsc、Vitest、生产 build、Rust fmt/test/integration/clippy、Android 生成树漂移、插件 JVM tests、benchmark compile、依赖审计 | 证明软件与生成物静态契约；不证明真机 CSS 几何/触控 |
-| `.github/workflows/release.yml` | GitHub Release published | 校验同 commit CI/版本/签名并发布 arm64 APK | 证明发布 artifact 治理；不是发布前设备实验室 |
+| `.github/workflows/ci.yml` | main/master push 与 PR | vue-tsc、Vitest、生产 build、Rust fmt/test/integration/clippy、Android 生成树漂移、插件 JVM tests、pnpm 依赖审计 | 证明软件与生成物静态契约；不证明真机 CSS 几何/触控 |
+| `.github/workflows/release.yml` | GitHub Release published | 校验版本源/签名并发布 arm64 APK | 证明发布 artifact 治理；不是发布前设备实验室 |
 | Android Debug Agent | 具名人工执行 | Debug-only 安装/权限/USB Dev/PID 日志/状态/单张截图 | 证明指定设备启动与诊断状态；不自动遍历 UI，不触碰 Release |
 | 多设备 UI 验收 | Release 前具名执行 | 手机/平板/折叠屏窗口、WebView、截图与触控矩阵 | 是 `DEVICE-VERIFIED` 的必要证据，当前 `DEVICE-EVIDENCE-PENDING` |
 | 性能脚本 | 独立性能候选人工执行 | APK size、`am start -W`、dumpsys、Criterion、具名页面帧 A/B | 仅报告；不构成自动 Release SLA |

@@ -438,12 +438,12 @@ VCPMobile/
 - **`.github/workflows/ci.yml`**（PR CI）:
   - 触发条件：`push` / `pull_request` 到 `main` / `master`。
   - 所有第三方 Actions 固定完整 commit SHA；pnpm 使用 frozen lockfile，Cargo 命令统一 `--locked`。
-  - 步骤：类型检查、Vitest 与生产 `pnpm build` → Rust fmt/test/integration/clippy/bench compile → `tauri android init --ci` 生成树漂移检查 → Gradle JVM 测试 → pnpm/cargo audit。
+  - 步骤：类型检查、Vitest 与生产 `pnpm build` → Rust fmt/test/integration/clippy → `tauri android init --ci` 生成树漂移检查 → Gradle JVM 测试 → pnpm audit。
   - 需要 Java 17 + Android SDK + Tauri Linux 依赖。
 - **`.github/workflows/release.yml`**（Release）:
   - 触发条件：GitHub Release 被 `published`。
   - 环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。
-  - Release tag、checkout HEAD 与 event SHA 必须一致，并要求同 commit 的 CI Check 已成功；四处版本源与 Android versionCode 必须一致。
+  - Release tag、checkout HEAD 与 event SHA 必须一致；四处版本源与 Android versionCode 必须一致。发布不再要求同 commit 的 CI Check 已成功。
   - 从 step 级 secrets 恢复密钥库；验签步骤要求 APK 单一签名者且拒绝调试证书。
   - 构建启用显式受信 LAN 模式；只上传签名 arm64 APK 及其 SHA-256 文件，不发布独立前端 ZIP。
 
