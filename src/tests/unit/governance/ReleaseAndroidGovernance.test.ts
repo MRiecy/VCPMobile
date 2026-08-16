@@ -57,6 +57,7 @@ describe('release and Android governance contracts', () => {
     );
     expect(releaseWorkflow).not.toContain('ANDROID_RELEASE_CERT_SHA256');
     expect(releaseWorkflow).toContain('APK certificate SHA-256: ${APK_CERTS[0]}');
+    expect(releaseWorkflow).toContain('{print $NF}');
     expect(releaseWorkflow).toContain('APK is signed with Android Debug key');
     expect(releaseWorkflow).toContain('sha256sum "$target_apk"');
     expect(releaseWorkflow).toContain('*.sha256');

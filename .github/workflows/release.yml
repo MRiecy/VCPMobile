@@ -211,7 +211,7 @@ jobs:
           CERT_OUTPUT=$("$APK_SIGNER" verify --verbose --print-certs "$SOURCE_APK")
           printf '%s\n' "$CERT_OUTPUT"
 
-          mapfile -t APK_CERTS < <(awk -F': ' '/certificate SHA-256 digest:/ {print $2}' <<< "$CERT_OUTPUT" | tr -d ':' | tr '[:upper:]' '[:lower:]' | sort -u)
+          mapfile -t APK_CERTS < <(awk -F': ' '/certificate SHA-256 digest:/ {print $NF}' <<< "$CERT_OUTPUT" | tr -d ':' | tr '[:upper:]' '[:lower:]' | sort -u)
           if [[ "${#APK_CERTS[@]}" -ne 1 || ! "${APK_CERTS[0]:-}" =~ ^[0-9a-f]{64}$ ]]; then
             echo "APK certificate SHA-256 extraction failed or returned multiple identities" >&2
             exit 1
