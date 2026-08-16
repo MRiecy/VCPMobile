@@ -29,6 +29,7 @@ const handleAction = (action: OverlayActionItem) => {
       <div v-if="isOpen" class="fixed inset-0 bg-black/20 pointer-events-auto z-dialog"
         @click="handleBackdropClick">
         <div
+          v-guide="'context-menu-sheet'"
           class="absolute left-1/2 -translate-x-1/2 w-[calc(100%-24px)] max-w-sm rounded-3xl border border-black/5 dark:border-white/10 bg-white/92 dark:bg-[#111827]/92 shadow-2xl overflow-hidden"
           :style="{ bottom: 'calc(var(--vcp-safe-bottom, 48px) + 24px)' }"
           role="dialog"

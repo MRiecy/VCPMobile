@@ -1,10 +1,13 @@
 /**
- * plus-longpress — 长按聊天框「+」按钮教学
+ * plus-longpress — 聊天框「+」按钮教学（单击附件 + 长按上下文注入）
  *
  * 触发（D2 用户确认的推演）：输入框解锁（当前话题存在）+ 左右栏均关闭。
- * 长按 = Tarven 上下文注入规则选择器；单击 = 附件菜单。
+ * 真机反馈轮起：单击与长按均唤起真实业务——
+ * 单击 = 真实展开附件面板；长按 = 真实弹出 VCP 上下文注入规则抽屉。
  */
 import { defineGuide } from '../registry';
+import { setAttachMenu } from '../../chat/attachMenuController';
+import { useTarvenStore } from '../../../core/stores/tarvenStore';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useLayoutStore } from '../../../core/stores/layout';
 import { useOverlayStore } from '../../../core/stores/overlay';
@@ -39,16 +42,45 @@ defineGuide({
   steps: [
     {
       target: 'chat-plus-button',
-      title: '聊天框 + 按钮',
-      content: '单击展开附件菜单（相机 / 相册 / 文件）；长按打开 VCP 上下文注入管理器。',
+      title: '单击展开附件',
+      content: '单击 + 按钮，展开附件面板。',
       placement: 'top',
-      demo: 'press-hold',
-      demoHint: ['上下文注入规则'],
+      demo: 'tap',
+      // 真实业务：真实展开附件面板（attachMenuController 即按钮点击同源状态）。
+      perform: () => setAttachMenu(true),
+      undo: () => setAttachMenu(false),
+    },
+    {
+      target: 'chat-attach-menu',
+      title: '附件面板',
+      content: '三种附件入口：拍摄、相册、文件。',
+      placement: 'top',
+      undo: () => setAttachMenu(false),
     },
     {
       target: 'chat-plus-button',
-      title: '真实效果',
-      content: '长按弹出上下文注入规则列表，可为回答启用不同注入规则；有规则启用时按钮会带有绿色小点。',
+      title: '长按上下文注入',
+      content: '长按 + 约 0.6 秒，打开 VCP 上下文注入规则仓。',
+      placement: 'top',
+      demo: 'press-hold',
+      // 真实业务：收起附件面板，弹出真实的规则仓抽屉（TarvenSelector）。
+      perform: () => {
+        setAttachMenu(false);
+        useTarvenStore().isSelectorOpen = true;
+      },
+      undo: () => {
+        setAttachMenu(false);
+        useTarvenStore().isSelectorOpen = false;
+      },
+    },
+    {
+      target: 'tarven-selector',
+      title: '规则仓',
+      content: '在此启用 / 停用注入规则；有规则启用时 + 按钮会显示绿色小点。',
+      placement: 'top',
+      undo: () => {
+        useTarvenStore().isSelectorOpen = false;
+      },
     },
   ],
 });

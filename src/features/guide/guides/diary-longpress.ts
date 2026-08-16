@@ -32,7 +32,6 @@ defineGuide({
       content: '在任意日记条目上长按，进入多选模式。',
       placement: 'bottom',
       demo: 'press-hold',
-      demoHint: ['批量选择'],
       // 首次打开日记中心：目录加载 + 虚拟列表行挂载 + 页面滑入动画
       // 可能超过默认 3s，放宽到 6s；行未就绪前继续轮询而非越过。
       waitFor: () => useDiaryStore().displayedNotes.length >= 1,

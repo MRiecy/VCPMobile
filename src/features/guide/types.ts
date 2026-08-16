@@ -10,8 +10,8 @@
 /** 卡片相对目标的优先方位，Overlay 在空间不足时自动翻转。 */
 export type GuidePlacement = 'top' | 'bottom' | 'left' | 'right';
 
-/** 演示动画原语：长按 / 右滑 / 纵向拖拽。 */
-export type GuideDemo = 'press-hold' | 'swipe-right' | 'drag-vertical';
+/** 演示动画原语：长按 / 单击 / 右滑 / 纵向拖拽。 */
+export type GuideDemo = 'press-hold' | 'tap' | 'swipe-right' | 'drag-vertical';
 
 export interface GuideStep {
   /** 目标元素注册表 id；支持函数动态求值（如 sidebar 的「第一个 Agent 行」）。 */
@@ -22,8 +22,16 @@ export interface GuideStep {
   placement?: GuidePlacement;
   /** 演示动画；缺省 = 纯说明步骤。 */
   demo?: GuideDemo;
-  /** 长按演示结束后弹出的示意小卡内容（如 ['气泡', '统一', '杂志']）。 */
-  demoHint?: string[];
+  /**
+   * 步骤开始时执行的真实业务动作（纯数据驱动：打开菜单/面板等安全操作，
+   * 无数据副作用；异常被吞掉不阻塞教学）。
+   */
+  perform?: () => void;
+  /**
+   * 整场结束时的收尾清理（幂等，可多次调用；步间不执行——
+   * 步间清理由下一步 perform 显式负责）。
+   */
+  undo?: () => void;
   /** 可选步骤级门控；false 时该步保持等待直至超时。 */
   waitFor?: () => boolean;
   /** 目标等待超时（ms），超时静默越过该步。默认 3000。 */

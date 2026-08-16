@@ -8,6 +8,7 @@
 import { useMediaQuery } from '@vueuse/core';
 import { defineGuide, hasTarget } from '../registry';
 import { sortByOrder } from '../../agent/agentOrder';
+import { swipeClose, swipeOpen } from '../../agent/swipeController';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { useLayoutStore } from '../../../core/stores/layout';
@@ -30,6 +31,11 @@ export const firstAgentId = (): string | null => {
 const firstAgentRowTarget = (): string => {
   const id = firstAgentId();
   return id ? `agent-row-${id}` : '';
+};
+
+const firstAgentSettingsTarget = (): string => {
+  const id = firstAgentId();
+  return id ? `agent-row-settings-${id}` : '';
 };
 
 defineGuide({
@@ -72,16 +78,29 @@ defineGuide({
     {
       target: firstAgentRowTarget,
       title: '右滑查看设置',
-      content: '在第一个 Agent 上向右滑动，露出设置入口，点击即可进入对应设置页。',
+      content: '在第一个 Agent 上向右滑动，露出背后的设置入口。',
       placement: 'right',
       demo: 'swipe-right',
+      // 真实业务：驱动真实行滑开（swipeController 即 AgentList 手势同源状态）。
+      perform: () => {
+        const id = firstAgentId();
+        if (id) swipeOpen(id);
+      },
+      undo: swipeClose,
+    },
+    {
+      target: firstAgentSettingsTarget,
+      title: '设置入口',
+      content: '滑动后露出的齿轮按钮，点击即可进入该 Agent 的设置页。',
+      placement: 'right',
     },
     {
       target: firstAgentRowTarget,
       title: '按住拖动排序',
-      content: '按住第一个 Agent 约 0.2 秒后上下拖动，可调整排列顺序，松手落位。',
+      content: '按住 Agent 约 0.2 秒后上下拖动，可调整排列顺序，松手落位。',
       placement: 'right',
       demo: 'drag-vertical',
+      undo: swipeClose,
     },
   ],
 });

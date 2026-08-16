@@ -2,7 +2,7 @@
 
 > 专项文件夹：`plan/vcpmobile-guide-tour-research/`
 > 目标：为「点击/长按」等隐蔽交互建立零空间成本的可视化教学（Coachmark）机制，并支持未来新功能上线时的版本化指引。
-> 当前状态：**已实施**（引擎 + 四场指引 + 回放入口 + L4 测试，`pnpm check` / `pnpm test:run` / `pnpm build` 全绿）。真机 L7 三宽度验收待用户设备执行（见文末「实施状态」）。
+> 当前状态：**已实施**（引擎 + 四场指引 + 回放入口 + 真实业务联动 + 聚光视觉打磨 + L4 测试，`pnpm check` / `pnpm test:run` / `pnpm build` 全绿）。真机 L7 三宽度验收待用户设备执行（见文末「实施状态」）。
 
 ## 文档索引
 
@@ -34,7 +34,8 @@
 - 实施期修正（与原研究文档的差异）：治理测试锁 `CLAUDE.md`（AGENTS.md 同步）；日记列表为虚拟列表（锚点靠注册表多元素解析）；GuideOverlay 条件兄弟节点加 `:key` 防函数 ref 递归更新。
 - 实施期补强（2026-08-16 第 2 轮）：① `workspace-not-occluded` 谓词加入 sidebar/theme/plus 三场（研究 03 只编码了抽屉关闭，未覆盖 SlidePage 页面栈遮挡工作区导致「指引在设置/日记中心页后面播放」的误触发）；② 队列严格 FIFO（修复 finish 后 250ms 恢复间隙内的插队竞态，队头延迟到恢复定时器内再 shift）；③ `diary-longpress` 两步 `waitTimeoutMs` 放宽至 6000 + `waitFor` 门控，兼容首开目录加载与虚拟行挂载慢于默认 3s 的场景。
 - 实施期补强（第 3 轮）：帮助与指引页新增「重置全部指引进度」入口（`guideStore.resetProgress` + 红色确认框 + Toast），供反复测试与用户重温；完成后返回对应界面即按前置条件重新自动触发。
-- L4：`src/tests/unit/guide/` 32 项；全仓 `pnpm test:run` 263 项、`pnpm check`、`pnpm build` 全绿。
+- 实施期补强（第 4 轮，真机反馈迭代）：① 安全类交互改为唤起真实业务——sidebar 右滑由 `swipeController` 驱动真实行滑开并新增「设置入口」步；plus 单击真实展开附件面板、长按真实弹出 Tarven 规则仓（新增 `attachMenuController`）；theme 长按真实弹出「消息呈现」菜单（`presentationMenu` 共享入口）——步骤级 `perform`/`undo` 钩子 + 整场逆序清理；② 手势演示图标化（`i-ph-hand-tap/hand-swipe-right/hand-fist` 构建期内联），删除假示意卡/假行/手绘手指；③ 聚光拆分 veil/frame 双层：入场 scale(8)→1 阴影自四周聚焦收敛，步间 top/left/width/height 过渡平滑滑移，兜底暗纱淡入淡出让位消除步间黑屏闪烁；④ 新锚点 `agent-row-settings-<id>` / `context-menu-sheet` / `chat-attach-menu` / `tarven-selector`。
+- L4：`src/tests/unit/guide/` 45 项；全仓 `pnpm test:run` 276 项、`pnpm check`、`pnpm build` 全绿。
 - **待办：L7 真机验收**（07 文档阶段 6 清单，`pnpm android:debug:dev`，手机/平板/折叠三宽度）。
 
 ## 跨文档一致性约定（整理后定稿）

@@ -10,6 +10,7 @@ import { useTarvenStore } from '../../core/stores/tarvenStore';
 import { useLongTextPaste } from './composables/useLongTextPaste';
 import { useSpeechRecognition } from '../../core/composables/useSpeechRecognition';
 import { useAudioRecorder } from '../../core/composables/useAudioRecorder';
+import { attachMenuOpen, toggleAttachMenu } from './attachMenuController';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
 
@@ -32,9 +33,8 @@ const emit = defineEmits<{
 }>();
 
 const input = ref('');
-const showAttachMenu = ref(false);
 
-watch(showAttachMenu, (val) => {
+watch(attachMenuOpen, (val) => {
   emit('toggle-menu', val);
 });
 const historyStore = useChatHistoryStore();
@@ -76,7 +76,7 @@ let iconLongPressTimeout: number | null = null;
 const toggleAudioMode = () => {
   if (props.disabled) return;
   
-  showAttachMenu.value = false;
+  attachMenuOpen.value = false;
   
   // 如果当前正处于某种语音输入状态中，先彻底释放
   if (isSTTActive.value) {
@@ -311,7 +311,7 @@ const handleIconTouchCancel = (e: TouchEvent) => {
 };
 
 const handleFocus = () => {
-  showAttachMenu.value = false;
+  attachMenuOpen.value = false;
   if (!props.disabled && historyStore.currentChatHistory.length > 0) {
     emit('focus-input');
   }
@@ -374,7 +374,7 @@ const handleSend = () => {
   if (canSend.value) {
     emit('send', input.value);
     input.value = '';
-    showAttachMenu.value = false;
+    attachMenuOpen.value = false;
   }
 };
 
@@ -409,8 +409,8 @@ const removeStagedAttachment = (index: number) => {
 const rootRef = ref<HTMLElement | null>(null);
 
 const handleClickOutside = (event: MouseEvent) => {
-  if (showAttachMenu.value && rootRef.value && !rootRef.value.contains(event.target as Node)) {
-    showAttachMenu.value = false;
+  if (attachMenuOpen.value && rootRef.value && !rootRef.value.contains(event.target as Node)) {
+    attachMenuOpen.value = false;
   }
 };
 
@@ -548,10 +548,10 @@ onUnmounted(() => {
           <button
             v-longpress="openTarvenSelector"
             v-guide="'chat-plus-button'"
-            @click="showAttachMenu = !showAttachMenu"
+            @click="toggleAttachMenu()"
             class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all relative"
           >
-            <div class="i-heroicons-plus-circle text-2xl transition-transform duration-300 ease-out" :class="{ 'rotate-45': showAttachMenu }"></div>
+            <div class="i-heroicons-plus-circle text-2xl transition-transform duration-300 ease-out" :class="{ 'rotate-45': attachMenuOpen }"></div>
             <!-- 当有激活规则时显示绿色指示点 -->
             <div v-if="tarvenStore.rules.some(r => r.isEnabled)" 
               class="absolute top-1.5 right-1.5 w-2 h-2 bg-emerald-500 rounded-full border-2 border-[var(--secondary-bg)] shadow-[0_0_8px_rgba(16,185,129,0.5)]">
@@ -575,14 +575,15 @@ onUnmounted(() => {
     </div>
 
     <!-- 往上平滑弹起的百搭扩展面板 -->
-    <div 
+    <div
+      v-guide="'chat-attach-menu'"
       class="overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
-      :class="showAttachMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'"
-      :style="{ height: showAttachMenu ? '112px' : '0px' }"
+      :class="attachMenuOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'"
+      :style="{ height: attachMenuOpen ? '112px' : '0px' }"
     >
       <div 
         class="w-full h-full border-t border-[var(--border-color)]/20 pt-3 pb-2 flex justify-around items-center transition-all duration-300"
-        :class="showAttachMenu ? 'translate-y-0 opacity-100 scale-100' : 'translate-y-4 opacity-0 scale-95'"
+        :class="attachMenuOpen ? 'translate-y-0 opacity-100 scale-100' : 'translate-y-4 opacity-0 scale-95'"
       >
         <!-- 拍摄按钮 -->
         <button @click="triggerFilePick('camera')" 

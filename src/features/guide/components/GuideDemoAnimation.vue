@@ -1,61 +1,54 @@
 <script setup lang="ts">
 /**
- * GuideDemoAnimation — 纯视觉演示动画原语
+ * GuideDemoAnimation — 手势演示动画原语（图标化版本）
  *
- * 设计约束（研究 01/05 文档）：
- * - 纯 CSS keyframes + 内联 SVG，零依赖；transform/opacity only；
- * - 动画循环 2 次后定格（iteration-count: 2 + fill both）；
- * - 全程 pointer-events: none，不触发任何真实业务；
- * - 受全局 `vcp-paused-animations` 暂停类控制（前后台自动暂停）。
+ * 设计约束（真机反馈轮修订）：
+ * - 手指改为现成图标（@iconify-json/ph 手势图标，走 UnoCSS 现有管线），
+ *   不再手绘"圆+长柱"；图标置于柔和光晕圆底上（radial-gradient，无边框盒）；
+ * - 删除假示意卡 / 假行 / 假设置 chip——真实业务（若步骤配置 perform）
+ *   由真实 UI 呈现，演示层不再叠加"多框"视觉元素；
+ * - press-hold 进度环 600ms 对齐 v-longpress 阈值；
+ * - 纯 CSS keyframes + transform/opacity only；循环 2 次后定格；
+ * - 全程 pointer-events: none；受 prefers-reduced-motion 降级。
  */
-import { Settings } from 'lucide-vue-next';
 import type { GuideDemo } from '../types';
 
 defineProps<{
   demo: GuideDemo;
-  hint?: string[];
 }>();
 </script>
 
 <template>
   <div class="guide-demo pointer-events-none" aria-hidden="true">
-    <!-- 长按：手指按下 + 600ms 进度环 + 示意小卡 -->
+    <!-- 长按：手势图标 + 600ms 进度环 -->
     <template v-if="demo === 'press-hold'">
-      <div class="demo-finger demo-finger--press">
-        <svg viewBox="0 0 40 40" width="34" height="34">
-          <rect x="16" y="3" width="8" height="17" rx="4" class="demo-finger-shape" />
-          <ellipse cx="20" cy="23" rx="13" ry="12" class="demo-finger-shape" />
-        </svg>
+      <div class="demo-icon demo-icon--press">
+        <div class="i-ph-hand-tap demo-icon-glyph" />
       </div>
       <svg class="demo-ring" viewBox="0 0 48 48" width="48" height="48">
         <circle class="demo-ring-track" cx="24" cy="24" r="21" />
         <circle class="demo-ring-progress" cx="24" cy="24" r="21" />
       </svg>
-      <div v-if="hint && hint.length" class="demo-hint-card">
-        <span v-for="item in hint" :key="item" class="demo-hint-chip">{{ item }}</span>
+    </template>
+
+    <!-- 单击：手势图标短按 pulse -->
+    <template v-else-if="demo === 'tap'">
+      <div class="demo-icon demo-icon--tap">
+        <div class="i-ph-hand-tap demo-icon-glyph" />
       </div>
     </template>
 
-    <!-- 右滑：手指右移 + 行位移露出设置入口（示意，真实行不动） -->
+    <!-- 右滑：手势图标右移（真实行由 perform 驱动真实滑开） -->
     <template v-else-if="demo === 'swipe-right'">
-      <div class="demo-swipe-settings"><Settings :size="16" /></div>
-      <div class="demo-ghost-row demo-ghost-row--swipe"></div>
-      <div class="demo-finger demo-finger--swipe">
-        <svg viewBox="0 0 40 40" width="34" height="34">
-          <rect x="16" y="3" width="8" height="17" rx="4" class="demo-finger-shape" />
-          <ellipse cx="20" cy="23" rx="13" ry="12" class="demo-finger-shape" />
-        </svg>
+      <div class="demo-icon demo-icon--swipe">
+        <div class="i-ph-hand-swipe-right demo-icon-glyph" />
       </div>
     </template>
 
-    <!-- 纵向拖拽：按住 → 行上浮 → 上下轨迹 → 松手落位 -->
+    <!-- 纵向拖拽：手势图标上下轨迹 -->
     <template v-else-if="demo === 'drag-vertical'">
-      <div class="demo-ghost-row demo-ghost-row--drag"></div>
-      <div class="demo-finger demo-finger--drag">
-        <svg viewBox="0 0 40 40" width="34" height="34">
-          <rect x="16" y="3" width="8" height="17" rx="4" class="demo-finger-shape" />
-          <ellipse cx="20" cy="23" rx="13" ry="12" class="demo-finger-shape" />
-        </svg>
+      <div class="demo-icon demo-icon--drag">
+        <div class="i-ph-hand-fist demo-icon-glyph" />
       </div>
     </template>
   </div>
@@ -68,18 +61,37 @@ defineProps<{
   overflow: visible;
 }
 
-.demo-finger-shape {
-  fill: rgba(200, 200, 200, 0.6);
-  stroke: rgba(0, 0, 0, 0.35);
-  stroke-width: 1.5;
-}
-
-.demo-finger {
+.demo-icon {
   position: absolute;
   left: 50%;
   top: 50%;
-  opacity: 0;
   z-index: 2;
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 柔和光晕圆底：增强图标在亮/暗背景上的可读性（非边框盒） */
+.demo-icon::before {
+  content: '';
+  position: absolute;
+  inset: -9px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(59, 130, 246, 0.3) 0%,
+    rgba(59, 130, 246, 0.12) 55%,
+    rgba(59, 130, 246, 0) 72%
+  );
+  z-index: -1;
+}
+
+.demo-icon-glyph {
+  width: 34px;
+  height: 34px;
+  color: #ffffff;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.55));
 }
 
 .demo-ring {
@@ -108,12 +120,13 @@ defineProps<{
   animation: guide-demo-ring 3s linear 2 both;
 }
 
+/* 600ms 走满一圈对齐 v-longpress 阈值，其余时间保持满环 */
 @keyframes guide-demo-ring {
   0%, 22% { stroke-dashoffset: 132; }
   42%, 100% { stroke-dashoffset: 0; }
 }
 
-.demo-finger--press {
+.demo-icon--press {
   transform: translate(-50%, -50%);
   animation: guide-demo-press-finger 3s ease-in-out 2 both;
 }
@@ -125,85 +138,18 @@ defineProps<{
   90%, 100% { opacity: 1; transform: translate(-50%, -50%) translateY(0); }
 }
 
-.demo-hint-card {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, calc(-100% - 14px));
-  display: flex;
-  gap: 4px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  background: var(--vcp-panel-bg-97, var(--secondary-bg));
-  border: 1px solid var(--border-color);
-  opacity: 0;
-  z-index: 3;
-  animation: guide-demo-hint 3s ease-in-out 2 both;
-}
-
-.demo-hint-chip {
-  font-size: 10px;
-  line-height: 1;
-  padding: 3px 6px;
-  border-radius: 4px;
-  background: var(--vcp-accent-bg-25, rgba(59, 130, 246, 0.25));
-  color: var(--primary-text);
-  font-family: monospace;
-  white-space: nowrap;
-}
-
-@keyframes guide-demo-hint {
-  0%, 42% { opacity: 0; transform: translate(-50%, calc(-100% - 6px)); }
-  52%, 100% { opacity: 1; transform: translate(-50%, calc(-100% - 14px)); }
-}
-
-.demo-ghost-row {
-  position: absolute;
-  inset: 0;
-  border-radius: 10px;
-  background: rgba(160, 160, 160, 0.16);
-  border: 1px solid rgba(160, 160, 160, 0.45);
-  opacity: 0;
-  z-index: 0;
-}
-
-.demo-ghost-row--swipe {
-  animation: guide-demo-swipe-row 1.6s ease-in-out 2 both;
-}
-
-@keyframes guide-demo-swipe-row {
-  0% { opacity: 0; transform: translateX(0); }
-  8% { opacity: 0.75; transform: translateX(0); }
-  45% { opacity: 0.75; transform: translateX(80px); }
-  65% { opacity: 0.75; transform: translateX(80px); }
-  85%, 100% { opacity: 0; transform: translateX(0); }
-}
-
-.demo-swipe-settings {
-  position: absolute;
-  left: 50%;
-  top: 50%;
+.demo-icon--tap {
   transform: translate(-50%, -50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  color: var(--highlight-text, #3b82f6);
-  background: rgba(59, 130, 246, 0.14);
-  opacity: 0;
-  z-index: 1;
-  animation: guide-demo-swipe-settings 1.6s ease-in-out 2 both;
+  animation: guide-demo-tap 1.4s ease-in-out 2 both;
 }
 
-@keyframes guide-demo-swipe-settings {
-  0%, 30% { opacity: 0; }
-  45%, 65% { opacity: 1; }
-  90%, 100% { opacity: 0; }
+@keyframes guide-demo-tap {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(1.15); }
+  30% { opacity: 1; transform: translate(-50%, -50%) scale(0.92); }
+  45%, 100% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
 }
 
-.demo-finger--swipe {
+.demo-icon--swipe {
   transform: translate(-50%, -50%);
   animation: guide-demo-swipe-finger 1.6s ease-in-out 2 both;
 }
@@ -215,20 +161,7 @@ defineProps<{
   80%, 100% { opacity: 0; transform: translate(-50%, -50%) translateX(0); }
 }
 
-.demo-ghost-row--drag {
-  animation: guide-demo-drag-row 3.2s ease-in-out 2 both;
-}
-
-@keyframes guide-demo-drag-row {
-  0% { opacity: 0; transform: translateY(0); }
-  10% { opacity: 0.8; transform: translateY(-6px); }
-  35% { opacity: 0.8; transform: translateY(56px); }
-  50% { opacity: 0.8; transform: translateY(-56px); }
-  65% { opacity: 0.8; transform: translateY(-4px); }
-  75%, 100% { opacity: 0.8; transform: translateY(0); }
-}
-
-.demo-finger--drag {
+.demo-icon--drag {
   transform: translate(-50%, -50%);
   animation: guide-demo-drag-finger 3.2s ease-in-out 2 both;
 }
@@ -244,14 +177,12 @@ defineProps<{
 
 @media (prefers-reduced-motion: reduce) {
   .demo-ring-progress,
-  .demo-finger--press,
-  .demo-hint-card,
-  .demo-ghost-row--swipe,
-  .demo-swipe-settings,
-  .demo-finger--swipe,
-  .demo-ghost-row--drag,
-  .demo-finger--drag {
+  .demo-icon--press,
+  .demo-icon--tap,
+  .demo-icon--swipe,
+  .demo-icon--drag {
     animation: none;
+    opacity: 1;
   }
 }
 </style>

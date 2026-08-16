@@ -7,6 +7,7 @@
  * 正则与消息计数标准。
  */
 import { defineGuide } from '../registry';
+import { openPresentationMenu } from '../../chat/presentationMenu';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
 import { useLayoutStore } from '../../../core/stores/layout';
@@ -58,16 +59,20 @@ defineGuide({
   steps: [
     {
       target: 'chat-theme-button',
-      title: '亮暗模式按钮',
-      content: '单击切换深色/浅色主题；长按打开消息呈现菜单，切换排版样式（气泡 / 统一 / 杂志）。',
+      title: '长按亮暗按钮',
+      content: '长按约 0.6 秒，弹出「消息呈现」菜单。',
       placement: 'bottom',
       demo: 'press-hold',
-      demoHint: ['气泡', '统一', '杂志'],
+      // 真实业务：弹出真实的「消息呈现」菜单（ContextMenuSheet）。
+      perform: openPresentationMenu,
+      undo: () => useOverlayStore().closeContextMenu(),
     },
     {
-      target: 'chat-theme-button',
-      title: '真实效果',
-      content: '长按后弹出「消息呈现」菜单，可切换排版样式。现在去按住按钮试试吧。',
+      target: 'context-menu-sheet',
+      title: '消息呈现菜单',
+      content: '在「气泡 / 统一 / 杂志」中选择一种排版样式。',
+      placement: 'top',
+      undo: () => useOverlayStore().closeContextMenu(),
     },
   ],
 });

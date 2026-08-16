@@ -4,11 +4,7 @@ import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useTopicStore } from "../../core/stores/topicListManager";
-import {
-  CHAT_PRESENTATION_OPTIONS,
-  useThemeStore,
-  type ChatPresentationMode,
-} from "../../core/stores/theme";
+import { useThemeStore } from "../../core/stores/theme";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
 import { useLayoutStore } from "../../core/stores/layout";
@@ -23,6 +19,7 @@ import { useAttachmentStore } from "../../core/stores/attachmentStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useChatScroll } from "../../core/composables/useChatScroll";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { openPresentationMenu } from "./presentationMenu";
 
 const sessionStore = useChatSessionStore();
 const historyStore = useChatHistoryStore();
@@ -86,36 +83,6 @@ const {
 const isPresentationMenuOpen = computed(
   () => overlayStore.contextMenuConfig?.title === "消息呈现",
 );
-
-const handlePresentationSelection = (mode: ChatPresentationMode) => {
-  const result = themeStore.setPresentationMode(mode);
-  if (!result.ok) {
-    notificationStore.addNotification({
-      id: "chat-presentation-save-failed",
-      type: "error",
-      title: "消息呈现切换失败",
-      message: result.error || "请检查本地存储后重试",
-      toastOnly: true,
-    });
-  }
-};
-
-const openPresentationMenu = () => {
-  try {
-    navigator.vibrate?.(25);
-  } catch {
-    // Haptics are an optional enhancement; unsupported devices stay silent.
-  }
-
-  overlayStore.openContextMenu(
-    CHAT_PRESENTATION_OPTIONS.map((option) => ({
-      label: option.label,
-      selected: themeStore.presentationMode === option.value,
-      handler: () => handlePresentationSelection(option.value),
-    })),
-    "消息呈现",
-  );
-};
 
 // The pre-flush watcher captures the old geometry before Vue patches the data
 // attribute. This protects both the long-press menu and the settings-page entry.

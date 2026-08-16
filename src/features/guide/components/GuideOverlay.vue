@@ -9,7 +9,8 @@
  *   约束在 --vcp-safe-* insets 内；ResizeObserver / resize / 键盘 Insets /
  *   生命周期 resume 均触发重算；
  * - 目标不可解析：waitFor 轮询 100ms / waitTimeoutMs 超时静默越过该步；
- * - 全屏拦截指针事件（touch-action: none），教学期间真实业务零副作用。
+ * - 全屏拦截指针事件（touch-action: none），教学期间用户手势零副作用；
+ *   步骤可配置 perform（真实安全业务：打开菜单/面板）与 undo（整场收尾清理）。
  *
  * 由 App.vue 在 lifecycle READY 后挂载；mounted 时调用 guideStore.init()。
  */
@@ -51,6 +52,8 @@ const isLastStep = computed(() => {
 const cardEl = ref<HTMLElement | null>(null);
 const spotRect = ref<SpotRect | null>(null);
 const cardStyle = ref<Record<string, string>>({ top: '-9999px', left: '-9999px' });
+/** 卡片完成首次定位后才启用位置过渡（避免 -9999px 占位处飞入）。 */
+const cardPlaced = ref(false);
 const fallbackVeil = computed(() => isActive.value && spotRect.value === null);
 
 const spotStyle = computed<Record<string, string>>(() => {
@@ -75,6 +78,20 @@ let targetObserver: ResizeObserver | null = null;
 let cardObserver: ResizeObserver | null = null;
 let lifecycleUnlisten: UnlistenFn | null = null;
 let roInitialCallback = false;
+/** 本场指引已执行 perform 的步骤 undo 栈（整场结束时逆序执行）。 */
+let undoStack: Array<() => void> = [];
+
+const runUndoStack = () => {
+  const stack = undoStack;
+  undoStack = [];
+  for (let i = stack.length - 1; i >= 0; i -= 1) {
+    try {
+      stack[i]();
+    } catch (e) {
+      console.warn('[Guide] undo() failed:', e);
+    }
+  }
+};
 
 const clearTimers = () => {
   if (waitTimer !== null) {
@@ -322,7 +339,7 @@ const beginStep = () => {
   clearTimers();
   targetEl = null;
   lastSample = null;
-  spotRect.value = null;
+  // 保留旧 spotRect：步间推进不闪黑纱，新目标就绪后经 CSS 过渡滑移聚焦。
   targetObserver?.disconnect();
   targetObserver = null;
 
@@ -331,6 +348,15 @@ const beginStep = () => {
     skipStep(token);
     return;
   }
+  // 步骤级真实业务（安全类：打开菜单/面板），先于目标轮询执行；
+  // 异常吞掉不阻塞教学；undo 入栈，整场结束时统一逆序清理。
+  try {
+    s.perform?.();
+  } catch (e) {
+    console.warn('[Guide] perform() failed:', e);
+  }
+  if (s.undo) undoStack.push(s.undo);
+
   const id = targetIdOf();
   if (!id) {
     skipStep(token);
@@ -366,8 +392,9 @@ const bindCardRef = (el: unknown) => {
     });
     observer.observe(node);
     cardObserver = observer;
-    // 挂载后立即定位一次（消除初始 -9999px 占位）。
+    // 挂载后立即定位一次（消除初始 -9999px 占位），随后启用位置过渡。
     positionCard(spotRect.value);
+    cardPlaced.value = true;
   }
 };
 
@@ -379,14 +406,20 @@ watch(
 );
 
 watch(isActive, (active) => {
+  // 注意：active 分支不做任何 undo 栈清理——本 watcher 在 stepKey
+  // watcher（beginStep → perform 入栈）之后运行，此处清栈会误删首步 undo；
+  // 上一场结束时 runUndoStack 已保证开播前栈为空。
   if (active) return;
   stepToken += 1;
   clearTimers();
   targetEl = null;
   lastSample = null;
   spotRect.value = null;
+  cardPlaced.value = false;
   targetObserver?.disconnect();
   targetObserver = null;
+  // 真实业务收尾：关闭本场打开过的菜单/面板/滑开状态。
+  runUndoStack();
 });
 
 onMounted(() => {
@@ -427,23 +460,28 @@ onBeforeUnmount(() => {
       @touchend.prevent
       @touchcancel.prevent
     >
-      <!-- 目标未就绪时的兜底暗纱（事件拦截始终由根层负责）
+      <!-- 目标未就绪时的兜底暗纱（仅在本场指引尚未解析出任何 rect 前显示；
+           出现与让位均走淡入淡出，配合聚光收敛避免瞬间全黑闪烁）
            注意：条件兄弟节点必须带 key，防止无 key 索引匹配在重渲染时
            卸载/重挂载卡片 vnode，进而通过模板 ref 改写 cardStyle 形成递归更新。 -->
-      <div
-        v-if="fallbackVeil"
-        key="guide-veil"
-        class="guide-veil absolute inset-0 pointer-events-none"
-        style="background: rgba(0, 0, 0, 0.55)"
-      />
+      <Transition name="guide-veil-fade">
+        <div
+          v-if="fallbackVeil"
+          key="guide-veil"
+          class="guide-veil absolute inset-0 pointer-events-none"
+        />
+      </Transition>
 
-      <!-- 聚光高亮框：2px Accent 描边 + box-shadow 挖洞暗化 -->
+      <!-- 聚光高亮：veil 层（box-shadow 挖洞 + 入场收敛动画）
+           + frame 层（2px Accent 描边，不随收敛缩放保持清晰）；
+           步间推进时两层经 top/left/width/height 过渡平滑滑移到新目标。 -->
       <div v-if="spotRect" key="guide-spot" class="guide-spot pointer-events-none" :style="spotStyle">
+        <div class="guide-spot-veil" />
+        <div class="guide-spot-frame" />
         <GuideDemoAnimation
           v-if="step && step.demo"
           :key="stepKey"
           :demo="step.demo"
-          :hint="step.demoHint"
         />
       </div>
 
@@ -453,6 +491,7 @@ onBeforeUnmount(() => {
         key="guide-card"
         :ref="bindCardRef"
         class="guide-card pointer-events-auto"
+        :class="{ 'guide-card--placed': cardPlaced }"
         :style="cardStyle"
         @click.stop
         @touchstart.stop
@@ -482,9 +521,72 @@ onBeforeUnmount(() => {
 
 .guide-spot {
   position: absolute;
+  /* 步间/目标移动时平滑滑移：阴影逐渐位移聚焦到新目标 */
+  transition:
+    top 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    left 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    height 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 挖洞暗化层：入场时洞从约 8 倍大小收敛到目标，
+   阴影自四周逐渐聚焦到元素上（transform/box-shadow 合成动画）。 */
+.guide-spot-veil {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  transform-origin: center;
+  animation: guide-spot-converge 0.42s ease-out both;
+}
+
+@keyframes guide-spot-converge {
+  from {
+    transform: scale(8);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0);
+  }
+  55% {
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.4);
+  }
+  to {
+    transform: scale(1);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* 2px Accent 描边层：不参与缩放，收敛期间淡入，保持边缘清晰 */
+.guide-spot-frame {
+  position: absolute;
+  inset: 0;
   border: 2px solid var(--highlight-text, #3b82f6);
   border-radius: 12px;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  animation: guide-frame-in 0.26s ease-out both;
+}
+
+@keyframes guide-frame-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.guide-veil {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+/* 兜底暗纱淡入 + 让位时淡出（与收敛动画叠加，暗度平滑转移而非瞬间切换） */
+.guide-veil-fade-enter-active {
+  transition: opacity 0.15s ease-out;
+}
+
+.guide-veil-fade-leave-active {
+  transition: opacity 0.35s ease-out;
+}
+
+.guide-veil-fade-enter-from,
+.guide-veil-fade-leave-to {
+  opacity: 0;
 }
 
 .guide-card {
@@ -497,6 +599,13 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
   color: var(--primary-text);
   animation: guide-card-in 0.2s ease-out both;
+}
+
+/* 完成首次定位后启用位置过渡（与聚光同步滑移，避免 -9999px 飞入） */
+.guide-card--placed {
+  transition:
+    top 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    left 0.26s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @keyframes guide-card-in {
@@ -580,6 +689,15 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) {
   .guide-card {
     animation: none;
+  }
+  .guide-spot,
+  .guide-card--placed {
+    transition: none;
+  }
+  .guide-spot-veil,
+  .guide-spot-frame {
+    animation: none;
+    opacity: 1;
   }
 }
 </style>

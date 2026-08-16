@@ -56,6 +56,7 @@ onMounted(() => {
     <!-- 抽屉体 (高颜值磨砂玻璃) -->
     <Transition name="slide-up">
       <div v-if="tarvenStore.isSelectorOpen"
+        v-guide="'tarven-selector'"
         class="fixed bottom-0 left-0 right-0 z-sheet bg-white dark:bg-zinc-900 rounded-t-3xl shadow-2xl p-5 flex flex-col border-t border-black/10 dark:border-white/10"
         style="padding-right: calc(var(--vcp-safe-right, 0px) + 1.25rem); padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 12px); padding-left: calc(var(--vcp-safe-left, 0px) + 1.25rem);">
         

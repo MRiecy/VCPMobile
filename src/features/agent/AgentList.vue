@@ -8,6 +8,7 @@ import { useSettingsStore } from "../../core/stores/settings";
 import { useOverlayStore } from "../../core/stores/overlay";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import { sortByOrder } from "./agentOrder";
+import { activeSwipeId, currentSwipeX, MAX_SWIPE } from "./swipeController";
 
 const props = defineProps<{
   searchQuery: string;
@@ -42,8 +43,6 @@ const orderedAgents = computed(() => {
 
 // --- Shared Swipe State ---
 const isSorting = ref(false);
-const activeSwipeId = ref<string | null>(null);
-const currentSwipeX = ref(0);
 let startX = 0;
 let startY = 0;
 const isDragging = ref(false);
@@ -125,7 +124,6 @@ let isVerticalScroll = false;
 let hasDeterminedDirection = false;
 let isStartedAsSwiped = false;
 const SWIPE_THRESHOLD = 50;
-const MAX_SWIPE = 80;
 
 const onTouchStart = (e: TouchEvent, id: string) => {
   if (isSorting.value) return;
@@ -362,6 +360,7 @@ const filteredCombinedItems = computed(() => {
           <div class="absolute inset-0 rounded-xl overflow-hidden z-0 pointer-events-none">
             <div class="absolute inset-0 bg-black/10 dark:bg-white/10 flex items-center justify-start">
               <div
+                v-guide="'agent-row-settings-' + agent.id"
                 class="w-[80px] h-full flex items-center justify-center text-blue-600/70 dark:text-blue-400/70 hover:text-blue-600 dark:hover:text-blue-400 transition-colors cursor-pointer active:bg-black/5 dark:active:bg-white/5 pointer-events-auto"
                 @click.stop="goToSettings(agent.id, 'agent')"
                 @touchstart.stop>

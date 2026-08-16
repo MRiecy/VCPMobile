@@ -66,7 +66,6 @@ describe('GuideOverlay', () => {
           content: '内容一',
           placement: 'bottom',
           demo: 'press-hold',
-          demoHint: ['甲', '乙'],
         },
         { target: 'overlay-target', title: '第二步', content: '内容二' },
       ],
@@ -83,10 +82,15 @@ describe('GuideOverlay', () => {
     expect(wrapper.find('.guide-overlay').exists()).toBe(true);
     expect(wrapper.find('.guide-veil').exists()).toBe(true);
 
-    // 稳定性采样：连续两次采样一致后聚光出现
+    // 稳定性采样：连续两次采样一致后聚光出现（veil 挖洞层 + frame 描边层）
     vi.advanceTimersByTime(140);
     await nextTick();
     expect(wrapper.find('.guide-spot').exists()).toBe(true);
+    expect(wrapper.find('.guide-spot-veil').exists()).toBe(true);
+    expect(wrapper.find('.guide-spot-frame').exists()).toBe(true);
+    // 兜底暗纱让位（淡出过渡 + 帧调度完成后移除）
+    vi.advanceTimersByTime(500);
+    await nextTick();
     expect(wrapper.find('.guide-veil').exists()).toBe(false);
 
     // 卡片：[1/2] 计数 + 标题 + 正文 + 下一步按钮
@@ -97,10 +101,10 @@ describe('GuideOverlay', () => {
     expect(card.text()).toContain('内容一');
     expect(wrapper.find('.guide-btn').text()).toBe('下一步');
 
-    // press-hold 演示动画挂载（进度环 + 示意 chip）
+    // press-hold 演示动画挂载（进度环 + 手势图标）
     expect(wrapper.find('.guide-demo').exists()).toBe(true);
     expect(wrapper.find('.demo-ring-progress').exists()).toBe(true);
-    expect(wrapper.find('.demo-hint-chip').exists()).toBe(true);
+    expect(wrapper.find('.demo-icon-glyph').exists()).toBe(true);
 
     // 推进到第二步：纯说明步骤无演示动画
     await wrapper.find('.guide-btn').trigger('click');
@@ -170,6 +174,92 @@ describe('GuideOverlay', () => {
     await nextTick();
     expect(wrapper.find('.guide-overlay').exists()).toBe(false);
     expect(store.isCompleted('ov-dead')).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('runs step perform on entry and runs the undo stack in reverse on finish', async () => {
+    vi.useFakeTimers();
+    const performed: string[] = [];
+    const undone: string[] = [];
+    defineGuide({
+      id: 'ov-real',
+      title: 'real',
+      description: 'real',
+      steps: [
+        {
+          target: 'overlay-target',
+          title: '第一步',
+          content: '内容一',
+          perform: () => performed.push('s1'),
+          undo: () => undone.push('s1'),
+        },
+        {
+          target: 'overlay-target',
+          title: '第二步',
+          content: '内容二',
+          perform: () => performed.push('s2'),
+          undo: () => undone.push('s2'),
+        },
+      ],
+    });
+    const store = useGuideStore();
+    const target = createTarget('overlay-target');
+    target.setAttribute('data-target', 'overlay');
+
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-real');
+    await nextTick();
+    vi.advanceTimersByTime(140);
+    await nextTick();
+    // 步骤进入时执行一次 perform（稳定性重采样不重复执行）
+    expect(performed).toEqual(['s1']);
+
+    await wrapper.find('.guide-btn').trigger('click');
+    await nextTick();
+    expect(performed).toEqual(['s1', 's2']);
+    // 步间推进不执行 undo（真实业务状态跨步保留，由下一步 perform 自理）
+    expect(undone).toEqual([]);
+
+    vi.advanceTimersByTime(140);
+    await nextTick();
+    await wrapper.find('.guide-btn').trigger('click'); // 我知道了 → 整场结束
+    await nextTick();
+    expect(undone).toEqual(['s2', 's1']); // 逆序清理
+
+    wrapper.unmount();
+  });
+
+  it('keeps the spotlight mounted (no veil flash) while advancing steps', async () => {
+    vi.useFakeTimers();
+    defineGuide({
+      id: 'ov-glide',
+      title: 'glide',
+      description: 'glide',
+      steps: [
+        { target: 'overlay-target', title: '第一步', content: '内容一' },
+        { target: 'other-target', title: '第二步', content: '内容二' },
+      ],
+    });
+    const store = useGuideStore();
+    createTarget('overlay-target').setAttribute('data-target', 'overlay');
+    createTarget('other-target').setAttribute('data-target', 'overlay');
+
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-glide');
+    await nextTick();
+    vi.advanceTimersByTime(140);
+    await nextTick();
+    expect(wrapper.find('.guide-spot').exists()).toBe(true);
+    // 首步兜底暗纱完成淡出让位
+    vi.advanceTimersByTime(500);
+    await nextTick();
+
+    // 推进步骤：新目标未稳定期间旧聚光保留，不重现全屏暗纱（防闪回归）
+    await wrapper.find('.guide-btn').trigger('click');
+    await nextTick();
+    expect(wrapper.find('.guide-veil').exists()).toBe(false);
+    expect(wrapper.find('.guide-spot').exists()).toBe(true);
 
     wrapper.unmount();
   });
