@@ -13,6 +13,12 @@ defineGuide({
   id: 'diary-longpress',
   title: '长按日记项',
   description: '长按进入多选模式，批量移动 / 删除',
+  prepare: () => {
+    // 回放时打开日记中心，否则 diary-note-row 永不挂载、指引会静默越过。
+    const overlayStore = useOverlayStore();
+    overlayStore.popToRoot();
+    overlayStore.openDiaryCenter();
+  },
   trigger: {
     predicates: [
       {

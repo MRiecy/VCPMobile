@@ -6,7 +6,7 @@
  * 单击 = 真实展开附件面板；长按 = 真实弹出 VCP 上下文注入规则抽屉。
  */
 import { defineGuide } from '../registry';
-import { setAttachMenu } from '../../chat/attachMenuController';
+import { attachMenuOpen, setAttachMenu } from '../../chat/attachMenuController';
 import { useTarvenStore } from '../../../core/stores/tarvenStore';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useLayoutStore } from '../../../core/stores/layout';
@@ -16,6 +16,13 @@ defineGuide({
   id: 'plus-longpress',
   title: '长按聊天框 + 按钮',
   description: '单击附件菜单，长按上下文注入管理器',
+  prepare: () => {
+    // 回放时清空页面栈并关闭两侧抽屉，确保聊天框 + 按钮不被遮挡。
+    useOverlayStore().popToRoot();
+    const layoutStore = useLayoutStore();
+    layoutStore.setLeftDrawer(false);
+    layoutStore.setRightDrawer(false);
+  },
   trigger: {
     predicates: [
       {
@@ -46,8 +53,9 @@ defineGuide({
       content: '单击 + 按钮，展开附件面板。',
       placement: 'top',
       demo: 'tap',
-      // 真实业务：真实展开附件面板（attachMenuController 即按钮点击同源状态）。
+      // 真实业务：tap 动画落定（约 0.8s）后真实展开附件面板。
       perform: () => setAttachMenu(true),
+      performDelayMs: 800,
       undo: () => setAttachMenu(false),
     },
     {
@@ -55,6 +63,8 @@ defineGuide({
       title: '附件面板',
       content: '三种附件入口：拍摄、相册、文件。',
       placement: 'top',
+      // 用户提前推进时面板稍后展开，等待就绪再聚光。
+      waitFor: () => attachMenuOpen.value,
       undo: () => setAttachMenu(false),
     },
     {
@@ -63,11 +73,12 @@ defineGuide({
       content: '长按 + 约 0.6 秒，打开 VCP 上下文注入规则仓。',
       placement: 'top',
       demo: 'press-hold',
-      // 真实业务：收起附件面板，弹出真实的规则仓抽屉（TarvenSelector）。
+      // 真实业务：进度环走满 600ms 时收起附件、弹出真实规则仓抽屉。
       perform: () => {
         setAttachMenu(false);
         useTarvenStore().isSelectorOpen = true;
       },
+      performDelayMs: 600,
       undo: () => {
         setAttachMenu(false);
         useTarvenStore().isSelectorOpen = false;
@@ -78,6 +89,8 @@ defineGuide({
       title: '规则仓',
       content: '在此启用 / 停用注入规则；有规则启用时 + 按钮会显示绿色小点。',
       placement: 'top',
+      waitFor: () => useTarvenStore().isSelectorOpen,
+      waitTimeoutMs: 6000,
       undo: () => {
         useTarvenStore().isSelectorOpen = false;
       },

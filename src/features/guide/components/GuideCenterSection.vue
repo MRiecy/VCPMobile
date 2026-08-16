@@ -11,7 +11,9 @@ import { CircleCheck, Circle, Play, RotateCcw } from 'lucide-vue-next';
 import { allGuides } from '../registry';
 import { useGuideStore } from '../stores/guideStore';
 import { useOverlayStore } from '../../../core/stores/overlay';
+import { useLayoutStore } from '../../../core/stores/layout';
 import { useNotificationStore } from '../../../core/stores/notification';
+import { sidebarTab } from '../../agent/sidebarTab';
 
 const guideStore = useGuideStore();
 
@@ -35,11 +37,17 @@ const resetAll = async () => {
   });
   if (!confirmed) return;
   guideStore.resetProgress();
+  // 回到可触发环境：退出设置回主界面 + 打开左边栏并切到助理页，
+  // 使 sidebar-gestures 的前置条件齐备，返回主界面后自动开播。
+  const overlayStore = useOverlayStore();
+  overlayStore.popToRoot();
+  sidebarTab.value = 'agents';
+  useLayoutStore().setLeftDrawer(true);
   useNotificationStore().addNotification({
     id: 'guide-reset-done',
     toastOnly: true,
     title: '已重置全部指引进度',
-    message: '返回对应界面即可重新体验教学。',
+    message: '已返回主界面，教学将自动开始。',
     type: 'success',
     duration: 3000,
   });

@@ -9,6 +9,7 @@ import { useMediaQuery } from '@vueuse/core';
 import { defineGuide, hasTarget } from '../registry';
 import { sortByOrder } from '../../agent/agentOrder';
 import { swipeClose, swipeOpen } from '../../agent/swipeController';
+import { sidebarTab } from '../../agent/sidebarTab';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { useLayoutStore } from '../../../core/stores/layout';
@@ -43,7 +44,9 @@ defineGuide({
   title: '左边栏手势',
   description: '右滑查看设置入口，按住拖动调整排序',
   prepare: () => {
-    // 回放时确保左边栏可见（平板常驻栏下为无害 no-op）。
+    // 回放时清空页面栈、确保左边栏可见且处于「助理」页（话题页下 Agent 行不挂载）。
+    useOverlayStore().popToRoot();
+    sidebarTab.value = 'agents';
     useLayoutStore().setLeftDrawer(true);
   },
   trigger: {

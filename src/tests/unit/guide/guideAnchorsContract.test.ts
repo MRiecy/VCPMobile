@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import { createPinia, setActivePinia } from 'pinia';
 import chatViewSource from '@/features/chat/ChatView.vue?raw';
 import inputEnhancerSource from '@/features/chat/InputEnhancer.vue?raw';
 import agentListSource from '@/features/agent/AgentList.vue?raw';
 import diaryNoteListSource from '@/features/diary/components/DiaryNoteList.vue?raw';
 import contextMenuSheetSource from '@/components/ui/ContextMenuSheet.vue?raw';
 import tarvenSelectorSource from '@/features/chat/components/TarvenSelector.vue?raw';
+import { useOverlayStore } from '@/core/stores/overlay';
+import { useLayoutStore } from '@/core/stores/layout';
+import { sidebarTab } from '@/features/agent/sidebarTab';
 import '@/features/guide/guides';
 import { allGuides } from '@/features/guide/registry';
 
@@ -102,6 +106,48 @@ describe('guide anchor / definition contract', () => {
       expect(step.waitTimeoutMs).toBe(6000);
       expect(typeof step.waitFor).toBe('function');
     }
+  });
+
+  it('keeps the real-business timing specs (performDelayMs / waitFor)', () => {
+    const theme = guideById('theme-longpress');
+    expect(theme.steps[0].performDelayMs).toBe(600);
+    expect(theme.steps[1].waitFor).toBeDefined();
+
+    const plus = guideById('plus-longpress');
+    expect(plus.steps[0].performDelayMs).toBe(800);
+    expect(plus.steps[1].waitFor).toBeDefined();
+    expect(plus.steps[2].performDelayMs).toBe(600);
+    expect(plus.steps[3].waitFor).toBeDefined();
+    expect(plus.steps[3].waitTimeoutMs).toBe(6000);
+  });
+
+  it('prepares the right environment for manual replay', () => {
+    setActivePinia(createPinia());
+    const overlayStore = useOverlayStore();
+    const layoutStore = useLayoutStore();
+
+    // theme/plus：清页面栈 + 双关抽屉
+    layoutStore.setRightDrawer(true);
+    guideById('theme-longpress').prepare?.();
+    expect(overlayStore.pageStack).toEqual([]);
+    expect(layoutStore.leftDrawerOpen).toBe(false);
+    expect(layoutStore.rightDrawerOpen).toBe(false);
+
+    layoutStore.setRightDrawer(true);
+    guideById('plus-longpress').prepare?.();
+    expect(overlayStore.pageStack).toEqual([]);
+    expect(layoutStore.rightDrawerOpen).toBe(false);
+
+    // sidebar：清页面栈 + 切助理 Tab + 开左抽屉
+    sidebarTab.value = 'topics';
+    guideById('sidebar-gestures').prepare?.();
+    expect(sidebarTab.value).toBe('agents');
+    expect(layoutStore.leftDrawerOpen).toBe(true);
+    layoutStore.setLeftDrawer(false);
+
+    // diary：清页面栈 + 打开日记中心
+    guideById('diary-longpress').prepare?.();
+    expect(overlayStore.pageStack.map((p) => p.type)).toEqual(['diaryCenter']);
   });
 
   it('keeps every guide at 1–4 steps with the two-button model reachable', () => {

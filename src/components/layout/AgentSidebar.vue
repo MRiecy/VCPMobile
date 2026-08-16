@@ -10,12 +10,13 @@ import AgentList from '../../features/agent/AgentList.vue';
 import TopicList from '../../features/topic/TopicList.vue';
 import AgentsCreator from '../../features/agent/AgentsCreator.vue';
 import TopicCreator from '../../features/topic/TopicCreator.vue';
+import { sidebarTab } from '../../features/agent/sidebarTab';
 
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const sessionStore = useChatSessionStore();
 
-const activeTab = ref<'agents' | 'topics'>('agents');
+const activeTab = sidebarTab;
 const searchQuery = ref('');
 
 // 切换 Tab 时清空搜索框

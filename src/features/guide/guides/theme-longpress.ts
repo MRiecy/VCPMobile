@@ -19,6 +19,14 @@ defineGuide({
   id: 'theme-longpress',
   title: '长按亮暗模式按钮',
   description: '单击切换深浅主题，长按切换消息呈现样式',
+  prepare: () => {
+    // 回放时清空页面栈并关闭两侧抽屉，确保聊天 header 的目标不被遮挡
+    // （手机端抽屉 82vw 覆盖 header；平板常驻栏下为无害 no-op）。
+    useOverlayStore().popToRoot();
+    const layoutStore = useLayoutStore();
+    layoutStore.setLeftDrawer(false);
+    layoutStore.setRightDrawer(false);
+  },
   trigger: {
     requires: ['sidebar-gestures'],
     predicates: [
@@ -63,8 +71,9 @@ defineGuide({
       content: '长按约 0.6 秒，弹出「消息呈现」菜单。',
       placement: 'bottom',
       demo: 'press-hold',
-      // 真实业务：弹出真实的「消息呈现」菜单（ContextMenuSheet）。
+      // 真实业务：进度环走满 600ms（对齐 v-longpress 阈值）时弹出真实菜单。
       perform: openPresentationMenu,
+      performDelayMs: 600,
       undo: () => useOverlayStore().closeContextMenu(),
     },
     {
@@ -72,6 +81,7 @@ defineGuide({
       title: '消息呈现菜单',
       content: '在「气泡 / 统一 / 杂志」中选择一种排版样式。',
       placement: 'top',
+      waitFor: () => useOverlayStore().contextMenuConfig !== null,
       undo: () => useOverlayStore().closeContextMenu(),
     },
   ],

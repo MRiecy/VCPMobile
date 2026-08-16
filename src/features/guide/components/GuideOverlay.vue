@@ -80,6 +80,31 @@ let lifecycleUnlisten: UnlistenFn | null = null;
 let roInitialCallback = false;
 /** 本场指引已执行 perform 的步骤 undo 栈（整场结束时逆序执行）。 */
 let undoStack: Array<() => void> = [];
+/** 本场指引的延迟 perform 定时器（会话级：跨步仍触发，整场结束时清除）。 */
+let performTimers: Array<ReturnType<typeof setTimeout>> = [];
+
+const clearPerformTimers = () => {
+  for (const timer of performTimers) clearTimeout(timer);
+  performTimers = [];
+};
+
+/** 调度步骤真实业务：delay<=0 立即执行；否则延迟触发（跨步不取消）。 */
+const schedulePerform = (s: GuideStep) => {
+  if (!s.perform) return;
+  const fire = () => {
+    try {
+      s.perform?.();
+    } catch (e) {
+      console.warn('[Guide] perform() failed:', e);
+    }
+  };
+  const delay = s.performDelayMs ?? 0;
+  if (delay <= 0) {
+    fire();
+    return;
+  }
+  performTimers.push(setTimeout(fire, delay));
+};
 
 const runUndoStack = () => {
   const stack = undoStack;
@@ -348,13 +373,9 @@ const beginStep = () => {
     skipStep(token);
     return;
   }
-  // 步骤级真实业务（安全类：打开菜单/面板），先于目标轮询执行；
+  // 步骤级真实业务（安全类：打开菜单/面板），先于目标轮询调度；
   // 异常吞掉不阻塞教学；undo 入栈，整场结束时统一逆序清理。
-  try {
-    s.perform?.();
-  } catch (e) {
-    console.warn('[Guide] perform() failed:', e);
-  }
+  schedulePerform(s);
   if (s.undo) undoStack.push(s.undo);
 
   const id = targetIdOf();
@@ -412,6 +433,7 @@ watch(isActive, (active) => {
   if (active) return;
   stepToken += 1;
   clearTimers();
+  clearPerformTimers();
   targetEl = null;
   lastSample = null;
   spotRect.value = null;

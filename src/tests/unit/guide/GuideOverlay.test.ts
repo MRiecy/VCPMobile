@@ -263,4 +263,87 @@ describe('GuideOverlay', () => {
 
     wrapper.unmount();
   });
+
+  it('fires a delayed perform on schedule, even after advancing steps', async () => {
+    vi.useFakeTimers();
+    const performed: string[] = [];
+    defineGuide({
+      id: 'ov-delay',
+      title: 'delay',
+      description: 'delay',
+      steps: [
+        {
+          target: 'overlay-target',
+          title: '第一步',
+          content: '内容一',
+          perform: () => performed.push('s1'),
+          performDelayMs: 800,
+        },
+        {
+          target: 'overlay-target',
+          title: '第二步',
+          content: '内容二',
+          // 提前推进时延迟 perform 尚未弹出真实业务，由 waitFor 接住。
+          waitFor: () => performed.includes('s1'),
+        },
+      ],
+    });
+    const store = useGuideStore();
+    createTarget('overlay-target').setAttribute('data-target', 'overlay');
+
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-delay');
+    await nextTick();
+    expect(performed).toEqual([]);
+
+    vi.advanceTimersByTime(140);
+    await nextTick();
+    // 提前推进（累计 300ms，未到 800ms）
+    vi.advanceTimersByTime(160);
+    await wrapper.find('.guide-btn').trigger('click');
+    await nextTick();
+    expect(performed).toEqual([]);
+
+    // 到点后跨步触发（会话级定时器不随步骤切换取消）
+    vi.advanceTimersByTime(500);
+    await nextTick();
+    expect(performed).toEqual(['s1']);
+
+    wrapper.unmount();
+  });
+
+  it('cancels a pending delayed perform when the guide ends', async () => {
+    vi.useFakeTimers();
+    const performSpy = vi.fn();
+    defineGuide({
+      id: 'ov-delay-cancel',
+      title: 'cancel',
+      description: 'cancel',
+      steps: [
+        {
+          target: 'overlay-target',
+          title: '唯一',
+          content: '内容',
+          perform: performSpy,
+          performDelayMs: 5000,
+        },
+      ],
+    });
+    const store = useGuideStore();
+    createTarget('overlay-target').setAttribute('data-target', 'overlay');
+
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-delay-cancel');
+    await nextTick();
+    vi.advanceTimersByTime(140);
+    await nextTick();
+    expect(performSpy).not.toHaveBeenCalled();
+
+    await wrapper.find('.guide-btn').trigger('click'); // 我知道了 → 整场结束
+    await nextTick();
+    vi.advanceTimersByTime(5000);
+    expect(performSpy).not.toHaveBeenCalled(); // 会话结束清除延迟定时器
+
+    wrapper.unmount();
+  });
 });

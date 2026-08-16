@@ -28,6 +28,12 @@ export interface GuideStep {
    */
   perform?: () => void;
   /**
+   * perform 的延迟触发（ms，默认 0）：用于让手势演示先播放、真实业务在
+   * 手势落定（如长按进度环走满 600ms）时再弹出。定时器为会话级——
+   * 用户提前推进步骤时仍会触发，由后续步骤的 waitFor 接住；整场结束时清除。
+   */
+  performDelayMs?: number;
+  /**
    * 整场结束时的收尾清理（幂等，可多次调用；步间不执行——
    * 步间清理由下一步 perform 显式负责）。
    */
