@@ -777,7 +777,10 @@ mod tests {
             (TerminalIntentTarget::Cancelled, VcpCliJobState::Cancelled),
             (TerminalIntentTarget::TimedOut, VcpCliJobState::TimedOut),
             (TerminalIntentTarget::Failed, VcpCliJobState::Failed),
-            (TerminalIntentTarget::Interrupted, VcpCliJobState::Interrupted),
+            (
+                TerminalIntentTarget::Interrupted,
+                VcpCliJobState::Interrupted,
+            ),
         ] {
             let mut ledger = JobLedger::empty(8);
             ledger.insert_job(running_job(8)).expect("insert job");

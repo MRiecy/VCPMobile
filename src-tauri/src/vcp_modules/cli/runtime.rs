@@ -448,9 +448,10 @@ impl MobileCliRuntimeState {
                 self.cancel_action(app, &request.operation_id, &job_id, false)
                     .await?
             }
-            VcpCliAction::List => self
-                .list_action(app, &request.operation_id, request.session_id.as_deref())
-                .await?,
+            VcpCliAction::List => {
+                self.list_action(app, &request.operation_id, request.session_id.as_deref())
+                    .await?
+            }
         };
 
         let mut owner = self.inner.lock().await;
@@ -1006,8 +1007,9 @@ impl MobileCliRuntimeState {
                     target: TerminalIntentTarget::Interrupted,
                     operation_id: format!("lease-loss-{}", Uuid::new_v4()),
                     requested_at_ms: now_ms()?,
-                    reason: "CLI foreground lease was lost; the runtime will contain the process tree."
-                        .to_string(),
+                    reason:
+                        "CLI foreground lease was lost; the runtime will contain the process tree."
+                            .to_string(),
                 },
                 now_ms()?,
             );
