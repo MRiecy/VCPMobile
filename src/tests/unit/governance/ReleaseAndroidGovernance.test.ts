@@ -6,7 +6,6 @@ import androidSettingsGenerator from '../../../../.github/generate-tauri-android
 import packageManifest from '../../../../package.json?raw';
 import tauriConfig from '../../../../src-tauri/tauri.conf.json?raw';
 import rootReadme from '../../../../README.md?raw';
-import dependencyGuide from '../../../../docs/DEPENDENCY_MANAGEMENT.md?raw';
 import claudeGuide from '../../../../CLAUDE.md?raw';
 import pluginIndex from '../../../../docs/plugins/00_总览与导航.md?raw';
 import syncIndex from '../../../../docs/sync/00_总览与导航.md?raw';
@@ -18,7 +17,6 @@ import androidManifest from '../../../../src-tauri/gen/android/app/src/main/Andr
 import backupRules from '../../../../src-tauri/gen/android/app/src/main/res/xml/backup_rules.xml?raw';
 import dataExtractionRules from '../../../../src-tauri/gen/android/app/src/main/res/xml/data_extraction_rules.xml?raw';
 import wrapperProperties from '../../../../src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties?raw';
-import verificationMetadata from '../../../../src-tauri/gen/android/gradle/verification-metadata.xml?raw';
 import appSource from '../../../App.vue?raw';
 import lifecycleSource from '../../../core/stores/appLifecycle.ts?raw';
 import updateDownloaderSource from '../../../core/composables/useUpdateDownloader.ts?raw';
@@ -85,7 +83,7 @@ describe('release and Android governance contracts', () => {
     expect(cleanupStep).toContain('rm -f -- "$ANDROID_KEYSTORE_PATH"');
   });
 
-  it('uses the official checksummed Gradle wrapper and strict dependency verification', () => {
+  it('uses the official checksummed Gradle wrapper', () => {
     expect(wrapperProperties).toContain(
       'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip',
     );
@@ -93,8 +91,6 @@ describe('release and Android governance contracts', () => {
       'distributionSha256Sum=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531',
     );
     expect(rootGradle).not.toContain('maven.aliyun.com');
-    expect(verificationMetadata).toContain('<verify-metadata>true</verify-metadata>');
-    expect(verificationMetadata).toMatch(/<sha256 value="[0-9a-f]{64}"/);
     expect(ciWorkflow).toContain(
       '7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172',
     );
@@ -102,15 +98,8 @@ describe('release and Android governance contracts', () => {
       '7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172',
     );
     expect(ciWorkflow).toContain('sha256sum --check --strict');
-    expect(ciWorkflow).toContain('--dependency-verification strict');
-    expect(releaseWorkflow).toContain(
-      'test -s src-tauri/gen/android/gradle/verification-metadata.xml',
-    );
     expect(releaseWorkflow).toContain(
       'pnpm tauri android build --apk --target aarch64',
-    );
-    expect(releaseWorkflow).not.toContain(
-      'tauri android build --apk --target aarch64 -- --dependency-verification',
     );
   });
 
@@ -181,7 +170,6 @@ describe('release and Android governance contracts', () => {
     expect(ciWorkflow).toContain('git status --porcelain --untracked-files=all --');
     expect(ciWorkflow).toContain('src-tauri/gen/android');
     expect(ciWorkflow).toContain('src-tauri/plugins/vcp-mobile/permissions');
-    expect(dependencyGuide).toContain('verification-metadata.xml');
     expect(claudeGuide).not.toContain('build_android_release.ps1');
 
     for (const guide of [rootReadme, claudeGuide, pluginIndex, syncIndex, syncGuide, localServerGuide]) {

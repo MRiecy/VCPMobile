@@ -59,7 +59,7 @@
 ## 🛠 工程与质量
 
 - **Agent 安全调试工具链**：新增低噪声 USB/HMR Debug Agent（`pnpm android:debug:*`），PID 隔离日志、有限快照，不触碰正式安装包。
-- **构建供应链加固**：Gradle 依赖严格校验（verification-metadata.xml）、CI 修复、`tauri.settings.gradle` 停止跟踪。
+- **构建工程修复**：CI 修复、`tauri.settings.gradle` 停止跟踪。
 - **测试规模**：Rust 内联单测 323 通过；Vitest 前端测试 279 通过（45 文件，其中指引引擎专项 48 项，覆盖状态机、队列、锚点契约、触发接线与指令）；`vue-tsc` + `cargo check` + 生产构建全绿。
 - **文档**：WebView 性能兼容研究、日记架构、同步 Wire 1.2 契约、CLI 收敛 ADR 与真机验收存档，以及指引系统专项讨论档案（Coachmark 方案、教学点证据、触发边界与三方审查）。
 

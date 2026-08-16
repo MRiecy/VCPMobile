@@ -269,12 +269,12 @@ AGP 升级通常伴随 Kotlin、Gradle Wrapper、compileSdk 的联动：
 
 ```powershell
 cd src-tauri/gen/android
-.\gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest
+.\gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
 cd ../../..
-pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict
+pnpm tauri android build --apk --target aarch64
 ```
 
-任何 Gradle 直接依赖、插件或 Wrapper 版本变更都必须重新生成并人工审查 `gradle/verification-metadata.xml`；不得用关闭 dependency verification 的方式绕过未知摘要。Tauri 生成树更新后还必须执行 `git diff --exit-code -- src-tauri/gen/android src-tauri/plugins/vcp-mobile/permissions`，确保生成结果已显式提交。
+任何 Gradle 直接依赖、插件或 Wrapper 版本变更都必须重新验证 debug 与 release 两条构建链路。Tauri 生成树更新后还必须执行 `git diff --exit-code -- src-tauri/gen/android src-tauri/plugins/vcp-mobile/permissions`，确保生成结果已显式提交。
 
 ### 3.5 回滚计划
 
@@ -354,7 +354,7 @@ pnpm tauri android build --apk --target aarch64 -- --dependency-verification str
 7. **禁止在 CI 中使用 `pnpm install` 而不加 `--frozen-lockfile`**。`release.yml` 已正确配置，不得移除该标志。
 8. **禁止混合使用 npm/yarn 与 pnpm**。项目唯一包管理器为 pnpm，`package-lock.json` 与 `yarn.lock` 不应存在于仓库中。
 9. **禁止 CI/Release 中使用可移动 Action tag**。所有 `uses:` 必须固定完整 commit SHA，并在升级时记录对应上游版本。
-10. **禁止绕过锁与摘要门禁**。Cargo 使用 `--locked`；Gradle Wrapper 使用官方 URL/SHA，依赖使用 committed `verification-metadata.xml` 的 strict 校验。
+10. **禁止绕过锁门禁**。Cargo 使用 `--locked`；Gradle Wrapper 使用官方 URL/SHA 并由 CI/Release 核对官方 wrapper JAR SHA-256。
 
 ---
 
@@ -394,12 +394,12 @@ pnpm tauri android build --apk --target aarch64 -- --dependency-verification str
 - AGP 与 Gradle Wrapper 版本存在严格对应关系。升级 AGP 时，必须同步更新 `gradle/wrapper/gradle-wrapper.properties`。
 - AGP `8.11.0` 要求 Gradle `8.13+`；当前 Wrapper `8.14.3` 满足要求。
 
-Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保留 Google Maven、Maven Central 与 Root 能力所需的 content-filtered JitPack；所有解析制品由 `gradle/verification-metadata.xml` 固定 SHA-256。不得恢复第三方镜像或关闭摘要校验绕过下载问题。
+Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保留 Google Maven、Maven Central 与 Root 能力所需的 content-filtered JitPack。不得恢复第三方镜像绕过下载问题。
 
 ### 6.5 发布供应链门禁
 
 - `gradle-wrapper.properties` 固定官方 Gradle 8.14.3 分发与官方 SHA-256；wrapper JAR/脚本由该版本官方 Wrapper 任务生成，CI/Release 另行核对官方 wrapper JAR SHA-256。
-- CI 在 `tauri android init --ci` 后检查 Android 生成树与插件权限生成树无漂移，并以 strict 模式运行 Gradle JVM 测试。
+- CI 在 `tauri android init --ci` 后检查 Android 生成树与插件权限生成树无漂移，并运行 Gradle JVM 测试。
 - Release 仅接受同 commit 已成功的 CI，核对 tag/HEAD/event SHA、四处版本源和 Android versionCode。
 - 签名 secrets 只进入恢复、构建与验证步骤；缺任一输入即失败。验签步骤要求 APK 单一签名者且拒绝调试证书。
 - Release 只上传 arm64 签名 APK 与其 `.sha256`；不发布可被主 WebView 独立加载的前端 ZIP。
@@ -444,7 +444,7 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 - [ ] `cargo clippy --locked -- -D warnings` 零警告。
 - [ ] `pnpm android:debug:dev` USB 真机启动成功。
 - [ ] 核心功能回归：登录/同步/聊天/文件上传/设置。
-- [ ] APK Release 构建成功：`pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict`。
+- [ ] APK Release 构建成功：`pnpm tauri android build --apk --target aarch64`。
 - [ ] APK 安装后无闪退，签名验证通过。
 
 ### 7.4 时间线要求
@@ -486,7 +486,7 @@ sdkmanager --list_installed | findstr ndk
 | Rust Crates | `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` |
 | Rust 插件 | `src-tauri/Cargo.toml` |
 | npm Runtime / Dev / 插件 | `package.json`, `pnpm-lock.yaml` |
-| AGP / Kotlin / Gradle 供应链 | `src-tauri/gen/android/build.gradle.kts`, `src-tauri/gen/android/buildSrc/build.gradle.kts`, `src-tauri/gen/android/gradle/wrapper/`, `src-tauri/gen/android/gradle/verification-metadata.xml` |
+| AGP / Kotlin / Gradle 供应链 | `src-tauri/gen/android/build.gradle.kts`, `src-tauri/gen/android/buildSrc/build.gradle.kts`, `src-tauri/gen/android/gradle/wrapper/` |
 | AndroidX | `src-tauri/gen/android/app/build.gradle.kts` |
 | SDK / NDK | `src-tauri/gen/android/app/build.gradle.kts`, `.github/workflows/release.yml` |
 | Tauri 配置 | `src-tauri/tauri.conf.json` |

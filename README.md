@@ -524,7 +524,7 @@ vue-tsc --noEmit
 cd src-tauri; cargo check --locked
 
 # 7. Build Release APK
-pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict
+pnpm tauri android build --apk --target aarch64
 ```
 
 ---
@@ -545,7 +545,7 @@ pnpm tauri android build --apk --target aarch64 -- --dependency-verification str
 | `pnpm android:debug:status -- --json` | 统一 Debug CLI | 有界设备/WebView/包/进程状态 |
 | `pnpm android:debug:logs -- --lines 80` | 统一 Debug CLI | Debug PID 日志，不清空全局 logcat |
 | `pnpm android:debug:snapshot -- --screenshot` | 统一 Debug CLI | 状态、有限日志和可选单张截图落盘 |
-| `pnpm tauri android build --apk --target aarch64 -- --dependency-verification strict` | — | Release APK 构建（需四项签名环境变量）|
+| `pnpm tauri android build --apk --target aarch64` | — | Release APK 构建（需四项签名环境变量）|
 
 当前仓库不提供根 `scripts/` 目录。Android Debug 统一使用 tracked
 `tests/e2e-android/scripts/android-debug-agent.cjs`，完整规范见

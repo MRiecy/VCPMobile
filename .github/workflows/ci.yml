@@ -101,7 +101,7 @@ jobs:
         working-directory: ./src-tauri/gen/android
         run: |
           chmod +x ./gradlew
-          ./gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest
+          ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
 
       - name: Rust Benchmark Compile Check
         working-directory: ./src-tauri

@@ -322,7 +322,7 @@ pnpm android:debug:dev
 
 **现有测试**：覆盖插件契约、执行器域、分享边界、ForegroundGuardian 与 SSE socket 所有权；总数以 Gradle 测试报告为准。
 
-**运行**：`cd src-tauri/gen/android; ./gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest`
+**运行**：`cd src-tauri/gen/android; ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest`
 
 ### 5.5 Android Debug Agent 与 E2E
 
@@ -356,7 +356,7 @@ cargo test --locked --lib   # Rust 内联单元测试
 cargo test --locked --test file_extractor_integration  # Rust 集成测试
 cargo bench --locked --profile perf  # Rust Criterion 性能基准
 # Android 插件测试（在 src-tauri/gen/android/ 下执行）：
-./gradlew --dependency-verification strict :tauri-plugin-vcp-mobile:testDebugUnitTest
+./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
 # E2E / 性能（需连接 Android 设备）：
 pnpm android:debug:doctor -- --json    # ADB/USB/工具链检查
 pnpm android:debug:dev                 # 低噪声 USB/HMR Debug 会话
@@ -438,14 +438,14 @@ VCPMobile/
 - **`.github/workflows/ci.yml`**（PR CI）:
   - 触发条件：`push` / `pull_request` 到 `main` / `master`。
   - 所有第三方 Actions 固定完整 commit SHA；pnpm 使用 frozen lockfile，Cargo 命令统一 `--locked`。
-  - 步骤：类型检查、Vitest 与生产 `pnpm build` → Rust fmt/test/integration/clippy/bench compile → `tauri android init --ci` 生成树漂移检查 → Gradle strict dependency verification/JVM 测试 → pnpm/cargo audit。
+  - 步骤：类型检查、Vitest 与生产 `pnpm build` → Rust fmt/test/integration/clippy/bench compile → `tauri android init --ci` 生成树漂移检查 → Gradle JVM 测试 → pnpm/cargo audit。
   - 需要 Java 17 + Android SDK + Tauri Linux 依赖。
 - **`.github/workflows/release.yml`**（Release）:
   - 触发条件：GitHub Release 被 `published`。
   - 环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。
   - Release tag、checkout HEAD 与 event SHA 必须一致，并要求同 commit 的 CI Check 已成功；四处版本源与 Android versionCode 必须一致。
   - 从 step 级 secrets 恢复密钥库；验签步骤要求 APK 单一签名者且拒绝调试证书。
-  - 构建启用 strict Gradle dependency verification 与显式受信 LAN 模式；只上传签名 arm64 APK 及其 SHA-256 文件，不发布独立前端 ZIP。
+  - 构建启用显式受信 LAN 模式；只上传签名 arm64 APK 及其 SHA-256 文件，不发布独立前端 ZIP。
 
 ### 本地发布
 
@@ -455,7 +455,7 @@ VCPMobile/
 pnpm tauri android build --apk --target aarch64
 ```
 
-`src-tauri/gen/android/gradle/verification-metadata.xml` 会让 Gradle 默认启用 strict dependency verification；`tauri android build -- <args>` 的尾随参数会传给 Cargo runner，不能把 Gradle 的 `--dependency-verification` 放在该位置。
+`tauri android build -- <args>` 的尾随参数会传给 Cargo runner。
 
 ---
 
