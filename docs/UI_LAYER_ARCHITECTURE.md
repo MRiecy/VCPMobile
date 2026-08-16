@@ -22,7 +22,7 @@
 
 ## 2. 层级体系总表
 
-项目采用 **12 级分层架构**（L0–L11），每层间隔 10，预留插入空间。
+项目采用 **13 级分层架构**（L0–L12），每层间隔 10，预留插入空间。
 
 | 层级 | 语义名 | 数值 | 用途 | 代表性组件 |
 |------|--------|------|------|-----------|
@@ -36,13 +36,14 @@
 | L7 | `editor` | 70 | 最高级全屏编辑器 | `HtmlPreviewBlock` (fullscreen) |
 | L8 | `viewer` | 80 | 全屏查看器 / 编辑器 | `AttachmentViewer`, `FullScreenEditor`, `AvatarCropper` |
 | L9 | `toast` | 90 | Toast 通知 | `ToastManager` |
-| L10 | `boot` | 100 | 启动屏 | `BootScreen` |
-| L11 | `gate` | 110 | 权限门禁页 | `PermissionGate` |
+| L10 | `guide` | 95 | 教学引导覆盖层 | `GuideOverlay` |
+| L11 | `boot` | 100 | 启动屏 | `BootScreen` |
+| L12 | `gate` | 110 | 权限门禁页 | `PermissionGate` |
 
 **层叠秩序口诀**：
 
 ```
-内容 < 局部 < 抽屉 < 覆盖 < 页面 < 弹层 < 对话框 < 编辑器 < 查看器 < Toast < 启动 < 门禁
+内容 < 局部 < 抽屉 < 覆盖 < 页面 < 弹层 < 对话框 < 编辑器 < 查看器 < Toast < 教学指引 < 启动 < 门禁
 ```
 
 ---
@@ -67,6 +68,7 @@
   --layer-editor: 70;
   --layer-viewer: 80;
   --layer-toast: 90;
+  --layer-guide: 95;
   --layer-boot: 100;
   --layer-gate: 110;
 }
@@ -91,6 +93,7 @@ theme: {
     editor: '70',
     viewer: '80',
     toast: '90',
+    guide: '95',
     boot: '100',
     gate: '110',
   },
@@ -114,6 +117,7 @@ export const LAYER_DIALOG = 60;
 export const LAYER_EDITOR = 70;
 export const LAYER_VIEWER = 80;
 export const LAYER_TOAST = 90;
+export const LAYER_GUIDE = 95;
 export const LAYER_BOOT = 100;
 export const LAYER_GATE = 110;
 

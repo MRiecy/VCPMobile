@@ -37,6 +37,7 @@
   --layer-editor: 70;
   --layer-viewer: 80;
   --layer-toast: 90;
+  --layer-guide: 95;
   --layer-boot: 100;
   --layer-gate: 110;
 }

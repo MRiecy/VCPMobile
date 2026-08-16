@@ -57,6 +57,7 @@ export default defineConfig({
       viewer: '80',
       editor: '70',
       toast: '90',
+      guide: '95',
       boot: '100',
       gate: '110',
     },

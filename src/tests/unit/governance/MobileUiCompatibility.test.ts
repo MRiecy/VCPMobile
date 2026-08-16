@@ -142,6 +142,7 @@ describe('Android mobile UI compatibility contracts', () => {
       editor: 70,
       viewer: 80,
       toast: 90,
+      guide: 95,
       boot: 100,
       gate: 110,
     };

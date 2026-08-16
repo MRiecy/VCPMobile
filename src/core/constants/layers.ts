@@ -15,6 +15,7 @@
  *   editor   (70)  → HtmlPreviewBlock（全屏HTML）
  *   viewer   (80)  → AttachmentViewer、FullScreenEditor、AvatarCropper
  *   toast    (90)  → Toast 通知
+ *   guide    (95)  → GuideOverlay（教学引导覆盖层）
  *   boot     (100) → BootScreen（启动屏）
  *   gate     (110) → PermissionGate（权限引导页）
  */
@@ -29,6 +30,7 @@ export const LAYER_DIALOG = 60;
 export const LAYER_EDITOR = 70;
 export const LAYER_VIEWER = 80;
 export const LAYER_TOAST = 90;
+export const LAYER_GUIDE = 95;
 export const LAYER_BOOT = 100;
 export const LAYER_GATE = 110;
 
@@ -57,7 +59,8 @@ export type LayerName =
   | 'viewer'
   | 'editor'
   | 'boot'
-  | 'gate';
+  | 'gate'
+  | 'guide';
 
 /** 层级名称到数值的映射 */
 export const LAYER_MAP: Record<LayerName, number> = {
@@ -73,4 +76,5 @@ export const LAYER_MAP: Record<LayerName, number> = {
   editor: LAYER_EDITOR,
   boot: LAYER_BOOT,
   gate: LAYER_GATE,
+  guide: LAYER_GUIDE,
 };

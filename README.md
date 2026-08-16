@@ -158,7 +158,7 @@ v1.1.2 引入的认知广播观察面板，让 AI 在 RAG 检索、工具调用�
 
 ### 🏗️ Semantic Z-Index / SlidePage 虚拟导航
 
-12 级语义化层级系统，彻底消灭 `z-[999]` 魔法数字。
+13 级语义化层级系统，彻底消灭 `z-[999]` 魔法数字。
 
 | 语义名 | 数值 | 用途 |
 |--------|------|------|
@@ -172,6 +172,7 @@ v1.1.2 引入的认知广播观察面板，让 AI 在 RAG 检索、工具调用�
 | `editor` | 70 | HtmlPreviewBlock 全屏 HTML 预览 |
 | `viewer` | 80 | AttachmentViewer、FullScreenEditor、AvatarCropper |
 | `toast` | 90 | Toast 通知 |
+| `guide` | 95 | 教学引导覆盖层 |
 | `boot` | 100 | 启动屏 |
 | `gate` | 110 | 权限引导页 |
 
