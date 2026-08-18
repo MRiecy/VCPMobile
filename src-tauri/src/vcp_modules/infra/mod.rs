@@ -1,3 +1,4 @@
+pub mod admin_api;
 pub mod file_extractor;
 pub mod file_manager;
 pub mod high_speed_channel;

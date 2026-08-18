@@ -94,6 +94,7 @@ use vcp_modules::vcp_info_service::{
 use vcp_modules::vcp_log_service::{
     init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
 };
+use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -304,6 +305,8 @@ pub fn run() {
             diary_move_notes,
             diary_delete_notes,
             diary_delete_empty_folder,
+            logcenter_fetch,
+            logcenter_clear_server,
             handle_group_chat_message,
             invite_group_member_to_speak,
             create_agent,
