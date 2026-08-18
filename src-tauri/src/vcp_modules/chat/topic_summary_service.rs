@@ -1,7 +1,6 @@
 use crate::vcp_modules::infra::utils::normalize_vcp_url;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, State};
@@ -67,11 +66,10 @@ pub async fn summarize_topic(
         recent_content, DEFAULT_SUMMARY_PROMPT
     );
 
-    // 3. 调用 AI
-    let client = Client::builder()
-        .timeout(Duration::from_secs(AI_REQUEST_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // 3. 调用 AI（共享 ChatStream 画像 Client；总超时属请求级策略，留在 RequestBuilder 上）
+    let client = crate::vcp_modules::infra::http_clients::client(
+        crate::vcp_modules::infra::http_clients::HttpProfile::ChatStream,
+    );
 
     let model = if settings.topic_summary_model.is_empty() {
         DEFAULT_SUMMARY_MODEL.to_string()
@@ -90,6 +88,7 @@ pub async fn summarize_topic(
             "max_tokens": AI_MAX_TOKENS,
             "stream": false
         }))
+        .timeout(Duration::from_secs(AI_REQUEST_TIMEOUT_SECS))
         .send()
         .await
         .map_err(|e| e.to_string())?;

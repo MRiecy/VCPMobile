@@ -461,11 +461,9 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
         }
     }
 
-    // === 6. 配置网络请求 ===
-    let client = Client::builder()
-        .tcp_keepalive(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // === 6. 配置网络请求（共享 ChatStream 画像 Client，克隆仅复制 Arc 句柄、共享连接池） ===
+    let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream)
+        .clone();
 
     // === 7. 分发至专职处理器执行请求 ===
     if is_stream {
@@ -1763,6 +1761,8 @@ pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result
         models_url
     );
 
+    // 一次性连接探测：按 http_clients.rs 规矩 4 的有据例外，瞬时 Client 用完即弃，
+    // 避免探测结果受共享池内半死连接干扰。
     let client = Client::builder()
         .timeout(Duration::from_secs(10)) // 测试连接 10s 超时即可
         .build()
@@ -2234,7 +2234,9 @@ async fn resume_claimed_generation<R: Runtime>(
         last_event_index
     );
 
-    let client = Client::builder().build().map_err(|e| e.to_string())?;
+    // 共享 ChatStream 画像 Client（见 http_clients.rs；克隆仅复制 Arc 句柄）
+    let client =
+        super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
     let pool = app.state::<DbState>().pool.clone();
 

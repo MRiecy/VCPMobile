@@ -215,8 +215,10 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         return Err("Invalid VCP Server URL".to_string());
     };
 
-    // 3. 请求远程接口
-    let client = reqwest::Client::new();
+    // 3. 请求远程接口（共享 AdminApi 画像 Client，见 infra/http_clients.rs）
+    let client = crate::vcp_modules::infra::http_clients::client(
+        crate::vcp_modules::infra::http_clients::HttpProfile::AdminApi,
+    );
     let api_url = format!("{}/admin_api/emojis/list", base_url);
 
     let mut req = client.get(&api_url);
