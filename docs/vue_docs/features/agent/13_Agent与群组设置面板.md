@@ -238,6 +238,15 @@ interface AgentConfig {
 | `groupPrompt` | `string` | 群组全局背景提示词 |
 | `invitePrompt` | `string` | 邀请某位助手发言时的提示语模板，支持 `{{VCPChatAgentName}}` 占位符 |
 
+### 3.4 发言模式帮助说明（GroupModeHelpDialog）
+
+「群聊模式」区块标题右侧有问号按钮（经 `SettingsSection` 的 `action` 插槽注入），
+点击弹出 `GroupModeHelpDialog.vue`（z-dialog 居中弹窗，接入 `useModalHistory`
+返回手势栈）。内容覆盖：三种发言模式的触发规则、strict/natural 的 Tag 匹配差异、
+以及两条隐式行为——**新成员默认 Tag 为名字**（strict 下不带 @ 的名字提及也会触发）
+与 **@所有人 仅 naturerandom 有效**。规则文案应与
+`group_speaking_policy.rs` 的策略实现对齐维护。
+
 ---
 
 ## 4. 头像系统

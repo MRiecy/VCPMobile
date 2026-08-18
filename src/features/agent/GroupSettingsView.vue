@@ -12,6 +12,7 @@ import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import SettingsSection from "../../components/settings/SettingsSection.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 import SettingsSwitch from "../../components/settings/SettingsSwitch.vue";
+import GroupModeHelpDialog from "./GroupModeHelpDialog.vue";
 
 interface GroupConfig {
   id: string;
@@ -259,6 +260,9 @@ const tagModeOptions = [
   { value: "strict", label: "严格模式", desc: "原始行为，严格匹配标签" },
   { value: "natural", label: "自然模式", desc: "区分 Tag 来源，避免循环触发" },
 ];
+
+// 「群聊模式」帮助说明弹窗
+const showModeHelp = ref(false);
 </script>
 
 <template>
@@ -345,6 +349,15 @@ const tagModeOptions = [
 
         <!-- 3. Chat Modes -->
         <SettingsSection title="群聊模式" accent-color="bg-purple-500">
+          <template #action>
+            <button
+              class="w-6 h-6 flex items-center justify-center rounded-full text-primary-text opacity-40 hover:opacity-80 active:text-blue-500 active:scale-90 transition-all"
+              aria-label="发言模式说明"
+              @click="showModeHelp = true"
+            >
+              <div class="i-heroicons-question-mark-circle text-lg"></div>
+            </button>
+          </template>
           <div class="card-modern space-y-4">
             <div>
               <label class="text-[10px] uppercase font-bold opacity-40 mb-3 block">发言逻辑 (Mode)</label>
@@ -435,6 +448,9 @@ const tagModeOptions = [
   </SlidePage>
   <!-- 头像裁剪器 -->
   <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="isCropping = false" @confirm="onCropConfirm" />
+
+  <!-- 群聊模式帮助说明 -->
+  <GroupModeHelpDialog v-model="showModeHelp" />
 </template>
 
 <style scoped>
