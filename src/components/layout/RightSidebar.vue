@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Settings,
   SquareTerminal,
+  ScrollText,
 } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -55,6 +56,12 @@ const openMoreTool = (open: () => void) => {
 };
 
 const moreTools = [
+  {
+    id: 'log-center',
+    label: '日志中心',
+    icon: ScrollText,
+    open: () => overlayStore.openLogCenter(),
+  },
   {
     id: 'vcp-cli',
     label: 'VCP CLI',
@@ -241,7 +248,7 @@ watch(
             <strong class="block mt-0.5 text-[13px] text-primary-text">更多功能</strong>
           </header>
 
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-3 gap-2">
             <button
               v-for="tool in moreTools"
               :key="tool.id"
