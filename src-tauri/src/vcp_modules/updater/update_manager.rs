@@ -15,8 +15,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 pub const UPDATE_STATUS_EVENT: &str = "vcp-update://status";
 
 const GITHUB_API_LATEST_URL: &str = "https://api.github.com/repos/MRiecy/VCPMobile/releases/latest";
+/// 回退列表需要拉取多条：列表按创建时间倒序，最新创建的可能不是应用版本
+/// Release（例如同步模块的独立发布），必须过滤后才能取到真正的应用版本。
 const GITHUB_API_LIST_URL: &str =
-    "https://api.github.com/repos/MRiecy/VCPMobile/releases?per_page=1";
+    "https://api.github.com/repos/MRiecy/VCPMobile/releases?per_page=10";
 const APK_ASSET_SUFFIX: &str = "arm64-v8a.apk";
 const CHECKSUM_ASSET_SUFFIX: &str = "arm64-v8a.apk.sha256";
 const UPDATES_DIR_NAME: &str = "updates";
@@ -207,6 +209,14 @@ fn select_checksum_asset<'a>(assets: &'a [GitHubAsset], apk_name: &str) -> Optio
     assets.iter().find(|a| a.name == expected)
 }
 
+/// 从按创建时间倒序的 Release 列表中选出第一个标签为合法 semver 的应用版本
+/// Release。非版本标签（如同步模块的独立发布）不参与应用 OTA 比较。
+fn select_latest_version_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+    releases.into_iter().find(|release| {
+        semver::Version::parse(release.tag_name.trim_start_matches('v')).is_ok()
+    })
+}
+
 fn version_is_newer(latest: &str, current: &str) -> bool {
     match (
         semver::Version::parse(latest),
@@ -333,10 +343,8 @@ async fn fetch_latest_release(client: &Client) -> Result<GitHubRelease, String> 
             .await
             .map_err(|e| format!("解析 GitHub 响应失败: {}", e))?;
 
-        return releases
-            .into_iter()
-            .next()
-            .ok_or_else(|| "GitHub 上暂无任何 Release".to_string());
+        return select_latest_version_release(releases)
+            .ok_or_else(|| "GitHub 上暂无有效的应用版本 Release".to_string());
     }
 
     let status = res.status();
@@ -1125,9 +1133,10 @@ pub async fn install_update(
 mod tests {
     use super::{
         cleanup_stale_installer_apks_at, parse_sha256_sidecar, remove_canonical_legacy_dir,
-        select_apk_asset, select_checksum_asset, stage_installer_apk_in_updates,
-        validate_installer_path_in_updates, validate_release_asset_url, version_is_newer,
-        GitHubAsset, APK_ASSET_SUFFIX, APK_FILENAME, STALE_INSTALLER_AGE,
+        select_apk_asset, select_checksum_asset, select_latest_version_release,
+        stage_installer_apk_in_updates, validate_installer_path_in_updates,
+        validate_release_asset_url, version_is_newer, GitHubAsset, GitHubRelease,
+        APK_ASSET_SUFFIX, APK_FILENAME, STALE_INSTALLER_AGE,
     };
 
     fn asset(name: &str) -> GitHubAsset {
@@ -1138,6 +1147,28 @@ mod tests {
             ),
             size: 100,
         }
+    }
+
+    fn release(tag: &str) -> GitHubRelease {
+        GitHubRelease {
+            tag_name: tag.to_string(),
+            body: None,
+            html_url: format!("https://github.com/MRiecy/VCPMobile/releases/tag/{tag}"),
+            assets: vec![],
+        }
+    }
+
+    #[test]
+    fn release_list_fallback_skips_non_semver_tags() {
+        // 列表按创建时间倒序：最新创建的可能不是应用版本 Release
+        // （例如同步模块的独立发布 tag "0"），必须跳过它取到真正的应用版本。
+        let releases = vec![release("0"), release("v1.1.3"), release("v1.1.2")];
+        let selected = select_latest_version_release(releases).expect("semver release");
+        assert_eq!(selected.tag_name, "v1.1.3");
+
+        // 无任何合法 semver 标签时返回 None，而不是误用非版本 Release
+        assert!(select_latest_version_release(vec![release("0"), release("sync")]).is_none());
+        assert!(select_latest_version_release(vec![]).is_none());
     }
 
     #[test]

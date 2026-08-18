@@ -53,6 +53,7 @@ const handleSkip = () => {
 const state = computed(() => updateStore.state);
 const error = computed(() => updateStore.error);
 const percent = computed(() => updateStore.progressPercent);
+const currentVersion = computed(() => updateStore.info?.currentVersion || '');
 
 const formatBytes = (bytes: number) => {
   if (bytes === 0) return '0 B';
@@ -124,28 +125,47 @@ const cancelDownload = () => {
           <div class="absolute left-0 top-4 bottom-4 w-0.5 bg-blue-500 rounded-r"></div>
 
           <!-- 标题区 -->
-          <div class="flex items-baseline justify-between mb-3 pl-2">
+          <div class="flex items-center justify-between mb-3 pl-2">
             <h3 class="text-sm font-bold text-gray-800 dark:text-gray-100">
               发现新版本
             </h3>
-            <span class="font-mono text-xs font-bold text-blue-600 dark:text-blue-400">
-              v{{ version }}
+            <span
+              class="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold text-blue-600 dark:text-blue-400 border border-blue-500/30"
+            >
+              OTA
             </span>
           </div>
 
-          <!-- 更新细则 -->
-          <div
-            v-if="releaseNotesHtml"
-            class="vcp-markdown-block text-xs text-gray-700 dark:text-gray-300 max-h-[32vh] overflow-y-auto leading-relaxed mb-3 ml-2 p-3 bg-black/5 dark:bg-white/5 rounded border border-black/5 dark:border-white/5 custom-scrollbar"
-            v-html="releaseNotesHtml"
-          ></div>
+          <!-- 版本跃迁：一眼看懂「当前版本 → 新版本」 -->
+          <div class="ml-2 mb-3 flex items-center gap-2 font-mono text-xs">
+            <span
+              v-if="currentVersion"
+              class="px-2 py-1 rounded bg-black/5 dark:bg-white/5 text-gray-500 dark:text-gray-400"
+            >
+              v{{ currentVersion }}
+            </span>
+            <span v-if="currentVersion" class="text-gray-300 dark:text-gray-600">→</span>
+            <span
+              class="px-2 py-1 rounded bg-blue-500/10 border border-blue-500/25 text-blue-600 dark:text-blue-400 font-bold"
+            >
+              v{{ version }}
+            </span>
+            <span v-if="apkSize" class="ml-auto text-[10px] text-gray-400 dark:text-gray-500">
+              {{ formatBytes(apkSize) }}
+            </span>
+          </div>
 
-          <!-- 文件大小信息 -->
-          <div
-            v-if="apkSize"
-            class="ml-2 text-[10px] text-gray-400 dark:text-gray-500 font-mono mb-3"
-          >
-            安装包大小 {{ formatBytes(apkSize) }}
+          <!-- 更新内容 -->
+          <div v-if="releaseNotesHtml" class="ml-2 mb-3">
+            <div
+              class="text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5"
+            >
+              更新内容
+            </div>
+            <div
+              class="vcp-markdown-block text-xs text-gray-700 dark:text-gray-300 max-h-[32vh] overflow-y-auto leading-relaxed p-3 bg-black/5 dark:bg-white/5 rounded border border-black/5 dark:border-white/5 custom-scrollbar"
+              v-html="releaseNotesHtml"
+            ></div>
           </div>
 
           <!-- 错误信息反馈 -->
@@ -180,8 +200,24 @@ const cancelDownload = () => {
             </div>
           </div>
 
-          <!-- 操作按钮区 -->
-          <div class="flex justify-end gap-2 mt-4">
+          <!-- 次级操作：弱化为文本链接，避免与主操作争夺注意力 -->
+          <div class="ml-2 flex items-center gap-4 mt-4 mb-3">
+            <button
+              class="text-[11px] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 underline underline-offset-2 transition-colors"
+              @click="openReleasePage"
+            >
+              Release 页面
+            </button>
+            <button
+              class="text-[11px] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 underline underline-offset-2 transition-colors"
+              @click="handleSkip"
+            >
+              忽略此版本
+            </button>
+          </div>
+
+          <!-- 主操作区：一个次按钮 + 一个主按钮 -->
+          <div class="flex justify-end gap-2">
             <button
               v-if="state === 'downloading'"
               class="px-3 py-2 rounded text-xs font-bold text-red-500 hover:bg-red-500/10 transition-colors"
@@ -190,18 +226,7 @@ const cancelDownload = () => {
               取消下载
             </button>
             <button
-              class="px-3 py-2 rounded text-xs font-bold text-gray-500 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-              @click="handleSkip"
-            >
-              忽略此版本
-            </button>
-            <button
-              class="px-3 py-2 rounded text-xs font-bold text-gray-500 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-              @click="openReleasePage"
-            >
-              Release 页面
-            </button>
-            <button
+              v-else
               class="px-3 py-2 rounded text-xs font-bold text-gray-500 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
               @click="handleDismiss"
             >
