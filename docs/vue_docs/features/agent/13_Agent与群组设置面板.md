@@ -231,7 +231,7 @@ interface AgentConfig {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `mode` | `string` | 发言逻辑：`sequential`（顺序轮流）、`naturerandom`（基于标签智能选择）、`invite_only`（用户手动邀请） |
+| `mode` | `string` | 发言逻辑：`sequential`（顺序轮流）、`naturerandom`（基于标签与 @提及 智能选择）、`invite_only`（输入框上方邀约横条 / @ 选择器点人发言） |
 | `tagMatchMode` | `string` | Tag 匹配严格度：`strict`（原始严格匹配）、`natural`（区分 Tag 来源，避免自引用循环触发） |
 | `useUnifiedModel` | `boolean` | 是否强制所有成员使用同一模型 |
 | `unifiedModel` | `string` | 统一模型 ID，仅在 `useUnifiedModel = true` 时生效 |

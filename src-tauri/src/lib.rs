@@ -43,7 +43,9 @@ use vcp_modules::emoticon_manager::{
 use vcp_modules::file_manager::{
     check_attachment_support, get_attachment_real_path, open_file, register_local_file, store_file,
 };
-use vcp_modules::group_chat_application_service::handle_group_chat_message;
+use vcp_modules::group_chat_application_service::{
+    handle_group_chat_message, invite_group_member_to_speak,
+};
 use vcp_modules::group_service::{
     create_group, delete_group, get_groups, read_group_config, save_group_config,
     update_group_config,
@@ -303,6 +305,7 @@ pub fn run() {
             diary_delete_notes,
             diary_delete_empty_folder,
             handle_group_chat_message,
+            invite_group_member_to_speak,
             create_agent,
             create_group,
             save_group_config,

@@ -13,6 +13,8 @@ import { useAudioRecorder } from '../../core/composables/useAudioRecorder';
 import { attachMenuOpen, toggleAttachMenu } from './attachMenuController';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
+import GroupInviteBar from './components/GroupInviteBar.vue';
+import { useMentionSelector, MENTION_ALL_ID, type MentionMember } from './composables/useMentionSelector';
 
 const tarvenStore = useTarvenStore();
 
@@ -387,7 +389,68 @@ const handleAction = () => {
   }
 };
 
+// ----------------------------------------------------
+// 群聊：@提及 选择器（输入 @ 自动弹出成员浮层）
+// ----------------------------------------------------
+const {
+  isOpen: mentionOpen,
+  target: mentionTarget,
+  filtered: mentionFiltered,
+  groupMode: mentionGroupMode,
+  updateCursor: updateMentionCursor,
+  dismiss: dismissMention,
+} = useMentionSelector(input);
+
+const isGroupChat = computed(() => {
+  const item = sessionStore.currentSelectedItem;
+  return !!item && (item.type === 'group' || !!item.members);
+});
+
+const inputPlaceholder = computed(() => {
+  if (props.disabled) return '请先选择话题以开启对话';
+  return isGroupChat.value ? '说点什么... 输入 @ 提及成员' : '说点什么...';
+});
+
+const syncMentionCursor = (e: Event) => {
+  const el = e.target as HTMLTextAreaElement | null;
+  if (el) updateMentionCursor(el.selectionStart ?? el.value.length);
+};
+
+const handleMentionSelect = (member: MentionMember) => {
+  const target = mentionTarget.value;
+  if (!target) return;
+
+  // invite_only：@提及 策略层不消费，选择成员等价于直接邀约
+  if (mentionGroupMode.value === 'invite_only' && member.id !== MENTION_ALL_ID) {
+    input.value = input.value.slice(0, target.start) + input.value.slice(target.end);
+    dismissMention();
+    if (!streamStore.isGroupGenerating) {
+      historyStore.inviteGroupMember(member.id);
+    }
+    return;
+  }
+
+  const insertText = `@${member.name} `;
+  input.value = input.value.slice(0, target.start) + insertText + input.value.slice(target.end);
+  dismissMention();
+  nextTick(() => {
+    const el = textareaRef.value;
+    if (el) {
+      const pos = target.start + insertText.length;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+      updateMentionCursor(pos);
+      autoResize();
+    }
+  });
+};
+
 const handleKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Escape' && mentionOpen.value) {
+    e.preventDefault();
+    dismissMention();
+    return;
+  }
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     handleAction();
@@ -427,6 +490,9 @@ onUnmounted(() => {
   <div ref="rootRef" class="px-1 py-1 w-full transition-opacity duration-300 no-swipe relative flex flex-col gap-1.5" :class="{ 'opacity-70 pointer-events-none': disabled }">
     <!-- 全局群组停止按钮 -->
     <GroupStopAllButton />
+
+    <!-- 群组邀请发言横条（invite_only 模式） -->
+    <GroupInviteBar />
 
     <!-- 暂存附件预览区 -->
     <div v-if="attachmentStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
@@ -487,20 +553,46 @@ onUnmounted(() => {
 
         <!-- 核心输入/按住说话极简交互区 (极致自然：仅原 textarea 区域变化，右侧按钮完全正常静止显示) -->
         <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
-          
+
+          <!-- @提及 成员选择浮层（锚定于输入框上方，z-local 局部悬浮） -->
+          <Transition name="fade">
+            <div
+              v-if="mentionOpen"
+              class="absolute bottom-full left-0 right-0 mb-1 z-local bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-lg shadow-lg max-h-44 overflow-y-auto"
+            >
+              <button
+                v-for="member in mentionFiltered"
+                :key="member.id"
+                class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                @touchend.prevent="handleMentionSelect(member)"
+                @click="handleMentionSelect(member)"
+              >
+                <span class="text-[10px] font-mono font-bold text-blue-500 shrink-0">@</span>
+                <span class="text-sm font-semibold text-primary-text">{{ member.name }}</span>
+                <span
+                  v-if="mentionGroupMode === 'invite_only' && member.id !== MENTION_ALL_ID"
+                  class="ml-auto text-[10px] text-primary-text opacity-40"
+                >邀其发言</span>
+              </button>
+            </div>
+          </Transition>
+
           <!-- 情况 1：普通文本输入键盘状态 -->
           <textarea 
             v-if="!isAudioMode && !isLongPressRecording"
             ref="textareaRef" 
             v-model="input" 
             @focus="handleFocus"
-            @keydown="handleKeydown" 
-            @paste="handlePaste" 
-            @beforeinput="handleBeforeInput" 
+            @keydown="handleKeydown"
+            @input="syncMentionCursor"
+            @keyup="syncMentionCursor"
+            @click="syncMentionCursor"
+            @paste="handlePaste"
+            @beforeinput="handleBeforeInput"
             rows="1"
             class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[var(--primary-text)] text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide vcp-textarea"
             style="max-height: 114px;"
-            :placeholder="disabled ? '请先选择话题以开启对话' : '说点什么...'" 
+            :placeholder="inputPlaceholder"
             :disabled="disabled"
           ></textarea>
           

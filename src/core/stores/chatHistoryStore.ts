@@ -329,6 +329,65 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   /**
+   * 构造群聊/单聊共用的流式事件 Channel 接线
+   */
+  const makeStreamChannel = (key: ConversationKey) => {
+    const streamChannel = new Channel<any>();
+    streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
+      onMessageCreated: (msg, tid) => {
+        if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
+          currentChatHistory.value.push(msg);
+          currentChatHistory.value = mergeHistoryWindow(
+            currentChatHistory.value,
+            [],
+            false,
+          );
+        }
+      },
+      onStreamFinished: (_mid, tid) => {
+        if (tid === key.topicId && canCommitConversation(key)) {
+          summarizeTopic();
+        }
+      }
+    });
+    return streamChannel;
+  };
+
+  /**
+   * 邀请群成员单人发言（invite_only 模式入口）
+   */
+  const inviteGroupMember = async (agentId: string) => {
+    const key = captureLoadedConversation();
+    if (!key || key.ownerType !== "group") return;
+    try {
+      const settings = settingsStore.settings;
+      if (!settings) throw new Error("应用尚未完成初始化");
+
+      const streamChannel = makeStreamChannel(key);
+      await invoke("invite_group_member_to_speak", {
+        payload: {
+          groupId: key.ownerId,
+          topicId: key.topicId,
+          agentId,
+          vcpUrl: settings.vcpServerUrl || "",
+          vcpApiKey: settings.vcpApiKey || "",
+        },
+        streamChannel,
+      });
+    } catch (e) {
+      console.error("[ChatHistoryStore] Invite failed:", e);
+      // 邀请链路失败绝不能静默：必须给用户可见反馈
+      notificationStore.addNotification({
+        type: "error",
+        title: "邀请发言失败",
+        message: e instanceof Error ? e.message : String(e),
+        toastOnly: true,
+        duration: 6000,
+      });
+    }
+  };
+
+  /**
    * 触发 AI 生成逻辑
    */
   const triggerGeneration = async (userMsg: ChatMessage, frozenKey?: ConversationKey) => {
@@ -356,24 +415,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       const settings = settingsStore.settings;
       if (!settings) throw new Error("应用尚未完成初始化");
 
-      const streamChannel = new Channel<any>();
-      streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
-        onMessageCreated: (msg, tid) => {
-          if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
-            currentChatHistory.value.push(msg);
-            currentChatHistory.value = mergeHistoryWindow(
-              currentChatHistory.value,
-              [],
-              false,
-            );
-          }
-        },
-        onStreamFinished: (_mid, tid) => {
-          if (tid === key.topicId && canCommitConversation(key)) {
-            summarizeTopic();
-          }
-        }
-      });
+      const streamChannel = makeStreamChannel(key);
 
       if (key.ownerType === "group") {
         const result = await invoke<{ status?: string; reason?: string }>("handle_group_chat_message", {
@@ -764,6 +806,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     deleteMessage,
     deleteAttachment,
     triggerGeneration,
+    inviteGroupMember,
     summarizeTopic,
     updateMessageContent,
     regenerateResponse,
