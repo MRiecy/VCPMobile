@@ -199,6 +199,13 @@ pub async fn internal_process_agent_chat_message(
         }
         Err(e) => {
             log::error!("[AgentChatAppService] perform_vcp_request failed: {}", e);
+            // 与 assistant 路径对齐：失败必须向前端补发 error 终结事件，
+            // 否则 thinking 气泡永远悬挂，用户看到的是"Agent 完全无反应"
+            let _ = stream_channel.send(StreamEvent::error(
+                thinking_id.clone(),
+                context,
+                e.clone(),
+            ));
         }
     }
 

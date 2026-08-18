@@ -7,6 +7,7 @@ import { useAttachmentStore } from "./attachmentStore";
 import { useAssistantStore } from "./assistant";
 import { useSettingsStore } from "./settings";
 import { useTopicStore } from "./topicListManager";
+import { useNotificationStore } from "./notification";
 import { clearMessageCache } from "../utils/astRenderer";
 
 import type { ChatMessage, ContentBlock } from "../types/chat";
@@ -80,6 +81,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const assistantStore = useAssistantStore();
   const settingsStore = useSettingsStore();
   const topicStore = useTopicStore();
+  const notificationStore = useNotificationStore();
 
   const captureLoadedConversation = (): ConversationKey | null => {
     const key = sessionStore.currentConversationKey;
@@ -398,6 +400,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       }
     } catch (e) {
       console.error("[ChatHistoryStore] Generation failed:", e);
+      // 生成链路失败绝不能静默：release 下控制台不可见，必须给用户可见反馈
+      notificationStore.addNotification({
+        type: "error",
+        title: "消息生成失败",
+        message: e instanceof Error ? e.message : String(e),
+        toastOnly: true,
+        duration: 6000,
+      });
     }
   };
 
@@ -640,6 +650,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       });
     } catch (e) {
       console.error("[ChatHistoryStore] Regeneration failed:", e);
+      // 与 triggerGeneration 一致：重新生成失败同样需要用户可见反馈
+      notificationStore.addNotification({
+        type: "error",
+        title: "重新生成失败",
+        message: e instanceof Error ? e.message : String(e),
+        toastOnly: true,
+        duration: 6000,
+      });
     }
   };
 

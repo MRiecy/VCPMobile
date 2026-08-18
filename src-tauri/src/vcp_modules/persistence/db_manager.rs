@@ -1143,6 +1143,58 @@ mod tests {
         assert_eq!(version_six, 1);
     }
 
+    /// 1.1.2 血统老库（无迁移追踪表、0001 被 legacy bootstrap 整体跳过）必须仍能
+    /// 通过后续迁移获得 active_generations 表 —— 1.1.4 的 begin_stream_message 依赖它。
+    /// 回归守护：修复前该表对老库永远不存在，导致发消息后 Agent 完全无反应。
+    #[tokio::test]
+    async fn untracked_legacy_schema_gains_active_generations_via_migration_seven() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        // 1.1.2 时代 schema 的最小特征：messages 带 deleted_at/topic_id（FTS 触发器需要）、
+        // message_attachments 已热迁移 deleted_at（v2 将被 seed 跳过）、无 messages_fts
+        //（v3/v4 将真正执行）、avatars 无 deleted_at（v6 将执行）、有 render_cache
+        //（v5 需要 ALTER 它）、且没有 active_generations（v7 的职责）。
+        sqlx::query(
+            "CREATE TABLE messages (
+                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, deleted_at BIGINT,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             CREATE TABLE message_attachments (hash TEXT, deleted_at BIGINT);
+             CREATE TABLE avatars (
+                owner_type TEXT, owner_id TEXT, image_data BLOB,
+                PRIMARY KEY(owner_type, owner_id)
+             );
+             CREATE TABLE render_cache (topic_id TEXT, msg_id TEXT);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create 1.1.2-era legacy fixture");
+
+        let migrator = sqlx::migrate!("./migrations");
+        bootstrap_legacy_if_needed(&pool, &migrator)
+            .await
+            .expect("bridge legacy migration state");
+        migrator.run(&pool).await.expect("apply pending migrations");
+
+        let has_active_generations: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='active_generations')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect active_generations table");
+        assert!(has_active_generations);
+
+        let version_seven: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("read migration seven record");
+        assert_eq!(version_seven, 1);
+    }
+
     #[tokio::test]
     async fn archive_preserves_database_wal_and_shm_as_one_unit() {
         let temp = tempfile::tempdir().expect("tempdir");

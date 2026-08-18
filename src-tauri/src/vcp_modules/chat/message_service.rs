@@ -875,19 +875,6 @@ pub async fn begin_stream_message(
         .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "INSERT INTO active_generations (msg_id, topic_id, owner_id, owner_type, created_at) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(message_id)
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    sqlx::query(
         "UPDATE topics SET updated_at = ?, msg_count = (SELECT COUNT(*) FROM messages \
          WHERE topic_id = ? AND deleted_at IS NULL) WHERE topic_id = ?",
     )
@@ -900,6 +887,28 @@ pub async fn begin_stream_message(
     HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+
+    // 活跃生成注册（断点恢复事务日志）属于锦上添花能力，绝不允许绑架发消息热路径：
+    // 1.1.2 血统的老库可能缺失 active_generations 表（0001 被 legacy bootstrap 整体跳过，
+    // 由迁移 0007 兜底补建），此处失败只降级恢复能力，不影响本次生成。
+    if let Err(e) = sqlx::query(
+        "INSERT INTO active_generations (msg_id, topic_id, owner_id, owner_type, created_at) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(message_id)
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .bind(now)
+    .execute(db_pool)
+    .await
+    {
+        log::warn!(
+            "[MessageService] best-effort active_generations registration skipped for {}: {}",
+            message_id,
+            e
+        );
+    }
     Ok(())
 }
 
