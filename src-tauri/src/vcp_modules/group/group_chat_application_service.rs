@@ -320,6 +320,15 @@ pub async fn internal_process_group_chat_message(
                 agent_id,
                 e
             );
+            // 与 agent/assistant 路径对齐：接力失败必须给前端终结事件，
+            // 否则该 Agent 的 thinking 气泡永久悬挂，用户看到"无反应"
+            if let Some(chan) = &stream_channel {
+                let _ = chan.send(StreamEvent::error(
+                    message_id.clone(),
+                    context.clone(),
+                    e.clone(),
+                ));
+            }
         }
     }
 
