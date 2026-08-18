@@ -114,11 +114,18 @@ pub async fn internal_process_group_chat_message(
             "[GroupChatAppService] Mode {} not implemented, ignoring.",
             group_config.mode
         );
-        return Ok(json!({"status": "no_ai_response"}));
+        return Ok(json!({
+            "status": "no_ai_response",
+            "reason": "mode_not_implemented",
+            "mode": group_config.mode,
+        }));
     };
 
     if speakers.is_empty() {
-        return Ok(json!({"status": "no_ai_response"}));
+        return Ok(json!({
+            "status": "no_ai_response",
+            "reason": "no_speakers",
+        }));
     }
 
     // 提前加载轻量级全量纯文本和附件历史记录作为接力上下文的基础 (从底层隔离 UI 渲染反序列化和 Shell 计算)

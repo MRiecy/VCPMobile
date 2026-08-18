@@ -376,16 +376,29 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       });
 
       if (key.ownerType === "group") {
-        await invoke("handle_group_chat_message", { 
+        const result = await invoke<{ status?: string; reason?: string }>("handle_group_chat_message", {
           payload: {
             groupId: key.ownerId,
             topicId: key.topicId,
             userMessage: userMsg,
             vcpUrl: settings.vcpServerUrl || "",
             vcpApiKey: settings.vcpApiKey || "",
-          }, 
-          streamChannel 
+          },
+          streamChannel
         });
+        // 群组回合可能合法地"无人发言"（如未实现的发言模式），必须显式可见，
+        // 否则用户看到的是"发送后没有任何反应"
+        if (result?.status === "no_ai_response") {
+          notificationStore.addNotification({
+            type: "info",
+            title: "群组未产生回复",
+            message: result.reason === "mode_not_implemented"
+              ? "当前发言模式尚未实现，请在群组设置中改为「顺序发言」或「自然随机」。"
+              : "没有成员满足发言条件，可尝试 @提及 成员或调整发言模式。",
+            toastOnly: true,
+            duration: 6000,
+          });
+        }
       } else {
         await invoke("handle_agent_chat_message", { 
           payload: {
