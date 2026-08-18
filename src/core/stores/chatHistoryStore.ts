@@ -431,12 +431,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         // 群组回合可能合法地"无人发言"（如未实现的发言模式），必须显式可见，
         // 否则用户看到的是"发送后没有任何反应"
         if (result?.status === "no_ai_response") {
+          const message = result.reason === "invite_only"
+            ? "邀请发言模式下成员不会自动回复，请点击输入框上方的成员头像邀其发言。"
+            : result.reason === "mode_not_implemented"
+              ? "当前发言模式尚未实现，请在群组设置中改为「顺序发言」或「自然随机」。"
+              : "没有成员满足发言条件，可尝试 @提及 成员或调整发言模式。";
           notificationStore.addNotification({
             type: "info",
             title: "群组未产生回复",
-            message: result.reason === "mode_not_implemented"
-              ? "当前发言模式尚未实现，请在群组设置中改为「顺序发言」或「自然随机」。"
-              : "没有成员满足发言条件，可尝试 @提及 成员或调整发言模式。",
+            message,
             toastOnly: true,
             duration: 6000,
           });

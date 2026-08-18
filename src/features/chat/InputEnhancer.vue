@@ -321,11 +321,17 @@ const handleFocus = () => {
 
 // 自动调整输入框高度
 const autoResize = () => {
-  if (textareaRef.value) {
-    textareaRef.value.style.height = 'auto'; // Reset height
-    const scrollHeight = textareaRef.value.scrollHeight;
-    textareaRef.value.style.height = `${scrollHeight}px`;
+  const el = textareaRef.value;
+  if (!el) return;
+  // 空内容时恢复默认单行高度：多行 placeholder 会在部分 WebView 中撑大
+  // scrollHeight，删除文字后留下"幻影换行"
+  if (!input.value) {
+    el.style.height = '';
+    return;
   }
+  el.style.height = 'auto'; // Reset height
+  const scrollHeight = el.scrollHeight;
+  el.style.height = `${scrollHeight}px`;
 };
 
 watch(input, () => {
@@ -408,7 +414,8 @@ const isGroupChat = computed(() => {
 
 const inputPlaceholder = computed(() => {
   if (props.disabled) return '请先选择话题以开启对话';
-  return isGroupChat.value ? '说点什么... 输入 @ 提及成员' : '说点什么...';
+  // 群聊提示必须保持单行，过长占位文字会撑出幻影高度
+  return isGroupChat.value ? '@ 提及成员...' : '说点什么...';
 });
 
 const syncMentionCursor = (e: Event) => {

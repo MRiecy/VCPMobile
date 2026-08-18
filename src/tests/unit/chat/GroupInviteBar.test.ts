@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { nextTick } from 'vue';
+import { mockInvoke } from '../../mocks/tauri';
 import GroupInviteBar from '../../../features/chat/components/GroupInviteBar.vue';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
@@ -61,5 +62,25 @@ describe('GroupInviteBar', () => {
     const first = wrapper.find('button');
     expect(first.exists()).toBe(true);
     expect(first.attributes('disabled')).toBeDefined();
+  });
+
+  it('saveGroup syncs mode into the groups snapshot (invite bar data source)', async () => {
+    // 回归契约：群设置保存后 mode 必须进入 assistantStore.groups 快照，
+    // 否则邀约横条/@选择器永远读到旧模式（本 bug 的血训）
+    mockInvoke('save_group_config', () => undefined);
+    const wrapper = await mountBar({ id: 'g2', type: 'group', name: '顺序群' });
+    expect(wrapper.findAll('button')).toHaveLength(0);
+
+    const assistantStore = useAssistantStore();
+    await assistantStore.saveGroup({
+      id: 'g2',
+      name: '顺序群',
+      members: ['a1'],
+      mode: 'invite_only',
+    } as any);
+    await nextTick();
+
+    expect(assistantStore.groups.find((g) => g.id === 'g2')?.mode).toBe('invite_only');
+    expect(wrapper.findAll('button')).toHaveLength(1);
   });
 });

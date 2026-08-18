@@ -264,6 +264,8 @@ export const useAssistantStore = defineStore("assistant", () => {
           ...updated[index],
           name: group.name,
           members: group.members,
+          // mode 被邀请横条与 @提及 选择器消费，必须随保存同步
+          mode: group.mode,
           avatarCalculatedColor: group.avatarCalculatedColor || updated[index].avatarCalculatedColor,
         };
         groups.value = updated;

@@ -324,6 +324,12 @@ pub async fn internal_process_group_chat_message(
             &group_config,
             &user_message,
         )
+    } else if group_config.mode == "invite_only" {
+        // 邀请发言：用户消息不触发自动回复，发言由 invite_group_member_to_speak 显式驱动
+        return Ok(json!({
+            "status": "no_ai_response",
+            "reason": "invite_only",
+        }));
     } else {
         log::warn!(
             "[GroupChatAppService] Mode {} not implemented, ignoring.",
