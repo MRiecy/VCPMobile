@@ -74,6 +74,76 @@ fn parse_delete_timestamp(item: &Value, id: &str, action: &str) -> Result<Option
         })
 }
 
+/// 校验 SYNC_DIFF_RESULTS 条目并过滤契约豁免的 default 话题动作。
+/// 返回（参与计数与派发的有效条目，被豁免的 default 话题动作条数）。
+fn validate_and_filter_diff_items(
+    items: &[Value],
+    data_type: &SyncDataType,
+) -> Result<(Vec<Value>, u32), String> {
+    let mut seen_ids = HashSet::new();
+    let mut filtered = Vec::with_capacity(items.len());
+    let mut exempt_default_topics = 0u32;
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "SYNC_DIFF_RESULTS item requires a non-empty id".to_string())?;
+        // 契约豁免：default 话题不参与同步（与 phase1_metadata / phase3_message /
+        // pull_executor 三处既有排除点对齐）。CDS 会为每个 owner 的 default 话题
+        // 忠实产出动作——topic id 仅在单个 owner 内唯一，default 跨 owner 合法
+        // 重复——在此统一豁免：不参与查重、计数与派发，任何 action
+        // （含 PUSH_DELETE）一律跳过。
+        if *data_type == SyncDataType::Topic && id == "default" {
+            exempt_default_topics += 1;
+            continue;
+        }
+        if !seen_ids.insert(id) {
+            return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
+        }
+        let action = item
+            .get("action")
+            .and_then(Value::as_str)
+            .filter(|action| {
+                matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP")
+            })
+            .ok_or_else(|| format!("SYNC_DIFF_RESULTS item {id} has an invalid action"))?;
+        parse_delete_timestamp(item, id, action)?;
+        if item.get("mismatchedContent").is_some()
+            && item
+                .get("mismatchedContent")
+                .and_then(Value::as_bool)
+                .is_none()
+        {
+            return Err(format!(
+                "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
+            ));
+        }
+        if *data_type == SyncDataType::Topic && matches!(action, "PULL" | "PUSH") {
+            let _owner_type = item
+                .get("ownerType")
+                .and_then(Value::as_str)
+                .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
+                .ok_or_else(|| {
+                    format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
+                })?;
+            if action == "PUSH"
+                && item
+                    .get("ownerId")
+                    .and_then(Value::as_str)
+                    .filter(|owner_id| !owner_id.is_empty())
+                    .is_none()
+            {
+                return Err(format!(
+                    "SYNC_DIFF_RESULTS topic {id} push requires ownerId"
+                ));
+            }
+        }
+        filtered.push(item.clone());
+    }
+    Ok((filtered, exempt_default_topics))
+}
+
 impl DiffHandler {
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_diff(
@@ -101,54 +171,12 @@ impl DiffHandler {
             .get("data")
             .and_then(Value::as_array)
             .ok_or_else(|| "SYNC_DIFF_RESULTS.data must be an array".to_string())?;
-        let mut seen_ids = HashSet::new();
-        for item in items {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "SYNC_DIFF_RESULTS item requires a non-empty id".to_string())?;
-            if !seen_ids.insert(id) {
-                return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
-            }
-            let action = item
-                .get("action")
-                .and_then(Value::as_str)
-                .filter(|action| {
-                    matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP")
-                })
-                .ok_or_else(|| format!("SYNC_DIFF_RESULTS item {id} has an invalid action"))?;
-            parse_delete_timestamp(item, id, action)?;
-            if item.get("mismatchedContent").is_some()
-                && item
-                    .get("mismatchedContent")
-                    .and_then(Value::as_bool)
-                    .is_none()
-            {
-                return Err(format!(
-                    "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
-                ));
-            }
-            if data_type == SyncDataType::Topic && matches!(action, "PULL" | "PUSH") {
-                let _owner_type = item
-                    .get("ownerType")
-                    .and_then(Value::as_str)
-                    .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
-                    .ok_or_else(|| {
-                        format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
-                    })?;
-                if action == "PUSH"
-                    && item
-                        .get("ownerId")
-                        .and_then(Value::as_str)
-                        .filter(|owner_id| !owner_id.is_empty())
-                        .is_none()
-                {
-                    return Err(format!(
-                        "SYNC_DIFF_RESULTS topic {id} push requires ownerId"
-                    ));
-                }
-            }
+        let (items_clone, exempt_default_topics) =
+            validate_and_filter_diff_items(items, &data_type)?;
+        if exempt_default_topics > 0 {
+            log::info!(
+                "[Sync] Exempted {exempt_default_topics} default-topic action(s) from {data_type} diff results (contract: default topics are not synced)"
+            );
         }
 
         let current_phase = manifest_phase.load(Ordering::SeqCst);
@@ -160,8 +188,6 @@ impl DiffHandler {
         )?;
 
         {
-            let items_clone: Vec<serde_json::Value> = items.clone();
-
             // 统计有效操作数（排除 SKIP）
             let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
             let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
@@ -854,12 +880,56 @@ impl DiffHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{consume_manifest_response_type, next_manifest_command, parse_delete_timestamp};
+    use super::{
+        consume_manifest_response_type, next_manifest_command, parse_delete_timestamp,
+        validate_and_filter_diff_items,
+    };
     use crate::vcp_modules::sync_service::SyncCommand;
     use crate::vcp_modules::sync_types::SyncDataType;
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Mutex;
+
+    #[test]
+    fn default_topic_actions_are_exempt_from_diff_validation_and_dispatch() {
+        let items = json!([
+            {"id": "default", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
+            {"id": "default", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
+            {"id": "default", "action": "PUSH_DELETE", "deletedAt": 7, "ownerType": "group", "ownerId": "group-a"},
+            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
+        ]);
+        let (filtered, exempt) =
+            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+                .expect("cross-owner default topics must be exempt, not duplicate-rejected");
+        assert_eq!(exempt, 3);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["id"], "topic-1");
+    }
+
+    #[test]
+    fn duplicate_non_default_topic_ids_are_still_rejected() {
+        let items = json!([
+            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
+            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
+        ]);
+        let err =
+            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+                .expect_err("duplicate non-default ids must fail");
+        assert!(err.contains("duplicate id"));
+    }
+
+    #[test]
+    fn default_id_is_not_exempt_for_non_topic_types() {
+        let items = json!([
+            {"id": "default", "action": "PULL"},
+            {"id": "default", "action": "PULL"},
+        ]);
+        assert!(validate_and_filter_diff_items(
+            items.as_array().unwrap(),
+            &SyncDataType::Agent
+        )
+        .is_err());
+    }
 
     #[test]
     fn manifest_responses_consume_exact_type_once_for_the_current_phase() {
