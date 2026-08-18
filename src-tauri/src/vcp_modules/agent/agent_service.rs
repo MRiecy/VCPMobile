@@ -702,8 +702,14 @@ pub async fn get_assistants_snapshot(
     _group_state: State<'_, GroupManagerState>,
     db_state: State<'_, DbState>,
 ) -> Result<AssistantsSnapshot, String> {
+    build_assistants_snapshot(&db_state.pool).await
+}
+
+/// 快照查询主体（与 Tauri State 解耦，便于内存库单测）。
+async fn build_assistants_snapshot(
+    pool: &sqlx::SqlitePool,
+) -> Result<AssistantsSnapshot, String> {
     let start_total = std::time::Instant::now();
-    let pool = &db_state.pool;
 
     // 1. 获取 agents。批量快照不写实体缓存，避免并发删除后迟到回填 ghost。
     let agent_rows = sqlx::query(
@@ -733,8 +739,9 @@ pub async fn get_assistants_snapshot(
     }
 
     // 2. 获取 groups，同样只生成列表快照而不预热实体缓存。
+    // mode 必须随快照下发：前端邀约横条/@选择器的模式判定只读列表快照。
     let group_rows = sqlx::query(
-        "SELECT g.group_id, g.name, av.dominant_color
+        "SELECT g.group_id, g.name, COALESCE(g.mode, 'sequential') AS mode, av.dominant_color
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.deleted_at IS NULL",
@@ -771,12 +778,14 @@ pub async fn get_assistants_snapshot(
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
         let name: String = row.get("name");
 
+        let mode: String = row.get("mode");
         let members = group_members.remove(&group_id).unwrap_or_default();
         groups_list.push(GroupListItem {
             id: group_id,
             name,
             avatar_calculated_color,
             members,
+            mode,
         });
     }
 
@@ -852,5 +861,48 @@ mod cache_generation_tests {
             current_generation,
         );
         assert!(state.caches.contains_key("agent-current"));
+    }
+
+    /// 回归契约：列表快照必须携带 groups.mode——前端邀约横条/@选择器的
+    /// 模式判定只读快照，DTO 丢字段曾导致 invite_only 群重启后永不识别。
+    #[tokio::test]
+    async fn snapshot_groups_carry_speaking_mode() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory pool");
+
+        // 快照查询涉及的最小 schema（agents/avatars/groups/group_members/topics）
+        sqlx::query(
+            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, name TEXT, model TEXT, deleted_at INTEGER);
+             CREATE TABLE avatars (owner_id TEXT, owner_type TEXT, dominant_color TEXT, deleted_at INTEGER);
+             CREATE TABLE groups (group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, deleted_at INTEGER);
+             CREATE TABLE group_members (group_id TEXT, agent_id TEXT, sort_order INTEGER);
+             CREATE TABLE topics (owner_id TEXT, unread_count INTEGER, unread INTEGER, deleted_at INTEGER);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create schema");
+
+        sqlx::query(
+            "INSERT INTO agents (agent_id, name, model) VALUES ('a1', 'Nova', 'm');
+             INSERT INTO groups (group_id, name, mode) VALUES ('g1', '邀约群', 'invite_only');
+             INSERT INTO groups (group_id, name, mode) VALUES ('g2', '老群', NULL);
+             INSERT INTO group_members (group_id, agent_id, sort_order) VALUES ('g1', 'a1', 0);",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed rows");
+
+        let snapshot = build_assistants_snapshot(&pool).await.expect("snapshot");
+
+        let g1 = snapshot.groups.iter().find(|g| g.id == "g1").expect("g1");
+        assert_eq!(g1.mode, "invite_only");
+        assert_eq!(g1.members, vec!["a1".to_string()]);
+
+        // 历史数据 mode 可能为 NULL：必须回退 sequential 而非查询失败
+        let g2 = snapshot.groups.iter().find(|g| g.id == "g2").expect("g2");
+        assert_eq!(g2.mode, "sequential");
     }
 }

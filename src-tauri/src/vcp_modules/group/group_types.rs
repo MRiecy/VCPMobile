@@ -65,4 +65,9 @@ pub struct GroupListItem {
     pub name: String,
     pub avatar_calculated_color: Option<String>,
     pub members: Vec<String>,
+    /// 发言模式 (sequential, naturerandom, invite_only)。
+    /// 前端邀约横条/@选择器的模式判定以列表快照为准，缺此字段会导致
+    /// invite_only 群在重启后永远识别不到（血训：曾被快照 DTO 丢弃）。
+    #[serde(default = "default_group_mode")]
+    pub mode: String,
 }
