@@ -179,7 +179,7 @@ VCP-CDS internal protocol 2 不是 Mobile Wire 1.2。它当前有四种较窄的
 双端各自保存字节完全相同的 fixture：
 
 - `error_contract_1_2_golden.json`，SHA-256 `434279b33a86a2206c1e4f47caccb4e72f05b2f9d48e093af95d5ebae6947adb`；
-- `protocol_1_2_golden.json`，SHA-256 `7226118ea55766f952575032efc8cfff883a19c9d196f637ac267cb8795fcef8`。
+- `protocol_1_2_golden.json`，SHA-256 `62d4eecb639feb1a6e46302dc4046c622a5477d6a53463320c891757be629a9b`。
 
 错误 fixture 的 `registeredSemantics` 固定所有跨端 code 的 `kind/retry` 二元组；任一端遗漏 code 或改变其类别、重试策略，契约测试必须立即失败。`origin/stage` 仍由实际捕获边界收窄，不作为 code 的静态属性。
 

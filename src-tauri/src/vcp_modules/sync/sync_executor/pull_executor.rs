@@ -350,16 +350,21 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
             .and_then(Value::as_str)
             .filter(|role| !role.is_empty())
             .ok_or_else(|| format!("Message {message_id} has missing or empty role"))?;
+        // topicId 是来源元数据而非消息身份：frame topic 才是存储权威（消息按
+        // frame topic 落盘），消息指纹也不含 topicId。话题分支会合法地让消息
+        // 携带旧话题的 topicId，因此 Wire 1.1 的"必须等于 frame topic"硬校验
+        // 降级为 frame 权威归一化：不一致（或非字符串）时重写并记日志。
         match message.get("topicId") {
             None | Some(Value::Null) => {}
             Some(Value::String(message_topic)) if message_topic == &topic_id => {}
-            Some(Value::String(message_topic)) => {
-                return Err(format!(
-                    "Message {message_id} topicId {message_topic} conflicts with frame topic {topic_id}"
-                ));
-            }
-            Some(_) => {
-                return Err(format!("Message {message_id} topicId must be a string"));
+            Some(original) => {
+                log::warn!(
+                    "[PullExecutor] Message {} topicId {:?} normalized to frame topic {}",
+                    message_id,
+                    original,
+                    topic_id
+                );
+                message.insert("topicId".to_string(), Value::String(topic_id.clone()));
             }
         }
         if message.get("status").and_then(Value::as_str) == Some("removed")
@@ -1680,7 +1685,7 @@ mod ndjson_budget_tests {
 
     const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
     const PROTOCOL_1_2_GOLDEN_SHA256: &str =
-        "7226118ea55766f952575032efc8cfff883a19c9d196f637ac267cb8795fcef8";
+        "62d4eecb639feb1a6e46302dc4046c622a5477d6a53463320c891757be629a9b";
 
     #[test]
     fn pull_frame_owner_identity_must_match_the_local_topic() {
@@ -1731,29 +1736,6 @@ mod ndjson_budget_tests {
                 parsed.legacy_attachment_warnings as u64,
                 expected["warningCount"]
             );
-            let hashes = parsed.messages[0]
-                .attachments
-                .as_ref()
-                .expect("canonical attachments")
-                .iter()
-                .map(|attachment| attachment.hash.clone())
-                .collect::<Vec<_>>();
-            let expected_hashes = expected["attachmentHashes"]
-                .as_array()
-                .expect("expected hashes")
-                .iter()
-                .map(|value| value.as_str().expect("hash string").to_string())
-                .collect::<Vec<_>>();
-            assert_eq!(hashes, expected_hashes);
-            assert_eq!(
-                parsed.messages[0].attachments.as_ref().unwrap()[1]
-                    .extracted_text
-                    .as_deref(),
-                expected["nestedExtractedText"].as_str()
-            );
-            assert!(parsed.messages[0].content.contains("你好"));
-            assert!(parsed.messages[0].content.contains("raw html"));
-            assert!(parsed.messages[1].content.is_empty());
             assert_eq!(
                 serde_json::to_value(&parsed.messages).expect("canonical messages JSON"),
                 expected["canonicalMessages"]
@@ -1799,6 +1781,77 @@ mod ndjson_budget_tests {
                     .expect("expected error fragment")
             ));
         }
+    }
+
+    #[test]
+    fn protocol_1_2_golden_legacy_frame_attachment_details_are_stable() {
+        let bundle: serde_json::Value =
+            serde_json::from_slice(PROTOCOL_1_2_GOLDEN).expect("golden bundle JSON");
+        let case = bundle["validFrames"]
+            .as_array()
+            .expect("valid golden frames")
+            .iter()
+            .find(|case| case["name"] == "flat_nested_null_missing_conflict_unicode_html_empty")
+            .expect("legacy golden frame");
+        let bytes = serde_json::to_vec(&case["input"]).expect("serialize golden frame");
+        let parsed = parse_topic_ndjson_frame(&bytes).expect("valid golden frame");
+        let expected = &case["expected"];
+        let hashes = parsed.messages[0]
+            .attachments
+            .as_ref()
+            .expect("canonical attachments")
+            .iter()
+            .map(|attachment| attachment.hash.clone())
+            .collect::<Vec<_>>();
+        let expected_hashes = expected["attachmentHashes"]
+            .as_array()
+            .expect("expected hashes")
+            .iter()
+            .map(|value| value.as_str().expect("hash string").to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(hashes, expected_hashes);
+        assert_eq!(
+            parsed.messages[0].attachments.as_ref().unwrap()[1]
+                .extracted_text
+                .as_deref(),
+            expected["nestedExtractedText"].as_str()
+        );
+        assert!(parsed.messages[0].content.contains("你好"));
+        assert!(parsed.messages[0].content.contains("raw html"));
+        assert!(parsed.messages[1].content.is_empty());
+    }
+
+    #[test]
+    fn topic_id_mismatch_is_normalized_to_frame_topic() {
+        // 话题分支会让消息 JSON 携带旧话题的 topicId；frame topic 才是存储权威，
+        // 冲突应被重写为 frame topic 而非拒绝整帧。
+        let frame = json!({
+            "topicId": "topic-branch",
+            "messages": [{
+                "id": "message-branched",
+                "role": "user",
+                "content": "branched",
+                "timestamp": 1700000002,
+                "topicId": "topic-origin"
+            }],
+        });
+        let parsed = parse_topic_ndjson_frame(frame.to_string().as_bytes())
+            .expect("conflicting topicId must be normalized, not rejected");
+        assert_eq!(parsed.messages[0].topic_id.as_deref(), Some("topic-branch"));
+
+        let non_string = json!({
+            "topicId": "topic-branch",
+            "messages": [{
+                "id": "message-branched-2",
+                "role": "user",
+                "content": "branched",
+                "timestamp": 1700000003,
+                "topicId": 42
+            }],
+        });
+        let parsed = parse_topic_ndjson_frame(non_string.to_string().as_bytes())
+            .expect("non-string topicId must be normalized, not rejected");
+        assert_eq!(parsed.messages[0].topic_id.as_deref(), Some("topic-branch"));
     }
 
     #[test]

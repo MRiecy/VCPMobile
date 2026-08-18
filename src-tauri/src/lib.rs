@@ -4,7 +4,7 @@ mod vcp_modules;
 const DISTRIBUTED_NETWORK_EVENT: &str = "vcp-mobile://vcp-network-status-changed";
 
 use tauri::{Listener, Manager};
-use tauri_plugin_log::{Target, TargetKind};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
 use vcp_modules::agent_service::{
     create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config,
@@ -205,6 +205,9 @@ pub fn run() {
                 } else {
                     log::LevelFilter::Warn
                 })
+                // 只保留最近一份日志，超过 5 MiB 触发轮转，避免 LogDir 无限增长
+                .rotation_strategy(RotationStrategy::KeepOne)
+                .max_file_size(5 * 1024 * 1024)
                 .filter(|metadata| {
                     let target = metadata.target();
                     // 屏蔽高频 UI 交互、系统窗口以及 Android 系统底层冗余日志

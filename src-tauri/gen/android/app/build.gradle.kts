@@ -35,7 +35,7 @@ val hasReleaseSigning = resolvedReleaseKeystoreFile?.exists() == true
 val trustedLanMode = (
     providers.gradleProperty("vcp.trustedLanMode").orNull
         ?: System.getenv("VCP_TRUSTED_LAN_MODE")
-        ?: "disabled"
+        ?: "enabled"
 ).trim().lowercase()
 if (trustedLanMode !in setOf("enabled", "disabled")) {
     throw GradleException("VCP trusted LAN mode must be exactly 'enabled' or 'disabled'")
