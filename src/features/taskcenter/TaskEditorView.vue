@@ -6,10 +6,10 @@
  * 滑入子页。randomN 魔法字符串控件化为「随机抽取」开关 + 人数步进器；
  * 占位符 chips 点击插入光标处（解决软键盘输入 {{...}} 的痛苦）。
  */
-import { computed, reactive, ref } from 'vue';
-import { ArrowLeft, Plus, Trash2, X } from 'lucide-vue-next';
-import BottomSheet, { type ActionItem } from '../../components/ui/BottomSheet.vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { ArrowLeft, Plus, Search, Trash2, X } from 'lucide-vue-next';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
+import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useTaskCenterStore } from './taskCenterStore';
 import {
@@ -66,24 +66,49 @@ const runAtInput = computed({
 
 // ---------- 目标 Agent ----------
 const isAgentPickerOpen = ref(false);
+const agentSearch = ref('');
 const manualAgentName = ref('');
 
-const agentPickerActions = computed<ActionItem[]>(() =>
-  store.agentOptions
-    .filter((option) => !draft.agents.includes(option.chineseName))
-    .map((option) => ({
-      label: option.description
-        ? `${option.chineseName} — ${option.description.slice(0, 24)}`
-        : option.chineseName,
-      handler: () => {
-        draft.agents.push(option.chineseName);
-      },
-    })),
-);
+// 选择器注册进 Modal History：返回手势先关选择器而不是编辑器
+const { registerModal, unregisterModal } = useModalHistory();
+const PICKER_MODAL_ID = 'TaskCenter:AgentPicker';
+
+watch(isAgentPickerOpen, (open) => {
+  if (open) registerModal(PICKER_MODAL_ID, () => closeAgentPicker());
+  else unregisterModal(PICKER_MODAL_ID);
+});
+
+onBeforeUnmount(() => {
+  unregisterModal(PICKER_MODAL_ID);
+});
+
+const filteredAgentOptions = computed(() => {
+  const keyword = agentSearch.value.trim().toLowerCase();
+  const available = store.agentOptions.filter(
+    (option) => !draft.agents.includes(option.chineseName),
+  );
+  if (!keyword) return available;
+  return available.filter(
+    (option) =>
+      option.chineseName.toLowerCase().includes(keyword) ||
+      option.description.toLowerCase().includes(keyword) ||
+      option.baseName.toLowerCase().includes(keyword),
+  );
+});
 
 function openAgentPicker(): void {
   void store.loadAgentOptions();
+  agentSearch.value = '';
   isAgentPickerOpen.value = true;
+}
+
+function closeAgentPicker(): void {
+  isAgentPickerOpen.value = false;
+}
+
+function pickAgent(name: string): void {
+  if (!draft.agents.includes(name)) draft.agents.push(name);
+  closeAgentPicker();
 }
 
 function addManualAgent(): void {
@@ -276,19 +301,20 @@ async function remove(): Promise<void> {
               <X :size="12" />
             </button>
           </span>
-          <button type="button" class="tce-chip" @click="openAgentPicker">
-            <Plus :size="13" /> 选择
+          <button type="button" class="tce-add-btn" @click="openAgentPicker">
+            <Plus :size="14" />
+            <span>选择</span>
           </button>
         </div>
         <div class="tce-manual-agent">
           <input
             v-model="manualAgentName"
             type="text"
-            class="tce-input"
+            class="tce-input tce-manual-input"
             placeholder="手动输入 Agent 中文名"
             @keyup.enter="addManualAgent"
           />
-          <button type="button" class="tce-chip" @click="addManualAgent">添加</button>
+          <button type="button" class="tce-manual-add" @click="addManualAgent">添加</button>
         </div>
 
         <div class="tce-switch-row">
@@ -381,7 +407,45 @@ async function remove(): Promise<void> {
       </button>
     </footer>
 
-    <BottomSheet v-model="isAgentPickerOpen" title="选择目标 Agent" :actions="agentPickerActions" />
+    <!-- Agent 选择器（精修滑升面板：搜索 + 描述行） -->
+    <Transition name="tce-fade">
+      <div v-if="isAgentPickerOpen" class="tce-picker-mask" @click="closeAgentPicker" @touchmove.prevent />
+    </Transition>
+    <Transition name="tce-picker-slide">
+      <section v-if="isAgentPickerOpen" class="tce-picker" role="dialog" aria-label="选择目标 Agent">
+        <header class="tce-picker-header">
+          <span class="tce-picker-title">选择目标 Agent</span>
+          <button type="button" class="tce-icon-btn" aria-label="关闭" @click="closeAgentPicker">
+            <X :size="17" />
+          </button>
+        </header>
+        <div class="tce-picker-search">
+          <Search :size="14" class="tce-picker-search-icon" />
+          <input
+            v-model="agentSearch"
+            type="search"
+            class="tce-picker-search-input"
+            placeholder="搜索名称 / 描述…"
+            enterkeyhint="search"
+          />
+        </div>
+        <div class="tce-picker-list vcp-scrollable">
+          <div v-if="filteredAgentOptions.length === 0" class="tce-picker-empty">
+            {{ store.agentOptions.length === 0 ? 'Agent 列表不可用，请使用手动输入' : '没有匹配的 Agent' }}
+          </div>
+          <button
+            v-for="option in filteredAgentOptions"
+            :key="option.chineseName"
+            type="button"
+            class="tce-picker-row"
+            @click="pickAgent(option.chineseName)"
+          >
+            <span class="tce-picker-row-name">{{ option.chineseName }}</span>
+            <span class="tce-picker-row-desc">{{ option.description || option.modelId || '—' }}</span>
+          </button>
+        </div>
+      </section>
+    </Transition>
   </div>
 </template>
 
@@ -560,6 +624,7 @@ async function remove(): Promise<void> {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 10px;
+  align-items: center;
 }
 
 .tce-agent-chip {
@@ -588,14 +653,206 @@ async function remove(): Promise<void> {
   opacity: 0.7;
 }
 
-.tce-manual-agent {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
+/* 「选择」按钮：与 chip 等高的描边胶囊，主色文字 + 细图标 */
+.tce-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
 }
 
-.tce-manual-agent .tce-input {
+@supports (background-color: color-mix(in srgb, black, transparent)) {
+  .tce-add-btn {
+    border-color: color-mix(in srgb, var(--highlight-text) 45%, transparent);
+    background: color-mix(in srgb, var(--highlight-text) 8%, transparent);
+  }
+}
+
+.tce-add-btn:active {
+  opacity: 0.75;
+}
+
+/* 手动输入行：输入框与按钮连体 */
+.tce-manual-agent {
+  display: flex;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.tce-manual-input {
   flex: 1;
+  border: none !important;
+  border-radius: 0 !important;
+  background: var(--secondary-bg);
+}
+
+.tce-manual-add {
+  flex-shrink: 0;
+  min-width: 64px;
+  border: none;
+  border-left: 1px solid var(--border-color);
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tce-manual-add:active {
+  opacity: 0.75;
+}
+
+/* ---- Agent 选择器滑升面板 ---- */
+.tce-picker-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: var(--layer-local);
+}
+
+.tce-picker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 68%;
+  display: flex;
+  flex-direction: column;
+  background: var(--secondary-bg);
+  border-top: 1px solid var(--border-color);
+  border-radius: 14px 14px 0 0;
+  padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 8px);
+  z-index: var(--layer-local);
+}
+
+.tce-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 8px;
+  flex-shrink: 0;
+}
+
+.tce-picker-title {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.tce-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 14px 8px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--primary-bg);
+  flex-shrink: 0;
+}
+
+.tce-picker-search-icon {
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+
+.tce-picker-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--primary-text);
+  font-size: 13px;
+}
+
+.tce-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px;
+}
+
+.tce-picker-empty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.5;
+}
+
+.tce-picker-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-bottom: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--primary-text);
+  text-align: left;
+}
+
+.tce-picker-row:active {
+  opacity: 0.7;
+}
+
+.tce-picker-row-name {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.tce-picker-row-desc {
+  font-size: 11px;
+  opacity: 0.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.tce-fade-enter-active,
+.tce-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.tce-fade-enter-from,
+.tce-fade-leave-to {
+  opacity: 0;
+}
+
+.tce-picker-slide-enter-active,
+.tce-picker-slide-leave-active {
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.tce-picker-slide-enter-from,
+.tce-picker-slide-leave-to {
+  transform: translateY(100%);
+}
+
+@media (min-width: 768px) {
+  .tce-picker {
+    left: 50%;
+    right: auto;
+    width: 520px;
+    transform: translateX(-50%);
+  }
+
+  .tce-picker-slide-enter-from,
+  .tce-picker-slide-leave-to {
+    transform: translateX(-50%) translateY(100%);
+  }
 }
 
 .tce-switch-row {

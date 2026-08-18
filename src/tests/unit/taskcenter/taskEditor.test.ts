@@ -91,19 +91,58 @@ describe('任务编辑器草稿模型', () => {
 });
 
 describe('异步委托归一化', () => {
-  it('解析数组与包裹形态', () => {
+  it('解析真实上游契约 {data:{active,recent}}（epoch 时间戳 → ISO）', () => {
     const list = normalizeDelegations({
-      delegations: [
-        {
-          delegationId: 'del_1',
-          agent_name: '艾米莉亚',
-          status: 'running',
-          created_at: '2026-08-18T10:00:00+08:00',
-        },
-      ],
+      success: true,
+      data: {
+        active: [
+          {
+            id: 'del_1',
+            agentName: '艾米莉亚',
+            status: 'running',
+            startTime: 1755475200000,
+            updatedAt: 1755475260000,
+            currentRound: 3,
+            maxRounds: 15,
+            taskPromptPreview: '巡航任务',
+            lastResponsePreview: '正在阅读帖子…',
+          },
+        ],
+        recent: [
+          {
+            id: 'del_0',
+            agentName: 'Nova',
+            status: 'failed',
+            startTime: 1755470000000,
+            finalReportPreview: '模型配置错误',
+          },
+        ],
+      },
     });
-    expect(list).toHaveLength(1);
-    expect(list[0]).toMatchObject({ id: 'del_1', agentName: '艾米莉亚', status: 'running' });
+    expect(list).toHaveLength(2);
+    expect(list[0]).toMatchObject({
+      id: 'del_1',
+      agentName: '艾米莉亚',
+      status: 'running',
+      currentRound: 3,
+      maxRounds: 15,
+      summary: '正在阅读帖子…',
+    });
+    expect(list[0].createdAt).toBe(new Date(1755475200000).toISOString());
+    expect(list[1].status).toBe('failed');
+    expect(list[1].summary).toBe('模型配置错误');
+  });
+
+  it('兼容裸数组与 {delegations} 包裹形态', () => {
+    const fromArray = normalizeDelegations([
+      { id: 'del_1', agentName: '艾米莉亚', status: 'running' },
+    ]);
+    expect(fromArray).toHaveLength(1);
+    const fromWrapped = normalizeDelegations({
+      delegations: [{ id: 'del_2', agentName: 'Nova', status: 'completed' }],
+    });
+    expect(fromWrapped).toHaveLength(1);
+    expect(fromWrapped[0].id).toBe('del_2');
   });
 
   it('无 id 项被丢弃', () => {

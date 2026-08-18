@@ -65,7 +65,10 @@ async function confirmCancel(item: DelegationItem): Promise<void> {
           <span class="dp-agent">{{ item.agentName }}</span>
           <span class="dp-status">{{ statusLabel(item) }}</span>
         </div>
-        <p class="dp-line">{{ formatDateTime(item.createdAt) }} 开始</p>
+        <p class="dp-line">
+          {{ formatDateTime(item.createdAt) }} 开始<span v-if="item.currentRound">
+            · 第 {{ item.currentRound }}{{ item.maxRounds ? `/${item.maxRounds}` : '' }} 轮</span>
+        </p>
         <p v-if="item.summary" class="dp-summary">{{ item.summary }}</p>
         <div class="dp-actions">
           <button

@@ -18,6 +18,8 @@ import SlidePage from '../../components/ui/SlidePage.vue';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import TaskEditorView from './TaskEditorView.vue';
 import DelegationPanel from './components/DelegationPanel.vue';
+import HistoryDetailSheet from './components/HistoryDetailSheet.vue';
+import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useTaskCenterStore } from './taskCenterStore';
 import {
   RUN_STATUS_LABEL,
@@ -49,6 +51,20 @@ const activeTab = ref<'tasks' | 'history' | 'delegations'>('tasks');
 const editorDraft = ref<TaskDraft | null>(null);
 const isEditorOpen = ref(false);
 
+// 编辑器注册进全局 Modal History：返回手势先关编辑器，而不是退出调度中心
+const { registerModal, unregisterModal } = useModalHistory();
+const EDITOR_MODAL_ID = 'TaskCenter:Editor';
+
+watch(isEditorOpen, (open) => {
+  if (open) {
+    registerModal(EDITOR_MODAL_ID, () => {
+      closeEditor();
+    });
+  } else {
+    unregisterModal(EDITOR_MODAL_ID);
+  }
+});
+
 function openCreateEditor(): void {
   void store.loadAgentOptions();
   editorDraft.value = emptyDraft();
@@ -66,6 +82,17 @@ function closeEditor(): void {
   editorDraft.value = null;
 }
 
+// ---------- 执行历史详情 ----------
+const historyDetail = ref<RunRecord | null>(null);
+
+function openHistoryDetail(record: RunRecord): void {
+  historyDetail.value = record;
+}
+
+function closeHistoryDetail(): void {
+  historyDetail.value = null;
+}
+
 watch(
   () => props.isOpen,
   (open) => {
@@ -76,6 +103,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  unregisterModal(EDITOR_MODAL_ID);
   store.resetSession();
 });
 
@@ -147,10 +175,11 @@ const emptyState = computed(() => {
         <button
           type="button"
           class="tc-icon-btn"
-          aria-label="刷新"
+          aria-label="刷新任务状态"
+          title="刷新任务状态"
           @click="store.refresh()"
         >
-          <RefreshCw :size="17" />
+          <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
         </button>
       </header>
 
@@ -312,6 +341,10 @@ const emptyState = computed(() => {
           :key="record.id"
           class="tc-history-row"
           :class="historyStateClass(record)"
+          role="button"
+          tabindex="0"
+          @click="openHistoryDetail(record)"
+          @keyup.enter="openHistoryDetail(record)"
         >
           <div class="tc-history-head">
             <span class="tc-history-name">{{ record.taskName }}</span>
@@ -343,6 +376,9 @@ const emptyState = computed(() => {
           @close="closeEditor"
         />
       </Transition>
+
+      <!-- 执行历史详情 -->
+      <HistoryDetailSheet :record="historyDetail" @close="closeHistoryDetail" />
     </div>
   </SlidePage>
 </template>

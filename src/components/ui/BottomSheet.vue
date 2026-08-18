@@ -14,6 +14,8 @@ const props = defineProps<{
   modelValue: boolean;
   title?: string;
   actions: ActionItem[];
+  /** 紧凑模式：更小字号与内边距，适合设置类选项列表（如日志中心）。 */
+  compact?: boolean;
 }>();
 
 const emit = defineEmits(['update:modelValue']);
@@ -69,21 +71,26 @@ const handleAction = (action: ActionItem) => {
         <div class="flex flex-col gap-2 px-1">
           <button v-for="(action, index) in actions" :key="index" @click="handleAction(action)"
             :disabled="action.disabled"
-            class="flex items-center justify-start px-6 py-4 rounded-2xl active:scale-[0.98] transition-all text-[16px] font-black border"
+            class="flex items-center justify-start rounded-2xl active:scale-[0.98] transition-all border"
             :class="[
+              props.compact ? 'px-4 py-2.5 text-[13px] font-bold' : 'px-6 py-4 text-[16px] font-black',
               action.danger
                 ? 'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 border-red-100 dark:border-red-500/20 shadow-sm shadow-red-500/10'
                 : 'bg-black/5 dark:bg-white/5 text-gray-800 dark:text-gray-200 border-transparent hover:bg-black/10 dark:hover:bg-white/10 shadow-sm',
               action.disabled ? 'opacity-40 cursor-not-allowed' : ''
             ]">
-            <component v-if="action.icon" :is="action.icon" :size="20" class="mr-4 opacity-90"
-              :class="action.danger ? 'text-red-500' : 'text-blue-500/80 dark:text-blue-400/80'" />
+            <component v-if="action.icon" :is="action.icon" :size="props.compact ? 16 : 20"
+              class="opacity-90" :class="[
+                props.compact ? 'mr-2.5' : 'mr-4',
+                action.danger ? 'text-red-500' : 'text-blue-500/80 dark:text-blue-400/80'
+              ]" />
             <span class="tracking-wide">{{ action.label }}</span>
           </button>
 
           <!-- 取消按钮 -->
           <button @click="close"
-            class="mt-3 py-4 rounded-2xl text-[16px] font-bold bg-black/5 dark:bg-white/5 text-gray-500 dark:text-gray-400 active:scale-[0.98] transition-all border border-transparent flex items-center justify-center">
+            class="rounded-2xl font-bold bg-black/5 dark:bg-white/5 text-gray-500 dark:text-gray-400 active:scale-[0.98] transition-all border border-transparent flex items-center justify-center"
+            :class="props.compact ? 'mt-2 py-2.5 text-[13px]' : 'mt-3 py-4 text-[16px]'">
             取消
           </button>
         </div>

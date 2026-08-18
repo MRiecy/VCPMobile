@@ -255,7 +255,7 @@ watch(
             <strong class="block mt-0.5 text-[13px] text-primary-text">更多功能</strong>
           </header>
 
-          <div class="grid grid-cols-3 gap-2">
+          <div class="right-tool-grid grid grid-cols-2 gap-2">
             <button
               v-for="tool in moreTools"
               :key="tool.id"
@@ -373,6 +373,13 @@ watch(
   background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   transform-origin: 75% 100%;
+}
+
+/* 平板/宽屏下 popover 变宽，网格升为三列；基础形态保持两列长胶囊 */
+@media (min-width: 768px) {
+  .right-tool-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .right-tool-popover::after {

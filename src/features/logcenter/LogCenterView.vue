@@ -112,6 +112,16 @@ watch(
   },
 );
 
+// 行数限制变化（尤其从大改小）：虚拟列表总高收缩后原滚动位置会悬空白屏，
+// 必须等 DOM 更新后重新钳制到末尾。
+watch(
+  () => store.lineLimit,
+  async () => {
+    await nextTick();
+    await jumpToEnd();
+  },
+);
+
 // ---------- 会话生命周期 ----------
 watch(
   () => props.isOpen,
@@ -275,7 +285,7 @@ const statusLine = computed(() => {
             <component :is="store.isPaused ? Play : Pause" :size="17" />
           </button>
           <button type="button" class="log-icon-btn" aria-label="全量刷新" @click="store.refresh()">
-            <RefreshCw :size="17" />
+            <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
           </button>
           <button
             type="button"
@@ -368,18 +378,19 @@ const statusLine = computed(() => {
           </div>
         </div>
 
-        <!-- 跳到底部 FAB -->
+        <!-- 跳到最新 FAB（圆形悬浮钮 + 角标） -->
         <Transition name="log-fab">
           <button
             v-if="showJumpFab"
             type="button"
             class="log-jump-fab"
+            :class="{ 'log-jump-fab-reverse': store.isReverse }"
             aria-label="跳到最新日志"
             @click="jumpToEnd()"
           >
-            <ArrowDownToLine :size="16" />
+            <ArrowDownToLine :size="17" />
             <span v-if="store.newLineCount > 0" class="log-jump-badge">
-              +{{ store.newLineCount > 99 ? '99' : store.newLineCount }}
+              {{ store.newLineCount > 99 ? '99+' : store.newLineCount }}
             </span>
           </button>
         </Transition>
@@ -389,8 +400,8 @@ const statusLine = computed(() => {
       <footer class="log-footer" :title="store.logPath">{{ statusLine }}</footer>
 
       <!-- 溢出菜单 -->
-      <BottomSheet v-model="isMenuOpen" title="日志选项" :actions="menuActions" />
-      <BottomSheet v-model="isLimitSheetOpen" title="行数限制" :actions="limitActions" />
+      <BottomSheet v-model="isMenuOpen" title="日志选项" :actions="menuActions" compact />
+      <BottomSheet v-model="isLimitSheetOpen" title="行数限制" :actions="limitActions" compact />
     </div>
   </SlidePage>
 </template>
@@ -653,35 +664,62 @@ const statusLine = computed(() => {
 
 .log-jump-fab {
   position: absolute;
-  right: 16px;
-  bottom: 16px;
+  right: 18px;
+  bottom: 18px;
+  width: 42px;
+  height: 42px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 38px;
-  padding: 0 14px;
-  border-radius: 999px;
+  justify-content: center;
+  border-radius: 50%;
   border: 1px solid var(--border-color);
   background: var(--secondary-bg);
   color: var(--highlight-text);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
   z-index: var(--layer-local);
+  transition: opacity 0.15s ease;
+}
+
+.log-jump-fab:active {
+  opacity: 0.75;
+}
+
+/* 倒序时最新在顶部，箭头语义反转 */
+.log-jump-fab-reverse :first-child {
+  transform: rotate(180deg);
 }
 
 .log-jump-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--highlight-text);
+  color: #fff;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 9px;
+  font-weight: 800;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
 
 .log-fab-enter-active,
 .log-fab-leave-active {
-  transition: opacity 0.15s ease;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
 }
 
 .log-fab-enter-from,
 .log-fab-leave-to {
   opacity: 0;
+  transform: translateY(6px);
 }
 
 .log-footer {

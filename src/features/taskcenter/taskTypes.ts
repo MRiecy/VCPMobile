@@ -422,31 +422,70 @@ export interface DelegationItem {
   createdAt: string;
   updatedAt: string;
   summary: string;
+  /** 当前轮次（1 起）；无则 null。 */
+  currentRound: number | null;
+  maxRounds: number | null;
 }
 
+/** 时间戳归一：上游快照用 epoch millis（Date.now()），兼容 ISO 字符串。 */
+function asIsoTime(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return new Date(value).toISOString();
+  }
+  if (typeof value === 'string' && value) return value;
+  return '';
+}
+
+function normalizeDelegationSnapshot(item: unknown): DelegationItem | null {
+  if (!item || typeof item !== 'object') return null;
+  const record = item as Record<string, unknown>;
+  const id = asString(record.id ?? record.delegationId).trim();
+  if (!id) return null;
+  const currentRound = asNumber(record.currentRound, 0);
+  const maxRounds = asNumber(record.maxRounds, 0);
+  return {
+    id,
+    agentName: asString(record.agentName ?? record.agent_name) || '未知 Agent',
+    status: asString(record.status, 'unknown'),
+    createdAt: asIsoTime(record.startTime ?? record.createdAt ?? record.created_at),
+    updatedAt: asIsoTime(record.updatedAt ?? record.updated_at),
+    summary: asString(
+      record.lastResponsePreview ?? record.finalReportPreview ?? record.taskPromptPreview,
+    ),
+    currentRound: currentRound > 0 ? currentRound : null,
+    maxRounds: maxRounds > 0 ? maxRounds : null,
+  };
+}
+
+/**
+ * 归一化委托列表。真实上游契约（agentAssistant.js + AgentAssistant.js）：
+ * `{ success: true, data: { active: [snapshot…], recent: [snapshot…] } }`。
+ * 同时兼容裸数组与 {delegations}/{items} 包裹形态（防御）。
+ */
 export function normalizeDelegations(raw: unknown): DelegationItem[] {
-  const list = Array.isArray(raw)
-    ? raw
-    : ((raw as Record<string, unknown>)?.delegations ??
-      (raw as Record<string, unknown>)?.items ??
-      []);
-  if (!Array.isArray(list)) return [];
-  return list
-    .map((item): DelegationItem | null => {
-      if (!item || typeof item !== 'object') return null;
-      const record = item as Record<string, unknown>;
-      const id = asString(record.id ?? record.delegationId).trim();
-      if (!id) return null;
-      return {
-        id,
-        agentName: asString(record.agentName ?? record.agent_name) || '未知 Agent',
-        status: asString(record.status, 'unknown'),
-        createdAt: asString(record.createdAt ?? record.created_at),
-        updatedAt: asString(record.updatedAt ?? record.updated_at),
-        summary: asString(record.summary ?? record.lastReply ?? record.message),
-      };
-    })
-    .filter((entry): entry is DelegationItem => entry !== null);
+  if (Array.isArray(raw)) {
+    return raw
+      .map(normalizeDelegationSnapshot)
+      .filter((entry): entry is DelegationItem => entry !== null);
+  }
+  const root = (raw ?? {}) as Record<string, unknown>;
+  const data = (root.data ?? root) as Record<string, unknown>;
+  if (Array.isArray(data.active) || Array.isArray(data.recent)) {
+    const active = (Array.isArray(data.active) ? data.active : [])
+      .map(normalizeDelegationSnapshot)
+      .filter((entry): entry is DelegationItem => entry !== null);
+    const recent = (Array.isArray(data.recent) ? data.recent : [])
+      .map(normalizeDelegationSnapshot)
+      .filter((entry): entry is DelegationItem => entry !== null);
+    return [...active, ...recent];
+  }
+  const fallback = data.delegations ?? data.items;
+  if (Array.isArray(fallback)) {
+    return fallback
+      .map(normalizeDelegationSnapshot)
+      .filter((entry): entry is DelegationItem => entry !== null);
+  }
+  return [];
 }
 
 export const DELEGATION_STATUS_LABEL: Record<string, string> = {
