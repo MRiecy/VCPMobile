@@ -190,10 +190,17 @@ function parseReverseMappings(output) {
     .filter(Boolean);
 }
 
+// 新版 adb（platform-tools ≥ 34）的 `reverse --list` 首列输出传输类型而非设备序列号
+const ADB_REVERSE_TRANSPORT_TOKENS = new Set(['usbffs', 'tcpip', 'local']);
+
 function selectedReverseMappings() {
   const serial = getDeviceInfo().serial;
   return parseReverseMappings(runAdb(['reverse', '--list'], { allowFailure: true }))
-    .filter((mapping) => !mapping.serial || mapping.serial === serial);
+    .filter((mapping) =>
+      !mapping.serial ||
+      mapping.serial === serial ||
+      // adb 调用已按单设备隔离（-s / 单设备强制），传输类型列（如 UsbFfs）直接放行
+      ADB_REVERSE_TRANSPORT_TOKENS.has(mapping.serial.toLowerCase()));
 }
 
 function ensureUsbDevice() {
