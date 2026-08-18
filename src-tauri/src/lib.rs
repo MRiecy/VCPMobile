@@ -95,6 +95,9 @@ use vcp_modules::vcp_log_service::{
     init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
 };
 use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
+use vcp_modules::taskcenter::{
+    task_get_config, task_get_status, task_set_enabled, task_set_global_enabled, task_trigger,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -307,6 +310,11 @@ pub fn run() {
             diary_delete_empty_folder,
             logcenter_fetch,
             logcenter_clear_server,
+            task_get_config,
+            task_get_status,
+            task_trigger,
+            task_set_enabled,
+            task_set_global_enabled,
             handle_group_chat_message,
             invite_group_member_to_speak,
             create_agent,

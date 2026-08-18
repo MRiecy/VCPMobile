@@ -8,6 +8,7 @@ pub mod infra;
 pub mod logcenter;
 pub mod persistence;
 pub mod sync;
+pub mod taskcenter;
 pub mod updater;
 
 // 2. 扁平化外观代理导出 (Façade Re-exporting)

@@ -82,10 +82,34 @@ pub fn admin_request(
     suffix: &[&str],
 ) -> Result<RequestBuilder, String> {
     let url = admin_url(settings, suffix)?;
+    client_request(settings, method, url.as_str())
+}
+
+/// 以完整 URL 字符串构造带 Basic Auth 的请求（调用方已自行拼好路径）。
+pub fn client_request(
+    settings: &Settings,
+    method: Method,
+    url: &str,
+) -> Result<RequestBuilder, String> {
+    let parsed = Url::parse(url).map_err(|_| "内部错误：admin_api URL 解析失败".to_string())?;
     Ok(client(HttpProfile::AdminApi)
-        .request(method, url)
+        .request(method, parsed)
         .basic_auth(&settings.admin_username, Some(&settings.admin_password))
         .header(reqwest::header::ACCEPT, "application/json"))
+}
+
+/// GET 便捷函数。
+pub fn client_get(settings: &Settings, url: &str) -> Result<RequestBuilder, String> {
+    client_request(settings, Method::GET, url)
+}
+
+/// POST JSON 便捷函数。
+pub fn client_post_json(
+    settings: &Settings,
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<RequestBuilder, String> {
+    Ok(client_request(settings, Method::POST, url)?.json(body))
 }
 
 #[cfg(test)]
