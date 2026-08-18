@@ -194,6 +194,137 @@ pub async fn task_set_global_enabled<R: Runtime>(
     .await
 }
 
+/// 新建任务（细粒度 POST；body 为完整 Task 契约，后端 sanitizeTaskInput 校验）。
+#[tauri::command]
+pub async fn task_create<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    task: Value,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let url = build_url(&settings, &["task-assistant", "tasks"])?;
+    send_json(
+        admin_api::client_post_json(&settings, &url, &task)?,
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+/// 更新任务（细粒度 PATCH，合并式；runtime/meta 由后端保留）。
+#[tauri::command]
+pub async fn task_update<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    task_id: String,
+    task: Value,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let url = task_url(&settings, &task_id)?;
+    send_json(
+        admin_api::client_request(&settings, Method::PATCH, &url)?.json(&task),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+/// 删除任务（细粒度 DELETE）。
+#[tauri::command]
+pub async fn task_delete<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    task_id: String,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let url = task_url(&settings, &task_id)?;
+    send_json(
+        admin_api::client_request(&settings, Method::DELETE, &url)?,
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+/// Agent 列表（目标选择器数据源）：GET /agent-assistant/config 的 agents[]。
+/// 只回传选择器所需字段（chineseName/baseName/description/modelId），
+/// 不透传 systemPrompt 等大字段。
+#[tauri::command]
+pub async fn task_agent_list<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let url = build_url(&settings, &["agent-assistant", "config"])?;
+    let config = send_json(
+        admin_api::client_get(&settings, &url)?,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    let agents = config
+        .get("agents")
+        .and_then(|a| a.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|agent| {
+                    let chinese_name = agent.get("chineseName")?.as_str()?.trim().to_string();
+                    if chinese_name.is_empty() {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "chineseName": chinese_name,
+                        "baseName": agent.get("baseName").and_then(|v| v.as_str()).unwrap_or(""),
+                        "description": agent.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                        "modelId": agent.get("modelId").and_then(|v| v.as_str()).unwrap_or(""),
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(Value::Array(agents))
+}
+
+/// 异步委托列表（运行中 + 最近记录）。
+#[tauri::command]
+pub async fn delegation_list<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let url = build_url(&settings, &["agent-assistant", "delegations"])?;
+    send_json(
+        admin_api::client_get(&settings, &url)?,
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+/// 请求取消异步委托。
+#[tauri::command]
+pub async fn delegation_cancel<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    delegation_id: String,
+    reason: Option<String>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let trimmed = delegation_id.trim();
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return Err("delegationId 为空或含控制字符".to_string());
+    }
+    let url = build_url(
+        &settings,
+        &["agent-assistant", "delegations", trimmed, "cancel"],
+    )?;
+    send_json(
+        admin_api::client_post_json(
+            &settings,
+            &url,
+            &serde_json::json!({ "reason": reason.unwrap_or_default() }),
+        )?,
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

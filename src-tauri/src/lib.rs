@@ -96,7 +96,9 @@ use vcp_modules::vcp_log_service::{
 };
 use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
 use vcp_modules::taskcenter::{
+    delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
     task_get_config, task_get_status, task_set_enabled, task_set_global_enabled, task_trigger,
+    task_update,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -315,6 +317,12 @@ pub fn run() {
             task_trigger,
             task_set_enabled,
             task_set_global_enabled,
+            task_create,
+            task_update,
+            task_delete,
+            task_agent_list,
+            delegation_list,
+            delegation_cancel,
             handle_group_chat_message,
             invite_group_member_to_speak,
             create_agent,

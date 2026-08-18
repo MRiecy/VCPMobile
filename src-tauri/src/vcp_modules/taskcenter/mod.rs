@@ -6,5 +6,7 @@
 mod task_service;
 
 pub use task_service::{
+    delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
     task_get_config, task_get_status, task_set_enabled, task_set_global_enabled, task_trigger,
+    task_update,
 };
