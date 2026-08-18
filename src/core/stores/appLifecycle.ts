@@ -11,7 +11,7 @@ import { useTopicStore } from './topicListManager';
 import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
 import { useAvatarStore } from './avatar';
 
-export type AppState = 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
+export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
 
 export interface CoreStatus {
   status: 'initializing' | 'ready' | 'error' | 'none';
@@ -51,6 +51,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
   const statusText = computed(() => {
     switch (state.value) {
+      case 'PERMISSIONS':
+        return '正在检查系统权限...';
       case 'BOOTING':
         return '正在初始化界面资源...';
       case 'CONNECTING':
@@ -323,6 +325,25 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         isBootstrapping.value = true;
         errorMsg.value = null;
         hasBootstrapped.value = false;
+
+        // --- 权限门禁：通知、电池优化豁免与通知监听是本产品（常驻中继节点）的保活核心能力，
+        // 缺失时先进入引导页；存储等非核心权限保持按需（feature-triggered）申请 ---
+        try {
+          const pStatus = await invoke<{ notification: boolean; battery: boolean }>('plugin:vcp-mobile|check_all_permissions');
+          const listenerRes = await invoke<{ enabled: boolean }>('plugin:vcp-mobile|check_notification_listener_permission');
+          if (!pStatus.notification || !pStatus.battery || !listenerRes.enabled) {
+            console.log('[Lifecycle] Missing keep-alive critical permissions, entering permission gate');
+            // 仅在确认缺失权限时才将状态设为 PERMISSIONS，避免权限完整时引导页一闪而过
+            setState('PERMISSIONS', '权限缺失，展示引导界面');
+            // 清除 Promise，以便用户在引导页点击“激活并进入应用”时能重新触发
+            bootstrapPromise = null;
+            isBootstrapping.value = false;
+            return;
+          }
+        } catch (e) {
+          // 非 Android host（桌面开发/测试）无系统权限概念，直接放行
+          console.warn('[Lifecycle] Permission check unavailable, skipping gate:', e);
+        }
 
         setState('BOOTING', '开始前端主线程启动编排');
         

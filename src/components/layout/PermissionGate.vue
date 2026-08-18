@@ -5,15 +5,14 @@ import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
 
 const lifecycleStore = useAppLifecycleStore();
 
+// 仅保活核心权限进入门禁；存储（全媒体读取）等非核心权限由对应功能按需申请
 interface PermissionStatus {
   notification: boolean;
-  storage: boolean;
   battery: boolean;
 }
 
 const status = ref<PermissionStatus>({
   notification: false,
-  storage: false,
   battery: false
 });
 
@@ -34,7 +33,7 @@ const freeDiskSpaceGB = ref(0);
 const totalDiskSpaceGB = ref(0);
 const isDiskCheckError = ref(false);
 
-const allGranted = computed(() => status.value.notification && status.value.storage && status.value.battery);
+const allGranted = computed(() => status.value.notification && status.value.battery);
 
 // 自启动是否配置好 (小米/红米/VIVO/魅族支持自动感应，非支持机型依赖用户勾选)
 const isAutoStartReady = computed(() => {
@@ -97,7 +96,7 @@ const checkDiskSpace = async () => {
   }
 };
 
-const request = async (type: 'notification' | 'storage' | 'battery') => {
+const request = async (type: 'notification' | 'battery') => {
   try {
     await invoke('plugin:vcp-mobile|request_android_permission', { pType: type });
   } catch (e) {
@@ -235,8 +234,7 @@ onUnmounted(() => {
             <div class="w-full space-y-3 mb-4">
               <!-- Permission Cards -->
               <div v-for="item in [
-                { id: 'notification', name: '系统通知', desc: '显示 Agent 运行状态和即时提醒', icon: 'i-heroicons-bell' },
-                { id: 'storage', name: '储存空间权限', desc: '用于保存头像、聊天图片及导出日志', icon: 'i-heroicons-folder-open' },
+                { id: 'notification', name: '系统通知', desc: '前台保活服务的运行状态可见性，未授予时后台保活静默生效但无任何提示', icon: 'i-heroicons-bell' },
                 { id: 'battery', name: '后台运行权限', desc: '切换到后台时保持连接不被系统中断', icon: 'i-heroicons-arrow-path' }
               ]" :key="item.id"
                 class="group flex items-center gap-4 px-4 py-3 rounded-2xl bg-gray-100/50 active:bg-gray-200/60 transition-all"

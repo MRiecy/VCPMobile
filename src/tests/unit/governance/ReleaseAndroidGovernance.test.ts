@@ -19,6 +19,7 @@ import dataExtractionRules from '../../../../src-tauri/gen/android/app/src/main/
 import wrapperProperties from '../../../../src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties?raw';
 import appSource from '../../../App.vue?raw';
 import lifecycleSource from '../../../core/stores/appLifecycle.ts?raw';
+import permissionGateSource from '../../../components/layout/PermissionGate.vue?raw';
 import updateDownloaderSource from '../../../core/composables/useUpdateDownloader.ts?raw';
 
 const workflowActionReferences = (source: string) =>
@@ -119,12 +120,22 @@ describe('release and Android governance contracts', () => {
     expect(dataExtractionRules).toContain('<exclude domain="sharedpref" path="." />');
   });
 
-  it('keeps optional Android permissions out of bootstrap and requests them at feature use', () => {
-    expect(appSource).not.toContain('PermissionGate');
-    expect(lifecycleSource).not.toContain("'PERMISSIONS'");
-    expect(lifecycleSource).not.toContain('check_all_permissions');
-    expect(lifecycleSource).not.toContain('check_notification_listener_permission');
+  it('gates bootstrap on keep-alive critical permissions and requests the rest at feature use', () => {
+    // 本产品定位为常驻中继节点：通知、电池优化豁免与通知监听是保活核心能力，
+    // 必须在 bootstrap 阶段经 PermissionGate 硬门禁收齐，禁止再次整体移除门禁。
+    expect(appSource).toContain('PermissionGate');
+    expect(lifecycleSource).toContain("'PERMISSIONS'");
+    expect(lifecycleSource).toContain('check_all_permissions');
+    expect(lifecycleSource).toContain('check_notification_listener_permission');
 
+    // 门禁硬门槛仅限保活核心三项；存储（全媒体读取）等非核心权限保持按需申请，
+    // 不得回流进启动门禁。
+    expect(permissionGateSource).toContain("pType: type");
+    expect(permissionGateSource).not.toContain('储存空间权限');
+    expect(permissionGateSource).not.toContain("| 'storage'");
+    expect(lifecycleSource).not.toContain('pStatus.storage');
+
+    // 次级链路（应用内更新下载）仍按需请求通知权限，且必须先请求再发通知。
     const requestIndex = updateDownloaderSource.indexOf("pType: 'notification'");
     const notificationIndex = updateDownloaderSource.indexOf('start_download_notification');
     expect(requestIndex).toBeGreaterThan(-1);

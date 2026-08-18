@@ -30,6 +30,7 @@ useAppLifecycle();
 const releaseNativeInsetsBridge = retainNativeInsetsBridge();
 
 // Layout Components
+import PermissionGate from "./components/layout/PermissionGate.vue";
 import BootScreen from "./components/layout/BootScreen.vue";
 import AgentSidebar from "./components/layout/AgentSidebar.vue";
 import RightSidebar from "./components/layout/RightSidebar.vue";
@@ -487,8 +488,11 @@ onUnmounted(() => {
 
 <template>
   <div ref="appRootRef" class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
-    <!-- 0. 全局初始化加载层 & 错误看板；系统权限由使用对应功能时按需申请 -->
-    <BootScreen />
+    <!-- 0. 权限门禁（仅在 PERMISSIONS 状态显示；保活核心权限缺失时阻断进入） -->
+    <PermissionGate v-if="lifecycleStore.state === 'PERMISSIONS'" />
+
+    <!-- 0.5. 全局初始化加载层 & 错误看板；存储等非核心权限仍由对应功能按需申请 -->
+    <BootScreen v-else />
 
     <!-- 1. 背景底层 -->
     <Transition name="bg-fade">
