@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-verify-apk-signature"
+description = "Enables the verify_apk_signature command without any pre-configured scope."
+commands.allow = ["verify_apk_signature"]
+
+[[permission]]
+identifier = "deny-verify-apk-signature"
+description = "Denies the verify_apk_signature command without any pre-configured scope."
+commands.deny = ["verify_apk_signature"]

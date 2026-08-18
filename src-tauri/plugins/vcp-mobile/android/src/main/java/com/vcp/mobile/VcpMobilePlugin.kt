@@ -2135,6 +2135,98 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     // ==================================================================
+    // OTA Update Support (签名连续性 / 安装权限 / 下载保活)
+    // ==================================================================
+
+    @Command
+    fun verifyApkSignature(invoke: Invoke) {
+        val args = invoke.parseArgs(VerifyApkSignatureArgs::class.java)
+        val path = args.path
+        if (path.isEmpty()) {
+            invoke.reject("Path is empty")
+            return
+        }
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "verifyApkSignature", task@{
+            try {
+                if (!isSafeLocalPath(activity, path)) {
+                    invoke.reject("安全拒绝：禁止校验沙箱外部的文件")
+                    return@task
+                }
+                val file = java.io.File(path)
+                if (!file.exists() || !file.isFile) {
+                    invoke.reject("APK 文件不存在: $path")
+                    return@task
+                }
+                val apkSha256 = ApkSignatureInspector.apkSignatureSha256(activity, path)
+                val selfSha256 = ApkSignatureInspector.selfSignatureSha256(activity)
+                val result = JSObject().apply {
+                    put("apkSha256", apkSha256)
+                    put("selfSha256", selfSha256)
+                    put("matched", ApkSignatureInspector.digestsMatch(apkSha256, selfSha256))
+                }
+                invoke.resolve(result)
+            } catch (e: Throwable) {
+                Log.e(TAG, "[verifyApkSignature] failed", e)
+                invoke.reject("签名校验失败: ${e.message}")
+            }
+        })
+    }
+
+    @Command
+    fun canInstallPackages(invoke: Invoke) {
+        try {
+            val allowed = activity.packageManager.canRequestPackageInstalls()
+            invoke.resolve(JSObject().apply { put("allowed", allowed) })
+        } catch (e: Throwable) {
+            Log.e(TAG, "[canInstallPackages] failed", e)
+            invoke.reject("检查安装权限失败: ${e.message}")
+        }
+    }
+
+    @Command
+    fun openUnknownSourcesSettings(invoke: Invoke) {
+        try {
+            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                data = Uri.parse("package:${activity.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (e: Throwable) {
+            Log.e(TAG, "[openUnknownSourcesSettings] failed", e)
+            invoke.reject("打开安装权限设置失败: ${e.message}")
+        }
+    }
+
+    @Command
+    fun acquireOtaKeepalive(invoke: Invoke) {
+        try {
+            val generation = com.vcp.mobile.service.ForegroundGuardian.acquire(
+                activity,
+                "ota",
+                com.vcp.mobile.service.ForegroundGuardian.PRIORITY_OTA,
+                "[正在下载更新]",
+                false,
+            )
+            resolveWhenGuardianReady(invoke, generation)
+        } catch (e: Exception) {
+            Log.e(TAG, "acquireOtaKeepalive failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    @Command
+    fun releaseOtaKeepalive(invoke: Invoke) {
+        try {
+            com.vcp.mobile.service.ForegroundGuardian.release(activity, "ota")
+            invoke.resolve()
+        } catch (e: Exception) {
+            Log.e(TAG, "releaseOtaKeepalive failed", e)
+            invoke.reject(e.message ?: "Unknown error")
+        }
+    }
+
+    // ==================================================================
     // Security Sandbox Boundary & Verification
     // ==================================================================
     private fun isSafeLocalPath(context: Context, path: String): Boolean {
@@ -2800,6 +2892,11 @@ class RequestPermissionArgs {
 
 @InvokeArg
 class OpenFileArgs {
+    lateinit var path: String
+}
+
+@InvokeArg
+class VerifyApkSignatureArgs {
     lateinit var path: String
 }
 

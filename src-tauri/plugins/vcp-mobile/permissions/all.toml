@@ -44,4 +44,9 @@ commands.allow = [
     "get_free_disk_space",
     "acquire_foreground",
     "release_foreground",
+    "verify_apk_signature",
+    "can_install_packages",
+    "open_unknown_sources_settings",
+    "acquire_ota_keepalive",
+    "release_ota_keepalive",
 ]

@@ -19,9 +19,8 @@ const status = ref<PermissionStatus>({
 const currentStep = ref(1);
 
 // Step 2 状态
-const autoStartStatus = ref<'true' | 'false' | 'unsupported'>('unsupported');
-const hasClickedAutoStart = ref(false);
-const userConfirmedAutoStart = ref(false);
+// 注：自启动已移出门禁——当前架构无 BOOT_COMPLETED 接收器、服务 START_NOT_STICKY、
+// 无推送/定时任务，没有任何代码路径消费该权限，配置了也是空转
 const hasClickedPower = ref(false);
 const userConfirmedPower = ref(false);
 const isNotificationListenerReady = ref(false);
@@ -35,12 +34,6 @@ const isDiskCheckError = ref(false);
 
 const allGranted = computed(() => status.value.notification && status.value.battery);
 
-// 自启动是否配置好 (小米/红米/VIVO/魅族支持自动感应，非支持机型依赖用户勾选)
-const isAutoStartReady = computed(() => {
-  if (autoStartStatus.value === 'true') return true;
-  return userConfirmedAutoStart.value;
-});
-
 // 后台省电是否配置好 (优先自动感应电池优化白名单和无后台限制状态)
 const isPowerReady = computed(() => {
   return status.value.battery || userConfirmedPower.value;
@@ -53,7 +46,7 @@ const isListenerReady = computed(() => {
 });
 
 // Step 2 是否满足要求
-const step2Ready = computed(() => isAutoStartReady.value && isPowerReady.value && isListenerReady.value);
+const step2Ready = computed(() => isPowerReady.value && isListenerReady.value);
 
 // Step 3 存储检测是否合格 (要求 >= 5.0 GB)
 const isStorageSpaceOk = computed(() => freeDiskSpaceGB.value >= 5.0);
@@ -67,20 +60,10 @@ const check = async () => {
     const listenerRes = await invoke<{ enabled: boolean }>('plugin:vcp-mobile|check_notification_listener_permission');
     isNotificationListenerReady.value = listenerRes.enabled;
     
-    // 如果已经授予存储权限，检测内部存储空间和自启动状态
+    // 检测内部存储空间
     await checkDiskSpace();
-    await checkAutoStart();
   } catch (e) {
     console.error('[PermissionGate] Failed to check permissions:', e);
-  }
-};
-
-const checkAutoStart = async () => {
-  try {
-    const res = await invoke<string>('plugin:vcp-mobile|check_auto_start_permission');
-    autoStartStatus.value = res as any;
-  } catch (e) {
-    console.error('[PermissionGate] Failed to check auto start permission:', e);
   }
 };
 
@@ -101,15 +84,6 @@ const request = async (type: 'notification' | 'battery') => {
     await invoke('plugin:vcp-mobile|request_android_permission', { pType: type });
   } catch (e) {
     console.error(`[PermissionGate] Failed to request ${type} permission:`, e);
-  }
-};
-
-const triggerAutoStartSettings = async () => {
-  try {
-    await invoke('plugin:vcp-mobile|request_auto_start_permission');
-    hasClickedAutoStart.value = true;
-  } catch (e) {
-    console.error('[PermissionGate] Failed to request auto start settings:', e);
   }
 };
 
@@ -277,46 +251,13 @@ onUnmounted(() => {
 
           <!-- ========== Step 2: Battery Optimization ========== -->
           <div class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
-            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">品牌厂商自启动与后台管理</h3>
+            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">品牌厂商后台管理</h3>
             <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
-              由于国产手机系统拥有极其激进的后台强杀机制，必须强制前往设置开启自启动和后台完全允许运行。
+              由于国产手机系统拥有极其激进的后台强杀机制，必须强制前往设置允许后台完全运行并开启通知监听守护。
             </p>
 
             <div class="w-full space-y-4 mb-4">
-              <!-- 卡片 1：自启动 -->
-              <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
-                <div class="flex items-center gap-3">
-                  <div class="w-8 h-8 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0">
-                    <div class="i-heroicons-arrow-path text-indigo-500 text-lg"></div>
-                  </div>
-                  <div class="flex-1">
-                    <span class="font-semibold text-gray-900 text-sm">开机与后台自启动</span>
-                    <span v-if="autoStartStatus === 'true'" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
-                  </div>
-                  <div v-if="autoStartStatus === 'true'" class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0">
-                    已开启
-                  </div>
-                  <button v-else
-                    @click="triggerAutoStartSettings"
-                    class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
-                  >
-                    去设置
-                  </button>
-                </div>
-                <p class="text-xs text-gray-500 leading-relaxed pl-11">
-                  请在打开的系统页面中开启以下选项：
-                  <span class="block mt-1 text-[11px] text-[#8B7D6B] font-bold">
-                    关联权限名称：自启动 / 开机自动启动 / 关联启动
-                  </span>
-                </p>
-                <!-- 非支持设备，或者检测不成功，在点击跳转后，显示勾选防呆机制 -->
-                <div v-if="autoStartStatus !== 'true' && hasClickedAutoStart" class="mt-2 pl-11 flex items-center gap-2">
-                  <input type="checkbox" id="chkAutoStart" v-model="userConfirmedAutoStart" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
-                  <label for="chkAutoStart" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已允许自启动</label>
-                </div>
-              </div>
-
-              <!-- 卡片 2：省电策略 (完全允许后台行为) -->
+              <!-- 卡片 1：省电策略 (完全允许后台行为) -->
               <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
                 <div class="flex items-center gap-3">
                   <div class="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
@@ -348,7 +289,7 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- 卡片 3：通知栏监听守护 (极度稳定的后台常驻) -->
+              <!-- 卡片 2：通知栏监听守护 (极度稳定的后台常驻) -->
               <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
                 <div class="flex items-center gap-3">
                   <div class="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">

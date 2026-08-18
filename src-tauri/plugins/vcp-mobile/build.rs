@@ -41,6 +41,11 @@ const COMMANDS: &[&str] = &[
     "acquire_wake_lock",
     "release_wake_lock",
     "start_network_monitoring",
+    "verify_apk_signature",
+    "can_install_packages",
+    "open_unknown_sources_settings",
+    "acquire_ota_keepalive",
+    "release_ota_keepalive",
 ];
 
 fn main() {

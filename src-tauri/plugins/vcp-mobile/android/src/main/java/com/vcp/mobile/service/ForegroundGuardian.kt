@@ -22,6 +22,7 @@ object ForegroundGuardian {
     private const val TAG = "ForegroundGuardian"
 
     // 优先级常量定义
+    const val PRIORITY_OTA = 50
     const val PRIORITY_SYNC = 40
     const val PRIORITY_CLI = 35
     const val PRIORITY_PRERENDER = 30
@@ -167,6 +168,7 @@ object ForegroundGuardian {
             when {
                 tag.startsWith("stream:") -> 10 * 60 * 1000L // 对话流生成：10 分钟
                 tag == "sync" -> 30 * 60 * 1000L        // 增量数据同步：30 分钟
+                tag == "ota" -> 60 * 60 * 1000L         // OTA 大文件下载：60 分钟
                 tag == "prerender" -> 30 * 60 * 1000L   // 预渲染重建：30 分钟
                 tag == "distributed" || tag == "manual_keepalive" -> 2 * 60 * 60 * 1000L // 分布式/手动锁：2 小时
                 else -> 15 * 60 * 1000L                 // 默认兜底：15 分钟

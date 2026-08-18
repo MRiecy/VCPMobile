@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-acquire-ota-keepalive"
+description = "Enables the acquire_ota_keepalive command without any pre-configured scope."
+commands.allow = ["acquire_ota_keepalive"]
+
+[[permission]]
+identifier = "deny-acquire-ota-keepalive"
+description = "Denies the acquire_ota_keepalive command without any pre-configured scope."
+commands.deny = ["acquire_ota_keepalive"]

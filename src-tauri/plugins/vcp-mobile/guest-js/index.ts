@@ -45,6 +45,32 @@ export function openFileNative(path: string): Promise<void> {
   return invoke('plugin:vcp-mobile|open_file_native', { path });
 }
 
+export interface ApkSignatureVerification {
+  apkSha256: string | null;
+  selfSha256: string | null;
+  matched: boolean;
+}
+
+export function verifyApkSignature(path: string): Promise<ApkSignatureVerification> {
+  return invoke('plugin:vcp-mobile|verify_apk_signature', { path });
+}
+
+export function canInstallPackages(): Promise<boolean> {
+  return invoke('plugin:vcp-mobile|can_install_packages');
+}
+
+export function openUnknownSourcesSettings(): Promise<void> {
+  return invoke('plugin:vcp-mobile|open_unknown_sources_settings');
+}
+
+export function acquireOtaKeepalive(): Promise<void> {
+  return invoke('plugin:vcp-mobile|acquire_ota_keepalive');
+}
+
+export function releaseOtaKeepalive(): Promise<void> {
+  return invoke('plugin:vcp-mobile|release_ota_keepalive');
+}
+
 export interface GallerySaveResult {
   uri: string;
   displayName: string;

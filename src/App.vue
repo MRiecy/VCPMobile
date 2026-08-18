@@ -82,7 +82,8 @@ const reconcileDrawerPresentation = () => {
   if (rightSidebarPersistent.matches) layoutStore.setRightDrawer(false);
 };
 const { initGlobalFixer } = useEmoticonFixer();
-const { isPromptOpen, updateInfo, handleConfirm, handleDismiss } = useAutoUpdate();
+const { isPromptOpen, updateInfo, handleConfirm, handleDismiss, handleSkipVersion } =
+  useAutoUpdate();
 const router = useRouter();
 
 const { initRootHistory } = useModalHistory();
@@ -563,6 +564,7 @@ onUnmounted(() => {
       :apk-size="updateInfo?.apkSize"
       @confirm="handleConfirm"
       @dismiss="handleDismiss"
+      @skip="handleSkipVersion"
     />
   </div>
 </template>

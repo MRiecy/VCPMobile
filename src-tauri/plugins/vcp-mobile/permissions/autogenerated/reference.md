@@ -49,6 +49,32 @@ Denies the acquire_foreground command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-acquire-ota-keepalive`
+
+</td>
+<td>
+
+Enables the acquire_ota_keepalive command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-acquire-ota-keepalive`
+
+</td>
+<td>
+
+Denies the acquire_ota_keepalive command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-acquire-wake-lock`
 
 </td>
@@ -68,6 +94,32 @@ Enables the acquire_wake_lock command without any pre-configured scope.
 <td>
 
 Denies the acquire_wake_lock command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-can-install-packages`
+
+</td>
+<td>
+
+Enables the can_install_packages command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-can-install-packages`
+
+</td>
+<td>
+
+Denies the can_install_packages command without any pre-configured scope.
 
 </td>
 </tr>
@@ -543,6 +595,32 @@ Denies the open_file_native command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-open-unknown-sources-settings`
+
+</td>
+<td>
+
+Enables the open_unknown_sources_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-open-unknown-sources-settings`
+
+</td>
+<td>
+
+Denies the open_unknown_sources_settings command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-pick-file`
 
 </td>
@@ -614,6 +692,32 @@ Enables the release_foreground command without any pre-configured scope.
 <td>
 
 Denies the release_foreground command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-release-ota-keepalive`
+
+</td>
+<td>
+
+Enables the release_ota_keepalive command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-release-ota-keepalive`
+
+</td>
+<td>
+
+Denies the release_ota_keepalive command without any pre-configured scope.
 
 </td>
 </tr>
@@ -1082,6 +1186,32 @@ Enables the update_download_notification command without any pre-configured scop
 <td>
 
 Denies the update_download_notification command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-verify-apk-signature`
+
+</td>
+<td>
+
+Enables the verify_apk_signature command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-verify-apk-signature`
+
+</td>
+<td>
+
+Denies the verify_apk_signature command without any pre-configured scope.
 
 </td>
 </tr>

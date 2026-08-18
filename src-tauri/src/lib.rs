@@ -77,7 +77,10 @@ use vcp_modules::topic_service::{
     regenerate_topic_response, set_topic_unread, summarize_topic, toggle_topic_lock,
     update_topic_title,
 };
-use vcp_modules::update_manager::{check_for_update, download_update, install_update};
+use vcp_modules::update_manager::{
+    cancel_update_download, check_for_update, get_update_status, install_update,
+    start_update_download, UpdateSession,
+};
 use vcp_modules::vcp_client::{
     get_active_generations, interruptGroupTurn, interruptRequest, recover_active_generation,
     sendToVCP, test_vcp_connection, ActiveRequests, CancelledGroupTurns,
@@ -115,6 +118,7 @@ pub fn run() {
             app.manage(vcp_modules::model_manager::ModelManagerState::new());
             app.manage(vcp_modules::emoticon_manager::EmoticonManagerState::default());
             app.manage(MobileCliRuntimeState::new());
+            app.manage(UpdateSession::new());
 
             let handle = app.handle().clone();
 
@@ -359,7 +363,9 @@ pub fn run() {
             distributed::execute_distributed_tool,
             distributed::reconnect_distributed_client,
             check_for_update,
-            download_update,
+            start_update_download,
+            cancel_update_download,
+            get_update_status,
             install_update,
             tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
             restart_or_exit_app,

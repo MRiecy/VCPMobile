@@ -1,12 +1,7 @@
-import { ref } from 'vue';
-import { invoke, Channel } from '@tauri-apps/api/core';
+import { computed, watch } from 'vue';
+import { invoke } from '@tauri-apps/api/core';
 import { useNotificationStore } from '../stores/notification';
 import { useUpdateStore } from '../stores/update';
-
-interface DownloadProgress {
-  downloaded: number;
-  total: number | null;
-}
 
 const formatBytes = (bytes: number) => {
   if (bytes === 0) return '0 B';
@@ -16,60 +11,57 @@ const formatBytes = (bytes: number) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
+/**
+ * OTA 下载/安装编排器：消费 update store 的状态机，
+ * 负责系统通知栏进度、Toast 反馈与下载完成后的安装接续。
+ */
 export function useUpdateDownloader() {
   const notificationStore = useNotificationStore();
   const updateStore = useUpdateStore();
 
-  const downloadAndInstall = async (url: string) => {
-    // 1. 单例前置硬锁定，防止多任务并发冲突
-    if (updateStore.status === 'downloading') {
+  const isDownloading = computed(() =>
+    ['downloading', 'verifying'].includes(updateStore.state),
+  );
+
+  const downloadAndInstall = async () => {
+    if (updateStore.state === 'downloading' || updateStore.state === 'verifying') {
       console.log('[UpdateDownloader] Refused: download already in progress.');
       return;
     }
 
-    updateStore.setStatus('downloading');
-    updateStore.updateProgress(0, null);
-
     const isAndroid = navigator.userAgent.toLowerCase().includes('android');
 
-    try {
-      // 2. 优化：立即弹出起步 Toast，给用户明确反馈，防止物理链路延迟造成“无反应”错觉
-      notificationStore.addNotification({
-        title: '发起更新下载',
-        message: '已发起后台下载；允许通知后，进度也会显示在系统通知栏。',
-        type: 'info',
-        duration: 3500,
-        toastOnly: true,
+    notificationStore.addNotification({
+      title: '发起更新下载',
+      message: '已发起后台下载；允许通知后，进度也会显示在系统通知栏。',
+      type: 'info',
+      duration: 3500,
+      toastOnly: true,
+    });
+
+    // Android 13+ 的通知权限只在用户真正开始 OTA 下载时申请。
+    // 拒绝通知不阻断下载，应用内进度与系统安装器仍可正常工作。
+    if (isAndroid) {
+      await invoke('plugin:vcp-mobile|request_android_permission', { pType: 'notification' }).catch((e) => {
+        console.warn('[UpdateDownloader] notification permission unavailable:', e);
       });
+      await invoke('plugin:vcp-mobile|start_download_notification').catch((e) => {
+        console.error('[UpdateDownloader] start_download_notification failed:', e);
+      });
+    }
 
-      // 3. 在 Android 上拉起系统通知栏的 Ongoing 进度通知
-      if (isAndroid) {
-        // Android 13+ 的通知权限只在用户真正开始 OTA 下载时申请。
-        // 拒绝通知不阻断下载，应用内进度与系统安装器仍可正常工作。
-        await invoke('plugin:vcp-mobile|request_android_permission', { pType: 'notification' }).catch((e) => {
-          console.warn('[UpdateDownloader] notification permission unavailable:', e);
-        });
-        await invoke('plugin:vcp-mobile|start_download_notification').catch((e) => {
-          console.error('[UpdateDownloader] start_download_notification failed:', e);
-        });
-      }
-
-      let lastNotifyTime = 0;
-
-      const channel = new Channel<DownloadProgress>();
-      channel.onmessage = (msg) => {
-        // 更新全局 Pinia Store 状态，使关于页面 100% 走字同步
-        updateStore.updateProgress(msg.downloaded, msg.total);
-
-        // 计算当前下载百分比
-        const percent = msg.total ? Math.round((msg.downloaded / msg.total) * 100) : 0;
-        const text = msg.total
-          ? `已下载 ${percent}% (${formatBytes(msg.downloaded)} / ${formatBytes(msg.total)})`
-          : `已下载 ${formatBytes(msg.downloaded)}`;
-
-        // 4. 通知栏更新的 300ms 节流策略，避开 JNI 高频调用性能损耗
+    // 通知栏进度跟随 store 状态，300ms 节流避开 JNI 高频调用
+    let lastNotifyTime = 0;
+    const stopWatch = watch(
+      () => [updateStore.status.downloaded, updateStore.status.total] as const,
+      ([downloaded, total]) => {
+        if (!isAndroid) return;
+        const percent = total ? Math.round((downloaded / total) * 100) : 0;
+        const text = total
+          ? `已下载 ${percent}% (${formatBytes(downloaded)} / ${formatBytes(total)})`
+          : `已下载 ${formatBytes(downloaded)}`;
         const now = Date.now();
-        if (isAndroid && (now - lastNotifyTime > 300 || percent === 100)) {
+        if (now - lastNotifyTime > 300 || percent === 100) {
           lastNotifyTime = now;
           invoke('plugin:vcp-mobile|update_download_notification', {
             progress: percent,
@@ -78,30 +70,32 @@ export function useUpdateDownloader() {
             console.error('[UpdateDownloader] update_download_notification failed:', e);
           });
         }
-      };
+      },
+    );
 
-      const apkPath = await invoke<string>('download_update', {
-        url,
-        onProgress: channel,
-      });
+    try {
+      const downloaded = await updateStore.startDownload();
 
-      // 5. 下载顺利完成，取消系统通知栏 Ongoing 通知
-      if (isAndroid) {
-        await invoke('plugin:vcp-mobile|cancel_download_notification').catch(() => {});
+      if (downloaded.error || downloaded.state === 'failed') {
+        throw new Error(downloaded.error?.message ?? '下载失败');
       }
-
-      updateStore.setStatus('downloaded');
+      if (downloaded.state !== 'readyToInstall') {
+        // 用户取消或其他中断：状态机已广播，静默退出
+        return;
+      }
 
       notificationStore.addNotification({
         title: '下载完成',
-        message: '正在拉起更新安装器...',
+        message: '校验通过，正在拉起更新安装器...',
         type: 'success',
         duration: 3000,
         toastOnly: true,
       });
 
-      updateStore.setStatus('installing');
-      await invoke('install_update', { apkPath });
+      const installed = await updateStore.install();
+      if (installed.error) {
+        throw new Error(installed.error.message);
+      }
 
       notificationStore.addNotification({
         title: '安装器已唤起',
@@ -110,17 +104,8 @@ export function useUpdateDownloader() {
         duration: 5000,
         toastOnly: true,
       });
-
-      updateStore.setStatus('idle');
     } catch (e: any) {
-      // 出现异常，坚决销毁系统通知栏 Ongoing 通知，避免残留
-      if (isAndroid) {
-        await invoke('plugin:vcp-mobile|cancel_download_notification').catch(() => {});
-      }
-
-      const errorString = String(e);
-      updateStore.setError(errorString);
-
+      const errorString = String(e instanceof Error ? e.message : e);
       notificationStore.addNotification({
         title: '更新失败',
         message: errorString,
@@ -129,11 +114,16 @@ export function useUpdateDownloader() {
         toastOnly: true,
       });
       throw e;
+    } finally {
+      stopWatch();
+      if (isAndroid) {
+        await invoke('plugin:vcp-mobile|cancel_download_notification').catch(() => {});
+      }
     }
   };
 
   return {
     downloadAndInstall,
-    isDownloading: ref(updateStore.status === 'downloading'),
+    isDownloading,
   };
 }

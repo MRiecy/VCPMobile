@@ -411,6 +411,122 @@ pub fn open_file_native<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApkSignatureVerification {
+    pub apk_sha256: Option<String>,
+    pub self_sha256: Option<String>,
+    pub matched: bool,
+}
+
+/// OTA 安装前证书连续性校验：比对未安装 APK 与当前应用的签名证书 SHA-256。
+#[tauri::command]
+pub fn verify_apk_signature<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+) -> Result<ApkSignatureVerification, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        return plugin_handle
+            .run_mobile_plugin::<ApkSignatureVerification>(
+                "verifyApkSignature",
+                serde_json::json!({ "path": path }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = path;
+        Err("签名校验仅在 Android 上可用".to_string())
+    }
+}
+
+/// 是否已授予"安装未知应用"权限。
+#[tauri::command]
+pub fn can_install_packages<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        let result = plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("canInstallPackages", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        return Ok(result
+            .get("allowed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+/// 跳转系统"安装未知应用"授权页。
+#[tauri::command]
+pub fn open_unknown_sources_settings<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "openUnknownSourcesSettings",
+                serde_json::json!({}),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
+/// OTA 下载期间持有前台锁，防止切后台后进程被杀导致下载中断。
+#[tauri::command]
+pub fn acquire_ota_keepalive<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("acquireOtaKeepalive", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn release_ota_keepalive<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>("releaseOtaKeepalive", serde_json::json!({}))
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowSnapshot {
